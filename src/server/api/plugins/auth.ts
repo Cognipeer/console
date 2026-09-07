@@ -1,9 +1,9 @@
 import { SignJWT, jwtVerify } from 'jose';
 import bcrypt from 'bcryptjs';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type ITenant } from '@/lib/database';
+import { getDatabase, type ITenant, type IUser } from '@/lib/database';
 import { LicenseManager, type LicenseType } from '@/lib/license/license-manager';
 import { TokenManager } from '@/lib/license/token-manager';
 import { sendEmail } from '@/lib/email/mailer';
@@ -12,6 +12,7 @@ import {
   LOGIN_RATE_LIMIT,
   PASSWORD_RESET_RATE_LIMIT,
   REGISTER_RATE_LIMIT,
+  SESSION_ISSUANCE_RATE_LIMIT,
 } from '@/lib/services/auth/rateLimiter';
 import {
   BCRYPT_ROUNDS,
@@ -97,6 +98,135 @@ async function withTenantScope<T>(
   }
   await db.switchToTenant(tenantDbName);
   return fn();
+}
+
+/**
+ * Issues a session (JWT + cookies) for an already-authenticated user and sends
+ * the standard login response. This is the shared tail of every login path —
+ * local password, and any external authenticator (LDAP, OIDC/SSO) that has
+ * already verified the caller and just needs a session. Runs inside the
+ * tenant's DB scope for its whole duration.
+ */
+export async function issueSessionForAuthenticatedUser(
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  authenticatedTenant: ITenant,
+  authenticatedUser: IUser,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<FastifyReply> {
+  // Every authenticator ends up here — local password (already rate-limited
+  // at the top of /auth/login, which guards against password-guessing before
+  // any of this runs), LDAP, and OIDC/SSO's ticket-exchange callback. This is
+  // the one place that's guaranteed to run regardless of which of those
+  // called it, so it's where a shared, can't-forget-it limit belongs.
+  const clientIp = getClientIp(request);
+  const rl = checkRateLimit(`session:${clientIp}`, SESSION_ISSUANCE_RATE_LIMIT);
+  if (!rl.allowed) {
+    sendRateLimitHeaders(
+      {
+        'Retry-After': String(rl.retryAfterSeconds),
+        'X-RateLimit-Remaining': '0',
+        'X-RateLimit-Reset': rl.resetAt.toISOString(),
+      },
+      reply,
+    );
+    return reply.code(429).send({ error: 'Too many sign-in attempts. Please try again later.' });
+  }
+
+  return withTenantScope(db, authenticatedTenant.dbName, async () => {
+    const tenantIdStr =
+      typeof authenticatedTenant._id === 'string'
+        ? authenticatedTenant._id
+        : authenticatedTenant._id!.toString();
+    const userIdStr =
+      typeof authenticatedUser._id === 'string'
+        ? authenticatedUser._id
+        : authenticatedUser._id!.toString();
+
+    const defaultProject = await ensureDefaultProject(
+      authenticatedTenant.dbName,
+      tenantIdStr,
+      userIdStr,
+    );
+    const defaultProjectId =
+      typeof defaultProject._id === 'string'
+        ? defaultProject._id
+        : defaultProject._id?.toString();
+
+    let activeProjectId = request.cookies.active_project_id;
+
+    if (authenticatedUser.role === 'user' || authenticatedUser.role === 'project_admin') {
+      const allowed = await collectAccessibleProjectIds(
+        db,
+        userIdStr,
+        authenticatedUser.projectIds,
+      );
+      if (!activeProjectId || !allowed.includes(activeProjectId)) {
+        activeProjectId = allowed[0];
+      }
+    } else if (!activeProjectId) {
+      const allProjects = await db.listProjects(tenantIdStr);
+      const preferred = allProjects.find(
+        (project) =>
+          project.key !== DEFAULT_PROJECT_KEY
+          && String(project._id) !== defaultProjectId,
+      );
+      activeProjectId = preferred
+        ? (
+          typeof preferred._id === 'string'
+            ? preferred._id
+            : preferred._id?.toString()
+        )
+        : defaultProjectId;
+    }
+
+    const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(authenticatedTenant);
+    const token = await TokenManager.generateToken({
+      email: authenticatedUser.email,
+      features: effectiveLicense.features,
+      licenseExpiresAt: effectiveLicense.expiresAt?.toISOString(),
+      licenseId: effectiveLicense.licenseId,
+      licenseType: effectiveLicense.licenseType,
+      role: authenticatedUser.role!,
+      tenantDbName: authenticatedTenant.dbName,
+      tenantId: tenantIdStr,
+      tenantSlug: authenticatedTenant.slug,
+      userId: userIdStr,
+    });
+
+    if (authenticatedUser.invitedBy && !authenticatedUser.inviteAcceptedAt) {
+      try {
+        await db.updateUser(userIdStr, { inviteAcceptedAt: new Date() });
+        authenticatedUser.inviteAcceptedAt = new Date();
+      } catch (error) {
+        logger.error('Failed to mark invite accepted', { error });
+      }
+    }
+
+    setSessionCookies(reply, {
+      activeProjectId,
+      token,
+    });
+
+    return reply.code(200).send({
+      message: 'Login successful',
+      mustChangePassword: Boolean(authenticatedUser.mustChangePassword),
+      tenant: {
+        companyName: authenticatedTenant.companyName,
+        id: authenticatedTenant._id,
+        slug: authenticatedTenant.slug,
+      },
+      user: {
+        email: authenticatedUser.email,
+        features: effectiveLicense.features,
+        id: authenticatedUser._id,
+        licenseType: effectiveLicense.licenseType,
+        name: authenticatedUser.name,
+        role: authenticatedUser.role,
+        servicePermissions: normalizeServicePermissions(authenticatedUser.servicePermissions),
+      },
+    });
+  });
 }
 
 export const authApiPlugin: FastifyPluginAsync = async (app) => {
@@ -325,100 +455,13 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       const authenticatedTenant = tenant;
       const authenticatedUser = user;
 
-      return await withTenantScope(db, authenticatedTenant.dbName, async () => {
-        const tenantIdStr =
-          typeof authenticatedTenant._id === 'string'
-            ? authenticatedTenant._id
-            : authenticatedTenant._id!.toString();
-        const userIdStr =
-          typeof authenticatedUser._id === 'string'
-            ? authenticatedUser._id
-            : authenticatedUser._id!.toString();
-
-        const defaultProject = await ensureDefaultProject(
-          authenticatedTenant.dbName,
-          tenantIdStr,
-          userIdStr,
-        );
-        const defaultProjectId =
-          typeof defaultProject._id === 'string'
-            ? defaultProject._id
-            : defaultProject._id?.toString();
-
-        let activeProjectId = request.cookies.active_project_id;
-
-        if (authenticatedUser.role === 'user' || authenticatedUser.role === 'project_admin') {
-          const allowed = await collectAccessibleProjectIds(
-            db,
-            userIdStr,
-            authenticatedUser.projectIds,
-          );
-          if (!activeProjectId || !allowed.includes(activeProjectId)) {
-            activeProjectId = allowed[0];
-          }
-        } else if (!activeProjectId) {
-          const allProjects = await db.listProjects(tenantIdStr);
-          const preferred = allProjects.find(
-            (project) =>
-              project.key !== DEFAULT_PROJECT_KEY
-              && String(project._id) !== defaultProjectId,
-          );
-          activeProjectId = preferred
-            ? (
-              typeof preferred._id === 'string'
-                ? preferred._id
-                : preferred._id?.toString()
-            )
-            : defaultProjectId;
-        }
-
-        const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(authenticatedTenant);
-        const token = await TokenManager.generateToken({
-          email: authenticatedUser.email,
-          features: effectiveLicense.features,
-          licenseExpiresAt: effectiveLicense.expiresAt?.toISOString(),
-          licenseId: effectiveLicense.licenseId,
-          licenseType: effectiveLicense.licenseType,
-          role: authenticatedUser.role!,
-          tenantDbName: authenticatedTenant.dbName,
-          tenantId: tenantIdStr,
-          tenantSlug: authenticatedTenant.slug,
-          userId: userIdStr,
-        });
-
-        if (authenticatedUser.invitedBy && !authenticatedUser.inviteAcceptedAt) {
-          try {
-            await db.updateUser(userIdStr, { inviteAcceptedAt: new Date() });
-            authenticatedUser.inviteAcceptedAt = new Date();
-          } catch (error) {
-            logger.error('Failed to mark invite accepted', { error });
-          }
-        }
-
-        setSessionCookies(reply, {
-          activeProjectId,
-          token,
-        });
-
-        return reply.code(200).send({
-          message: 'Login successful',
-          mustChangePassword: Boolean(authenticatedUser.mustChangePassword),
-          tenant: {
-            companyName: authenticatedTenant.companyName,
-            id: authenticatedTenant._id,
-            slug: authenticatedTenant.slug,
-          },
-          user: {
-            email: authenticatedUser.email,
-            features: effectiveLicense.features,
-            id: authenticatedUser._id,
-            licenseType: effectiveLicense.licenseType,
-            name: authenticatedUser.name,
-            role: authenticatedUser.role,
-            servicePermissions: normalizeServicePermissions(authenticatedUser.servicePermissions),
-          },
-        });
-      });
+      return await issueSessionForAuthenticatedUser(
+        db,
+        authenticatedTenant,
+        authenticatedUser,
+        request,
+        reply,
+      );
     } catch (error) {
       logger.error('Login error', { error });
       return reply.code(500).send({ error: 'Internal server error' });

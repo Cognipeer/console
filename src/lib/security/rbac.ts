@@ -47,7 +47,9 @@ export type PermissionService =
   | 'realtime'
   | 'gpu-fleet'
   | 'ai-app-gateway'
-  | 'cluster';
+  | 'cluster'
+  | 'sso'
+  | 'ldap';
 
 /**
  * Tenant-wide roles.
@@ -134,6 +136,8 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   // Deliberately NOT adminService: a team lead must be able to read their own
   // department's gateway feed without holding tenant-admin.
   { id: 'ai-app-gateway', label: 'AI App Gateway', description: 'Coding-agent gateway instances: identity, observation, policy enforcement and session traces.', category: 'operate' },
+  { id: 'sso', label: 'Single Sign-On', description: 'OIDC single sign-on connection, attribute mapping and JIT provisioning.', category: 'admin', adminService: true },
+  { id: 'ldap', label: 'LDAP Directory', description: 'LDAP/Active Directory connection, group→role mapping and JIT provisioning.', category: 'admin', adminService: true },
 ];
 
 const SERVICE_IDS = new Set<PermissionService>(RBAC_SERVICE_DEFINITIONS.map((service) => service.id));

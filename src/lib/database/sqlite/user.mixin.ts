@@ -42,6 +42,25 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       return row ? this.mapUserRow(row) : null;
     }
 
+    /**
+     * Looks up a user by their external-directory identity (e.g. an OIDC
+     * `sub` or LDAP entry DN), NOT by email. Used by external-auth providers
+     * whose stable identifier isn't the email — a synthesized/placeholder
+     * email must never orphan the account, so this lookup wins over email
+     * matching when it hits.
+     */
+    async findUserByExternalId(
+      authProvider: NonNullable<IUser['authProvider']>,
+      externalId: string,
+    ): Promise<IUser | null> {
+      if (!externalId) return null;
+      const db = this.getTenantDb();
+      const row = db.prepare(
+        `SELECT * FROM ${TABLES.users} WHERE authProvider = @authProvider AND externalId = @externalId LIMIT 1`,
+      ).get({ authProvider, externalId }) as SqliteRow | undefined;
+      return row ? this.mapUserRow(row) : null;
+    }
+
     async createUser(userData: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>): Promise<IUser> {
       const db = this.getTenantDb();
       const id = this.newId();

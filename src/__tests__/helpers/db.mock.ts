@@ -88,6 +88,7 @@ function buildPrimers(): Record<string, Mock> {
     // User
     findUserByEmail: vi.fn().mockResolvedValue(null),
     findUserById: vi.fn().mockResolvedValue(null),
+    findUserByExternalId: vi.fn().mockResolvedValue(null),
     createUser: vi.fn().mockResolvedValue({ _id: 'user-1', email: 'test@example.com' }),
     listUsers: vi.fn().mockResolvedValue([]),
     deleteUser: vi.fn().mockResolvedValue(true),

@@ -194,6 +194,11 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   // User operations (tenant-specific)
   findUserByEmail(email: string): Promise<IUser | null>;
   findUserById(id: string): Promise<IUser | null>;
+  /** Looks up by external-directory identity (OIDC `sub`, LDAP DN, ...), not email. */
+  findUserByExternalId(
+    authProvider: NonNullable<IUser['authProvider']>,
+    externalId: string,
+  ): Promise<IUser | null>;
   createUser(
     user: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>,
   ): Promise<IUser>;

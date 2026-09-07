@@ -64,6 +64,15 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     prefixes: ['/api/ldap/'],
   },
   {
+    // OIDC single sign-on: same shape as LDAP above. The admin CONFIG/TEST
+    // surface is enterprise-gated; the actual login flow lives under
+    // /api/auth/sso/ (not /api/sso/), so it is never gated here and always
+    // works. A non-enterprise tenant cannot configure SSO (402); a stored but
+    // now-unlicensed connection is skipped in-handler (defense in depth).
+    module: 'sso',
+    prefixes: ['/api/sso/config', '/api/sso/test'],
+  },
+  {
     // Realtime voice/chat: admin model CRUD under /api/realtime, client session
     // surface under /api/client/v1/realtime. The websocket upgrade itself is
     // public (auth handled in-handler), so it never reaches this guard; the

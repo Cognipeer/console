@@ -112,6 +112,22 @@ export const PASSWORD_RESET_RATE_LIMIT: RateLimitConfig = {
   windowSeconds: 15 * 60,
 };
 
+/**
+ * Session-issuance rate limit: 20 per 15 minutes per IP.
+ *
+ * Guards `issueSessionForAuthenticatedUser` itself, not just the local
+ * `/auth/login` entry point that used to be its only caller — every
+ * authenticator that reaches it (local password, LDAP, OIDC/SSO ticket
+ * exchange) shares this one limiter, so a new external-auth callback can't
+ * ship unthrottled just because it forgot its own rate-limit check.
+ * Slightly more generous than LOGIN_RATE_LIMIT since it also covers
+ * already-authenticated traffic (e.g. several tenants/tabs via SSO).
+ */
+export const SESSION_ISSUANCE_RATE_LIMIT: RateLimitConfig = {
+  maxAttempts: 20,
+  windowSeconds: 15 * 60,
+};
+
 export function resetRateLimitStore(): void {
   store.clear();
 }
