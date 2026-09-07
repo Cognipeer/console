@@ -12,6 +12,7 @@ import {
   LOGIN_RATE_LIMIT,
   PASSWORD_RESET_RATE_LIMIT,
   REGISTER_RATE_LIMIT,
+  SESSION_ISSUANCE_RATE_LIMIT,
 } from '@/lib/services/auth/rateLimiter';
 import {
   BCRYPT_ROUNDS,
@@ -113,6 +114,25 @@ export async function issueSessionForAuthenticatedUser(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<FastifyReply> {
+  // Every authenticator ends up here — local password (already rate-limited
+  // at the top of /auth/login, which guards against password-guessing before
+  // any of this runs), LDAP, and OIDC/SSO's ticket-exchange callback. This is
+  // the one place that's guaranteed to run regardless of which of those
+  // called it, so it's where a shared, can't-forget-it limit belongs.
+  const clientIp = getClientIp(request);
+  const rl = checkRateLimit(`session:${clientIp}`, SESSION_ISSUANCE_RATE_LIMIT);
+  if (!rl.allowed) {
+    sendRateLimitHeaders(
+      {
+        'Retry-After': String(rl.retryAfterSeconds),
+        'X-RateLimit-Remaining': '0',
+        'X-RateLimit-Reset': rl.resetAt.toISOString(),
+      },
+      reply,
+    );
+    return reply.code(429).send({ error: 'Too many sign-in attempts. Please try again later.' });
+  }
+
   return withTenantScope(db, authenticatedTenant.dbName, async () => {
     const tenantIdStr =
       typeof authenticatedTenant._id === 'string'
