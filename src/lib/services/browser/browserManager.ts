@@ -294,6 +294,14 @@ class BrowserManager {
       logger.info('Launching Chromium', {
         headless: cfg.headless,
         proxied: Boolean(proxy),
+        // Host only, never the full proxy URL — a corporate proxy's URL
+        // commonly embeds basic-auth credentials (http://user:pass@host).
+        // `proxied: true` with no host next to it was a diagnostic dead end
+        // on the incident this log line was written for: no way to tell
+        // from the pod's own logs whether the configured proxy matched what
+        // the network actually required.
+        proxyHost: proxy ? safeProxyHost(proxy.server) : undefined,
+        proxyBypassConfigured: Boolean(proxy?.bypass),
         extraArgs: cfg.chromiumExtraArgs.length,
         ignoreCertificateErrors: cfg.ignoreCertificateErrors,
       });
@@ -423,7 +431,12 @@ class BrowserManager {
             blockPrivateNetwork,
           });
           if (!decision.allowed) {
-            logger.debug('Browser request blocked by egress policy', {
+            // `warn`, not `debug`: this only fires when a policy actually
+            // denies a request (default-allow otherwise emits nothing), so
+            // it's a rare, actionable diagnostic signal, not per-request
+            // noise -- and at `debug` it was invisible at the log level
+            // every production deployment actually runs at.
+            logger.warn('Browser request blocked by egress policy', {
               reason: decision.reason,
               urlHost: getSafeUrlHost(url),
             });
@@ -781,7 +794,14 @@ class BrowserManager {
             throw new Error(decision.reason ?? 'Browser navigation blocked by egress policy');
           }
           await this.activePage(live).goto(action.url, {
-            waitUntil: action.waitUntil ?? 'load',
+            // Playwright's own default. 'load' waits for every last
+            // subresource on the page -- trackers, fonts, third-party
+            // widgets -- which routinely pushes a heavy real-world page (in
+            // particular one behind a corporate egress proxy) past any
+            // reasonable navigation timeout on content that finished
+            // rendering long before. 'domcontentloaded' is what crawl4ai and
+            // most browser-automation tooling default to for the same reason.
+            waitUntil: action.waitUntil ?? 'domcontentloaded',
             timeout: action.timeout,
           });
           break;
@@ -925,9 +945,17 @@ class BrowserManager {
         tabs,
       };
     } catch (err) {
+      // A `goto` that times out (a slow network, a heavy corporate-proxied
+      // page) often leaves a partially- or fully-rendered page behind, not a
+      // blank one -- capture it best-effort instead of returning nothing, so
+      // "the action failed" doesn't also mean "the caller has no idea what
+      // the page looked like when it did."
+      const ariaSnapshot = await this.captureAriaSnapshot(live).catch(() => undefined);
       return {
         ok: false,
         url: this.activePage(live).url(),
+        pageTitle: await this.activePage(live).title().catch(() => undefined),
+        ariaSnapshot,
         targetStrategy: strategy,
         errorMessage: err instanceof Error ? err.message : String(err),
       };
@@ -1398,6 +1426,16 @@ async function evaluateBrowserRequestAccess(
 function getSafeUrlHost(rawUrl: string): string | undefined {
   try {
     return normalizeHost(new URL(rawUrl).hostname);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `host:port`, stripped of scheme and any embedded basic-auth credentials — safe to log. */
+function safeProxyHost(rawUrl: string): string | undefined {
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
   } catch {
     return undefined;
   }

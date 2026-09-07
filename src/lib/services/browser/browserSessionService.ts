@@ -257,6 +257,10 @@ export async function createBrowserSession(
     const refreshed = await db.findBrowserSessionById(sessionId);
     return serializeSession(refreshed ?? created);
   } catch (err) {
+    // This used to be persisted only to the DB row, never to the pod's own
+    // logs -- diagnosing a live incident meant querying Mongo to find out a
+    // session failed to open at all, with nothing in `oc logs` naming why.
+    logger.error('Browser session failed to open', { error: err, sessionKey, tenantId: ctx.tenantId });
     await db.updateBrowserSession(sessionId, {
       status: 'errored',
       errorMessage: err instanceof Error ? err.message : String(err),
