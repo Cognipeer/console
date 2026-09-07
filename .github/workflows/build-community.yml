@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: arc-runner-cgate
+    runs-on: self-hosted-runner-cgate-azure
     outputs:
       image_digest: ${{ steps.image.outputs.digest }}
       commit_sha: ${{ steps.vars.outputs.commit_sha }}
@@ -46,7 +46,7 @@ jobs:
         run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   sync-console-ee:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted-runner-cgate-azure
     timeout-minutes: 40
     needs: build
     steps:
@@ -160,7 +160,7 @@ jobs:
   notify-crm:
     if: always() && needs.build.result != 'skipped'
     environment: production
-    runs-on: ubuntu-latest
+    runs-on: self-hosted-runner-cgate-azure
     needs: [build, sync-console-ee]
     steps:
       - name: Report community artifact to CRM
