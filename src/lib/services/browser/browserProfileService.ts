@@ -6,7 +6,7 @@ import slugify from 'slugify';
 import { z } from 'zod';
 import { createLogger } from '@/lib/core/logger';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { IBrowser } from '@/lib/database';
 import type { BrowserView, CreateBrowserInput, UpdateBrowserInput } from './types';
 import { matchesProjectScope } from './internals';
@@ -70,24 +70,25 @@ export async function createBrowser(
   ctx: BrowserCtx,
   input: CreateBrowserInput,
 ): Promise<BrowserView> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const key = await generateUniqueBrowserKey(db, ctx.tenantId, input.key ?? input.name, ctx.projectId);
-  const created = await db.createBrowser({
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    status: input.status ?? 'active',
-    artifactBucketKey: input.artifactBucketKey,
-    defaultSessionConfig: input.defaultSessionConfig,
-    defaultModelKey: input.defaultModelKey,
-    defaultRunOptions: input.defaultRunOptions,
-    metadata: input.metadata,
-    createdBy: input.createdBy,
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const key = await generateUniqueBrowserKey(db, ctx.tenantId, input.key ?? input.name, ctx.projectId);
+    const created = await db.createBrowser({
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      status: input.status ?? 'active',
+      artifactBucketKey: input.artifactBucketKey,
+      defaultSessionConfig: input.defaultSessionConfig,
+      defaultModelKey: input.defaultModelKey,
+      defaultRunOptions: input.defaultRunOptions,
+      metadata: input.metadata,
+      createdBy: input.createdBy,
+    });
+    logger.info('Browser created', { browserId: created._id, key });
+    return serializeBrowser(created);
   });
-  logger.info('Browser created', { browserId: created._id, key });
-  return serializeBrowser(created);
 }
 
 export async function listBrowsers(

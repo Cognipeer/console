@@ -139,32 +139,33 @@ export async function createBrowserFlow(
   ctx: FlowContext,
   input: CreateBrowserFlowInput,
 ): Promise<BrowserFlowView> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const browser = await resolveBrowser(ctx, input.browserId);
-  if (!browser) {
-    throw new Error(`Browser not found: ${input.browserId}`);
-  }
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const browser = await resolveBrowser(ctx, input.browserId);
+    if (!browser) {
+      throw new Error(`Browser not found: ${input.browserId}`);
+    }
 
-  const key = await generateUniqueFlowKey(db, ctx.tenantId, input.key ?? input.name, ctx.projectId);
-  const created = await db.createBrowserFlow({
-    tenantId: ctx.tenantId,
-    projectId: ctx.projectId,
-    key,
-    name: input.name,
-    description: input.description,
-    status: input.status ?? 'draft',
-    browserId: String(browser._id ?? ''),
-    inputs: input.inputs,
-    outputs: input.outputs,
-    steps: normalizeSteps(input.steps ?? []),
-    sessionConfig: input.sessionConfig,
-    recordedFromSessionId: input.recordedFromSessionId,
-    version: 1,
-    metadata: input.metadata,
-    createdBy: input.createdBy,
+    const key = await generateUniqueFlowKey(db, ctx.tenantId, input.key ?? input.name, ctx.projectId);
+    const created = await db.createBrowserFlow({
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      key,
+      name: input.name,
+      description: input.description,
+      status: input.status ?? 'draft',
+      browserId: String(browser._id ?? ''),
+      inputs: input.inputs,
+      outputs: input.outputs,
+      steps: normalizeSteps(input.steps ?? []),
+      sessionConfig: input.sessionConfig,
+      recordedFromSessionId: input.recordedFromSessionId,
+      version: 1,
+      metadata: input.metadata,
+      createdBy: input.createdBy,
+    });
+    logger.info('Browser flow created', { flowId: created._id, key, steps: created.steps.length });
+    return serializeFlow(created);
   });
-  logger.info('Browser flow created', { flowId: created._id, key, steps: created.steps.length });
-  return serializeFlow(created);
 }
 
 export async function updateBrowserFlow(
@@ -261,8 +262,9 @@ export async function getBrowserFlowRun(
 async function resolveFlowRecord(
   ctx: FlowContext,
   idOrKey: string,
+  scopedDb?: DatabaseProvider,
 ): Promise<IBrowserFlow | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
+  const db = scopedDb ?? await withTenantDb(ctx.tenantDbName);
   const record =
     (await db.findBrowserFlowById(idOrKey).catch(() => null))
     ?? (await db.findBrowserFlowByKey(ctx.tenantId, idOrKey, ctx.projectId));
@@ -529,7 +531,7 @@ async function prepareFlowRun(
   idOrKey: string,
   input: RunBrowserFlowInput,
 ): Promise<FlowRunSetup> {
-  const flow = await resolveFlowRecord(ctx, idOrKey);
+  const flow = await resolveFlowRecord(ctx, idOrKey, db);
   if (!flow) throw new Error(`Browser flow not found: ${idOrKey}`);
   if (flow.status === 'disabled') throw new Error(`Browser flow ${flow.key} is disabled`);
   if (!flow.steps.length) throw new Error(`Browser flow ${flow.key} has no steps`);
@@ -685,9 +687,10 @@ export async function runBrowserFlow(
   idOrKey: string,
   input: RunBrowserFlowInput,
 ): Promise<BrowserFlowRunView> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const setup = await prepareFlowRun(db, ctx, idOrKey, input);
-  return executeFlowRun(db, ctx, setup, input);
+  return runWithTenantScope(ctx.tenantDbName, async (db) => {
+    const setup = await prepareFlowRun(db, ctx, idOrKey, input);
+    return executeFlowRun(db, ctx, setup, input);
+  });
 }
 
 /**
@@ -709,8 +712,9 @@ export async function startBrowserFlowRun(
   idOrKey: string,
   input: RunBrowserFlowInput,
 ): Promise<BrowserFlowRunView> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const setup = await prepareFlowRun(db, ctx, idOrKey, input);
+  const setup = await runWithTenantScope(ctx.tenantDbName, (db) => (
+    prepareFlowRun(db, ctx, idOrKey, input)
+  ));
   const requestContext = captureRequestContext();
 
   void runWithRequestContext(requestContext ?? {}, () => (
