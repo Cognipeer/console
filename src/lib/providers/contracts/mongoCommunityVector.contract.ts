@@ -132,8 +132,9 @@ function buildCollectionNames(
   settings: MongoCommunityVectorSettings,
   tenantId: string,
   providerKey: string,
+  defaultDbName: string,
 ): { dbName: string; indexesCollection: string; entriesCollection: string } {
-  const dbName = settings.database?.trim() || 'cognipeer_vectors';
+  const dbName = settings.database?.trim() || defaultDbName;
   const prefix = settings.collectionPrefix?.trim() || 'vec';
   const safeTenant = tenantId.replace(/[^a-zA-Z0-9_]/g, '_');
   const safeProvider = providerKey.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -188,7 +189,8 @@ export const MongoCommunityVectorProviderContract: ProviderContract<
             type: 'text',
             required: false,
             placeholder: 'cognipeer_vectors',
-            description: 'Optional. Defaults to a dedicated "cognipeer_vectors" database.',
+            description:
+              'Optional. Defaults to a dedicated "cognipeer_vectors" database, or the app\'s own main database when MONGODB_SINGLE_DATABASE is on.',
             scope: 'settings',
           },
           {
@@ -222,10 +224,29 @@ export const MongoCommunityVectorProviderContract: ProviderContract<
 
   async createRuntime({ tenantId, providerKey, credentials, settings, logger }) {
     const uri = resolveUri(credentials);
+
+    // On-prem `MONGODB_SINGLE_DATABASE` mode collapses the app's own
+    // main+tenant collections into one physical database (see
+    // MongoDBProviderBase.singleDatabase) so on-prem installs don't have to
+    // provision/back up a second database. Mirror that here when this store
+    // is reusing the app's own connection (no explicit `uri` credential) and
+    // the operator hasn't explicitly named a database: keep vectors as their
+    // own tenant+provider-scoped collections (buildCollectionNames already
+    // guarantees no name collision with the app's `vector_*` collections)
+    // inside that same database instead of a dedicated `cognipeer_vectors`
+    // one — one physical database, as intended.
+    const usingAppConnection = !credentials?.uri?.trim();
+    const cfg = getConfig();
+    const defaultDbName =
+      usingAppConnection && cfg.database.provider === 'mongodb' && cfg.database.singleDatabase
+        ? cfg.database.mainDbName
+        : 'cognipeer_vectors';
+
     const { dbName, indexesCollection, entriesCollection } = buildCollectionNames(
       settings,
       tenantId,
       providerKey,
+      defaultDbName,
     );
 
     const client = new MongoClient(uri);

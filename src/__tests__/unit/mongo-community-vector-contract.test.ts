@@ -7,10 +7,12 @@
  * application code.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
+import { MongoClient } from 'mongodb';
 import { MongoCommunityVectorProviderContract } from '@/lib/providers/contracts/mongoCommunityVector.contract';
 import type { VectorProviderRuntime } from '@/lib/providers/domains/vector';
+import { getConfigSource, setConfigSource, type ConfigSource } from '@/lib/core/config';
 
 const MONGO_AVAILABLE: boolean = (() => {
   try {
@@ -141,6 +143,84 @@ describe.runIf(MONGO_AVAILABLE)('MongoCommunityVectorProviderContract', () => {
       const result = await runtime.queryVectors(handle, { vector: [1, 0, 0], topK: 10 });
       expect(result.matches.map((m) => m.id)).not.toContain('v1');
       expect(result.matches).toHaveLength(3);
+    });
+  });
+
+  // ── On-prem single-database mode ────────────────────────────────────
+
+  describe('MONGODB_SINGLE_DATABASE mode', () => {
+    const originalSource = getConfigSource();
+
+    afterEach(() => {
+      setConfigSource(originalSource);
+    });
+
+    it('reuses the app main database (as its own collections) when the store reuses the app connection with no explicit database setting', async () => {
+      setConfigSource({
+        name: 'test-single-db',
+        get: (key: string) => {
+          const overrides: Record<string, string> = {
+            DB_PROVIDER: 'mongodb',
+            MONGODB_URI: server.getUri(),
+            MONGODB_SINGLE_DATABASE: 'true',
+            MAIN_DB_NAME: 'single_db_test_main',
+          };
+          return overrides[key];
+        },
+      } as ConfigSource);
+
+      // No `uri` credential (reuses the app connection) and no `database`
+      // setting — must collapse into the app's single main database instead
+      // of the dedicated `cognipeer_vectors` database.
+      await MongoCommunityVectorProviderContract.createRuntime({
+        tenantId: 'single_db_tenant',
+        providerKey: PROVIDER_KEY,
+        credentials: {},
+        settings: {},
+      });
+
+      const client = new MongoClient(server.getUri());
+      await client.connect();
+      try {
+        const mainDbCollections = await client.db('single_db_test_main').listCollections().toArray();
+        expect(mainDbCollections.some((c) => c.name.includes('single_db_tenant'))).toBe(true);
+
+        const dedicatedDbCollections = await client.db('cognipeer_vectors').listCollections().toArray();
+        expect(dedicatedDbCollections.some((c) => c.name.includes('single_db_tenant'))).toBe(false);
+      } finally {
+        await client.close();
+      }
+    });
+
+    it('still honors an explicit database setting even in single-database mode', async () => {
+      setConfigSource({
+        name: 'test-single-db-explicit',
+        get: (key: string) => {
+          const overrides: Record<string, string> = {
+            DB_PROVIDER: 'mongodb',
+            MONGODB_URI: server.getUri(),
+            MONGODB_SINGLE_DATABASE: 'true',
+            MAIN_DB_NAME: 'single_db_test_main',
+          };
+          return overrides[key];
+        },
+      } as ConfigSource);
+
+      await MongoCommunityVectorProviderContract.createRuntime({
+        tenantId: 'single-db-tenant-explicit',
+        providerKey: PROVIDER_KEY,
+        credentials: {},
+        settings: { database: 'explicit_vectors_db' },
+      });
+
+      const client = new MongoClient(server.getUri());
+      await client.connect();
+      try {
+        const explicitDbCollections = await client.db('explicit_vectors_db').listCollections().toArray();
+        expect(explicitDbCollections.some((c) => c.name.includes('single_db_tenant_explicit'))).toBe(true);
+      } finally {
+        await client.close();
+      }
     });
   });
 
