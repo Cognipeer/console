@@ -1,0 +1,36 @@
+name: Release Workflow Checks
+
+on:
+  pull_request:
+    paths: ['.github/workflows/**', 'ci/**']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/**', 'ci/**']
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: self-hosted-runner-cgate-azure
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install YAML test parser
+        run: |
+          set -euo pipefail
+          case "${RUNNER_ARCH}" in
+            X64) ARCH=amd64 ;;
+            ARM64) ARCH=arm64 ;;
+            *) echo "::error::Unsupported runner architecture."; exit 1 ;;
+          esac
+          mkdir -p "${RUNNER_TEMP}/release-tools"
+          curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
+            "https://github.com/mikefarah/yq/releases/download/v4.47.1/yq_linux_${ARCH}" \
+            -o "${RUNNER_TEMP}/release-tools/yq"
+          chmod +x "${RUNNER_TEMP}/release-tools/yq"
+          echo "${RUNNER_TEMP}/release-tools" >> "$GITHUB_PATH"
+      - run: node --test ci/*.test.mjs
