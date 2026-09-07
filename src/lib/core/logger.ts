@@ -58,9 +58,33 @@ function redactValue(value: unknown, depth: number, seen: WeakSet<object>): unkn
     return value.map((item) => redactValue(item, depth + 1, seen));
   }
 
-  // Preserve Error / Date / Buffer instances as-is.
-  if (value instanceof Error || value instanceof Date || Buffer.isBuffer(value)) {
+  if (value instanceof Date || Buffer.isBuffer(value)) {
     return value;
+  }
+
+  // `winston.format.errors({ stack: true })` below only expands an Error
+  // passed as the log call's own top-level message/splat -- it never looks
+  // inside a metadata property. `logger.error('X failed', { error })`, the
+  // dominant pattern across this codebase, buries the Error one level down,
+  // so it reaches here unexpanded and then hits `winston.format.json()`:
+  // `message` and `stack` are non-enumerable own properties on a plain
+  // `Error`, so a bare `JSON.stringify` drops both and keeps only whatever a
+  // custom subclass explicitly assigned as an enumerable own property (e.g.
+  // Playwright's TimeoutError setting `this.name`) -- which is exactly why
+  // these logs showed `{"name":"TimeoutError"}` and nothing else. Expand it
+  // into a plain object instead of returning it as-is, so every one of those
+  // call sites actually logs what it was written to log.
+  if (value instanceof Error) {
+    const expanded: Record<string, unknown> = {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+    for (const [k, v] of Object.entries(value as unknown as Record<string, unknown>)) {
+      if (k === 'name' || k === 'message' || k === 'stack') continue;
+      expanded[k] = SENSITIVE_KEY_PATTERN.test(k) ? REDACTED : redactValue(v, depth + 1, seen);
+    }
+    return expanded;
   }
 
   const out: Record<string, unknown> = {};
@@ -74,7 +98,8 @@ function redactValue(value: unknown, depth: number, seen: WeakSet<object>): unkn
   return out;
 }
 
-const redactSecretsFormat = winston.format((info) => {
+/** Exported for direct testing of the actual serialization pipeline. */
+export const redactSecretsFormat = winston.format((info) => {
   for (const key of Object.keys(info)) {
     // Skip Winston's well-known structural fields.
     if (key === 'level' || key === 'message' || key === 'timestamp' || key === 'scope') continue;
