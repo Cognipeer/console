@@ -47,7 +47,9 @@ export type PermissionService =
   | 'realtime'
   | 'gpu-fleet'
   | 'ai-app-gateway'
-  | 'cluster';
+  | 'cluster'
+  | 'sso'
+  | 'ldap';
 
 /**
  * Tenant-wide roles.
@@ -134,6 +136,8 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   // Deliberately NOT adminService: a team lead must be able to read their own
   // department's gateway feed without holding tenant-admin.
   { id: 'ai-app-gateway', label: 'AI App Gateway', description: 'Coding-agent gateway instances: identity, observation, policy enforcement and session traces.', category: 'operate' },
+  { id: 'sso', label: 'Single Sign-On', description: 'OIDC single sign-on connection, attribute mapping and JIT provisioning.', category: 'admin', adminService: true },
+  { id: 'ldap', label: 'LDAP Directory', description: 'LDAP/Active Directory connection, group→role mapping and JIT provisioning.', category: 'admin', adminService: true },
 ];
 
 const SERVICE_IDS = new Set<PermissionService>(RBAC_SERVICE_DEFINITIONS.map((service) => service.id));
@@ -162,13 +166,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/crawler', service: 'crawler' },
   { prefix: '/api/client/v1/websearch', service: 'websearch' },
   { prefix: '/api/client/v1/ocr-jobs', service: 'ocr' },
-  // Single-shot OCR completion — same capability tier as ocr-jobs, just a
-  // synchronous call instead of a batch job.
-  { prefix: '/api/client/v1/ocr', service: 'ocr' },
-  // Audio (STT/TTS) and image generation are additional model-invocation
-  // dialects over the Model Hub, same tier as chat/embeddings below.
-  { prefix: '/api/client/v1/audio', service: 'models' },
-  { prefix: '/api/client/v1/images', service: 'models' },
   { prefix: '/api/client/v1/automations', service: 'automations' },
   { prefix: '/api/client/v1/config', service: 'config' },
   { prefix: '/api/client/v1/files', service: 'files' },
@@ -203,10 +200,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/prompts', service: 'prompts' },
   { prefix: '/api/client/v1/rag', service: 'rag' },
   { prefix: '/api/client/v1/rerank', service: 'reranker' },
-  // `/rerankers` (list) does NOT start with `/rerank/` — it needs its own
-  // entry. A prior comment in client-reranker.ts incorrectly assumed the
-  // `/rerank` prefix above already covered it; it never matched.
-  { prefix: '/api/client/v1/rerankers', service: 'reranker' },
   { prefix: '/api/client/v1/tools', service: 'tools' },
   { prefix: '/api/client/v1/tracing', service: 'tracing' },
   { prefix: '/api/client/v1/traces', service: 'tracing' },
@@ -216,11 +209,6 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // path as /api/client/v1/agents — gate it identically so a token's 'agents'
   // scope (or lack of it) applies here too.
   { prefix: '/api/client/v1/a2a', service: 'agents' },
-  // OpenAI Assistants API dialect: an "assistant" is an agent (assistantId is
-  // derived from agentKey) and a "thread" is that agent's conversation — same
-  // underlying resource as /api/client/v1/agents, gate it identically.
-  { prefix: '/api/client/v1/assistants', service: 'agents' },
-  { prefix: '/api/client/v1/threads', service: 'agents' },
   { prefix: '/api/client/v1/batches', service: 'models' },
   { prefix: '/api/client/v1/spend', service: 'models' },
   { prefix: '/api/client/v1/budgets', service: 'models' },

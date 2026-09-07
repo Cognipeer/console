@@ -22,6 +22,8 @@ const MODULE_LABELS: Record<string, string> = {
   realtime: 'Realtime',
   reports: 'Service Reports',
   'ai-app-gateway': 'AI App Gateway',
+  sso: 'Single Sign-On (OIDC)',
+  ldap: 'LDAP Directory',
 };
 
 export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {
