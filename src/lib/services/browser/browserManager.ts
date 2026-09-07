@@ -276,7 +276,27 @@ class BrowserManager {
 
       const cfg = getConfig().browser;
       const proxy = resolveBrowserProxyConfig();
-      logger.info('Launching Chromium', { headless: cfg.headless, proxied: Boolean(proxy) });
+      const args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        // Operator-controlled escape hatch (BROWSER_CHROMIUM_EXTRA_ARGS) for
+        // whatever a specific network needs that isn't one of the knobs
+        // above/below — no code change or release required to add one.
+        ...cfg.chromiumExtraArgs,
+        // TLS-inspecting corporate proxies re-sign every certificate with
+        // their own CA; Chromium has no independent way to trust it the way
+        // Node's own TLS stack does via NODE_EXTRA_CA_CERTS (which Chromium
+        // also doesn't read). BROWSER_IGNORE_CERTIFICATE_ERRORS is the
+        // browser-side equivalent escape hatch — off by default.
+        ...(cfg.ignoreCertificateErrors ? ['--ignore-certificate-errors'] : []),
+      ];
+      logger.info('Launching Chromium', {
+        headless: cfg.headless,
+        proxied: Boolean(proxy),
+        extraArgs: cfg.chromiumExtraArgs.length,
+        ignoreCertificateErrors: cfg.ignoreCertificateErrors,
+      });
       return chromium.launch({
         headless: cfg.headless,
         // Chromium's own setuid/user-namespace sandbox needs privileges that
@@ -285,7 +305,7 @@ class BrowserManager {
         // Playwright's own timeout fires. --disable-dev-shm-usage works
         // around the default 64MB /dev/shm in containers, which otherwise
         // crashes the renderer. Matches the crawler's playwrightFetcher.ts.
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        args,
         // Chromium does not read HTTP(S)_PROXY itself, unlike axios/undici —
         // without this, a network that requires an egress proxy leaves every
         // browser session unable to reach anything at all (not just blocked

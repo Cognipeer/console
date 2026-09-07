@@ -233,6 +233,25 @@ export interface AppConfig {
     defaultArtifactBucketKey: string;
     /** Block localhost/private network egress from managed browser sessions. */
     blockPrivateNetwork: boolean;
+    /**
+     * Extra Chromium command-line flags, appended after the built-in
+     * `--no-sandbox`/`--disable-dev-shm-usage` set on every launch — an
+     * operator-controlled escape hatch for whatever a specific network
+     * requires (e.g. `--proxy-bypass-list=...`,
+     * `--ignore-certificate-errors-spki-list=...`) without needing a code
+     * change and a new release for each one.
+     */
+    chromiumExtraArgs: string[];
+    /**
+     * Passes `--ignore-certificate-errors` to Chromium. For networks with a
+     * TLS-inspecting corporate proxy (the browser-side equivalent of setting
+     * `NODE_EXTRA_CA_CERTS`/`NODE_TLS_REJECT_UNAUTHORIZED=0` for Node's own
+     * TLS stack, which Chromium does not read either) whose intercepting
+     * certificate Chromium has no independent way to trust. This disables
+     * certificate validation for EVERY page the managed browser navigates
+     * to — only turn it on for a network you already control end-to-end.
+     */
+    ignoreCertificateErrors: boolean;
   };
 
   outboundHttp: {
@@ -502,6 +521,8 @@ function buildConfig(source: ConfigSource): AppConfig {
       reaperIntervalMs: int(source, 'BROWSER_REAPER_INTERVAL_MS', 30 * 1000),
       defaultArtifactBucketKey: str(source, 'BROWSER_DEFAULT_ARTIFACT_BUCKET', 'browser-artifacts'),
       blockPrivateNetwork: bool(source, 'BROWSER_BLOCK_PRIVATE_NETWORK', true),
+      chromiumExtraArgs: list(source, 'BROWSER_CHROMIUM_EXTRA_ARGS', []),
+      ignoreCertificateErrors: bool(source, 'BROWSER_IGNORE_CERTIFICATE_ERRORS', false),
     },
 
     outboundHttp: {

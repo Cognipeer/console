@@ -8,6 +8,7 @@ import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { chromium, type Browser, type BrowserContext, type Download, type Page } from 'playwright';
 import mime from 'mime-types';
+import { getConfig } from '@/lib/core/config';
 import { resolveBrowserProxyConfig } from '@/lib/core/browserProxyConfig';
 import { looksLikeJsShell } from './links';
 import { parseContentTypeBase } from './normalize';
@@ -56,6 +57,7 @@ export class PlaywrightSession {
     if (this.launching) return this.launching;
     this.launching = (async () => {
       const proxy = resolveBrowserProxyConfig();
+      const cfg = getConfig().browser;
       this.browser = await chromium.launch({
         headless: true,
         args: [
@@ -73,6 +75,11 @@ export class PlaywrightSession {
           // (the automation-controlled infobar / `--enable-automation`
           // behavior bundled into the default launch flags).
           '--disable-blink-features=AutomationControlled',
+          // Same operator escape hatches as the interactive Browser feature
+          // (browserManager.ts) — see BROWSER_CHROMIUM_EXTRA_ARGS /
+          // BROWSER_IGNORE_CERTIFICATE_ERRORS in config.ts.
+          ...cfg.chromiumExtraArgs,
+          ...(cfg.ignoreCertificateErrors ? ['--ignore-certificate-errors'] : []),
         ],
         // Chromium does not read HTTP(S)_PROXY itself, unlike the axios
         // fetcher this engine is an alternative to — on a network that
