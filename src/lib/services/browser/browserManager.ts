@@ -401,7 +401,11 @@ class BrowserManager {
       if (sessionConfig.httpCredentials?.username) {
         contextOptions.httpCredentials = sessionConfig.httpCredentials;
       }
-      if (sessionConfig.ignoreHTTPSErrors) contextOptions.ignoreHTTPSErrors = true;
+      // cfg.ignoreCertificateErrors only ever set the Chromium launch-level
+      // CLI flag; Playwright enforces its own, independent context-level
+      // check that flag doesn't touch, so the deployment-wide toggle must
+      // also flip this or it silently keeps blocking navigation.
+      if (sessionConfig.ignoreHTTPSErrors || cfg.ignoreCertificateErrors) contextOptions.ignoreHTTPSErrors = true;
       // Replaying a signed-in session: cookies + origin storage exported by a
       // previous session, so a scheduled flow starts authenticated instead of
       // pushing credentials through a login form on every run.

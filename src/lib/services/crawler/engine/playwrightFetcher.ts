@@ -98,7 +98,11 @@ export class PlaywrightSession {
             : {}),
         },
         httpCredentials: this.http.basicAuth,
-        ignoreHTTPSErrors: this.http.allowInsecureTls ?? false,
+        // cfg.ignoreCertificateErrors only sets the Chromium launch-level CLI
+        // flag above; Playwright enforces its own, independent context-level
+        // check that flag doesn't touch, so the deployment-wide toggle must
+        // also flip this or it silently keeps failing navigation.
+        ignoreHTTPSErrors: (this.http.allowInsecureTls ?? false) || cfg.ignoreCertificateErrors,
       });
       // Patch the most commonly-checked automation fingerprints before any
       // page script runs. `navigator.webdriver` in particular is the single
