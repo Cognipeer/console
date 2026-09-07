@@ -481,9 +481,12 @@ export default function GuardrailPolicyEditor({
               placeholder={meta.label}
               value={draft.label ?? ''}
               readOnly={readOnly}
-              onChange={(event) =>
-                setDraft((prev) => assign(prev, { label: event.currentTarget.value || undefined }))
-              }
+              onChange={(event) => {
+                // Read it HERE: a functional update runs during the next
+                // render, by which time `currentTarget` is null.
+                const value = event.currentTarget.value;
+                setDraft((prev) => assign(prev, { label: value || undefined }));
+              }}
             />
           </FormField>
           <FormField
@@ -498,7 +501,10 @@ export default function GuardrailPolicyEditor({
               value={draft.id}
               readOnly={!isNew || readOnly}
               disabled={!isNew}
-              onChange={(event) => setDraft((prev) => assign(prev, { id: event.currentTarget.value }))}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setDraft((prev) => assign(prev, { id: value }));
+              }}
             />
           </FormField>
         </FormRow>
@@ -519,9 +525,10 @@ export default function GuardrailPolicyEditor({
           description="A disabled policy keeps its whole configuration and evaluates nothing."
           checked={draft.enabled}
           disabled={readOnly}
-          onChange={(event) =>
-            setDraft((prev) => assign(prev, { enabled: event.currentTarget.checked }))
-          }
+          onChange={(event) => {
+            const checked = event.currentTarget.checked;
+            setDraft((prev) => assign(prev, { enabled: checked }));
+          }}
         />
       </FormSection>
 

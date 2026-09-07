@@ -1,15 +1,23 @@
 'use client';
 
 /**
- * One browser flow: its steps, its inputs, and what happened when it ran.
+ * Flow editor — the playground with a flow attached.
  *
- * The step list is the product. It is shown as an ordered ledger rather than
- * a card grid because order is the information — step 4 running before step 3
- * is a different automation — and because an operator debugging a 3am failure
- * needs to find "the step that broke" by position, fast.
+ * The playground is for finding out what a page does; this is for turning
+ * that into something that runs without you. Same three panes, because the
+ * loop is the same one — look, act, see what happened — but here every action
+ * has a second effect: it lands in the flow at the insertion point, with its
+ * volatile `ref` stripped and, for anything you typed, the value lifted out
+ * into an input rather than baked in.
+ *
+ * The left rail is the flow itself, in four views that are really four
+ * questions: what does it do (Steps), what does it need (Inputs), what does
+ * it give back (Output), and what happened when it ran (Runs). A test run
+ * takes over the same panes it was authored in, which is the point: the thing
+ * you watch failing is the thing you just built, in the place you built it.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   ActionIcon,
@@ -17,162 +25,159 @@ import {
   Button,
   Code,
   Group,
-  NumberInput,
+  Loader,
+  ScrollArea,
+  SegmentedControl,
   Select,
-  Stack,
   Switch,
   Text,
   TextInput,
-  Textarea,
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
-  IconArrowDown,
-  IconArrowUp,
   IconChevronLeft,
   IconPlayerPlay,
   IconPlus,
+  IconRefresh,
   IconRoute,
-  IconTrash,
+  IconX,
 } from '@tabler/icons-react';
-import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import StatTile from '@/components/common/ui/StatTile';
-import StatusBadge from '@/components/common/ui/StatusBadge';
 import FormShell, { FormField, FormRow, FormSection } from '@/components/common/ui/FormShell';
+import type { BrowserFlowRunView, BrowserFlowView } from '@/lib/services/browser';
 import type {
-  BrowserFlowRunView,
-  BrowserFlowView,
-} from '@/lib/services/browser';
-import type { IBrowserFlowInput, IBrowserFlowStep } from '@/lib/database';
+  IBrowserFlowInput,
+  IBrowserFlowOutput,
+  IBrowserFlowStep,
+  IBrowserFlowStepResult,
+} from '@/lib/database';
+import ActionComposer from '../../_workbench/ActionComposer';
+import StagePanel from '../../_workbench/StagePanel';
+import {
+  EMPTY_DRAFT,
+  TARGETED,
+  actionForRole,
+  buildAction,
+  describeTarget,
+  targetForNode,
+  targetsOnlyByRef,
+  toDurableAction,
+  type ActionDraft,
+} from '../../_workbench/actions';
+import type { SnapshotNode } from '../../_workbench/snapshot';
+import { useDriveSession, useFillMain, useWorkbenchStage } from '../../_workbench/useWorkbench';
+import classes from '../../_workbench/workbench.module.css';
+import InputsPanel from './_components/InputsPanel';
+import OutputPanel from './_components/OutputPanel';
+import RunsPanel from './_components/RunsPanel';
+import StepsPanel from './_components/StepsPanel';
+import StepDialog, {
+  EMPTY_STEP,
+  draftToStep,
+  stepToDraft,
+  type StepDraft,
+} from './_components/StepDialog';
+import InputDialog, { EMPTY_INPUT } from './_components/InputDialog';
+import OutputDialog, { EMPTY_OUTPUT } from './_components/OutputDialog';
+import ParametrizeDialog, { applyToAction } from './_components/ParametrizeDialog';
 
-const RUN_STATUS_VARIANT: Record<string, 'active' | 'paused' | 'error'> = {
-  succeeded: 'active',
-  running: 'paused',
-  pending: 'paused',
-  failed: 'error',
-  cancelled: 'paused',
-};
-
-/**
- * The actions a step can be, in the order an operator reaches for them.
- *
- * `upload` and `drag` are absent on purpose: one needs a Files id and the
- * other two targets, so neither is a sensible thing to add from a dropdown.
- * They go through the API.
- */
-const STEP_TYPES = [
-  { value: 'goto', label: 'Navigate to URL' },
-  { value: 'click', label: 'Click' },
-  { value: 'type', label: 'Type text' },
-  { value: 'select', label: 'Select an option' },
-  { value: 'check', label: 'Check / uncheck' },
-  { value: 'press', label: 'Press a key' },
-  { value: 'hover', label: 'Hover' },
-  { value: 'scroll', label: 'Scroll' },
-  { value: 'wait', label: 'Wait' },
-  { value: 'extract', label: 'Read a value' },
-  { value: 'back', label: 'Go back' },
-  { value: 'forward', label: 'Go forward' },
-  { value: 'reload', label: 'Reload' },
-];
-
-/** Which step types take an element target rather than acting on the page. */
-const TARGETED = new Set(['click', 'type', 'select', 'check', 'press', 'hover', 'scroll', 'extract']);
-
-interface StepDraft {
-  type: string;
-  role: string;
-  name: string;
-  testId: string;
-  label: string;
-  placeholder: string;
-  text: string;
-  selector: string;
-  nth: string;
-  url: string;
-  key: string;
-  value: string;
-  ms: string;
-  waitText: string;
-  checked: boolean;
-  captureAs: string;
-  retries: number;
-  timeoutMs: string;
-  optional: boolean;
-}
-
-const EMPTY_STEP: StepDraft = {
-  type: 'click',
-  role: '', name: '', testId: '', label: '', placeholder: '', text: '', selector: '', nth: '',
-  url: '', key: '', value: '', ms: '', waitText: '', checked: true,
-  captureAs: '', retries: 0, timeoutMs: '', optional: false,
-};
-
-/** Turn the editor's flat draft into the action payload the API accepts. */
-function draftToAction(draft: StepDraft): Record<string, unknown> {
-  const action: Record<string, unknown> = { type: draft.type };
-
-  if (TARGETED.has(draft.type)) {
-    if (draft.role.trim()) action.role = draft.role.trim();
-    if (draft.name.trim()) action.name = draft.name.trim();
-    if (draft.testId.trim()) action.testId = draft.testId.trim();
-    if (draft.label.trim()) action.label = draft.label.trim();
-    if (draft.placeholder.trim()) action.placeholder = draft.placeholder.trim();
-    if (draft.text.trim() && draft.type !== 'type') action.text = draft.text.trim();
-    if (draft.selector.trim()) action.selector = draft.selector.trim();
-    if (draft.nth.trim()) action.nth = Number(draft.nth);
+/** A slug that is a valid identifier and not already taken. */
+function uniqueName(base: string, taken: string[]): string {
+  const slug = base.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'value';
+  const safe = /^[a-z_]/.test(slug) ? slug : `f_${slug}`;
+  let candidate = safe;
+  let n = 2;
+  while (taken.includes(candidate)) {
+    candidate = `${safe}_${n}`;
+    n += 1;
   }
-
-  if (draft.type === 'goto') action.url = draft.url.trim();
-  if (draft.type === 'press') action.key = draft.key.trim();
-  if (draft.type === 'type') action.text = draft.value;
-  if (draft.type === 'select') action.labels = [draft.value];
-  if (draft.type === 'check') action.checked = draft.checked;
-  if (draft.type === 'wait') {
-    if (draft.waitText.trim()) action.text = draft.waitText.trim();
-    else if (draft.ms.trim()) action.ms = Number(draft.ms);
-    else if (draft.selector.trim()) action.selector = draft.selector.trim();
-  }
-  if (draft.type === 'scroll' && draft.ms.trim()) action.y = Number(draft.ms);
-
-  return action;
+  return candidate;
 }
 
-function describeStep(step: IBrowserFlowStep): string {
-  if (step.label) return step.label;
-  const action = step.action as Record<string, unknown>;
-  return `${action.type ?? 'step'}`;
+/** Fields whose name suggests a credential, so the input defaults to `secret`. */
+function looksSecret(action: Record<string, unknown>): boolean {
+  const haystack = `${action.name ?? ''} ${action.label ?? ''} ${action.placeholder ?? ''} ${action.testId ?? ''}`
+    .toLowerCase();
+  return /pass|şifre|sifre|secret|token|otp|pin|cvv/.test(haystack);
 }
 
-export default function BrowserFlowDetailPage() {
+export default function BrowserFlowEditorPage() {
   const router = useRouter();
   const params = useParams<{ flowId: string }>();
   const flowId = params?.flowId ?? '';
+  const shell = useFillMain();
 
   const [flow, setFlow] = useState<BrowserFlowView | null>(null);
   const [runs, setRuns] = useState<BrowserFlowRunView[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [running, setRunning] = useState(false);
 
-  const [stepOpen, setStepOpen] = useState(false);
-  const [stepDraft, setStepDraft] = useState<StepDraft>(EMPTY_STEP);
-  const [inputOpen, setInputOpen] = useState(false);
-  const [inputDraft, setInputDraft] = useState<IBrowserFlowInput>({ name: '', type: 'string', required: true });
+  const [tab, setTab] = useState('steps');
+  const [cursor, setCursor] = useState(0);
+  const [draft, setDraft] = useState<ActionDraft>(EMPTY_DRAFT);
+  const [autoParam, setAutoParam] = useState(true);
+
+  const [selectedRun, setSelectedRun] = useState<BrowserFlowRunView | null>(null);
+  const [watchRunId, setWatchRunId] = useState<string | null>(null);
   const [runOpen, setRunOpen] = useState(false);
   const [runValues, setRunValues] = useState<Record<string, string>>({});
-  const [selectedRun, setSelectedRun] = useState<BrowserFlowRunView | null>(null);
+  const [runStarting, setRunStarting] = useState(false);
+
+  const [stepDialog, setStepDialog] = useState<{ open: boolean; index: number | null; initial: StepDraft }>(
+    { open: false, index: null, initial: EMPTY_STEP },
+  );
+  const [inputDialog, setInputDialog] = useState<{ open: boolean; name: string | null; initial: IBrowserFlowInput }>(
+    { open: false, name: null, initial: EMPTY_INPUT },
+  );
+  const [outputDialog, setOutputDialog] = useState<{ open: boolean; name: string | null; initial: IBrowserFlowOutput }>(
+    { open: false, name: null, initial: EMPTY_OUTPUT },
+  );
+  const [paramIndex, setParamIndex] = useState<number | null>(null);
+  /** Armed from the Output tab: the next element picked becomes an output. */
+  const [pickForOutput, setPickForOutput] = useState(false);
+
+  const [authorKey, setAuthorKey] = useState<string | undefined>(undefined);
+  // ── The authoring session's position in the flow ──────────
+  // Building a flow means getting the page to where the next step's element
+  // exists. `executedThrough` is how far the live session has actually been
+  // driven; `captures` carries what earlier steps read, so a later
+  // `{{step.x}}` resolves the same way it will in a run.
+  const [authValues, setAuthValues] = useState<Record<string, string>>({});
+  const [authResults, setAuthResults] = useState<Array<IBrowserFlowStepResult | undefined>>([]);
+  const [captures, setCaptures] = useState<Record<string, unknown>>({});
+  const [executedThrough, setExecutedThrough] = useState(-1);
+  const [replayingTo, setReplayingTo] = useState<number | null>(null);
+
+  // A finished run's session is closed server-side, so the panes fall back to
+  // whatever is being authored; a running or failed one is still open (a test
+  // run always asks to keep it) and worth inspecting.
+  const inspectable = Boolean(
+    selectedRun && (selectedRun.status === 'running' || selectedRun.status === 'failed'),
+  );
+  const previewKey = inspectable ? selectedRun?.sessionKey : authorKey;
+  const stage = useWorkbenchStage(previewKey, { paused: Boolean(selectedRun) && !watchRunId });
+
+  const drive = useDriveSession({
+    browserId: flow?.browserId ?? '',
+    name: `flow-editor:${flow?.key ?? ''}`,
+    stage,
+  });
+
+  // ── Loading and saving ────────────────────────────────────
+
+  const loadRuns = useCallback(async () => {
+    const res = await fetch(`/api/browser/flow-runs?flowId=${encodeURIComponent(flowId)}&limit=25`, { cache: 'no-store' });
+    if (res.ok) setRuns((await res.json()).runs ?? []);
+  }, [flowId]);
 
   const load = useCallback(async () => {
     try {
-      const [flowRes, runsRes] = await Promise.all([
-        fetch(`/api/browser/flows/${flowId}`, { cache: 'no-store' }),
-        fetch(`/api/browser/flow-runs?flowId=${encodeURIComponent(flowId)}&limit=25`, { cache: 'no-store' }),
-      ]);
-      if (!flowRes.ok) throw new Error('Flow not found');
-      setFlow((await flowRes.json()).flow);
-      setRuns(runsRes.ok ? (await runsRes.json()).runs ?? [] : []);
+      const res = await fetch(`/api/browser/flows/${flowId}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error('Flow not found');
+      const { flow: loaded } = await res.json();
+      setFlow(loaded);
+      setCursor(loaded.steps?.length ?? 0);
+      await loadRuns();
     } catch (err) {
       notifications.show({
         color: 'red',
@@ -182,11 +187,9 @@ export default function BrowserFlowDetailPage() {
     } finally {
       setLoading(false);
     }
-  }, [flowId]);
+  }, [flowId, loadRuns]);
 
-  useEffect(() => {
-    if (flowId) void load();
-  }, [flowId, load]);
+  useEffect(() => { if (flowId) void load(); }, [flowId, load]);
 
   const patch = useCallback(async (body: Record<string, unknown>, message?: string) => {
     setSaving(true);
@@ -200,23 +203,286 @@ export default function BrowserFlowDetailPage() {
       if (!res.ok) throw new Error(data.error || 'Save failed');
       setFlow(data.flow);
       if (message) notifications.show({ color: 'teal', title: 'Saved', message });
-      return true;
+      return data.flow as BrowserFlowView;
     } catch (err) {
       notifications.show({
         color: 'red',
-        title: 'Error',
+        title: 'Could not save',
         message: err instanceof Error ? err.message : 'Save failed',
       });
-      return false;
+      return null;
     } finally {
       setSaving(false);
     }
   }, [flowId]);
 
-  const saveSteps = useCallback(
-    (steps: IBrowserFlowStep[], message?: string) => patch({ steps }, message),
-    [patch],
-  );
+  // ── Authoring ─────────────────────────────────────────────
+
+  /** Everything about where the live session is. A new session knows nothing. */
+  function forgetPosition() {
+    setExecutedThrough(-1);
+    setCaptures({});
+    setAuthResults([]);
+    setCursor(flow?.steps.length ?? 0);
+  }
+
+  async function startAuthoring() {
+    const session = await drive.start();
+    if (!session) return null;
+    setAuthorKey(session.sessionKey);
+    setSelectedRun(null);
+    forgetPosition();
+    return session.sessionKey;
+  }
+
+  async function endAuthoring() {
+    await drive.end();
+    setAuthorKey(undefined);
+    forgetPosition();
+  }
+
+  /** A fresh session, so a replay starts from a page nothing has touched. */
+  async function restartAuthoring() {
+    await drive.end();
+    setAuthorKey(undefined);
+    return startAuthoring();
+  }
+
+  /**
+   * Put the live session into the state after `index`.
+   *
+   * Forward is a continuation — it runs only the steps between where the
+   * session already is and where you asked for, so a form is not submitted
+   * twice on the way. Backward cannot be undone in a browser, so it restarts
+   * the session and replays from the top; that is also what makes ▶ on step 1
+   * mean "start over".
+   */
+  async function runThrough(index: number) {
+    if (!flow || replayingTo != null) return;
+
+    const backwards = index <= executedThrough;
+    setReplayingTo(index);
+    try {
+      let sessionKey = authorKey;
+      if (backwards || !sessionKey) {
+        const key = await (sessionKey ? restartAuthoring() : startAuthoring());
+        if (!key) return;
+        sessionKey = key;
+      }
+      const from = backwards ? 0 : executedThrough + 1;
+      const carried = backwards ? {} : captures;
+
+      const res = await fetch(`/api/browser/flows/${flow.id}/steps/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sessionKey,
+          from,
+          to: index + 1,
+          inputs: authValues,
+          captures: carried,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not replay the steps');
+
+      const results = (data.results ?? []) as IBrowserFlowStepResult[];
+      setAuthResults((current) => {
+        const next = backwards ? [] : [...current];
+        for (const result of results) next[result.index] = result;
+        return next;
+      });
+      setCaptures(data.captures ?? {});
+
+      const failedAt = data.failedStepIndex as number | undefined;
+      const reached = failedAt === undefined ? index : failedAt - 1;
+      setExecutedThrough(reached);
+      setCursor(reached + 1);
+      await stage.refreshFrom(sessionKey);
+
+      notifications.show({
+        color: failedAt === undefined ? 'teal' : 'red',
+        title: failedAt === undefined ? `At step ${index + 1}` : `Stopped at step ${failedAt + 1}`,
+        message: failedAt === undefined
+          ? `${results.length} step(s) replayed — the page is where step ${index + 2} begins.`
+          : data.errorMessage ?? 'See the step for details',
+      });
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Replay failed',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
+    } finally {
+      setReplayingTo(null);
+    }
+  }
+
+  /**
+   * Run the composed action against the authoring session, then append what
+   * ran to the flow — as a durable step, with typed values lifted into inputs.
+   */
+  async function runAndRecord() {
+    if (!flow) return;
+    const action = buildAction(draft);
+    if (!action) {
+      notifications.show({
+        color: 'orange',
+        title: 'Nothing to run',
+        message: TARGETED.has(draft.type)
+          ? 'Pick an element from the list on the right first.'
+          : 'Fill in the action first.',
+      });
+      return;
+    }
+
+    const outcome = await drive.runAction(action);
+    if (!outcome?.ok) return;
+
+    const durable = toDurableAction(action);
+    if (targetsOnlyByRef(durable)) {
+      notifications.show({
+        color: 'orange',
+        title: 'Ran, but not recorded',
+        message: 'That element is only addressable by its snapshot ref — nothing durable to store. Give it a testId or use a selector.',
+      });
+      return;
+    }
+
+    const inputs = [...(flow.inputs ?? [])];
+    const step: IBrowserFlowStep = { id: '', action: durable };
+    let note: string | undefined;
+
+    // Anything typed becomes a parameter by default: a literal password in a
+    // step is a credential in the flow document, and even a harmless value is
+    // usually the thing the next run wants to change.
+    if (autoParam && durable.type === 'type' && typeof durable.text === 'string'
+      && durable.text.length > 0 && !durable.text.includes('{{')) {
+      const name = uniqueName(
+        String(durable.name ?? durable.label ?? durable.placeholder ?? durable.testId ?? 'value'),
+        inputs.map((item) => item.name),
+      );
+      inputs.push({
+        name,
+        label: describeTarget(durable),
+        type: looksSecret(durable) ? 'secret' : 'string',
+        required: true,
+        description: `Value typed into ${describeTarget(durable)} while authoring.`,
+      });
+      durable.text = `{{input.${name}}}`;
+      note = `Stored as {{input.${name}}}`;
+    }
+
+    // A read is only useful if something can point at what it read.
+    let captured: unknown;
+    if (durable.type === 'extract') {
+      const taken = (flow.steps ?? []).map((item) => item.captureAs).filter(Boolean) as string[];
+      step.captureAs = uniqueName(
+        String(durable.name ?? durable.label ?? durable.testId ?? 'value'),
+        taken,
+      );
+      note = `Captured as {{step.${step.captureAs}}}`;
+      const values = outcome.result.values;
+      if (Array.isArray(values) && values.length > 0) {
+        captured = values.length === 1 ? values[0] : values;
+        note += ` — read “${String(values[0]).slice(0, 60)}”`;
+      }
+    }
+
+    const steps = [...flow.steps];
+    const at = Math.min(Math.max(cursor, 0), steps.length);
+    steps.splice(at, 0, step);
+
+    const saved = await patch({ steps, inputs });
+    if (saved) {
+      setCursor(at + 1);
+      // This step did not just get written — it just RAN, in this session. If
+      // it landed where the session already was, the session is now past it,
+      // and the next ▶ must not replay it.
+      if (at === executedThrough + 1) {
+        setExecutedThrough(at);
+        setAuthResults((current) => {
+          const next = [...current];
+          next[at] = {
+            stepId: step.id,
+            index: at,
+            status: 'succeeded',
+            attempts: 1,
+            durationMs: outcome.durationMs,
+          };
+          return next;
+        });
+        if (step.captureAs && captured !== undefined) {
+          setCaptures((current) => ({ ...current, [step.captureAs as string]: captured }));
+        }
+      }
+      // The ref just consumed belongs to a snapshot that no longer describes
+      // the page, so it must not address the next action.
+      setDraft((current) => ({ ...current, target: {}, value: '' }));
+      if (note) notifications.show({ color: 'teal', title: 'Step recorded', message: note });
+    }
+  }
+
+  /**
+   * Read an element straight into an output.
+   *
+   * Declaring what a flow returns used to mean three separate moves — add an
+   * `extract` step, give it a capture name, then point an output at that name
+   * — and the element you actually wanted was on screen the whole time. This
+   * does all three from one click: read it live so you can see the value,
+   * record the step, and open the output form already pointing at it.
+   */
+  async function captureElementAsOutput(node: SnapshotNode) {
+    if (!flow || !authorKey) return;
+    setPickForOutput(false);
+
+    const target = await targetForNode(authorKey, node);
+    const outcome = await drive.runAction({ type: 'extract', ...target });
+    if (!outcome?.ok) return;
+
+    const durable = toDurableAction({ type: 'extract', ...target });
+    if (targetsOnlyByRef(durable)) {
+      notifications.show({
+        color: 'orange',
+        title: 'Nothing durable to store',
+        message: 'That element is only addressable by its snapshot ref. Give it a testId, or add the step by hand with a selector.',
+      });
+      return;
+    }
+
+    const name = uniqueName(
+      String(node.name ?? durable.testId ?? node.role ?? 'value'),
+      [...captureNames, ...outputs.map((item) => item.name)],
+    );
+    const step: IBrowserFlowStep = { id: '', action: durable, captureAs: name };
+    const steps = [...flow.steps];
+    const at = Math.min(Math.max(cursor, 0), steps.length);
+    steps.splice(at, 0, step);
+
+    const saved = await patch({ steps });
+    if (!saved) return;
+    setCursor(at + 1);
+    if (at === executedThrough + 1) setExecutedThrough(at);
+
+    const values = outcome.result.values;
+    const read = Array.isArray(values) && values.length > 0 ? String(values[0]) : undefined;
+    if (read !== undefined) setCaptures((current) => ({ ...current, [name]: read }));
+
+    setTab('output');
+    setOutputDialog({
+      open: true,
+      name: null,
+      initial: {
+        name,
+        source: `{{step.${name}}}`,
+        description: read ? `Read “${read.slice(0, 80)}” while authoring.` : undefined,
+      },
+    });
+  }
+
+  // ── Step / input / output edits ───────────────────────────
+
+  const saveSteps = (steps: IBrowserFlowStep[], message?: string) => patch({ steps }, message);
 
   const moveStep = (index: number, delta: number) => {
     if (!flow) return;
@@ -232,626 +498,487 @@ export default function BrowserFlowDetailPage() {
     void saveSteps(flow.steps.filter((_, i) => i !== index), 'Step removed');
   };
 
-  const addStep = () => {
+  const submitStep = (stepDraft: StepDraft) => {
     if (!flow) return;
-    const action = draftToAction(stepDraft);
-    void saveSteps([...flow.steps, {
-      id: '',
-      action,
-      captureAs: stepDraft.captureAs.trim() || undefined,
-      policy: {
-        ...(stepDraft.retries ? { retries: stepDraft.retries } : {}),
-        ...(stepDraft.timeoutMs.trim() ? { timeoutMs: Number(stepDraft.timeoutMs) } : {}),
-        ...(stepDraft.optional ? { optional: true } : {}),
-      },
-    } as IBrowserFlowStep], 'Step added').then((ok) => {
-      if (ok) {
-        setStepOpen(false);
-        setStepDraft(EMPTY_STEP);
-      }
-    });
+    const steps = [...flow.steps];
+    if (stepDialog.index === null) {
+      const at = Math.min(Math.max(cursor, 0), steps.length);
+      steps.splice(at, 0, draftToStep(stepDraft));
+      setCursor(at + 1);
+    } else {
+      steps[stepDialog.index] = draftToStep(stepDraft, steps[stepDialog.index]);
+    }
+    void saveSteps(steps, stepDialog.index === null ? 'Step added' : 'Step saved')
+      .then((ok) => { if (ok) setStepDialog({ open: false, index: null, initial: EMPTY_STEP }); });
   };
 
-  const addInput = () => {
+  const submitInput = (input: IBrowserFlowInput) => {
     if (!flow) return;
-    void patch(
-      { inputs: [...(flow.inputs ?? []), inputDraft] },
-      'Input added',
-    ).then((ok) => {
-      if (ok) {
-        setInputOpen(false);
-        setInputDraft({ name: '', type: 'string', required: true });
-      }
-    });
+    const inputs = [...(flow.inputs ?? [])];
+    const at = inputs.findIndex((item) => item.name === inputDialog.name);
+    if (at >= 0) inputs[at] = input;
+    else inputs.push(input);
+    void patch({ inputs }, at >= 0 ? 'Input saved' : 'Input added')
+      .then((ok) => { if (ok) setInputDialog({ open: false, name: null, initial: EMPTY_INPUT }); });
   };
 
-  const removeInput = (name: string) => {
+  const submitOutput = (output: IBrowserFlowOutput) => {
     if (!flow) return;
-    void patch({ inputs: (flow.inputs ?? []).filter((item) => item.name !== name) }, 'Input removed');
+    const outputs = [...(flow.outputs ?? [])];
+    const at = outputs.findIndex((item) => item.name === outputDialog.name);
+    if (at >= 0) outputs[at] = output;
+    else outputs.push(output);
+    void patch({ outputs }, at >= 0 ? 'Output saved' : 'Output added')
+      .then((ok) => { if (ok) setOutputDialog({ open: false, name: null, initial: EMPTY_OUTPUT }); });
   };
 
-  async function executeRun() {
-    setRunning(true);
+  const submitParametrize = (change: { path: string; placeholder: string; newInput?: IBrowserFlowInput }) => {
+    if (!flow || paramIndex === null) return;
+    const steps = [...flow.steps];
+    const step = steps[paramIndex];
+    steps[paramIndex] = {
+      ...step,
+      action: applyToAction(step.action as Record<string, unknown>, change.path, change.placeholder),
+    };
+    const inputs = change.newInput ? [...(flow.inputs ?? []), change.newInput] : flow.inputs;
+    void patch({ steps, inputs }, `Bound to ${change.placeholder}`)
+      .then((ok) => { if (ok) setParamIndex(null); });
+  };
+
+  // ── Test runs ─────────────────────────────────────────────
+
+  async function startRun() {
+    if (!flow) return;
+    setRunStarting(true);
     try {
-      const res = await fetch(`/api/browser/flows/${flowId}/run`, {
+      const res = await fetch(`/api/browser/flows/${flow.id}/run/start`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ inputs: runValues }),
+        body: JSON.stringify({
+          inputs: runValues,
+          // A failed run's session is otherwise closed immediately, and the
+          // whole point of watching it here is seeing the page it broke on.
+          keepSessionOpen: true,
+        }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Run failed to start');
-
-      const run = data.run as BrowserFlowRunView;
-      notifications.show({
-        color: run.status === 'succeeded' ? 'teal' : 'red',
-        title: run.status === 'succeeded' ? 'Flow succeeded' : 'Flow failed',
-        message: run.status === 'succeeded'
-          ? `${run.stepResults?.length ?? 0} step(s) in ${run.durationMs ?? 0}ms`
-          : run.errorMessage ?? 'See the run for details',
-      });
+      if (!res.ok) throw new Error(data.error || 'Could not start the run');
       setRunOpen(false);
-      setSelectedRun(run);
-      await load();
+      setSelectedRun(data.run);
+      setWatchRunId(data.run.id);
+      setTab('steps');
+      stage.reset();
     } catch (err) {
       notifications.show({
         color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Run failed',
+        title: 'Could not start run',
+        message: err instanceof Error ? err.message : 'Failed',
       });
     } finally {
-      setRunning(false);
+      setRunStarting(false);
     }
   }
 
-  const stats = useMemo(() => {
-    const succeeded = runs.filter((run) => run.status === 'succeeded').length;
-    const failed = runs.filter((run) => run.status === 'failed').length;
-    const durations = runs.map((run) => run.durationMs ?? 0).filter(Boolean);
-    const median = durations.length
-      ? [...durations].sort((a, b) => a - b)[Math.floor(durations.length / 2)]
-      : 0;
-    return { succeeded, failed, median };
-  }, [runs]);
+  // Poll the run while it is in progress. Each new step result refreshes the
+  // preview and element list, so the run lands one step at a time rather than
+  // appearing finished.
+  const refreshFrom = stage.refreshFrom;
+  const lastSteps = useRef(-1);
+  useEffect(() => {
+    if (!watchRunId) return;
+    let cancelled = false;
+    lastSteps.current = -1;
+
+    const tick = async () => {
+      const res = await fetch(`/api/browser/flow-runs/${watchRunId}`, { cache: 'no-store' });
+      if (!res.ok || cancelled) return;
+      const { run } = (await res.json()) as { run: BrowserFlowRunView };
+      if (cancelled) return;
+      setSelectedRun(run);
+
+      const count = run.stepResults?.length ?? 0;
+      if (run.sessionKey && count !== lastSteps.current) {
+        lastSteps.current = count;
+        await refreshFrom(run.sessionKey);
+      }
+
+      if (run.status !== 'running') {
+        setWatchRunId(null);
+        void loadRuns();
+        notifications.show({
+          color: run.status === 'succeeded' ? 'teal' : 'red',
+          title: run.status === 'succeeded' ? 'Flow succeeded' : `Flow ${run.status}`,
+          message: run.status === 'succeeded'
+            ? `${run.stepResults?.length ?? 0} step(s) in ${run.durationMs ?? 0}ms`
+            : run.errorMessage ?? 'See the step list for details',
+        });
+      }
+    };
+
+    const timer = setInterval(() => { void tick(); }, 800);
+    void tick();
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [watchRunId, refreshFrom, loadRuns]);
+
+  // ── Derived ───────────────────────────────────────────────
+
+  const captureNames = useMemo(
+    () => (flow?.steps ?? []).map((step) => step.captureAs).filter(Boolean) as string[],
+    [flow],
+  );
+  const inputNames = useMemo(() => (flow?.inputs ?? []).map((item) => item.name), [flow]);
+  // Stable identities: these are props of components whose effects would
+  // otherwise re-run on every render of this page.
+  const inputs = useMemo(() => flow?.inputs ?? [], [flow]);
+  const outputs = useMemo(() => flow?.outputs ?? [], [flow]);
 
   if (loading) {
-    return <PageContainer><Text c="dimmed">Loading…</Text></PageContainer>;
+    return <div style={{ padding: 24 }}><Text c="dimmed">Loading…</Text></div>;
   }
   if (!flow) {
-    return <PageContainer><Text c="dimmed">Flow not found.</Text></PageContainer>;
+    return <div style={{ padding: 24 }}><Text c="dimmed">Flow not found.</Text></div>;
   }
 
+  const watching = Boolean(watchRunId);
+  const showingRun = Boolean(selectedRun);
+
   return (
-    <PageContainer>
-      <PageHeader
-        eyebrow="Operate · Browsers · Flows"
-        title={flow.name}
-        subtitle={flow.description || `${flow.steps.length} step(s) · version ${flow.version}`}
-        actions={(
-          <Group gap="xs">
-            <Button
-              variant="default"
+    <div ref={shell.ref} className={classes.shell} style={shell.style}>
+      {/* ── Header ─────────────────────────────────────────── */}
+      <header className={classes.header}>
+        <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
+          <Tooltip label="All flows">
+            <ActionIcon
+              variant="subtle"
               size="sm"
-              leftSection={<IconChevronLeft size={14} />}
+              aria-label="All flows"
               onClick={() => router.push('/dashboard/browser/flows')}
             >
-              All flows
-            </Button>
-            <Select
-              size="sm"
-              w={130}
-              value={flow.status}
-              data={[
-                { value: 'draft', label: 'Draft' },
-                { value: 'active', label: 'Active' },
-                { value: 'disabled', label: 'Disabled' },
-              ]}
-              onChange={(value) => value && patch({ status: value }, `Flow is now ${value}`)}
-              aria-label="Flow status"
-            />
-            <Button
-              color="teal"
-              size="sm"
-              loading={running}
-              disabled={flow.steps.length === 0}
-              leftSection={<IconPlayerPlay size={14} stroke={1.7} />}
-              onClick={() => {
-                const seed: Record<string, string> = {};
-                for (const item of flow.inputs ?? []) {
-                  seed[item.name] = item.default === undefined ? '' : String(item.default);
-                }
-                setRunValues(seed);
-                setRunOpen(true);
-              }}
-            >
-              Run flow
-            </Button>
-          </Group>
-        )}
-      />
+              <IconChevronLeft size={16} />
+            </ActionIcon>
+          </Tooltip>
+          <IconRoute size={18} stroke={1.7} />
+          <Text fw={600} size="sm" truncate>{flow.name}</Text>
+          <Badge size="sm" variant="light" color="gray">v{flow.version}</Badge>
+          {watching && selectedRun ? (
+            <Badge size="sm" variant="light" color="blue" leftSection={<Loader size={9} color="blue" />}>
+              running
+            </Badge>
+          ) : drive.session ? (
+            <>
+              <Badge size="sm" variant="light" color="teal">authoring</Badge>
+              <Code style={{ fontSize: 11 }}>{drive.session.sessionKey}</Code>
+            </>
+          ) : null}
+        </Group>
 
-      <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
-        <StatTile label="Steps" icon={<IconRoute size={14} stroke={1.7} />} value={flow.steps.length} />
-        <StatTile label="Inputs" value={flow.inputs?.length ?? 0} />
-        <StatTile label="Succeeded" value={stats.succeeded} />
-        <StatTile label="Failed" value={stats.failed} delta={stats.median ? `${stats.median}ms median` : undefined} />
+        <Group gap="xs" wrap="nowrap">
+          <Select
+            size="xs"
+            w={120}
+            value={flow.status}
+            data={[
+              { value: 'draft', label: 'Draft' },
+              { value: 'active', label: 'Active' },
+              { value: 'disabled', label: 'Disabled' },
+            ]}
+            onChange={(value) => value && patch({ status: value }, `Flow is now ${value}`)}
+            aria-label="Flow status"
+          />
+          {drive.session ? (
+            <Button size="xs" variant="default" leftSection={<IconX size={14} />} onClick={endAuthoring}>
+              End session
+            </Button>
+          ) : (
+            <Button
+              size="xs"
+              variant="light"
+              color="teal"
+              loading={drive.starting}
+              leftSection={<IconPlayerPlay size={14} />}
+              onClick={startAuthoring}
+            >
+              Author live
+            </Button>
+          )}
+          <Button
+            size="xs"
+            color="blue"
+            loading={runStarting}
+            disabled={flow.steps.length === 0 || watching}
+            leftSection={<IconRoute size={14} />}
+            onClick={() => {
+              const seed: Record<string, string> = {};
+              for (const item of flow.inputs ?? []) {
+                // Whatever you have been authoring with is almost always what
+                // you want to test with; the declared default is the fallback.
+                seed[item.name] = authValues[item.name]
+                  ?? (item.default === undefined ? '' : String(item.default));
+              }
+              setRunValues(seed);
+              setRunOpen(true);
+            }}
+          >
+            Test run
+          </Button>
+        </Group>
+      </header>
+
+      <div className={classes.body}>
+        {/* ── Left: the flow ───────────────────────────────── */}
+        <aside className={classes.left}>
+          <div className={classes.rightHead}>
+            <SegmentedControl
+              size="xs"
+              fullWidth
+              value={tab}
+              onChange={setTab}
+              data={[
+                { value: 'steps', label: `Steps (${flow.steps.length})` },
+                { value: 'inputs', label: `Inputs (${flow.inputs?.length ?? 0})` },
+                { value: 'output', label: `Output (${flow.outputs?.length ?? 0})` },
+                { value: 'runs', label: 'Runs' },
+              ]}
+            />
+          </div>
+
+          {tab === 'steps' && drive.session ? (
+            <>
+              <div className={classes.panelHead}>
+                <Text size="xs" fw={600} tt="uppercase" c="dimmed">Act, and record it</Text>
+                <Switch
+                  size="xs"
+                  label="Parametrize typed values"
+                  checked={autoParam}
+                  onChange={(event) => setAutoParam(event.currentTarget.checked)}
+                />
+              </div>
+              <ActionComposer
+                draft={draft}
+                onChange={setDraft}
+                onSubmit={runAndRecord}
+                busy={drive.busy || saving}
+                disabled={!drive.session}
+                submitLabel="Run & add step"
+                hint={`Lands at position ${Math.min(cursor, flow.steps.length) + 1}.`}
+              />
+            </>
+          ) : null}
+
+          {tab === 'steps' ? (
+            <div className={classes.panelHead}>
+              <Text size="xs" fw={600} tt="uppercase" c="dimmed">
+                Steps{showingRun ? ` · run ${selectedRun?.id.slice(0, 8)}` : ''}
+              </Text>
+              <Group gap={4}>
+                {showingRun ? (
+                  <Button
+                    size="compact-xs"
+                    variant="subtle"
+                    onClick={() => { setSelectedRun(null); setWatchRunId(null); }}
+                  >
+                    Clear run
+                  </Button>
+                ) : null}
+                {!showingRun && flow.steps.length > 0 ? (
+                  <Tooltip label="Replay the whole flow into this session, leaving it open at the end">
+                    <Button
+                      size="compact-xs"
+                      variant="subtle"
+                      color="teal"
+                      loading={replayingTo != null}
+                      leftSection={<IconPlayerPlay size={12} />}
+                      onClick={() => runThrough(flow.steps.length - 1)}
+                    >
+                      Replay all
+                    </Button>
+                  </Tooltip>
+                ) : null}
+                {!showingRun && drive.session && executedThrough >= 0 ? (
+                  <Tooltip label="Throw this session away and start from a blank page">
+                    <Button
+                      size="compact-xs"
+                      variant="subtle"
+                      leftSection={<IconRefresh size={12} />}
+                      onClick={() => { void restartAuthoring(); }}
+                    >
+                      Reset
+                    </Button>
+                  </Tooltip>
+                ) : null}
+                <Button
+                  size="compact-xs"
+                  variant="light"
+                  leftSection={<IconPlus size={12} />}
+                  onClick={() => setStepDialog({ open: true, index: null, initial: EMPTY_STEP })}
+                >
+                  Add
+                </Button>
+              </Group>
+            </div>
+          ) : null}
+
+          <ScrollArea className={classes.logScroll}>
+            {tab === 'steps' ? (
+              <StepsPanel
+                steps={flow.steps}
+                results={showingRun ? selectedRun?.stepResults : (authResults.length > 0 ? authResults : undefined)}
+                running={watching}
+                onRunTo={showingRun ? undefined : runThrough}
+                executedThrough={showingRun ? -1 : executedThrough}
+                replayingTo={replayingTo}
+                cursor={cursor}
+                onCursor={setCursor}
+                onMove={moveStep}
+                onRemove={removeStep}
+                onEdit={(index) => setStepDialog({
+                  open: true,
+                  index,
+                  initial: stepToDraft(flow.steps[index]),
+                })}
+                onParametrize={setParamIndex}
+                saving={saving}
+              />
+            ) : null}
+
+            {tab === 'inputs' ? (
+              <InputsPanel
+                inputs={inputs}
+                steps={flow.steps}
+                values={authValues}
+                onValue={(name, value) => setAuthValues((current) => ({ ...current, [name]: value }))}
+                saving={saving}
+                onAdd={() => setInputDialog({ open: true, name: null, initial: EMPTY_INPUT })}
+                onEdit={(name) => setInputDialog({
+                  open: true,
+                  name,
+                  initial: inputs.find((item) => item.name === name) ?? EMPTY_INPUT,
+                })}
+                onDeclare={(name) => setInputDialog({
+                  open: true,
+                  name: null,
+                  initial: { ...EMPTY_INPUT, name },
+                })}
+                onRemove={(name) => patch(
+                  { inputs: inputs.filter((item) => item.name !== name) },
+                  'Input removed',
+                )}
+              />
+            ) : null}
+
+            {tab === 'output' ? (
+              <OutputPanel
+                outputs={outputs}
+                captureNames={captureNames}
+                run={selectedRun ?? runs[0] ?? null}
+                saving={saving}
+                picking={pickForOutput}
+                onPickFromPage={drive.session ? () => setPickForOutput((armed) => !armed) : undefined}
+                onAdd={() => setOutputDialog({ open: true, name: null, initial: EMPTY_OUTPUT })}
+                onEdit={(name) => setOutputDialog({
+                  open: true,
+                  name,
+                  initial: outputs.find((item) => item.name === name) ?? EMPTY_OUTPUT,
+                })}
+                onRemove={(name) => patch(
+                  { outputs: outputs.filter((item) => item.name !== name) },
+                  'Output removed',
+                )}
+              />
+            ) : null}
+
+            {tab === 'runs' ? (
+              <RunsPanel
+                runs={runs}
+                selectedId={selectedRun?.id}
+                onSelect={(run) => { setSelectedRun(run); setTab('steps'); }}
+              />
+            ) : null}
+          </ScrollArea>
+        </aside>
+
+        {/* ── Right: the page ──────────────────────────────── */}
+        <StagePanel
+          stage={stage}
+          sessionKey={previewKey}
+          emptyHint={
+            showingRun
+              ? 'That run has finished and its session is closed.'
+              : 'Start an authoring session, or run the flow, to see the page.'
+          }
+          pickHint={pickForOutput
+            ? 'Pick the element to read — it becomes a step and an output field.'
+            : undefined}
+          onPickElement={drive.session ? (node) => {
+            if (pickForOutput) {
+              void captureElementAsOutput(node);
+              return;
+            }
+            // Respond immediately with what the snapshot knows, then upgrade
+            // to a durable target once the page has been asked.
+            setDraft((current) => ({
+              ...current,
+              target: {
+                ref: node.ref,
+                role: node.role,
+                ...(node.name ? { name: node.name } : {}),
+                ...(node.ambiguous ? { nth: node.nth } : {}),
+              },
+              type: actionForRole(node.role, current.type),
+            }));
+            if (!authorKey) return;
+            void targetForNode(authorKey, node).then((target) => {
+              setDraft((current) => (current.target.ref === node.ref ? { ...current, target } : current));
+            });
+          } : undefined}
+        />
       </div>
 
-      {/* ── Inputs ─────────────────────────────────────────────── */}
-      <section style={{ marginBottom: 24 }}>
-        <Group justify="space-between" mb="xs">
-          <Text size="sm" fw={600}>Inputs</Text>
-          <Button
-            size="xs"
-            variant="light"
-            leftSection={<IconPlus size={13} />}
-            onClick={() => setInputOpen(true)}
-          >
-            Add input
-          </Button>
-        </Group>
-        {(flow.inputs?.length ?? 0) === 0 ? (
-          <Text size="xs" c="dimmed" fs="italic">
-            No inputs. Recording adds one for every value that was typed, so nothing is baked into the steps.
-          </Text>
-        ) : (
-          <Stack gap={4}>
-            {flow.inputs?.map((item) => (
-              <Group key={item.name} gap="xs" wrap="nowrap">
-                <Code>{`{{input.${item.name}}}`}</Code>
-                <Badge size="xs" variant="light" color={item.type === 'secret' ? 'orange' : 'gray'}>
-                  {item.type}
-                </Badge>
-                {item.required ? <Badge size="xs" variant="light" color="blue">required</Badge> : null}
-                <Text size="xs" c="dimmed" style={{ flex: 1 }}>{item.description ?? item.label ?? ''}</Text>
-                <ActionIcon
-                  size="sm"
-                  variant="subtle"
-                  color="red"
-                  aria-label={`Remove ${item.name}`}
-                  onClick={() => removeInput(item.name)}
-                >
-                  <IconTrash size={13} />
-                </ActionIcon>
-              </Group>
-            ))}
-          </Stack>
-        )}
-      </section>
+      <StepDialog
+        open={stepDialog.open}
+        initial={stepDialog.initial}
+        editing={stepDialog.index !== null}
+        saving={saving}
+        onClose={() => setStepDialog({ open: false, index: null, initial: EMPTY_STEP })}
+        onSubmit={submitStep}
+      />
 
-      {/* ── Steps ──────────────────────────────────────────────── */}
-      <section style={{ marginBottom: 24 }}>
-        <Group justify="space-between" mb="xs">
-          <Text size="sm" fw={600}>Steps</Text>
-          <Button
-            size="xs"
-            variant="light"
-            leftSection={<IconPlus size={13} />}
-            onClick={() => setStepOpen(true)}
-          >
-            Add step
-          </Button>
-        </Group>
+      <InputDialog
+        open={inputDialog.open}
+        initial={inputDialog.initial}
+        editing={inputDialog.name !== null}
+        saving={saving}
+        onClose={() => setInputDialog({ open: false, name: null, initial: EMPTY_INPUT })}
+        onSubmit={submitInput}
+      />
 
-        {flow.steps.length === 0 ? (
-          <Text size="xs" c="dimmed" fs="italic">
-            No steps yet. Record a driven session, or add steps by hand.
-          </Text>
-        ) : (
-          <Stack gap={0}>
-            {flow.steps.map((step, index) => (
-              <Group
-                key={step.id}
-                wrap="nowrap"
-                gap="sm"
-                style={{
-                  padding: '10px 12px',
-                  borderTop: index === 0 ? '1px solid var(--ds-border)' : undefined,
-                  borderBottom: '1px solid var(--ds-border)',
-                  borderLeft: `3px solid ${
-                    selectedRun?.failedStepIndex === index ? 'var(--ds-err)' : 'transparent'
-                  }`,
-                }}
-              >
-                <Text size="xs" c="dimmed" ff="monospace" w={24}>{index + 1}</Text>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <Text size="sm">{describeStep(step)}</Text>
-                  <Text size="xs" c="dimmed" ff="monospace" style={{ wordBreak: 'break-all' }}>
-                    {JSON.stringify(step.action)}
-                  </Text>
-                </div>
-                {step.captureAs ? (
-                  <Badge size="xs" variant="light" color="teal">→ {step.captureAs}</Badge>
-                ) : null}
-                {step.policy?.optional ? <Badge size="xs" variant="light">optional</Badge> : null}
-                {step.policy?.retries ? (
-                  <Badge size="xs" variant="light">{step.policy.retries} retries</Badge>
-                ) : null}
-                <Group gap={2} wrap="nowrap">
-                  <Tooltip label="Move up">
-                    <ActionIcon size="sm" variant="subtle" disabled={index === 0 || saving} onClick={() => moveStep(index, -1)} aria-label="Move step up">
-                      <IconArrowUp size={13} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip label="Move down">
-                    <ActionIcon size="sm" variant="subtle" disabled={index === flow.steps.length - 1 || saving} onClick={() => moveStep(index, 1)} aria-label="Move step down">
-                      <IconArrowDown size={13} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip label="Remove">
-                    <ActionIcon size="sm" variant="subtle" color="red" disabled={saving} onClick={() => removeStep(index)} aria-label="Remove step">
-                      <IconTrash size={13} />
-                    </ActionIcon>
-                  </Tooltip>
-                </Group>
-              </Group>
-            ))}
-          </Stack>
-        )}
-      </section>
+      <OutputDialog
+        open={outputDialog.open}
+        initial={outputDialog.initial}
+        editing={outputDialog.name !== null}
+        saving={saving}
+        captureNames={captureNames}
+        inputNames={inputNames}
+        onClose={() => setOutputDialog({ open: false, name: null, initial: EMPTY_OUTPUT })}
+        onSubmit={submitOutput}
+      />
 
-      {/* ── Run history ────────────────────────────────────────── */}
-      <section>
-        <Text size="sm" fw={600} mb="xs">Run history</Text>
-        {runs.length === 0 ? (
-          <Text size="xs" c="dimmed" fs="italic">Never run.</Text>
-        ) : (
-          <Stack gap={0}>
-            {runs.map((run) => (
-              <Group
-                key={run.id}
-                wrap="nowrap"
-                gap="sm"
-                style={{
-                  padding: '9px 12px',
-                  borderBottom: '1px solid var(--ds-border)',
-                  cursor: 'pointer',
-                  background: selectedRun?.id === run.id ? 'var(--ds-surface-sunken)' : undefined,
-                }}
-                onClick={() => setSelectedRun(run)}
-              >
-                <StatusBadge status={RUN_STATUS_VARIANT[run.status] ?? 'paused'} label={run.status} />
-                <Text size="xs" c="dimmed">{run.startedAt ? new Date(run.startedAt).toLocaleString() : '—'}</Text>
-                <Badge size="xs" variant="light">{run.trigger}</Badge>
-                <Text size="xs" c="dimmed">v{run.flowVersion}</Text>
-                <Text size="xs" c="dimmed" style={{ flex: 1 }}>
-                  {run.status === 'failed'
-                    ? `failed at step ${(run.failedStepIndex ?? 0) + 1}: ${run.errorMessage ?? ''}`
-                    : `${run.stepResults?.length ?? 0} step(s)`}
-                </Text>
-                <Text size="xs" c="dimmed" ff="monospace">{run.durationMs ?? 0}ms</Text>
-              </Group>
-            ))}
-          </Stack>
-        )}
+      <ParametrizeDialog
+        open={paramIndex !== null}
+        step={paramIndex === null ? null : flow.steps[paramIndex]}
+        inputs={inputs}
+        saving={saving}
+        onClose={() => setParamIndex(null)}
+        onSubmit={submitParametrize}
+      />
 
-        {selectedRun ? (
-          <div style={{ marginTop: 16 }}>
-            <Text size="xs" fw={600} mb={6}>
-              Run {selectedRun.id.slice(0, 8)} · {selectedRun.status}
-            </Text>
-            <Stack gap={2}>
-              {selectedRun.stepResults?.map((result) => (
-                <Group key={result.stepId} gap="xs" wrap="nowrap">
-                  <Text size="xs" ff="monospace" c="dimmed" w={24}>{result.index + 1}</Text>
-                  <Badge
-                    size="xs"
-                    variant="light"
-                    color={result.status === 'succeeded' ? 'teal' : result.status === 'skipped' ? 'gray' : 'red'}
-                  >
-                    {result.status}
-                  </Badge>
-                  <Text size="xs" c="dimmed" style={{ flex: 1, wordBreak: 'break-all' }}>
-                    {result.errorMessage ?? result.url ?? ''}
-                  </Text>
-                  <Text size="xs" c="dimmed" ff="monospace">{result.attempts}× · {result.durationMs ?? 0}ms</Text>
-                </Group>
-              ))}
-            </Stack>
-            {selectedRun.outputs && Object.keys(selectedRun.outputs).length > 0 ? (
-              <div style={{ marginTop: 10 }}>
-                <Text size="xs" fw={600} mb={4}>Captured</Text>
-                <Code block>{JSON.stringify(selectedRun.outputs, null, 2)}</Code>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </section>
-
-      {/* ── Add step ───────────────────────────────────────────── */}
-      <FormShell
-        open={stepOpen}
-        onClose={() => setStepOpen(false)}
-        title="Add step"
-        subtitle="Describe the element the way a person would — role and name survive a redesign, a CSS selector usually does not."
-        icon={<IconRoute size={18} stroke={1.7} />}
-        primaryAction={{ label: 'Add step', color: 'teal', loading: saving, onClick: addStep }}
-        secondaryAction={{ label: 'Cancel', onClick: () => setStepOpen(false) }}
-      >
-        <FormSection number={1} title="Action">
-          <FormRow cols={1}>
-            <FormField label="What this step does" required>
-              <Select
-                data={STEP_TYPES}
-                value={stepDraft.type}
-                onChange={(value) => value && setStepDraft((draft) => ({ ...draft, type: value }))}
-              />
-            </FormField>
-          </FormRow>
-
-          {stepDraft.type === 'goto' ? (
-            <FormRow cols={1}>
-              <FormField label="URL" required hint="Supports {{input.name}} placeholders.">
-                <TextInput
-                  placeholder="https://portal.example.com/expenses"
-                  value={stepDraft.url}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, url: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-          ) : null}
-
-          {stepDraft.type === 'type' ? (
-            <FormRow cols={1}>
-              <FormField label="Text to type" required hint="Use {{input.name}} so the value is supplied per run rather than stored here.">
-                <TextInput
-                  placeholder="{{input.reference}}"
-                  value={stepDraft.value}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, value: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-          ) : null}
-
-          {stepDraft.type === 'select' ? (
-            <FormRow cols={1}>
-              <FormField label="Option label" required>
-                <TextInput
-                  placeholder="Administrator"
-                  value={stepDraft.value}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, value: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-          ) : null}
-
-          {stepDraft.type === 'press' ? (
-            <FormRow cols={1}>
-              <FormField label="Key" required>
-                <TextInput
-                  placeholder="Enter"
-                  value={stepDraft.key}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, key: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-          ) : null}
-
-          {stepDraft.type === 'check' ? (
-            <FormRow cols={1}>
-              <FormField label="Target state" hint="Checking is idempotent — replaying will not toggle a box that is already right.">
-                <Switch
-                  label={stepDraft.checked ? 'Checked' : 'Unchecked'}
-                  checked={stepDraft.checked}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, checked: event.currentTarget.checked }))}
-                />
-              </FormField>
-            </FormRow>
-          ) : null}
-
-          {stepDraft.type === 'wait' ? (
-            <FormRow cols={2}>
-              <FormField label="Until this text appears" optional>
-                <TextInput
-                  placeholder="Payment received"
-                  value={stepDraft.waitText}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, waitText: event.currentTarget.value }))}
-                />
-              </FormField>
-              <FormField label="Or a fixed delay (ms)" optional>
-                <TextInput
-                  placeholder="1000"
-                  value={stepDraft.ms}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, ms: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-          ) : null}
-
-          {stepDraft.type === 'scroll' ? (
-            <FormRow cols={1}>
-              <FormField label="Scroll down by (px)" optional hint="Leave empty and give a target below to scroll that element into view.">
-                <TextInput
-                  placeholder="800"
-                  value={stepDraft.ms}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, ms: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-          ) : null}
-        </FormSection>
-
-        {TARGETED.has(stepDraft.type) ? (
-          <FormSection
-            number={2}
-            title="Which element"
-            description="Fill the most durable one you can. Role + name is what a screen reader would say; a test id is even better when the app provides one."
-          >
-            <FormRow cols={2}>
-              <FormField label="Role" hint="button, link, textbox, checkbox, combobox…">
-                <TextInput
-                  placeholder="button"
-                  value={stepDraft.role}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, role: event.currentTarget.value }))}
-                />
-              </FormField>
-              <FormField label="Accessible name">
-                <TextInput
-                  placeholder="Sign in"
-                  value={stepDraft.name}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, name: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-            <FormRow cols={2}>
-              <FormField label="Test id" optional>
-                <TextInput
-                  placeholder="submit-btn"
-                  value={stepDraft.testId}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, testId: event.currentTarget.value }))}
-                />
-              </FormField>
-              <FormField label="Form label" optional>
-                <TextInput
-                  placeholder="Username"
-                  value={stepDraft.label}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, label: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-            <FormRow cols={2}>
-              <FormField label="Placeholder" optional>
-                <TextInput
-                  value={stepDraft.placeholder}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, placeholder: event.currentTarget.value }))}
-                />
-              </FormField>
-              <FormField label="Nth match" optional hint="Only when the target above matches several elements.">
-                <TextInput
-                  placeholder="0"
-                  value={stepDraft.nth}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, nth: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-            <FormRow cols={1}>
-              <FormField label="CSS selector" optional hint="Last resort — it encodes markup nobody promised to keep.">
-                <TextInput
-                  placeholder="#submit"
-                  value={stepDraft.selector}
-                  onChange={(event) => setStepDraft((draft) => ({ ...draft, selector: event.currentTarget.value }))}
-                />
-              </FormField>
-            </FormRow>
-          </FormSection>
-        ) : null}
-
-        <FormSection
-          number={TARGETED.has(stepDraft.type) ? 3 : 2}
-          title="When it goes wrong"
-          collapsible
-          defaultOpen={false}
-        >
-          <FormRow cols={2}>
-            <FormField label="Retries" hint="Delay doubles between attempts.">
-              <NumberInput
-                min={0}
-                max={10}
-                value={stepDraft.retries}
-                onChange={(value) => setStepDraft((draft) => ({ ...draft, retries: Number(value) || 0 }))}
-              />
-            </FormField>
-            <FormField label="Timeout (ms)" optional>
-              <TextInput
-                placeholder="15000"
-                value={stepDraft.timeoutMs}
-                onChange={(event) => setStepDraft((draft) => ({ ...draft, timeoutMs: event.currentTarget.value }))}
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label="Optional" hint="A failing optional step is recorded and skipped instead of aborting the run.">
-              <Switch
-                checked={stepDraft.optional}
-                onChange={(event) => setStepDraft((draft) => ({ ...draft, optional: event.currentTarget.checked }))}
-              />
-            </FormField>
-            <FormField label="Capture result as" optional hint="Makes the value available to later steps and to the run's outputs.">
-              <TextInput
-                placeholder="receipt"
-                value={stepDraft.captureAs}
-                onChange={(event) => setStepDraft((draft) => ({ ...draft, captureAs: event.currentTarget.value }))}
-              />
-            </FormField>
-          </FormRow>
-        </FormSection>
-      </FormShell>
-
-      {/* ── Add input ──────────────────────────────────────────── */}
-      <FormShell
-        open={inputOpen}
-        onClose={() => setInputOpen(false)}
-        title="Add flow input"
-        subtitle="Inputs are supplied per run and referenced from steps as {{input.name}}."
-        primaryAction={{ label: 'Add input', color: 'teal', loading: saving, onClick: addInput }}
-        secondaryAction={{ label: 'Cancel', onClick: () => setInputOpen(false) }}
-      >
-        <FormSection title="Definition">
-          <FormRow cols={2}>
-            <FormField label="Name" required hint="Used as {{input.name}}. Letters, digits and underscores.">
-              <TextInput
-                placeholder="reference"
-                value={inputDraft.name}
-                onChange={(event) => setInputDraft((draft) => ({ ...draft, name: event.currentTarget.value }))}
-              />
-            </FormField>
-            <FormField label="Type" required hint="A secret is never written to the run record.">
-              <Select
-                data={[
-                  { value: 'string', label: 'Text' },
-                  { value: 'number', label: 'Number' },
-                  { value: 'boolean', label: 'Boolean' },
-                  { value: 'secret', label: 'Secret' },
-                ]}
-                value={inputDraft.type}
-                onChange={(value) => value && setInputDraft((draft) => ({
-                  ...draft,
-                  type: value as IBrowserFlowInput['type'],
-                  // A default on a secret would be a credential stored in the
-                  // flow document, readable by anyone who can see the flow.
-                  default: value === 'secret' ? undefined : draft.default,
-                }))}
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label="Required">
-              <Switch
-                checked={inputDraft.required ?? false}
-                onChange={(event) => setInputDraft((draft) => ({ ...draft, required: event.currentTarget.checked }))}
-              />
-            </FormField>
-            <FormField label="Default" optional hint={inputDraft.type === 'secret' ? 'Not available for secrets.' : undefined}>
-              <TextInput
-                disabled={inputDraft.type === 'secret'}
-                value={inputDraft.default === undefined ? '' : String(inputDraft.default)}
-                onChange={(event) => setInputDraft((draft) => ({
-                  ...draft,
-                  default: event.currentTarget.value || undefined,
-                }))}
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={1}>
-            <FormField label="Description" optional>
-              <Textarea
-                autosize
-                minRows={2}
-                value={inputDraft.description ?? ''}
-                onChange={(event) => setInputDraft((draft) => ({ ...draft, description: event.currentTarget.value }))}
-              />
-            </FormField>
-          </FormRow>
-        </FormSection>
-      </FormShell>
-
-      {/* ── Run ────────────────────────────────────────────────── */}
       <FormShell
         open={runOpen}
         onClose={() => setRunOpen(false)}
-        title={`Run ${flow.name}`}
-        subtitle={`${flow.steps.length} step(s) will run in a fresh browser session.`}
-        icon={<IconPlayerPlay size={18} stroke={1.7} />}
-        primaryAction={{ label: 'Run now', color: 'teal', loading: running, onClick: executeRun }}
+        title={`Test ${flow.name}`}
+        subtitle="Runs in its own fresh session, shown here step by step as it goes."
+        icon={<IconRoute size={18} stroke={1.7} />}
+        primaryAction={{ label: 'Run now', color: 'blue', loading: runStarting, onClick: startRun }}
         secondaryAction={{ label: 'Cancel', onClick: () => setRunOpen(false) }}
       >
         <FormSection title="Inputs">
@@ -869,17 +996,30 @@ export default function BrowserFlowDetailPage() {
                     type={item.type === 'secret' ? 'password' : 'text'}
                     placeholder={item.type === 'secret' ? 'Supplied per run, never stored' : undefined}
                     value={runValues[item.name] ?? ''}
-                    onChange={(event) => setRunValues((values) => ({
-                      ...values,
-                      [item.name]: event.currentTarget.value,
-                    }))}
+                    onChange={(event) => {
+                      // Read the value HERE, not inside the updater: React
+                      // runs a functional update during the next render, by
+                      // which time the synthetic event's `currentTarget` is
+                      // null — and reading `.value` off it throws inside
+                      // render, which the dashboard's error boundary turns
+                      // into "Dashboard could not be loaded".
+                      const value = event.currentTarget.value;
+                      setRunValues((values) => ({ ...values, [item.name]: value }));
+                    }}
                   />
                 </FormField>
               </FormRow>
             ))
           )}
         </FormSection>
+        {(flow.outputs?.length ?? 0) > 0 ? (
+          <FormSection title="Returns">
+            <Text size="xs" c="dimmed">
+              {(flow.outputs ?? []).map((item) => item.name).join(', ')}
+            </Text>
+          </FormSection>
+        ) : null}
       </FormShell>
-    </PageContainer>
+    </div>
   );
 }

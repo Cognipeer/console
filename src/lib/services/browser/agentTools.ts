@@ -331,6 +331,13 @@ export function buildBrowserAgentTools(ctx: ToolBindCtx) {
             required: item.required ?? false,
             description: item.description,
           })),
+          // What `browser_run_flow` will hand back, so the flow can be picked
+          // for the value it returns rather than run to find out.
+          outputs: (flow.outputs ?? []).map((item) => ({
+            name: item.name,
+            type: item.type ?? 'as captured',
+            description: item.description,
+          })),
         })),
       };
     }),

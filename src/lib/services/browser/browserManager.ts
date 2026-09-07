@@ -76,6 +76,8 @@ type PwLocator = {
   dragTo(target: PwLocator, options?: Record<string, unknown>): Promise<void>;
   innerText(): Promise<string>;
   innerHTML(): Promise<string>;
+  /** Runs in the PAGE, so its body may only use browser globals. */
+  evaluate<R>(fn: (element: Element) => R, arg?: unknown, options?: Record<string, unknown>): Promise<R>;
   inputValue(options?: Record<string, unknown>): Promise<string>;
   getAttribute(name: string): Promise<string | null>;
   scrollIntoViewIfNeeded(options?: Record<string, unknown>): Promise<void>;
@@ -129,6 +131,8 @@ const logger = createLogger('browser:manager');
 const HOST_SECURITY_CACHE_TTL_MS = 5 * 60 * 1000;
 /** How long to wait for an aria `ref` before falling back to a durable strategy. */
 const REF_PROBE_TIMEOUT_MS = 2_000;
+/** How long a snapshot waits for a navigation in flight before giving up on it. */
+const SNAPSHOT_SETTLE_MS = 3_000;
 /** Per-session ring buffer size for console messages and failed requests. */
 const OBSERVATION_BUFFER = 200;
 const hostSecurityCache = new Map<string, { privateNetwork: boolean; expiresAt: number }>();
@@ -682,6 +686,112 @@ class BrowserManager {
     return described;
   }
 
+  /**
+   * Resolve a snapshot `ref` to something a step can still find tomorrow.
+   *
+   * `describeRef` answers from the snapshot index alone, which is enough when
+   * the element has an accessible name — but an unnamed one comes back as
+   * bare `{ role: 'button' }`, and that matches the FIRST button on the page.
+   * Storing it produces a step that looks fine and clicks the wrong thing.
+   *
+   * So for those, ask the page itself: a test id if the authors left one, a
+   * stable id if there is one, otherwise a structural path. A CSS path is the
+   * weakest kind of target — it encodes markup nobody promised to keep — but
+   * it is the honest answer for an element the page gives no other handle to,
+   * and it is what the operator sees before they commit to it.
+   */
+  async describeElement(sessionKey: string, ref: string): Promise<{
+    target: BrowserTarget;
+    path: string;
+    tag: string;
+    text?: string;
+  } | null> {
+    const live = this.requireSession(sessionKey);
+    const known = this.describeRef(live, ref);
+    const locator = this.activePage(live).locator(`aria-ref=${ref}`);
+
+    const detail = await locator.evaluate((el: Element) => {
+      const TEST_ID_ATTRS = ['data-testid', 'data-test-id', 'data-test', 'data-qa'];
+      const testIdOf = (node: Element) => {
+        for (const attribute of TEST_ID_ATTRS) {
+          const value = node.getAttribute(attribute);
+          if (value && value.trim()) return { attribute, value: value.trim() };
+        }
+        return null;
+      };
+      // Framework-generated ids (React's `:r3:`, css-module hashes, ids ending
+      // in a long random run) change on the next render, so a selector built
+      // on one is a selector that breaks silently.
+      const stableIdOf = (node: Element) => {
+        const id = node.getAttribute('id');
+        if (!id || /^:r|[0-9a-f]{8,}|\d{6,}/i.test(id)) return null;
+        return id;
+      };
+      const escape = (value: string) => (
+        typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value.replace(/[^\w-]/g, '\\$&')
+      );
+      const positionOf = (node: Element) => {
+        const tag = node.tagName.toLowerCase();
+        const parent = node.parentElement;
+        if (!parent) return tag;
+        const siblings = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+        return siblings.length === 1 ? tag : `${tag}:nth-of-type(${siblings.indexOf(node) + 1})`;
+      };
+
+      const own = testIdOf(el);
+      const parts: string[] = [];
+      const readable: string[] = [];
+      let node: Element | null = el;
+      let hops = 0;
+
+      // Walk up until something identifies the subtree, so the path is
+      // anchored rather than counting divs all the way to <body>.
+      while (node && node !== document.body && hops < 8) {
+        const id = stableIdOf(node);
+        const testId = testIdOf(node);
+        if (node !== el && testId) {
+          parts.unshift(`[${testId.attribute}="${testId.value}"]`);
+          readable.unshift(`@${testId.value}`);
+          break;
+        }
+        if (id) {
+          parts.unshift(`#${escape(id)}`);
+          readable.unshift(`#${id}`);
+          break;
+        }
+        parts.unshift(positionOf(node));
+        readable.unshift(node.tagName.toLowerCase());
+        node = node.parentElement;
+        hops += 1;
+      }
+
+      const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 120);
+      return {
+        testId: own?.value,
+        selector: parts.join(' > '),
+        path: readable.join(' › '),
+        tag: el.tagName.toLowerCase(),
+        text: text || undefined,
+      };
+    }).catch(() => null);
+
+    if (!detail) return known ? { target: known, path: known.role ?? '', tag: '' } : null;
+
+    const target: BrowserTarget = { ...(known ?? {}) };
+    // Name beats structure, so only reach for the selector when there is no
+    // name to address the element by.
+    if (detail.testId) target.testId = detail.testId;
+    if (!target.name && !detail.testId && detail.selector) {
+      target.selector = detail.selector;
+      // A selector already pins the element; a role alongside it only narrows
+      // the same thing twice and gives the resolver a second way to be wrong.
+      delete target.role;
+      delete target.nth;
+    }
+
+    return { target, path: detail.path, tag: detail.tag, text: detail.text };
+  }
+
   /** The locator root an action addresses — the page, or a frame within it. */
   private locatorRoot(live: LiveSession, frame?: string | string[]): PwLocatorRoot {
     let root: PwLocatorRoot = this.activePage(live);
@@ -1224,16 +1334,47 @@ class BrowserManager {
     // never settles. `setDefaultTimeout` covers it, but be explicit here since
     // this runs after every action.
     const timeout = live.config.actionTimeoutMs ?? getConfig().browser.defaultActionTimeoutMs;
+
+    // Settle first. A click returns as soon as it has been dispatched, while
+    // the navigation it triggered is still in flight — snapshot in that gap
+    // and the tree describes a document that is on its way out, or nothing at
+    // all, and the caller's element list comes back empty for a page that is
+    // plainly there in the screenshot beside it.
+    //
+    // `load` rather than `domcontentloaded`: a client-rendered app answers
+    // `domcontentloaded` with an empty shell — a few wrappers and nothing to
+    // click — and a snapshot of that is worse than useless, because it looks
+    // like an answer. Bounded well under the action timeout either way: this
+    // runs after EVERY action, and a page that streams for ten seconds must
+    // not make every one of them wait for it.
+    await this.activePage(live)
+      .waitForLoadState('load', { timeout: Math.min(timeout, SNAPSHOT_SETTLE_MS) })
+      .catch(() => undefined);
+
     let snapshot = '';
     try {
       snapshot = await this.activePage(live).locator('html').ariaSnapshot({ mode: 'ai', timeout });
-    } catch {
-      // A Playwright old enough to lack `mode` still gives a readable tree;
-      // it just cannot be addressed by ref, so callers fall back to selectors.
+    } catch (err) {
+      // The usual cause here is a navigation racing the snapshot — a click
+      // just fired and the frame's execution context was torn down mid-call —
+      // not an old Playwright missing `mode`. Retry once after the page
+      // settles, or every action that happens to trigger navigation silently
+      // empties the caller's element list on the ref-less fallback below.
+      await this.activePage(live).waitForLoadState('domcontentloaded', { timeout }).catch(() => undefined);
       try {
-        snapshot = await this.activePage(live).locator('html').ariaSnapshot({ timeout });
+        snapshot = await this.activePage(live).locator('html').ariaSnapshot({ mode: 'ai', timeout });
       } catch {
-        snapshot = '';
+        logger.warn('ariaSnapshot mode:ai failed twice, falling back to a ref-less tree', {
+          sessionKey: live.sessionKey,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // A Playwright old enough to lack `mode` still gives a readable tree;
+        // it just cannot be addressed by ref, so callers fall back to selectors.
+        try {
+          snapshot = await this.activePage(live).locator('html').ariaSnapshot({ timeout });
+        } catch {
+          snapshot = '';
+        }
       }
     }
     live.refIndex = indexAriaRefs(snapshot);

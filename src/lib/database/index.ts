@@ -403,6 +403,7 @@ export type {
   BrowserActionType,
   IBrowserFlow,
   IBrowserFlowInput,
+  IBrowserFlowOutput,
   IBrowserFlowRun,
   IBrowserFlowStep,
   IBrowserFlowStepPolicy,

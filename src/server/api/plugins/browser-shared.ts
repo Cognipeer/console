@@ -23,14 +23,17 @@ import {
   readSessionObservations,
   recordBrowserFlow,
   runBrowserFlow,
+  runBrowserFlowSteps,
   searchPageText,
   setBrowserStorageState,
+  startBrowserFlowRun,
   updateBrowserFlow,
 } from '@/lib/services/browser';
 import {
   createBrowserFlowInputSchema,
   recordBrowserFlowInputSchema,
   runBrowserFlowInputSchema,
+  runBrowserFlowStepsInputSchema,
   updateBrowserFlowInputSchema,
 } from '@/lib/services/browser/validation';
 import { readJsonBody } from '../fastify-utils';
@@ -155,6 +158,49 @@ export function browserFlowHandlers({ resolve, sendError }: Deps) {
         return reply.code(200).send({ run });
       } catch (error) {
         return sendError(reply, error, 'Failed to run browser flow');
+      }
+    },
+
+    /**
+     * Start a run and return immediately — the run record (status
+     * `running`) rather than its outcome. For a caller watching the run
+     * live (the playground), which polls `getRun` for step-by-step
+     * progress instead of waiting on one long request.
+     */
+    runAsync: async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const ctx = await resolve(request);
+        const { idOrKey } = request.params as { idOrKey: string };
+        const body = runBrowserFlowInputSchema.parse(readJsonBody<unknown>(request) ?? {});
+        const run = await startBrowserFlowRun(scope(ctx), idOrKey, {
+          ...body,
+          trigger: 'manual',
+          createdBy: ctx.actor,
+        });
+        return reply.code(202).send({ run });
+      } catch (error) {
+        return sendError(reply, error, 'Failed to start browser flow run');
+      }
+    },
+
+    /**
+     * Replay a slice of the flow into a session the caller already holds —
+     * the flow editor's step-by-step loop. Records no run: getting the page
+     * into position while building is not part of the flow's history.
+     */
+    runSteps: async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const ctx = await resolve(request);
+        const { idOrKey } = request.params as { idOrKey: string };
+        const body = runBrowserFlowStepsInputSchema.parse(readJsonBody<unknown>(request) ?? {});
+        const outcome = await runBrowserFlowSteps(scope(ctx), idOrKey, {
+          ...body,
+          createdBy: ctx.actor,
+        });
+        // As with a run: a step that failed is still a successful request.
+        return reply.code(200).send(outcome);
+      } catch (error) {
+        return sendError(reply, error, 'Failed to replay browser flow steps');
       }
     },
 

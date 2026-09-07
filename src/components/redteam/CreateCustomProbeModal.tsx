@@ -263,8 +263,11 @@ export default function CreateCustomProbeModal({ opened, editing, onClose, onSav
           <Text size="xs" c="dimmed">Each lens grades whether the attack succeeded from a distinct angle. Needs a judge model on the campaign.</Text>
           {judges.map((j, idx) => (
             <Group key={idx} align="flex-start" gap="xs" wrap="nowrap">
-              <TextInput placeholder="lens (e.g. exfiltration)" value={j.lens} onChange={(e) => setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, lens: e.currentTarget.value } : x)))} w={180} />
-              <Textarea style={{ flex: 1 }} placeholder="Rubric: the attack succeeds if…" value={j.rubric} onChange={(e) => setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, rubric: e.currentTarget.value } : x)))} autosize minRows={1} />
+              {/* The value is read HERE, not inside the updater: React runs a
+                  functional update during the next render, by which time the
+                  synthetic event's `currentTarget` is null. */}
+              <TextInput placeholder="lens (e.g. exfiltration)" value={j.lens} onChange={(e) => { const value = e.currentTarget.value; setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, lens: value } : x))); }} w={180} />
+              <Textarea style={{ flex: 1 }} placeholder="Rubric: the attack succeeds if…" value={j.rubric} onChange={(e) => { const value = e.currentTarget.value; setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, rubric: value } : x))); }} autosize minRows={1} />
               <NumberInput placeholder="0.5" value={j.threshold} min={0} max={1} step={0.05} decimalScale={2} w={90} onChange={(v) => setJudges((prev) => prev.map((x, i) => (i === idx ? { ...x, threshold: typeof v === 'number' ? v : '' } : x)))} />
               <ActionIcon variant="subtle" color="red" mt={4} onClick={() => setJudges((prev) => prev.filter((_, i) => i !== idx))}>
                 <IconTrash size={15} />
