@@ -23,6 +23,7 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
+import { resolveBrowserProxyConfig } from '@/lib/core/browserProxyConfig';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
 import {
   getConcurrencyLimiter,
@@ -274,7 +275,8 @@ class BrowserManager {
       }
 
       const cfg = getConfig().browser;
-      logger.info('Launching Chromium', { headless: cfg.headless });
+      const proxy = resolveBrowserProxyConfig();
+      logger.info('Launching Chromium', { headless: cfg.headless, proxied: Boolean(proxy) });
       return chromium.launch({
         headless: cfg.headless,
         // Chromium's own setuid/user-namespace sandbox needs privileges that
@@ -284,6 +286,13 @@ class BrowserManager {
         // around the default 64MB /dev/shm in containers, which otherwise
         // crashes the renderer. Matches the crawler's playwrightFetcher.ts.
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        // Chromium does not read HTTP(S)_PROXY itself, unlike axios/undici —
+        // without this, a network that requires an egress proxy leaves every
+        // browser session unable to reach anything at all (not just blocked
+        // hosts), surfacing only as a page.goto timeout with nothing naming
+        // the actual cause. A session's own `config.proxy` (below, at context
+        // creation) overrides this per-session; this is just the default.
+        ...(proxy ? { proxy } : {}),
       });
     })();
 
