@@ -12,8 +12,15 @@ function waitForPin(pin = compat, overrides = {}) {
   const result = spawnSync('bash', ['-e', '-u', '-o', 'pipefail'], {
     input: `
       gh() { echo 'gh must not be required' >&2; return 127; }
-      sleep() { :; }
-      curl() { [[ "$HTTP_FAILURE" == 0 ]] || return 22; printf '%s' "$PIN"; }
+      sleep() { printf 'compat-poll-wait\\n'; }
+      curl() {
+        [[ "$HTTP_FAILURE" == 0 ]] || return 22
+        if [[ "$attempt" -lt "$PIN_READY_ATTEMPT" ]]; then
+          printf '%s' "$INITIAL_PIN"
+        else
+          printf '%s' "$PIN"
+        fi
+      }
       source "$SCRIPT_FILE"
     `,
     encoding: 'utf8', timeout: 30_000,
@@ -21,7 +28,8 @@ function waitForPin(pin = compat, overrides = {}) {
       ...process.env, SCRIPT_FILE: join(directory, 'wait-community-compat.sh'),
       GH_TOKEN: 'test-token', GITHUB_REPOSITORY: 'Cognipeer/console',
       CONSOLE_EE_REPOSITORY: 'Cognipeer/console-ee', COMMUNITY_TAG: compat.communityRef,
-      COMMUNITY_SHA: sha, PIN: JSON.stringify(pin), HTTP_FAILURE: '0', ...overrides,
+      COMMUNITY_SHA: sha, PIN: JSON.stringify(pin), HTTP_FAILURE: '0',
+      INITIAL_PIN: JSON.stringify(pin), PIN_READY_ATTEMPT: '1', ...overrides,
     },
   });
   assert.ifError(result.error);
@@ -31,6 +39,19 @@ function waitForPin(pin = compat, overrides = {}) {
 test('accepts an exact already-merged pin without gh or a new PR', () => {
   const result = waitForPin();
   assert.equal(result.status, 0, result.output);
+});
+
+test('waits for the exact pin to appear after compatibility sync', () => {
+  for (const initialPin of [
+    { ...compat, communityRef: 'v1.2.59-community' },
+    { ...compat, communitySha: 'c'.repeat(40) },
+  ]) {
+    const result = waitForPin(compat, {
+      INITIAL_PIN: JSON.stringify(initialPin), PIN_READY_ATTEMPT: '3',
+    });
+    assert.equal(result.status, 0, result.output);
+    assert.equal(result.output, 'compat-poll-wait\ncompat-poll-wait\n');
+  }
 });
 
 test('does not accept a moved tag, missing SHA, wrong repo or older pin', () => {
