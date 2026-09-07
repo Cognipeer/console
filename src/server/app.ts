@@ -9,6 +9,23 @@ import { bootstrapApplication } from './bootstrap';
 
 const logger = createLogger('server');
 
+/**
+ * Fastify's `trustProxy` accepts a boolean, a hop count, or an IP/CIDR list.
+ * Empty config (the default) preserves the existing `trustProxy: true`
+ * behaviour -- trust every hop, unchanged for anyone who hasn't opted in to
+ * hardening this. A single numeric entry ("1", "2", ...) is a hop count; one
+ * or more non-numeric entries are IPs/CIDRs of the actual trusted
+ * proxy/load balancer, and everything else falls back to the raw socket
+ * address instead of a client-controlled header.
+ */
+export function resolveTrustProxyOption(trustedProxies: string[]): boolean | number | string[] {
+  if (trustedProxies.length === 0) return true;
+  if (trustedProxies.length === 1 && /^\d+$/.test(trustedProxies[0])) {
+    return Number.parseInt(trustedProxies[0], 10);
+  }
+  return trustedProxies;
+}
+
 function parseBodySize(input: string): number {
   const normalized = input.trim().toLowerCase();
   const match = normalized.match(/^(\d+)(kb|mb|gb|b)?$/);
@@ -109,7 +126,7 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
   const app = Fastify({
     bodyLimit: parseBodySize(config.limits.bodySize),
     logger: false,
-    trustProxy: true,
+    trustProxy: resolveTrustProxyOption(config.network.trustedProxies),
   });
 
   await app.register(cookie);

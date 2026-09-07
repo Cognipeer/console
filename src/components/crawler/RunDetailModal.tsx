@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ActionIcon, Badge, Button, Code, Loader, Modal, Tooltip } from '@mantine/core';
+import { ActionIcon, Badge, Button, Code, Loader, Modal, Select, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconAlertTriangle,
@@ -10,6 +10,7 @@ import {
   IconFile,
   IconFileText,
   IconSearch,
+  IconUpload,
   IconX,
 } from '@tabler/icons-react';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -22,6 +23,13 @@ interface RunDetailModalProps {
   canceling: boolean;
   onCancel: (jobId: string) => void;
   onClose: () => void;
+  /** Active Knowledge Engine modules available to push this run's pages into. */
+  ragModules: Array<{ key: string; name: string }>;
+  /** Pre-selects the crawler's currently-configured module, if any. */
+  defaultRagModuleKey?: string;
+  /** Pushes the run's already-fetched pages into the chosen module — no re-crawl. */
+  onSyncToRag: (jobId: string, ragModuleKey: string) => Promise<void>;
+  syncingToRag: boolean;
 }
 
 const TYPE_META: Record<
@@ -54,11 +62,16 @@ export default function RunDetailModal({
   canceling,
   onCancel,
   onClose,
+  ragModules,
+  defaultRagModuleKey,
+  onSyncToRag,
+  syncingToRag,
 }: RunDetailModalProps) {
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'html' | 'file' | 'error'>('all');
   const [ragFilter, setRagFilter] = useState<'all' | 'indexed' | 'pending' | 'skipped' | 'failed' | 'none'>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [syncModuleKey, setSyncModuleKey] = useState<string | null>(null);
 
   // Reset transient view state whenever a different job is opened.
   useEffect(() => {
@@ -66,7 +79,8 @@ export default function RunDetailModal({
     setTypeFilter('all');
     setRagFilter('all');
     setSelectedId(null);
-  }, [job?.id]);
+    setSyncModuleKey(defaultRagModuleKey || null);
+  }, [job?.id, defaultRagModuleKey]);
 
   const counts = useMemo(() => {
     let html = 0;
@@ -113,6 +127,12 @@ export default function RunDetailModal({
   );
 
   const active = job?.status === 'queued' || job?.status === 'running';
+  const hasFetchablePages = counts.html + counts.file > 0;
+
+  const handleSync = async () => {
+    if (!job || !syncModuleKey) return;
+    await onSyncToRag(job.id, syncModuleKey);
+  };
 
   const copyBody = async (text: string) => {
     try {
@@ -166,7 +186,35 @@ export default function RunDetailModal({
                 {job.startedAt ? ` · started ${new Date(job.startedAt).toLocaleString()}` : ''}
               </div>
             </div>
-            <div className="ds-row ds-gap-sm">
+            <div className="ds-row ds-gap-sm" style={{ alignItems: 'center' }}>
+              {!active && hasFetchablePages ? (
+                <>
+                  <Select
+                    size="xs"
+                    w={220}
+                    placeholder={ragModules.length === 0 ? 'No Knowledge Engine modules' : 'Choose a module'}
+                    data={ragModules.map((m) => ({ value: m.key, label: `${m.name} · ${m.key}` }))}
+                    value={syncModuleKey}
+                    onChange={setSyncModuleKey}
+                    disabled={ragModules.length === 0 || syncingToRag}
+                    searchable
+                    nothingFoundMessage="No matching modules"
+                    aria-label="Knowledge Engine module to sync into"
+                  />
+                  <Tooltip label="Push this run's already-fetched pages into the module — no re-crawl" withArrow>
+                    <Button
+                      variant="light"
+                      size="xs"
+                      leftSection={<IconUpload size={14} />}
+                      loading={syncingToRag}
+                      disabled={!syncModuleKey}
+                      onClick={() => void handleSync()}
+                    >
+                      Send to Knowledge Engine
+                    </Button>
+                  </Tooltip>
+                </>
+              ) : null}
               {active ? (
                 <Button
                   color="red"

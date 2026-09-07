@@ -1,7 +1,4 @@
-import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type IAuditLog } from '@/lib/database';
-
-const logger = createLogger('audit-service');
 
 export interface AuditWriteContext {
   tenantDbName: string;
@@ -10,24 +7,25 @@ export interface AuditWriteContext {
 
 export type AuditLogInput = Omit<IAuditLog, '_id' | 'createdAt' | 'tenantId'>;
 
+/**
+ * Write one audit row. Deliberately does NOT catch its own errors: a
+ * swallowed failure here used to log at `warn` and resolve normally, so even
+ * a caller that awaited this could never tell the write was lost. Letting it
+ * reject lets `criticalFireAndForget` (the caller today) log it at `error`
+ * with a `critical: true` marker and count it against the critical pending
+ * set — or lets any future caller that needs to know retry, alert, or
+ * surface the failure to the request itself.
+ */
 export async function recordAuditLog(
   context: AuditWriteContext,
   input: AuditLogInput,
 ): Promise<void> {
-  try {
-    const db = await getDatabase();
-    await db.switchToTenant(context.tenantDbName);
-    await db.createAuditLog({
-      ...input,
-      tenantId: context.tenantId,
-    });
-  } catch (error) {
-    logger.warn('Failed to write audit log', {
-      error: error instanceof Error ? error.message : String(error),
-      service: input.service,
-      event: input.event,
-    });
-  }
+  const db = await getDatabase();
+  await db.switchToTenant(context.tenantDbName);
+  await db.createAuditLog({
+    ...input,
+    tenantId: context.tenantId,
+  });
 }
 
 export interface AuditLogListFilters {

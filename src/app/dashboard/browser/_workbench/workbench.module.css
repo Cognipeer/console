@@ -1,5 +1,6 @@
 /*
- * Full-height two-pane playground.
+ * Full-height two-pane browser workbench — shared by the playground (drive a
+ * session) and the flow editor (build one into a replayable flow).
  *
  * The shell owns the space rather than sitting inside PageContainer's
  * scrolling column: driving a browser means watching the page while you act
@@ -99,6 +100,17 @@
   margin-top: 2px;
 }
 
+.spin {
+  color: var(--ds-accent, #2563eb);
+  flex: none;
+  margin-top: 2px;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ── Right pane ────────────────────────────────────────────── */
 
 .right {
@@ -186,10 +198,54 @@
   outline-offset: -2px;
 }
 
+/*
+ * Two columns: how a step addresses the element, and what is in it.
+ *
+ * Fixed-share rather than content-width so the values line up down the page —
+ * scanning a column of values is the whole point, and a ragged left edge
+ * defeats it.
+ */
+.elementTarget {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 45%;
+  min-width: 0;
+  flex: none;
+}
+
 .elementName {
   flex: 1;
   min-width: 0;
   font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Armed: the next row you click is going somewhere specific. */
+.pickHint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ds-border);
+  background: var(--ds-accent-soft, rgba(37, 99, 235, 0.08));
+  color: var(--ds-accent, #2563eb);
+}
+
+.elementPath {
+  font-family: var(--ds-font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--ds-text-faint, var(--ds-text-muted));
+}
+
+.elementValue {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--ds-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--ds-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -205,6 +261,92 @@
 .console {
   flex: 1;
   min-height: 0;
+}
+
+/* ── Flow editor ───────────────────────────────────────────── */
+
+/*
+ * A step row is a drop-in for `.logRow` that can also be selected, so the
+ * two lists (what you ran, what the flow will run) read as one thing.
+ */
+.stepRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ds-border-soft, var(--ds-border));
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--ds-text);
+}
+
+.stepRow:hover {
+  background: var(--ds-surface-sunken, var(--ds-surface));
+}
+
+.stepRowSelected {
+  background: var(--ds-surface-sunken, var(--ds-surface));
+  border-left-color: var(--ds-accent, #2563eb);
+}
+
+.stepRowFailed {
+  border-left-color: var(--ds-err, #dc2626);
+}
+
+/* Already executed in the live authoring session — the page is past it. */
+.stepRowExecuted {
+  border-left-color: var(--ds-ok, #16a34a);
+}
+
+/*
+ * Where the next recorded step lands. A hairline that only shows its label on
+ * hover, so a 40-step flow isn't half insertion markers.
+ */
+.insertMark {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0 12px;
+  height: 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ds-accent, #2563eb);
+  font: inherit;
+  font-size: 10px;
+  opacity: 0;
+}
+
+.insertMark:hover,
+.insertMarkActive {
+  opacity: 1;
+}
+
+.insertMark::after {
+  content: '';
+  flex: 1;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.jsonBlock {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--ds-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--ds-surface-sunken, var(--ds-bg));
+  border: 1px solid var(--ds-border);
+  border-radius: 6px;
+  color: var(--ds-text);
 }
 
 @media (max-width: 900px) {

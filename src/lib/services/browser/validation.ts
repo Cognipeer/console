@@ -308,6 +308,11 @@ export const browserPdfInputSchema = z.object({
   printBackground: z.boolean().optional(),
 }).strict();
 
+/** One snapshot marker, to be resolved into a durable target. */
+export const describeElementInputSchema = z.object({
+  ref: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/, 'Not a snapshot ref'),
+}).strict();
+
 // ── Flows ───────────────────────────────────────────────────────────────
 
 const flowInputSchema = z.object({
@@ -327,6 +332,25 @@ const flowInputSchema = z.object({
     (value) => value.type !== 'secret' || value.default === undefined,
     'A secret input cannot carry a default value',
   );
+
+/**
+ * One declared field of the run's return value.
+ *
+ * `source` is deliberately a template rather than a capture name: a field is
+ * often a capture verbatim (`{{step.total}}`), but just as often it is one
+ * assembled from several (`{{step.first}} {{step.last}}`), and a flow that
+ * has to add a step just to concatenate two strings is a worse flow.
+ */
+const flowOutputSchema = z.object({
+  name: z.string().trim().min(1).max(64).regex(
+    /^[A-Za-z_][A-Za-z0-9_]*$/,
+    'Output name must be a valid identifier',
+  ),
+  source: z.string().trim().min(1).max(2_000),
+  type: z.enum(['string', 'number', 'boolean', 'json']).optional(),
+  required: z.boolean().optional(),
+  description: optionalTrimmedString(500),
+}).strict();
 
 const flowStepPolicySchema = z.object({
   retries: z.number().int().min(0).max(10).optional(),
@@ -402,6 +426,7 @@ export const createBrowserFlowInputSchema = z.object({
   status: z.enum(['draft', 'active', 'disabled']).optional(),
   browserId: z.string().trim().min(1).max(128),
   inputs: z.array(flowInputSchema).max(50).optional(),
+  outputs: z.array(flowOutputSchema).max(50).optional(),
   steps: z.array(flowStepSchema).max(500).default([]),
   sessionConfig: sessionConfigSchema.omit({ storageState: true }).optional(),
   recordedFromSessionId: optionalTrimmedString(128),
@@ -434,6 +459,20 @@ export const runBrowserFlowInputSchema = z.object({
   keepSessionOpen: z.boolean().optional(),
   /** Stop after this many steps. For dry-running a long flow. */
   maxSteps: z.number().int().min(1).max(500).optional(),
+}).strict();
+
+/**
+ * Replay a slice of a flow into a session the caller already holds.
+ *
+ * `sessionKey` is the caller's own — the session service resolves it inside
+ * the caller's tenant, so this cannot reach another tenant's browser.
+ */
+export const runBrowserFlowStepsInputSchema = z.object({
+  sessionKey: z.string().trim().min(1).max(128),
+  from: z.number().int().min(0).max(500).optional(),
+  to: z.number().int().min(0).max(500).optional(),
+  inputs: z.record(z.string().max(64), z.unknown()).optional(),
+  captures: z.record(z.string().max(64), z.unknown()).optional(),
 }).strict();
 
 export type CreateBrowserFlowPayload = z.infer<typeof createBrowserFlowInputSchema>;

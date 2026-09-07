@@ -87,9 +87,40 @@ curl -X POST /api/client/v1/browser/flows/<key>/run \
   -d '{ "inputs": { "reference": "EXP-2002", "amount": "999" } }'
 ```
 
-The response is the run record: per-step status and attempt count, whatever
-`captureAs` collected, and — on a failure — the index of the step that broke
-plus a screenshot of the page it gave up on.
+The response is the run record: per-step status and attempt count, the JSON
+the flow returns, and — on a failure — the index of the step that broke plus
+a screenshot of the page it gave up on.
+
+### What a run returns
+
+A step with `captureAs` stores its result under that name. Left alone, a run
+hands those captures back verbatim — which changes the moment someone renames
+one. Declare `outputs` to make the return value a contract instead:
+
+```json
+{
+  "outputs": [
+    { "name": "receiptCode", "source": "{{step.receipt}}" },
+    { "name": "amount", "source": "{{step.amountText}}", "type": "number" },
+    { "name": "summary", "source": "{{input.reference}} → {{step.amountText}}" }
+  ]
+}
+```
+
+| Field | Effect |
+|---|---|
+| `name` | the key in the returned JSON |
+| `source` | a template over `{{step.x}}` and `{{input.y}}`; a lone placeholder passes the captured value through untouched, so an `extract` with `multiple` stays an array |
+| `type` | `string`, `number`, `boolean` or `json`. Omitted, the value is returned exactly as captured; a cast that fails leaves the field out rather than emitting `NaN` |
+| `required` | a run that cannot resolve the field **fails**, even when every step passed |
+
+The raw captures stay on the run as `captures`, so a field that resolved to
+nothing can be debugged against what the steps actually collected. Declared
+outputs also appear in `browser_list_flows`, so an agent can pick a flow for
+the value it returns rather than running it to find out.
+
+Changing `steps` or `outputs` bumps the flow's `version`, and a run pins the
+version it executed — renaming the flow does not.
 
 Step policy:
 
@@ -107,13 +138,79 @@ usually worse than an untouched one.
 Agents reach flows through `browser_list_flows` and `browser_run_flow` —
 check for an existing flow before working a task out step by step.
 
-Flows live at **Operate → Browser → Flows**.
+### The flow editor
+
+Flows live at **Operate → Browser → Flows**, and opening one opens the
+editor: the playground's three panes with the flow attached.
 
 ![A flow's steps and run history](/screenshots/browser/13-flow-detail-run-history.jpg)
 
-Every step shows the durable target it was recorded with — never a `ref` — and
-the run history underneath is a per-step ledger: status, attempt count and
-duration, so a failure names the step that broke rather than just the flow.
+The left rail answers four questions about the flow.
+
+- **Steps** — the ordered ledger. Every step shows the durable target it was
+  recorded with, never a `ref`. The ⚡ on a row lifts a literal out of the step
+  into an input; the marker between rows is where the next recorded step lands.
+- **Inputs** — what a run supplies. It flags both disagreements that otherwise
+  fail silently: a `{{input.x}}` no input declares, and an input no step uses.
+- **Output** — the JSON declared above, shown beside what the selected run
+  actually returned. **From page** reads a field straight off the live page:
+  click it in the Elements list and it becomes a read step, a capture, and an
+  output field in one move, with the value it just read shown to confirm you
+  picked the right thing.
+- **Runs** — history. Selecting a run puts its outcome on the step list, its
+  JSON on the output tab, and its session in the preview.
+
+**Author live** opens a session against the flow's browser and turns the
+editor into a recorder: pick an element, run the action, and it lands in the
+flow at the insertion point — ref stripped, and (unless you turn that off)
+anything you typed lifted into an input rather than baked in. A read is given
+a capture name automatically, so an output has something to point at.
+
+#### Running steps while you build
+
+The next step is built by clicking something on the page, so the page has to
+be at the point where that something exists. **▶ on a step row** puts the live
+session exactly there:
+
+- **Forwards** it is a continuation — only the steps between where the session
+  already is and the one you clicked, so a form is not submitted twice on the
+  way.
+- **Backwards** it restarts the session and replays from the top, because a
+  browser cannot be rewound. ▶ on step 1 is therefore "start over".
+- **Replay all** runs the whole flow into the session and *leaves it open* at
+  the end, which is the difference between this and a test run.
+
+The session's position is shown on the step list (a green edge on everything
+it has passed) and the insertion marker follows it, so a recorded action lands
+after the last step that ran rather than at the end of the list.
+
+The **Elements** list keeps itself current whether or not it is the tab on
+screen, so a page that moves on its own — a login redirect, a client-side
+route change, a modal that renders a second later — is already reflected when
+you switch to it. Each row is two columns: on the left how a step will address
+the element (its role and accessible name), on the right what is in it right
+now (a field's value or placeholder, a link's target). The filter searches
+both, which is how you find one textbox among six. An element with no
+accessible name shows where it sits instead — `generic › generic › button` —
+and picking one asks the page for a real handle (a `data-testid` if the app
+has one, otherwise a CSS path), because a step that stored only `role:
+button` would match the first button on the page. (Turn the **Live** switch
+off to freeze the list and the preview.)
+
+Values for `{{input.x}}` while authoring come from the **Inputs** tab — each
+declared input gets a field there. They stay in the browser and are never
+saved to the flow; a run from the API or an agent supplies its own. An input
+nobody has filled in yet does not block a replay: the placeholder is typed
+literally, exactly as it would be in a run.
+
+**Test run** is the check, not the build loop: it replays the flow in its own
+fresh session, shows it landing one step at a time, and closes that session at
+the end (a failed one is kept open so you can see the page it broke on).
+
+The playground (`/dashboard/browser/playground`) stays what it is: a place to
+drive a browser and find out what a page does. It builds nothing — its one
+hand-off is **Record as flow**, which freezes the session into a draft and
+opens it here.
 
 ## Signed-in profiles
 

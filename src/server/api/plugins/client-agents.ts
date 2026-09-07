@@ -178,7 +178,12 @@ function createResponsesHandler(usePublished: boolean) {
         const resolvedConversationId = conversationIdFromResponseId(body.previous_response_id);
         if (resolvedConversationId) {
           const conversation = await getConversationById(ctx.tenantDbName, resolvedConversationId);
-          if (!conversation || conversation.agentKey !== agent.key) {
+          // agentKey alone is not unique across projects (findAgentByKey takes
+          // an optional projectId precisely because the same key can exist in
+          // more than one) — without the projectId check, a token in project B
+          // could reuse a previous_response_id from project A's conversation
+          // with the same-keyed agent and read/append to project A's history.
+          if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
             return reply.code(404).send({
               error: 'previous_response_id does not match a valid conversation',
             });
@@ -297,6 +302,12 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // Deliberately different defaults, not a typo: /agents/responses always
+  // runs the published version (usePublished=true); the general /responses
+  // dialect runs the current draft config unless the caller asks for a
+  // specific version (usePublished=false). A caller who has only ever seen
+  // a published version in the dashboard can otherwise assume the general
+  // Responses route uses it too — it does not, unless told to.
   app.post('/client/v1/agents/responses', createResponsesHandler(true));
   app.post('/client/v1/responses', createResponsesHandler(false));
 

@@ -38,10 +38,12 @@
 import { randomUUID } from 'node:crypto';
 import slugify from 'slugify';
 import { createLogger } from '@/lib/core/logger';
-import { getDatabase, type DatabaseProvider } from '@/lib/database';
+import { captureRequestContext, runWithRequestContext } from '@/lib/core/requestContext';
+import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type {
   IBrowserFlow,
   IBrowserFlowInput,
+  IBrowserFlowOutput,
   IBrowserFlowRun,
   IBrowserFlowStep,
   IBrowserFlowStepResult,
@@ -63,6 +65,8 @@ import type {
   BrowserFlowView,
   CreateBrowserFlowInput,
   RunBrowserFlowInput,
+  RunBrowserFlowStepsInput,
+  BrowserFlowStepsResult,
   RecordBrowserFlowInput,
   UpdateBrowserFlowInput,
 } from './types';
@@ -151,6 +155,7 @@ export async function createBrowserFlow(
     status: input.status ?? 'draft',
     browserId: String(browser._id ?? ''),
     inputs: input.inputs,
+    outputs: input.outputs,
     steps: normalizeSteps(input.steps ?? []),
     sessionConfig: input.sessionConfig,
     recordedFromSessionId: input.recordedFromSessionId,
@@ -176,6 +181,7 @@ export async function updateBrowserFlow(
     description: input.description,
     status: input.status,
     inputs: input.inputs,
+    outputs: input.outputs,
     sessionConfig: input.sessionConfig,
     metadata: input.metadata,
     updatedBy: input.updatedBy,
@@ -187,10 +193,15 @@ export async function updateBrowserFlow(
     patch.browserId = String(browser._id ?? '');
   }
 
-  // The version pins what a run executed, so it moves only when the STEPS
-  // move — renaming a flow must not invalidate the history of what ran.
+  // The version pins what a run executed, so it moves only when what runs
+  // moves — renaming a flow must not invalidate the history of what ran.
+  // Outputs count: they decide the run's return value, so a run recorded
+  // under version 3 has to mean one return shape, not whichever shape was
+  // declared last.
   if (input.steps) {
     patch.steps = normalizeSteps(input.steps);
+  }
+  if (input.steps || input.outputs) {
     patch.version = (existing.version ?? 1) + 1;
   }
 
@@ -503,20 +514,21 @@ function describeAction(action: Record<string, unknown>): string {
 
 // ── Replay ───────────────────────────────────────────────────────────────
 
-/**
- * Execute a flow's steps in order against a fresh session.
- *
- * No model is involved. Each step is resolved, retried per its own policy,
- * and recorded; the run aborts at the first non-optional failure with the
- * failing index, a message and a screenshot, because a half-finished form is
- * usually worse than an untouched one.
- */
-export async function runBrowserFlow(
+interface FlowRunSetup {
+  flow: IBrowserFlow;
+  run: IBrowserFlowRun;
+  runId: string;
+  bindings: InputBindings;
+  attribution: ReturnType<typeof resolveUsageAttribution>;
+}
+
+/** Validate the flow and open its run record. Cheap — safe to await inline. */
+async function prepareFlowRun(
+  db: DatabaseProvider,
   ctx: FlowContext,
   idOrKey: string,
   input: RunBrowserFlowInput,
-): Promise<BrowserFlowRunView> {
-  const db = await withTenantDb(ctx.tenantDbName);
+): Promise<FlowRunSetup> {
   const flow = await resolveFlowRecord(ctx, idOrKey);
   if (!flow) throw new Error(`Browser flow not found: ${idOrKey}`);
   if (flow.status === 'disabled') throw new Error(`Browser flow ${flow.key} is disabled`);
@@ -539,11 +551,34 @@ export async function runBrowserFlow(
     startedAt: new Date(),
     createdBy: input.createdBy,
   });
-  const runId = String(run._id ?? '');
+  return { flow, run, runId: String(run._id ?? ''), bindings, attribution };
+}
+
+/**
+ * Execute a flow's steps in order against a fresh session.
+ *
+ * No model is involved. Each step is resolved, retried per its own policy,
+ * and recorded; the run aborts at the first non-optional failure with the
+ * failing index, a message and a screenshot, because a half-finished form is
+ * usually worse than an untouched one.
+ *
+ * Each step result is also flushed to the run record as it lands (best
+ * effort), not only once at the end — `startBrowserFlowRun` depends on this
+ * to let a caller watch a run progress instead of only seeing it appear
+ * finished.
+ */
+async function executeFlowRun(
+  db: DatabaseProvider,
+  ctx: FlowContext,
+  setup: FlowRunSetup,
+  input: RunBrowserFlowInput,
+): Promise<BrowserFlowRunView> {
+  const { flow, run, runId, bindings, attribution } = setup;
 
   let sessionKey: string | undefined;
   const stepResults: IBrowserFlowStepResult[] = [];
-  const outputs: Record<string, unknown> = {};
+  /** What `captureAs` collected — the raw material `flow.outputs` reads from. */
+  const captures: Record<string, unknown> = {};
   let failedStepIndex: number | undefined;
   let errorMessage: string | undefined;
 
@@ -562,8 +597,9 @@ export async function runBrowserFlow(
 
     for (let index = 0; index < limit; index += 1) {
       const step = flow.steps[index];
-      const result = await executeStep(ctx, sessionKey, step, index, bindings.all, outputs);
+      const result = await executeStep(ctx, sessionKey, step, index, bindings.all, captures);
       stepResults.push(result);
+      await db.updateBrowserFlowRun(runId, { stepResults: [...stepResults] }).catch(() => undefined);
 
       if (result.status === 'failed') {
         failedStepIndex = index;
@@ -582,6 +618,21 @@ export async function runBrowserFlow(
     }
   }
 
+  // Only worth resolving if the steps actually got there — a run that broke
+  // at step 2 has no captures to speak of, and reporting a missing required
+  // output on top of the real failure buries it.
+  let outputs: Record<string, unknown> = {};
+  if (!errorMessage) {
+    const resolved = resolveFlowOutputs(flow, bindings.all, captures);
+    outputs = resolved.outputs;
+    if (resolved.missing.length > 0) {
+      // Every step passed and the flow still did not produce what it
+      // promises to return, which for a caller is indistinguishable from a
+      // failure — so it is one.
+      errorMessage = `Flow produced no value for required output(s): ${resolved.missing.join(', ')}`;
+    }
+  }
+
   const endedAt = new Date();
   const startedAt = run.startedAt ?? endedAt;
   const durationMs = endedAt.getTime() - startedAt.getTime();
@@ -591,6 +642,7 @@ export async function runBrowserFlow(
     status,
     stepResults,
     outputs,
+    captures,
     endedAt,
     durationMs,
     errorMessage,
@@ -623,7 +675,116 @@ export async function runBrowserFlow(
     durationMs,
   });
 
-  return serializeRun(updated ?? { ...run, status, stepResults, outputs, endedAt, durationMs, errorMessage, failedStepIndex });
+  return serializeRun(updated ?? {
+    ...run, status, stepResults, outputs, captures, endedAt, durationMs, errorMessage, failedStepIndex,
+  });
+}
+
+export async function runBrowserFlow(
+  ctx: FlowContext,
+  idOrKey: string,
+  input: RunBrowserFlowInput,
+): Promise<BrowserFlowRunView> {
+  const db = await withTenantDb(ctx.tenantDbName);
+  const setup = await prepareFlowRun(db, ctx, idOrKey, input);
+  return executeFlowRun(db, ctx, setup, input);
+}
+
+/**
+ * Create the run record and hand it back immediately (status `running`,
+ * empty `stepResults`), continuing execution in the background — for a
+ * caller that wants to watch a run live (the playground) rather than hold a
+ * connection open for the whole flow. `runBrowserFlow` stays the
+ * synchronous entry point every other caller uses.
+ *
+ * The background continuation outlives this request, so it cannot rely on
+ * the request's AsyncLocalStorage scopes: `switchToTenant` alone does not
+ * survive past this function returning (a concurrent request for another
+ * tenant can steal the process-global handle — see `runWithTenantScope`),
+ * and per-actor attribution reads the same request context. Both are
+ * captured here and reopened explicitly around the detached execution.
+ */
+export async function startBrowserFlowRun(
+  ctx: FlowContext,
+  idOrKey: string,
+  input: RunBrowserFlowInput,
+): Promise<BrowserFlowRunView> {
+  const db = await withTenantDb(ctx.tenantDbName);
+  const setup = await prepareFlowRun(db, ctx, idOrKey, input);
+  const requestContext = captureRequestContext();
+
+  void runWithRequestContext(requestContext ?? {}, () => (
+    runWithTenantScope(ctx.tenantDbName, (bgDb) => executeFlowRun(bgDb, ctx, setup, input))
+  )).catch((err) => {
+    logger.error('Background browser flow run crashed', {
+      runId: setup.runId,
+      flowKey: setup.flow.key,
+      error: err instanceof Error ? err.message : err,
+    });
+  });
+
+  return serializeRun(setup.run);
+}
+
+/**
+ * Execute a SLICE of a flow against a session the caller already has open.
+ *
+ * This is the authoring loop, not a run: building a flow means getting the
+ * page into the state where the next step's element exists, and a run cannot
+ * do that — it opens its own session and closes it at the end, leaving
+ * nothing to click. Replaying steps 1..N into the editor's live session
+ * leaves the browser sitting exactly where the next step begins.
+ *
+ * It goes through the same `executeStep` as a real run rather than a
+ * client-side reimplementation, so `when`, retries, `optional`, captures and
+ * placeholder substitution cannot drift from what the flow will actually do
+ * in production. It records NO run: a half-replay while building is not part
+ * of the flow's history, and writing one would bury the real runs.
+ *
+ * Inputs are bound leniently — a flow being authored routinely has a
+ * required input nobody has typed a value for yet, and refusing to move the
+ * page until the whole form is filled would make the editor useless. An
+ * unresolved `{{input.x}}` stays a literal, exactly as it does in a run.
+ */
+export async function runBrowserFlowSteps(
+  ctx: FlowContext,
+  idOrKey: string,
+  input: RunBrowserFlowStepsInput,
+): Promise<BrowserFlowStepsResult> {
+  const flow = await resolveFlowRecord(ctx, idOrKey);
+  if (!flow) throw new Error(`Browser flow not found: ${idOrKey}`);
+
+  const total = flow.steps.length;
+  const from = Math.min(Math.max(input.from ?? 0, 0), total);
+  const to = Math.min(Math.max(input.to ?? total, from), total);
+
+  const bindings = resolveInputBindings(flow, input.inputs ?? {}, { requireAll: false });
+  const captures: Record<string, unknown> = { ...(input.captures ?? {}) };
+  const results: IBrowserFlowStepResult[] = [];
+  let failedStepIndex: number | undefined;
+  let errorMessage: string | undefined;
+
+  for (let index = from; index < to; index += 1) {
+    const step = flow.steps[index];
+    const result = await executeStep(ctx, input.sessionKey, step, index, bindings.all, captures);
+    results.push(result);
+
+    if (result.status === 'failed') {
+      failedStepIndex = index;
+      errorMessage = result.errorMessage ?? `Step ${index + 1} failed`;
+      break;
+    }
+  }
+
+  logger.info('Browser flow steps replayed for authoring', {
+    flowKey: flow.key,
+    sessionKey: input.sessionKey,
+    from,
+    to,
+    failedStepIndex,
+  });
+
+  return { results, captures, failedStepIndex, errorMessage };
 }
 
 async function executeStep(
@@ -752,13 +913,19 @@ interface InputBindings {
 function resolveInputBindings(
   flow: IBrowserFlow,
   supplied: Record<string, unknown>,
+  options: { requireAll?: boolean } = {},
 ): InputBindings {
+  const { requireAll = true } = options;
   const all: Record<string, unknown> = {};
   const persistable: Record<string, unknown> = {};
   const missing: string[] = [];
 
   for (const declared of flow.inputs ?? []) {
-    const value = supplied[declared.name] ?? declared.default;
+    // An empty string is "not supplied", not "supplied as blank" — a form
+    // sends one for every field nobody typed into, and a declared default
+    // that a blank field could beat would never apply.
+    const given = supplied[declared.name];
+    const value = given === undefined || given === '' ? declared.default : given;
     if (value === undefined || value === '') {
       if (declared.required) missing.push(declared.name);
       continue;
@@ -767,11 +934,104 @@ function resolveInputBindings(
     if (declared.type !== 'secret') persistable[declared.name] = value;
   }
 
-  if (missing.length > 0) {
+  // A flow being authored routinely has a required input nobody has typed a
+  // value for yet; refusing to move the page until the form is complete
+  // would make the editor unusable. A real run still refuses.
+  if (requireAll && missing.length > 0) {
     throw new Error(`Missing required flow input(s): ${missing.join(', ')}`);
   }
 
   return { all, persistable };
+}
+
+// ── Declared outputs ─────────────────────────────────────────────────────
+
+/** A `source` that is exactly one placeholder and nothing else. */
+const LONE_PLACEHOLDER = /^\{\{\s*(input|step)\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$/;
+
+/**
+ * Turn the run's captures into the JSON the flow says it returns.
+ *
+ * A flow that declares nothing returns its captures verbatim — that is what
+ * every run did before outputs existed, and breaking it would rewrite the
+ * return value of every flow already in production.
+ *
+ * A lone `{{step.x}}` passes the captured VALUE through rather than a
+ * rendered string, so an `extract` with `multiple` stays an array. Anything
+ * else is a template, and a template that still contains `{{` after
+ * substitution did not resolve: reporting `{{step.total}}` as the value of
+ * `total` would put a literal placeholder into a caller's JSON.
+ */
+function resolveFlowOutputs(
+  flow: IBrowserFlow,
+  bindings: Record<string, unknown>,
+  captures: Record<string, unknown>,
+): { outputs: Record<string, unknown>; missing: string[] } {
+  const declared = flow.outputs ?? [];
+  if (declared.length === 0) return { outputs: { ...captures }, missing: [] };
+
+  const outputs: Record<string, unknown> = {};
+  const missing: string[] = [];
+
+  for (const field of declared) {
+    const lone = field.source.match(LONE_PLACEHOLDER);
+    let value: unknown;
+
+    if (lone) {
+      value = (lone[1] === 'input' ? bindings : captures)[lone[2]];
+    } else {
+      const rendered = substituteString(field.source, bindings, captures);
+      value = rendered.includes('{{') ? undefined : rendered;
+    }
+
+    const cast = value === undefined || value === '' ? undefined : coerceOutput(value, field.type);
+    if (cast === undefined) {
+      if (field.required) missing.push(field.name);
+      else if (value !== undefined && value !== '') {
+        logger.warn('Browser flow output dropped — value did not fit its type', {
+          flowKey: flow.key,
+          output: field.name,
+          type: field.type,
+        });
+      }
+      continue;
+    }
+    outputs[field.name] = cast;
+  }
+
+  return { outputs, missing };
+}
+
+/**
+ * Cast a captured value to the field's declared type, or `undefined` when it
+ * does not fit. Never `NaN`: a number output that reads "12,50 TL" has not
+ * been produced, and saying so beats handing a caller arithmetic poison.
+ */
+function coerceOutput(value: unknown, type: IBrowserFlowOutput['type']): unknown {
+  if (!type) return value;
+
+  if (type === 'string') return typeof value === 'string' ? value : JSON.stringify(value);
+
+  if (type === 'number') {
+    const parsed = typeof value === 'number' ? value : Number(String(value).trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  if (type === 'boolean') {
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (['true', '1', 'yes', 'on', 'checked'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off', 'unchecked'].includes(normalized)) return false;
+    return undefined;
+  }
+
+  // `json`: a value that is already structured is already parsed.
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Replace `{{input.x}}` / `{{step.y}}` inside every string of a payload. */

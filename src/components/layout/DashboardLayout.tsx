@@ -46,6 +46,8 @@ const SETTINGS_NAV_ORDER: string[] = [
   'tokens',
   'audit',
   'license',
+  'sso',
+  'ldap',
 ];
 
 interface DashboardLayoutProps {

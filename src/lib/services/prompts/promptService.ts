@@ -744,7 +744,18 @@ export async function resolvePromptForEnvironment(
 
 	if (typeof version === 'number') {
 		resolvedVersion = getVersionByNumber(versions, version);
-	} else if (environment && prompt.deployments?.[environment]?.versionId) {
+	} else if (
+		environment
+		&& prompt.deployments?.[environment]?.versionId
+		&& prompt.deployments[environment]?.rolloutStatus === 'active'
+	) {
+		// `promotePromptVersion` writes a fresh deployment as `rolloutStatus:
+		// 'planned'` — it only becomes servable once `activatePromptDeployment`
+		// flips it to 'active'. Without this check, a promoted-but-not-yet-
+		// activated version was served identically to an approved one; a
+		// deployment stuck at 'planned' now falls through to the same
+		// currentVersion fallback used when the environment has no deployment
+		// configured at all, rather than serving the half-promoted version.
 		resolvedVersion = versions.find((item) => item.id === prompt.deployments?.[environment]?.versionId) ?? null;
 	} else if (typeof prompt.currentVersion === 'number') {
 		resolvedVersion = getVersionByNumber(versions, prompt.currentVersion);

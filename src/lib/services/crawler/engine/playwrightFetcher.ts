@@ -8,6 +8,8 @@ import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { chromium, type Browser, type BrowserContext, type Download, type Page } from 'playwright';
 import mime from 'mime-types';
+import { getConfig } from '@/lib/core/config';
+import { resolveBrowserProxyConfig } from '@/lib/core/browserProxyConfig';
 import { looksLikeJsShell } from './links';
 import { parseContentTypeBase } from './normalize';
 import { assertSafeUrl } from './ssrf';
@@ -54,6 +56,8 @@ export class PlaywrightSession {
     if (this.context) return;
     if (this.launching) return this.launching;
     this.launching = (async () => {
+      const proxy = resolveBrowserProxyConfig();
+      const cfg = getConfig().browser;
       this.browser = await chromium.launch({
         headless: true,
         args: [
@@ -71,7 +75,17 @@ export class PlaywrightSession {
           // (the automation-controlled infobar / `--enable-automation`
           // behavior bundled into the default launch flags).
           '--disable-blink-features=AutomationControlled',
+          // Same operator escape hatches as the interactive Browser feature
+          // (browserManager.ts) — see BROWSER_CHROMIUM_EXTRA_ARGS /
+          // BROWSER_IGNORE_CERTIFICATE_ERRORS in config.ts.
+          ...cfg.chromiumExtraArgs,
+          ...(cfg.ignoreCertificateErrors ? ['--ignore-certificate-errors'] : []),
         ],
+        // Chromium does not read HTTP(S)_PROXY itself, unlike the axios
+        // fetcher this engine is an alternative to — on a network that
+        // requires an egress proxy, that made the axios engine work while
+        // this one silently couldn't reach anything, browser-launched or not.
+        ...(proxy ? { proxy } : {}),
       });
       this.context = await this.browser.newContext({
         userAgent: this.http.userAgent ?? DEFAULT_USER_AGENT,
@@ -84,7 +98,11 @@ export class PlaywrightSession {
             : {}),
         },
         httpCredentials: this.http.basicAuth,
-        ignoreHTTPSErrors: this.http.allowInsecureTls ?? false,
+        // cfg.ignoreCertificateErrors only sets the Chromium launch-level CLI
+        // flag above; Playwright enforces its own, independent context-level
+        // check that flag doesn't touch, so the deployment-wide toggle must
+        // also flip this or it silently keeps failing navigation.
+        ignoreHTTPSErrors: (this.http.allowInsecureTls ?? false) || cfg.ignoreCertificateErrors,
       });
       // Patch the most commonly-checked automation fingerprints before any
       // page script runs. `navigator.webdriver` in particular is the single

@@ -52,6 +52,7 @@ import {
   IconChartHistogram,
   IconActivity,
   IconFileUpload,
+  IconAlertTriangle,
 } from '@tabler/icons-react';
 import EditRagModuleModal from '@/components/rag/EditRagModuleModal';
 import ChunkConfigFields from '@/components/rag/ChunkConfigFields';
@@ -267,6 +268,34 @@ function KpiCard({ label, value, icon, color, hint }: KpiCardProps) {
   );
 }
 
+interface InlineLoadErrorProps {
+  message: string;
+  onRetry: () => void;
+}
+
+/**
+ * A failed load must look different from "there is nothing here yet" --
+ * without this, documents/usage/insights sections that failed to fetch
+ * rendered exactly like a genuinely empty tenant, with the actual failure
+ * visible only in devtools (F-19, finance-institution assessment,
+ * 2026-09-05).
+ */
+function InlineLoadError({ message, onRetry }: InlineLoadErrorProps) {
+  return (
+    <Center py="xl">
+      <Stack gap="sm" align="center">
+        <ThemeIcon size={64} radius="xl" variant="light" color="red">
+          <IconAlertTriangle size={32} />
+        </ThemeIcon>
+        <Text size="sm" c="dimmed" ta="center" maw={360}>{message}</Text>
+        <Button size="xs" variant="light" color="red" leftSection={<IconRefresh size={14} />} onClick={onRetry}>
+          Retry
+        </Button>
+      </Stack>
+    </Center>
+  );
+}
+
 /* ── Page ──────────────────────────────────────────────────────────────── */
 
 export default function RagModuleDetailPage() {
@@ -282,6 +311,7 @@ export default function RagModuleDetailPage() {
   /* documents */
   const [documents, setDocuments] = useState<RagDocumentView[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
+  const [docsError, setDocsError] = useState<string | null>(null);
   const [ingesting, setIngesting] = useState(false);
   const [ingestFileName, setIngestFileName] = useState('');
   const [ingestContent, setIngestContent] = useState('');
@@ -302,11 +332,13 @@ export default function RagModuleDetailPage() {
   const [queryLogs, setQueryLogs] = useState<RagQueryLogView[]>([]);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageTotals, setUsageTotals] = useState<UsageTotals | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
 
   /* insight panels */
   const [scoreBuckets, setScoreBuckets] = useState<ScoreBucket[]>([]);
   const [zeroQueries, setZeroQueries] = useState<RagQueryLogView[]>([]);
   const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
 
   const queryForm = useForm({
     initialValues: { query: '', topK: 5, minScore: 0, filter: '' },
@@ -382,12 +414,17 @@ export default function RagModuleDetailPage() {
     if (!silent) setDocsLoading(true);
     try {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/documents`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setDocuments(data.documents ?? []);
+      if (!res.ok) {
+        throw new Error(`Failed to load documents (HTTP ${res.status})`);
       }
+      const data = await res.json();
+      setDocuments(data.documents ?? []);
+      setDocsError(null);
     } catch (e) {
       console.error('[rag docs]', e);
+      // A failed load must not be mistaken for "zero documents" -- the table
+      // below only renders its empty state when docsError is also cleared.
+      setDocsError(e instanceof Error ? e.message : 'Failed to load documents');
     } finally {
       setDocsLoading(false);
     }
@@ -398,22 +435,25 @@ export default function RagModuleDetailPage() {
     setUsageLoading(true);
     try {
       const res = await fetch(`/api/rag/modules/${encodeURIComponent(moduleKey)}/usage?limit=50`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setQueryLogs(data.logs ?? []);
-        setUsageTotals(
-          typeof data.total === 'number' && typeof data.avgLatencyMs === 'number'
-            ? {
-              total: data.total,
-              avgLatencyMs: data.avgLatencyMs,
-              zeroMatchCount: data.zeroMatchCount ?? 0,
-              minScoreFilteredCount: data.minScoreFilteredCount ?? 0,
-            }
-            : null,
-        );
+      if (!res.ok) {
+        throw new Error(`Failed to load usage (HTTP ${res.status})`);
       }
+      const data = await res.json();
+      setQueryLogs(data.logs ?? []);
+      setUsageTotals(
+        typeof data.total === 'number' && typeof data.avgLatencyMs === 'number'
+          ? {
+            total: data.total,
+            avgLatencyMs: data.avgLatencyMs,
+            zeroMatchCount: data.zeroMatchCount ?? 0,
+            minScoreFilteredCount: data.minScoreFilteredCount ?? 0,
+          }
+          : null,
+      );
+      setUsageError(null);
     } catch (e) {
       console.error('[rag usage]', e);
+      setUsageError(e instanceof Error ? e.message : 'Failed to load usage');
     } finally {
       setUsageLoading(false);
     }
@@ -428,16 +468,17 @@ export default function RagModuleDetailPage() {
         fetch(`${base}/score-distribution`, { cache: 'no-store' }),
         fetch(`${base}/queries?zeroOnly=true&limit=25`, { cache: 'no-store' }),
       ]);
-      if (distributionRes.ok) {
-        const data = await distributionRes.json();
-        setScoreBuckets(data.buckets ?? []);
+      if (!distributionRes.ok || !zeroRes.ok) {
+        const failedStatus = !distributionRes.ok ? distributionRes.status : zeroRes.status;
+        throw new Error(`Failed to load insights (HTTP ${failedStatus})`);
       }
-      if (zeroRes.ok) {
-        const data = await zeroRes.json();
-        setZeroQueries(data.logs ?? []);
-      }
+      const [distributionData, zeroData] = await Promise.all([distributionRes.json(), zeroRes.json()]);
+      setScoreBuckets(distributionData.buckets ?? []);
+      setZeroQueries(zeroData.logs ?? []);
+      setInsightsError(null);
     } catch (e) {
       console.error('[rag insights]', e);
+      setInsightsError(e instanceof Error ? e.message : 'Failed to load insights');
     } finally {
       setInsightsLoading(false);
     }
@@ -897,11 +938,15 @@ export default function RagModuleDetailPage() {
                   </Text>
                 </div>
               </Group>
-              <ScoreDistributionChart
-                buckets={scoreBuckets}
-                minScore={mod.defaultMinScore ?? 0}
-                loading={insightsLoading}
-              />
+              {insightsError ? (
+                <InlineLoadError message={insightsError} onRetry={() => void loadInsights()} />
+              ) : (
+                <ScoreDistributionChart
+                  buckets={scoreBuckets}
+                  minScore={mod.defaultMinScore ?? 0}
+                  loading={insightsLoading}
+                />
+              )}
             </Paper>
 
             {/* Content gaps */}
@@ -927,6 +972,8 @@ export default function RagModuleDetailPage() {
 
               {insightsLoading ? (
                 <Center py="xl"><Loader size="sm" color="violet" /></Center>
+              ) : insightsError ? (
+                <InlineLoadError message={insightsError} onRetry={() => void loadInsights()} />
               ) : zeroQueries.length === 0 ? (
                 <Center py="xl">
                   <Text size="sm" c="dimmed">No zero-result queries logged. Every query found something.</Text>
@@ -1268,6 +1315,8 @@ export default function RagModuleDetailPage() {
 
               {docsLoading ? (
                 <Center py="xl"><Loader size="sm" color="violet" /></Center>
+              ) : docsError ? (
+                <InlineLoadError message={docsError} onRetry={() => void loadDocuments()} />
               ) : documents.length === 0 ? (
                 <Center py="xl">
                   <Stack gap="sm" align="center">
@@ -1551,6 +1600,8 @@ export default function RagModuleDetailPage() {
 
               {usageLoading ? (
                 <Center py="xl"><Loader size="sm" /></Center>
+              ) : usageError ? (
+                <InlineLoadError message={usageError} onRetry={() => void loadUsage()} />
               ) : queryLogs.length === 0 ? (
                 <Center py="xl">
                   <Stack gap="sm" align="center">

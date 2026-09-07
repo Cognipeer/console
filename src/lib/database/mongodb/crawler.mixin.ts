@@ -287,6 +287,26 @@ export function CrawlerMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       }
     }
 
+    async updateCrawlResult(
+      id: string,
+      data: Partial<Pick<ICrawlResult, 'ragDocumentId' | 'ragStatus' | 'errorMessage'>>,
+    ): Promise<ICrawlResult | null> {
+      const db = this.getTenantDb();
+      const payload: Record<string, unknown> = {};
+      if (data.ragDocumentId !== undefined) payload.ragDocumentId = data.ragDocumentId;
+      if (data.ragStatus !== undefined) payload.ragStatus = data.ragStatus;
+      if (data.errorMessage !== undefined) payload.errorMessage = data.errorMessage;
+      const result = await db
+        .collection<ICrawlResult>(COLLECTIONS.crawlResults)
+        .findOneAndUpdate(
+          { _id: objectId(id) },
+          { $set: payload },
+          { returnDocument: 'after' },
+        );
+      if (!result) return null;
+      return { ...result, _id: toId(result._id) } as ICrawlResult;
+    }
+
     async countCrawlResults(jobId: string): Promise<number> {
       const db = this.getTenantDb();
       return db

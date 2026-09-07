@@ -53,6 +53,30 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
       };
     }
 
+    /**
+     * Looks up a user by their external-directory identity (e.g. an OIDC
+     * `sub` or LDAP entry DN), NOT by email. Used by external-auth providers
+     * whose stable identifier isn't the email — a synthesized/placeholder
+     * email must never orphan the account, so this lookup wins over email
+     * matching when it hits.
+     */
+    async findUserByExternalId(
+      authProvider: NonNullable<IUser['authProvider']>,
+      externalId: string,
+    ): Promise<IUser | null> {
+      if (!externalId) return null;
+      const db = this.getTenantDb();
+      const user = await db
+        .collection<IUser>(COLLECTIONS.users)
+        .findOne({ authProvider, externalId } as Partial<IUser>);
+      if (!user) return null;
+
+      return {
+        ...user,
+        _id: user._id?.toString(),
+      };
+    }
+
     async createUser(
       userData: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IUser> {

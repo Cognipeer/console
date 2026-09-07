@@ -1,10 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { Suspense, useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Button,
+  Center,
+  Divider,
+  Loader,
   PasswordInput,
   TextInput,
 } from '@mantine/core';
@@ -20,10 +23,35 @@ import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
 
-export default function LoginPage() {
+type SsoDiscovery =
+  | { available: false }
+  | { available: true; mode: 'direct'; startUrl: string }
+  | { available: true; mode: 'email' };
+
+const SSO_ERROR_MESSAGES: Record<string, string> = {
+  not_found: 'No single sign-on connection is set up for that email address.',
+  unavailable: 'Single sign-on is not available right now.',
+  state_mismatch: 'Your sign-in session expired. Please try again.',
+  expired: 'Your sign-in session expired. Please try again.',
+  invalid_request: 'Something went wrong starting single sign-on. Please try again.',
+  idp_error: 'The identity provider declined the sign-in request.',
+  no_subject: 'The identity provider did not return a usable identity.',
+  no_email: 'The identity provider did not return a usable email address.',
+  email_not_verified: 'Your identity provider email is not verified.',
+  'account-link-refused': 'This identity cannot be linked to an existing account automatically. Contact your admin.',
+  'login-disabled': 'This account cannot sign in.',
+  callback_failed: 'Single sign-on failed. Please try again.',
+};
+
+function LoginPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [sso, setSso] = useState<SsoDiscovery>({ available: false });
+  const [ssoStep, setSsoStep] = useState(false);
+  const [ssoEmail, setSsoEmail] = useState('');
+  const [ssoLoading, setSsoLoading] = useState(false);
   const t = useTranslations('login');
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
@@ -60,6 +88,61 @@ export default function LoginPage() {
     };
     void checkAuth();
   }, [router]);
+
+  useEffect(() => {
+    const discover = async () => {
+      try {
+        const response = await fetch('/api/auth/sso/discover', {
+          method: 'GET',
+          cache: 'no-store',
+        });
+        if (!response.ok) return;
+        const data = (await response.json()) as SsoDiscovery;
+        setSso(data);
+      } catch {
+        // SSO is an enhancement — a failed discovery check just hides the button.
+      }
+    };
+    void discover();
+  }, []);
+
+  useEffect(() => {
+    const errorCode = searchParams.get('ssoError');
+    if (!errorCode) return;
+    notifications.show({
+      title: tNotifications('loginFailedTitle'),
+      message: SSO_ERROR_MESSAGES[errorCode] ?? SSO_ERROR_MESSAGES.callback_failed,
+      color: 'red',
+    });
+    router.replace('/login');
+  }, [searchParams, router, tNotifications]);
+
+  const handleSsoButtonClick = () => {
+    if (sso.available && sso.mode === 'direct') {
+      window.location.href = sso.startUrl;
+      return;
+    }
+    setSsoStep(true);
+  };
+
+  const handleSsoEmailSubmit = async () => {
+    const email = ssoEmail.trim().toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      notifications.show({
+        title: tNotifications('errorTitle'),
+        message: tValidation('invalidEmail'),
+        color: 'red',
+      });
+      return;
+    }
+    setSsoLoading(true);
+    try {
+      const next = '/dashboard';
+      window.location.href = `/api/auth/sso/start?email=${encodeURIComponent(email)}&next=${encodeURIComponent(next)}`;
+    } finally {
+      setSsoLoading(false);
+    }
+  };
 
   const handleSubmit = async (values: typeof form.values) => {
     setLoading(true);
@@ -137,52 +220,117 @@ export default function LoginPage() {
         </>
       }
     >
-      <form onSubmit={form.onSubmit(handleSubmit)}>
+      {ssoStep ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <TextInput
-            label={t('form.email.label')}
-            placeholder={t('form.email.placeholder')}
+            label={t('sso.emailStep.title')}
+            description={t('sso.emailStep.description')}
+            placeholder={t('sso.emailStep.placeholder')}
             required
             size="md"
             autoComplete="email"
-            {...form.getInputProps('email')}
+            value={ssoEmail}
+            onChange={(event) => setSsoEmail(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                void handleSsoEmailSubmit();
+              }
+            }}
           />
-
-          <PasswordInput
-            label={t('form.password.label')}
-            placeholder={t('form.password.placeholder')}
-            required
-            size="md"
-            autoComplete="current-password"
-            {...form.getInputProps('password')}
-          />
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <Link
-              href="/forgot-password"
-              style={{
-                fontSize: 12.5,
-                color: 'var(--ds-text-muted)',
-                textDecoration: 'none',
-              }}
-            >
-              Forgot password?
-            </Link>
-          </div>
 
           <Button
-            type="submit"
             color="teal"
             size="md"
             fullWidth
-            loading={loading}
-            leftSection={<IconLogin size={16} stroke={1.7} />}
-            mt={4}
+            loading={ssoLoading}
+            leftSection={<IconShieldLock size={16} stroke={1.7} />}
+            onClick={() => void handleSsoEmailSubmit()}
           >
-            {t('form.submit')}
+            {t('sso.emailStep.continue')}
+          </Button>
+
+          <Button variant="subtle" color="gray" size="sm" onClick={() => setSsoStep(false)}>
+            {t('sso.emailStep.back')}
           </Button>
         </div>
-      </form>
+      ) : (
+        <form onSubmit={form.onSubmit(handleSubmit)}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <TextInput
+              label={t('form.email.label')}
+              placeholder={t('form.email.placeholder')}
+              required
+              size="md"
+              autoComplete="email"
+              {...form.getInputProps('email')}
+            />
+
+            <PasswordInput
+              label={t('form.password.label')}
+              placeholder={t('form.password.placeholder')}
+              required
+              size="md"
+              autoComplete="current-password"
+              {...form.getInputProps('password')}
+            />
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Link
+                href="/forgot-password"
+                style={{
+                  fontSize: 12.5,
+                  color: 'var(--ds-text-muted)',
+                  textDecoration: 'none',
+                }}
+              >
+                Forgot password?
+              </Link>
+            </div>
+
+            <Button
+              type="submit"
+              color="teal"
+              size="md"
+              fullWidth
+              loading={loading}
+              leftSection={<IconLogin size={16} stroke={1.7} />}
+              mt={4}
+            >
+              {t('form.submit')}
+            </Button>
+
+            {sso.available && (
+              <>
+                <Divider label={t('sso.divider')} labelPosition="center" my={2} />
+                <Button
+                  variant="default"
+                  size="md"
+                  fullWidth
+                  leftSection={<IconShieldLock size={16} stroke={1.7} />}
+                  onClick={handleSsoButtonClick}
+                >
+                  {t('sso.button')}
+                </Button>
+              </>
+            )}
+          </div>
+        </form>
+      )}
     </AuthShell>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <Center mih="100vh">
+          <Loader />
+        </Center>
+      }
+    >
+      <LoginPageContent />
+    </Suspense>
   );
 }

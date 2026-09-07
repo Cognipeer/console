@@ -1,3 +1,18 @@
+/**
+ * NOTE (F-18, finance-institution assessment, 2026-09-05): every handler this
+ * file imports comes from `@/server/api/routes/client/v1/...` -- the legacy
+ * Next.js route tree. Per this project's convention, the LIVE client API is
+ * the Fastify plugin tree under `@/server/api/plugins/client-*.ts`
+ * (registered in `src/server/api/plugin.ts`); `routes/**` is not registered
+ * and is not reachable in production. A passing test here documents this old
+ * handler's behavior, not the behavior of the API a real token hits today --
+ * in particular, the "passes topK and filter to queryRag" test below asserts
+ * a tenant-wide (`projectId: undefined`) call as correct, which was a real
+ * cross-project data-leak bug in the LIVE plugin (see F-02) fixed separately
+ * in `client-rag.ts` and covered by `client-rag-project-scope.test.ts`. Do
+ * not read a green run here as evidence about the live RAG API's project
+ * scoping.
+ */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 
@@ -83,7 +98,7 @@ describe('POST /api/client/v1/rag/modules/:key/query', () => {
     expect(json.error).toContain('query');
   });
 
-  it('passes topK and filter to queryRag', async () => {
+  it('passes topK and filter to queryRag (legacy handler; the live plugin passes ctx.projectId here instead, see file header)', async () => {
     (queryRag as ReturnType<typeof vi.fn>).mockResolvedValue({ hits: [] });
 
     await ragQueryPOST(
@@ -94,7 +109,7 @@ describe('POST /api/client/v1/rag/modules/:key/query', () => {
     expect(queryRag).toHaveBeenCalledWith(
       'tenant_acme',
       'tenant-1',
-      undefined,
+      undefined, // legacy dead-code behavior only -- NOT how the live client-rag.ts plugin behaves post-F-02
       expect.objectContaining({
         ragModuleKey: 'product-docs',
         query: 'test',

@@ -17,6 +17,7 @@ import {
   createBrowserSession,
   deleteBrowser,
   deleteBrowserSession,
+  describeSessionElement,
   exportSessionPdf,
   extractFromBrowser,
   getBrowser,
@@ -34,6 +35,7 @@ import {
   browserScreenshotInputSchema,
   createBrowserInputSchema,
   createBrowserSessionInputSchema,
+  describeElementInputSchema,
   updateBrowserInputSchema,
 } from '@/lib/services/browser/validation';
 import {
@@ -285,6 +287,32 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  /**
+   * Resolve one snapshot `ref` to the durable target a step should store.
+   *
+   * The element list picks by ref; a flow cannot keep one. This is what turns
+   * a pick into something replayable — role+name when the element has a name,
+   * a test id or a structural selector when it does not.
+   */
+  app.post('/browser/sessions/:sessionKey/describe', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { sessionKey } = request.params as { sessionKey: string };
+      const body = describeElementInputSchema.parse(readJsonBody<unknown>(request));
+      const described = await describeSessionElement(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        sessionKey,
+        body.ref,
+      );
+      if (!described) return reply.code(404).send({ error: 'That element is no longer on the page' });
+      return reply.code(200).send(described);
+    } catch (error) {
+      if (sendProjectContextError(reply, error)) return;
+      logger.error('Describe element failed', { error });
+      return reply.code(500).send({ error: error instanceof Error ? error.message : 'Failed' });
+    }
+  }));
+
   app.get('/browser/sessions/:sessionKey/screenshot/live', withApiRequestContext(async (request, reply) => {
     try {
       const { sessionKey } = request.params as { sessionKey: string };
@@ -403,6 +431,13 @@ export const browserApiPlugin: FastifyPluginAsync = async (app) => {
   app.patch('/browser/flows/:idOrKey', withApiRequestContext(flows.update));
   app.delete('/browser/flows/:idOrKey', withApiRequestContext(flows.remove));
   app.post('/browser/flows/:idOrKey/run', withApiRequestContext(flows.run));
+  // Dashboard-only: the playground watches this run live via `flow-runs/:runId`
+  // rather than holding a connection open, so it needs the runId before the
+  // flow finishes. Not exposed on the client API, which stays synchronous.
+  app.post('/browser/flows/:idOrKey/run/start', withApiRequestContext(flows.runAsync));
+  // Authoring: replay part of the flow into a session the caller already has
+  // open, so the editor can put the page where the next step begins.
+  app.post('/browser/flows/:idOrKey/steps/run', withApiRequestContext(flows.runSteps));
 
   app.put('/browser/browsers/:idOrKey/profile', withApiRequestContext(profiles.uploadProfile));
   app.delete('/browser/browsers/:idOrKey/profile', withApiRequestContext(profiles.deleteProfile));

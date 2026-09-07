@@ -181,7 +181,7 @@ describe('message/send', () => {
   });
 
   it('reuses the conversation for a known contextId and rejects a foreign one', async () => {
-    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', messages: [] });
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
     mockFn(executeAgentChat).mockResolvedValue({
       output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'again' }] }],
       _conversation_messages: [{}, {}, {}, {}],
@@ -201,7 +201,7 @@ describe('message/send', () => {
     expect(parseJsonBody<{ result: { contextId: string } }>(ok.body).result.contextId).toBe('conv-9');
     expect(mockFn(createConversation)).not.toHaveBeenCalled();
 
-    mockFn(getConversationById).mockResolvedValue({ agentKey: 'other-agent', messages: [] });
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'other-agent', projectId: 'proj-1', messages: [] });
     const bad = await app.inject({
       method: 'POST',
       url: '/api/client/v1/a2a/support-bot',
@@ -221,6 +221,7 @@ describe('tasks/get and unknown methods', () => {
   it('rebuilds a completed task from the conversation store', async () => {
     mockFn(getConversationById).mockResolvedValue({
       agentKey: 'support-bot',
+      projectId: 'proj-1',
       messages: [
         { role: 'user', content: 'Hello' },
         { role: 'assistant', content: 'Hi there' },

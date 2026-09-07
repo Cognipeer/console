@@ -8,8 +8,10 @@ import type {
   IBrowserAccessRules,
   IBrowserFlow,
   IBrowserFlowInput,
+  IBrowserFlowOutput,
   IBrowserFlowRun,
   IBrowserFlowStep,
+  IBrowserFlowStepResult,
   IBrowserSession,
   IBrowserSessionConfig,
   IBrowserSessionEvent,
@@ -46,6 +48,7 @@ export interface CreateBrowserFlowInput {
   status?: BrowserFlowStatus;
   browserId: string;
   inputs?: IBrowserFlowInput[];
+  outputs?: IBrowserFlowOutput[];
   steps?: Array<Partial<IBrowserFlowStep>>;
   sessionConfig?: IBrowserSessionConfig;
   recordedFromSessionId?: string;
@@ -59,6 +62,7 @@ export interface UpdateBrowserFlowInput {
   status?: BrowserFlowStatus;
   browserId?: string;
   inputs?: IBrowserFlowInput[];
+  outputs?: IBrowserFlowOutput[];
   steps?: Array<Partial<IBrowserFlowStep>>;
   sessionConfig?: IBrowserSessionConfig;
   metadata?: Record<string, unknown>;
@@ -81,6 +85,30 @@ export interface RunBrowserFlowInput {
   maxSteps?: number;
   trigger?: BrowserFlowTrigger;
   createdBy: string;
+}
+
+/**
+ * Replay part of a flow into a session the caller already holds — the
+ * authoring loop, where the point is to LEAVE the browser somewhere rather
+ * than to record a run.
+ */
+export interface RunBrowserFlowStepsInput {
+  sessionKey: string;
+  /** First step to execute, 0-based inclusive. Defaults to the beginning. */
+  from?: number;
+  /** Stop before this index. Defaults to the end of the flow. */
+  to?: number;
+  inputs?: Record<string, unknown>;
+  /** Captures from an earlier slice, so `{{step.x}}` still resolves. */
+  captures?: Record<string, unknown>;
+  createdBy: string;
+}
+
+export interface BrowserFlowStepsResult {
+  results: IBrowserFlowStepResult[];
+  captures: Record<string, unknown>;
+  failedStepIndex?: number;
+  errorMessage?: string;
 }
 
 // ── Service inputs ──────────────────────────────────────────────────────

@@ -26,7 +26,7 @@ process.env.MAIN_DB_NAME = 'browser_flow_main';
 process.env.BROWSER_BLOCK_PRIVATE_NETWORK = 'false';
 
 import { reloadConfig } from '@/lib/core/config';
-import { disconnectDatabase, getDatabase } from '@/lib/database';
+import { disconnectDatabase, getDatabase, runWithTenantScope } from '@/lib/database';
 import { browserManager } from '@/lib/services/browser/browserManager';
 import { chromiumAvailable } from '../helpers/browserAvailability';
 import {
@@ -46,6 +46,8 @@ import {
   listBrowserFlowRuns,
   recordBrowserFlow,
   runBrowserFlow,
+  runBrowserFlowSteps,
+  startBrowserFlowRun,
   updateBrowserFlow,
 } from '@/lib/services/browser/browserFlowService';
 
@@ -53,6 +55,30 @@ const TENANT_DB_NAME = 'browser_flow_tenant';
 const TENANT_ID = 'tenant-browser-flow';
 const ACTOR = 'tester@example.com';
 const ctx = { tenantDbName: TENANT_DB_NAME, tenantId: TENANT_ID, projectId: 'proj-1' };
+
+// A second tenant, used only to prove a backgrounded run (`startBrowserFlowRun`)
+// survives concurrent activity from another tenant instead of racing the
+// process-global `switchToTenant` fallback (the exact bug `runWithTenantScope`
+// exists to prevent).
+const TENANT2_DB_NAME = 'browser_flow_tenant_2';
+const TENANT2_ID = 'tenant-browser-flow-2';
+const ctx2 = { tenantDbName: TENANT2_DB_NAME, tenantId: TENANT2_ID, projectId: 'proj-1' };
+
+/** Poll a flow run until it leaves `running`, or throw once `deadlineMs` passes. */
+async function awaitRunTerminal(
+  runCtx: typeof ctx,
+  runId: string,
+  deadlineMs = 30_000,
+): Promise<NonNullable<Awaited<ReturnType<typeof getBrowserFlowRun>>>> {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    const polled = await getBrowserFlowRun(runCtx, runId);
+    if (!polled) throw new Error(`Run ${runId} disappeared while polling`);
+    if (polled.status !== 'running') return polled;
+    if (Date.now() > deadline) throw new Error(`Run ${runId} did not finish within ${deadlineMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
 
 /**
  * A two-step app: fill a form, submit, land on a result page.
@@ -383,6 +409,351 @@ describe.skipIf(!chromiumAvailable())('replay', () => {
     expect(run.status).toBe('succeeded');
     expect(run.stepResults?.[1].status).toBe('skipped');
   }, 120_000);
+});
+
+/**
+ * What a run RETURNS, as opposed to what it did.
+ *
+ * A flow is called by something that wants a value back — an agent, an API
+ * client — and "whatever `captureAs` happened to collect" is not a contract:
+ * it changes when someone renames a capture. These cover the declared shape:
+ * that it is honoured, that it survives the steps being rearranged, and that
+ * a promise the run cannot keep is a failure rather than a quietly missing
+ * key.
+ */
+describe.skipIf(!chromiumAvailable())('declared outputs', () => {
+  /** A flow that fills the form and reads back both the receipt and the amount. */
+  async function expenseFlow(outputs?: Parameters<typeof createBrowserFlow>[1]['outputs']) {
+    return createBrowserFlow(ctx, {
+      name: `Declared outputs ${Math.random().toString(36).slice(2, 8)}`,
+      browserId,
+      status: 'active',
+      createdBy: ACTOR,
+      inputs: [{ name: 'reference', type: 'string', required: true }],
+      outputs,
+      steps: [
+        { action: { type: 'goto', url: baseUrl } },
+        { action: { type: 'type', label: 'Reference', text: '{{input.reference}}' } },
+        { action: { type: 'type', label: 'Amount', text: '4200' } },
+        { action: { type: 'click', role: 'button', name: 'Submit expense' } },
+        { action: { type: 'extract', selector: '#receipt' }, captureAs: 'receipt' },
+        { action: { type: 'extract', selector: '#amount', mode: 'value' }, captureAs: 'amountText' },
+      ],
+    });
+  }
+
+  it('returns the raw captures when a flow declares nothing', async () => {
+    const flow = await expenseFlow();
+    const run = await runBrowserFlow(ctx, flow.key, {
+      inputs: { reference: 'EXP-3003' },
+      createdBy: ACTOR,
+    });
+
+    expect(run.status).toBe('succeeded');
+    expect(run.outputs).toEqual({ receipt: 'RECEIPT EXP-3003/4200TRY/normal', amountText: '4200' });
+    // The captures are recorded either way — they are what an output reads
+    // from, so a flow being written needs them visible before it declares one.
+    expect(run.captures?.receipt).toBe('RECEIPT EXP-3003/4200TRY/normal');
+  }, 120_000);
+
+  it('shapes the return value, casts it, and keeps the captures alongside', async () => {
+    const flow = await expenseFlow([
+      { name: 'receiptCode', source: '{{step.receipt}}' },
+      { name: 'amount', source: '{{step.amountText}}', type: 'number' },
+      { name: 'summary', source: '{{input.reference}} → {{step.amountText}}' },
+    ]);
+
+    const run = await runBrowserFlow(ctx, flow.key, {
+      inputs: { reference: 'EXP-4004' },
+      createdBy: ACTOR,
+    });
+
+    expect(run.status).toBe('succeeded');
+    expect(run.outputs).toEqual({
+      receiptCode: 'RECEIPT EXP-4004/4200TRY/normal',
+      // Cast, not the string the page rendered.
+      amount: 4200,
+      // A template assembled from two sources, which is why `source` is not
+      // just a capture name.
+      summary: 'EXP-4004 → 4200',
+    });
+    // Declaring a shape must not throw the raw material away — it is the
+    // debugging view when an output resolves to nothing.
+    expect(run.captures?.amountText).toBe('4200');
+  }, 120_000);
+
+  it('fails a run that cannot produce a required output, even when every step passed', async () => {
+    const flow = await expenseFlow([
+      { name: 'vatNumber', source: '{{step.vat}}', required: true },
+    ]);
+
+    const run = await runBrowserFlow(ctx, flow.key, {
+      inputs: { reference: 'EXP-5005' },
+      createdBy: ACTOR,
+    });
+
+    expect(run.stepResults?.every((step) => step.status === 'succeeded')).toBe(true);
+    expect(run.status).toBe('failed');
+    expect(run.errorMessage).toContain('vatNumber');
+    // Nothing broke on the page, so there is no failing step to point at.
+    expect(run.failedStepIndex).toBeUndefined();
+  }, 120_000);
+
+  it('drops a value that does not fit its declared type instead of returning NaN', async () => {
+    const flow = await expenseFlow([
+      // The receipt is text like `RECEIPT EXP-6006/...`, which is not a number.
+      { name: 'total', source: '{{step.receipt}}', type: 'number' },
+      { name: 'receiptCode', source: '{{step.receipt}}' },
+    ]);
+
+    const run = await runBrowserFlow(ctx, flow.key, {
+      inputs: { reference: 'EXP-6006' },
+      createdBy: ACTOR,
+    });
+
+    expect(run.status).toBe('succeeded');
+    expect(run.outputs).not.toHaveProperty('total');
+    expect(run.outputs?.receiptCode).toContain('EXP-6006');
+  }, 120_000);
+
+  it('moves the flow version when the declared outputs change', async () => {
+    const flow = await expenseFlow();
+    const before = flow.version;
+
+    const updated = await updateBrowserFlow(ctx, flow.id, {
+      outputs: [{ name: 'receiptCode', source: '{{step.receipt}}' }],
+      updatedBy: ACTOR,
+    });
+
+    // A run pins the version it executed, and the version has to mean one
+    // return shape — not whichever was declared last.
+    expect(updated?.version).toBe(before + 1);
+
+    const renamed = await updateBrowserFlow(ctx, flow.id, { name: 'Renamed', updatedBy: ACTOR });
+    expect(renamed?.version).toBe(before + 1);
+  }, 60_000);
+});
+
+/**
+ * The authoring loop: replay part of a flow into a session the caller holds.
+ *
+ * A run cannot serve this — it opens its own session and closes it, leaving
+ * nothing on screen to build the next step against. These cover what the
+ * editor depends on: the page really moves, a second slice continues from
+ * where the first stopped (captures included), and a half-built flow with an
+ * unanswered required input still replays instead of refusing.
+ */
+describe.skipIf(!chromiumAvailable())('step-by-step authoring', () => {
+  async function authoringFlow() {
+    return createBrowserFlow(ctx, {
+      name: `Authoring ${Math.random().toString(36).slice(2, 8)}`,
+      browserId,
+      status: 'draft',
+      createdBy: ACTOR,
+      inputs: [
+        { name: 'reference', type: 'string', required: true },
+        { name: 'amount', type: 'string', required: true, default: '77' },
+      ],
+      steps: [
+        { action: { type: 'goto', url: baseUrl } },
+        { action: { type: 'type', label: 'Reference', text: '{{input.reference}}' } },
+        { action: { type: 'type', label: 'Amount', text: '{{input.amount}}' } },
+        { action: { type: 'click', role: 'button', name: 'Submit expense' } },
+        { action: { type: 'extract', selector: '#receipt' }, captureAs: 'receipt' },
+      ],
+    });
+  }
+
+  it('replays a slice into an open session and leaves the page there', async () => {
+    const flow = await authoringFlow();
+    const session = await createBrowserSession(ctx, { browserId, name: 'authoring', createdBy: ACTOR });
+
+    // Steps 1–2 only: fill the reference, and stop.
+    const first = await runBrowserFlowSteps(ctx, flow.key, {
+      sessionKey: session.sessionKey,
+      to: 2,
+      inputs: { reference: 'EXP-7007' },
+      createdBy: ACTOR,
+    });
+
+    expect(first.results.map((step) => step.status)).toEqual(['succeeded', 'succeeded']);
+    expect(first.failedStepIndex).toBeUndefined();
+
+    // The session is still open AND the typed value is on the page — this is
+    // the whole point: the next step is built against this state.
+    const snapshot = await captureSnapshot(ctx, session.sessionKey);
+    expect(snapshot.ariaSnapshot).toContain('EXP-7007');
+
+    // Continuing runs only the remaining steps, carrying the captures.
+    const rest = await runBrowserFlowSteps(ctx, flow.key, {
+      sessionKey: session.sessionKey,
+      from: 2,
+      inputs: { reference: 'EXP-7007' },
+      captures: first.captures,
+      createdBy: ACTOR,
+    });
+
+    expect(rest.results.map((step) => step.index)).toEqual([2, 3, 4]);
+    // `amount` was never supplied, so its declared default applied.
+    expect(rest.captures.receipt).toBe('RECEIPT EXP-7007/77TRY/normal');
+
+    await closeBrowserSession(ctx, session.sessionKey).catch(() => undefined);
+  }, 120_000);
+
+  it('replays a half-built flow whose required input has no value yet', async () => {
+    const flow = await authoringFlow();
+    const session = await createBrowserSession(ctx, { browserId, name: 'authoring', createdBy: ACTOR });
+
+    // No `reference` at all. A run would refuse; authoring must not.
+    const outcome = await runBrowserFlowSteps(ctx, flow.key, {
+      sessionKey: session.sessionKey,
+      to: 2,
+      createdBy: ACTOR,
+    });
+
+    expect(outcome.results.every((step) => step.status === 'succeeded')).toBe(true);
+    // The unresolved placeholder is typed literally rather than blanked — the
+    // same rule a run follows, so what you see here is what a run would do.
+    const snapshot = await captureSnapshot(ctx, session.sessionKey);
+    expect(snapshot.ariaSnapshot).toContain('{{input.reference}}');
+
+    await closeBrowserSession(ctx, session.sessionKey).catch(() => undefined);
+  }, 120_000);
+
+  it('stops at the first failing step and says which one', async () => {
+    const flow = await createBrowserFlow(ctx, {
+      name: `Authoring break ${Math.random().toString(36).slice(2, 8)}`,
+      browserId,
+      status: 'draft',
+      createdBy: ACTOR,
+      steps: [
+        { action: { type: 'goto', url: baseUrl } },
+        {
+          action: { type: 'click', role: 'button', name: 'Not on this page' },
+          policy: { timeoutMs: 1_000 },
+        },
+        { action: { type: 'extract', selector: '#receipt' }, captureAs: 'never' },
+      ],
+    });
+    const session = await createBrowserSession(ctx, { browserId, name: 'authoring', createdBy: ACTOR });
+
+    const outcome = await runBrowserFlowSteps(ctx, flow.key, {
+      sessionKey: session.sessionKey,
+      createdBy: ACTOR,
+    });
+
+    expect(outcome.failedStepIndex).toBe(1);
+    expect(outcome.results).toHaveLength(2);
+    expect(outcome.captures.never).toBeUndefined();
+
+    await closeBrowserSession(ctx, session.sessionKey).catch(() => undefined);
+  }, 120_000);
+
+  it('records no run — authoring is not history', async () => {
+    const flow = await authoringFlow();
+    const session = await createBrowserSession(ctx, { browserId, name: 'authoring', createdBy: ACTOR });
+
+    await runBrowserFlowSteps(ctx, flow.key, {
+      sessionKey: session.sessionKey,
+      to: 1,
+      createdBy: ACTOR,
+    });
+
+    const runs = await listBrowserFlowRuns(ctx, { flowId: flow.id, limit: 5 });
+    expect(runs).toHaveLength(0);
+
+    await closeBrowserSession(ctx, session.sessionKey).catch(() => undefined);
+  }, 120_000);
+});
+
+describe.skipIf(!chromiumAvailable())('background run', () => {
+  it('returns immediately and lets a caller watch step results land one at a time', async () => {
+    const flow = await createBrowserFlow(ctx, {
+      name: 'Background watch',
+      browserId,
+      status: 'active',
+      createdBy: ACTOR,
+      steps: [
+        { action: { type: 'goto', url: baseUrl } },
+        { action: { type: 'wait', ms: 150 } },
+        { action: { type: 'extract', role: 'heading', name: 'Expense Portal' }, captureAs: 'title' },
+      ],
+    });
+
+    const started = await startBrowserFlowRun(ctx, flow.key, { createdBy: ACTOR });
+    expect(started.status).toBe('running');
+    expect(started.stepResults ?? []).toHaveLength(0);
+
+    let sawPartialProgress = false;
+    let polled = started;
+    const deadline = Date.now() + 30_000;
+    while (polled.status === 'running') {
+      if ((polled.stepResults?.length ?? 0) > 0) sawPartialProgress = true;
+      if (Date.now() > deadline) throw new Error('Run did not finish in time');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const next = await getBrowserFlowRun(ctx, started.id);
+      if (!next) throw new Error('Run disappeared while polling');
+      polled = next;
+    }
+
+    expect(polled.status).toBe('succeeded');
+    expect(polled.stepResults?.length).toBe(3);
+    expect(polled.outputs?.title).toBe('Expense Portal');
+    // The 150ms wait step gives the 20ms poll loop room to observe the run
+    // mid-flight — this is what actually distinguishes background execution
+    // from a run that merely reports `running` and then finishes atomically.
+    expect(sawPartialProgress).toBe(true);
+  }, 60_000);
+
+  it('keeps a backgrounded run correctly tenant-scoped despite concurrent activity from another tenant', async () => {
+    const flow = await createBrowserFlow(ctx, {
+      name: 'Tenant isolation under background run',
+      browserId,
+      status: 'active',
+      createdBy: ACTOR,
+      steps: [
+        { action: { type: 'goto', url: baseUrl } },
+        { action: { type: 'wait', ms: 200 } },
+        { action: { type: 'extract', role: 'heading', name: 'Expense Portal' }, captureAs: 'title' },
+      ],
+    });
+
+    // Set up tenant 2 up front — a bare (unscoped) `switchToTenant` call is
+    // racy against ANY concurrent tenant regardless of this test, so this
+    // step happens before either tenant has anything running concurrently.
+    const browser2 = await createBrowser(ctx2, {
+      name: 'Tenant 2 browser',
+      createdBy: ACTOR,
+      defaultSessionConfig: { headless: true },
+    });
+    const flow2 = await createBrowserFlow(ctx2, {
+      name: 'Tenant 2 flow',
+      browserId: browser2.id,
+      status: 'active',
+      createdBy: ACTOR,
+      steps: [{ action: { type: 'goto', url: baseUrl } }],
+    });
+
+    const started = await startBrowserFlowRun(ctx, flow.key, { createdBy: ACTOR });
+    expect(started.status).toBe('running');
+
+    // While tenant 1's run continues in the background, drive tenant 2 through
+    // the same `runWithTenantScope` binding a real dashboard request gets from
+    // `withApiRequestContext` — this is the concurrency `startBrowserFlowRun`
+    // has to survive: two ALS-scoped tenants racing the same process-global
+    // `switchToTenant` fallback underneath.
+    await runWithTenantScope(ctx2.tenantDbName, () => runBrowserFlow(ctx2, flow2.key, { createdBy: ACTOR }));
+    await runWithTenantScope(ctx2.tenantDbName, () => runBrowserFlow(ctx2, flow2.key, { createdBy: ACTOR }));
+
+    const finalRun = await awaitRunTerminal(ctx, started.id);
+    expect(finalRun.status).toBe('succeeded');
+    expect(finalRun.tenantId).toBe(TENANT_ID);
+    expect(finalRun.outputs?.title).toBe('Expense Portal');
+
+    // And it must be invisible from tenant 2 — proof it never landed there.
+    const crossTenantLookup = await getBrowserFlowRun(ctx2, started.id);
+    expect(crossTenantLookup).toBeNull();
+  }, 60_000);
 });
 
 describe.skipIf(!chromiumAvailable())('browser profile', () => {

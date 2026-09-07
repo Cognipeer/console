@@ -310,6 +310,18 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.browsers, 'storageStateEnc', 'storageStateEnc TEXT');
     this.ensureTableColumn(db, TABLES.browsers, 'storageStateMeta', 'storageStateMeta TEXT');
 
+    // Browser flows: the declared return shape, and the raw captures a run
+    // resolved it from. A flow recorded before this change updates through
+    // the same UPDATE statement, so the columns have to exist for it too.
+    this.ensureTableColumn(db, TABLES.browserFlows, 'outputs', 'outputs TEXT');
+    this.ensureTableColumn(db, TABLES.browserFlowRuns, 'captures', 'captures TEXT');
+
+    // Owning cluster node name (see src/lib/core/cluster/nodeRegistry.ts) —
+    // without this, boot reconciliation on any replica could only ask "does
+    // THIS process know about this session", so a session genuinely alive on
+    // another replica looked identical to one truly orphaned by a crash.
+    this.ensureTableColumn(db, TABLES.browserSessions, 'ownerNode', 'ownerNode TEXT');
+
     // Knowledge Engine: richer chunking (offsets, heading path, real token
     // counts) plus the stored source a re-index rebuilds from. CREATE TABLE IF
     // NOT EXISTS never alters an existing tenant DB, so without these the

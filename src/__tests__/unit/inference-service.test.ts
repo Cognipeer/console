@@ -22,9 +22,16 @@ vi.mock('@/lib/services/models/semanticCacheService', () => ({
   storeInCache: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('@/lib/services/models/usageLogger', () => ({
-  logModelUsage: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/services/models/usageLogger')>();
+  return {
+    ...original,
+    // calculateCost stays REAL (pure, deterministic) so the budget-settlement
+    // tests below exercise the same arithmetic production traffic gets, not a
+    // stand-in that always returns some fixed number.
+    logModelUsage: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 vi.mock('@/lib/services/guardrail', () => ({
   evaluateGuardrail: vi.fn().mockResolvedValue({ action: 'allow', findings: [] }),
@@ -246,6 +253,30 @@ describe('handleChatCompletion', () => {
     );
   });
 
+  it('settles the budget with the realized cost for a non-streaming completion too (F-05)', async () => {
+    const model = makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } });
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(model);
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: makeChatRuntime(),
+    });
+    (summarizeUsage as ReturnType<typeof vi.fn>).mockReturnValue({
+      inputTokens: 100,
+      outputTokens: 200,
+      totalTokens: 300,
+    });
+
+    const onUsageSettled = vi.fn();
+    await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [{ role: 'user', content: 'Hello' }] },
+      onUsageSettled,
+    });
+
+    expect(onUsageSettled).toHaveBeenCalledWith(
+      expect.objectContaining({ currency: 'USD', totalCost: 0.007 }),
+    );
+  });
+
   it('forwards finishReason and reasoningTokens to logModelUsage without perturbing totalTokens', async () => {
     // reasoningTokens is a SUBSET of outputTokens — it must reach logModelUsage
     // as its own field, and totalTokens must stay exactly what summarizeUsage
@@ -448,6 +479,50 @@ describe('handleChatCompletion', () => {
     expect(result).toHaveProperty('stream');
     expect(result).toHaveProperty('requestId');
     expect(result.stream).toBeInstanceOf(ReadableStream);
+  });
+
+  it('settles the budget with the realized cost once a stream completes (F-05)', async () => {
+    // Regression for the 2026-09-05 assessment's F-05: streaming usage was
+    // logged via logModelUsage, but nothing fed it back into the budget
+    // counter — only the non-streaming branch's caller did that, using
+    // `result.usage`, a field a streaming outcome never carries. A caller
+    // that wants the real cost has to be told through `onUsageSettled`,
+    // since it isn't known until the stream this function already returned
+    // finishes.
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeLlmModel({ pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } }),
+    );
+    const asyncIterator = (async function* () {
+      yield { content: 'Hello' };
+    })();
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          invoke: vi.fn(),
+          stream: vi.fn().mockResolvedValue(asyncIterator),
+        }),
+      },
+    });
+    (toOpenAIStreamChunk as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: 'chatcmpl-1',
+      object: 'chat.completion.chunk',
+      choices: [{ index: 0, delta: { content: 'Hello' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
+    });
+
+    const onUsageSettled = vi.fn();
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      body: { messages: [], stream_options: { include_usage: true } },
+      stream: true,
+      onUsageSettled,
+    });
+    await new Response(result.stream).text();
+
+    // 100 input tokens @ $10/1M + 200 output tokens @ $30/1M = $0.001 + $0.006
+    expect(onUsageSettled).toHaveBeenCalledWith(
+      expect.objectContaining({ currency: 'USD', totalCost: 0.007 }),
+    );
   });
 
   it('emits requested stream usage as a final usage-only chunk', async () => {
@@ -705,7 +780,10 @@ describe('handleChatCompletion', () => {
   });
 
   describe('client disconnects mid-stream', () => {
-    const startCancellableStream = async (modelOverrides = {}) => {
+    const startCancellableStream = async (
+      modelOverrides = {},
+      onUsageSettled?: (cost: { currency: string; totalCost: number }) => void,
+    ) => {
       (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeLlmModel(modelOverrides));
       let aborted = false;
       (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -738,6 +816,7 @@ describe('handleChatCompletion', () => {
         ...BASE_PARAMS,
         body: { messages: [] },
         stream: true,
+        onUsageSettled,
       });
 
       const reader = result.stream!.getReader();
@@ -767,6 +846,19 @@ describe('handleChatCompletion', () => {
         cancelled: 'client_disconnected',
         output_tokens_estimated: true,
       });
+    });
+
+    it('settles the budget for the partial usage too — the provider still billed for it (F-05)', async () => {
+      const onUsageSettled = vi.fn();
+      await startCancellableStream(
+        { pricing: { inputTokenPer1M: 10, outputTokenPer1M: 30 } },
+        onUsageSettled,
+      );
+
+      expect(onUsageSettled).toHaveBeenCalledTimes(1);
+      const [cost] = onUsageSettled.mock.calls[0];
+      expect(cost.currency).toBe('USD');
+      expect(cost.totalCost).toBeGreaterThan(0);
     });
 
     it('still audits the output guardrail over the text that was delivered', async () => {

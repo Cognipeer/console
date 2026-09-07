@@ -13,17 +13,18 @@ RESPONSE_FILE=$(mktemp)
 trap 'rm -f "${PAYLOAD_FILE}" "${RESPONSE_FILE}"' EXIT
 IMMUTABLE_REF=""
 if [[ -n "${IMAGE_DIGEST:-}" ]]; then
-  [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Invalid Community digest."; exit 1; }
+  [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Invalid Community digest." >&2; exit 1; }
   IMMUTABLE_REF="ghcr.io/cognipeer/console@${IMAGE_DIGEST}"
+fi
+if [[ "${RELEASE_STATUS}" == "succeeded" && -z "${IMMUTABLE_REF}" ]]; then
+  echo "::error::Community success requires an immutable image digest." >&2
+  exit 1
 fi
 jq -n \
   --arg repo "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}" \
-  --arg version "${RELEASE_VERSION}" \
-  --arg commitSha "${COMMIT_SHA}" \
-  --arg immutableRef "${IMMUTABLE_REF}" \
-  --arg status "${RELEASE_STATUS}" \
-  --arg actor "${GITHUB_ACTOR:-github-actions}" \
-  --arg runUrl "${RUN_URL}" \
+  --arg version "${RELEASE_VERSION}" --arg commitSha "${COMMIT_SHA}" \
+  --arg immutableRef "${IMMUTABLE_REF}" --arg status "${RELEASE_STATUS}" \
+  --arg actor "${GITHUB_ACTOR:-github-actions}" --arg runUrl "${RUN_URL}" \
   '{
     requireExecution: true, product: "console", targetKey: "community", environment: "artifacts",
     repo: $repo, version: $version, commitSha: $commitSha,
@@ -44,5 +45,5 @@ jq -e '
   and (.executionId | type == "string" and test("^[A-Za-z0-9-]+$"))
   and .targetKey == "community" and .environmentKey == "artifacts"
 ' "${RESPONSE_FILE}" >/dev/null \
-  || { echo "::error::CRM did not confirm the Community release execution."; exit 1; }
+  || { echo "::error::CRM did not confirm the Community release execution." >&2; exit 1; }
 echo "CRM recorded Community ${RELEASE_VERSION}: ${RELEASE_STATUS}."

@@ -608,9 +608,44 @@ export async function checkRateLimit(
   return { allowed: true, effectiveLimits };
 }
 
-function usdToCents(usd: number): number {
+/**
+ * Micro-dollars (1 USD = 1,000,000 micros), the same precision Google/AWS
+ * billing APIs use for per-call costs. Whole cents lost calls cheaper than
+ * $0.005 entirely: `Math.round(0.004 * 100)` is 0, so 1,000 real $0.004
+ * charges — $4 of actual spend — added up to $0 on the counter.
+ */
+const MICROS_PER_USD = 1_000_000;
+
+function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) return 0;
-  return Math.max(0, Math.round(usd * 100));
+  return Math.max(0, Math.round(usd * MICROS_PER_USD));
+}
+
+/**
+ * Debit a budget window with a call's REALIZED cost, once it is known.
+ *
+ * `checkBudget()` alone is a pre-flight gate — called before a call runs, or
+ * with no `usd` at all it only reads the window without incrementing it.
+ * Every caller that later learns the real cost (a stream's terminal usage
+ * chunk, an audio/OCR provider response) must feed it back through here, or
+ * the budget counter never reflects what actually happened and a hard cap
+ * only ever throttles requests, never spend. Swallows its own errors — same
+ * failure mode as `checkBudget`'s window-read errors — because a settlement
+ * failure must never surface as a user-facing error on a call that already
+ * completed and was already billed by the provider.
+ */
+export async function settleUsageBudget(
+  context: QuotaContext,
+  cost: { currency: string; totalCost: number },
+): Promise<void> {
+  if (cost.currency !== 'USD' || !Number.isFinite(cost.totalCost) || cost.totalCost <= 0) {
+    return;
+  }
+  try {
+    await checkBudget(context, { usd: cost.totalCost });
+  } catch (error) {
+    logger.error('Failed to settle realized budget usage', { error });
+  }
 }
 
 export async function checkBudget(
@@ -624,54 +659,54 @@ export async function checkBudget(
   const budget = effectiveLimits.budget;
   if (!budget) return { allowed: true, effectiveLimits };
 
-  const costCents = usdToCents(cost.usd ?? 0);
+  const costMicros = usdToMicros(cost.usd ?? 0);
   const errors: string[] = [];
 
   const checkWindow = async (
     windowName: 'perDay' | 'perMonth',
     limitUsd: number | undefined,
-    incrementByCents: number,
+    incrementByMicros: number,
   ) => {
     if (limitUsd === undefined || limitUsd === -1) return;
 
-    const limitCents = usdToCents(limitUsd);
+    const limitMicros = usdToMicros(limitUsd);
     const windowSeconds = windowName === 'perDay' ? 86400 : 2592000;
-
-    const keyParts = ['budget', context.domain, 'usd_cents', windowName];
-    if (context.providerKey) keyParts.push(`prov:${context.providerKey}`);
-    if (context.resourceKey) keyParts.push(`res:${context.resourceKey}`);
-    if (context.userId) keyParts.push(`user:${context.userId}`);
-    else if (context.tokenId) keyParts.push(`token:${context.tokenId}`);
-    else keyParts.push(`tenant:${context.tenantId}`);
-
-    const key = keyParts.join(':');
+    const key = budgetCounterKey(context, windowName);
 
     try {
       // Read current value without incrementing.
       const current = await db.incrementRateLimit(key, windowSeconds, 0);
-      if (current.count >= limitCents) {
-        errors.push(`Budget exceeded for ${windowName} (${current.count}/${limitCents} cents)`);
+      if (current.count >= limitMicros) {
+        errors.push(`Budget exceeded for ${windowName} (${current.count}/${limitMicros} micros)`);
         return;
       }
 
-      if (incrementByCents > 0) {
+      if (incrementByMicros > 0) {
         const updated = await db.incrementRateLimit(
           key,
           windowSeconds,
-          incrementByCents,
+          incrementByMicros,
         );
-        if (updated.count > limitCents) {
-          errors.push(`Budget exceeded for ${windowName} (${updated.count}/${limitCents} cents)`);
+        if (updated.count > limitMicros) {
+          errors.push(`Budget exceeded for ${windowName} (${updated.count}/${limitMicros} micros)`);
         }
       }
     } catch (error) {
       logger.error('Budget check failed', { error });
+      // Fail CLOSED, not open: this branch only runs when the tenant has an
+      // actual dailySpendLimit/monthlySpendLimit configured (the early return
+      // above skips it otherwise) — i.e. only for callers who explicitly
+      // opted into a hard cap. Silently letting spend through on a counter
+      // lookup failure made that cap meaningless during exactly the kind of
+      // outage a hard cap exists to survive; it never affects a tenant that
+      // hasn't configured a budget limit at all.
+      errors.push(`Budget check unavailable for ${windowName}; failing closed`);
     }
   };
 
   await Promise.all([
-    checkWindow('perDay', budget.dailySpendLimit, costCents),
-    checkWindow('perMonth', budget.monthlySpendLimit, costCents),
+    checkWindow('perDay', budget.dailySpendLimit, costMicros),
+    checkWindow('perMonth', budget.monthlySpendLimit, costMicros),
   ]);
 
   if (errors.length > 0) {
@@ -700,9 +735,9 @@ export interface BudgetUsage {
   alertThresholds?: number[];
 }
 
-/** Mirrors the counter key scheme used by `checkBudget`. */
+/** Shared counter key scheme for `checkBudget` and `getBudgetUsage`. */
 function budgetCounterKey(context: QuotaContext, windowName: 'perDay' | 'perMonth'): string {
-  const keyParts = ['budget', context.domain, 'usd_cents', windowName];
+  const keyParts = ['budget', context.domain, 'usd_micros', windowName];
   if (context.providerKey) keyParts.push(`prov:${context.providerKey}`);
   if (context.resourceKey) keyParts.push(`res:${context.resourceKey}`);
   if (context.userId) keyParts.push(`user:${context.userId}`);
@@ -734,7 +769,7 @@ export async function getBudgetUsage(context: QuotaContext): Promise<BudgetUsage
         windowSeconds,
         0,
       );
-      usedUsd = current.count / 100;
+      usedUsd = current.count / MICROS_PER_USD;
     } catch (error) {
       logger.error('Budget usage read failed', { error });
     }

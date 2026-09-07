@@ -77,7 +77,17 @@ COPY --from=builder /app/mail-templates ./mail-templates
 
 
 RUN mkdir -p /app/.next/cache/images && \
-    chown -R node:node /app
+    chown -R node:node /app && \
+    # OpenShift's default restricted SCC ignores the image's USER/UID and
+    # runs the container as an arbitrary, unpredictable UID instead — but
+    # that UID is always a member of GID 0. `chown node:node` alone leaves
+    # Next's own runtime writes (ISR/data cache, on-demand image
+    # optimization writing into .next/cache/images) failing EACCES on
+    # OpenShift even though the very same image runs fine on plain Docker
+    # or Kubernetes without that SCC. Group-write + GID 0 makes it work
+    # under both.
+    chgrp -R 0 /app/.next/cache && \
+    chmod -R g=u /app/.next/cache
 
 USER node
 

@@ -15,9 +15,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted-runner-cgate-azure
     environment: production
-    timeout-minutes: 45
+    timeout-minutes: 90
     outputs:
       image_digest: ${{ steps.identity.outputs.digest }}
       commit_sha: ${{ steps.vars.outputs.commit_sha }}
@@ -53,7 +53,7 @@ jobs:
         id: existing
         env:
           IMAGE_REF: ghcr.io/cognipeer/console:${{ github.ref_name }}
-          SOURCE_SHA_REF: ghcr.io/cognipeer/console:sha-${{ steps.vars.outputs.commit_sha }}
+          SOURCE_COMMIT_SHA: ${{ steps.vars.outputs.commit_sha }}
         run: bash ci/resolve-image.sh
 
       - name: Build & Push to GHCR
@@ -66,23 +66,32 @@ jobs:
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/cognipeer/console:${{ github.ref_name }}
-            ghcr.io/cognipeer/console:sha-${{ steps.vars.outputs.commit_sha }}
+          provenance: mode=min
+          tags: ghcr.io/cognipeer/console:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ steps.vars.outputs.commit_sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
 
-      - name: Capture image identity
+      - name: Verify image identity
         id: identity
         env:
+          IMAGE_REF: ghcr.io/cognipeer/console:${{ github.ref_name }}
+          SOURCE_COMMIT_SHA: ${{ steps.vars.outputs.commit_sha }}
           EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
           BUILT_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
+          source ci/registry-digest.sh
           DIGEST="${EXISTING_DIGEST:-${BUILT_DIGEST:-}}"
-          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::Community image digest is missing."; exit 1; }
+          [[ -n "${DIGEST}" && "$(registry_digest "${IMAGE_REF}")" == "${DIGEST}" ]] \
+            || { echo "::error::Community image digest changed or is missing."; exit 1; }
+          assert_image_identity "${IMAGE_REF}" "${DIGEST}" "${SOURCE_COMMIT_SHA}"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
   sync-console-ee:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted-runner-cgate-azure
     timeout-minutes: 40
     needs: build
     steps:
@@ -148,13 +157,14 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           COMMUNITY_TAG: ${{ github.ref_name }}
+          COMMUNITY_SHA: ${{ needs.build.outputs.commit_sha }}
           CONSOLE_EE_REPOSITORY: Cognipeer/console-ee
         run: bash ci/wait-community-compat.sh
 
   notify-crm:
     if: always() && needs.build.result != 'skipped'
     environment: production
-    runs-on: ubuntu-latest
+    runs-on: self-hosted-runner-cgate-azure
     needs: [build, sync-console-ee]
     steps:
       - name: Checkout
@@ -172,7 +182,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-
           RELEASE_STATUS=succeeded
           if [[ "${BUILD_RESULT}" != "success" || "${COMPAT_SYNC_RESULT}" != "success" ]]; then
             RELEASE_STATUS=failed

@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
-import { routeInstanceCall } from '@/lib/core/cluster';
+import { getThisNodeName, routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { getDatabase, runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import { downloadFile, uploadFile } from '@/lib/services/files';
@@ -32,6 +32,7 @@ import type {
   BrowserScreenshotInput,
   BrowserSessionEventView,
   BrowserSessionView,
+  BrowserTarget,
   CreateBrowserSessionInput,
 } from './types';
 import type {
@@ -180,6 +181,11 @@ export async function createBrowserSession(
     eventCount: 0,
     metadata: input.metadata,
     createdBy: input.createdBy,
+    // browserManager.openSession below always runs on whichever node handled
+    // this request (session creation is not itself assignment-routed) — this
+    // is what boot reconciliation checks before treating an unknown session
+    // as orphaned.
+    ownerNode: getThisNodeName(),
   });
 
   const sessionId = created._id ? String(created._id) : '';
@@ -252,6 +258,10 @@ export async function createBrowserSession(
     const refreshed = await db.findBrowserSessionById(sessionId);
     return serializeSession(refreshed ?? created);
   } catch (err) {
+    // This used to be persisted only to the DB row, never to the pod's own
+    // logs -- diagnosing a live incident meant querying Mongo to find out a
+    // session failed to open at all, with nothing in `oc logs` naming why.
+    logger.error('Browser session failed to open', { error: err, sessionKey, tenantId: ctx.tenantId });
     await db.updateBrowserSession(sessionId, {
       status: 'errored',
       errorMessage: err instanceof Error ? err.message : String(err),
@@ -497,6 +507,23 @@ export async function captureSnapshot(
     data: { length: snapshot.length },
   });
   return { ariaSnapshot: snapshot, url };
+}
+
+/**
+ * Turn a snapshot `ref` into the durable target a step should store.
+ *
+ * The element list hands back a ref; a flow cannot keep one. For a named
+ * element role+name is the answer, and for an unnamed one this is what finds
+ * a real handle (a test id, an id, a structural path) instead of storing a
+ * bare role that would match the first element of that kind on the page.
+ */
+export async function describeSessionElement(
+  ctx: SessionContext,
+  sessionKey: string,
+  ref: string,
+): Promise<{ target: BrowserTarget; path: string; tag: string; text?: string } | null> {
+  await loadSessionForKey(ctx, sessionKey);
+  return browserManager.describeElement(sessionKey, ref);
 }
 
 /**

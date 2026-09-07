@@ -865,6 +865,60 @@
       ],
       "tenantAdminOnly": true,
       "settings": true
+    },
+    {
+      "id": "sso",
+      "href": "/dashboard/sso",
+      "icon": "IconShieldLock",
+      "category": "admin",
+      "navLabelKey": "sso",
+      "navDescriptionKey": "ssoDescription",
+      "tags": [
+        "sso",
+        "oidc",
+        "authentication",
+        "enterprise"
+      ],
+      "searchKeywords": [
+        "sso",
+        "oidc",
+        "single sign-on",
+        "authentication",
+        "keycloak",
+        "okta",
+        "entra",
+        "azure ad"
+      ],
+      "tenantAdminOnly": true,
+      "settings": true,
+      "requiresEnterprise": true,
+      "enterpriseModule": "sso"
+    },
+    {
+      "id": "ldap",
+      "href": "/dashboard/ldap",
+      "icon": "IconAddressBook",
+      "category": "admin",
+      "navLabelKey": "ldap",
+      "navDescriptionKey": "ldapDescription",
+      "tags": [
+        "ldap",
+        "directory",
+        "authentication",
+        "enterprise"
+      ],
+      "searchKeywords": [
+        "ldap",
+        "active directory",
+        "directory",
+        "openldap",
+        "authentication",
+        "on-prem"
+      ],
+      "tenantAdminOnly": true,
+      "settings": true,
+      "requiresEnterprise": true,
+      "enterpriseModule": "ldap"
     }
   ]
 }
