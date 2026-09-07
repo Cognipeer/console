@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-cgate
     outputs:
       image_digest: ${{ steps.image.outputs.digest }}
       commit_sha: ${{ steps.vars.outputs.commit_sha }}
