@@ -1,0 +1,178 @@
+{
+  "impactRows": [
+    {
+      "id": "benign-short",
+      "moderationFindings": 0,
+      "promptShieldFindings": 0
+    },
+    {
+      "id": "benign-medium",
+      "moderationFindings": 0,
+      "promptShieldFindings": 0
+    },
+    {
+      "id": "violation-drugs",
+      "moderationFindings": 1,
+      "promptShieldFindings": 0
+    },
+    {
+      "id": "violation-injection",
+      "moderationFindings": 0,
+      "promptShieldFindings": 2
+    },
+    {
+      "id": "violation-injection-tr",
+      "moderationFindings": 0,
+      "promptShieldFindings": 2
+    },
+    {
+      "id": "long-benign",
+      "moderationFindings": 0,
+      "promptShieldFindings": 0
+    }
+  ],
+  "modLatencyRows": [
+    {
+      "id": "benign-short",
+      "chars": 54,
+      "n": 2000,
+      "meanMs": 0.077,
+      "p50Ms": 0.073,
+      "p95Ms": 0.097,
+      "p99Ms": 0.116,
+      "maxMs": 0.276
+    },
+    {
+      "id": "benign-medium",
+      "chars": 167,
+      "n": 2000,
+      "meanMs": 0.142,
+      "p50Ms": 0.139,
+      "p95Ms": 0.165,
+      "p99Ms": 0.18,
+      "maxMs": 0.262
+    },
+    {
+      "id": "violation-drugs",
+      "chars": 61,
+      "n": 2000,
+      "meanMs": 0.081,
+      "p50Ms": 0.077,
+      "p95Ms": 0.102,
+      "p99Ms": 0.128,
+      "maxMs": 0.185
+    },
+    {
+      "id": "violation-injection",
+      "chars": 101,
+      "n": 2000,
+      "meanMs": 0.096,
+      "p50Ms": 0.094,
+      "p95Ms": 0.117,
+      "p99Ms": 0.129,
+      "maxMs": 0.158
+    },
+    {
+      "id": "violation-injection-tr",
+      "chars": 63,
+      "n": 2000,
+      "meanMs": 0.083,
+      "p50Ms": 0.081,
+      "p95Ms": 0.104,
+      "p99Ms": 0.12,
+      "maxMs": 0.145
+    },
+    {
+      "id": "long-benign",
+      "chars": 2640,
+      "n": 2000,
+      "meanMs": 1.735,
+      "p50Ms": 1.719,
+      "p95Ms": 1.862,
+      "p99Ms": 2.022,
+      "maxMs": 3.042
+    }
+  ],
+  "shieldLatencyRows": [
+    {
+      "id": "benign-short",
+      "chars": 54,
+      "n": 2000,
+      "meanMs": 0.001,
+      "p50Ms": 0.001,
+      "p95Ms": 0.001,
+      "p99Ms": 0.002,
+      "maxMs": 0.017
+    },
+    {
+      "id": "benign-medium",
+      "chars": 167,
+      "n": 2000,
+      "meanMs": 0.002,
+      "p50Ms": 0.002,
+      "p95Ms": 0.002,
+      "p99Ms": 0.003,
+      "maxMs": 0.03
+    },
+    {
+      "id": "violation-drugs",
+      "chars": 61,
+      "n": 2000,
+      "meanMs": 0.001,
+      "p50Ms": 0.001,
+      "p95Ms": 0.001,
+      "p99Ms": 0.001,
+      "maxMs": 0.004
+    },
+    {
+      "id": "violation-injection",
+      "chars": 101,
+      "n": 2000,
+      "meanMs": 0.002,
+      "p50Ms": 0.001,
+      "p95Ms": 0.002,
+      "p99Ms": 0.002,
+      "maxMs": 0.063
+    },
+    {
+      "id": "violation-injection-tr",
+      "chars": 63,
+      "n": 2000,
+      "meanMs": 0.001,
+      "p50Ms": 0.001,
+      "p95Ms": 0.001,
+      "p99Ms": 0.001,
+      "maxMs": 0.005
+    },
+    {
+      "id": "long-benign",
+      "chars": 2640,
+      "n": 2000,
+      "meanMs": 0.03,
+      "p50Ms": 0.03,
+      "p95Ms": 0.034,
+      "p99Ms": 0.039,
+      "maxMs": 0.119
+    }
+  ],
+  "concurrencyRows": [
+    {
+      "concurrency": 1,
+      "total": 5000,
+      "wallMs": 711.35,
+      "reqPerSec": 7029
+    },
+    {
+      "concurrency": 20,
+      "total": 5000,
+      "wallMs": 702.56,
+      "reqPerSec": 7117
+    },
+    {
+      "concurrency": 100,
+      "total": 5000,
+      "wallMs": 711.12,
+      "reqPerSec": 7031
+    }
+  ]
+}

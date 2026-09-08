@@ -61,6 +61,26 @@ export interface AppConfig {
     dataDir: string;
   };
 
+  pii: {
+    /**
+     * Directory containing local ONNX NER models, laid out as
+     * `<nerModelPath>/<modelId>/{config.json,tokenizer.json,onnx/model*.onnx}`
+     * — the layout `@huggingface/transformers` expects for a local model.
+     * Empty (default): the NER layer is unavailable and any policy asking
+     * for `detection.mode: 'pattern+dictionary+ner'` runs dictionary-only
+     * and reports itself degraded. This is the LOCAL stand-in for the
+     * planned GitHub-Releases asset registry (see
+     * `internal-notes/pii-v2-nlp-ve-asset-registry-plani.md` §3) — not
+     * itself the registry.
+     */
+    nerModelPath: string;
+    /** In-process concurrency cap on simultaneous NER inference calls. No
+     *  worker pool (product decision, 2026-09-09): runs inline in the app
+     *  process; isolation is deferred to a future sandbox-executor
+     *  integration. */
+    nerMaxConcurrent: number;
+  };
+
   database: {
     provider: 'mongodb' | 'sqlite';
     uri: string;
@@ -438,6 +458,11 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     storage: {
       dataDir: str(source, 'DATA_DIR', './data'),
+    },
+
+    pii: {
+      nerModelPath: str(source, 'PII_NER_MODEL_PATH', ''),
+      nerMaxConcurrent: int(source, 'PII_NER_MAX_CONCURRENT', 2),
     },
 
     database: {

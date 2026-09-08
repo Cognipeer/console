@@ -744,8 +744,9 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         options: [
           { value: 'llm', label: 'LLM judge', description: 'Any chat model. Works everywhere; costs a completion per run and reports a coarse severity.' },
           { value: 'model', label: 'Moderation model', description: 'A model whose category is "moderation". One cheap call with real per-category scores.' },
+          { value: 'lexicon', label: 'Lexicon (no model)', description: 'Built-in keyword lists + a structural child-safety check. Zero cost/latency; lower recall on figurative or coded phrasing than either model option — pairs a tenant word list per category for hate/harassment/sexual coverage.' },
         ],
-        help: 'Which detector runs this policy. The model picked below has to match: a chat model for the judge, a moderation model for the classifier.',
+        help: 'Which detector runs this policy. The model picked below has to match: a chat model for the judge, a moderation model for the classifier. Lexicon needs no model at all.',
       },
       {
         kind: 'reference',
@@ -753,7 +754,7 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         resource: 'model',
         label: 'Model',
         required: true,
-        help: 'The classifier. An enabled policy with no model reads as active while nothing runs, so the server refuses to save one.',
+        help: 'The classifier. An enabled policy with no model reads as active while nothing runs, so the server refuses to save one. Ignored by the Lexicon detector.',
         emptyHint: 'No models available on this project yet.',
       },
       {
@@ -763,6 +764,16 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         options: MODERATION_CATEGORY_OPTIONS,
         defaultValue: false,
         help: 'Only the categories switched on are sent to the classifier, and only they can produce a finding.',
+      },
+      {
+        kind: 'key_list',
+        key: 'lexiconCustomLists',
+        label: 'Lexicon custom lists (per category)',
+        keyLabel: 'Category',
+        valueLabel: 'Word list key',
+        keyPlaceholder: 'e.g. hate',
+        valuePlaceholder: 'e.g. tenant-hate-terms',
+        help: 'Lexicon detector only. Maps a moderation category id to one or more of your uploaded word lists (Guardrails → Word lists) — the only way "hate", "harassment", "sexual" and "sexual/minors" get real lexicon coverage, since no built-in list ships for those.',
       },
     ]),
     defaults: () => ({
@@ -777,11 +788,12 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
     }),
     summarise: (policy) => {
       const on = enabledKeys(policy.categories).length;
+      const detectorLabel = policy.detector === 'model' ? 'classifier' : policy.detector === 'lexicon' ? 'lexicon (no model)' : 'LLM judge';
       return summary(
         [
           on > 0 ? `${on} of ${MODERATION_CATEGORIES.length} categories` : 'No categories switched on',
-          policy.detector === 'model' ? 'classifier' : 'LLM judge',
-          policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen',
+          detectorLabel,
+          ...(policy.detector === 'lexicon' ? [] : [policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen']),
         ],
         'Not configured yet.',
       );
@@ -805,12 +817,22 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
     needsFailMode: true,
     fields: fieldsFor<PromptShieldPolicyConfig>([
       {
+        kind: 'select',
+        key: 'detector',
+        label: 'Detector',
+        options: [
+          { value: 'llm', label: 'LLM judge', description: 'Understands intent — catches framing/social-engineering attacks a pattern cannot. Costs a model call.' },
+          { value: 'pattern', label: 'Pattern (no model)', description: 'Matches mechanical attack shapes (override phrases, fake system blocks, exfiltration requests, encoding tricks). Zero cost/latency; misses intent-based attacks (hypothetical framing, social engineering) by design — see the field help.' },
+        ],
+        help: 'Pattern only catches attacks with a recognisable textual SHAPE. Attacks that rely on framing or persuasion rather than a fixed phrase (hypothetical scenarios, social engineering, payload splitting) need the LLM judge.',
+      },
+      {
         kind: 'reference',
         key: 'modelKey',
         resource: 'model',
         label: 'Model',
         required: true,
-        help: 'The judge. An enabled policy with no model reads as active while nothing runs.',
+        help: 'The judge. An enabled policy with no model reads as active while nothing runs. Ignored by the Pattern detector.',
         emptyHint: 'No models available on this project yet.',
       },
       {
@@ -825,12 +847,12 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         ],
       },
     ]),
-    defaults: () => ({ ...base('prompt_shield'), sensitivity: 'balanced' }),
+    defaults: () => ({ ...base('prompt_shield'), detector: 'llm' as const, sensitivity: 'balanced' }),
     summarise: (policy) =>
       summary(
         [
           `${policy.sensitivity ?? 'balanced'} sensitivity`,
-          policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen',
+          policy.detector === 'pattern' ? 'pattern (no model)' : (policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen'),
         ],
         'Not configured yet.',
       ),

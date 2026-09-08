@@ -37,6 +37,21 @@ export interface PiiFinding {
   /** Suggested replacement when redacting/masking. Always present so the caller
    *  can stitch the output with a single pass even in detect-only mode. */
   replacement: string;
+
+  // ── PII v2 (additive — undefined on any pre-v2 caller/test) ──────────────
+  /**
+   * 0–1 confidence, this category's `baseScore` plus a context-word boost
+   * (see `confidence.ts`), or the noisy-OR of multiple detectors agreeing on
+   * the same span (`detectAsync`'s fusion). NOT used to filter `detect()`'s
+   * output unless a policy sets `detection.minConfidence > 0` — its absence
+   * of effect on the default path is what keeps every pre-v2 policy's
+   * findings identical to before this field existed.
+   */
+  confidence?: number;
+  /** Which layer raised this finding. `detect()` (sync, pattern-only) always reports 'pattern'; `detectAsync` can also report 'dictionary' or 'ner'. */
+  detector?: 'pattern' | 'dictionary' | 'ner';
+  /** Short human-readable reasons (context word matched, sequence pattern, checksum) — the confidence number's audit trail. */
+  evidence?: string[];
 }
 
 /** A single vault entry: maps a token back to its original value. */
@@ -70,6 +85,8 @@ export interface PiiScanResult {
   languages: PiiLanguage[];
   /** Token → original-value vault. Present only when action === 'tokenize'. */
   vault?: PiiVault;
+  /** PII v2: present (non-empty) only when `detectAsync` ran and something didn't complete as requested — a NER model unavailable, a window timing out, input clipped. Absent on the `detect()` (pattern-only) path. */
+  degraded?: string[];
 }
 
 export interface PiiServicePolicyView extends Omit<IPiiPolicy, '_id'> {

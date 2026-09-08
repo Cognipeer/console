@@ -26,7 +26,7 @@ import {
   filterCategoriesByLanguages,
   type PiiCategoryDefinition,
 } from './categories';
-import { detect, applyReplacements, tokenize, detokenize, explainCustomPatternError } from './detector';
+import { detect, detectAsync, applyReplacements, tokenize, detokenize, explainCustomPatternError } from './detector';
 import type {
   PiiFinding,
   PiiScanResult,
@@ -363,16 +363,26 @@ export async function scanWithPolicy(params: {
   }
 
   const action: PiiAction = params.actionOverride ?? policy.defaultAction;
-  const findings = detect(
-    params.text,
-    {
-      categories: policy.categories,
-      customPatterns: policy.customPatterns,
-      languages: policy.languages,
-      locale: params.locale ?? 'en',
-    },
-    action,
-  );
+  const detectorConfig = {
+    categories: policy.categories,
+    customPatterns: policy.customPatterns,
+    languages: policy.languages,
+    locale: params.locale ?? 'en',
+    // PII v2: absent on every policy created before this field existed, so
+    // `detectAsync`'s fast path (`mode` defaulting to 'pattern') makes this
+    // branch call `detect()` with identical output to the line this
+    // replaced — see `detectAsync`'s own doc comment.
+    detection: policy.detection,
+  };
+  // `detect()` stays the entry point whenever no NLP layer is requested —
+  // not just an optimization: it keeps a plain policy's call stack (and
+  // therefore its latency) completely unchanged, which is what makes the
+  // load test's 'pattern' arm a true baseline rather than `detectAsync`
+  // doing slightly more work to reach the same answer.
+  const usesNlpLayers = policy.detection?.mode && policy.detection.mode !== 'pattern';
+  const { findings, degraded } = usesNlpLayers
+    ? await detectAsync(params.text, detectorConfig, action)
+    : { findings: detect(params.text, detectorConfig, action), degraded: [] as string[] };
 
   if (action === 'tokenize') {
     const { outputText, vault, findings: tokenized } = tokenize(params.text, findings);
@@ -386,6 +396,7 @@ export async function scanWithPolicy(params: {
       vault,
       policyKey: policy.key,
       policyName: policy.name,
+      ...(degraded.length > 0 ? { degraded } : {}),
     };
   }
 
@@ -404,6 +415,7 @@ export async function scanWithPolicy(params: {
     languages: policy.languages ?? [],
     policyKey: policy.key,
     policyName: policy.name,
+    ...(degraded.length > 0 ? { degraded } : {}),
   };
 }
 

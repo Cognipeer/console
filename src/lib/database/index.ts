@@ -310,6 +310,7 @@ export type {
   IPiiCustomPattern,
   PiiAction,
   PiiLanguage,
+  PiiDetectionConfig,
   IAlertRule,
   IAlertEvent,
   IPrescriptionReport,

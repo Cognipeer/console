@@ -51,23 +51,48 @@ export interface IGuardrailModerationPolicy {
    * Which detector runs this policy.
    *  - `llm` (default): the chat model named by `modelKey` judges the text.
    *  - `model`: the moderation-category model named by `modelKey` classifies it.
+   *  - `lexicon`: no model call at all — `moderationLexicon.ts`'s built-in,
+   *    category-scoped keyword lists (reusing the word-filter matcher) plus
+   *    a structural `child_safety` check. Zero cost/latency, materially
+   *    lower recall on figurative/coded/novel phrasing than either model
+   *    path — see `moderationLexicon.ts`'s header for the categories it
+   *    covers and the ones it deliberately doesn't.
    *
-   * The judge is the universal fallback — it works against any chat model — but
-   * it costs a full completion on the hot path of every guarded request, and it
-   * can only report a coarse severity. Where the provider has a real
-   * classifier, `model` is both far cheaper and the only path that yields true
-   * per-category probabilities.
+   * The judge is the universal fallback — it works against any chat model —
+   * but it costs a full completion on the hot path of every guarded
+   * request, and it can only report a coarse severity. Where the provider
+   * has a real classifier, `model` is both far cheaper and the only path
+   * that yields true per-category probabilities. `lexicon` is cheaper
+   * still, and — per `families/llm.ts`'s `runIf` gating — a natural
+   * pre-filter for either model path rather than only a standalone choice.
    */
-  detector?: 'llm' | 'model';
-  /** Chat model (detector `llm`) or moderation model (detector `model`). */
+  detector?: 'llm' | 'model' | 'lexicon';
+  /** Chat model (detector `llm`) or moderation model (detector `model`). Unused by `lexicon`. */
   modelKey?: string;
   categories: Record<string, boolean>;
+  /**
+   * detector `lexicon` only: tenant word-list keys (the existing
+   * `guardrail_word_lists` feature) mapped onto a moderation category id.
+   * This is how `hate`/`harassment`/`sexual`/`sexual/minors` — which ship
+   * with no built-in lexicon, see `moderationWordLists.ts` — get real
+   * coverage, and how any built-in category's seed list can be extended.
+   */
+  lexiconCustomLists?: Record<string, string[]>;
 }
 
 export interface IGuardrailPromptShieldPolicy {
   enabled: boolean;
   modelKey?: string;
   sensitivity: 'low' | 'balanced' | 'high';
+  /**
+   * `llm` (default): the judge in `llmEvaluator.ts`. `pattern`: no model
+   * call — `promptShieldLexicon.ts`'s mechanical/structural pattern set
+   * (override phrases, fake system blocks, exfiltration requests, encoding
+   * tricks). Covers roughly a third of `PROMPT_SHIELD_ISSUES` — the
+   * categories that turn on textual SHAPE rather than intent; see that
+   * file's header for exactly which and why the rest stay LLM-only.
+   */
+  detector?: 'llm' | 'pattern';
 }
 
 export interface IGuardrailPresetPolicy {
@@ -351,14 +376,18 @@ export interface GuardrailRegexPolicyConfig extends GuardrailPolicyBase<'regex'>
 
 export interface GuardrailModerationPolicyConfig extends GuardrailPolicyBase<'moderation'> {
   /** See `IGuardrailModerationPolicy.detector`. */
-  detector?: 'llm' | 'model';
+  detector?: 'llm' | 'model' | 'lexicon';
   modelKey?: string;
   categories: Record<string, boolean>;
+  /** See `IGuardrailModerationPolicy.lexiconCustomLists`. */
+  lexiconCustomLists?: Record<string, string[]>;
 }
 
 export interface GuardrailPromptShieldPolicyConfig extends GuardrailPolicyBase<'prompt_shield'> {
   modelKey?: string;
   sensitivity: 'low' | 'balanced' | 'high';
+  /** See `IGuardrailPromptShieldPolicy.detector`. */
+  detector?: 'llm' | 'pattern';
 }
 
 export interface GuardrailCustomPolicyConfig extends GuardrailPolicyBase<'custom'> {
@@ -3291,10 +3320,52 @@ export interface IPiiPolicy {
   /** Whether the policy is enabled overall. */
   enabled: boolean;
   metadata?: Record<string, unknown>;
+  /**
+   * PII v2: opt-in NLP layers on top of the pattern engine. Absent/undefined
+   * on every policy created before this field existed, and the detector's
+   * default ('pattern' mode, no dictionary/NER pass, no confidence filter)
+   * reproduces the pre-v2 behaviour exactly — this is additive, not a
+   * migration.
+   */
+  detection?: PiiDetectionConfig;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * Config for the PII v2 detection pipeline (`services/pii/detector.ts`).
+ * See `internal-notes/pii-v2-nlp-ve-asset-registry-plani.md` for the full
+ * 5-layer design; this is the subset implemented against local model/dict
+ * files rather than the (not-yet-built) GitHub asset registry.
+ */
+export interface PiiDetectionConfig {
+  /**
+   * 'pattern' (default): regex + checksum only, identical to pre-v2 output.
+   * 'pattern+dictionary': adds the Aho-Corasick gazetteer pass (person/org/
+   * location candidates).
+   * 'pattern+dictionary+ner': also runs the local ONNX NER model.
+   */
+  mode?: 'pattern' | 'pattern+dictionary' | 'pattern+dictionary+ner';
+  /** Findings below this confidence are dropped. 0 = no filtering (default). */
+  minConfidence?: number;
+  /** Boost a finding's confidence when a category's context word appears
+   *  within ±60 chars. Default true; has no effect on categories with no
+   *  configured context words. */
+  contextBoost?: boolean;
+  ner?: {
+    /** Local model ids to run, e.g. ['tr-ner']. See `pii/ner.ts` NER_MODELS. */
+    models?: string[];
+    /** Hard cap on characters sent to the model per scan. Default 4000. */
+    maxChars?: number;
+    /** Per-window soft timeout; a window that misses it is skipped and
+     *  reported as degraded rather than blocking the scan. Default 1500. */
+    timeoutMs?: number;
+    /** 'open' (default): a model error/timeout lets that window's NER
+     *  findings pass silently. 'closed': surfaces as a scan-level warning. */
+    failMode?: 'open' | 'closed';
+  };
 }
 
 // ── Prescriptions (automated analysis reports) types ─────────────────────

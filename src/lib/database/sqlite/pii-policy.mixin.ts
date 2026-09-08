@@ -21,10 +21,10 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       db.prepare(`
         INSERT INTO ${TABLES.piiPolicies}
         (id, tenantId, projectId, key, name, description, defaultAction,
-         categories, customPatterns, languages, enabled, metadata,
+         categories, customPatterns, languages, enabled, metadata, detection,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @key, @name, @description, @defaultAction,
-         @categories, @customPatterns, @languages, @enabled, @metadata,
+         @categories, @customPatterns, @languages, @enabled, @metadata, @detection,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -39,6 +39,7 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         languages: this.toJson(policy.languages ?? []),
         enabled: this.toBoolInt(policy.enabled),
         metadata: this.toJson(policy.metadata ?? {}),
+        detection: policy.detection ? this.toJson(policy.detection) : null,
         createdBy: policy.createdBy,
         updatedBy: policy.updatedBy ?? null,
         createdAt: now,
@@ -65,6 +66,7 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.languages !== undefined) { sets.push('languages = @languages'); params.languages = this.toJson(data.languages); }
       if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = this.toBoolInt(data.enabled); }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
+      if (data.detection !== undefined) { sets.push('detection = @detection'); params.detection = data.detection ? this.toJson(data.detection) : null; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
 
@@ -132,6 +134,7 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         languages: this.parseJson(r.languages, []),
         enabled: this.fromBoolInt(r.enabled),
         metadata: this.parseJson(r.metadata, {}),
+        detection: r.detection ? this.parseJson(r.detection, undefined) : undefined,
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),
