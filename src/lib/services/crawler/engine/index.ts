@@ -370,7 +370,7 @@ export async function* crawl(
           const html = fetched.html ?? '';
           const meta = extractMeta(html);
           const body = await withTimeout(
-            htmlToMarkdown({ html, options: plan.markdownOptions }),
+            htmlToMarkdown({ html, url: item.url, options: plan.markdownOptions }),
             MARKDOWN_CONVERSION_TIMEOUT_MS,
             `HTML markdown conversion for ${item.url}`,
           ).catch((err: unknown) => {

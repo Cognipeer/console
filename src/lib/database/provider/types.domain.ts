@@ -2686,7 +2686,13 @@ export interface ICrawlerMarkdownOptions {
   cleanup?: boolean;
   /** Strip base64-inlined `data:` images before conversion. Default true. */
   stripDataImages?: boolean;
-  /** Narrow extraction to the main content region (drops nav/header/footer). */
+  /**
+   * Extract the primary article region with Mozilla's Readability before
+   * conversion (drops nav/ads/comments far more reliably than
+   * `mainContentOnly`). Default true.
+   */
+  readability?: boolean;
+  /** Narrow extraction to the main content region (drops nav/header/footer). Fallback when `readability` is off or finds no article. */
   mainContentOnly?: boolean;
   /** Explicit CSS selector for the main content region. */
   contentSelector?: string;

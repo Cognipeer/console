@@ -5,12 +5,16 @@
 
 import * as cheerio from 'cheerio';
 import { decodeHTML } from 'entities';
+import { JSDOM } from 'jsdom';
+import { Readability } from '@mozilla/readability';
 import { convertToMarkdown } from '@cognipeer/to-markdown';
 import type { CrawlMarkdownOptions } from './types';
 
 export interface MarkdownInput {
   html: string;
   fileName?: string;
+  /** Page URL, used to resolve relative links/images during Readability extraction. */
+  url?: string;
   options?: CrawlMarkdownOptions;
 }
 
@@ -28,8 +32,8 @@ function toConverterOcr(
 }
 
 export async function htmlToMarkdown(input: MarkdownInput): Promise<string> {
-  const { html, fileName = 'page.html', options } = input;
-  const prepared = preprocessHtml(html, options);
+  const { html, fileName = 'page.html', url, options } = input;
+  const prepared = preprocessHtml(html, url, options);
   try {
     const base64 = Buffer.from(prepared, 'utf8').toString('base64');
     const dataUri = `data:text/html;base64,${base64}`;
@@ -133,16 +137,19 @@ export function markdownToText(md: string): string {
  * content region. Best-effort — any failure returns the original HTML so a
  * parse hiccup never loses the page.
  */
-function preprocessHtml(html: string, options?: CrawlMarkdownOptions): string {
+function preprocessHtml(html: string, url: string | undefined, options?: CrawlMarkdownOptions): string {
   const stripDataImages = options?.stripDataImages ?? true;
+  const useReadability = (options?.readability ?? true) && !options?.contentSelector;
+  const readabilityHtml = useReadability ? extractReadabilityContent(html, url) : undefined;
   const hasWork =
     stripDataImages ||
     options?.mainContentOnly ||
     options?.contentSelector ||
+    readabilityHtml !== undefined ||
     (options?.removeSelectors?.length ?? 0) > 0;
   if (!hasWork) return html;
   try {
-    const $ = cheerio.load(html);
+    const $ = cheerio.load(readabilityHtml ?? html);
     // Always drop non-content chrome that only adds noise to extracted text.
     $('script, style, noscript, template').remove();
     if (stripDataImages) {
@@ -157,8 +164,10 @@ function preprocessHtml(html: string, options?: CrawlMarkdownOptions): string {
     for (const sel of options?.removeSelectors ?? []) {
       try { $(sel).remove(); } catch { /* ignore bad selector */ }
     }
+    // Readability already narrowed to the article; only fall back to the
+    // plain selector heuristic when it didn't (disabled, or no article found).
     const selector = options?.contentSelector
-      || (options?.mainContentOnly ? pickMainContentSelector($) : undefined);
+      || (!readabilityHtml && options?.mainContentOnly ? pickMainContentSelector($) : undefined);
     if (selector) {
       const region = $(selector).first();
       if (region.length && region.html()) {
@@ -172,8 +181,28 @@ function preprocessHtml(html: string, options?: CrawlMarkdownOptions): string {
 }
 
 /**
- * Tiny readability-style heuristic: prefer semantic main-content containers,
- * else the block with the most text. Returns a selector string or undefined.
+ * Extract the primary article region via Mozilla's Readability (the engine
+ * behind Firefox Reader View). Far more reliable than the plain CSS-selector
+ * heuristic at stripping nav/ads/comments while keeping real article
+ * content. Best-effort: a parse failure or a "this isn't an article" verdict
+ * (product listings, home pages, …) returns undefined so the caller falls
+ * back to the selector heuristic or the whole page.
+ */
+function extractReadabilityContent(html: string, url?: string): string | undefined {
+  try {
+    const dom = new JSDOM(html, url ? { url } : undefined);
+    const article = new Readability(dom.window.document).parse();
+    const content = article?.content?.trim();
+    return content || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Tiny CSS-selector heuristic: prefer semantic main-content containers.
+ * Returns a selector string or undefined. Used only as a fallback when
+ * Readability is disabled or can't identify an article on the page.
  */
 function pickMainContentSelector($: cheerio.CheerioAPI): string | undefined {
   for (const sel of ['main', 'article', '[role="main"]', '#content', '#main', '.content', '.main-content']) {

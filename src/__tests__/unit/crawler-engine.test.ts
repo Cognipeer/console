@@ -183,6 +183,64 @@ describe('engine/markdown — output cleanup', () => {
   });
 });
 
+describe('engine/markdown — Readability extraction', () => {
+  const articleParagraph = (marker: string) =>
+    `<p>Ocean currents, driven by wind, temperature and salinity differences, move enormous ` +
+    `volumes of water across the globe every single day. ${marker} Scientists have long studied ` +
+    `how these currents redistribute heat from the equator toward the poles, moderating regional ` +
+    `climates and influencing weather patterns far inland. Understanding these processes, ` +
+    `researchers argue, is essential for predicting how a warming planet will respond.</p>`;
+
+  const articlePage = () => `
+    <html>
+      <head><title>How Ocean Currents Shape Climate</title></head>
+      <body>
+        <nav>NAVMARKERLINKS <a href="/">Home</a> <a href="/about">About</a> <a href="/contact">Contact</a></nav>
+        <aside class="related-widget"><h3>Related posts</h3><p>SIDEBARMARKERTEXT some other post teaser here.</p></aside>
+        <article>
+          <h1>How Deep Ocean Currents Shape Global Climate</h1>
+          ${articleParagraph('ARTICLEMARKERONE')}
+          ${articleParagraph('ARTICLEMARKERTWO')}
+          ${articleParagraph('ARTICLEMARKERTHREE')}
+          ${articleParagraph('ARTICLEMARKERFOUR')}
+        </article>
+        <footer>FOOTERMARKERTEXT Copyright 2026 Example Corp. All rights reserved. Privacy Policy.</footer>
+      </body>
+    </html>
+  `;
+
+  it('is on by default and drops nav/sidebar/footer chrome, keeping the article', async () => {
+    const md = await htmlToMarkdown({ html: articlePage(), url: 'https://example.com/ocean-currents' });
+    expect(md).toContain('ARTICLEMARKERONE');
+    expect(md).not.toContain('NAVMARKERLINKS');
+    expect(md).not.toContain('SIDEBARMARKERTEXT');
+    expect(md).not.toContain('FOOTERMARKERTEXT');
+  });
+
+  it('falls back to whole-body extraction when disabled', async () => {
+    // @cognipeer/to-markdown always strips <nav>/<header>/<footer> itself, so
+    // use the sidebar (untouched by that library-level filter) to prove our
+    // own Readability narrowing — not the wrapped converter — is what's off.
+    const md = await htmlToMarkdown({
+      html: articlePage(),
+      url: 'https://example.com/ocean-currents',
+      options: { readability: false },
+    });
+    expect(md).toContain('ARTICLEMARKERONE');
+    expect(md).toContain('SIDEBARMARKERTEXT');
+  });
+
+  it('yields to an explicit contentSelector', async () => {
+    const md = await htmlToMarkdown({
+      html: articlePage(),
+      url: 'https://example.com/ocean-currents',
+      options: { contentSelector: 'aside.related-widget' },
+    });
+    expect(md).toContain('SIDEBARMARKERTEXT');
+    expect(md).not.toContain('ARTICLEMARKERONE');
+  });
+});
+
 describe('engine/markdown — cleanup pass', () => {
   it('decodes leftover HTML entities', () => {
     expect(cleanupMarkdown('Foo&nbsp;bar &amp; baz &#39;x&#39;')).toBe("Foo bar & baz 'x'");
