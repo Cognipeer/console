@@ -70,6 +70,7 @@ interface HttpForm {
   outputFormat: 'markdown' | 'text';
   cleanup: boolean;
   stripDataImages: boolean;
+  readability: boolean;
   mainContentOnly: boolean;
   contentSelector: string;
   removeSelectors: string;
@@ -152,6 +153,7 @@ export default function CrawlerDetailPage() {
       outputFormat: 'markdown',
       cleanup: true,
       stripDataImages: true,
+      readability: true,
       mainContentOnly: false,
       contentSelector: '',
       removeSelectors: '',
@@ -222,6 +224,7 @@ export default function CrawlerDetailPage() {
         outputFormat: c.markdownOptions?.outputFormat ?? 'markdown',
         cleanup: c.markdownOptions?.cleanup ?? true,
         stripDataImages: c.markdownOptions?.stripDataImages ?? true,
+        readability: c.markdownOptions?.readability ?? true,
         mainContentOnly: c.markdownOptions?.mainContentOnly ?? false,
         contentSelector: c.markdownOptions?.contentSelector ?? '',
         removeSelectors: (c.markdownOptions?.removeSelectors ?? []).join('\n'),
@@ -443,6 +446,7 @@ export default function CrawlerDetailPage() {
         outputFormat: values.outputFormat,
         cleanup: values.cleanup,
         stripDataImages: values.stripDataImages,
+        readability: values.readability,
         mainContentOnly: values.mainContentOnly,
         contentSelector: values.contentSelector || undefined,
         removeSelectors: values.removeSelectors
@@ -1226,14 +1230,19 @@ Content-Type: application/json
                   {...httpForm.getInputProps('stripDataImages', { type: 'checkbox' })}
                 />
                 <Switch
-                  label="Main content only"
-                  description="Extract just the primary content region, dropping nav menus, headers and footers. Reduces boilerplate noise in the Knowledge Engine."
+                  label="Readability extraction"
+                  description="Use Mozilla's Readability (Firefox Reader View's engine) to isolate the article body, dropping nav/ads/comments far more reliably than the fallback heuristic below. Recommended for blogs, docs and news pages. Ignored when a content selector is set."
+                  {...httpForm.getInputProps('readability', { type: 'checkbox' })}
+                />
+                <Switch
+                  label="Main content only (fallback heuristic)"
+                  description="Extract just the primary content region via a plain CSS-selector guess, dropping nav menus, headers and footers. Only used when Readability is off or can't identify an article on the page."
                   {...httpForm.getInputProps('mainContentOnly', { type: 'checkbox' })}
                 />
                 <TextInput
                   label="Content selector (optional)"
                   placeholder="e.g. main, article, #content"
-                  description="CSS selector for the main content region. Overrides the auto heuristic when set."
+                  description="CSS selector for the main content region. Overrides both Readability and the auto heuristic when set."
                   {...httpForm.getInputProps('contentSelector')}
                 />
                 <Textarea

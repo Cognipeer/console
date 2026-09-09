@@ -71,10 +71,21 @@ export interface CrawlMarkdownOptions {
    */
   stripDataImages?: boolean;
   /**
+   * Extract the primary article region with Mozilla's Readability (the
+   * library behind Firefox Reader View) before markdown conversion, so nav
+   * menus, sidebars, ads and comment sections are dropped far more reliably
+   * than the plain CSS-selector heuristic below. Default true. Ignored when
+   * `contentSelector` is set (an explicit selector always wins); falls back
+   * to `mainContentOnly`/whole-body extraction on pages where Readability
+   * can't identify an article.
+   */
+  readability?: boolean;
+  /**
    * Restrict extraction to the page's main content, dropping nav menus,
    * headers, footers and other chrome. When a `contentSelector` is given it is
-   * used verbatim; otherwise a small readability-style heuristic picks the
-   * densest `<main>/<article>/[role=main]`-like region. Default false
+   * used verbatim; otherwise a small CSS-selector heuristic picks the densest
+   * `<main>/<article>/[role=main]`-like region. Only applied when
+   * `readability` is disabled or found no article on the page. Default false
    * (whole-body extraction, preserving prior behaviour).
    */
   mainContentOnly?: boolean;

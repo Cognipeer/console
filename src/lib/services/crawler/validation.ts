@@ -67,6 +67,7 @@ const markdownOptionsSchema = z.object({
   outputFormat: z.enum(['markdown', 'text']).optional(),
   cleanup: z.boolean().optional(),
   stripDataImages: z.boolean().optional(),
+  readability: z.boolean().optional(),
   mainContentOnly: z.boolean().optional(),
   contentSelector: z.string().max(200).optional(),
   removeSelectors: z.array(z.string().max(200)).max(50).optional(),
