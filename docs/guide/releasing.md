@@ -29,6 +29,9 @@ The community build is tag-driven.
 - Run the normal validation set for the release candidate.
 - Create and push a tag in the format `vX.Y.Z-community`.
 - The community build workflow publishes from that tag.
+- Once pushed, a release tag is immutable. If its tagged workflow cannot be
+  recovered from that revision, merge the fix and advance to the next patch
+  version.
 
 Current trigger: `.github/workflows/build-community.yml` listens only for `vX.Y.Z-community` tags.
 
@@ -47,6 +50,8 @@ The public contract to remember is simple: enterprise SaaS must follow a release
 - Do not treat a release branch or PR as the release itself.
 - Do not assume enterprise SaaS will include community changes that only exist in a branch.
 - Do not cut the SaaS release first when it depends on community changes that are not tagged yet.
+- Do not delete, move, or reuse a failed release tag to pick up newer workflow
+  code.
 
 ## Minimal Checklist
 
