@@ -187,7 +187,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines, code style, a
 
 Security reporting guidance is in [SECURITY.md](SECURITY.md). Do not disclose vulnerabilities in public issues.
 
-## License
+## License 
 
 This repository is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE) for the full text.
 
