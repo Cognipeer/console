@@ -10,7 +10,7 @@ on:
 
 jobs:
   validate:
-    runs-on: cognipeer-azure-runners
+    runs-on: self-hosted-runner-cgate-azure
     steps:
       - name: Checkout
         uses: actions/checkout@v4
