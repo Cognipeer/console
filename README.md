@@ -191,4 +191,4 @@ Security reporting guidance is in [SECURITY.md](SECURITY.md). Do not disclose vu
 
 This repository is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE) for the full text.
 
-If you want to embed Cognipeer Console in a closed-source product, offer a proprietary hosted derivative without AGPL obligations, or purchase support/SLA coverage, see [COMMERCIAL.md](COMMERCIAL.md).
+If you want to embed Cognipeer Console in a closed-source product, offer a proprietary hosted derivative without AGPL obligations, or purchase support/SLA coverage, see [COMMERCIAL.md](COMMERCIAL.md)
