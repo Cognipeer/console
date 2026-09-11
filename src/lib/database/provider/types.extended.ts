@@ -670,7 +670,7 @@ export interface IGpuSlice {
   updatedAt?: Date;
 }
 
-export type LlmDeploymentRuntime = 'vllm' | 'tgi' | 'ollama' | 'custom';
+export type LlmDeploymentRuntime = 'vllm' | 'tgi' | 'ollama' | 'ray' | 'custom';
 
 export type LlmDeploymentDesiredState = 'running' | 'stopped';
 
@@ -714,6 +714,12 @@ export interface ILlmDeployment {
     readOnly?: boolean;
   }>;
   restart: 'no' | 'on-failure' | 'always' | 'unless-stopped';
+  /**
+   * `/dev/shm` size in bytes for the container, or `null` to use the
+   * agent's per-runtime default (see `resolveShmSizeBytes` in the agent's
+   * `docker.ts`). Operator-chosen at deploy time; not auto-inferred.
+   */
+  shmSizeBytes: number | null;
   desiredState: LlmDeploymentDesiredState;
   actualState: LlmDeploymentActualState;
   /** Container id from the agent's last report. */
