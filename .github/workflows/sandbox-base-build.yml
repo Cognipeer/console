@@ -1,0 +1,75 @@
+name: Sandbox Base - Build & Push
+
+on:
+  push:
+    tags:
+      - 'sandbox-base-v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+env:
+  ACR_LOGIN_SERVER: cognipeer.azurecr.io
+  ACR_REPOSITORY: cognipeer-sandbox-base
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: |
+          # tag format: sandbox-base-v1.0.0 -> image tag: v1.0.0
+          TAG="${GITHUB_REF_NAME#sandbox-base-}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "image tag: ${TAG}"
+
+      - name: "[Azure] Login via Service Principal"
+        uses: azure/login@v1
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+            }
+
+      - name: "[Azure] Login to ACR"
+        run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Guard against overwriting an existing tag
+        run: |
+          REGISTRY_NAME=$(echo "${{ env.ACR_LOGIN_SERVER }}" | cut -d'.' -f1)
+          if az acr repository show-tags \
+               --name "${REGISTRY_NAME}" \
+               --repository "${{ env.ACR_REPOSITORY }}" \
+               -o tsv 2>/dev/null | grep -qx "${{ steps.vars.outputs.tag }}"; then
+            echo "::error::Tag '${{ steps.vars.outputs.tag }}' already exists in ACR."
+            echo "::error::Bump the version and push a new tag (e.g. sandbox-base-v1.0.1)."
+            exit 1
+          fi
+          echo "Tag is free, proceeding."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/sandbox-base
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}
+
+      - name: Summary
+        run: |
+          echo "### Sandbox Base — Yeni Surum" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`${{ env.ACR_LOGIN_SERVER }}/${{ env.ACR_REPOSITORY }}:${{ steps.vars.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Console Helm chart'inda \`SANDBOX_BASE_IMAGE\` env degerini bu referansla guncelleyip \`helm upgrade\` yapin." >> $GITHUB_STEP_SUMMARY
