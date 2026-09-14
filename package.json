@@ -38,6 +38,7 @@
     "@aws-sdk/util-stream-node": "^3.370.0",
     "@azure/search-documents": "^12.2.0",
     "@cognipeer/agent-sdk": "^0.10.0",
+    "@cognipeer/guardrail": "^0.1.0",
     "@cognipeer/to-markdown": "^3.4.2",
     "@elastic/elasticsearch": "^8.19.1",
     "@fastify/cookie": "^11.0.2",

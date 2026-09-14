@@ -78,6 +78,11 @@ export const BLOCK_REASON_FOR_FAMILY: Readonly<Record<PolicyFamily, BlockReasonC
   custom: 'custom',
   tool_access: 'tool_denied',
   webhook: 'custom',
+  // Each owns exactly one gate's categories, so each gets that gate's own
+  // reason class — same pairing as `moderation`/`prompt_shield` above,
+  // `prompt_shield`'s included the "never say which rule fired" reasoning.
+  cognipeer_guardrail_moderation: 'moderation',
+  cognipeer_guardrail_prompt_shield: 'injection',
 };
 
 const EN: Readonly<Record<BlockReasonClass, string>> = {

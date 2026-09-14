@@ -34,6 +34,7 @@
 
 import {
   IconAlertOctagon,
+  IconCpu,
   IconFilterX,
   IconFingerprint,
   IconKey,
@@ -226,6 +227,23 @@ const META: Readonly<Record<PolicyFamily, Omit<PolicyFamilyMeta, 'family' | 'lab
     needsModel: true,
     needsFailMode: true,
   },
+  cognipeer_guardrail_moderation: {
+    short: 'CG Mod.',
+    description: 'A bundled, offline classifier — six content categories from one on-device inference. No model to pick.',
+    icon: IconCpu,
+    color: 'green',
+    needsModel: false,
+    // The model load or one inference call can fail.
+    needsFailMode: true,
+  },
+  cognipeer_guardrail_prompt_shield: {
+    short: 'CG Shield',
+    description: 'A bundled, offline classifier — three jailbreak/injection categories from one on-device inference. No model to pick.',
+    icon: IconCpu,
+    color: 'lime',
+    needsModel: false,
+    needsFailMode: true,
+  },
   custom: {
     short: 'Custom',
     description: 'A rule you write in prose, judged by an LLM.',
@@ -290,6 +308,11 @@ export const FAMILY_PICKER_ORDER: readonly PolicyFamily[] = [
   'regex',
   'word_filter',
   'tool_access',
+  // Deterministic and local like the five above despite classifying content
+  // like the two below — costs no model call, so both are grouped with the
+  // cheap half.
+  'cognipeer_guardrail_moderation',
+  'cognipeer_guardrail_prompt_shield',
   'moderation',
   'prompt_shield',
   'custom',

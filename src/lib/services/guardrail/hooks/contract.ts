@@ -34,6 +34,8 @@ import type {
   GuardrailPolicy,
   GuardrailPolicyBase as PolicyBase,
   GuardrailPolicyFamily as PolicyFamily,
+  GuardrailCognipeerGuardrailModerationPolicyConfig as CognipeerGuardrailModerationPolicyConfig,
+  GuardrailCognipeerGuardrailPromptShieldPolicyConfig as CognipeerGuardrailPromptShieldPolicyConfig,
   GuardrailContractVersion,
   GuardrailCustomPolicyConfig as CustomPolicyConfig,
   GuardrailHookBinding as HookBinding,
@@ -67,6 +69,8 @@ export type {
   BlockReasonClass,
   PolicyBase,
   PolicyFamily,
+  CognipeerGuardrailModerationPolicyConfig,
+  CognipeerGuardrailPromptShieldPolicyConfig,
   CustomPolicyConfig,
   GuardrailPolicy,
   GuardrailContractVersion,
@@ -431,7 +435,7 @@ export const isMutating = (a: SafetyAction): boolean => a === 'redact';
 
 // ── 4. Policy families ───────────────────────────────────────────────────────
 /**
- * NINE families. `regex` survives as its own family despite `word_filter`
+ * ELEVEN families. `regex` survives as its own family despite `word_filter`
  * already carrying a `regexes` list, because the stream gate needs span-capable
  * patterns with a DECLARED `maxMatchChars` and word_filter can provide neither:
  * its character folding is NFKD-normalising (so length-changing, so its offsets
@@ -442,6 +446,28 @@ export const isMutating = (a: SafetyAction): boolean => a === 'redact';
  * families, `rate_limit` is absent because a per-process counter enforces N x
  * the limit across N replicas and resets on every deploy, and `plugin` is
  * absent because `webhook` IS the extension point.
+ *
+ * `cognipeer_guardrail_moderation` and `cognipeer_guardrail_prompt_shield` are
+ * the tenth and eleventh — deliberately TWO families, not one, and deliberately
+ * NOT a `detector` option on `moderation`/`prompt_shield`:
+ *
+ *   · TWO, mirroring the `moderation`/`prompt_shield` split they sit beside,
+ *     so an operator can bind, enable, and set a threshold profile for the
+ *     content gate independently of the injection gate — exactly the
+ *     independence `moderation` and `prompt_shield` already offer each other,
+ *     even though a single LLM call could in principle answer both prompts at
+ *     once. Both families call the SAME classifier (one inference answers
+ *     both gates — see `families/cognipeerGuardrail.ts`'s shared instance
+ *     cache), so running both costs one extra classifier call, not two model
+ *     loads.
+ *   · NOT a `detector` option, because `moderation`/`prompt_shield`'s
+ *     `detector: 'model'`/`'llm'` paths are shaped around a REMOTE round trip
+ *     to a registered `Model` (`DEFERRED_PHASE_FAMILIES`, `runIf` gating, a
+ *     per-policy model-call timeout) that a bundled, in-process ONNX
+ *     classifier has no use for — these two belong in
+ *     `DETERMINISTIC_POLICY_FAMILIES` with `pii`/`secrets`/`regex` instead,
+ *     and forcing them through the model-phase machinery would cost them
+ *     nothing but that phase's own overhead.
  */
 
 /**
@@ -461,6 +487,10 @@ export const LEGACY_FINDING_TYPE: Readonly<Record<PolicyFamily, GuardrailFinding
   custom: 'custom',
   tool_access: 'custom',
   webhook: 'custom',
+  // Clean, unlike `secrets` borrowing `pii` above: each of these two families
+  // owns exactly one gate's categories, so its legacy type is simply that gate.
+  cognipeer_guardrail_moderation: 'moderation',
+  cognipeer_guardrail_prompt_shield: 'prompt_shield',
 };
 
 /** Derived from the map above so the list cannot fall behind the union — the
@@ -693,6 +723,12 @@ export const FAMILY_PRECEDENCE: Readonly<Record<PolicyFamily, number>> = {
   tool_access: 60,
   moderation: 50,
   prompt_shield: 50,
+  // Never actually consulted: neither produces mutations (a whole-text
+  // verdict, like moderation/prompt_shield — see SPAN_CAPABLE), so neither
+  // competes for an overlapping span. Given the same rank as their two
+  // closest siblings for the same reason those two tie with each other.
+  cognipeer_guardrail_moderation: 50,
+  cognipeer_guardrail_prompt_shield: 50,
   custom: 40,
   webhook: 30,
 };
@@ -940,6 +976,10 @@ export const POLICY_VALID_HOOKS: Readonly<Record<PolicyFamily, readonly HookId[]
   custom: ['prompt.pre', 'input.pre', 'output.pre', 'tool.pre', 'tool.post'],
   tool_access: ['tool.pre', 'tool.post'],
   webhook: ['prompt.pre', 'input.pre', 'output.pre', 'tool.pre', 'tool.post'],
+  // Same subject shape as moderation/prompt_shield (a whole-text verdict), so
+  // the same hook set for both.
+  cognipeer_guardrail_moderation: ['prompt.pre', 'input.pre', 'output.pre', 'tool.post'],
+  cognipeer_guardrail_prompt_shield: ['prompt.pre', 'input.pre', 'output.pre', 'tool.post'],
 };
 
 /**
@@ -957,13 +997,22 @@ export const STREAM_ELIGIBLE_FAMILIES: ReadonlySet<PolicyFamily> = new Set<Polic
   'regex',
 ]);
 
-/** Cheap, local, database-or-CPU only. They run BEFORE any LLM family. */
+/**
+ * Cheap, local, database-or-CPU only. They run BEFORE any LLM family.
+ *
+ * The two `cognipeer_guardrail_*` families belong here despite classifying
+ * CONTENT the way `moderation`/`prompt_shield` do: their inference is a
+ * bundled ONNX model running on the same process's CPU, not a remote round
+ * trip, so each costs a phase-1 policy's budget rather than a model-phase one.
+ */
 export const DETERMINISTIC_POLICY_FAMILIES: ReadonlySet<PolicyFamily> = new Set<PolicyFamily>([
   'pii',
   'secrets',
   'word_filter',
   'regex',
   'tool_access',
+  'cognipeer_guardrail_moderation',
+  'cognipeer_guardrail_prompt_shield',
 ]);
 
 /**

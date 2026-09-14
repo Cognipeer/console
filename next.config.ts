@@ -58,6 +58,13 @@ const nextConfig: NextConfig = {
     // webpack's bundling attempt.
     'onnxruntime-node',
     '@huggingface/transformers',
+    // The `cognipeer_guardrail` guardrail family (services/guardrail/families/
+    // cognipeerGuardrail.ts). Same reason as onnxruntime-node above, plus its
+    // own: the package locates its bundled model.onnx via
+    // `path.join(__dirname, '..', 'model')` at RUNTIME, which only resolves
+    // correctly when the package is loaded unbundled — webpack rewrites
+    // `__dirname` for anything it bundles.
+    '@cognipeer/guardrail',
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),

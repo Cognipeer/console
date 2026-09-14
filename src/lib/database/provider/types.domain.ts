@@ -190,7 +190,7 @@ export type GuardrailMode = 'enforce' | 'monitor' | 'disabled';
  */
 export type GuardrailSafetyAction = 'allow' | GuardrailAction;
 
-/** The nine policy families a hook can run. */
+/** The eleven policy families a hook can run. */
 export type GuardrailPolicyFamily =
   | 'pii'
   | 'secrets'
@@ -200,7 +200,9 @@ export type GuardrailPolicyFamily =
   | 'prompt_shield'
   | 'custom'
   | 'tool_access'
-  | 'webhook';
+  | 'webhook'
+  | 'cognipeer_guardrail_moderation'
+  | 'cognipeer_guardrail_prompt_shield';
 
 export interface GuardrailPolicyBase<F extends GuardrailPolicyFamily> {
   /** Stable within the guardrail and never reused — it appears on every finding. */
@@ -498,6 +500,48 @@ export interface GuardrailWebhookPolicyConfig extends GuardrailPolicyBase<'webho
   retries?: 0 | 1 | 2;
 }
 
+/**
+ * Two bundled, offline classifiers — split across TWO families rather than
+ * one, deliberately mirroring the `moderation` / `prompt_shield` split above
+ * even though both run the SAME `@cognipeer/guardrail` npm package model:
+ * an operator configures, binds, and enables/disables the content gate and
+ * the injection gate independently (same reason a hosted moderation model and
+ * an LLM prompt-shield judge are two separate policies today, not one), and
+ * this pair is meant to sit ALONGSIDE `moderation`/`prompt_shield` — an
+ * additional, no-model detector an operator can turn on next to them — not to
+ * be folded into either.
+ *
+ * The model itself answers both gates from ONE inference regardless of which
+ * family calls it — see `families/cognipeerGuardrail.ts`'s shared instance
+ * cache — so running both costs one extra classifier call, not two model
+ * loads.
+ *
+ * NO `modelKey` on either: the model ships inside the npm package, so there
+ * is nothing for an operator to register or point at.
+ */
+export interface GuardrailCognipeerGuardrailModerationPolicyConfig
+  extends GuardrailPolicyBase<'cognipeer_guardrail_moderation'> {
+  /** Six content category ids, verbatim from the package's `manifest.json`:
+   *  `insult`, `hate`, `sexual`, `violence`, `self_harm`, `illegal`. */
+  categories: Record<string, boolean>;
+  /**
+   * A false-positive BUDGET, not a raw cutoff — see `Guardrail.load`'s own doc
+   * comment in the package. `sexual`/`violence`/`self_harm`/`illegal` score
+   * identically in every profile; only the noisier `insult`/`hate` move.
+   */
+  profile: 'strict' | 'balanced' | 'sensitive';
+}
+
+export interface GuardrailCognipeerGuardrailPromptShieldPolicyConfig
+  extends GuardrailPolicyBase<'cognipeer_guardrail_prompt_shield'> {
+  /** Three prompt-shield category ids, verbatim from the package's
+   *  `manifest.json`: `jailbreak`, `prompt_injection`, `data_exfiltration`. */
+  categories: Record<string, boolean>;
+  /** Same budget as the moderation twin; here it is the shield categories
+   *  that move between profiles. */
+  profile: 'strict' | 'balanced' | 'sensitive';
+}
+
 export type GuardrailPolicy =
   | GuardrailPiiPolicyConfig
   | GuardrailSecretsPolicyConfig
@@ -507,7 +551,9 @@ export type GuardrailPolicy =
   | GuardrailPromptShieldPolicyConfig
   | GuardrailCustomPolicyConfig
   | GuardrailToolAccessPolicyConfig
-  | GuardrailWebhookPolicyConfig;
+  | GuardrailWebhookPolicyConfig
+  | GuardrailCognipeerGuardrailModerationPolicyConfig
+  | GuardrailCognipeerGuardrailPromptShieldPolicyConfig;
 
 export interface GuardrailHookBinding {
   enabled: boolean;
