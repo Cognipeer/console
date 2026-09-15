@@ -892,8 +892,10 @@ export const en = {
     },
     actions: {
       apply: 'Apply license',
+      copyWorkspaceSlug: 'Copy workspace slug',
       refresh: 'Refresh',
       reset: 'Reset to free',
+      workspaceSlugCopied: 'Workspace slug copied',
     },
     fields: {
       expires: 'Expires',
@@ -901,6 +903,7 @@ export const en = {
       never: 'Never',
       projects: 'Projects',
       status: 'Status',
+      workspaceSlug: 'Workspace slug',
     },
     form: {
       keyLabel: 'License key',

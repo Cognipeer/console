@@ -67,6 +67,18 @@ export const tr: typeof en = {
     supportErrorTitle: 'Destek açılamadı',
     supportErrorMessage: 'Destek şu anda açılamadı. Lütfen kısa süre sonra tekrar deneyin.',
   },
+  license: {
+    ...en.license,
+    actions: {
+      ...en.license.actions,
+      copyWorkspaceSlug: 'Çalışma alanı slug\'ını kopyala',
+      workspaceSlugCopied: 'Çalışma alanı slug\'ı kopyalandı',
+    },
+    fields: {
+      ...en.license.fields,
+      workspaceSlug: 'Çalışma alanı slug\'ı',
+    },
+  },
   navigation: {
     ...en.navigation,
     evaluations: 'Değerlendirme',

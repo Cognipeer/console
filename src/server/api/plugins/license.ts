@@ -35,6 +35,7 @@ export const licenseApiPlugin: FastifyPluginAsync = async (app) => {
         canManage: canManageLicense(session.userRole),
         license,
         projectCount: projects.length,
+        tenantSlug: tenant.slug,
       });
     } catch (error) {
       logger.error('Get license error', { error });
