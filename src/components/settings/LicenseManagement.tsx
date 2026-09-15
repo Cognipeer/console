@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
+  CopyButton,
   Divider,
   Group,
   Paper,
@@ -12,15 +14,17 @@ import {
   Stack,
   Text,
   Textarea,
+  Tooltip,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
-import { IconCertificate, IconRefresh, IconTrash } from '@tabler/icons-react';
+import { IconCertificate, IconCheck, IconCopy, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
 type LicenseResponse = {
   canManage: boolean;
   projectCount: number;
+  tenantSlug: string;
   license: {
     error?: string;
     expiresAt?: string;
@@ -205,6 +209,30 @@ export default function LicenseManagement() {
             <Text size="sm" ff="monospace" c="dimmed">
               {license?.licenseId ?? 'FREE'}
             </Text>
+            <Text size="sm" fw={600} mt="xs">
+              {t('fields.workspaceSlug')}
+            </Text>
+            <Group gap="xs" wrap="nowrap">
+              <Text size="sm" ff="monospace" c="dimmed" style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
+                {data?.tenantSlug ?? '—'}
+              </Text>
+              {data?.tenantSlug ? (
+                <CopyButton value={data.tenantSlug} timeout={1500}>
+                  {({ copied, copy }) => (
+                    <Tooltip label={copied ? t('actions.workspaceSlugCopied') : t('actions.copyWorkspaceSlug')} withArrow>
+                      <ActionIcon
+                        variant="subtle"
+                        color={copied ? 'teal' : 'gray'}
+                        onClick={copy}
+                        aria-label={copied ? t('actions.workspaceSlugCopied') : t('actions.copyWorkspaceSlug')}
+                      >
+                        {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+                      </ActionIcon>
+                    </Tooltip>
+                  )}
+                </CopyButton>
+              ) : null}
+            </Group>
             {license?.error ? (
               <Text size="sm" c="red">
                 {license.error}
