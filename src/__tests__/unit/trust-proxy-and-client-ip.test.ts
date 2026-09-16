@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { resolveTrustProxyOption } from '@/server/app';
 import { getClientIp } from '@/server/api/fastify-utils';
-import type { FastifyRequest } from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 
 function makeRequest(overrides: {
   ip?: string;
@@ -27,14 +27,35 @@ describe('resolveTrustProxyOption', () => {
     expect(resolveTrustProxyOption([])).toBe(true);
   });
 
-  it('treats a single numeric entry as a hop count', () => {
-    expect(resolveTrustProxyOption(['1'])).toBe(1);
-    expect(resolveTrustProxyOption(['2'])).toBe(2);
+  it('fails closed for legacy numeric hop counts instead of bypassing Fastify hardening', () => {
+    expect(resolveTrustProxyOption(['0'])).toBe(false);
+    expect(resolveTrustProxyOption(['1'])).toBe(false);
+    expect(resolveTrustProxyOption(['2'])).toBe(false);
   });
 
   it('treats non-numeric entries as the real proxy/load balancer IPs or CIDRs', () => {
     expect(resolveTrustProxyOption(['10.0.0.5'])).toEqual(['10.0.0.5']);
     expect(resolveTrustProxyOption(['10.0.0.0/8', '172.16.0.0/12'])).toEqual(['10.0.0.0/8', '172.16.0.0/12']);
+  });
+
+  it('ignores spoofed forwarded headers for numeric settings and only trusts allowlisted peers', async () => {
+    for (const [settings, remoteAddress, expectedIp] of [
+      [['1'], '10.0.0.5', '10.0.0.5'],
+      [['10.0.0.0/8'], '192.0.2.10', '192.0.2.10'],
+      [['10.0.0.0/8'], '10.0.0.5', '203.0.113.9'],
+    ] as const) {
+      const app = Fastify({ trustProxy: resolveTrustProxyOption([...settings]) });
+      app.get('/probe', (request) => ({ ip: getClientIp(request) }));
+      try {
+        const response = await app.inject({
+          method: 'GET', url: '/probe', remoteAddress,
+          headers: { 'x-forwarded-for': '203.0.113.9' },
+        });
+        expect(response.json()).toEqual({ ip: expectedIp });
+      } finally {
+        await app.close();
+      }
+    }
   });
 });
 

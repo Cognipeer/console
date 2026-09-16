@@ -179,10 +179,11 @@ export interface AppConfig {
      * honestly. Empty (default) preserves the existing `trustProxy: true`
      * behaviour -- every hop is trusted, including one the caller
      * themselves controls if a request can reach this process directly.
-     * Set to your real reverse proxy/load balancer's IP(s) or CIDR(s) (or a
-     * small integer hop count, e.g. "1") to close that gap; anything not
-     * matching this list falls back to the raw socket address instead of a
-     * spoofable header.
+    * Set to your real reverse proxy/load balancer's IP(s) or CIDR(s) to
+    * close that gap. Numeric hop counts are intentionally unsupported:
+    * they cannot authenticate the immediate peer and fail closed. Anything
+    * not matching this list falls back to the raw socket address instead of
+    * a spoofable header.
      */
     trustedProxies: string[];
   };

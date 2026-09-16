@@ -110,7 +110,7 @@ one. Declare `outputs` to make the return value a contract instead:
 | Field | Effect |
 |---|---|
 | `name` | the key in the returned JSON |
-| `source` | a template over `{{step.x}}` and `{{input.y}}`; a lone placeholder passes the captured value through untouched, so an `extract` with `multiple` stays an array |
+| `source` | a template over <code v-pre>{{step.x}}</code> and <code v-pre>{{input.y}}</code>; a lone placeholder passes the captured value through untouched, so an `extract` with `multiple` stays an array |
 | `type` | `string`, `number`, `boolean` or `json`. Omitted, the value is returned exactly as captured; a cast that fails leaves the field out rather than emitting `NaN` |
 | `required` | a run that cannot resolve the field **fails**, even when every step passed |
 
@@ -151,7 +151,7 @@ The left rail answers four questions about the flow.
   recorded with, never a `ref`. The ⚡ on a row lifts a literal out of the step
   into an input; the marker between rows is where the next recorded step lands.
 - **Inputs** — what a run supplies. It flags both disagreements that otherwise
-  fail silently: a `{{input.x}}` no input declares, and an input no step uses.
+  fail silently: an <code v-pre>{{input.x}}</code> no input declares, and an input no step uses.
 - **Output** — the JSON declared above, shown beside what the selected run
   actually returned. **From page** reads a field straight off the live page:
   click it in the Elements list and it becomes a read step, a capture, and an
@@ -197,7 +197,7 @@ has one, otherwise a CSS path), because a step that stored only `role:
 button` would match the first button on the page. (Turn the **Live** switch
 off to freeze the list and the preview.)
 
-Values for `{{input.x}}` while authoring come from the **Inputs** tab — each
+Values for <code v-pre>{{input.x}}</code> while authoring come from the **Inputs** tab — each
 declared input gets a field there. They stay in the browser and are never
 saved to the flow; a run from the API or an agent supplies its own. An input
 nobody has filled in yet does not block a replay: the placeholder is typed
