@@ -4,37 +4,97 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+-community'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Yeniden calistirilacak vX.Y.Z-community tag'i
+        required: true
+        type: string
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: console-community-${{ github.ref_name }}
+  group: console-community-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  # ci.yml'den tasinan kontroller
+  validate:
+    runs-on: cognipeer-azure-runners
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium for browser tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Endpoint auth-coverage gate
+        run: npm run test:endpoints
+
+      - name: Build docs
+        run: npm run docs:build
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+
+      - name: License summary
+        run: npx license-checker --production --summary
+
   build:
     runs-on: cognipeer-azure-runners
     environment: production
     timeout-minutes: 90
+    needs: validate
     outputs:
       image_digest: ${{ steps.identity.outputs.digest }}
       commit_sha: ${{ steps.vars.outputs.commit_sha }}
+      release_tag: ${{ steps.vars.outputs.release_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
 
       - name: Capture release identity
         id: vars
-        run: echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.release_tag || github.ref_name }}"
+          [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-community$ ]] \
+            || { echo "::error::Tag '${TAG}' beklenen formatta degil (vX.Y.Z-community)."; exit 1; }
+          {
+            echo "commit_sha=$(git rev-parse HEAD)"
+            echo "release_tag=${TAG}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify managed release with CRM
         env:
           WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
+          CRM_OPTIONAL: "true"
           COMMIT_SHA: ${{ steps.vars.outputs.commit_sha }}
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.vars.outputs.release_tag }}
           RELEASE_STATUS: pending
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash ci/notify-release-crm.sh
@@ -52,7 +112,7 @@ jobs:
       - name: Resolve existing image
         id: existing
         env:
-          IMAGE_REF: ghcr.io/cognipeer/console:${{ github.ref_name }}
+          IMAGE_REF: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
           SOURCE_COMMIT_SHA: ${{ steps.vars.outputs.commit_sha }}
         run: bash ci/resolve-image.sh
 
@@ -67,9 +127,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=min
-          tags: ghcr.io/cognipeer/console:${{ github.ref_name }}
+          tags: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
           labels: |
-            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.release_tag }}
             org.opencontainers.image.revision=${{ steps.vars.outputs.commit_sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
@@ -77,7 +137,7 @@ jobs:
       - name: Verify image identity
         id: identity
         env:
-          IMAGE_REF: ghcr.io/cognipeer/console:${{ github.ref_name }}
+          IMAGE_REF: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
           SOURCE_COMMIT_SHA: ${{ steps.vars.outputs.commit_sha }}
           EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
           BUILT_DIGEST: ${{ steps.image.outputs.digest }}
@@ -97,6 +157,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.release_tag }}
 
       - name: Create release automation token
         id: app-token
@@ -113,22 +175,17 @@ jobs:
       - name: Update Console Enterprise compatibility pin
         env:
           DISPATCH_TOKEN: ${{ steps.app-token.outputs.token }}
-          COMMUNITY_TAG: ${{ github.ref_name }}
+          COMMUNITY_TAG: ${{ needs.build.outputs.release_tag }}
           COMMUNITY_SHA: ${{ needs.build.outputs.commit_sha }}
         run: |
           set -euo pipefail
-
-          if [[ -z "${DISPATCH_TOKEN}" ]]; then
-            echo "::error::GitHub release automation App token is not available."
-            exit 1
-          fi
+          [[ -n "${DISPATCH_TOKEN}" ]] \
+            || { echo "::error::GitHub release automation App token yok."; exit 1; }
 
           SEAM_CONTRACT_VERSION=$(grep -oE 'SEAM_CONTRACT_VERSION = [0-9]+' \
             src/enterprise/registry.ts | grep -oE '[0-9]+$')
-          if [[ -z "${SEAM_CONTRACT_VERSION}" ]]; then
-            echo "::error::Community registry does not declare SEAM_CONTRACT_VERSION."
-            exit 1
-          fi
+          [[ -n "${SEAM_CONTRACT_VERSION}" ]] \
+            || { echo "::error::Community registry SEAM_CONTRACT_VERSION bildirmiyor."; exit 1; }
 
           PAYLOAD=$(jq -n \
             --arg tag "${COMMUNITY_TAG}" \
@@ -138,9 +195,7 @@ jobs:
             '{
               event_type: "community-released",
               client_payload: {
-                tag: $tag,
-                sha: $sha,
-                repository: $repository,
+                tag: $tag, sha: $sha, repository: $repository,
                 seamContractVersion: $seamContractVersion
               }
             }')
@@ -156,7 +211,7 @@ jobs:
       - name: Wait for Console Enterprise compatibility merge
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          COMMUNITY_TAG: ${{ github.ref_name }}
+          COMMUNITY_TAG: ${{ needs.build.outputs.release_tag }}
           COMMUNITY_SHA: ${{ needs.build.outputs.commit_sha }}
           CONSOLE_EE_REPOSITORY: Cognipeer/console-ee
         run: bash ci/wait-community-compat.sh
@@ -169,16 +224,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.release_tag }}
 
       - name: Report community artifact to CRM
         env:
           WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
+          CRM_OPTIONAL: "true"
           BUILD_RESULT: ${{ needs.build.result }}
           COMPAT_SYNC_RESULT: ${{ needs.sync-console-ee.result }}
-          COMMIT_SHA: ${{ needs.build.outputs.commit_sha || github.sha }}
+          COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
           IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
-          RELEASE_VERSION: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release_tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
