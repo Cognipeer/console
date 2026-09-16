@@ -5,6 +5,13 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json* npm-shrinkwrap.json* ./
 RUN npm ci --no-audit --no-fund
 
+# --------------------- production dependencies stage ---------------------
+FROM node:22 AS production-deps
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package.json package-lock.json* npm-shrinkwrap.json* ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
 # --------------------- builder stage ---------------------
 FROM node:22 AS builder
 WORKDIR /app
@@ -41,6 +48,22 @@ ENV HOST=0.0.0.0
 ENV DATA_DIR=/app/data
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
 
+RUN npm install --global npm@12.0.2 \
+    && mkdir -p /tmp/npm-patches/brace-expansion /tmp/npm-patches/ip-address /tmp/npm-patches/tar \
+    && npm pack --silent --pack-destination /tmp/npm-patches brace-expansion@5.0.9 \
+    && npm pack --silent --pack-destination /tmp/npm-patches ip-address@10.3.1 \
+    && npm pack --silent --pack-destination /tmp/npm-patches tar@7.5.21 \
+    && tar -xzf /tmp/npm-patches/brace-expansion-5.0.9.tgz -C /tmp/npm-patches/brace-expansion \
+    && tar -xzf /tmp/npm-patches/ip-address-10.3.1.tgz -C /tmp/npm-patches/ip-address \
+    && tar -xzf /tmp/npm-patches/tar-7.5.21.tgz -C /tmp/npm-patches/tar \
+    && rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
+      /usr/local/lib/node_modules/npm/node_modules/ip-address \
+      /usr/local/lib/node_modules/npm/node_modules/tar \
+    && mv /tmp/npm-patches/brace-expansion/package /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
+    && mv /tmp/npm-patches/ip-address/package /usr/local/lib/node_modules/npm/node_modules/ip-address \
+    && mv /tmp/npm-patches/tar/package /usr/local/lib/node_modules/npm/node_modules/tar \
+    && rm -rf /tmp/npm-patches
+
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
@@ -51,6 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
        docker-ce-cli \
        docker-buildx-plugin \
        docker-compose-plugin \
+     && apt-get --with-new-pkgs upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -64,7 +88,7 @@ RUN mkdir -p /home/node/.cache/ms-playwright && \
     mkdir -p /app/data && \
     chown -R node:node /home/node
 
-COPY --from=deps /app/node_modules ./node_modules
+COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/next.config.ts ./next.config.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json

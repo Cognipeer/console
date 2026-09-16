@@ -52,6 +52,17 @@ For self-hosted production deployments, verify at minimum:
 - dependency updates and vulnerability scanning,
 - explicit incident-response ownership.
 
+## Dependency and Image Remediation
+
+Treat dependency and image remediation as a staged release workflow:
+
+1. **Code dependencies:** Update direct and transitive runtime dependencies within supported version ranges. Verify document conversion, mail delivery, Fastify routes, and affected service contracts.
+2. **Production dependency closure:** Keep build and test tooling out of the runner image. Before using a production-only install, move every runtime dependency, including TypeScript runtime tooling and Fastify plugins, into `dependencies`.
+3. **Operating-system packages:** Rebuild from a current base image and apply available security package updates after all required OS packages are installed. Revalidate browser and process-launch capabilities.
+4. **Runtime tool inventory:** Remove CLI tools from the runner image only after confirming that production workflows do not invoke them directly or indirectly.
+5. **Workload separation:** Where browser automation has a materially different dependency footprint, evaluate a separate browser worker image instead of weakening the API image's runtime requirements.
+6. **Verification and enforcement:** Rebuild both Community and Enterprise images, scan their immutable local or registry digests, and switch to enforcement only after the approved policy reports no fixable blocking findings. Track vendor-unfixed findings separately; do not hide them through permanent exceptions.
+
 ## Public Repo Hygiene
 
 When the repository is public:
