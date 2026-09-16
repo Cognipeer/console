@@ -39,7 +39,7 @@ RUN NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP_MB}" npm run build \
   && rm -rf .next/cache
 
 # --------------------- runner stage ---------------------
-FROM node:22 AS runner
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -64,7 +64,7 @@ RUN npm install --global npm@12.0.2 \
     && mv /tmp/npm-patches/tar/package /usr/local/lib/node_modules/npm/node_modules/tar \
     && rm -rf /tmp/npm-patches
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg libpcre2-8-0 \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
     && chmod a+r /etc/apt/keyrings/docker.gpg \
@@ -74,7 +74,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
        docker-ce-cli \
        docker-buildx-plugin \
        docker-compose-plugin \
-     && apt-get --with-new-pkgs upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
 
