@@ -2,7 +2,8 @@ import { getConfig } from '@/lib/core/config';
 import { registerShutdownHandler } from '@/lib/core/lifecycle';
 import { createLogger } from '@/lib/core/logger';
 import cookie from '@fastify/cookie';
-import Fastify, { type FastifyInstance } from 'fastify';
+import { type Server } from 'node:http';
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import next from 'next';
 import { fastifyApiPlugin } from './api/plugin';
 import { bootstrapApplication } from './bootstrap';
@@ -98,7 +99,7 @@ function registerBodyParsers(app: FastifyInstance): void {
   );
 }
 
-export async function createServer(dev: boolean): Promise<FastifyInstance> {
+export async function createServer(dev: boolean): Promise<FastifyInstance<Server>> {
   const nextApp = next({
     dev,
     dir: process.cwd(),
@@ -123,10 +124,10 @@ export async function createServer(dev: boolean): Promise<FastifyInstance> {
   await nextApp.prepare();
 
   const config = getConfig();
-  const app = Fastify({
+  const app = Fastify<Server>({
     bodyLimit: parseBodySize(config.limits.bodySize),
     logger: false,
-    trustProxy: resolveTrustProxyOption(config.network.trustedProxies),
+    trustProxy: resolveTrustProxyOption(config.network.trustedProxies) as FastifyServerOptions<Server>['trustProxy'],
   });
 
   await app.register(cookie);
