@@ -104,6 +104,23 @@ test('callbacks require an exact linked v2 receipt', () => {
   ]) assert.notEqual(execute('notify-release-crm.sh', { RECEIPT: JSON.stringify(response) }).status, 0);
 });
 
+test('manual mode makes execution optional and soft-fails on CRM errors', () => {
+  // CRM_OPTIONAL=true: elle git tag ile tetiklenen release. requireExecution
+  // false olmali ve CRM hatalari (HTTP/receipt) pipeline'i durdurmamali.
+  const ok = execute('notify-release-crm.sh', { CRM_OPTIONAL: 'true' });
+  assert.equal(ok.status, 0, ok.output);
+  assert.equal(ok.payload.requireExecution, false);
+
+  // HTTP hatasi -> managed modda fail, manual modda soft-pass
+  assert.notEqual(execute('notify-release-crm.sh', { HTTP_FAILURE: '1' }).status, 0);
+  assert.equal(execute('notify-release-crm.sh', { HTTP_FAILURE: '1', CRM_OPTIONAL: 'true' }).status, 0);
+
+  // Reddedilmis receipt -> managed modda fail, manual modda soft-pass
+  const bad = JSON.stringify({ status: 'ignored' });
+  assert.notEqual(execute('notify-release-crm.sh', { RECEIPT: bad }).status, 0);
+  assert.equal(execute('notify-release-crm.sh', { RECEIPT: bad, CRM_OPTIONAL: 'true' }).status, 0);
+});
+
 test('never reports HTTP failure or missing success digest as success', () => {
   for (const overrides of [{ HTTP_FAILURE: '1' }, { RECEIPT: 'not-json' }, { IMAGE_DIGEST: '' }]) {
     assert.notEqual(execute('notify-release-crm.sh', overrides).status, 0);
