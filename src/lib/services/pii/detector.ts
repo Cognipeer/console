@@ -11,6 +11,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { performance } from 'node:perf_hooks';
 
 import type { PiiLanguage, IPiiCustomPattern } from '@/lib/database';
 // The regex family's interruptible sweep — a V8 context with a timeout, the
@@ -57,8 +58,8 @@ export interface CustomPatternSkip {
 interface CustomPatternReport {
   skipped: CustomPatternSkip[];
   budgetMs: number;
-  /** Epoch ms. ONE deadline for every `detect()` call made under the report. */
-  deadline: number;
+  /** Remaining execution budget shared by every `detect()` call under the report. */
+  remainingBudgetMs: number;
 }
 
 /**
@@ -83,7 +84,7 @@ export async function withCustomPatternBudget<T>(
   fn: () => Promise<T>,
   budgetMs = DEFAULT_REGEX_BUDGET_MS,
 ): Promise<{ result: T; skipped: CustomPatternSkip[] }> {
-  const report: CustomPatternReport = { skipped: [], budgetMs, deadline: Date.now() + budgetMs };
+  const report: CustomPatternReport = { skipped: [], budgetMs, remainingBudgetMs: budgetMs };
   const result = await reportStore.run(report, fn);
   return { result, skipped: report.skipped };
 }
@@ -345,7 +346,7 @@ export function detect(
   }
 
   // Custom patterns are tenant-authored, so they sweep under the regex family's
-  // bound: one wall-clock budget for the whole list (shared across every
+  // bound: one execution budget for the whole list (shared across every
   // `detect()` call under a `withCustomPatternBudget`), an input cap, a match
   // cap, and a V8 timeout that can actually interrupt `(a+)+$`. A pattern that
   // cannot finish is dropped and reported — a partial sweep would make the
@@ -357,14 +358,16 @@ export function detect(
       }
     } else {
       const budgetMs = report?.budgetMs ?? DEFAULT_REGEX_BUDGET_MS;
-      const deadline = report?.deadline ?? Date.now() + budgetMs;
+      let remainingBudgetMs = report?.remainingBudgetMs ?? budgetMs;
       for (const c of customs) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
+        if (remainingBudgetMs <= 0) {
           if (c.custom) skip(c.custom, `not run: the ${budgetMs}ms scan budget was spent by earlier patterns`);
           continue;
         }
-        const swept = execRuleBounded(c.regex, text, undefined, DEFAULT_MAX_MATCHES_PER_RULE, remaining);
+        const startedAt = performance.now();
+        const swept = execRuleBounded(c.regex, text, undefined, DEFAULT_MAX_MATCHES_PER_RULE, remainingBudgetMs);
+        remainingBudgetMs = Math.max(0, remainingBudgetMs - (performance.now() - startedAt));
+        if (report) report.remainingBudgetMs = remainingBudgetMs;
         if (swept.timedOut) {
           if (c.custom) {
             skip(
