@@ -100,7 +100,8 @@ function LoginPageContent() {
         const data = (await response.json()) as SsoDiscovery;
         setSso(data);
       } catch {
-        // SSO is an enhancement — a failed discovery check just hides the button.
+        // The button is always shown; a failed discovery check just means it
+        // falls back to the email step instead of a direct single-tenant redirect.
       }
     };
     void discover();
@@ -300,20 +301,16 @@ function LoginPageContent() {
               {t('form.submit')}
             </Button>
 
-            {sso.available && (
-              <>
-                <Divider label={t('sso.divider')} labelPosition="center" my={2} />
-                <Button
-                  variant="default"
-                  size="md"
-                  fullWidth
-                  leftSection={<IconShieldLock size={16} stroke={1.7} />}
-                  onClick={handleSsoButtonClick}
-                >
-                  {t('sso.button')}
-                </Button>
-              </>
-            )}
+            <Divider label={t('sso.divider')} labelPosition="center" my={2} />
+            <Button
+              variant="default"
+              size="md"
+              fullWidth
+              leftSection={<IconShieldLock size={16} stroke={1.7} />}
+              onClick={handleSsoButtonClick}
+            >
+              {t('sso.button')}
+            </Button>
           </div>
         </form>
       )}
