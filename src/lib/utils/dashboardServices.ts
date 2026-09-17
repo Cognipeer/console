@@ -114,6 +114,8 @@ export type DashboardServiceDefinition = {
   badge?: 'new';
   /** Gated to the ENTERPRISE tier; absent in the community build. */
   requiresEnterprise?: boolean;
+  /** Only usable on a self-hosted (onprem) deployment — hidden entirely on SaaS. */
+  requiresOnPrem?: boolean;
   /** Closed-source overlay module that provides this service. */
   enterpriseModule?: string;
   /** Settings entry — shown in the Settings section of the left nav, not the services launcher. */
@@ -141,6 +143,7 @@ interface RawPlatformServicesConfig {
     popular?: boolean;
     badge?: 'new';
     requiresEnterprise?: boolean;
+    requiresOnPrem?: boolean;
     enterpriseModule?: string;
     settings?: boolean;
   }>;
@@ -174,6 +177,7 @@ const DASHBOARD_SERVICE_DEFINITIONS: DashboardServiceDefinition[] = RAW.services
     popular: entry.popular,
     badge: entry.badge,
     requiresEnterprise: entry.requiresEnterprise,
+    requiresOnPrem: entry.requiresOnPrem,
     enterpriseModule: entry.enterpriseModule,
     isSettings: entry.settings,
   }),
@@ -184,6 +188,8 @@ type DashboardServicesOptions = {
   role?: UserRole;
   servicesHomeOnly?: boolean;
   servicePermissions?: UserServicePermissions;
+  /** Current deployment mode. Services marked `requiresOnPrem` are hidden entirely when false. */
+  isOnPrem?: boolean;
 };
 
 export function getDashboardServices(
@@ -194,9 +200,12 @@ export function getDashboardServices(
     role = 'user',
     servicesHomeOnly = false,
     servicePermissions = {},
+    isOnPrem = false,
   } = options;
 
   return DASHBOARD_SERVICE_DEFINITIONS.filter((service) => {
+    if (service.requiresOnPrem && !isOnPrem) return false;
+
     if (service.id !== 'services-home') {
       const level = getEffectiveServicePermission(
         { role, servicePermissions },
