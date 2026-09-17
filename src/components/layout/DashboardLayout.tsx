@@ -53,6 +53,7 @@ const SETTINGS_NAV_ORDER: string[] = [
 interface DashboardLayoutProps {
   children: ReactNode;
   supportEnabled?: boolean;
+  isOnPrem?: boolean;
   user?: {
     name: string;
     email: string;
@@ -62,7 +63,7 @@ interface DashboardLayoutProps {
   };
 }
 
-export default function DashboardLayout({ children, supportEnabled = false, user }: DashboardLayoutProps) {
+export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, user }: DashboardLayoutProps) {
   const router = useRouter();
   const pathname = usePathname() ?? '';
   const [docsOpened, docsControls] = useDisclosure(false);
@@ -129,8 +130,9 @@ export default function DashboardLayout({ children, supportEnabled = false, user
         isTenantAdmin,
         role: defaultUser.role,
         servicePermissions: defaultUser.servicePermissions,
+        isOnPrem,
       }),
-    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin],
+    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin, isOnPrem],
   );
 
   const settingsServices = useMemo(

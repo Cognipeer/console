@@ -5,6 +5,7 @@ import type {
   FastifyRequest,
 } from 'fastify';
 import { isApplicationReady } from '@/server/bootstrap';
+import { getConfig } from '@/lib/core/config';
 import { getDatabase } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
@@ -423,6 +424,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
         pathname,
         liveLicense.licenseType,
         liveLicense.licenseExpiresAt,
+        getConfig().deployment.isOnPrem,
       );
       if (enterpriseDenial) {
         return reply.code(enterpriseDenial.status).send(enterpriseDenial.body);
