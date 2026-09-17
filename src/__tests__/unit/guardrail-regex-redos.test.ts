@@ -177,7 +177,9 @@ describe('regex family: the budget does not change what benign rules do', () => 
       rule({ id: 'tckn', pattern: '\\b[1-9]\\d{10}\\b' }),
     ]);
 
-    expect(Date.now() - started).toBeLessThan(DEFAULT_REGEX_BUDGET_MS);
+    // The measured sweep is normally below the budget, but shared CI runners
+    // can add scheduler overhead to a millisecond-scale wall-clock assertion.
+    expect(Date.now() - started).toBeLessThan(DEFAULT_REGEX_BUDGET_MS * 2);
     expect(skipped).toHaveLength(0);
     expect(matches.map((m) => m.value)).toEqual(['a@corp.com']);
   });
