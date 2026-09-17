@@ -38,6 +38,22 @@ ARG NODE_BUILD_HEAP_MB=4096
 RUN NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP_MB}" npm run build \
   && rm -rf .next/cache
 
+# --------------------- runner tooling stage ---------------------
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS runner-tools
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+   && install -m 0755 -d /etc/apt/keyrings \
+   && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+   && chmod a+r /etc/apt/keyrings/docker.gpg \
+   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+     > /etc/apt/sources.list.d/docker.list \
+   && apt-get update && apt-get install -y --no-install-recommends \
+     docker-ce-cli \
+   && curl -fsSLo /usr/local/bin/kubectl \
+    "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl" \
+   && chmod +x /usr/local/bin/kubectl \
+   && rm -rf /var/lib/apt/lists/*
+
 # --------------------- runner stage ---------------------
 FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS runner
 WORKDIR /app
@@ -49,45 +65,40 @@ ENV DATA_DIR=/app/data
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright
 
 RUN npm install --global npm@12.0.2 \
-    && mkdir -p /tmp/npm-patches/brace-expansion /tmp/npm-patches/ip-address /tmp/npm-patches/tar \
+    && mkdir -p /tmp/npm-patches/brace-expansion /tmp/npm-patches/ip-address /tmp/npm-patches/tar /tmp/npm-patches/undici \
     && npm pack --silent --pack-destination /tmp/npm-patches brace-expansion@5.0.9 \
     && npm pack --silent --pack-destination /tmp/npm-patches ip-address@10.3.1 \
     && npm pack --silent --pack-destination /tmp/npm-patches tar@7.5.21 \
+    && npm pack --silent --pack-destination /tmp/npm-patches undici@6.28.0 \
     && tar -xzf /tmp/npm-patches/brace-expansion-5.0.9.tgz -C /tmp/npm-patches/brace-expansion \
     && tar -xzf /tmp/npm-patches/ip-address-10.3.1.tgz -C /tmp/npm-patches/ip-address \
     && tar -xzf /tmp/npm-patches/tar-7.5.21.tgz -C /tmp/npm-patches/tar \
+    && tar -xzf /tmp/npm-patches/undici-6.28.0.tgz -C /tmp/npm-patches/undici \
     && rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
       /usr/local/lib/node_modules/npm/node_modules/ip-address \
       /usr/local/lib/node_modules/npm/node_modules/tar \
+      /usr/local/lib/node_modules/npm/node_modules/undici \
     && mv /tmp/npm-patches/brace-expansion/package /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
     && mv /tmp/npm-patches/ip-address/package /usr/local/lib/node_modules/npm/node_modules/ip-address \
     && mv /tmp/npm-patches/tar/package /usr/local/lib/node_modules/npm/node_modules/tar \
+    && mv /tmp/npm-patches/undici/package /usr/local/lib/node_modules/npm/node_modules/undici \
     && rm -rf /tmp/npm-patches
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg libpcre2-8-0 \
-    && install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-    && chmod a+r /etc/apt/keyrings/docker.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
-       > /etc/apt/sources.list.d/docker.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-       docker-ce-cli \
-       docker-buildx-plugin \
-       docker-compose-plugin \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=runner-tools /usr/bin/docker /usr/bin/docker
+COPY --from=runner-tools /usr/local/bin/kubectl /usr/local/bin/kubectl
 
-RUN curl -fsSLo /usr/local/bin/kubectl \
-      "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(dpkg --print-architecture)/kubectl" \
-    && chmod +x /usr/local/bin/kubectl
+COPY --from=production-deps /app/node_modules ./node_modules
 
-RUN npx playwright install-deps chromium
+RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-playwright-build \
+    && ./node_modules/.bin/playwright install-deps chromium \
+    && rm /etc/apt/apt.conf.d/99-playwright-build
 
 RUN mkdir -p /home/node/.cache/ms-playwright && \
     mkdir -p /app/data && \
     chown -R node:node /home/node
-
-COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/next.config.ts ./next.config.ts
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
@@ -114,7 +125,7 @@ RUN mkdir -p /app/.next/cache/images && \
 
 USER node
 
-RUN npx playwright install chromium
+RUN ./node_modules/.bin/playwright install chromium
 
 EXPOSE 3000
 # Invoke node directly instead of `npm start`. `npm` as PID 1 does not
