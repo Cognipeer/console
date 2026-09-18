@@ -146,6 +146,8 @@ See [Cluster](/guide/cluster) for the full topology / assignment model.
 | `SMTP_USER` | SMTP username | — |
 | `SMTP_PASS` | SMTP password | — |
 | `SMTP_FROM` | From address | Falls back to `SMTP_USER` |
+| `SENDGRID_API_KEY` | SendGrid API key; used through SendGrid SMTP when `SMTP_*` credentials are absent | — |
+| `SENDGRID_FROM_EMAIL` | Verified SendGrid sender address | — |
 
 ### Application
 

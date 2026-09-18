@@ -449,6 +449,7 @@ export const en = {
       actions: {
         invite: 'Invite User',
         addUser: 'Add User',
+        copyInvitationLink: 'Copy invitation link',
       },
       table: {
         name: 'Name',
@@ -476,9 +477,11 @@ export const en = {
         fetch: 'Failed to fetch users',
         load: 'Failed to load users',
         delete: 'Failed to delete user',
+        copyInvitationLink: 'Failed to copy invitation link',
       },
       messages: {
         deleteSuccess: 'User deleted successfully',
+        invitationLinkCopied: 'Invitation link copied to clipboard',
       },
       deleteModal: {
         title: 'Delete User',
@@ -876,6 +879,18 @@ export const en = {
         copied: 'Copied!',
         created: 'Created',
         done: 'Done, I copied it',
+      },
+      invitationPanel: {
+        title: 'Invitation Ready',
+        deliveryLabel: 'Email delivery',
+        emailSentTitle: 'Email sent',
+        emailNotSentTitle: 'Email not sent',
+        emailSentDescription: 'The invitation email was sent. You can also copy the link below.',
+        emailNotSentDescription: 'Email delivery was not confirmed. Copy this link and share it securely.',
+        linkLabel: 'Invitation link',
+        copy: 'Copy invitation link',
+        copied: 'Copied!',
+        done: 'Done',
       },
       errors: {
         create: 'Failed to add user',

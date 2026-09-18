@@ -45,7 +45,6 @@ type RoleValue = 'user' | 'project_admin' | 'admin';
 
 export default function AddUserModal({ opened, onClose, onSuccess }: AddUserModalProps) {
   const t = useTranslations('settings.addUserModal');
-  const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
   const [submitting, setSubmitting] = useState(false);
   const [permissionServices, setPermissionServices] = useState<PermissionServiceOption[]>([]);
@@ -55,6 +54,10 @@ export default function AddUserModal({ opened, onClose, onSuccess }: AddUserModa
   // mirroring CreateTokenModal's plaintext-token-shown-once panel.
   const [generatedPassword, setGeneratedPassword] = useState<string | null>(null);
   const [createdSummary, setCreatedSummary] = useState<{ name: string; email: string } | null>(null);
+  const [createdInvitation, setCreatedInvitation] = useState<{
+    emailSent: boolean;
+    url: string;
+  } | null>(null);
 
   const form = useForm({
     initialValues: {
@@ -87,6 +90,7 @@ export default function AddUserModal({ opened, onClose, onSuccess }: AddUserModa
     setPermissionDraft({});
     setGeneratedPassword(null);
     setCreatedSummary(null);
+    setCreatedInvitation(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
@@ -137,7 +141,14 @@ export default function AddUserModal({ opened, onClose, onSuccess }: AddUserModa
         throw new Error(data.error || t('errors.create'));
       }
 
-      if (data.generatedPassword) {
+      if (typeof data.invitationUrl === 'string') {
+        setCreatedSummary({ email: values.email, name: values.name });
+        setCreatedInvitation({
+          emailSent: data.invitationEmailSent === true,
+          url: data.invitationUrl,
+        });
+        onSuccess();
+      } else if (data.generatedPassword) {
         // No-invite path: show the plaintext password once instead of
         // closing — the user must copy it now.
         setCreatedSummary({ email: values.email, name: values.name });
@@ -178,6 +189,87 @@ export default function AddUserModal({ opened, onClose, onSuccess }: AddUserModa
   ];
 
   const roleLabel = roleOptions.find((o) => o.value === values.role)?.label;
+
+  if (createdInvitation && createdSummary) {
+    const deliveryTitle = createdInvitation.emailSent
+      ? t('invitationPanel.emailSentTitle')
+      : t('invitationPanel.emailNotSentTitle');
+    const deliveryDescription = createdInvitation.emailSent
+      ? t('invitationPanel.emailSentDescription')
+      : t('invitationPanel.emailNotSentDescription');
+    const successSummary = (
+      <SummaryGroup title={t('invitationPanel.title')}>
+        <SummaryKV label={t('form.name.label')} value={createdSummary.name} />
+        <SummaryKV label={t('form.email.label')} value={createdSummary.email} />
+        <SummaryKV
+          label={t('invitationPanel.deliveryLabel')}
+          value={(
+            <span className={createdInvitation.emailSent ? 'ds-badge ds-badge-ok' : 'ds-badge'}>
+              {deliveryTitle}
+            </span>
+          )}
+        />
+      </SummaryGroup>
+    );
+
+    return (
+      <FormShell
+        open={opened}
+        onClose={handleClose}
+        icon={<IconUserPlus size={16} />}
+        title={t('invitationPanel.title')}
+        subtitle={deliveryDescription}
+        summary={successSummary}
+        primaryAction={{
+          label: t('invitationPanel.done'),
+          color: 'teal',
+          onClick: handleClose,
+        }}
+      >
+        <FormSection number={1} title={deliveryTitle} description={deliveryDescription} done>
+          <Alert
+            icon={<IconAlertCircle size={16} />}
+            title={deliveryTitle}
+            color={createdInvitation.emailSent ? 'teal' : 'orange'}
+          >
+            {deliveryDescription}
+          </Alert>
+        </FormSection>
+
+        <FormSection number={2} title={t('invitationPanel.linkLabel')} done>
+          <FormRow cols={1}>
+            <FormField label={t('invitationPanel.linkLabel')}>
+              <Group gap="xs" wrap="nowrap">
+                <Text
+                  ff="monospace"
+                  style={{
+                    flex: 1,
+                    padding: '8px 12px',
+                    wordBreak: 'break-all',
+                    fontSize: 12,
+                    backgroundColor: 'var(--ds-surface-2, #f5f5f5)',
+                    borderRadius: 6,
+                    border: '1px solid var(--ds-border, #e0e0e0)',
+                  }}
+                >
+                  {createdInvitation.url}
+                </Text>
+                <CopyButton value={createdInvitation.url}>
+                  {({ copied, copy }) => (
+                    <Tooltip label={copied ? t('invitationPanel.copied') : t('invitationPanel.copy')}>
+                      <ActionIcon color={copied ? 'teal' : 'blue'} variant="filled" onClick={copy} size="lg">
+                        {copied ? <IconCheck size={18} /> : <IconCopy size={18} />}
+                      </ActionIcon>
+                    </Tooltip>
+                  )}
+                </CopyButton>
+              </Group>
+            </FormField>
+          </FormRow>
+        </FormSection>
+      </FormShell>
+    );
+  }
 
   // ── One-time "generated password" success view ──────────────────────────
   if (generatedPassword && createdSummary) {
