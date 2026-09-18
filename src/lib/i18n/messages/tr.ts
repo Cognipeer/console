@@ -67,6 +67,40 @@ export const tr: typeof en = {
     supportErrorTitle: 'Destek açılamadı',
     supportErrorMessage: 'Destek şu anda açılamadı. Lütfen kısa süre sonra tekrar deneyin.',
   },
+  settings: {
+    ...en.settings,
+    addUserModal: {
+      ...en.settings.addUserModal,
+      invitationPanel: {
+        ...en.settings.addUserModal.invitationPanel,
+        title: 'Davet Hazır',
+        deliveryLabel: 'E-posta teslimatı',
+        emailSentTitle: 'E-posta gönderildi',
+        emailNotSentTitle: 'E-posta gönderilemedi',
+        emailSentDescription: 'Davet e-postası gönderildi. Bağlantıyı aşağıdan da kopyalayabilirsiniz.',
+        emailNotSentDescription: 'E-posta teslimatı doğrulanamadı. Bu bağlantıyı kopyalayıp güvenli biçimde paylaşın.',
+        linkLabel: 'Davet bağlantısı',
+        copy: 'Davet bağlantısını kopyala',
+        copied: 'Kopyalandı!',
+        done: 'Tamam',
+      },
+    },
+    userManagement: {
+      ...en.settings.userManagement,
+      actions: {
+        ...en.settings.userManagement.actions,
+        copyInvitationLink: 'Davet bağlantısını kopyala',
+      },
+      errors: {
+        ...en.settings.userManagement.errors,
+        copyInvitationLink: 'Davet bağlantısı kopyalanamadı',
+      },
+      messages: {
+        ...en.settings.userManagement.messages,
+        invitationLinkCopied: 'Davet bağlantısı panoya kopyalandı',
+      },
+    },
+  },
   license: {
     ...en.license,
     actions: {

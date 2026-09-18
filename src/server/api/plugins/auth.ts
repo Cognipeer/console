@@ -7,6 +7,7 @@ import { getDatabase, type ITenant, type IUser } from '@/lib/database';
 import { LicenseManager, type LicenseType } from '@/lib/license/license-manager';
 import { TokenManager } from '@/lib/license/token-manager';
 import { sendEmail } from '@/lib/email/mailer';
+import { INVITATION_TOKEN_PURPOSE } from '@/lib/services/auth/invitation';
 import {
   checkRateLimit,
   LOGIN_RATE_LIMIT,
@@ -905,8 +906,9 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const isInvitation = payload.purpose === INVITATION_TOKEN_PURPOSE;
       if (
-        payload.purpose !== 'password-reset'
+        (payload.purpose !== 'password-reset' && !isInvitation)
         || !payload.sub
         || !payload.slug
         || typeof payload.iat !== 'number'
@@ -925,7 +927,15 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         // Same generic answer as an invalid token for a login-disabled account:
         // a token minted before `canLogin` was turned off must not be able to
         // set a password on a record that is never supposed to log in.
-        if (!user || user.canLogin === false) {
+        if (
+          !user
+          || user.canLogin === false
+          || (isInvitation && (
+            !user.invitedBy
+            || user.inviteAcceptedAt
+            || payload.email !== user.email
+          ))
+        ) {
           return reply.code(400).send({ error: 'Invalid reset token' });
         }
 
@@ -940,12 +950,14 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           });
         }
 
+        const changedAt = new Date();
         const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
         const updated = await db.updateUser(payload.sub!, {
+          ...(isInvitation ? { inviteAcceptedAt: changedAt } : {}),
           mustChangePassword: false,
           password: hashedPassword,
-          passwordChangedAt: new Date(),
-          updatedAt: new Date(),
+          passwordChangedAt: changedAt,
+          updatedAt: changedAt,
         });
 
         if (!updated) {

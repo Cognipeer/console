@@ -1,6 +1,5 @@
 import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync } from 'fastify';
-import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { IUser } from '@/lib/database';
@@ -12,6 +11,7 @@ import {
   RBAC_SERVICE_DEFINITIONS,
   SERVICE_PERMISSION_LEVELS,
 } from '@/lib/security/rbac';
+import { createInvitationUrl } from '@/lib/services/auth/invitation';
 import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import {
   CsvImportError,
@@ -484,18 +484,29 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      const invitationUrl = sendInvite
+        ? await createInvitationUrl(user, tenant.slug)
+        : undefined;
+      let invitationEmailSent = false;
       if (sendInvite) {
-        sendEmail(trimmedEmail, 'user-invitation', {
-          companyName: tenant.companyName,
-          email: trimmedEmail,
-          inviterName: session.userRole,
-          loginUrl: `${getConfig().app.url}/login`,
-          name: body.name,
-          slug: tenant.slug,
-          tempPassword,
-        }).catch((error: Error) => {
+        try {
+          invitationEmailSent = await sendEmail(trimmedEmail, 'user-invitation', {
+            companyName: tenant.companyName,
+            email: trimmedEmail,
+            inviterName: session.userRole,
+            inviteUrl: invitationUrl,
+            name: body.name,
+            slug: tenant.slug,
+          });
+        } catch (error) {
           logger.error('Failed to send invitation email', { error });
-        });
+        }
+
+        if (!invitationEmailSent) {
+          logger.warn('Invitation email was not delivered', {
+            userId: String(user._id),
+          });
+        }
       }
 
       return reply.code(201).send({
@@ -508,6 +519,7 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
           role: user.role,
           servicePermissions: normalizeServicePermissions(user.servicePermissions),
         },
+        ...(sendInvite ? { invitationEmailSent, invitationUrl } : {}),
         // Shown once, mirroring POST /tokens' one-time plaintext `token`
         // field — never retrievable again after this response.
         ...(sendInvite ? {} : { generatedPassword: tempPassword }),
@@ -517,6 +529,38 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
       logger.error('Invite user error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.post('/users/:id/invitation-link', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!isUserAdmin(session.userRole)) {
+        return reply.code(403).send({ error: 'Only owners and admins can copy invitation links' });
+      }
+
+      const { id } = request.params as { id: string };
+      const db = await getDatabase();
+      const tenant = await db.findTenantById(session.tenantId);
+      if (!tenant) {
+        return reply.code(404).send({ error: 'Tenant not found' });
+      }
+
+      await db.switchToTenant(session.tenantDbName);
+      const user = await db.findUserById(id);
+      if (!user || user.canLogin === false || !user.invitedBy || user.inviteAcceptedAt) {
+        return reply.code(404).send({ error: 'Pending invitation not found' });
+      }
+
+      return reply.code(200).send({
+        invitationUrl: await createInvitationUrl(user, tenant.slug),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Unauthorized') {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      logger.error('Create invitation link error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));

@@ -367,6 +367,13 @@ function oneOf<T extends string>(
 function buildConfig(source: ConfigSource): AppConfig {
   const nodeEnv = str(source, 'NODE_ENV', 'development');
   const databaseProvider = oneOf(source, 'DB_PROVIDER', ['mongodb', 'sqlite'], 'sqlite');
+  const smtpUser = str(source, 'SMTP_USER', '');
+  const smtpPass = str(source, 'SMTP_PASS', '');
+  const sendGridApiKey = str(source, 'SENDGRID_API_KEY', '');
+  const hasExplicitSmtpTransport = Boolean(
+    source.get('SMTP_HOST') || smtpUser || smtpPass,
+  );
+  const useSendGrid = Boolean(sendGridApiKey && !hasExplicitSmtpTransport);
   // SQLite is the self-hosted default, so it decides the mode unless an operator says otherwise.
   const deploymentMode = oneOf(
     source,
@@ -433,12 +440,13 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     smtp: {
-      host: str(source, 'SMTP_HOST', 'smtp.gmail.com'),
+      host: str(source, 'SMTP_HOST', useSendGrid ? 'smtp.sendgrid.net' : 'smtp.gmail.com'),
       port: int(source, 'SMTP_PORT', 587),
       secure: bool(source, 'SMTP_SECURE', false),
-      user: str(source, 'SMTP_USER', ''),
-      pass: str(source, 'SMTP_PASS', ''),
-      from: str(source, 'SMTP_FROM', '') || str(source, 'SMTP_USER', ''),
+      user: smtpUser || (useSendGrid ? 'apikey' : ''),
+      pass: smtpPass || (useSendGrid ? sendGridApiKey : ''),
+      from: str(source, 'SMTP_FROM', '')
+        || (useSendGrid ? str(source, 'SENDGRID_FROM_EMAIL', '') : smtpUser),
     },
 
     gateway: {
