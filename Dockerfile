@@ -84,7 +84,7 @@ RUN npm install --global npm@12.0.2 \
     && mv /tmp/npm-patches/undici/package /usr/local/lib/node_modules/npm/node_modules/undici \
     && rm -rf /tmp/npm-patches
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libpcre2-8-0 \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libpcre2-8-0 liblzma5 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=runner-tools /usr/bin/docker /usr/bin/docker
