@@ -37,7 +37,7 @@ export interface AgentOverviewPanelProps {
     hasKnowledgeEngine: boolean;
     sessions: SessionListItem[];
     sessionsLoading: boolean;
-    startingSession: boolean;
+    startingSession?: boolean;
     onStartSession: () => void;
     onOpenSession: (sessionId: string) => void;
     onGoToTab: (tab: string) => void;

@@ -1,20 +1,60 @@
 /*
  * Full page, not a cramped tab: the whole viewport minus the dashboard chrome
- * and this page's own header, versus the old tab's shared-with-everything-else
- * budget.
+ * and this page's own header, split into a transcript that scrolls and an
+ * inspector that does not.
  */
-.chatPanel {
+.workspace {
+  height: calc(100vh - 13rem);
+  height: calc(100dvh - 13rem);
+  min-height: 28rem;
+  align-items: stretch;
+}
+
+.titleBlock {
+  min-width: 0;
+}
+
+.transcriptPanel {
   display: flex;
   flex-direction: column;
+  flex: 1;
   min-width: 0;
-  height: calc(100vh - 11rem);
-  height: calc(100dvh - 11rem);
-  min-height: 28rem;
   overflow: hidden;
 }
 
-.panelHeader {
+.transcriptToolbar {
   border-bottom: 1px solid var(--mantine-color-gray-3);
+}
+
+/*
+ * The turn strip: one segment per answer, width proportional to how long that
+ * answer took. A 40s tool-heavy turn next to a 1s reply is the thing you are
+ * looking for when a session feels slow, and a list of timestamps does not
+ * show it.
+ */
+.timelineScroll {
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+  flex-shrink: 0;
+}
+
+.timelineSegment {
+  height: 1.25rem;
+  border-radius: 2px;
+  background: var(--mantine-color-blue-4);
+  flex-shrink: 0;
+  transition: background 120ms ease;
+}
+
+.timelineSegment:hover {
+  background: var(--mantine-color-blue-6);
+}
+
+.timelineSegmentFailed {
+  background: var(--mantine-color-red-4);
+}
+
+.timelineSegmentFailed:hover {
+  background: var(--mantine-color-red-6);
 }
 
 .panelBody {
@@ -35,12 +75,14 @@
   min-height: 0;
 }
 
-.chatBubble {
-  max-width: min(75%, 48rem);
-}
-
-.chatBubbleUser {
-  background: var(--mantine-color-blue-light);
+/*
+ * Full-width turns rather than chat bubbles: a turn here carries reasoning,
+ * a tool timeline and a structured-output block, none of which fit a 75%-wide
+ * bubble, and reading a transcript top-to-bottom beats ping-ponging across
+ * the page.
+ */
+.turn {
+  scroll-margin-block: 3rem;
 }
 
 .chatMarkdown {
@@ -53,7 +95,31 @@
   white-space: pre-wrap;
 }
 
-.chatInputRow {
+.disclosureButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.reasoningBody {
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 2px solid var(--mantine-color-violet-2);
+}
+
+.payloadCode {
+  font-size: 11px;
+  max-height: 13.75rem;
+  overflow: auto;
+}
+
+.outputCode {
+  font-size: 11px;
+  max-height: 16.25rem;
+  overflow: auto;
+}
+
+.composer {
   border-top: 1px solid var(--mantine-color-gray-3);
 }
 
@@ -61,9 +127,109 @@
   flex: 1;
 }
 
-@media (max-width: 48em) {
-  .chatPanel {
-    height: calc(100vh - 9rem);
-    height: calc(100dvh - 9rem);
+.noWrap {
+  white-space: nowrap;
+}
+
+/* ── Inspector ──────────────────────────────────────────────────────── */
+
+.inspectorPanel {
+  width: 21rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidePanel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidePanelBody {
+  flex: 1;
+  min-height: 0;
+}
+
+.metaRow {
+  padding-block: 4px;
+  border-bottom: 1px solid var(--mantine-color-gray-2);
+}
+
+.metaValue {
+  min-width: 0;
+  max-width: 60%;
+  text-align: right;
+}
+
+.copyId {
+  max-width: 100%;
+}
+
+.costChart {
+  height: 3.5rem;
+}
+
+.costBar {
+  flex: 1;
+  min-width: 3px;
+  max-width: 1.5rem;
+  border-radius: 2px 2px 0 0;
+  background: var(--mantine-color-teal-4);
+}
+
+.costBar:hover {
+  background: var(--mantine-color-teal-6);
+}
+
+.usageTable td {
+  padding-inline: 0;
+}
+
+.sidePanelCode {
+  font-size: 11px;
+  max-height: 12.5rem;
+  overflow: auto;
+}
+
+.eventRow {
+  padding: 4px 6px;
+  border-radius: var(--mantine-radius-sm);
+}
+
+.eventRow:hover {
+  background: var(--mantine-color-gray-0);
+}
+
+.eventBadge {
+  flex-shrink: 0;
+}
+
+.eventName {
+  min-width: 0;
+}
+
+@media (max-width: 64em) {
+  /*
+   * Below a laptop width the two panes stop fitting side by side, so the
+   * inspector moves under the transcript rather than squeezing it.
+   */
+  .workspace {
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+  }
+
+  .transcriptPanel {
+    height: calc(100vh - 18rem);
+    height: calc(100dvh - 18rem);
+    min-height: 24rem;
+  }
+
+  .inspectorPanel {
+    width: 100%;
+    max-height: 28rem;
   }
 }

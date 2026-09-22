@@ -28,6 +28,12 @@ import {
     validateAgentSchedule,
 } from '@/lib/services/agents/agentScheduleService';
 import { buildAgentMemoryOption, toConsoleScope } from '@/lib/services/agents/agentMemoryAdapter';
+import {
+    formatCompactTokens,
+    formatCost,
+    summariseSession,
+} from '@/components/agents/session/sessionUsage';
+import type { ChatMessage } from '@/components/agents/session/sessionTypes';
 import { toSdkSkill } from '@/lib/services/agents/agentSkillService';
 
 const AGENT = { key: 'sre-triage', name: 'SRE Triage', description: 'Triages Jira incidents', status: 'active' as const };
@@ -517,5 +523,60 @@ describe('agent memory', () => {
         expect(typeof option?.store?.upsert).toBe('function');
         expect(typeof option?.store?.markObsolete).toBe('function');
         expect(typeof option?.store?.semanticSearch).toBe('function');
+    });
+});
+
+describe('session usage', () => {
+    const turn = (usage?: ChatMessage['usage'], latencyMs?: number): ChatMessage => ({
+        role: 'assistant',
+        content: 'ok',
+        ...(usage ? { usage } : {}),
+        ...(latencyMs !== undefined ? { latencyMs } : {}),
+    });
+
+    it('sums only assistant turns — a user message costs nothing and takes no time', () => {
+        const totals = summariseSession([
+            { role: 'user', content: 'hi', latencyMs: 9999 } as ChatMessage,
+            turn({ inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsd: 0.001 }, 1200),
+            { role: 'user', content: 'again' } as ChatMessage,
+            turn({ inputTokens: 300, outputTokens: 40, totalTokens: 340, costUsd: 0.002 }, 800),
+        ]);
+        expect(totals.turns).toBe(2);
+        expect(totals.inputTokens).toBe(400);
+        expect(totals.outputTokens).toBe(60);
+        expect(totals.totalTokens).toBe(460);
+        expect(totals.activeMs).toBe(2000);
+        expect(totals.costUsd).toBeCloseTo(0.003, 6);
+        expect(totals.costComplete).toBe(true);
+    });
+
+    it('marks the total partial when a turn reported usage but carried no price', () => {
+        const totals = summariseSession([
+            turn({ inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.5 }),
+            // An unpriced model, or a turn recorded before pricing existed.
+            turn({ inputTokens: 10, outputTokens: 5, totalTokens: 15 }),
+        ]);
+        expect(totals.costUsd).toBeCloseTo(0.5, 6);
+        expect(totals.costComplete).toBe(false);
+    });
+
+    it('does not call a session with no usage at all partially priced', () => {
+        // A brand-new session has nothing to be missing — flagging it would
+        // put a "+" next to $0.00 on every session before its first turn.
+        const totals = summariseSession([turn(undefined, 400)]);
+        expect(totals.costComplete).toBe(true);
+        expect(totals.costUsd).toBe(0);
+    });
+
+    it('keeps sub-cent costs visible instead of rounding them to $0.00', () => {
+        expect(formatCost(0)).toBe('$0.00');
+        expect(formatCost(0.0003)).toBe('$0.0003');
+        expect(formatCost(1.234)).toBe('$1.23');
+    });
+
+    it('abbreviates token counts the way the header shows them', () => {
+        expect(formatCompactTokens(942)).toBe('942');
+        expect(formatCompactTokens(5432)).toBe('5.4k');
+        expect(formatCompactTokens(2_500_000)).toBe('2.5M');
     });
 });

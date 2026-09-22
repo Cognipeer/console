@@ -2430,6 +2430,8 @@ export async function createConversation(
     userId: string,
     agentKey: string,
     title?: string,
+    /** Session-level context — applied to every turn, see `executePlaygroundChatLocal`. */
+    metadata?: Record<string, unknown>,
 ): Promise<IAgentConversation> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
@@ -2440,6 +2442,7 @@ export async function createConversation(
         agentKey,
         title: title || 'New conversation',
         messages: [],
+        ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
         createdBy: userId,
     });
 }
@@ -2572,8 +2575,13 @@ export interface AgentPlaygroundChatResult {
     usage?: {
         inputTokens?: number;
         outputTokens?: number;
+        cachedInputTokens?: number;
         totalTokens?: number;
+        /** Priced from the model's own `pricing`; absent when the model has none. */
+        costUsd?: number;
     };
+    /** Wall-clock time of the run, measured server-side. */
+    latencyMs?: number;
     steps?: AgentPlaygroundStep[];
     /** Which config actually ran: a version number, or null for the draft. */
     version?: number | null;
@@ -3151,13 +3159,42 @@ function normalizePlaygroundUsage(
 
     const inputTokens = pick('inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens');
     const outputTokens = pick('outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens');
+    const cachedInputTokens = pick('cachedInputTokens', 'cached_input_tokens', 'cacheReadInputTokens');
     const totalTokens = pick('totalTokens', 'total_tokens')
         ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
 
     if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) {
         return undefined;
     }
-    return { usage: { inputTokens, outputTokens, totalTokens } };
+    return { usage: { inputTokens, outputTokens, cachedInputTokens, totalTokens } };
+}
+
+/**
+ * Prices a turn from the model's own `pricing` record.
+ *
+ * Returns undefined rather than 0 when the model has no pricing configured —
+ * a displayed "$0.00" reads as "this was free", which is a different claim
+ * from "nobody told the console what this model costs".
+ */
+async function priceTurn(
+    tenantDbName: string,
+    projectId: string,
+    modelKey: string | undefined,
+    usage: AgentPlaygroundChatResult['usage'],
+): Promise<number | undefined> {
+    if (!modelKey || !usage) return undefined;
+    try {
+        const model = await getModelByKey(tenantDbName, modelKey, projectId);
+        if (!model?.pricing) return undefined;
+        const { calculateCost } = await import('@/lib/services/models/usageLogger');
+        return calculateCost(model.pricing, {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cachedInputTokens: usage.cachedInputTokens,
+        }).totalCost;
+    } catch {
+        return undefined;
+    }
 }
 
 function describeStructuredOutputError(error: unknown): string {
@@ -3195,6 +3232,20 @@ export async function executePlaygroundChatLocal(
         ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
         : request.history;
 
+    // Context entered when the session was started applies to every turn in it.
+    // Merged UNDER the request's own context so a per-message override still
+    // wins — and merged per-key rather than wholesale, or setting one header on
+    // one turn would silently drop the session's whole context for that turn.
+    const sessionContext = sessionConversation?.metadata?.runtimeContext as AgentRuntimeContext | undefined;
+    const runtimeContext: AgentRuntimeContext | undefined = sessionContext
+        ? {
+            ...sessionContext,
+            ...request.runtimeContext,
+            headers: { ...sessionContext.headers, ...request.runtimeContext?.headers },
+            metadata: { ...sessionContext.metadata, ...request.runtimeContext?.metadata },
+        }
+        : request.runtimeContext;
+
     // The draft unless a version is asked for. Reading the published snapshot
     // is what makes "does my change actually help?" answerable in one screen.
     let config = agent.config;
@@ -3231,7 +3282,7 @@ export async function executePlaygroundChatLocal(
             config.connection,
             [...(history || []), { role: 'user', content: guardedMessage }],
             { tenantDbName, tenantId, projectId },
-            resolveRuntimeHeaders(request.runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
+            resolveRuntimeHeaders(runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
         );
 
         // Redacting here is still the only enforcement point for a STATELESS
@@ -3292,7 +3343,7 @@ export async function executePlaygroundChatLocal(
         config,
         agentKey,
         agentName: agent.name,
-        runtimeContext: request.runtimeContext,
+        runtimeContext: runtimeContext,
     });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
@@ -3378,7 +3429,7 @@ export async function executePlaygroundChatLocal(
         createTool,
         z,
         toolGuard,
-        request.runtimeContext,
+        runtimeContext,
     );
     playgroundTools.push(...boundPlaygroundTools);
     playgroundToolDefinitions.push(...boundPlaygroundToolDefinitions);
@@ -3409,7 +3460,7 @@ export async function executePlaygroundChatLocal(
         createToolFn: createTool,
         zod: z,
         guard: toolGuard,
-        runtimeContext: request.runtimeContext,
+        runtimeContext: runtimeContext,
     });
     cleanupTasks.push(...playgroundSubagents.cleanupTasks);
 
@@ -3433,7 +3484,7 @@ export async function executePlaygroundChatLocal(
             projectId,
             agentKey,
             conversationId: sessionConversation ? String(sessionConversation._id) : undefined,
-            userId: request.runtimeContext?.userId,
+            userId: runtimeContext?.userId,
         }),
     });
 
@@ -3453,6 +3504,7 @@ export async function executePlaygroundChatLocal(
         }
         : undefined;
 
+    const invokeStartedAt = Date.now();
     try {
         const result: AgentSdkInvokeResult = await sdkAgent.invoke(
             createConsoleAgentState(inputMessages),
@@ -3483,9 +3535,15 @@ export async function executePlaygroundChatLocal(
                 ? { outputError: describeStructuredOutputError(result.outputError) }
                 : {}),
             ...(normalizePlaygroundUsage(result.metadata?.usage) ?? {}),
+            latencyMs: Date.now() - invokeStartedAt,
             steps: extractPlaygroundSteps(result),
             version: ranVersion,
         };
+
+        const costUsd = await priceTurn(tenantDbName, projectId, config.modelKey, playgroundResult.usage);
+        if (costUsd !== undefined && playgroundResult.usage) {
+            playgroundResult.usage.costUsd = costUsd;
+        }
 
         if (sessionConversation) {
             await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
@@ -3527,6 +3585,7 @@ async function persistSessionTurn(
                 ...(result.output !== undefined ? { output: result.output } : {}),
                 ...(result.outputError ? { outputError: result.outputError } : {}),
                 ...(result.usage ? { usage: result.usage } : {}),
+                ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}),
                 version: result.version ?? null,
             },
         ];

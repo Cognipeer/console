@@ -843,13 +843,25 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!agent) return reply.code(404).send({ error: 'Agent not found' });
 
       const body = readJsonBody<Record<string, unknown>>(request);
+
+      // Session context is stamped with the dashboard user's identity the same
+      // way a per-message one is — `userId`/`source` stay server-owned, so a
+      // client cannot start a session that claims to be someone else.
+      const sessionContext = body.context && typeof body.context === 'object'
+        ? buildRuntimeContextFromRequest(body.context, request.headers, {
+          userId: session.userId,
+          source: 'playground',
+        })
+        : undefined;
+
       const created = await createConversation(
         session.tenantDbName,
         session.tenantId,
         projectId,
         session.userId,
         agent.key,
-        typeof body.title === 'string' ? body.title : undefined,
+        typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
+        sessionContext ? { runtimeContext: sessionContext } : undefined,
       );
       return reply.code(201).send({ session: created });
     } catch (error) {

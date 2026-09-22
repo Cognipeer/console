@@ -2449,9 +2449,18 @@ export interface IAgentConversationMessage {
   steps?: IAgentConversationStep[];
   output?: unknown;
   outputError?: string;
-  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedInputTokens?: number;
+    totalTokens?: number;
+    /** Priced from the model's own `pricing` at the time of the run — see `calculateCost`. */
+    costUsd?: number;
+  };
   /** Which agent config produced this turn: a version number, or null for the draft. */
   version?: number | null;
+  /** Wall-clock time the turn took, measured server-side. */
+  latencyMs?: number;
 }
 
 export interface IAgentConversation {
@@ -2461,6 +2470,11 @@ export interface IAgentConversation {
   agentKey: string;
   title?: string;
   messages: IAgentConversationMessage[];
+  /**
+   * `metadata.runtimeContext` holds the context entered once when the session
+   * is started, merged UNDER every turn's own runtime context (so a
+   * per-message override still wins) — see `executePlaygroundChatLocal`.
+   */
   metadata?: Record<string, unknown>;
   createdBy: string;
   createdAt?: Date;

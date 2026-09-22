@@ -86,6 +86,7 @@ import AgentExportPanel from './studio/AgentExportPanel';
 import AgentPromptPanel from './studio/AgentPromptPanel';
 import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList from './studio/SessionList';
+import StartSessionModal from './studio/StartSessionModal';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
@@ -386,7 +387,7 @@ export default function AgentDetailPage() {
   // own route, see AgentSessionView).
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [startingSession, setStartingSession] = useState(false);
+  const [startSessionOpen, setStartSessionOpen] = useState(false);
 
   // Config form
   const configForm = useForm({
@@ -662,32 +663,18 @@ export default function AgentDetailPage() {
   }, [agentId]);
 
   /**
-   * Creates a session and navigates straight to it — the chat itself lives at
-   * its own route now (AgentSessionView), not on this page.
+   * Sessions are created from StartSessionModal, which collects the name and
+   * the session context before the first message — that context is stored on
+   * the session and applied to every turn, so it has to exist by turn one.
    *
-   * The config save-before-chat the old inline playground did is gone too: a
-   * Session always runs a real config (the draft, or a version pinned on the
-   * session page itself), so there is nothing here that needs saving first.
+   * The chat itself lives at its own route now (AgentSessionView), not on this
+   * page, and the config save-before-chat the old inline playground did is
+   * gone: a Session always runs a real config (the draft, or a version pinned
+   * on the session page), so there is nothing here that needs saving first.
    */
-  const startNewSession = async () => {
-    setStartingSession(true);
-    try {
-      const res = await fetch(`/api/agents/${agentId}/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) throw new Error('Failed to start session');
-      const data = await res.json();
-      router.push(`/dashboard/agents/${agentId}/sessions/${data.session._id}`);
-    } catch (err) {
-      notifications.show({
-        title: t('notifications.error'),
-        message: err instanceof Error ? err.message : 'Failed to start session',
-        color: 'red',
-      });
-      setStartingSession(false);
-    }
+  const handleSessionStarted = (sessionId: string, pinnedVersion: string) => {
+    const query = pinnedVersion ? `?version=${encodeURIComponent(pinnedVersion)}` : '';
+    router.push(`/dashboard/agents/${agentId}/sessions/${sessionId}${query}`);
   };
 
   const handlePublish = async () => {
@@ -1264,8 +1251,7 @@ export default function AgentDetailPage() {
             hasKnowledgeEngine={Boolean(agent.config?.knowledgeEngineKey)}
             sessions={sessions}
             sessionsLoading={sessionsLoading}
-            startingSession={startingSession}
-            onStartSession={() => void startNewSession()}
+            onStartSession={() => setStartSessionOpen(true)}
             onOpenSession={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
             // Overview links by the OLD flat names on purpose — it should not
             // have to know how the tabs are grouped, so the alias table that
@@ -1292,8 +1278,7 @@ export default function AgentDetailPage() {
               <Button
                 size="sm"
                 leftSection={<IconPlus size={14} />}
-                loading={startingSession}
-                onClick={() => void startNewSession()}
+                onClick={() => setStartSessionOpen(true)}
               >
                 Start new session
               </Button>
@@ -1302,8 +1287,7 @@ export default function AgentDetailPage() {
               sessions={sessions}
               loading={sessionsLoading}
               onOpen={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
-              onStart={() => void startNewSession()}
-              starting={startingSession}
+              onStart={() => setStartSessionOpen(true)}
             />
           </SectionCard>
         </Tabs.Panel>
@@ -2043,6 +2027,17 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
           t={t}
         />
       </Modal>
+
+      <StartSessionModal
+        opened={startSessionOpen}
+        onClose={() => setStartSessionOpen(false)}
+        agentId={agentId}
+        agentName={agent.name}
+        versions={versions}
+        publishedVersion={agent.publishedVersion ?? null}
+        isConnected={isConnected}
+        onStarted={handleSessionStarted}
+      />
 
       {isConnected ? (
         <ConnectAgentModal
