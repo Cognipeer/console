@@ -1,0 +1,31 @@
+.table {
+  font-size: var(--mantine-font-size-sm);
+}
+
+.row td {
+  vertical-align: middle;
+}
+
+.nameButton {
+  width: 100%;
+  text-align: left;
+}
+
+.nameButton:hover {
+  text-decoration: underline;
+}
+
+/* Aligned digits, so a cost column can be scanned down rather than read. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.detailCell {
+  background: var(--mantine-color-gray-0);
+}
+
+@media (prefers-color-scheme: dark) {
+  .detailCell {
+    background: var(--mantine-color-dark-6);
+  }
+}

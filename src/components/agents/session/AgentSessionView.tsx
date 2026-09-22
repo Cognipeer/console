@@ -41,6 +41,7 @@ import {
     Text,
     Textarea,
     TextInput,
+    TypographyStylesProvider,
     ThemeIcon,
     Tooltip,
     UnstyledButton,
@@ -72,6 +73,8 @@ import EmptyState from '@/components/common/EmptyState';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import SessionSidePanel from './SessionSidePanel';
+import LiveToolCalls, { summariseArgs, type LiveToolCall } from './LiveToolCalls';
+import { consumeSse } from './consumeSse';
 import type { ChatMessage, PlaygroundStep } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
 import classes from './AgentSessionView.module.css';
@@ -132,6 +135,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [runtimeContextJson, setRuntimeContextJson] = useState('');
     const [pinnedVersion, setPinnedVersion] = useState(searchParams.get('version') ?? '');
     const [deleting, setDeleting] = useState(false);
+    const [liveCalls, setLiveCalls] = useState<LiveToolCall[]>([]);
+    const [generating, setGenerating] = useState(false);
 
     const viewportRef = useRef<HTMLDivElement>(null);
     const turnRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -215,58 +220,142 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
     };
 
+    /**
+     * Runs a turn over SSE so the tool calls show up as they happen.
+     *
+     * Falls back to the plain POST when the stream cannot be opened at all
+     * (an old server without the route, a proxy that rejects the content
+     * type). Losing live progress is a downgrade; losing the ability to send
+     * a message is a breakage, and the two should not be the same failure.
+     */
     const sendMessage = async () => {
         if (!input.trim() || sending) return;
         const message = input.trim();
         const startedAt = Date.now();
         setSending(true);
         setInput('');
+        setLiveCalls([]);
+        setGenerating(false);
 
         const optimistic: ChatMessage[] = [...messages, { role: 'user', content: message }];
         setMessages(optimistic);
 
-        try {
-            const res = await fetch(`/api/agents/${agentId}/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    message,
-                    conversationId: sessionId,
-                    runtime_context: parseRuntimeContextJson(runtimeContextJson),
-                    ...(pinnedVersion ? { version: Number(pinnedVersion) } : {}),
-                }),
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.error || 'Chat failed');
-            }
-            const data = await res.json();
+        const body = JSON.stringify({
+            message,
+            conversationId: sessionId,
+            runtime_context: parseRuntimeContextJson(runtimeContextJson),
+            ...(pinnedVersion ? { version: Number(pinnedVersion) } : {}),
+        });
+
+        const applyResult = (data: Record<string, unknown>) => {
             setMessages([
                 ...optimistic,
                 {
                     role: 'assistant',
-                    content: data.content,
+                    content: String(data.content ?? ''),
                     ...(typeof data.reasoning === 'string' && data.reasoning ? { reasoning: data.reasoning } : {}),
-                    ...(Array.isArray(data.steps) && data.steps.length > 0 ? { steps: data.steps } : {}),
+                    ...(Array.isArray(data.steps) && data.steps.length > 0
+                        ? { steps: data.steps as PlaygroundStep[] }
+                        : {}),
                     ...(data.output !== undefined ? { output: data.output } : {}),
                     ...(data.outputError ? { outputError: String(data.outputError) } : {}),
-                    ...(data.usage ? { usage: data.usage } : {}),
-                    version: data.version ?? null,
+                    ...(data.usage ? { usage: data.usage as ChatMessage['usage'] } : {}),
+                    version: (data.version as number | null) ?? null,
                     // The server times the invoke itself; the round trip is the
                     // fallback for an older response that carries no latency.
                     latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : Date.now() - startedAt,
                 },
             ]);
             setSessionUpdatedAt(new Date().toISOString());
-        } catch (err) {
+        };
+
+        const fail = (error: unknown) => {
             notifications.show({
                 title: 'Message failed',
-                message: err instanceof Error ? err.message : 'Unknown error',
+                message: error instanceof Error ? error.message : String(error),
                 color: 'red',
             });
             setMessages(messages);
+        };
+
+        try {
+            const res = await fetch(`/api/agents/${agentId}/chat/stream`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+                body,
+            });
+
+            if (!res.ok || !res.body) {
+                // A 4xx here is a real rejection (bad request, no access) and
+                // retrying it unstreamed would only produce the same error
+                // twice; only a missing route is worth falling back for.
+                if (res.status !== 404) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.error || `Chat failed (HTTP ${res.status})`);
+                }
+                const plain = await fetch(`/api/agents/${agentId}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body,
+                });
+                if (!plain.ok) {
+                    const err = await plain.json().catch(() => ({}));
+                    throw new Error(err.error || 'Chat failed');
+                }
+                applyResult(await plain.json());
+                return;
+            }
+
+            await consumeSse(res.body, (event, data) => {
+                if (event === 'tool') {
+                    const payload = data as {
+                        phase: string; name: string; id?: string; args?: unknown;
+                        durationMs?: number; error?: string;
+                    };
+                    setLiveCalls((current) => {
+                        // Terminal phases carry the same id as their start, so
+                        // the row updates in place; without an id (some
+                        // providers omit it) the newest running row of that
+                        // name is the one that just finished.
+                        const key = payload.id ?? `${payload.name}:${current.length}`;
+                        if (payload.phase === 'start') {
+                            setGenerating(false);
+                            return [...current, {
+                                key,
+                                name: payload.name,
+                                detail: summariseArgs(payload.args),
+                                running: true,
+                            }];
+                        }
+                        const index = payload.id
+                            ? current.findIndex((call) => call.key === payload.id)
+                            : current.map((call) => call.name === payload.name && call.running)
+                                .lastIndexOf(true);
+                        if (index < 0) return current;
+                        const next = [...current];
+                        next[index] = {
+                            ...next[index],
+                            running: false,
+                            durationMs: payload.durationMs,
+                            ...(payload.error ? { error: payload.error } : {}),
+                        };
+                        // Every call settled: whatever happens next is the model
+                        // writing, which is what the operator is now waiting on.
+                        if (next.every((call) => !call.running)) setGenerating(true);
+                        return next;
+                    });
+                } else if (event === 'result') {
+                    applyResult(data as Record<string, unknown>);
+                } else if (event === 'error') {
+                    throw new Error(String((data as { error?: string }).error || 'Chat failed'));
+                }
+            });
+        } catch (err) {
+            fail(err);
         } finally {
             setSending(false);
+            setLiveCalls([]);
+            setGenerating(false);
         }
     };
 
@@ -493,7 +582,18 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                             <ReasoningDisclosure reasoning={msg.reasoning} latencyMs={msg.latencyMs} />
                                                         ) : null}
                                                         {msg.steps?.length ? <StepTimeline steps={msg.steps} /> : null}
+                                                        {/*
+                                                      Wrapped so headings, lists and tables
+                                                      in an answer actually look like
+                                                      headings, lists and tables — a bare
+                                                      ReactMarkdown emits real h2/ul/table
+                                                      elements that nothing was styling, so
+                                                      a structured report rendered as one
+                                                      undifferentiated block of text.
+                                                    */}
+                                                    <TypographyStylesProvider className={classes.markdownBody}>
                                                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                                                    </TypographyStylesProvider>
                                                         {msg.output !== undefined ? <StructuredOutputBlock output={msg.output} /> : null}
                                                         {msg.outputError ? (
                                                             <Alert variant="light" color="red" icon={<IconAlertTriangle size={14} />} mt="xs" p="xs">
@@ -513,10 +613,26 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                         </Text>
                                     ) : null}
                                     {sending ? (
-                                        <Group gap="xs">
-                                            <Loader size="xs" />
-                                            <Text size="xs" c="dimmed">The agent is working…</Text>
-                                        </Group>
+                                        <Box>
+                                            <Group gap={6} mb={4}>
+                                                <Badge
+                                                    size="xs"
+                                                    variant="light"
+                                                    color="grape"
+                                                    leftSection={<IconRobot size={10} />}
+                                                >
+                                                    {agent.name}
+                                                </Badge>
+                                            </Group>
+                                            {liveCalls.length === 0 && !generating ? (
+                                                <Group gap="xs">
+                                                    <Loader size="xs" />
+                                                    <Text size="xs" c="dimmed">The agent is working…</Text>
+                                                </Group>
+                                            ) : (
+                                                <LiveToolCalls calls={liveCalls} generating={generating} />
+                                            )}
+                                        </Box>
                                     ) : null}
                                 </Stack>
                             </ScrollArea>

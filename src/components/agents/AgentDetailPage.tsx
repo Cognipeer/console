@@ -160,12 +160,21 @@ interface AgentVersion {
 }
 
 /** A row in the Sessions list / Overview's "recent sessions" — see AgentSessionView for the full record. */
+/** Mirrors `summariseConversation` on the sessions list route. */
 interface SessionSummary {
   _id: string;
   title?: string;
-  messages: Array<{ role: string }>;
-  updatedAt?: string;
   createdAt?: string;
+  updatedAt?: string;
+  messageCount?: number;
+  turns?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  costComplete?: boolean;
+  activeMs?: number;
+  hasContext?: boolean;
 }
 
 interface Model {
@@ -1236,6 +1245,7 @@ export default function AgentDetailPage() {
               loading={sessionsLoading}
               onOpen={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
               onStart={() => setStartSessionOpen(true)}
+              searchable
             />
           </SectionCard>
         </Tabs.Panel>

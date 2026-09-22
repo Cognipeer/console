@@ -35,6 +35,8 @@ import {
 } from '@/components/agents/session/sessionUsage';
 import type { ChatMessage } from '@/components/agents/session/sessionTypes';
 import { normalizePlaygroundUsage } from '@/lib/services/agents/playgroundUsage';
+import { consumeSse } from '@/components/agents/session/consumeSse';
+import { summariseArgs } from '@/components/agents/session/LiveToolCalls';
 import {
     collectConfiguredTools,
     countUnnamedToolSurfaces,
@@ -722,5 +724,83 @@ describe('memory tools', () => {
     it('tags them with the store they read and write', () => {
         const tools = collectConfiguredTools({ memory: MEM });
         expect(tools.every((tool) => tool.origin === 'memory' && tool.sourceKey === 'mem-1')).toBe(true);
+    });
+});
+
+describe('SSE framing', () => {
+    const streamOf = (...chunks: string[]): ReadableStream<Uint8Array> => {
+        const encoder = new TextEncoder();
+        return new ReadableStream({
+            start(controller) {
+                for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+                controller.close();
+            },
+        });
+    };
+
+    const collect = async (...chunks: string[]) => {
+        const seen: Array<[string, unknown]> = [];
+        await consumeSse(streamOf(...chunks), (event, data) => { seen.push([event, data]); });
+        return seen;
+    };
+
+    it('reassembles an event split across chunk boundaries', async () => {
+        // A chunk boundary can fall anywhere; treating one chunk as one event
+        // is the classic way an SSE client works until traffic gets real.
+        expect(await collect('event: too', 'l\ndata: {"na', 'me":"web_search"}\n\n'))
+            .toEqual([['tool', { name: 'web_search' }]]);
+    });
+
+    it('splits on the blank line, not on the chunk', async () => {
+        expect(await collect('event: tool\ndata: {"n":1}\n\nevent: tool\ndata: {"n":2}\n\n'))
+            .toEqual([['tool', { n: 1 }], ['tool', { n: 2 }]]);
+    });
+
+    it('delivers a final event that arrived without its trailing blank line', async () => {
+        // Losing this one would lose the run's result.
+        expect(await collect('event: result\ndata: {"content":"done"}'))
+            .toEqual([['result', { content: 'done' }]]);
+    });
+
+    it('joins repeated data lines with newlines', async () => {
+        expect(await collect('event: note\ndata: line one\ndata: line two\n\n'))
+            .toEqual([['note', 'line one\nline two']]);
+    });
+
+    it('does not re-deliver an event whose handler threw', async () => {
+        // The handler throwing is how the caller reports a stream error;
+        // catching it around JSON.parse made it look like unparseable data
+        // and ran the handler a second time with the raw text.
+        let calls = 0;
+        await expect(consumeSse(streamOf('event: error\ndata: {"error":"boom"}\n\n'), () => {
+            calls += 1;
+            throw new Error('boom');
+        })).rejects.toThrow('boom');
+        expect(calls).toBe(1);
+    });
+
+    it('ignores comments and events with no data', async () => {
+        expect(await collect(': keep-alive\n\nevent: tool\n\nevent: tool\ndata: {"n":1}\n\n'))
+            .toEqual([['tool', { n: 1 }]]);
+    });
+});
+
+describe('live tool call labels', () => {
+    it('picks the argument that tells two calls of one tool apart', () => {
+        expect(summariseArgs({ query: 'Cognipeer' })).toBe('Cognipeer');
+        expect(summariseArgs({ url: 'https://cognipeer.com/' })).toBe('https://cognipeer.com/');
+        // Conventional fields win over declaration order.
+        expect(summariseArgs({ limit: 5, question: 'who founded it' })).toBe('who founded it');
+    });
+
+    it('falls back to the first short string rather than dumping JSON', () => {
+        expect(summariseArgs({ unexpected: 'a value' })).toBe('a value');
+        expect(summariseArgs({ nested: { deep: 'x' } })).toBeUndefined();
+        expect(summariseArgs({ blob: 'x'.repeat(500) })).toBeUndefined();
+    });
+
+    it('has nothing to show for an argument-less call', () => {
+        expect(summariseArgs(undefined)).toBeUndefined();
+        expect(summariseArgs({})).toBeUndefined();
     });
 });

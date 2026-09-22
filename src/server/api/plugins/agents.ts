@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgent, IAgentConfig, IUser } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -19,7 +19,13 @@ import {
   updateAgentRecord,
 } from '@/lib/services/agents';
 // By path: the agents barrel does not export the error class.
-import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
+import {
+  AgentGuardrailBlockedError,
+  // Imported BY PATH: the barrel exports the queue-routing wrapper, and the
+  // streaming route deliberately needs the local one (a progress callback
+  // cannot cross the job queue).
+  executePlaygroundChatLocal,
+} from '@/lib/services/agents/agentService';
 import {
   AgentManifestError,
   applyAgentManifest,
@@ -816,6 +822,60 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // name yet, but adding rather than renaming means neither guess can be
   // wrong about who else might.
 
+
+/**
+ * One row of the sessions table: what it is, what it cost, how long it worked.
+ *
+ * Totals come from the turns themselves — each one recorded its own tokens,
+ * price and server-measured latency when it ran (`persistSessionTurn`) — so a
+ * session listed months later shows the same numbers it showed live, at the
+ * prices that applied then rather than today's.
+ */
+function summariseConversation(conversation: IAgentConversation) {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let costUsd = 0;
+  let activeMs = 0;
+  let turns = 0;
+  // A turn that reported usage but no price leaves the total a lower bound,
+  // which the UI marks rather than presenting as exact.
+  let costComplete = true;
+
+  for (const message of conversation.messages ?? []) {
+    if (message.role !== 'assistant') continue;
+    turns += 1;
+    inputTokens += message.usage?.inputTokens ?? 0;
+    outputTokens += message.usage?.outputTokens ?? 0;
+    totalTokens += message.usage?.totalTokens ?? 0;
+    activeMs += message.latencyMs ?? 0;
+    if (message.usage?.costUsd === undefined) {
+      if (message.usage) costComplete = false;
+    } else {
+      costUsd += message.usage.costUsd;
+    }
+  }
+
+  return {
+    _id: String(conversation._id),
+    title: conversation.title,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    messageCount: conversation.messages?.length ?? 0,
+    turns,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    costUsd,
+    costComplete,
+    activeMs,
+    hasContext: Boolean(
+      conversation.metadata?.runtimeContext
+      && Object.keys(conversation.metadata.runtimeContext as Record<string, unknown>).length > 0,
+    ),
+  };
+}
+
   app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
@@ -827,7 +887,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         limit: 100,
         projectId,
       });
-      return reply.code(200).send({ sessions });
+      // Summarised here rather than shipped whole: every record carries its
+      // full transcript, and a hundred of those is megabytes of tool payloads
+      // sent so the list can render a row count. The session PAGE fetches the
+      // one transcript it actually shows.
+      return reply.code(200).send({ sessions: sessions.map(summariseConversation) });
     } catch (error) {
       logger.error('List agent sessions error', { error });
       return sendProjectContextError(reply, error)
@@ -910,6 +974,97 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Failed to delete session' });
     }
+  }));
+
+  /**
+   * The same run as `/chat`, reported as it happens.
+   *
+   * A playground that says only "working…" for forty seconds is asking the
+   * operator to trust it. Tool calls are the interesting part of an agent
+   * run — which tool, with what argument, how long — and they are precisely
+   * what a request/response POST cannot show until it is too late to matter.
+   *
+   * SSE over POST (rather than EventSource, which is GET-only) because the
+   * body carries the message, the session and the runtime context. The final
+   * `result` event repeats what `/chat` would have returned, so the client's
+   * completed-turn rendering is identical either way — this endpoint adds
+   * visibility, it does not fork the contract.
+   *
+   * `executePlaygroundChatLocal` is called directly, NOT the queue-routing
+   * `executePlaygroundChat`: the progress callback is a function and cannot
+   * cross the job queue. A run that would have been routed to another node
+   * runs here instead, which is the right trade for a dashboard-only debug
+   * surface and the reason this is not the path production traffic takes.
+   */
+  app.post('/agents/:agentId/chat/stream', withApiRequestContext(async (request, reply) => {
+    const { projectId, user, session } = await requireProjectContextForRequest(request);
+    const { agentId } = request.params as { agentId: string };
+    const body = readJsonBody<Record<string, unknown>>(request);
+
+    if (typeof body.message !== 'string') {
+      return reply.code(400).send({ error: 'Message is required' });
+    }
+    const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+    if (!agent) {
+      return reply.code(404).send({ error: 'Agent not found' });
+    }
+
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    // Proxies that buffer would defeat the whole point of this endpoint.
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    reply.raw.flushHeaders?.();
+
+    let closed = false;
+    reply.raw.on('close', () => { closed = true; });
+    const send = (event: string, data: unknown) => {
+      if (closed) return;
+      try {
+        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        closed = true;
+      }
+    };
+
+    try {
+      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: session.userId,
+        source: 'playground',
+      });
+
+      const result = await executePlaygroundChatLocal({
+        agentKey: agent.key,
+        runtimeContext,
+        projectId,
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        userMessage: body.message,
+        ...(typeof body.version === 'number' ? { version: body.version } : {}),
+        ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+        onToolEvent: (event) => send('tool', event),
+      });
+
+      send('result', result);
+    } catch (error) {
+      if (error instanceof AgentGuardrailBlockedError) {
+        logger.info('Agent playground stream blocked by guardrail', {
+          guardrailKey: error.guardrailKey,
+          hook: error.hook,
+        });
+      } else {
+        logger.error('Agent playground stream error', { error });
+      }
+      // The status line is long gone by now, so the error travels as an
+      // event. A client that only listened for `result` would otherwise hang
+      // until the socket closed and call it a network fault.
+      send('error', {
+        error: error instanceof Error ? error.message : 'Agent chat failed',
+      });
+    } finally {
+      if (!closed) reply.raw.end();
+    }
+    return reply;
   }));
 
   app.post('/agents/:agentId/chat', withApiRequestContext(async (request, reply) => {

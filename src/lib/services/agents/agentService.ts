@@ -2505,6 +2505,17 @@ export interface AgentToolCallEvent {
     name: string;
     /** Provider tool-call id, when available. */
     id?: string;
+    /**
+     * The call's arguments. Carried so a live row can say WHICH search is
+     * running ("web_search · Cognipeer") rather than just that one is — with
+     * several parallel calls of the same tool, the name alone identifies
+     * nothing.
+     */
+    args?: unknown;
+    /** Filled on the terminal phase. */
+    durationMs?: number;
+    /** Filled on `error`. */
+    error?: string;
 }
 
 /** Ephemeral (playground) chat — no DB conversation required */
@@ -3555,7 +3566,14 @@ export async function executePlaygroundChatLocal(
                 if (event.type !== 'tool_call' || !event.name) return;
                 if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
                 try {
-                    onToolEvent({ phase: event.phase, name: event.name, id: event.id });
+                    onToolEvent({
+                        phase: event.phase,
+                        name: event.name,
+                        id: event.id,
+                        ...(event.args !== undefined ? { args: event.args } : {}),
+                        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+                        ...(event.error?.message ? { error: event.error.message } : {}),
+                    });
                 } catch (callbackError) {
                     logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
                 }
