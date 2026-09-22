@@ -29,3 +29,11 @@
     background: var(--mantine-color-dark-6);
   }
 }
+
+.sortHeader {
+  width: 100%;
+}
+
+.sortHeader:hover {
+  color: var(--mantine-color-blue-6);
+}

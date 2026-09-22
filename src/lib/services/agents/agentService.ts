@@ -2557,6 +2557,12 @@ export interface AgentPlaygroundChatRequest {
      * another cluster node the run still works, but no events fire.
      */
     onToolEvent?: (event: AgentToolCallEvent) => void;
+    /**
+     * Incremental answer text, for a caller that can render it as it arrives.
+     * Same queue caveat as `onToolEvent` — a function cannot be serialized to
+     * another node, so a routed run simply streams nothing.
+     */
+    onTextChunk?: (text: string) => void;
 }
 
 /**
@@ -3147,6 +3153,7 @@ export async function executePlaygroundChat(
     // (the local fast path still receives the full request).
     const payload = { ...request };
     delete payload.onToolEvent;
+    delete payload.onTextChunk;
     return routeInstanceCall(
         {
             entityType: 'agent',
@@ -3558,26 +3565,45 @@ export async function executePlaygroundChatLocal(
         memory: playgroundMemoryOption,
     });
 
-    // Surface tool-call progress to the caller (best-effort; never fails the run).
-    const { onToolEvent } = request;
-    const invokeConfig = onToolEvent
+    // Surface progress to the caller (best-effort; never fails the run).
+    const { onToolEvent, onTextChunk } = request;
+    const invokeConfig = onToolEvent || onTextChunk
         ? {
-            onEvent: (event: AgentSdkEvent) => {
-                if (event.type !== 'tool_call' || !event.name) return;
-                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
-                try {
-                    onToolEvent({
-                        phase: event.phase,
-                        name: event.name,
-                        id: event.id,
-                        ...(event.args !== undefined ? { args: event.args } : {}),
-                        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                        ...(event.error?.message ? { error: event.error.message } : {}),
-                    });
-                } catch (callbackError) {
-                    logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
-                }
-            },
+            ...(onToolEvent ? {
+                onEvent: (event: AgentSdkEvent) => {
+                    if (event.type !== 'tool_call' || !event.name) return;
+                    if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+                    try {
+                        onToolEvent({
+                            phase: event.phase,
+                            name: event.name,
+                            id: event.id,
+                            ...(event.args !== undefined ? { args: event.args } : {}),
+                            ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+                            ...(event.error?.message ? { error: event.error.message } : {}),
+                        });
+                    } catch (callbackError) {
+                        logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
+                    }
+                },
+            } : {}),
+            ...(onTextChunk ? {
+                // `stream: true` is what actually turns provider deltas on —
+                // with only `onStream` the SDK fires it exactly once, at the
+                // end, with the whole answer.
+                stream: true,
+                onStream: (chunk: { text?: string; isFinal?: boolean }) => {
+                    // That same terminal call repeats the FULL content, so
+                    // forwarding it would print the answer twice: once
+                    // streamed, once again in one burst.
+                    if (chunk.isFinal || !chunk.text) return;
+                    try {
+                        onTextChunk(chunk.text);
+                    } catch (callbackError) {
+                        logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+                    }
+                },
+            } : {}),
         }
         : undefined;
 

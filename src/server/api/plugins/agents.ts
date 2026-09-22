@@ -1043,6 +1043,7 @@ function summariseConversation(conversation: IAgentConversation) {
         ...(typeof body.version === 'number' ? { version: body.version } : {}),
         ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
         onToolEvent: (event) => send('tool', event),
+        onTextChunk: (text) => send('text', { text }),
       });
 
       send('result', result);

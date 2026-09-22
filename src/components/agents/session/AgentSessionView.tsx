@@ -24,7 +24,6 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
     ActionIcon,
     Alert,
-    Anchor,
     Badge,
     Box,
     Button,
@@ -56,6 +55,8 @@ import {
     IconClock,
     IconCopy,
     IconCoin,
+    IconMessageCircle,
+    IconPlayerPlay,
     IconRobot,
     IconSearch,
     IconSend,
@@ -67,7 +68,7 @@ import {
 } from '@tabler/icons-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import PageContainer from '@/components/common/ui/PageContainer';
+import DetailShell from '@/components/common/ui/DetailShell';
 import LoadingState from '@/components/common/LoadingState';
 import EmptyState from '@/components/common/EmptyState';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
@@ -137,9 +138,22 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [deleting, setDeleting] = useState(false);
     const [liveCalls, setLiveCalls] = useState<LiveToolCall[]>([]);
     const [generating, setGenerating] = useState(false);
+    const [streamText, setStreamText] = useState('');
 
     const viewportRef = useRef<HTMLDivElement>(null);
     const turnRefs = useRef<Array<HTMLDivElement | null>>([]);
+    const composerRef = useRef<HTMLTextAreaElement>(null);
+
+    /** Jump to the end of the transcript with the cursor already in the box. */
+    const continueSession = () => {
+        if (viewportRef.current) {
+            viewportRef.current.scrollTo({
+                top: viewportRef.current.scrollHeight,
+                behavior: 'smooth',
+            });
+        }
+        composerRef.current?.focus();
+    };
 
     const isConnected = agent?.config?.kind === 'external';
 
@@ -236,6 +250,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         setInput('');
         setLiveCalls([]);
         setGenerating(false);
+        setStreamText('');
 
         const optimistic: ChatMessage[] = [...messages, { role: 'user', content: message }];
         setMessages(optimistic);
@@ -344,6 +359,11 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         if (next.every((call) => !call.running)) setGenerating(true);
                         return next;
                     });
+                } else if (event === 'text') {
+                    // First delta means the model is writing: the tool rows
+                    // stop being the thing to watch.
+                    setGenerating(false);
+                    setStreamText((current) => current + String((data as { text?: string }).text ?? ''));
                 } else if (event === 'result') {
                     applyResult(data as Record<string, unknown>);
                 } else if (event === 'error') {
@@ -356,6 +376,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setSending(false);
             setLiveCalls([]);
             setGenerating(false);
+            // Cleared only now: dropping it the moment `result` lands would
+            // blank the answer for the frame between the two state updates.
+            setStreamText('');
         }
     };
 
@@ -387,61 +410,55 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     }
 
     return (
-        <PageContainer>
-            {/* ── Breadcrumb ─────────────────────────────────────────── */}
-            <Group gap={6} mb={4}>
-                <Anchor href={`/dashboard/agents/${agentId}`} size="xs" c="dimmed">{agent.name}</Anchor>
-                <Text size="xs" c="dimmed">/</Text>
-                <Anchor href={`/dashboard/agents/${agentId}?tab=sessions`} size="xs" c="dimmed">Sessions</Anchor>
-                <Text size="xs" c="dimmed">/</Text>
-                <Text size="xs" c="dimmed" ff="monospace">{sessionId}</Text>
-            </Group>
-
-            {/* ── Title + at-a-glance pills ──────────────────────────── */}
-            <Group justify="space-between" align="flex-start" wrap="nowrap" mb="sm">
-                <Box className={classes.titleBlock}>
-                    <Group gap="sm" align="center" wrap="wrap">
-                        <Text fw={700} fz="xl">{sessionTitle || 'Session'}</Text>
-                        <Badge size="sm" variant="light" color={sending ? 'blue' : 'gray'}>
-                            {sending ? 'Running' : 'Idle'}
-                        </Badge>
-                        <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
-                            {agent.name}
-                        </Badge>
-                        <Badge size="sm" variant="light" color={pinnedVersion ? 'teal' : 'gray'}>
-                            {pinnedVersion ? `v${pinnedVersion}` : 'draft'}
-                        </Badge>
-                        {totals.activeMs > 0 ? (
-                            <Tooltip label="Time the agent spent working, summed over turns" withArrow>
-                                <Badge size="sm" variant="transparent" c="dimmed" leftSection={<IconClock size={11} />}>
-                                    {formatDuration(totals.activeMs)}
-                                </Badge>
-                            </Tooltip>
-                        ) : null}
-                        {totals.totalTokens > 0 ? (
-                            <Tooltip
-                                label={`${totals.inputTokens} input · ${totals.outputTokens} output`}
-                                withArrow
-                            >
-                                <Badge size="sm" variant="transparent" c="dimmed">
-                                    {formatCompactTokens(totals.inputTokens)}/{formatCompactTokens(totals.outputTokens)} tokens
-                                </Badge>
-                            </Tooltip>
-                        ) : null}
-                        {totals.costUsd > 0 ? (
-                            <Badge size="sm" variant="transparent" c="dimmed" leftSection={<IconCoin size={11} />}>
-                                {formatCost(totals.costUsd)}
-                            </Badge>
-                        ) : null}
-                        {sessionUpdatedAt ? (
-                            <Text size="xs" c="dimmed">{formatRelativeTime(sessionUpdatedAt)}</Text>
-                        ) : null}
-                    </Group>
-                    {agent.description ? (
-                        <Text size="xs" c="dimmed" mt={2}>{agent.description}</Text>
+        <DetailShell
+            backHref={`/dashboard/agents/${agentId}?tab=sessions`}
+            backLabel="Back to sessions"
+            icon={<IconMessageCircle size={16} />}
+            title={
+                <>
+                    <span className="detail-title">{sessionTitle || 'Session'}</span>
+                    <Badge size="sm" variant="light" color={sending ? 'blue' : 'gray'}>
+                        {sending ? 'Running' : 'Idle'}
+                    </Badge>
+                    <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
+                        {agent.name}
+                    </Badge>
+                    <Badge size="sm" variant="light" color={pinnedVersion ? 'teal' : 'gray'}>
+                        {pinnedVersion ? `v${pinnedVersion}` : 'draft'}
+                    </Badge>
+                </>
+            }
+            meta={
+                <Group gap="sm" wrap="wrap">
+                    <Text size="xs" c="dimmed" ff="monospace">{sessionId}</Text>
+                    {totals.activeMs > 0 ? (
+                        <Tooltip label="Time the agent spent working, summed over turns" withArrow>
+                            <Group gap={3}>
+                                <IconClock size={11} />
+                                <Text size="xs" c="dimmed">{formatDuration(totals.activeMs)}</Text>
+                            </Group>
+                        </Tooltip>
                     ) : null}
-                </Box>
-                <Group gap="xs" wrap="nowrap">
+                    {totals.totalTokens > 0 ? (
+                        <Tooltip label={`${totals.inputTokens} input · ${totals.outputTokens} output`} withArrow>
+                            <Text size="xs" c="dimmed">
+                                {formatCompactTokens(totals.inputTokens)}/{formatCompactTokens(totals.outputTokens)} tokens
+                            </Text>
+                        </Tooltip>
+                    ) : null}
+                    {totals.costUsd > 0 ? (
+                        <Group gap={3}>
+                            <IconCoin size={11} />
+                            <Text size="xs" c="dimmed">{formatCost(totals.costUsd)}</Text>
+                        </Group>
+                    ) : null}
+                    {sessionUpdatedAt ? (
+                        <Text size="xs" c="dimmed">{formatRelativeTime(sessionUpdatedAt)}</Text>
+                    ) : null}
+                </Group>
+            }
+            actions={
+                <>
                     {!isConnected ? (
                         <Select
                             size="xs"
@@ -459,6 +476,21 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             disabled={sending}
                         />
                     ) : null}
+                    {/*
+                      A reopened session lands wherever you left the scroll, and
+                      the composer is a page-height away at the bottom. This is
+                      the "pick this back up" affordance the sessions table
+                      links straight to.
+                    */}
+                    <Button
+                        size="xs"
+                        variant="light"
+                        leftSection={<IconPlayerPlay size={14} />}
+                        onClick={continueSession}
+                        disabled={sending}
+                    >
+                        Continue
+                    </Button>
                     <Button
                         size="xs"
                         variant="light"
@@ -469,9 +501,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     >
                         Delete
                     </Button>
-                </Group>
-            </Group>
-
+                </>
+            }
+        >
             <Group align="stretch" gap="md" wrap="nowrap" className={classes.workspace}>
                 {/* ── Transcript ─────────────────────────────────────── */}
                 <Paper withBorder radius="md" className={classes.transcriptPanel}>
@@ -624,7 +656,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                     {agent.name}
                                                 </Badge>
                                             </Group>
-                                            {liveCalls.length === 0 && !generating ? (
+                                            {liveCalls.length === 0 && !generating && !streamText ? (
                                                 <Group gap="xs">
                                                     <Loader size="xs" />
                                                     <Text size="xs" c="dimmed">The agent is working…</Text>
@@ -632,6 +664,15 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                             ) : (
                                                 <LiveToolCalls calls={liveCalls} generating={generating} />
                                             )}
+                                            {streamText ? (
+                                                <Box className={classes.chatMarkdown} mt="xs">
+                                                    <TypographyStylesProvider className={classes.markdownBody}>
+                                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                            {streamText}
+                                                        </ReactMarkdown>
+                                                    </TypographyStylesProvider>
+                                                </Box>
+                                            ) : null}
                                         </Box>
                                     ) : null}
                                 </Stack>
@@ -640,6 +681,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
                         <Box p="sm" className={classes.composer}>
                             <Textarea
+                                ref={composerRef}
                                 placeholder="Send a message to the agent"
                                 value={input}
                                 onChange={(event) => setInput(event.currentTarget.value)}
@@ -703,7 +745,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     />
                 </Paper>
             </Group>
-        </PageContainer>
+        </DetailShell>
     );
 }
 
@@ -756,19 +798,15 @@ function ReasoningDisclosure({ reasoning, latencyMs }: { reasoning: string; late
 }
 
 /**
- * The tool calls a turn made, in order — open by default.
+ * The tool calls a turn made, in order.
  *
- * It used to collapse behind a "3 tool calls" button. That is the wrong
- * default for a playground: the whole reason to run a turn here rather than
- * in production is to watch what the agent did, and hiding it behind a click
- * made the transcript read like a chat window that happens to log.
- *
- * Long runs stay manageable because each call's payloads are what collapse,
- * not the call itself — you always see the sequence, and open the ones you
- * care about.
+ * Collapsed, because by the time a turn is in the transcript the calls have
+ * already been watched live (LiveToolCalls) and the answer is what the reader
+ * came back for. The summary line keeps them one click away, and a failure
+ * colours it red so a turn that went wrong still announces itself.
  */
 function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
-    const [open, setOpen] = useState(true);
+    const [open, setOpen] = useState(false);
     const failed = steps.filter((step) => step.error).length;
 
     return (

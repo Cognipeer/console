@@ -21,6 +21,7 @@ import {
     Button,
     CopyButton,
     Group,
+    Select,
     Skeleton,
     Stack,
     Table,
@@ -30,19 +31,89 @@ import {
     UnstyledButton,
 } from '@mantine/core';
 import {
+    IconArrowDown,
+    IconArrowUp,
     IconCheck,
     IconChevronDown,
     IconChevronRight,
     IconCopy,
     IconExternalLink,
     IconMessageCircle,
+    IconPlayerPlay,
     IconPlus,
     IconSearch,
+    IconX,
 } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import classes from './SessionList.module.css';
+
+
+type WindowFilter = 'all' | '24h' | '7d' | '30d';
+type ActivityFilter = 'all' | 'used' | 'empty' | 'unpriced';
+type SortColumn = 'title' | 'turns' | 'totalTokens' | 'costUsd' | 'activeMs' | 'updatedAt';
+interface SortState {
+    column: SortColumn;
+    direction: 'asc' | 'desc';
+}
+
+const WINDOW_MS: Record<Exclude<WindowFilter, 'all'>, number> = {
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+    '30d': 30 * 24 * 60 * 60 * 1000,
+};
+
+function windowCutoff(filter: WindowFilter): number | undefined {
+    return filter === 'all' ? undefined : Date.now() - WINDOW_MS[filter];
+}
+
+function filtersApplied(query: string, filter: WindowFilter, activity: ActivityFilter): boolean {
+    return Boolean(query.trim()) || filter !== 'all' || activity !== 'all';
+}
+
+function sortSessions(sessions: SessionListItem[], sort: SortState): SessionListItem[] {
+    const factor = sort.direction === 'asc' ? 1 : -1;
+    return [...sessions].sort((a, b) => {
+        if (sort.column === 'title') {
+            return factor * (a.title ?? 'New session').localeCompare(b.title ?? 'New session');
+        }
+        if (sort.column === 'updatedAt') {
+            const left = Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0;
+            const right = Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0;
+            return factor * (left - right);
+        }
+        return factor * ((a[sort.column] ?? 0) - (b[sort.column] ?? 0));
+    });
+}
+
+function SortHeader({
+    column,
+    sort,
+    onSort,
+    align,
+    children,
+}: {
+    column: SortColumn;
+    sort: SortState;
+    onSort: (column: SortColumn) => void;
+    align?: 'right';
+    children: React.ReactNode;
+}) {
+    const active = sort.column === column;
+    return (
+        <UnstyledButton onClick={() => onSort(column)} className={classes.sortHeader}>
+            <Group gap={2} wrap="nowrap" justify={align === 'right' ? 'flex-end' : 'flex-start'}>
+                <Text size="xs" fw={600} c={active ? undefined : 'dimmed'}>{children}</Text>
+                {active ? (
+                    sort.direction === 'asc'
+                        ? <IconArrowUp size={11} />
+                        : <IconArrowDown size={11} />
+                ) : null}
+            </Group>
+        </UnstyledButton>
+    );
+}
 
 /** A row as the summarising list route sends it — see `summariseConversation`. */
 export interface SessionListItem {
@@ -95,16 +166,47 @@ export default function SessionList({
 }: SessionListProps) {
     const [expanded, setExpanded] = useState<string | null>(null);
     const [query, setQuery] = useState('');
+    // Not named `window`: that shadows the global inside this component,
+    // which is a trap waiting for the first line that needs the real one.
+    const [timeWindow, setTimeWindow] = useState<WindowFilter>('all');
+    const [activity, setActivity] = useState<ActivityFilter>('all');
+    const [sort, setSort] = useState<SortState>({ column: 'updatedAt', direction: 'desc' });
 
     const filtered = useMemo(() => {
         const needle = query.trim().toLowerCase();
-        if (!needle) return sessions;
-        // Id included on purpose: pasting an id from a log or a trace is how
-        // you get to the session that produced it.
-        return sessions.filter((session) =>
-            (session.title ?? '').toLowerCase().includes(needle)
-            || session._id.toLowerCase().includes(needle));
-    }, [sessions, query]);
+        const cutoff = windowCutoff(timeWindow);
+
+        const matching = sessions.filter((session) => {
+            if (needle) {
+                // Id included on purpose: pasting an id from a log or a trace
+                // is how you get to the session that produced it.
+                const hit = (session.title ?? '').toLowerCase().includes(needle)
+                    || session._id.toLowerCase().includes(needle);
+                if (!hit) return false;
+            }
+            if (cutoff !== undefined) {
+                const when = Date.parse(session.updatedAt ?? session.createdAt ?? '');
+                // A row with no timestamp cannot be shown to be inside a
+                // window, so a time filter excludes it rather than quietly
+                // treating "unknown" as "recent".
+                if (!Number.isFinite(when) || when < cutoff) return false;
+            }
+            if (activity === 'used' && (session.turns ?? 0) === 0) return false;
+            if (activity === 'empty' && (session.turns ?? 0) > 0) return false;
+            if (activity === 'unpriced' && session.costComplete !== false) return false;
+            return true;
+        });
+
+        return sortSessions(matching, sort);
+    }, [sessions, query, timeWindow, activity, sort]);
+
+    const toggleSort = (column: SortColumn) => {
+        setSort((current) => current.column === column
+            ? { column, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+            // A newly-picked numeric column starts on its interesting end —
+            // nobody opens a cost column to find the cheapest session.
+            : { column, direction: 'desc' });
+    };
 
     if (loading) {
         return (
@@ -135,15 +237,59 @@ export default function SessionList({
     return (
         <Stack gap="sm">
             {searchable ? (
-                <Group justify="space-between">
-                    <TextInput
-                        size="xs"
-                        placeholder="Search by name or session id"
-                        leftSection={<IconSearch size={13} />}
-                        value={query}
-                        onChange={(event) => setQuery(event.currentTarget.value)}
-                        w={280}
-                    />
+                <Group justify="space-between" gap="xs" wrap="wrap">
+                    <Group gap="xs" wrap="wrap">
+                        <TextInput
+                            size="xs"
+                            placeholder="Search by name or session id"
+                            leftSection={<IconSearch size={13} />}
+                            value={query}
+                            onChange={(event) => setQuery(event.currentTarget.value)}
+                            w={260}
+                        />
+                        <Select
+                            size="xs"
+                            w={140}
+                            data={[
+                                { value: 'all', label: 'Any time' },
+                                { value: '24h', label: 'Last 24 hours' },
+                                { value: '7d', label: 'Last 7 days' },
+                                { value: '30d', label: 'Last 30 days' },
+                            ]}
+                            value={timeWindow}
+                            onChange={(next) => setTimeWindow((next as WindowFilter) ?? 'all')}
+                            allowDeselect={false}
+                            aria-label="Filter by last activity"
+                        />
+                        <Select
+                            size="xs"
+                            w={170}
+                            data={[
+                                { value: 'all', label: 'All sessions' },
+                                { value: 'used', label: 'Has turns' },
+                                // Started and abandoned: these are the rows
+                                // that make a session count look busier than
+                                // the agent actually was.
+                                { value: 'empty', label: 'Never used' },
+                                { value: 'unpriced', label: 'Unpriced turns' },
+                            ]}
+                            value={activity}
+                            onChange={(next) => setActivity((next as ActivityFilter) ?? 'all')}
+                            allowDeselect={false}
+                            aria-label="Filter by activity"
+                        />
+                        {filtersApplied(query, timeWindow, activity) ? (
+                            <Button
+                                size="compact-xs"
+                                variant="subtle"
+                                color="gray"
+                                leftSection={<IconX size={12} />}
+                                onClick={() => { setQuery(''); setTimeWindow('all'); setActivity('all'); }}
+                            >
+                                Clear
+                            </Button>
+                        ) : null}
+                    </Group>
                     <Text size="xs" c="dimmed">
                         {filtered.length === sessions.length
                             ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}`
@@ -152,21 +298,38 @@ export default function SessionList({
                 </Group>
             ) : null}
 
+            {filtered.length === 0 ? (
+                <Text size="sm" c="dimmed" ta="center" py="xl">
+                    No session matches these filters.
+                </Text>
+            ) : (
             <Table highlightOnHover verticalSpacing={6} className={classes.table}>
                 <Table.Thead>
                     <Table.Tr>
                         <Table.Th w={28} />
-                        <Table.Th>Name</Table.Th>
+                        <Table.Th>
+                            <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>
+                        </Table.Th>
                         <Table.Th w={190}>Session ID</Table.Th>
-                        <Table.Th w={70} ta="right">Turns</Table.Th>
-                        <Table.Th w={90} ta="right">Tokens</Table.Th>
-                        <Table.Th w={90} ta="right">Cost</Table.Th>
+                        <Table.Th w={70} ta="right">
+                            <SortHeader column="turns" sort={sort} onSort={toggleSort} align="right">Turns</SortHeader>
+                        </Table.Th>
+                        <Table.Th w={90} ta="right">
+                            <SortHeader column="totalTokens" sort={sort} onSort={toggleSort} align="right">Tokens</SortHeader>
+                        </Table.Th>
+                        <Table.Th w={90} ta="right">
+                            <SortHeader column="costUsd" sort={sort} onSort={toggleSort} align="right">Cost</SortHeader>
+                        </Table.Th>
                         <Table.Th w={90} ta="right">
                             <Tooltip label="Time the agent spent working, summed over turns" withArrow>
-                                <span>Active</span>
+                                <span>
+                                    <SortHeader column="activeMs" sort={sort} onSort={toggleSort} align="right">Active</SortHeader>
+                                </span>
                             </Tooltip>
                         </Table.Th>
-                        <Table.Th w={110}>Last activity</Table.Th>
+                        <Table.Th w={110}>
+                            <SortHeader column="updatedAt" sort={sort} onSort={toggleSort}>Last activity</SortHeader>
+                        </Table.Th>
                         <Table.Th w={40} />
                     </Table.Tr>
                 </Table.Thead>
@@ -239,9 +402,14 @@ export default function SessionList({
                                         </Tooltip>
                                     </Table.Td>
                                     <Table.Td>
-                                        <Tooltip label="Open session" withArrow>
+                                        <Tooltip
+                                            label={(session.turns ?? 0) > 0 ? 'Continue session' : 'Open session'}
+                                            withArrow
+                                        >
                                             <ActionIcon size="sm" variant="subtle" onClick={() => onOpen(session._id)}>
-                                                <IconExternalLink size={14} />
+                                                {(session.turns ?? 0) > 0
+                                                    ? <IconPlayerPlay size={14} />
+                                                    : <IconExternalLink size={14} />}
                                             </ActionIcon>
                                         </Tooltip>
                                     </Table.Td>
@@ -287,6 +455,7 @@ export default function SessionList({
                     })}
                 </Table.Tbody>
             </Table>
+            )}
         </Stack>
     );
 }
