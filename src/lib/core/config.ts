@@ -196,6 +196,10 @@ export interface AppConfig {
   };
 
   app: {
+    /**
+     * Canonical external URL for server-generated links. Resolved from APP_URL
+     * first, with NEXT_PUBLIC_APP_URL retained as a legacy fallback.
+     */
     url: string;
     shutdownTimeoutMs: number;
   };
@@ -360,6 +364,40 @@ function oneOf<T extends string>(
   return fallback;
 }
 
+const DEFAULT_APP_URL = 'http://localhost:3000';
+
+function resolveAppUrl(source: ConfigSource): string {
+  return source.get('APP_URL')?.trim()
+    || source.get('NEXT_PUBLIC_APP_URL')?.trim()
+    || DEFAULT_APP_URL;
+}
+
+function validateProductionAppUrl(value: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return 'must be an absolute http(s) URL';
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'must use the http or https protocol';
+  }
+
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname === '::1'
+    || hostname === '0.0.0.0'
+    || hostname.startsWith('127.')
+  ) {
+    return 'must not point to a loopback address';
+  }
+
+  return null;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Config Builder                                                    */
 /* ------------------------------------------------------------------ */
@@ -500,7 +538,7 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     app: {
-      url: str(source, 'NEXT_PUBLIC_APP_URL', 'http://localhost:3000'),
+      url: resolveAppUrl(source),
       shutdownTimeoutMs: int(source, 'SHUTDOWN_TIMEOUT_MS', 15000),
     },
 
@@ -678,6 +716,15 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
   // Hard-fail if request/response body logging is enabled in production.
   // These flags expose secrets (auth headers, API keys, prompts) to logs.
   if (cfg.nodeEnv === 'production') {
+    const appUrlError = validateProductionAppUrl(cfg.app.url);
+    if (appUrlError) {
+      errors.push({
+        key: 'APP_URL',
+        message:
+          `APP_URL ${appUrlError} in production. Set APP_URL (preferred) or `
+          + 'NEXT_PUBLIC_APP_URL (legacy) to the public Console origin.',
+      });
+    }
     if (cfg.logging.logRequestBody) {
       errors.push({
         key: 'LOG_REQUEST_BODY',
