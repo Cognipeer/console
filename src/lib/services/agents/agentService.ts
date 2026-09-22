@@ -102,6 +102,7 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
+import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
@@ -1581,7 +1582,11 @@ async function buildSubagentModel(
             modelSettings: resolveModelInvocationConfig(model, {}),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        return withAssembledStream(fromLangchainModel(lcModel));
+        return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+            tenantDbName,
+            model,
+            route: 'agent.subagent',
+        });
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
             modelKey,
@@ -3002,7 +3007,14 @@ export async function executeAgentChatLocal(
     // 7. Create agent-sdk instance and invoke
     // Wrapped so a streamed turn keeps its tool calls and usage — see
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
-    const sdkModel = withAssembledStream(fromLangchainModel(lcModel));
+    // Usage-tapped: agent calls bypass the gateway, so without this they
+    // never reached Model Hub or the bill — see modelUsageTap.ts.
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        tenantDbName,
+        model,
+        route: 'agent.chat',
+        agentKey,
+    });
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
     const chatSubagents = await buildAgentSubagents({
@@ -3580,7 +3592,14 @@ export async function executePlaygroundChatLocal(
     // Create agent-sdk instance and invoke (tracing enabled)
     // Wrapped so a streamed turn keeps its tool calls and usage — see
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
-    const sdkModel = withAssembledStream(fromLangchainModel(lcModel));
+    // Usage-tapped: agent calls bypass the gateway, so without this they
+    // never reached Model Hub or the bill — see modelUsageTap.ts.
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        tenantDbName,
+        model,
+        route: 'agent.playground',
+        agentKey,
+    });
     const tracingSink = await createInternalTracingSink(
         tenantDbName,
         tenantId,
