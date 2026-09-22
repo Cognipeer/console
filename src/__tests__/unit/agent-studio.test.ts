@@ -399,6 +399,16 @@ describe('prompt variables', () => {
         expect(shouldRenderInlinePrompt({ systemPrompt: 'Braces {{like this}} stay literal' })).toBe(false);
         expect(shouldRenderInlinePrompt({ promptVariables: { x: '1' } })).toBe(true);
     });
+
+    it('renders an inline prompt that references a built-in, with nothing declared', () => {
+        // The declare-variables screen is gone, so this is the only trigger a
+        // prompt like "Şu anda saat {{now}}" has — without it the braces
+        // reached the model literally.
+        expect(shouldRenderInlinePrompt({}, 'Şu anda saat {{now}}')).toBe(true);
+        expect(shouldRenderInlinePrompt({}, 'You are {{agent}}.')).toBe(true);
+        // A non-built-in placeholder alone still stays literal.
+        expect(shouldRenderInlinePrompt({}, 'Braces {{like this}} stay literal')).toBe(false);
+    });
 });
 
 describe('agent schedules', () => {

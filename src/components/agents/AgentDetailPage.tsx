@@ -19,7 +19,6 @@ import {
   CopyButton,
   Tooltip,
   Box,
-  NumberInput,
   Pagination,
   Modal,
   Table,
@@ -391,9 +390,7 @@ export default function AgentDetailPage() {
       promptMode: 'custom' as 'custom' | 'prompt',
       systemPrompt: '',
       promptKey: '',
-      temperature: 0.7,
       topP: 1,
-      maxTokens: 4096,
       knowledgeEngineKey: '',
       inputGuardrailKey: '',
       outputGuardrailKey: '',
@@ -435,9 +432,7 @@ export default function AgentDetailPage() {
           promptMode: cfg.promptKey ? 'prompt' : 'custom',
           systemPrompt: cfg.systemPrompt || '',
           promptKey: cfg.promptKey || '',
-          temperature: cfg.temperature ?? 0.7,
           topP: cfg.topP ?? 1,
-          maxTokens: cfg.maxTokens ?? 4096,
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
           inputGuardrailKey: cfg.inputGuardrailKey || '',
           outputGuardrailKey: cfg.outputGuardrailKey || '',
@@ -772,9 +767,13 @@ export default function AgentDetailPage() {
     const values = configForm.values;
     const nextConfig: Record<string, unknown> = {
       modelKey: values.modelKey,
-      temperature: values.temperature,
+      // No temperature / maxTokens. The form used to send 0.7 and 4096 on
+      // every save, so every agent was silently capped at 4096 output tokens
+      // and pinned to a temperature — settings nobody chose and, once the
+      // fields were removed, nobody could see. Leaving them out lets the
+      // model record's own settings govern; the next save clears any value
+      // an older save wrote.
       topP: values.topP,
-      maxTokens: values.maxTokens,
       knowledgeEngineKey: values.knowledgeEngineKey || undefined,
       toolBindings: bindings.length > 0 ? bindings : undefined,
     };
@@ -1095,23 +1094,6 @@ export default function AgentDetailPage() {
           <Stack gap="md">
             <div>
               <Text size="sm" mb={4}>
-                {t('config.temperature')}: {configForm.values.temperature}
-              </Text>
-              <Slider
-                min={0}
-                max={2}
-                step={0.1}
-                marks={[
-                  { value: 0, label: '0' },
-                  { value: 1, label: '1' },
-                  { value: 2, label: '2' },
-                ]}
-                {...configForm.getInputProps('temperature')}
-              />
-            </div>
-
-            <div>
-              <Text size="sm" mb={4}>
                 {t('config.topP')}: {configForm.values.topP}
               </Text>
               <Slider
@@ -1126,13 +1108,6 @@ export default function AgentDetailPage() {
                 {...configForm.getInputProps('topP')}
               />
             </div>
-
-            <NumberInput
-              label={t('config.maxTokens')}
-              min={1}
-              max={128000}
-              {...configForm.getInputProps('maxTokens')}
-            />
           </Stack>
         </ConfigBlock>
       </Stack>
@@ -1206,13 +1181,8 @@ export default function AgentDetailPage() {
           <AgentOverviewPanel
             agent={agent}
             isConnected={isConnected}
-            toolCount={toolBindings.length}
-            subagentCount={subagents.length}
-            hasKnowledgeEngine={Boolean(agent.config?.knowledgeEngineKey)}
-            sessions={sessions}
-            sessionsLoading={sessionsLoading}
+            sessionCount={sessions.length}
             onStartSession={() => setStartSessionOpen(true)}
-            onOpenSession={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
             // Overview links by the OLD flat names on purpose — it should not
             // have to know how the tabs are grouped, so the alias table that
             // already exists for deep links resolves the rail for it too.

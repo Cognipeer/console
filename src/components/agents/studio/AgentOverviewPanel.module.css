@@ -1,0 +1,49 @@
+.clickable {
+  cursor: pointer;
+}
+
+.clickable:hover {
+  border-color: var(--mantine-color-gray-4);
+}
+
+/* Aligned digits, so tiles and tool counts scan as columns. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.bars {
+  height: 6rem;
+}
+
+.bar {
+  flex: 1;
+  min-width: 3px;
+  border-radius: 2px 2px 0 0;
+  background: var(--mantine-color-blue-4);
+}
+
+.bar[data-empty] {
+  background: var(--mantine-color-gray-2);
+}
+
+.snippet {
+  position: relative;
+}
+
+.snippetCode {
+  font-size: 11px;
+  padding-right: 2rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+
+.dim {
+  color: var(--mantine-color-dimmed);
+  flex-shrink: 0;
+}

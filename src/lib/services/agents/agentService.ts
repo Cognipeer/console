@@ -101,6 +101,7 @@ import {
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
+import { withAssembledStream } from './assembledStream';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
@@ -1580,7 +1581,7 @@ async function buildSubagentModel(
             modelSettings: resolveModelInvocationConfig(model, {}),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        return fromLangchainModel(lcModel);
+        return withAssembledStream(fromLangchainModel(lcModel));
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
             modelKey,
@@ -2875,7 +2876,7 @@ export async function executeAgentChatLocal(
             systemPrompt = rendered.text;
             reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
         }
-    } else if (systemPrompt && shouldRenderInlinePrompt(config)) {
+    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
         const rendered = renderPromptTemplate(systemPrompt, promptVariables);
         systemPrompt = rendered.text;
         reportPromptVariables(rendered, { agentKey });
@@ -2999,7 +3000,9 @@ export async function executeAgentChatLocal(
     }));
 
     // 7. Create agent-sdk instance and invoke
-    const sdkModel = fromLangchainModel(lcModel);
+    // Wrapped so a streamed turn keeps its tool calls and usage — see
+    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
+    const sdkModel = withAssembledStream(fromLangchainModel(lcModel));
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
     const chatSubagents = await buildAgentSubagents({
@@ -3459,7 +3462,7 @@ export async function executePlaygroundChatLocal(
             systemPrompt = rendered.text;
             reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
         }
-    } else if (systemPrompt && shouldRenderInlinePrompt(config)) {
+    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
         const rendered = renderPromptTemplate(systemPrompt, promptVariables);
         systemPrompt = rendered.text;
         reportPromptVariables(rendered, { agentKey });
@@ -3575,7 +3578,9 @@ export async function executePlaygroundChatLocal(
     ];
 
     // Create agent-sdk instance and invoke (tracing enabled)
-    const sdkModel = fromLangchainModel(lcModel);
+    // Wrapped so a streamed turn keeps its tool calls and usage — see
+    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
+    const sdkModel = withAssembledStream(fromLangchainModel(lcModel));
     const tracingSink = await createInternalTracingSink(
         tenantDbName,
         tenantId,

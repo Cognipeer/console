@@ -139,10 +139,21 @@ export function renderPromptTemplate(
  * True when an inline system prompt should go through Mustache at all.
  *
  * Inline prompts were never rendered, so turning rendering on unconditionally
- * would silently eat a literal `{{` in someone's existing prompt. Rendering is
- * therefore opt-in: it happens only once the agent actually declares prompt
- * variables, which is an explicit act in the settings UI.
+ * would silently eat a literal `{{` in someone's existing prompt. It is
+ * triggered by either of two explicit signals:
+ *
+ *  - the agent declares prompt variables, or
+ *  - the template references a BUILT-IN (`{{now}}`, `{{agent}}`, `{{user}}`).
+ *
+ * The second is not optional. Declaring variables was a settings-screen act,
+ * and that screen was removed in favour of managing the prompt directly — so
+ * with only the first trigger, `Şu anda saat {{now}}` reached the model
+ * literally, braces and all. Nobody writes `{{now}}` into a prompt meaning
+ * the two braces.
  */
-export function shouldRenderInlinePrompt(config: IAgentConfig): boolean {
-    return Object.keys(config.promptVariables ?? {}).length > 0;
+export function shouldRenderInlinePrompt(config: IAgentConfig, template?: string): boolean {
+    if (Object.keys(config.promptVariables ?? {}).length > 0) return true;
+    if (!template) return false;
+    const referenced = collectTemplateVariables(template);
+    return referenced.some((name) => (BUILT_IN_PROMPT_VARIABLES as readonly string[]).includes(name));
 }
