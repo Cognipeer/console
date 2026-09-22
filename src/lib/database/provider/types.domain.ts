@@ -2362,19 +2362,46 @@ export interface IAgentVersion {
   createdAt?: Date;
 }
 
+/**
+ * One tool call as a debug session shows it — see `IAgentConversationMessage`.
+ * Kept minimal on purpose: full tool payloads live in tracing, not here.
+ */
+export interface IAgentConversationStep {
+  id?: string;
+  name: string;
+  args?: unknown;
+  output?: unknown;
+  error?: string;
+  subagent?: string;
+}
+
+export interface IAgentConversationMessage {
+  role: string;
+  content: string;
+  /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
+  reasoning?: string;
+  timestamp: Date;
+  /**
+   * Debug detail for an assistant turn produced by a Session (not the live
+   * `/v1/responses` path, which deliberately returns content only — see
+   * `agentService.ts`'s `AgentPlaygroundChatResult`). Persisted so reopening a
+   * session shows what happened, not just what was said.
+   */
+  steps?: IAgentConversationStep[];
+  output?: unknown;
+  outputError?: string;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  /** Which agent config produced this turn: a version number, or null for the draft. */
+  version?: number | null;
+}
+
 export interface IAgentConversation {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
   agentKey: string;
   title?: string;
-  messages: Array<{
-    role: string;
-    content: string;
-    /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
-    reasoning?: string;
-    timestamp: Date;
-  }>;
+  messages: IAgentConversationMessage[];
   metadata?: Record<string, unknown>;
   createdBy: string;
   createdAt?: Date;

@@ -1,22 +1,17 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Paper,
   Text,
   Group,
   Stack,
   Button,
-  TextInput,
   Textarea,
   Select,
   Slider,
   ActionIcon,
-  Loader,
-  Center,
-  ScrollArea,
-  ThemeIcon,
   Tabs,
   Divider,
   Badge,
@@ -39,17 +34,13 @@ import { useForm } from '@mantine/form';
 import { DatePickerInput } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
 import {
-  IconRobot,
-  IconSend,
   IconMessageCircle,
   IconTimeline,
   IconCode,
   IconCopy,
   IconCheck,
-  IconTrash,
   IconCalendar,
   IconRefresh,
-  IconBrain,
   IconChevronDown,
   IconChevronRight,
   IconSettings,
@@ -66,6 +57,9 @@ import {
   IconUsers,
   IconPackageExport,
   IconCalendarTime,
+  IconFileText,
+  IconLayoutDashboard,
+  IconPlus,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -77,18 +71,17 @@ import GuardrailBindingList, {
 import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SectionCard from '@/components/common/SectionCard';
 import SessionTable from '@/components/tracing/SessionTable';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import AgentAdvancedSettings, { countAdvancedOverrides } from './studio/AgentAdvancedSettings';
 import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
 import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
 import AgentExportPanel from './studio/AgentExportPanel';
-import PromptVariablesEditor from './studio/PromptVariablesEditor';
+import AgentPromptPanel from './studio/AgentPromptPanel';
+import AgentOverviewPanel from './studio/AgentOverviewPanel';
+import SessionList from './studio/SessionList';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import type {
   IAgentRuntimeConfig,
@@ -165,30 +158,13 @@ interface AgentVersion {
   createdAt: string;
 }
 
-interface PlaygroundStep {
-  id?: string;
-  name: string;
-  args?: unknown;
-  output?: unknown;
-  error?: string;
-  subagent?: string;
-}
-
-interface ChatMessage {
-  role: string;
-  content: string;
-  /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
-  reasoning?: string;
-  /** Tool calls the run made, in order. Assistant turns only. */
-  steps?: PlaygroundStep[];
-  /** Parsed structured output, when the agent declares an output schema. */
-  output?: unknown;
-  outputError?: string;
-  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
-  /** Which config produced this turn: a version number, or null for the draft. */
-  version?: number | null;
-  /** Wall-clock time the request took, measured client-side. */
-  latencyMs?: number;
+/** A row in the Sessions list / Overview's "recent sessions" — see AgentSessionView for the full record. */
+interface SessionSummary {
+  _id: string;
+  title?: string;
+  messages: Array<{ role: string }>;
+  updatedAt?: string;
+  createdAt?: string;
 }
 
 interface Model {
@@ -203,6 +179,7 @@ interface Prompt {
   _id: string;
   key: string;
   name: string;
+  description?: string;
   template: string;
 }
 
@@ -272,6 +249,7 @@ function seedGuardrailsFromLegacySlots(
 export default function AgentDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const agentId = params.agentId as string;
   const t = useTranslations('agents');
 
@@ -283,10 +261,12 @@ export default function AgentDetailPage() {
   const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string }>>([]);
   const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<string | null>('playground');
+  // Overview is the landing tab — it's the one screen that answers "is this
+  // agent healthy and what has it been doing", which is a better first thing
+  // to see than a blank chat box. A deep link (Sessions' "back to agent",
+  // a bookmark) can still land on any tab via `?tab=`.
+  const [activeTab, setActiveTab] = useState<string | null>(() => searchParams.get('tab') || 'overview');
   const [settingsTab, setSettingsTab] = useState<string | null>('basic');
-  /** '' = the draft. Otherwise a published version number, as a string. */
-  const [playgroundVersion, setPlaygroundVersion] = useState<string>('');
 
   // Collapsible section state
   const [knowledgeEngineOpen, setKnowledgeEngineOpen] = useState(false);
@@ -305,7 +285,6 @@ export default function AgentDetailPage() {
   const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
   const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
   const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
-  const [promptVariables, setPromptVariables] = useState<Record<string, string> | undefined>(undefined);
   /** Other agents in the project — the `ref` sub-agent picker's options. */
   const [projectAgents, setProjectAgents] = useState<Array<{ key: string; name: string; publishedVersion?: number | null }>>([]);
 
@@ -340,12 +319,11 @@ export default function AgentDetailPage() {
   const [compareVersionB, setCompareVersionB] = useState<string | null>(null);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
 
-  // Chat state (in-memory only — no DB conversations)
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [runtimeContextJson, setRuntimeContextJson] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
-  const chatViewportRef = useRef<HTMLDivElement>(null);
+  // Sessions list (for the Sessions tab — the actual chat now lives at its
+  // own route, see AgentSessionView).
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [startingSession, setStartingSession] = useState(false);
 
   // Config form
   const configForm = useForm({
@@ -376,19 +354,6 @@ export default function AgentDetailPage() {
   /** Badge on the Settings tab: how far this agent strays from the defaults. */
   const advancedOverrideCount = useMemo(() => countAdvancedOverrides(runtimeConfig), [runtimeConfig]);
 
-  /**
-   * The prompt text the agent will actually run, whichever source it comes
-   * from. The variables editor reads it to report which placeholders nobody
-   * filled — the check has to see the same string the server renders.
-   */
-  const resolvedPromptTemplate = useMemo(() => {
-    const values = configForm.getValues();
-    if (values.promptMode === 'prompt') {
-      return prompts.find((prompt) => prompt.key === values.promptKey)?.template ?? '';
-    }
-    return values.systemPrompt ?? '';
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configForm.values.promptMode, configForm.values.promptKey, configForm.values.systemPrompt, prompts]);
 
   const tracingPagination = useMemo(() => {
     const totalPages = Math.max(1, Math.ceil(tracingTotal / tracingPageSize));
@@ -423,7 +388,6 @@ export default function AgentDetailPage() {
         setStructuredOutput(cfg.structuredOutput);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
-        setPromptVariables(cfg.promptVariables);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -586,6 +550,50 @@ export default function AgentDetailPage() {
     }
   }, [agent, agentId]);
 
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/sessions`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to load sessions', err);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [agentId]);
+
+  /**
+   * Creates a session and navigates straight to it — the chat itself lives at
+   * its own route now (AgentSessionView), not on this page.
+   *
+   * The config save-before-chat the old inline playground did is gone too: a
+   * Session always runs a real config (the draft, or a version pinned on the
+   * session page itself), so there is nothing here that needs saving first.
+   */
+  const startNewSession = async () => {
+    setStartingSession(true);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error('Failed to start session');
+      const data = await res.json();
+      router.push(`/dashboard/agents/${agentId}/sessions/${data.session._id}`);
+    } catch (err) {
+      notifications.show({
+        title: t('notifications.error'),
+        message: err instanceof Error ? err.message : 'Failed to start session',
+        color: 'red',
+      });
+      setStartingSession(false);
+    }
+  };
+
   const handlePublish = async () => {
     setPublishing(true);
     try {
@@ -650,19 +658,16 @@ export default function AgentDetailPage() {
   useEffect(() => {
     // Export needs the version list too: it offers "export v3" as a source, and
     // a version the operator cannot pick is a version they will assume is gone.
-    // Playground needs them for its "run this version instead" selector,
-    // Export for its source picker.
-    if ((activeTab === 'versions' || activeTab === 'export' || activeTab === 'playground') && agent) {
+    if ((activeTab === 'versions' || activeTab === 'export') && agent) {
       loadVersions();
     }
   }, [activeTab, agent, loadVersions]);
 
-  // ── Chat Actions (in-memory, no DB) ──────────────────────────
-
-  const clearChat = () => {
-    setChatMessages([]);
-    setChatInput('');
-  };
+  useEffect(() => {
+    if ((activeTab === 'sessions' || activeTab === 'overview') && agent) {
+      void loadSessions();
+    }
+  }, [activeTab, agent, loadSessions]);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
@@ -687,7 +692,11 @@ export default function AgentDetailPage() {
     nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
     nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
     nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
-    nextConfig.promptVariables = promptVariables && Object.keys(promptVariables).length > 0 ? promptVariables : undefined;
+    // No editor writes this from here anymore (see the Prompt tab) — pass
+    // through whatever is already stored so a save from THIS page can never
+    // silently wipe a value an import or the API set, since `config` replaces
+    // the stored object wholesale rather than merging.
+    nextConfig.promptVariables = agent?.config?.promptVariables;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -787,97 +796,6 @@ export default function AgentDetailPage() {
       });
     }
   };
-
-  const sendMessage = async () => {
-    if (!chatInput.trim() || chatLoading) return;
-
-    const message = chatInput.trim();
-    const startedAt = Date.now();
-    setChatLoading(true);
-
-    // Connected agents have no editable config; never auto-save (it would
-    // overwrite the stored connection with an empty native config).
-    // Running a published version tests a frozen snapshot; saving the draft
-    // first would be both pointless and surprising.
-    if (agent?.config?.kind !== 'external' && !playgroundVersion) {
-      const saved = await saveAgentConfig({ notify: false });
-      if (!saved) {
-        notifications.show({
-          title: t('notifications.error'),
-          message: 'Failed to save current agent configuration before chat.',
-          color: 'red',
-        });
-        setChatLoading(false);
-        return;
-      }
-    }
-
-    setChatInput('');
-
-    // Optimistic update: add user message
-    const updatedMessages: ChatMessage[] = [
-      ...chatMessages,
-      { role: 'user', content: message },
-    ];
-    setChatMessages(updatedMessages);
-
-    try {
-      const res = await fetch(`/api/agents/${agentId}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message,
-          // Only the conversational fields: the steps/usage we attach to a turn
-          // are display state, and echoing a tool transcript back as history
-          // would both bloat the request and re-teach the model its own output.
-          history: chatMessages.map(({ role, content }) => ({ role, content })),
-          runtime_context: parseRuntimeContextJson(runtimeContextJson),
-          ...(playgroundVersion ? { version: Number(playgroundVersion) } : {}),
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Chat failed');
-      }
-
-      const data = await res.json();
-      setChatMessages([
-        ...updatedMessages,
-        {
-          role: 'assistant',
-          content: data.content,
-          ...(typeof data.reasoning === 'string' && data.reasoning
-            ? { reasoning: data.reasoning }
-            : {}),
-          ...(Array.isArray(data.steps) && data.steps.length > 0 ? { steps: data.steps } : {}),
-          ...(data.output !== undefined ? { output: data.output } : {}),
-          ...(data.outputError ? { outputError: String(data.outputError) } : {}),
-          ...(data.usage ? { usage: data.usage } : {}),
-          version: data.version ?? null,
-          latencyMs: Date.now() - startedAt,
-        },
-      ]);
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Unknown error';
-      notifications.show({
-        title: t('notifications.error'),
-        message: errMsg,
-        color: 'red',
-      });
-      // Revert optimistic update
-      setChatMessages(chatMessages);
-    } finally {
-      setChatLoading(false);
-    }
-  };
-
-  // Auto-scroll chat
-  useEffect(() => {
-    if (chatViewportRef.current) {
-      chatViewportRef.current.scrollTop = chatViewportRef.current.scrollHeight;
-    }
-  }, [chatMessages]);
 
   // ── Config Save ──────────────────────────────────────────────
 
@@ -983,38 +901,11 @@ export default function AgentDetailPage() {
             {...configForm.getInputProps('modelKey')}
           />
 
-          <Divider label={t('config.promptSection')} labelPosition="center" />
-
-          <Select
-            label={t('config.promptMode')}
-            data={[
-              { value: 'custom', label: t('config.customPrompt') },
-              { value: 'prompt', label: t('config.selectPrompt') },
-            ]}
-            {...configForm.getInputProps('promptMode')}
-          />
-
-          {configForm.values.promptMode === 'custom' ? (
-            <Textarea
-              label={t('config.systemPrompt')}
-              placeholder={t('config.systemPromptPlaceholder')}
-              minRows={4}
-              maxRows={12}
-              autosize
-              {...configForm.getInputProps('systemPrompt')}
-            />
-          ) : (
-            <Select
-              label={t('config.prompt')}
-              placeholder={t('config.promptPlaceholder')}
-              data={prompts.map((p) => ({
-                value: p.key,
-                label: p.name,
-              }))}
-              searchable
-              {...configForm.getInputProps('promptKey')}
-            />
-          )}
+          {/* Prompt configuration (mode / template / managed prompt) moved to
+              its own "Prompt" tab — see AgentPromptPanel. Editing the prompt
+              is common and deep enough (switching modes, editing the managed
+              Prompt record's template inline) to earn its own screen instead
+              of sharing this one with the model picker. */}
 
           {/* ── Knowledge Engine (collapsible) ───────── */}
           <Divider />
@@ -1239,8 +1130,12 @@ export default function AgentDetailPage() {
 
       <Tabs value={activeTab} onChange={setActiveTab}>
         <Tabs.List mb="md">
-          <Tabs.Tab value="playground" leftSection={<IconMessageCircle size={14} />}>
-            {t('tabs.playground')}
+          <Tabs.Tab value="overview" leftSection={<IconLayoutDashboard size={14} />}>
+            Overview
+          </Tabs.Tab>
+          <Tabs.Tab value="sessions" leftSection={<IconMessageCircle size={14} />}>
+            Sessions
+            {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
           </Tabs.Tab>
           <Tabs.Tab value="settings" leftSection={<IconSettings size={14} />}>
             Settings
@@ -1248,6 +1143,11 @@ export default function AgentDetailPage() {
               <Badge size="xs" variant="light" ml={6}>{advancedOverrideCount}</Badge>
             ) : null}
           </Tabs.Tab>
+          {!isConnected ? (
+            <Tabs.Tab value="prompt" leftSection={<IconFileText size={14} />}>
+              Prompt
+            </Tabs.Tab>
+          ) : null}
           {!isConnected ? (
             <Tabs.Tab value="subagents" leftSection={<IconUsers size={14} />}>
               Sub-agents
@@ -1295,25 +1195,7 @@ export default function AgentDetailPage() {
             </Tabs.List>
 
             <Tabs.Panel value="basic">
-              <div className={classes.settingsPane}>
-                {renderBasicSettings()}
-                {!isConnected ? (
-                  <SectionCard
-                    title="Prompt variables"
-                    description="Fill the placeholders this agent's prompt declares."
-                    mt="md"
-                  >
-                    <PromptVariablesEditor
-                      value={promptVariables}
-                      onChange={setPromptVariables}
-                      template={resolvedPromptTemplate}
-                    />
-                    <Group justify="flex-end" mt="md">
-                      <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-                    </Group>
-                  </SectionCard>
-                ) : null}
-              </div>
+              <div className={classes.settingsPane}>{renderBasicSettings()}</div>
             </Tabs.Panel>
 
             <Tabs.Panel value="advanced">
@@ -1344,6 +1226,26 @@ export default function AgentDetailPage() {
               </SectionCard>
             </Tabs.Panel>
           </Tabs>
+        </Tabs.Panel>
+
+        {/* ── Prompt Tab ──────────────────────────────────────── */}
+        <Tabs.Panel value="prompt">
+          <SectionCard
+            title="Prompt"
+            description="Inline text, or a prompt from the Prompts module — editable right here."
+          >
+            <AgentPromptPanel
+              mode={configForm.values.promptMode}
+              onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
+              systemPrompt={configForm.values.systemPrompt}
+              onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
+              promptKey={configForm.values.promptKey}
+              onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
+              prompts={prompts}
+              onPromptsChanged={(next) => setPrompts(next)}
+              onSaveAgentConfig={handleSaveConfig}
+            />
+          </SectionCard>
         </Tabs.Panel>
 
         {/* ── Sub-agents Tab ──────────────────────────────────── */}
@@ -1390,225 +1292,47 @@ export default function AgentDetailPage() {
           />
         </Tabs.Panel>
 
-        {/* ── Playground Tab ──────────────────────────────────── */}
-        {/*
-          Full width now. The configuration pane that used to sit in the left
-          column moved to Settings → Basic: the two were competing for the same
-          row, and the pane is about to grow (advanced runtime, sub-agents,
-          structured output) far past what a sidebar can hold.
-        */}
-        <Tabs.Panel value="playground">
-          <div className={classes.playgroundFull}>
+        {/* ── Overview Tab ────────────────────────────────────── */}
+        <Tabs.Panel value="overview">
+          <AgentOverviewPanel
+            agent={agent}
+            isConnected={isConnected}
+            toolCount={toolBindings.length}
+            subagentCount={subagents.length}
+            hasKnowledgeEngine={Boolean(agent.config?.knowledgeEngineKey)}
+            sessions={sessions}
+            sessionsLoading={sessionsLoading}
+            startingSession={startingSession}
+            onStartSession={() => void startNewSession()}
+            onOpenSession={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+            onGoToTab={(tab) => setActiveTab(tab)}
+          />
+        </Tabs.Panel>
 
-            {/* Chat Area */}
-            <Paper
-              withBorder
-              radius="md"
-              className={classes.chatPanel}
-            >
-              {/* Chat Header */}
-              <Group
-                p="sm"
-                justify="space-between"
-                className={classes.panelHeader}
+        {/* ── Sessions Tab ────────────────────────────────────── */}
+        <Tabs.Panel value="sessions">
+          <SectionCard
+            title="Sessions"
+            description="Each session is its own persisted conversation — history, tool calls and token usage all reload with it."
+          >
+            <Group justify="flex-end" mb="md">
+              <Button
+                size="sm"
+                leftSection={<IconPlus size={14} />}
+                loading={startingSession}
+                onClick={() => void startNewSession()}
               >
-                <Group gap="xs">
-                  <Text size="sm" fw={600}>
-                    {t('chat.title')}
-                  </Text>
-                  {chatMessages.length > 0 && (
-                    <Badge size="xs" variant="light" color="gray">
-                      {chatMessages.length} {t('chat.messages')}
-                    </Badge>
-                  )}
-                </Group>
-                <Group gap="xs">
-                  {!isConnected ? (
-                    <Select
-                      size="xs"
-                      w={190}
-                      data={[
-                        { value: '', label: 'Draft (unsaved config)' },
-                        ...versions.map((version) => ({
-                          value: String(version.version),
-                          label: `v${version.version}${version.version === agent.publishedVersion ? ' · published' : ''}`,
-                        })),
-                      ]}
-                      value={playgroundVersion}
-                      onChange={(next) => setPlaygroundVersion(next ?? '')}
-                      allowDeselect={false}
-                      // Switching mid-thread would attribute earlier turns to the
-                      // wrong config; each turn carries the version that produced it.
-                      disabled={chatLoading}
-                    />
-                  ) : null}
-                  <Button
-                    size="xs"
-                    variant="light"
-                    leftSection={<IconTrash size={14} />}
-                    onClick={clearChat}
-                    disabled={chatMessages.length === 0 && !chatLoading}
-                  >
-                    {t('chat.newChat')}
-                  </Button>
-                </Group>
-              </Group>
-
-              {/* Chat Messages */}
-              <div className={classes.panelBody}>
-                {chatMessages.length === 0 && !chatLoading ? (
-                  <Center className={classes.chatEmpty}>
-                    <Stack align="center" gap="sm">
-                      <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-                        <IconRobot size={24} />
-                      </ThemeIcon>
-                      <Text fw={600}>{agent.name}</Text>
-                      <Text size="sm" c="dimmed" ta="center" maw={300}>
-                        {agent.description || t('chat.startDescription')}
-                      </Text>
-                    </Stack>
-                  </Center>
-                ) : (
-                  <>
-                    <ScrollArea
-                      className={classes.chatScroll}
-                      viewportRef={chatViewportRef}
-                      p="md"
-                    >
-                      <Stack gap="md">
-                        {chatMessages.map((msg, i) => (
-                          <Group
-                            key={i}
-                            justify={msg.role === 'user' ? 'flex-end' : 'flex-start'}
-                            align="flex-start"
-                          >
-                            <Paper
-                              p="sm"
-                              radius="md"
-                              withBorder={msg.role === 'assistant'}
-                              className={`${classes.chatBubble} ${msg.role === 'user' ? classes.chatBubbleUser : ''}`}
-                            >
-                              {msg.role === 'assistant' ? (
-                                <Box className={classes.chatMarkdown}>
-                                  {msg.reasoning ? (
-                                    <ReasoningDisclosure reasoning={msg.reasoning} />
-                                  ) : null}
-                                  {msg.steps?.length ? <StepTimeline steps={msg.steps} /> : null}
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                    {msg.content}
-                                  </ReactMarkdown>
-                                  {msg.output !== undefined ? (
-                                    <StructuredOutputBlock output={msg.output} />
-                                  ) : null}
-                                  {msg.outputError ? (
-                                    <Alert
-                                      variant="light"
-                                      color="red"
-                                      icon={<IconAlertTriangle size={14} />}
-                                      mt="xs"
-                                      p="xs"
-                                    >
-                                      <Text size="xs">
-                                        The answer did not match the output schema: {msg.outputError}
-                                      </Text>
-                                    </Alert>
-                                  ) : null}
-                                  <TurnFooter message={msg} />
-                                </Box>
-                              ) : (
-                                <Text size="sm" className={classes.preWrap}>
-                                  {msg.content}
-                                </Text>
-                              )}
-                            </Paper>
-                          </Group>
-                        ))}
-                        {chatLoading && (
-                          <Group justify="flex-start">
-                            <Paper p="sm" radius="md" withBorder>
-                              <Loader size="xs" />
-                            </Paper>
-                          </Group>
-                        )}
-                      </Stack>
-                    </ScrollArea>
-
-                    {/* Input */}
-                    <Group
-                      p="sm"
-                      gap="sm"
-                      className={classes.chatInputRow}
-                    >
-                      <TextInput
-                        placeholder={t('chat.inputPlaceholder')}
-                        value={chatInput}
-                        onChange={(e) => setChatInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            sendMessage();
-                          }
-                        }}
-                        className={classes.flexGrow}
-                        disabled={chatLoading}
-                        rightSection={
-                          <ActionIcon
-                            size="sm"
-                            variant="filled"
-                            onClick={sendMessage}
-                            disabled={!chatInput.trim() || chatLoading}
-                          >
-                            <IconSend size={14} />
-                          </ActionIcon>
-                        }
-                      />
-                    </Group>
-                  </>
-                )}
-
-                {/* Always-visible input when no messages */}
-                {chatMessages.length === 0 && !chatLoading && (
-                  <Group
-                    p="sm"
-                    gap="sm"
-                    className={classes.chatInputRow}
-                  >
-                    <TextInput
-                      placeholder={t('chat.inputPlaceholder')}
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          sendMessage();
-                        }
-                      }}
-                      className={classes.flexGrow}
-                      disabled={chatLoading}
-                      rightSection={
-                        <ActionIcon
-                          size="sm"
-                          variant="filled"
-                          onClick={sendMessage}
-                          disabled={!chatInput.trim() || chatLoading}
-                        >
-                          <IconSend size={14} />
-                        </ActionIcon>
-                      }
-                    />
-                  </Group>
-                )}
-
-                {/* Runtime context sent with every playground turn */}
-                <Box px="sm" pb="sm">
-                  <RuntimeContextEditor
-                    value={runtimeContextJson}
-                    onChange={setRuntimeContextJson}
-                  />
-                </Box>
-              </div>
-            </Paper>
-          </div>
+                Start new session
+              </Button>
+            </Group>
+            <SessionList
+              sessions={sessions}
+              loading={sessionsLoading}
+              onOpen={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+              onStart={() => void startNewSession()}
+              starting={startingSession}
+            />
+          </SectionCard>
         </Tabs.Panel>
 
         {/* ── Traces Tab ─────────────────────────────────────── */}
@@ -2297,156 +2021,6 @@ function computeJsonDiff(
   return diffs;
 }
 
-/** Collapsible "thinking" trace shown above an assistant reply from a reasoning model. */
-function ReasoningDisclosure({ reasoning }: { reasoning: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Box mb="xs">
-      <UnstyledButton
-        onClick={() => setOpen((v) => !v)}
-        style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-      >
-        <IconBrain size={13} color="var(--mantine-color-violet-6)" />
-        <Text size="xs" fw={500} c="violet.6">
-          Reasoning
-        </Text>
-        {open ? (
-          <IconChevronDown size={12} color="var(--mantine-color-violet-6)" />
-        ) : (
-          <IconChevronRight size={12} color="var(--mantine-color-violet-6)" />
-        )}
-      </UnstyledButton>
-      <Collapse in={open}>
-        <Text
-          size="xs"
-          c="dimmed"
-          mt={4}
-          pl="xs"
-          style={{
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            borderLeft: '2px solid var(--mantine-color-violet-2)',
-          }}
-        >
-          {reasoning}
-        </Text>
-      </Collapse>
-    </Box>
-  );
-}
-
-/**
- * The tool calls a turn made, in order.
- *
- * Collapsed by default and expanded per step: a run with twelve tool calls is
- * common, and twelve open JSON payloads would bury the answer they produced.
- */
-function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
-  const [open, setOpen] = useState(false);
-  const failed = steps.filter((step) => step.error).length;
-
-  return (
-    <Box mb="xs">
-      <Button
-        size="compact-xs"
-        variant="subtle"
-        color={failed > 0 ? 'red' : 'gray'}
-        leftSection={<IconTimeline size={12} />}
-        onClick={() => setOpen((value) => !value)}
-      >
-        {steps.length} tool call{steps.length === 1 ? '' : 's'}
-        {failed > 0 ? ` · ${failed} failed` : ''}
-      </Button>
-
-      <Collapse in={open}>
-        <Stack gap={6} mt="xs">
-          {steps.map((step, index) => (
-            <Paper key={step.id ?? index} withBorder p="xs" radius="sm">
-              <Group gap="xs" mb={4}>
-                <Badge size="xs" variant="light" color={step.error ? 'red' : 'blue'}>
-                  {index + 1}
-                </Badge>
-                <Text size="xs" fw={600} ff="monospace">{step.name}</Text>
-                {step.subagent ? (
-                  <Badge size="xs" variant="outline" color="violet">
-                    via {step.subagent}
-                  </Badge>
-                ) : null}
-              </Group>
-              {step.args !== undefined ? (
-                <StepPayload label="args" value={step.args} />
-              ) : null}
-              {step.error ? (
-                <Text size="xs" c="red" className={classes.preWrap}>{step.error}</Text>
-              ) : step.output !== undefined ? (
-                <StepPayload label="result" value={step.output} />
-              ) : null}
-            </Paper>
-          ))}
-        </Stack>
-      </Collapse>
-    </Box>
-  );
-}
-
-/**
- * One payload inside a step. Long values are clipped rather than scrolled: a
- * 50KB tool result inside a chat bubble makes the whole transcript unusable,
- * and the full value is in the trace.
- */
-function StepPayload({ label, value }: { label: string; value: unknown }) {
-  const text = useMemo(() => {
-    if (typeof value === 'string') return value;
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
-    }
-  }, [value]);
-
-  const clipped = text.length > 1200;
-
-  return (
-    <Box mb={4}>
-      <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
-      <Code block style={{ fontSize: 11, maxHeight: 220, overflow: 'auto' }}>
-        {clipped ? `${text.slice(0, 1200)}\n… ${text.length - 1200} more characters` : text}
-      </Code>
-    </Box>
-  );
-}
-
-function StructuredOutputBlock({ output }: { output: unknown }) {
-  return (
-    <Box mt="xs">
-      <Text size="10px" c="dimmed" tt="uppercase" fw={600}>structured output</Text>
-      <Code block style={{ fontSize: 11, maxHeight: 260, overflow: 'auto' }}>
-        {JSON.stringify(output, null, 2)}
-      </Code>
-    </Box>
-  );
-}
-
-/** Tokens, latency and which config produced the turn. */
-function TurnFooter({ message }: { message: ChatMessage }) {
-  const parts: string[] = [];
-  if (message.usage?.totalTokens !== undefined) {
-    const { inputTokens, outputTokens, totalTokens } = message.usage;
-    parts.push(
-      inputTokens !== undefined && outputTokens !== undefined
-        ? `${totalTokens} tokens (${inputTokens} in / ${outputTokens} out)`
-        : `${totalTokens} tokens`,
-    );
-  }
-  if (message.latencyMs !== undefined) parts.push(`${(message.latencyMs / 1000).toFixed(1)}s`);
-  if (parts.length === 0 && message.version === undefined) return null;
-
-  return (
-    <Group gap="xs" mt={6}>
-      <Badge size="xs" variant="light" color={message.version ? 'teal' : 'gray'}>
-        {message.version ? `v${message.version}` : 'draft'}
-      </Badge>
-      {parts.length > 0 ? <Text size="10px" c="dimmed">{parts.join(' · ')}</Text> : null}
-    </Group>
-  );
-}
+// ReasoningDisclosure / StepTimeline / StepPayload / StructuredOutputBlock /
+// TurnFooter moved to `session/AgentSessionView.tsx` along with the rest of
+// the chat UI they belonged to — see that file.

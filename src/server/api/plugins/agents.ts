@@ -5,8 +5,10 @@ import {
   createAgentRecord,
   createConversation,
   deleteAgentRecord,
+  deleteConversation,
   executePlaygroundChat,
   getAgentById,
+  getConversationById,
   getAgentVersion,
   listAgents,
   listAgentVersions,
@@ -806,6 +808,98 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── Sessions ─────────────────────────────────────────────────────────
+  //
+  // A Session is the conversation record, presented under the name the
+  // Sessions page uses. Kept as its own route group rather than renaming
+  // `/conversations` above — nothing else in the codebase depends on that
+  // name yet, but adding rather than renaming means neither guess can be
+  // wrong about who else might.
+
+  app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const sessions = await listConversations(session.tenantDbName, agent.key, {
+        limit: 100,
+        projectId,
+      });
+      return reply.code(200).send({ sessions });
+    } catch (error) {
+      logger.error('List agent sessions error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to list sessions' });
+    }
+  }));
+
+  app.post('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const created = await createConversation(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        session.userId,
+        agent.key,
+        typeof body.title === 'string' ? body.title : undefined,
+      );
+      return reply.code(201).send({ session: created });
+    } catch (error) {
+      logger.error('Create agent session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to create session' });
+    }
+  }));
+
+  app.get('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, sessionId } = request.params as { agentId: string; sessionId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const found = await getConversationById(session.tenantDbName, sessionId);
+      // Scope check, not just existence — a session id valid for a sibling
+      // agent (or project) in the same tenant must 404 here too.
+      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
+        return reply.code(404).send({ error: 'Session not found' });
+      }
+      return reply.code(200).send({ session: found });
+    } catch (error) {
+      logger.error('Get agent session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to load session' });
+    }
+  }));
+
+  app.delete('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, sessionId } = request.params as { agentId: string; sessionId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const found = await getConversationById(session.tenantDbName, sessionId);
+      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
+        return reply.code(404).send({ error: 'Session not found' });
+      }
+      await deleteConversation(session.tenantDbName, sessionId);
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      logger.error('Delete agent session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to delete session' });
+    }
+  }));
+
   app.post('/agents/:agentId/chat', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
@@ -831,6 +925,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const result = await executePlaygroundChat({
         agentKey: agent.key,
         runtimeContext,
+        // Ignored server-side when conversationId is set (history loads from
+        // the session instead) — still parsed so a stateless call (no
+        // conversationId) keeps working exactly as before.
         history: Array.isArray(body.history)
           ? body.history
             .filter((item): item is { content: string; role: string } =>
@@ -850,6 +947,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
         userMessage: body.message,
         ...(typeof body.version === 'number' ? { version: body.version } : {}),
+        ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
       });
 
       return reply.code(200).send(result);

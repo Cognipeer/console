@@ -2495,8 +2495,20 @@ export interface AgentPlaygroundChatRequest {
     projectId: string;
     agentKey: string;
     userMessage: string;
-    /** Previous messages for context (in-memory only) */
+    /**
+     * Previous messages for context. Ignored (and the DB history loaded
+     * instead) whenever `conversationId` is set — a caller-supplied history
+     * next to a real conversation id would let the client fabricate turns the
+     * agent never actually produced, and persist them.
+     */
     history?: Array<{ role: string; content: string }>;
+    /**
+     * Backs this run with a persisted Session: history loads from the
+     * conversation instead of `history`, and the exchange (including steps/
+     * usage/output) is written back afterward. Omitted, this behaves exactly
+     * as the stateless playground always has — in-memory, nothing saved.
+     */
+    conversationId?: string;
     /**
      * Run a published version instead of the draft. The playground's whole point
      * is the draft, so absent means draft — but comparing a change against what
@@ -3133,13 +3145,29 @@ function describeStructuredOutputError(error: unknown): string {
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
 ): Promise<AgentPlaygroundChatResult> {
-    const { tenantDbName, tenantId, projectId, agentKey, userMessage, history } = request;
+    const { tenantDbName, tenantId, projectId, agentKey, userMessage } = request;
 
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
     const agent = await db.findAgentByKey(agentKey, projectId);
     if (!agent) throw new Error(`Agent "${agentKey}" not found`);
+
+    // A real Session: load its history from storage rather than trusting
+    // whatever the caller sent, and remember the row so the exchange can be
+    // written back once the run finishes. Scoped to this agent+project — a
+    // conversation id for a DIFFERENT agent must 404, not quietly attach.
+    let sessionConversation: IAgentConversation | null = null;
+    if (request.conversationId) {
+        const found = await db.findAgentConversationById(request.conversationId);
+        if (!found || found.agentKey !== agentKey || found.projectId !== projectId) {
+            throw new Error(`Session "${request.conversationId}" not found`);
+        }
+        sessionConversation = found;
+    }
+    const history = sessionConversation
+        ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
+        : request.history;
 
     // The draft unless a version is asked for. Reading the published snapshot
     // is what makes "does my change actually help?" answerable in one screen.
@@ -3180,8 +3208,10 @@ export async function executePlaygroundChatLocal(
             resolveRuntimeHeaders(request.runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
         );
 
-        // The playground persists nothing, so the returned string is the only
-        // copy of the answer — redacting it here is the whole enforcement.
+        // Redacting here is still the only enforcement point for a STATELESS
+        // call (no session) — the returned string is the only copy. For a
+        // Session, persistence below writes this same guarded text, never
+        // the raw upstream `content`.
         const guardedContent = await evaluateBoundGuardrails({
             tenantDbName,
             tenantId,
@@ -3192,8 +3222,13 @@ export async function executePlaygroundChatLocal(
             source: 'agent-playground',
         });
 
+        const externalResult: AgentPlaygroundChatResult = { content: guardedContent, version: ranVersion };
+        if (sessionConversation) {
+            await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
+        }
+
         logger.info('Connected agent playground chat completed', { agentKey });
-        return { content: guardedContent };
+        return externalResult;
     }
 
     // Resolve model
@@ -3402,7 +3437,7 @@ export async function executePlaygroundChatLocal(
 
         logger.info('Playground chat completed', { agentKey });
 
-        return {
+        const playgroundResult: AgentPlaygroundChatResult = {
             content: assistantContent,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
             ...(result.output !== undefined ? { output: result.output } : {}),
@@ -3413,7 +3448,63 @@ export async function executePlaygroundChatLocal(
             steps: extractPlaygroundSteps(result),
             version: ranVersion,
         };
+
+        if (sessionConversation) {
+            await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
+        }
+
+        return playgroundResult;
     } finally {
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
+    }
+}
+
+/**
+ * Appends one exchange (user turn + the rich assistant turn) to a Session's
+ * conversation record.
+ *
+ * Best-effort by design: a persistence failure must not turn a successful
+ * model run into an error the caller sees as "the agent failed" — it already
+ * answered. The turn is simply missing on reload, which is recoverable
+ * (retype the question) in a way a lost answer to a guardrail-approved,
+ * already-billed model call is not.
+ */
+async function persistSessionTurn(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    conversation: IAgentConversation,
+    userMessage: string,
+    result: AgentPlaygroundChatResult,
+): Promise<void> {
+    try {
+        const now = new Date();
+        const messages: IAgentConversation['messages'] = [
+            ...conversation.messages,
+            { role: 'user', content: userMessage, timestamp: now },
+            {
+                role: 'assistant',
+                content: result.content,
+                timestamp: now,
+                ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+                ...(result.steps && result.steps.length > 0 ? { steps: result.steps } : {}),
+                ...(result.output !== undefined ? { output: result.output } : {}),
+                ...(result.outputError ? { outputError: result.outputError } : {}),
+                ...(result.usage ? { usage: result.usage } : {}),
+                version: result.version ?? null,
+            },
+        ];
+        await db.updateAgentConversation(String(conversation._id), {
+            messages,
+            // First exchange in a freshly-created "New session" names itself
+            // after what was actually asked, same convention the live chat
+            // path already uses for its conversation titles.
+            title: (!conversation.title || conversation.title === 'New conversation') && messages.length <= 2
+                ? userMessage.substring(0, 80)
+                : conversation.title,
+        });
+    } catch (error) {
+        logger.error('Failed to persist session turn', {
+            conversationId: String(conversation._id),
+            error: error instanceof Error ? error.message : String(error),
+        });
     }
 }
