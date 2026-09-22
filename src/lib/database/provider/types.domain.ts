@@ -2037,6 +2037,159 @@ export interface IExternalAgentConnection {
   runtimeHeaders?: { allow?: boolean; allowedNames?: string[] };
 }
 
+// ── Agent runtime configuration (agent-sdk surface) ──────────────────────
+//
+// Every field below is optional and absent by default: an agent that has never
+// been touched in the Advanced settings tab produces exactly the option object
+// the module used to hard-code, so this is a pure widening of the config.
+
+export type AgentRuntimeProfile = 'fast' | 'balanced' | 'deep' | 'research';
+export type AgentPlanningMode = 'off' | 'todo' | 'planner_executor' | 'reasoning_then_tools';
+export type AgentReplanPolicy = 'never' | 'on_failure' | 'on_conflict' | 'every_n_steps';
+export type AgentContextPolicy = 'raw' | 'summary_only' | 'hybrid';
+export type AgentToolResponsePolicy = 'keep_full' | 'keep_structured' | 'summarize_archive' | 'drop';
+export type AgentChildContextPolicy = 'minimal' | 'scoped' | 'full';
+export type AgentSubagentMode = 'off' | 'registry_only' | 'registry_and_adhoc';
+export type AgentMemoryProvider = 'inMemory' | 'redis' | 'postgres' | 'mongo' | 's3';
+export type AgentMemoryScope = 'session' | 'user' | 'workspace' | 'tenant';
+export type AgentMemoryWritePolicy = 'manual' | 'auto_important' | 'always';
+export type AgentMemoryReadPolicy = 'recent_only' | 'semantic' | 'hybrid';
+export type AgentReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
+export type AgentReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
+
+export interface IAgentLimits {
+  maxToolCalls?: number;
+  maxParallelTools?: number;
+  maxContextTokens?: number;
+  maxTotalOutputTokens?: number;
+  /** Requires a cost estimator on the run; ignored when none is wired. */
+  maxCostUsd?: number;
+  maxWallClockMs?: number;
+}
+
+export interface IAgentSummarizationConfig {
+  enable?: boolean;
+  maxTokens?: number;
+  summaryTriggerTokens?: number;
+  summaryPromptMaxTokens?: number;
+  summaryMode?: 'incremental' | 'full_rewrite';
+  integrityCheck?: boolean;
+}
+
+export interface IAgentContextConfig {
+  policy?: AgentContextPolicy;
+  lastTurnsToKeep?: number;
+  toolResponsePolicy?: AgentToolResponsePolicy;
+}
+
+export interface IAgentPlanningConfig {
+  mode?: AgentPlanningMode;
+  replanPolicy?: AgentReplanPolicy;
+  everyNSteps?: number;
+}
+
+export interface IAgentContextPilotConfig {
+  enabled?: boolean;
+  /** Tool names ContextPilot must never compress (raw payload always kept). */
+  excludeTools?: string[];
+}
+
+export interface IAgentReasoningConfig {
+  enabled?: boolean;
+  level?: AgentReasoningLevel;
+  /** Provider-native effort. `none` is a value that gets SENT, not "off". */
+  effort?: AgentReasoningEffort;
+  budgetTokens?: number;
+  includeThoughts?: boolean;
+  /** SDK reflection pass. Absent = SDK default; `false` disables it. */
+  reflection?: boolean;
+}
+
+export interface IAgentMemoryConfig {
+  enabled?: boolean;
+  provider?: AgentMemoryProvider;
+  scope?: AgentMemoryScope;
+  writePolicy?: AgentMemoryWritePolicy;
+  readPolicy?: AgentMemoryReadPolicy;
+}
+
+export interface IAgentToolResponsesConfig {
+  defaultPolicy?: AgentToolResponsePolicy;
+  maxToolResponseChars?: number;
+  maxToolResponseTokens?: number;
+  retentionByTool?: Record<string, AgentToolResponsePolicy>;
+}
+
+/**
+ * Advanced runtime knobs, surfaced in the Settings → Advanced tab. Basic
+ * settings (model, prompt, temperature, tools) stay on `IAgentConfig` itself.
+ */
+export interface IAgentRuntimeConfig {
+  profile?: AgentRuntimeProfile;
+  limits?: IAgentLimits;
+  planning?: IAgentPlanningConfig;
+  summarization?: IAgentSummarizationConfig;
+  context?: IAgentContextConfig;
+  toolResponses?: IAgentToolResponsesConfig;
+  contextPilot?: IAgentContextPilotConfig;
+  reasoning?: IAgentReasoningConfig;
+  memory?: IAgentMemoryConfig;
+  /** Expose the SDK `ask_user_question` tool (human-in-the-loop). */
+  askUser?: boolean;
+}
+
+/** JSON-schema contract enforced on the agent's final answer. */
+export interface IAgentStructuredOutput {
+  enabled?: boolean;
+  /** Schema name surfaced to the provider. Defaults to `<agentKey>_output`. */
+  name?: string;
+  /** JSON Schema (draft-07 subset); converted to a zod schema at runtime. */
+  schema?: Record<string, unknown>;
+  /** Forbid extra properties and require every declared property. */
+  strict?: boolean;
+}
+
+/**
+ * A sub-agent the orchestrator may delegate to. Two flavours:
+ *  - `inline` — defined here, inside this agent's config
+ *  - `ref`    — points at another console agent, whose config is loaded at run time
+ */
+export interface IAgentSubagent {
+  kind: 'inline' | 'ref';
+  /** `delegate_to` name. Must be unique within the agent. */
+  name: string;
+  title?: string;
+  /** One-line "what it does + when to use it", shown in the delegation catalog. */
+  header: string;
+  /** inline only — role/system prompt for the child. */
+  systemPrompt?: string;
+  /** inline only — model override; falls back to the parent's model. */
+  modelKey?: string;
+  /** inline only — tool surface for the child. */
+  toolBindings?: IAgentToolBinding[];
+  /** inline only — knowledge engine attached to the child. */
+  knowledgeEngineKey?: string;
+  /** ref only — key of the console agent backing this sub-agent. */
+  agentKey?: string;
+  /** ref only — pin to a published version; absent = the published version. */
+  agentVersion?: number;
+  limits?: IAgentLimits;
+  childContextPolicy?: AgentChildContextPolicy;
+  /** JSON Schema for the child's structured result. */
+  outputSchema?: Record<string, unknown>;
+  /** Absent or true = available to the orchestrator. */
+  enabled?: boolean;
+}
+
+export interface IAgentSubagentPolicy {
+  mode?: AgentSubagentMode;
+  maxDepth?: number;
+  maxChildCalls?: number;
+  maxParallel?: number;
+  childContextPolicy?: AgentChildContextPolicy;
+  allowAdhocTools?: boolean;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
@@ -2077,6 +2230,14 @@ export interface IAgentConfig {
   kind?: AgentKind;
   /** Connection settings — present only when kind === 'external'. */
   connection?: IExternalAgentConnection;
+  /** Advanced agent-sdk runtime knobs (Settings → Advanced). */
+  runtime?: IAgentRuntimeConfig;
+  /** JSON-schema contract for the final answer. */
+  structuredOutput?: IAgentStructuredOutput;
+  /** Delegable sub-agents — inline definitions and references to other agents. */
+  subagents?: IAgentSubagent[];
+  /** Guards around delegation. Absent = SDK defaults with `registry_only`. */
+  subagentPolicy?: IAgentSubagentPolicy;
 }
 
 /** A single tool-source binding for an agent */

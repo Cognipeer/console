@@ -18,11 +18,20 @@ import type {
     RuntimeProfile as AgentSdkRuntimeProfile,
     SmartAgentEvent as AgentSdkEvent,
     SmartState as AgentSdkSmartState,
+    SubagentDef as AgentSdkSubagentDef,
     ToolResponseRetentionPolicy as AgentSdkToolResponseRetentionPolicy,
     ToolInterface as AgentSdkToolInterface,
     TraceSinkConfig as AgentSdkTraceSinkConfig,
     TraceSessionFile,
 } from '@cognipeer/agent-sdk';
+import type { ZodTypeAny } from 'zod';
+import {
+    jsonSchemaToZod,
+    resolveAgentRuntimeOptions,
+    resolveStructuredOutputSchema,
+    type ResolvedAgentRuntimeOptions,
+} from './agentRuntimeConfig';
+import type { IAgentSubagent } from '@/lib/database/provider/types.domain';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
@@ -86,23 +95,9 @@ import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/fin
 
 const logger = createLogger('agents');
 
-const CONSOLE_AGENT_RUNTIME_PROFILE: AgentSdkRuntimeProfile = 'balanced';
-const CONSOLE_AGENT_MAX_TOOL_CALLS = 12;
-const CONSOLE_AGENT_MAX_CONTEXT_TOKENS = 48_000;
-const CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS = 32_000;
-const CONSOLE_AGENT_SUMMARY_MAX_TOKENS = 48_000;
-const CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS = 8_000;
-const CONSOLE_AGENT_LAST_TURNS_TO_KEEP = 10;
-const CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL: Record<string, AgentSdkToolResponseRetentionPolicy> = {
-    knowledge_search: 'keep_full',
-};
-
-const CONSOLE_AGENT_TOOL_RESPONSES_CONFIG = {
-    defaultPolicy: 'summarize_archive' as const,
-    toolResponseRetentionByTool: CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL,
-    maxToolResponseChars: 80_000,
-    maxToolResponseTokens: 20_000,
-};
+// The console's runtime defaults moved to `./agentRuntimeConfig` when they
+// became per-agent settings; `CONSOLE_AGENT_DEFAULTS` there holds the same
+// values and is what an agent with no `runtime` block still resolves to.
 
 const CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION =
     'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty. Each match carries a documentId — pass it to knowledge_read_document or knowledge_read_document_lines when the question needs more of that file than the matched passage.';
@@ -1139,6 +1134,15 @@ type CreateConsoleSdkAgentInput = {
     threadId?: string;
     /** Guardrail plugins for the TEXT hooks; see `buildAgentGuardrailPlugins`. */
     plugins?: AgentSdkPlugin[];
+    /**
+     * Resolved agent-sdk knobs from `config.runtime`. Absent for callers that
+     * have no agent config to hand (they get the console defaults).
+     */
+    runtimeOptions?: ResolvedAgentRuntimeOptions;
+    /** zod contract for the final answer, from `config.structuredOutput`. */
+    outputSchema?: ZodTypeAny;
+    /** Sub-agent registry built from `config.subagents`. */
+    subagents?: AgentSdkSubagentDef[];
 };
 
 /**
@@ -1322,28 +1326,12 @@ function createConsoleSdkAgent(
         // thing to the host, and the shorter option object is what every other
         // conditional field here does.
         ...(input.plugins && input.plugins.length > 0 ? { plugins: input.plugins } : {}),
-        runtimeProfile: CONSOLE_AGENT_RUNTIME_PROFILE,
-        planning: {
-            mode: 'off',
-            replanPolicy: 'on_failure',
-        },
-        limits: {
-            maxToolCalls: CONSOLE_AGENT_MAX_TOOL_CALLS,
-            maxContextTokens: CONSOLE_AGENT_MAX_CONTEXT_TOKENS,
-        },
-        summarization: {
-            enable: true,
-            maxTokens: CONSOLE_AGENT_SUMMARY_MAX_TOKENS,
-            summaryTriggerTokens: CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS,
-            summaryPromptMaxTokens: CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS,
-            integrityCheck: true,
-        },
-        context: {
-            policy: 'hybrid',
-            lastTurnsToKeep: CONSOLE_AGENT_LAST_TURNS_TO_KEEP,
-            toolResponsePolicy: 'summarize_archive',
-        },
-        toolResponses: CONSOLE_AGENT_TOOL_RESPONSES_CONFIG,
+        // `runtimeOptions` already carries the module defaults for every knob an
+        // operator left untouched, so spreading it is equivalent to the literal
+        // block this replaced — see `agentRuntimeConfig.CONSOLE_AGENT_DEFAULTS`.
+        ...(input.runtimeOptions ?? resolveAgentRuntimeOptions({})),
+        ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
+        ...(input.subagents && input.subagents.length > 0 ? { subagents: input.subagents } : {}),
         ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
         tracing: {
             enabled: true,
@@ -1352,6 +1340,172 @@ function createConsoleSdkAgent(
             ...(input.threadId ? { threadId: input.threadId } : {}),
         },
     });
+}
+
+// ── Sub-agent registry ──────────────────────────────────────────────
+
+type BuildSubagentsInput = {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    subagents: IAgentSubagent[] | undefined;
+    createToolFn: typeof import('@cognipeer/agent-sdk').createTool;
+    zod: typeof import('zod').z;
+    guard: AgentToolGuard;
+    runtimeContext?: AgentRuntimeContext;
+    /** Depth guard: a `ref` sub-agent must not pull in its own `ref` children. */
+    depth?: number;
+};
+
+/**
+ * Turns `config.subagents` into the SDK's sub-agent registry.
+ *
+ * `inline` children are defined entirely in the parent's config. `ref` children
+ * borrow another console agent's prompt, model and tools — resolved from that
+ * agent's PUBLISHED config unless a version is pinned, so editing a draft can
+ * never change what a parent delegates to mid-flight.
+ *
+ * A `ref` child's own sub-agents are deliberately dropped: the SDK already
+ * enforces a depth budget, and expanding a reference tree here would let one
+ * edit in a leaf agent silently multiply every parent's tool surface. Nesting
+ * beyond one level is expressed with the SDK's own `maxDepth`, not by inlining.
+ */
+async function buildAgentSubagents(
+    input: BuildSubagentsInput,
+): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>> }> {
+    const entries = (input.subagents ?? []).filter((entry) => entry.enabled !== false);
+    if (entries.length === 0) return { subagents: [], cleanupTasks: [] };
+
+    const subagents: AgentSdkSubagentDef[] = [];
+    const cleanupTasks: Array<() => Promise<void>> = [];
+    const seen = new Set<string>();
+
+    for (const entry of entries) {
+        if (!entry.name || seen.has(entry.name)) {
+            logger.warn('Skipping sub-agent with missing or duplicate name', { name: entry.name });
+            continue;
+        }
+        seen.add(entry.name);
+
+        let systemPrompt = entry.systemPrompt;
+        let toolBindings = entry.toolBindings;
+        let knowledgeEngineKey = entry.knowledgeEngineKey;
+        let modelKey = entry.modelKey;
+
+        if (entry.kind === 'ref') {
+            if (!entry.agentKey) {
+                logger.warn('Skipping sub-agent reference with no agentKey', { name: entry.name });
+                continue;
+            }
+            try {
+                const resolved = await resolveAgentConfig(
+                    input.tenantDbName,
+                    entry.agentKey,
+                    input.projectId,
+                    entry.agentVersion,
+                );
+                if (resolved.config.kind === 'external') {
+                    // An external agent is an HTTP endpoint, not a set of tools —
+                    // it cannot be flattened into a child of this process.
+                    logger.warn('Skipping connected agent used as sub-agent', {
+                        name: entry.name,
+                        agentKey: entry.agentKey,
+                    });
+                    continue;
+                }
+                systemPrompt = entry.systemPrompt ?? resolved.config.systemPrompt;
+                toolBindings = resolved.config.toolBindings;
+                knowledgeEngineKey = resolved.config.knowledgeEngineKey;
+                modelKey = entry.modelKey ?? resolved.config.modelKey;
+            } catch (error) {
+                logger.warn('Sub-agent reference could not be resolved; skipping', {
+                    name: entry.name,
+                    agentKey: entry.agentKey,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                continue;
+            }
+        }
+
+        const childTools: AgentSdkToolInterface[] = [];
+        if (knowledgeEngineKey) {
+            const knowledge = await buildKnowledgeTools(
+                input.tenantDbName,
+                input.tenantId,
+                knowledgeEngineKey,
+                input.guard,
+            );
+            childTools.push(...knowledge.tools);
+        }
+        if (toolBindings && toolBindings.length > 0) {
+            const bound = await buildBoundTools(
+                input.tenantDbName,
+                input.tenantId,
+                input.projectId,
+                toolBindings,
+                input.createToolFn,
+                input.zod,
+                input.guard,
+                input.runtimeContext,
+            );
+            childTools.push(...bound.tools);
+            cleanupTasks.push(...bound.cleanupTasks);
+        }
+
+        let childModel: unknown;
+        if (modelKey) {
+            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey);
+        }
+
+        subagents.push({
+            name: entry.name,
+            ...(entry.title ? { title: entry.title } : {}),
+            header: entry.header || entry.title || entry.name,
+            ...(systemPrompt ? { systemPrompt } : {}),
+            ...(childTools.length > 0 ? { tools: childTools } : {}),
+            ...(childModel ? { model: childModel } : {}),
+            ...(entry.limits ? { limits: entry.limits } : {}),
+            ...(entry.childContextPolicy ? { childContextPolicy: entry.childContextPolicy } : {}),
+            ...(entry.outputSchema
+                ? { outputSchema: jsonSchemaToZod(entry.outputSchema) }
+                : {}),
+            metadata: { kind: entry.kind, ...(entry.agentKey ? { agentKey: entry.agentKey } : {}) },
+        });
+    }
+
+    return { subagents, cleanupTasks };
+}
+
+/**
+ * Builds the LangChain model for a sub-agent's model override. Returns
+ * undefined when the key no longer resolves, which makes the child fall back to
+ * the parent's model rather than failing the whole run.
+ */
+async function buildSubagentModel(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    modelKey: string,
+): Promise<unknown> {
+    try {
+        const model = await getModelByKey(tenantDbName, modelKey, projectId);
+        if (!model || model.category !== 'llm') return undefined;
+        const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
+        if (!runtime.createChatModel) return undefined;
+        const lcModel = await runtime.createChatModel({
+            modelId: model.modelId,
+            category: 'llm',
+            modelSettings: resolveModelInvocationConfig(model, {}),
+        });
+        const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
+        return fromLangchainModel(lcModel);
+    } catch (error) {
+        logger.warn('Sub-agent model override could not be built; falling back to parent model', {
+            modelKey,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return undefined;
+    }
 }
 
 // ── Tool Bridge ─────────────────────────────────────────────────────
@@ -2624,6 +2778,18 @@ export async function executeAgentChatLocal(
     const sdkModel = fromLangchainModel(lcModel);
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
+    const chatSubagents = await buildAgentSubagents({
+        tenantDbName,
+        tenantId,
+        projectId,
+        subagents: config.subagents,
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        runtimeContext: request.runtimeContext,
+    });
+    cleanupTasks.push(...chatSubagents.cleanupTasks);
+
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
         model: sdkModel,
@@ -2633,6 +2799,9 @@ export async function executeAgentChatLocal(
         plugins: guardrailPlugins,
         threadId: conversationId,
         version: resolvedVersion !== null ? String(resolvedVersion) : undefined,
+        runtimeOptions: resolveAgentRuntimeOptions(config),
+        outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
+        subagents: chatSubagents.subagents,
     });
 
     const userTurnIndex = existingMessages.length;
@@ -2966,6 +3135,18 @@ export async function executePlaygroundChatLocal(
         playgroundToolDefinitions,
     );
 
+    const playgroundSubagents = await buildAgentSubagents({
+        tenantDbName,
+        tenantId,
+        projectId,
+        subagents: config.subagents,
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        runtimeContext: request.runtimeContext,
+    });
+    cleanupTasks.push(...playgroundSubagents.cleanupTasks);
+
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
         model: sdkModel,
@@ -2973,6 +3154,9 @@ export async function executePlaygroundChatLocal(
         systemPrompt,
         tracingSink,
         plugins: guardrailPlugins,
+        runtimeOptions: resolveAgentRuntimeOptions(config),
+        outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
+        subagents: playgroundSubagents.subagents,
     });
 
     // Surface tool-call progress to the caller (best-effort; never fails the run).

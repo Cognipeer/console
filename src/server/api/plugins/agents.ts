@@ -18,6 +18,19 @@ import {
 } from '@/lib/services/agents';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
+import {
+  AgentManifestError,
+  applyAgentManifest,
+  buildAgentManifest,
+  parseAgentManifest,
+  previewAgentImport,
+  serializeAgentManifest,
+  type AgentManifestFormat,
+} from '@/lib/services/agents/agentManifest';
+import {
+  generateAgentProject,
+  type AgentCodegenTarget,
+} from '@/lib/services/agents/agentCodegen';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   readJsonBody,
@@ -391,6 +404,172 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('List agent versions error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Failed to list agent versions' });
+    }
+  }));
+
+  // ── Manifest export / import ───────────────────────────────────────────
+
+  app.get('/agents/:agentId/export', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const query = (request.query ?? {}) as { format?: string; version?: string; download?: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const format: AgentManifestFormat = query.format === 'yaml' ? 'yaml' : 'json';
+
+      // No `version` exports the DRAFT config — what the playground runs. A
+      // version number exports that immutable snapshot instead, which is what
+      // anyone promoting between environments actually wants.
+      let config = agent.config;
+      let version: number | null = null;
+      if (query.version) {
+        const requested = Number.parseInt(query.version, 10);
+        if (!Number.isFinite(requested)) {
+          return reply.code(400).send({ error: 'version must be a number' });
+        }
+        const snapshot = await getAgentVersion(session.tenantDbName, agentId, requested);
+        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
+        config = snapshot.snapshot.config;
+        version = requested;
+      }
+
+      const manifest = buildAgentManifest(agent, config, version);
+      const body = serializeAgentManifest(manifest, format);
+
+      if (query.download === '1') {
+        return reply
+          .code(200)
+          .header('content-type', format === 'yaml' ? 'application/yaml' : 'application/json')
+          .header(
+            'content-disposition',
+            `attachment; filename="${agent.key}${version !== null ? `-v${version}` : ''}.${format}"`,
+          )
+          .send(body);
+      }
+
+      return reply.code(200).send({ format, manifest, content: body });
+    } catch (error) {
+      logger.error('Export agent error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to export agent' });
+    }
+  }));
+
+  app.post('/agents/import', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const body = await readJsonBody<{
+        content?: string;
+        manifest?: unknown;
+        format?: AgentManifestFormat;
+        /** `true` validates and reports only — nothing is written. */
+        dryRun?: boolean;
+        mode?: 'create' | 'update' | 'upsert';
+        key?: string;
+        name?: string;
+        allowMissingDependencies?: boolean;
+      }>(request);
+
+      if (!body?.content && !body?.manifest) {
+        return reply.code(400).send({ error: 'content or manifest is required' });
+      }
+
+      const manifest = body.content
+        ? parseAgentManifest(body.content, body.format)
+        : parseAgentManifest(JSON.stringify(body.manifest), 'json');
+
+      if (body.dryRun) {
+        const preview = await previewAgentImport(session.tenantDbName, projectId, manifest);
+        return reply.code(200).send(preview);
+      }
+
+      const result = await applyAgentManifest(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        String(user._id),
+        manifest,
+        {
+          mode: body.mode,
+          key: body.key,
+          name: body.name,
+          allowMissingDependencies: body.allowMissingDependencies,
+        },
+      );
+
+      return reply.code(result.action === 'created' ? 201 : 200).send({
+        agent: redactAgent(result.agent),
+        action: result.action,
+        missing: result.missing,
+      });
+    } catch (error) {
+      if (error instanceof AgentManifestError) {
+        return reply.code(400).send({ error: error.message, issues: error.issues });
+      }
+      logger.error('Import agent error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to import agent' });
+    }
+  }));
+
+  // ── Code export ────────────────────────────────────────────────────────
+
+  app.post('/agents/:agentId/codegen', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const body = await readJsonBody<{
+        target?: AgentCodegenTarget;
+        packageName?: string;
+        consoleBaseUrl?: string;
+        includeDockerfile?: boolean;
+        version?: number;
+        /** `zip` streams an archive; anything else returns the file list as JSON. */
+        format?: 'zip' | 'json';
+      }>(request);
+
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const target = body?.target ?? 'server';
+      if (!['cli', 'server', 'worker', 'lambda'].includes(target)) {
+        return reply.code(400).send({ error: `Unknown target "${target}"` });
+      }
+
+      let config = agent.config;
+      if (typeof body?.version === 'number') {
+        const snapshot = await getAgentVersion(session.tenantDbName, agentId, body.version);
+        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
+        config = snapshot.snapshot.config;
+      }
+
+      const result = generateAgentProject(agent, config, {
+        target,
+        packageName: body?.packageName,
+        consoleBaseUrl: body?.consoleBaseUrl,
+        includeDockerfile: body?.includeDockerfile,
+      });
+
+      if (body?.format === 'zip') {
+        const { default: JSZip } = await import('jszip');
+        const zip = new JSZip();
+        const root = zip.folder(result.rootDir);
+        for (const file of result.files) root?.file(file.path, file.contents);
+        const buffer = await zip.generateAsync({ type: 'nodebuffer' });
+        return reply
+          .code(200)
+          .header('content-type', 'application/zip')
+          .header('content-disposition', `attachment; filename="${result.rootDir}.zip"`)
+          .send(buffer);
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Agent codegen error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to generate agent code' });
     }
   }));
 
