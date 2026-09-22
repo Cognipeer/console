@@ -184,9 +184,20 @@ export function buildRuntimeContextFromRequest(
 ): AgentRuntimeContext | undefined {
   const fromBody = parseRuntimeContext(rawContext);
   const merged = mergeRuntimeContext(fromBody, collectRuntimeHeadersFromHttpHeaders(httpHeaders));
-  if (!merged) return undefined;
+  // An empty `merged` used to return undefined, which threw away the caller
+  // stamp along with it: an authenticated request carrying no headers and no
+  // runtime_context reached the agent with no `userId` at all. That is a fact
+  // about WHO called, not data the caller supplied, and things downstream
+  // depend on it — user-scoped memory keys off `userId`, so dropping it
+  // silently gave every such call the same unscoped memory.
+  //
+  // Still undefined when there is genuinely nothing: no context, no headers
+  // and an anonymous caller. `source` alone has no consumer that a missing
+  // context would mislead, and that case is a documented part of this
+  // function's contract.
+  if (!merged && !caller.userId && !caller.tokenId) return undefined;
   return {
-    ...merged,
+    ...(merged ?? {}),
     ...(caller.userId ? { userId: caller.userId } : {}),
     ...(caller.tokenId ? { tokenId: caller.tokenId } : {}),
     source: caller.source,
