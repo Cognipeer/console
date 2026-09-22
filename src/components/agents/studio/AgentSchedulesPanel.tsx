@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
     ActionIcon,
     Alert,
+    Anchor,
     Badge,
     Button,
     Card,
@@ -231,8 +232,25 @@ export default function AgentSchedulesPanel({ agentId, publishedVersion }: Agent
                                 </Group>
                                 <Text size="xs" c="dimmed" lineClamp={2}>{schedule.message}</Text>
                                 <Group gap="md">
-                                    <Text size="xs" c="dimmed">Last: {formatWhen(schedule.lastRunAt)}</Text>
+                                    {schedule.lastConversationId ? (
+                                        <Anchor
+                                            size="xs"
+                                            href={`/dashboard/tracing/threads/${schedule.lastConversationId}`}
+                                            target="_blank"
+                                        >
+                                            Last: {formatWhen(schedule.lastRunAt)}
+                                        </Anchor>
+                                    ) : (
+                                        <Text size="xs" c="dimmed">Last: {formatWhen(schedule.lastRunAt)}</Text>
+                                    )}
                                     <Text size="xs" c="dimmed">Next: {formatWhen(nextRuns[schedule.id])}</Text>
+                                    <Anchor
+                                        size="xs"
+                                        href={`/dashboard/tracing/sessions?metadataKey=scheduleId&metadataValue=${schedule.id}`}
+                                        target="_blank"
+                                    >
+                                        All runs
+                                    </Anchor>
                                 </Group>
                                 {schedule.lastError ? (
                                     <Text size="xs" c="red" lineClamp={2}>{schedule.lastError}</Text>

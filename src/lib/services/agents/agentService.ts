@@ -1138,6 +1138,17 @@ type CreateConsoleSdkAgentInput = {
     /** Guardrail plugins for the TEXT hooks; see `buildAgentGuardrailPlugins`. */
     plugins?: AgentSdkPlugin[];
     /**
+     * Attribution tags forwarded to the trace session's own `metadata` field —
+     * separate from prompt variables. This is what lets a scheduled fire, a
+     * live API call, and a playground run show up distinguishably in the
+     * existing Traces/Observability views instead of needing a parallel "run"
+     * record: `?metadataKey=scheduleId&metadataValue=<id>` on the tracing list
+     * finds every fire of one schedule, and `schedule.lastConversationId`
+     * already equals the trace's `threadId` (see below), so a single fire is
+     * one click away without any new API surface.
+     */
+    tracingMetadata?: Record<string, string>;
+    /**
      * Resolved agent-sdk knobs from `config.runtime`. Absent for callers that
      * have no agent config to hand (they get the console defaults).
      */
@@ -1341,8 +1352,34 @@ function createConsoleSdkAgent(
             mode: 'batched',
             sink: input.tracingSink,
             ...(input.threadId ? { threadId: input.threadId } : {}),
+            ...(input.tracingMetadata && Object.keys(input.tracingMetadata).length > 0
+                ? { metadata: input.tracingMetadata }
+                : {}),
         },
     });
+}
+
+/**
+ * Reduces `runtimeContext` into the flat string map the trace session's own
+ * `metadata` field accepts.
+ *
+ * Deliberately narrow: `source` and `trigger`/`scheduleId`/`scheduleName` (the
+ * fields the scheduler stamps into `metadata` for prompt variables) are worth
+ * attribution — they are exactly what `?metadataKey=…&metadataValue=…` on the
+ * tracing list is for. The rest of a caller's free-form metadata is left out;
+ * it was sent for prompt rendering, not for a tracing filter, and object/array
+ * values would need a shape decision this call site should not make silently.
+ */
+function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undefined): Record<string, string> | undefined {
+    if (!runtimeContext) return undefined;
+    const out: Record<string, string> = {};
+    if (runtimeContext.source) out.source = runtimeContext.source;
+    const meta = runtimeContext.metadata;
+    for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
+        const value = meta?.[key];
+        if (typeof value === 'string' && value) out[key] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -2886,6 +2923,7 @@ export async function executeAgentChatLocal(
         runtimeOptions: resolveAgentRuntimeOptions(config),
         outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
         subagents: chatSubagents.subagents,
+        tracingMetadata: buildTracingMetadata(request.runtimeContext),
     });
 
     const userTurnIndex = existingMessages.length;
