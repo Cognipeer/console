@@ -35,6 +35,10 @@ import {
 } from '@/components/agents/session/sessionUsage';
 import type { ChatMessage } from '@/components/agents/session/sessionTypes';
 import { normalizePlaygroundUsage } from '@/lib/services/agents/playgroundUsage';
+import {
+    collectConfiguredTools,
+    countUnnamedToolSurfaces,
+} from '@/components/agents/session/sessionTools';
 import { toSdkSkill } from '@/lib/services/agents/agentSkillService';
 
 const AGENT = { key: 'sre-triage', name: 'SRE Triage', description: 'Triages Jira incidents', status: 'active' as const };
@@ -634,5 +638,54 @@ describe('playground usage', () => {
         // An empty ledger must not beat the flat branch into claiming 0 tokens.
         expect(normalizePlaygroundUsage({ totals: { m: { input: 0, output: 0, total: 0, cachedInput: 0 } } }))
             .toBeUndefined();
+    });
+});
+
+describe('session tools', () => {
+    it('lists every bound tool name, tagged with where it came from', () => {
+        const tools = collectConfiguredTools({
+            toolBindings: [
+                { source: 'tool', sourceKey: 'jira-api', toolNames: ['search_issues', 'add_comment'] },
+                { source: 'mcp', sourceKey: 'grafana', toolNames: ['query_range'] },
+                { source: 'system', sourceKey: 'browser_use', toolNames: ['browser_use'] },
+            ],
+        });
+        expect(tools).toEqual([
+            { name: 'search_issues', origin: 'tool', sourceKey: 'jira-api' },
+            { name: 'add_comment', origin: 'tool', sourceKey: 'jira-api' },
+            { name: 'query_range', origin: 'mcp', sourceKey: 'grafana' },
+            { name: 'browser_use', origin: 'system', sourceKey: 'browser_use' },
+        ]);
+    });
+
+    it('treats an empty toolNames as binding nothing, not everything', () => {
+        // Both resolution loops in agentService iterate the list literally, so
+        // an empty binding contributes no tool at all.
+        expect(collectConfiguredTools({
+            toolBindings: [{ source: 'mcp', sourceKey: 'grafana', toolNames: [] }],
+        })).toEqual([]);
+    });
+
+    it('adds the knowledge tools whenever an engine is attached', () => {
+        const tools = collectConfiguredTools({ knowledgeEngineKey: 'confluence-kb' });
+        expect(tools.map((tool) => tool.name)).toEqual([
+            'knowledge_search',
+            'knowledge_read_document',
+            'knowledge_read_document_lines',
+        ]);
+        expect(tools.every((tool) => tool.origin === 'knowledge')).toBe(true);
+    });
+
+    it('counts sub-agent and skill surfaces rather than inventing their tool names', () => {
+        // The SDK names its own control-plane tools from the resolved policy;
+        // guessing them here would be a plausible-looking lie.
+        expect(countUnnamedToolSurfaces({ subagents: [{}, {}], skills: [{}] }))
+            .toEqual({ subagents: 2, skills: 1 });
+        expect(countUnnamedToolSurfaces(undefined)).toEqual({ subagents: 0, skills: 0 });
+    });
+
+    it('returns nothing for an agent with no tool surface at all', () => {
+        expect(collectConfiguredTools(undefined)).toEqual([]);
+        expect(collectConfiguredTools({})).toEqual([]);
     });
 });

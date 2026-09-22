@@ -78,7 +78,16 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: { kind?: 'native' | 'external' };
+    config?: {
+        kind?: 'native' | 'external';
+        // What the agent can call, for the inspector's Tools tab — a tool that
+        // was never bound reads very differently from one that was bound and
+        // never chosen.
+        toolBindings?: Array<{ source?: string; sourceKey?: string; toolNames?: string[] }>;
+        knowledgeEngineKey?: string;
+        subagents?: unknown[];
+        skills?: unknown[];
+    };
 }
 
 interface VersionOption {
@@ -564,6 +573,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         pinnedVersion={pinnedVersion}
                         publishedVersion={agent.publishedVersion ?? null}
                         sessionContext={sessionContext}
+                        agentConfig={agent.config}
                         messages={messages}
                         running={sending}
                         onGoToTurn={goToTurn}

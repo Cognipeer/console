@@ -28,6 +28,12 @@ import { IconCheck, IconCopy, IconList, IconSettings, IconTool } from '@tabler/i
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import type { ChatMessage, PlaygroundStep } from './sessionTypes';
 import { formatCost, summariseSession } from './sessionUsage';
+import {
+    collectConfiguredTools,
+    countUnnamedToolSurfaces,
+    type AgentToolConfig,
+    type ToolOrigin,
+} from './sessionTools';
 import classes from './AgentSessionView.module.css';
 
 export interface SessionSidePanelProps {
@@ -40,6 +46,8 @@ export interface SessionSidePanelProps {
     pinnedVersion: string;
     publishedVersion?: number | null;
     sessionContext?: Record<string, unknown>;
+    /** The agent's stored config — what it CAN call, versus what it did. */
+    agentConfig?: AgentToolConfig;
     messages: ChatMessage[];
     running: boolean;
     /** Jumps the transcript to the turn an event belongs to. */
@@ -61,6 +69,7 @@ export default function SessionSidePanel({
     pinnedVersion,
     publishedVersion,
     sessionContext,
+    agentConfig,
     messages,
     running,
     onGoToTurn,
@@ -76,18 +85,44 @@ export default function SessionSidePanel({
         return flat;
     }, [messages]);
 
+    /**
+     * Every tool the agent can call, annotated with how often it did.
+     *
+     * Configured-first on purpose: a tool that was never bound and a tool that
+     * was bound but never chosen look identical in a transcript, and they are
+     * opposite problems. A name the run used but the config does not declare
+     * still shows up, marked — that is either a control-plane tool the SDK
+     * injected (delegation, skills) or a binding that changed after the turn.
+     */
     const tools = useMemo(() => {
-        const byName = new Map<string, { calls: number; failed: number; subagent?: string }>();
+        const used = new Map<string, { calls: number; failed: number }>();
         events.forEach(({ step }) => {
-            const entry = byName.get(step.name) ?? { calls: 0, failed: 0, subagent: step.subagent };
+            const entry = used.get(step.name) ?? { calls: 0, failed: 0 };
             entry.calls += 1;
             if (step.error) entry.failed += 1;
-            byName.set(step.name, entry);
+            used.set(step.name, entry);
         });
-        return Array.from(byName.entries())
-            .map(([name, value]) => ({ name, ...value }))
-            .sort((a, b) => b.calls - a.calls);
-    }, [events]);
+
+        const configured = collectConfiguredTools(agentConfig);
+        const seen = new Set(configured.map((tool) => tool.name));
+        const rows = configured.map((tool) => ({
+            ...tool,
+            calls: used.get(tool.name)?.calls ?? 0,
+            failed: used.get(tool.name)?.failed ?? 0,
+            declared: true,
+        }));
+
+        for (const [name, counts] of used) {
+            if (seen.has(name)) continue;
+            rows.push({ name, origin: 'runtime' as ToolOrigin, ...counts, declared: false });
+        }
+
+        // Used tools first, then the rest alphabetically — the ones that ran
+        // are what you came to read; the idle ones answer the second question.
+        return rows.sort((a, b) => (b.calls - a.calls) || a.name.localeCompare(b.name));
+    }, [events, agentConfig]);
+
+    const unnamedSurfaces = useMemo(() => countUnnamedToolSurfaces(agentConfig), [agentConfig]);
 
     /** Per-turn cost bars — the shape of the spend, not just its total. */
     const costSeries = useMemo(() => {
@@ -251,30 +286,66 @@ export default function SessionSidePanel({
 
                 <Tabs.Panel value="tools" p="md">
                     {tools.length === 0 ? (
-                        <Text size="xs" c="dimmed">This session has not called a tool yet.</Text>
+                        <Text size="xs" c="dimmed">
+                            This agent has no tools bound — it can only answer from the model and its
+                            prompt.
+                        </Text>
                     ) : (
-                        <Table withRowBorders={false} verticalSpacing={6}>
-                            <Table.Thead>
-                                <Table.Tr>
-                                    <Table.Th><Text size="10px" c="dimmed" tt="uppercase">Tool</Text></Table.Th>
-                                    <Table.Th ta="right"><Text size="10px" c="dimmed" tt="uppercase">Calls</Text></Table.Th>
-                                </Table.Tr>
-                            </Table.Thead>
-                            <Table.Tbody>
-                                {tools.map((tool) => (
-                                    <Table.Tr key={tool.name}>
-                                        <Table.Td>
-                                            <Text size="xs" ff="monospace" truncate>{tool.name}</Text>
-                                            {tool.failed > 0 ? (
-                                                <Text size="10px" c="red">{tool.failed} failed</Text>
+                        <Stack gap={2}>
+                            {tools.map((tool) => (
+                                <Group
+                                    key={`${tool.origin}:${tool.name}`}
+                                    justify="space-between"
+                                    wrap="nowrap"
+                                    gap="xs"
+                                    className={classes.toolRow}
+                                >
+                                    <Box className={classes.eventName}>
+                                        <Text
+                                            size="xs"
+                                            ff="monospace"
+                                            truncate
+                                            c={tool.calls > 0 ? undefined : 'dimmed'}
+                                        >
+                                            {tool.name}
+                                        </Text>
+                                        <Group gap={4}>
+                                            <Text size="10px" c="dimmed">{originLabel(tool.origin)}</Text>
+                                            {'sourceKey' in tool && tool.sourceKey ? (
+                                                <Text size="10px" c="dimmed" truncate>· {tool.sourceKey}</Text>
                                             ) : null}
-                                        </Table.Td>
-                                        <Table.Td ta="right"><Text size="xs">{tool.calls}</Text></Table.Td>
-                                    </Table.Tr>
-                                ))}
-                            </Table.Tbody>
-                        </Table>
+                                            {tool.failed > 0 ? (
+                                                <Text size="10px" c="red">· {tool.failed} failed</Text>
+                                            ) : null}
+                                        </Group>
+                                    </Box>
+                                    {tool.calls > 0 ? (
+                                        <Badge size="xs" variant="light" className={classes.eventBadge}>
+                                            {tool.calls}
+                                        </Badge>
+                                    ) : (
+                                        <Text size="10px" c="dimmed" className={classes.eventBadge}>unused</Text>
+                                    )}
+                                </Group>
+                            ))}
+                        </Stack>
                     )}
+
+                    {unnamedSurfaces.subagents > 0 || unnamedSurfaces.skills > 0 ? (
+                        <Text size="10px" c="dimmed" mt="sm">
+                            {/*
+                              Counted, not listed: the SDK names its own control-plane
+                              tools from the resolved policy, and inventing those names
+                              here would be exactly the plausible-looking lie this panel
+                              exists to prevent.
+                            */}
+                            Plus the SDK&apos;s control-plane tools for{' '}
+                            {[
+                                unnamedSurfaces.subagents > 0 ? `${unnamedSurfaces.subagents} sub-agent(s)` : null,
+                                unnamedSurfaces.skills > 0 ? `${unnamedSurfaces.skills} skill(s)` : null,
+                            ].filter(Boolean).join(' and ')}.
+                        </Text>
+                    ) : null}
                 </Tabs.Panel>
             </ScrollArea>
         </Tabs>
@@ -336,4 +407,12 @@ function UsageRow({
             <Table.Td ta="right"><Text size="xs" fw={strong ? 700 : 500}>{value}</Text></Table.Td>
         </Table.Tr>
     );
+}
+
+function originLabel(origin: string): string {
+    if (origin === 'mcp') return 'MCP';
+    if (origin === 'system') return 'built-in';
+    if (origin === 'knowledge') return 'knowledge engine';
+    if (origin === 'runtime') return 'not in config';
+    return 'tool';
 }

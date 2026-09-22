@@ -87,9 +87,12 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                         />
                         <Select
                             label="Write policy"
+                            description="When facts get written back to the store."
                             data={[
-                                { value: 'manual', label: 'manual — only via an explicit tool call' },
-                                { value: 'auto_important', label: 'auto_important — the SDK decides' },
+                                // Not "via a tool call" — the SDK exposes no memory
+                                // tool. `manual` simply means the SDK never writes.
+                                { value: 'manual', label: 'manual — the agent never writes' },
+                                { value: 'auto_important', label: 'auto_important — only stable facts' },
                                 { value: 'always', label: 'always — every compaction writes facts' },
                             ]}
                             value={value?.writePolicy ?? 'auto_important'}
@@ -120,6 +123,26 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                             </Text>
                         </Alert>
                     ) : null}
+
+                    {/*
+                      Two things operators reliably assume and are wrong about,
+                      both verified against the SDK rather than its docs.
+                    */}
+                    <Alert variant="light" color="gray">
+                        <Text size="xs">
+                            Memory adds <strong>no tools</strong>. Recalled facts are injected ahead of the
+                            model call as a system message, so the agent never decides to look something up —
+                            it simply already knows it.
+                        </Text>
+                        {value?.writePolicy !== 'manual' ? (
+                            <Text size="xs" mt={6}>
+                                Facts are written <strong>at compaction</strong>, from the summary the SDK
+                                produces. A conversation that never grows past the summarization threshold
+                                writes nothing, however much it was told — so a short session can read memory
+                                without ever adding to it.
+                            </Text>
+                        ) : null}
+                    </Alert>
                 </>
             ) : null}
         </Stack>

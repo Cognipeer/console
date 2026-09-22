@@ -233,3 +233,12 @@
     max-height: 28rem;
   }
 }
+
+.toolRow {
+  padding: 4px 6px;
+  border-radius: var(--mantine-radius-sm);
+}
+
+.toolRow:hover {
+  background: var(--mantine-color-gray-0);
+}
