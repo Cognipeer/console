@@ -416,3 +416,17 @@ describe('agent over the OpenAI chat-completions surface', () => {
         } as never)).toBe('the answer');
     });
 });
+
+describe('agent lookup must not break model traffic', () => {
+    it('falls back to the model path when the agent lookup throws', async () => {
+        // This runs on the hot path of every chat-completions call. Letting it
+        // propagate turned every inference error into a 500 — caught by the
+        // existing client-inference suite, which is exactly what it is for.
+        const agent = await resolveAgentModel(
+            'some-model',
+            { tenantDbName: 't', projectId: 'p1' },
+            async () => { throw new Error('db unavailable'); },
+        );
+        expect(agent).toBeNull();
+    });
+});

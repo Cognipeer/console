@@ -52,15 +52,28 @@ export async function resolveAgentModel(
     const key = explicit ? model.slice(AGENT_MODEL_PREFIX.length) : model;
     if (!key) return null;
 
-    if (!explicit && await modelExists(key)) return null;
+    // Fails soft, deliberately. This runs on the hot path of EVERY
+    // chat-completions call, so a lookup that throws — a bad connection, a
+    // tenant whose agent store is unavailable — must not take model traffic
+    // down with it. Returning null carries on as a model call, which is what
+    // the request was before agents were addressable here at all.
+    try {
+        if (!explicit && await modelExists(key)) return null;
 
-    const agent = await getAgentByKey(ctx.tenantDbName, key, ctx.projectId);
-    if (!agent) return null;
-    if (agent.status !== 'active') {
-        logger.info('Agent addressed by an inference call is not active', { agentKey: key });
+        const agent = await getAgentByKey(ctx.tenantDbName, key, ctx.projectId);
+        if (!agent) return null;
+        if (agent.status !== 'active') {
+            logger.info('Agent addressed by an inference call is not active', { agentKey: key });
+            return null;
+        }
+        return agent;
+    } catch (error) {
+        logger.warn('Agent lookup failed for an inference call; treating it as a model', {
+            model,
+            error: error instanceof Error ? error.message : String(error),
+        });
         return null;
     }
-    return agent;
 }
 
 /**
