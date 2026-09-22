@@ -3187,7 +3187,8 @@ export async function executePlaygroundChat(
  *    `rejected` call and flagged any tool whose successful result happens to
  *    carry a field called `error`.
  */
-function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundStep[] {
+/** EXPORTED FOR TESTS — see the failure rules above. */
+export function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundStep[] {
     const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
     if (!Array.isArray(history)) return [];
 
@@ -3196,15 +3197,25 @@ function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundSt
         const status = typeof entry.status === 'string'
             ? entry.status as AgentPlaygroundStep['status']
             : undefined;
-        // Fall back to the old sniff only when the SDK reported no status.
-        const sniffedError =
-            output !== null
-            && typeof output === 'object'
-            && 'error' in (output as Record<string, unknown>);
-        const failed = status ? status === 'error' || status === 'rejected' : sniffedError;
+        // The SDK records `status: 'error'` only when a tool THROWS. A tool
+        // that catches its own failure and returns `{ ok: false, error }`
+        // instead — `web_search` does — is recorded as a success, so status
+        // alone would show a failed search as a green tick. The payload check
+        // therefore SUPPLEMENTS status rather than being its fallback.
+        //
+        // Narrow on purpose: a truthy `error`, or an explicit `ok: false`. An
+        // `error: null` field, which plenty of successful results carry, is
+        // not a failure, and treating it as one is what made sniffing
+        // untrustworthy in the first place.
+        const record = output !== null && typeof output === 'object'
+            ? output as Record<string, unknown>
+            : undefined;
+        const sniffedError = Boolean(record?.error) || record?.ok === false;
+        const failed = status === 'error' || status === 'rejected' || sniffedError;
         const errorText = failed
             ? (status === 'rejected' ? 'Blocked before the tool ran.' : undefined)
-                ?? (sniffedError ? String((output as Record<string, unknown>).error) : 'The tool call failed.')
+                ?? (record?.error ? String(record.error) : undefined)
+                ?? 'The tool call failed.'
             : undefined;
 
         const rawOutput = entry.rawOutput;
@@ -3218,7 +3229,10 @@ function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundSt
             ...(rawDiffers ? { rawOutput } : {}),
             ...(errorText ? { error: errorText } : {}),
             ...(typeof entry.subagent === 'string' ? { subagent: entry.subagent } : {}),
-            ...(status ? { status } : {}),
+            // Reported as an error even when the SDK called it a success,
+            // so the transcript, the Events tab and the per-tool failure
+            // count all agree with the error text above.
+            ...(failed ? { status: 'error' as const } : status ? { status } : {}),
             ...(entry.fromCache === true ? { fromCache: true } : {}),
             ...(entry.summarized === true ? { summarized: true } : {}),
             ...(typeof entry.originalTokenCount === 'number'
