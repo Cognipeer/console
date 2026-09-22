@@ -368,6 +368,7 @@ async function runBootstrap(): Promise<void> {
   applicationReady = true;
 
   logger.info('Application started', {
+    appUrl: cfg.app.url,
     cacheProvider: cfg.cache.provider,
     corsEnabled: cfg.cors.enabled,
     logLevel: cfg.logging.level,
