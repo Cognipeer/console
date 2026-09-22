@@ -26,6 +26,7 @@ import {
   IconSearch,
   IconTool,
   IconBrowser,
+  IconWorldSearch,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 
@@ -57,6 +58,21 @@ interface ToolSourceGroup {
 }
 
 interface BrowserOption { id: string; name: string; key: string; status: string }
+
+interface WebSearchProviderOption { key: string; name: string; status: string }
+
+/** sourceKey → icon, for the built-in system tools rendered as their own group. */
+const SYSTEM_TOOL_ICONS: Record<string, typeof IconBrowser> = {
+  browser_use: IconBrowser,
+  web_search: IconWorldSearch,
+};
+
+/**
+ * System tools whose whole binding is one config field picked from a
+ * `Select` (a browser, a web search instance) rather than a checkbox list of
+ * discrete tool names.
+ */
+const CONFIG_ONLY_SYSTEM_KEYS = new Set(['browser_use', 'web_search']);
 
 // ── Props ────────────────────────────────────────────────────────────────
 
@@ -96,6 +112,9 @@ export function ToolSelectorModal({
   // Browser options for the browser_use picker
   const [browsers, setBrowsers] = useState<BrowserOption[]>([]);
 
+  // Web search instance options for the web_search picker
+  const [webSearchProviders, setWebSearchProviders] = useState<WebSearchProviderOption[]>([]);
+
   // ── Helpers ─────────────────────────────────────────────────────
 
   const toKey = (source: string, sourceKey: string, toolName: string) =>
@@ -114,7 +133,7 @@ export function ToolSelectorModal({
     const initialConfigs: Record<string, Record<string, unknown>> = {};
     for (const b of value) {
       const bindingId = `${b.source}::${b.sourceKey}`;
-      if (b.source === 'system' && b.sourceKey === 'browser_use') {
+      if (b.source === 'system' && CONFIG_ONLY_SYSTEM_KEYS.has(b.sourceKey)) {
         if (b.config) {
           initialConfigs[bindingId] = b.config;
         }
@@ -189,7 +208,19 @@ export function ToolSelectorModal({
       }
       setBrowsers(browserList);
 
-      const systemGroup: ToolSourceGroup = {
+      const webSearchRes = await fetch('/api/websearch/providers', { cache: 'no-store' });
+      let webSearchList: WebSearchProviderOption[] = [];
+      if (webSearchRes.ok) {
+        const webSearchData = await webSearchRes.json();
+        webSearchList = (webSearchData.providers ?? [])
+          .filter((p: { status: string }) => p.status === 'active')
+          .map((p: { key: string; name: string; status: string }) => ({
+            key: p.key, name: p.name, status: p.status,
+          }));
+      }
+      setWebSearchProviders(webSearchList);
+
+      const browserGroup: ToolSourceGroup = {
         source: 'system',
         sourceKey: 'browser_use',
         name: 'Browser Use',
@@ -199,7 +230,18 @@ export function ToolSelectorModal({
           { name: 'browser_use', description: 'Bundle of browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_extract and more.' },
         ],
       };
-      allGroups.unshift(systemGroup);
+      const webSearchGroup: ToolSourceGroup = {
+        source: 'system',
+        sourceKey: 'web_search',
+        name: 'Web Search',
+        description: 'Search the web through a configured Web Search instance and return ranked results, optionally with a synthesized answer.',
+        typeLabel: 'System',
+        tools: [
+          { name: 'web_search', description: 'Search the web and return ranked results (title, url, snippet), with an optional AI-synthesized answer.' },
+        ],
+      };
+      allGroups.unshift(webSearchGroup);
+      allGroups.unshift(browserGroup);
 
       setSources(allGroups);
 
@@ -299,6 +341,22 @@ export function ToolSelectorModal({
       });
     }
 
+    const webSearchConfig = systemConfigs['system::web_search'];
+    const webSearchProviderKey =
+      typeof webSearchConfig?.providerKey === 'string' ? webSearchConfig.providerKey : '';
+
+    if (webSearchProviderKey) {
+      map.set('system::web_search', {
+        source: 'system',
+        sourceKey: 'web_search',
+        toolNames: ['web_search'],
+        config: {
+          ...webSearchConfig,
+          providerKey: webSearchProviderKey,
+        },
+      });
+    }
+
     return Array.from(map.values());
   };
 
@@ -326,12 +384,17 @@ export function ToolSelectorModal({
     if (group.source === 'system' && group.sourceKey === 'browser_use') {
       return systemConfigs['system::browser_use']?.browserId ? 1 : 0;
     }
+    if (group.source === 'system' && group.sourceKey === 'web_search') {
+      return systemConfigs['system::web_search']?.providerKey ? 1 : 0;
+    }
 
     return group.tools.filter((t) => selected.has(toKey(group.source, group.sourceKey, t.name))).length;
   };
 
   const totalSelected =
-    selected.size + (systemConfigs['system::browser_use']?.browserId ? 1 : 0);
+    selected.size
+    + (systemConfigs['system::browser_use']?.browserId ? 1 : 0)
+    + (systemConfigs['system::web_search']?.providerKey ? 1 : 0);
 
   // ── Confirm ────────────────────────────────────────────────────
 
@@ -397,7 +460,12 @@ export function ToolSelectorModal({
                           <IconChevronRight size={16} />
                         )}
                         <ThemeIcon size="sm" variant="light" color={group.source === 'system' ? 'grape' : 'blue'}>
-                          {group.source === 'system' ? <IconBrowser size={12} /> : <IconServer size={12} />}
+                          {group.source === 'system'
+                            ? (() => {
+                                const SystemIcon = SYSTEM_TOOL_ICONS[group.sourceKey] ?? IconBrowser;
+                                return <SystemIcon size={12} />;
+                              })()
+                            : <IconServer size={12} />}
                         </ThemeIcon>
                         <div>
                           <Text size="sm" fw={600}>
@@ -445,6 +513,25 @@ export function ToolSelectorModal({
                           searchable
                           clearable
                           nothingFoundMessage="No browsers"
+                        />
+                      ) : group.source === 'system' && group.sourceKey === 'web_search' ? (
+                        <Select
+                          mt="xs"
+                          mb="xs"
+                          label="Web Search instance"
+                          placeholder={webSearchProviders.length === 0 ? 'No web search instances available' : 'Select an instance to add Web Search'}
+                          description="Selecting an instance adds the Web Search system tool to this agent."
+                          data={webSearchProviders.map((p) => ({ value: p.key, label: `${p.name} (${p.key})` }))}
+                          value={(systemConfigs[sourceId]?.providerKey as string) ?? null}
+                          onChange={(value) => {
+                            setSystemConfigs((prev) => ({
+                              ...prev,
+                              [sourceId]: { ...(prev[sourceId] ?? {}), providerKey: value ?? '' },
+                            }));
+                          }}
+                          searchable
+                          clearable
+                          nothingFoundMessage="No web search instances"
                         />
                       ) : (
                         <>

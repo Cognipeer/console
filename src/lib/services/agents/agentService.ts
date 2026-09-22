@@ -87,6 +87,7 @@ import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/servi
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
 import { getToolByKey, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
+import { buildWebSearchAgentTools } from '@/lib/services/webSearch';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
 import {
     buildToolDefinitionsSection,
@@ -217,11 +218,13 @@ function knowledgeReadLinesToolDefinition(): TraceToolDefinition {
  *   agent.knowledge.read_document_lines    for the module they happen to read
  *   agent.tool.<toolKey>.<actionKey>       unified tool-system actions
  *   agent.browser.<toolName>               the browser_use system tools
+ *   agent.websearch.<toolName>             the web_search system tool
  *
- * The browser segment is the tool's own name VERBATIM (`agent.browser.
- * browser_navigate`), redundant prefix and all. Stripping the `browser_` would
- * read better and buy nothing: the prefix is part of the name the model calls,
- * so keeping it means a policy author can copy what they see in a trace.
+ * The browser/websearch segment is the tool's own name VERBATIM (`agent.browser.
+ * browser_navigate`, `agent.websearch.web_search`), redundant prefix and all.
+ * Stripping it would read better and buy nothing: the prefix is part of the
+ * name the model calls, so keeping it means a policy author can copy what
+ * they see in a trace.
  *
  * Names, not keys, are what the MODEL sees, and an operator editing an action's
  * `name` must not silently disarm the policy written against it — hence
@@ -1892,6 +1895,37 @@ export async function buildBoundTools(
                 logger.error('Failed to bind browser_use system tool', {
                     browserId,
                     error: err instanceof Error ? err.message : String(err),
+                });
+            }
+        } else if (binding.source === 'system' && binding.sourceKey === 'web_search') {
+            // ── System tool: Web Search ─────────────────────────
+            // No session to open ahead of time — `runWebSearch` resolves the
+            // instance (pinned or the project's single active one) per call.
+            const providerKey = typeof binding.config?.providerKey === 'string'
+                ? (binding.config.providerKey as string)
+                : undefined;
+            const webSearchTools = (buildWebSearchAgentTools({
+                tenantDbName,
+                tenantId,
+                projectId,
+                providerKey,
+            }) as unknown as AgentSdkToolInterface[]).map((webSearchTool) =>
+                protectBuiltTool(
+                    guard,
+                    {
+                        name: agentToolPolicyName('websearch', webSearchTool.name),
+                        requestedName: webSearchTool.name,
+                    },
+                    webSearchTool,
+                ),
+            );
+            tools.push(...webSearchTools);
+            for (const webSearchTool of webSearchTools) {
+                definitions.push({
+                    name: webSearchTool.name,
+                    ...(typeof webSearchTool.description === 'string' && webSearchTool.description
+                        ? { description: webSearchTool.description }
+                        : {}),
                 });
             }
         }
