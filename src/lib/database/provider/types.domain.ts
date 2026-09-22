@@ -2444,9 +2444,28 @@ export interface IAgentConversationStep {
   id?: string;
   name: string;
   args?: unknown;
+  /**
+   * What the MODEL saw. With `toolResponsePolicy: 'summarize_archive'` (the
+   * console default) this can be a summary of the real result, not the result
+   * — see `rawOutput`.
+   */
   output?: unknown;
+  /** The untouched tool result, stored only when it differs from `output`. */
+  rawOutput?: unknown;
   error?: string;
   subagent?: string;
+  /**
+   * The SDK's own verdict. Authoritative: the old code sniffed the output for
+   * an `error` key, which both missed a guardrail-`rejected` call and flagged
+   * any tool that legitimately returns a field called `error`.
+   */
+  status?: 'success' | 'error' | 'rejected' | 'handoff';
+  /** Served from the response cache — no upstream call was made. */
+  fromCache?: boolean;
+  /** `output` is a compaction of the result; `originalTokenCount` is its pre-compaction size. */
+  summarized?: boolean;
+  originalTokenCount?: number;
+  timestamp?: string;
 }
 
 export interface IAgentConversationMessage {

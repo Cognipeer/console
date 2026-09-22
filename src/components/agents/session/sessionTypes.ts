@@ -8,9 +8,19 @@ export interface PlaygroundStep {
     id?: string;
     name: string;
     args?: unknown;
+    /** What the MODEL saw — under summarize_archive retention, possibly a compaction. */
     output?: unknown;
+    /** The untouched tool result, present only when it differs from `output`. */
+    rawOutput?: unknown;
     error?: string;
     subagent?: string;
+    /** The SDK's own verdict, not inferred from the payload. */
+    status?: 'success' | 'error' | 'rejected' | 'handoff';
+    /** Served from the response cache — no upstream call was made. */
+    fromCache?: boolean;
+    summarized?: boolean;
+    originalTokenCount?: number;
+    timestamp?: string;
 }
 
 export interface ChatMessage {

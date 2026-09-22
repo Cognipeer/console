@@ -54,6 +54,12 @@ export interface SessionSidePanelProps {
     onGoToTurn: (index: number) => void;
 }
 
+/** The SDK's verdict when it gave one; the thrown-error flag otherwise. */
+function stepFailed(step: PlaygroundStep): boolean {
+    if (step.status) return step.status === 'error' || step.status === 'rejected';
+    return Boolean(step.error);
+}
+
 interface FlatEvent {
     turnIndex: number;
     step: PlaygroundStep;
@@ -99,7 +105,7 @@ export default function SessionSidePanel({
         events.forEach(({ step }) => {
             const entry = used.get(step.name) ?? { calls: 0, failed: 0 };
             entry.calls += 1;
-            if (step.error) entry.failed += 1;
+            if (stepFailed(step)) entry.failed += 1;
             used.set(step.name, entry);
         });
 
@@ -266,16 +272,29 @@ export default function SessionSidePanel({
                                         <Badge
                                             size="xs"
                                             variant="light"
-                                            color={step.error ? 'red' : 'blue'}
+                                            color={stepFailed(step) ? 'red' : 'blue'}
                                             className={classes.eventBadge}
                                         >
                                             {stepIndex + 1}
                                         </Badge>
                                         <Box className={classes.eventName}>
                                             <Text size="xs" ff="monospace" truncate>{step.name}</Text>
-                                            {step.subagent ? (
-                                                <Text size="10px" c="violet.6">via {step.subagent}</Text>
-                                            ) : null}
+                                            <Group gap={4}>
+                                                {step.subagent ? (
+                                                    <Text size="10px" c="violet.6">via {step.subagent}</Text>
+                                                ) : null}
+                                                {step.status && step.status !== 'success' ? (
+                                                    <Text size="10px" c={stepFailed(step) ? 'red' : 'dimmed'}>
+                                                        {step.status}
+                                                    </Text>
+                                                ) : null}
+                                                {step.fromCache ? (
+                                                    <Text size="10px" c="dimmed">cached</Text>
+                                                ) : null}
+                                                {step.summarized ? (
+                                                    <Text size="10px" c="orange.7">summarized</Text>
+                                                ) : null}
+                                            </Group>
                                         </Box>
                                     </Group>
                                 </UnstyledButton>

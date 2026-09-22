@@ -31,6 +31,7 @@ import {
     Center,
     Code,
     Collapse,
+    CopyButton,
     Group,
     Loader,
     Paper,
@@ -48,9 +49,11 @@ import { notifications } from '@mantine/notifications';
 import {
     IconAlertTriangle,
     IconBrain,
+    IconCheck,
     IconChevronDown,
     IconChevronRight,
     IconClock,
+    IconCopy,
     IconCoin,
     IconRobot,
     IconSearch,
@@ -99,6 +102,9 @@ export interface AgentSessionViewProps {
     agentId: string;
     sessionId: string;
 }
+
+/** How much of a payload is shown before "Show the whole payload". */
+const PAYLOAD_CLIP_CHARS = 1200;
 
 /** Timeline zoom steps, in pixels-per-second of turn latency. */
 const ZOOM_LEVELS = [2, 6, 18, 54];
@@ -634,21 +640,29 @@ function ReasoningDisclosure({ reasoning, latencyMs }: { reasoning: string; late
 }
 
 /**
- * The tool calls a turn made, in order. Collapsed by default and expanded per
- * step: a run with twelve tool calls is common, and twelve open JSON payloads
- * would bury the answer they produced.
+ * The tool calls a turn made, in order — open by default.
+ *
+ * It used to collapse behind a "3 tool calls" button. That is the wrong
+ * default for a playground: the whole reason to run a turn here rather than
+ * in production is to watch what the agent did, and hiding it behind a click
+ * made the transcript read like a chat window that happens to log.
+ *
+ * Long runs stay manageable because each call's payloads are what collapse,
+ * not the call itself — you always see the sequence, and open the ones you
+ * care about.
  */
 function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
-    const [open, setOpen] = useState(false);
+    const [open, setOpen] = useState(true);
     const failed = steps.filter((step) => step.error).length;
 
     return (
-        <Box mb="xs">
+        <Box mb="sm">
             <Button
                 size="compact-xs"
                 variant="subtle"
                 color={failed > 0 ? 'red' : 'gray'}
                 leftSection={<IconTimeline size={12} />}
+                rightSection={open ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
                 onClick={() => setOpen((value) => !value)}
             >
                 {steps.length} tool call{steps.length === 1 ? '' : 's'}
@@ -657,19 +671,7 @@ function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
             <Collapse in={open}>
                 <Stack gap={6} mt="xs">
                     {steps.map((step, index) => (
-                        <Paper key={step.id ?? index} withBorder p="xs" radius="sm">
-                            <Group gap="xs" mb={4}>
-                                <Badge size="xs" variant="light" color={step.error ? 'red' : 'blue'}>{index + 1}</Badge>
-                                <Text size="xs" fw={600} ff="monospace">{step.name}</Text>
-                                {step.subagent ? <Badge size="xs" variant="outline" color="violet">via {step.subagent}</Badge> : null}
-                            </Group>
-                            {step.args !== undefined ? <StepPayload label="args" value={step.args} /> : null}
-                            {step.error ? (
-                                <Text size="xs" c="red" className={classes.preWrap}>{step.error}</Text>
-                            ) : step.output !== undefined ? (
-                                <StepPayload label="result" value={step.output} />
-                            ) : null}
-                        </Paper>
+                        <StepCard key={step.id ?? index} step={step} index={index} />
                     ))}
                 </Stack>
             </Collapse>
@@ -677,12 +679,84 @@ function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
     );
 }
 
+/** One tool call: what was asked, what came back, and how the run treated it. */
+function StepCard({ step, index }: { step: PlaygroundStep; index: number }) {
+    const failed = Boolean(step.error) || step.status === 'error' || step.status === 'rejected';
+
+    return (
+        <Paper withBorder p="xs" radius="sm">
+            <Group gap="xs" mb={6} wrap="wrap">
+                <Badge size="xs" variant="light" color={failed ? 'red' : 'blue'}>{index + 1}</Badge>
+                <Text size="xs" fw={600} ff="monospace">{step.name}</Text>
+                {step.status && step.status !== 'success' ? (
+                    <Badge size="xs" variant="light" color={failed ? 'red' : 'yellow'}>{step.status}</Badge>
+                ) : null}
+                {step.subagent ? (
+                    <Badge size="xs" variant="outline" color="violet">via {step.subagent}</Badge>
+                ) : null}
+                {step.fromCache ? (
+                    <Tooltip label="Served from the response cache — the tool was not actually called" withArrow>
+                        <Badge size="xs" variant="outline" color="gray">cached</Badge>
+                    </Tooltip>
+                ) : null}
+                {step.summarized ? (
+                    <Tooltip
+                        label={step.originalTokenCount
+                            ? `The model saw a compaction of this result (originally ~${step.originalTokenCount} tokens)`
+                            : 'The model saw a compaction of this result'}
+                        withArrow
+                    >
+                        <Badge size="xs" variant="outline" color="orange">summarized</Badge>
+                    </Tooltip>
+                ) : null}
+                {step.timestamp ? (
+                    <Text size="10px" c="dimmed">{new Date(step.timestamp).toLocaleTimeString()}</Text>
+                ) : null}
+            </Group>
+
+            {step.args !== undefined ? <StepPayload label="args" value={step.args} /> : null}
+            {step.error ? (
+                <Box mb={4}>
+                    <Text size="10px" c="dimmed" tt="uppercase" fw={600}>error</Text>
+                    <Text size="xs" c="red" className={classes.preWrap}>{step.error}</Text>
+                </Box>
+            ) : null}
+            {step.output !== undefined ? (
+                <StepPayload
+                    // Naming matters once the two can differ: with the console's
+                    // default retention the model may have read a compaction, and
+                    // calling that "result" hid the substitution entirely.
+                    label={step.rawOutput !== undefined ? 'what the model saw' : 'result'}
+                    value={step.output}
+                />
+            ) : null}
+            {step.rawOutput !== undefined ? (
+                <StepPayload label="full tool result" value={step.rawOutput} defaultOpen={false} />
+            ) : null}
+        </Paper>
+    );
+}
+
 /**
- * One payload inside a step. Long values are clipped rather than scrolled: a
- * 50KB tool result inside a transcript makes the whole session unusable, and
- * the full value is in the trace.
+ * One payload inside a step.
+ *
+ * Long values open clipped with the rest one click away, rather than being
+ * truncated outright: a 50KB tool result pasted into the transcript makes the
+ * whole session unreadable, but "… 48000 more characters" with no way to see
+ * them made the playground useless for the exact debugging it exists for.
  */
-function StepPayload({ label, value }: { label: string; value: unknown }) {
+function StepPayload({
+    label,
+    value,
+    defaultOpen = true,
+}: {
+    label: string;
+    value: unknown;
+    defaultOpen?: boolean;
+}) {
+    const [expanded, setExpanded] = useState(false);
+    const [open, setOpen] = useState(defaultOpen);
+
     const text = useMemo(() => {
         if (typeof value === 'string') return value;
         try {
@@ -691,14 +765,47 @@ function StepPayload({ label, value }: { label: string; value: unknown }) {
             return String(value);
         }
     }, [value]);
-    const clipped = text.length > 1200;
+
+    const clipped = text.length > PAYLOAD_CLIP_CHARS && !expanded;
+    const shown = clipped ? text.slice(0, PAYLOAD_CLIP_CHARS) : text;
 
     return (
-        <Box mb={4}>
-            <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
-            <Code block className={classes.payloadCode}>
-                {clipped ? `${text.slice(0, 1200)}\n… ${text.length - 1200} more characters` : text}
-            </Code>
+        <Box mb={6}>
+            <Group gap={6} mb={2}>
+                <UnstyledButton onClick={() => setOpen((value) => !value)}>
+                    <Group gap={3}>
+                        {open ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
+                        <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
+                    </Group>
+                </UnstyledButton>
+                <Text size="10px" c="dimmed">{text.length.toLocaleString()} chars</Text>
+                <CopyButton value={text}>
+                    {({ copied, copy }) => (
+                        <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
+                            <ActionIcon size={14} variant="subtle" color="gray" onClick={copy}>
+                                {copied ? <IconCheck size={10} /> : <IconCopy size={10} />}
+                            </ActionIcon>
+                        </Tooltip>
+                    )}
+                </CopyButton>
+            </Group>
+            <Collapse in={open}>
+                <Code block className={classes.payloadCode}>
+                    {shown}
+                    {clipped ? `\n… ${(text.length - PAYLOAD_CLIP_CHARS).toLocaleString()} more characters` : ''}
+                </Code>
+                {text.length > PAYLOAD_CLIP_CHARS ? (
+                    <Button
+                        size="compact-xs"
+                        variant="subtle"
+                        color="gray"
+                        mt={2}
+                        onClick={() => setExpanded((value) => !value)}
+                    >
+                        {expanded ? 'Collapse' : 'Show the whole payload'}
+                    </Button>
+                ) : null}
+            </Collapse>
         </Box>
     );
 }

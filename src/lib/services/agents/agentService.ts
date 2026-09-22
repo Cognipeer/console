@@ -2560,11 +2560,19 @@ export interface AgentPlaygroundStep {
     id?: string;
     name: string;
     args?: unknown;
+    /** What the MODEL saw — possibly a summary of the result. See `rawOutput`. */
     output?: unknown;
+    /** The untouched tool result, set only when it differs from `output`. */
+    rawOutput?: unknown;
     /** Present when the tool threw. */
     error?: string;
     /** Sub-agent that made the call, when delegation was involved. */
     subagent?: string;
+    status?: 'success' | 'error' | 'rejected' | 'handoff';
+    fromCache?: boolean;
+    summarized?: boolean;
+    originalTokenCount?: number;
+    timestamp?: string;
 }
 
 export interface AgentPlaygroundChatResult {
@@ -3147,6 +3155,19 @@ export async function executePlaygroundChat(
  * summarization (the archived entry keeps its `executionId`), so a long run
  * still shows every call it made instead of only the ones after the last
  * compaction.
+ *
+ * Carries the whole entry, not just name/args/output. Two of those fields
+ * change what the playground is actually showing you:
+ *
+ *  - `output` is what the MODEL saw, which under the console's default
+ *    `summarize_archive` retention can be a compaction of the real result.
+ *    `rawOutput` is the result itself, kept whenever the two differ, so
+ *    "what did this tool return" and "what did the model get to read" stop
+ *    being the same question with one answer.
+ *  - `status` is the SDK's own verdict. Inferring it by sniffing the output
+ *    for an `error` key — what this did before — both missed a guardrail
+ *    `rejected` call and flagged any tool whose successful result happens to
+ *    carry a field called `error`.
  */
 function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundStep[] {
     const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
@@ -3154,17 +3175,38 @@ function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundSt
 
     return history.map((entry) => {
         const output = entry.output;
-        const isError =
-            output !== null &&
-            typeof output === 'object' &&
-            'error' in (output as Record<string, unknown>);
+        const status = typeof entry.status === 'string'
+            ? entry.status as AgentPlaygroundStep['status']
+            : undefined;
+        // Fall back to the old sniff only when the SDK reported no status.
+        const sniffedError =
+            output !== null
+            && typeof output === 'object'
+            && 'error' in (output as Record<string, unknown>);
+        const failed = status ? status === 'error' || status === 'rejected' : sniffedError;
+        const errorText = failed
+            ? (status === 'rejected' ? 'Blocked before the tool ran.' : undefined)
+                ?? (sniffedError ? String((output as Record<string, unknown>).error) : 'The tool call failed.')
+            : undefined;
+
+        const rawOutput = entry.rawOutput;
+        const rawDiffers = rawOutput !== undefined && rawOutput !== output;
+
         return {
             id: typeof entry.executionId === 'string' ? entry.executionId : undefined,
             name: typeof entry.toolName === 'string' ? entry.toolName : 'tool',
             args: entry.args,
             output,
-            ...(isError ? { error: String((output as Record<string, unknown>).error) } : {}),
+            ...(rawDiffers ? { rawOutput } : {}),
+            ...(errorText ? { error: errorText } : {}),
             ...(typeof entry.subagent === 'string' ? { subagent: entry.subagent } : {}),
+            ...(status ? { status } : {}),
+            ...(entry.fromCache === true ? { fromCache: true } : {}),
+            ...(entry.summarized === true ? { summarized: true } : {}),
+            ...(typeof entry.originalTokenCount === 'number'
+                ? { originalTokenCount: entry.originalTokenCount }
+                : {}),
+            ...(typeof entry.timestamp === 'string' ? { timestamp: entry.timestamp } : {}),
         };
     });
 }
