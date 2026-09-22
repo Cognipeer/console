@@ -733,6 +733,20 @@ export interface IEvaluationTarget {
   description?: string;
   kind: EvaluationTargetKind;
   agentKey?: string;
+  /**
+   * `agent` targets: pin the run to one published version instead of following
+   * whatever is published now.
+   *
+   * Absent means "the published version", which is the right default for a
+   * suite that guards production. Pinning is what makes a comparison run
+   * meaningful: two targets on the same agent at v3 and v4 answer "did the new
+   * version regress?", and that question is unanswerable while both silently
+   * follow the same moving pointer.
+   *
+   * `null` is how a PATCH clears an existing pin: both provider mixins treat
+   * `undefined` as "leave this field alone", so an absent key cannot unpin.
+   */
+  agentVersion?: number | null;
   modelKey?: string;
   external?: IEvaluationExternalTarget;
   /** `rag` targets: which module to retrieve from, and how much. */
@@ -2195,6 +2209,17 @@ export interface IAgentConfig {
   modelKey?: string;
   systemPrompt?: string;
   promptKey?: string;
+  /**
+   * Static values for the `{{placeholders}}` in `promptKey`'s template (or in
+   * an inline `systemPrompt`). A caller can override any of these per run via
+   * `runtimeContext.metadata`; `agent`, `now` and `user` are reserved and
+   * always win.
+   *
+   * Declaring any variable here also switches on Mustache rendering for an
+   * inline `systemPrompt`, which is otherwise left untouched so a prompt
+   * containing literal braces keeps working.
+   */
+  promptVariables?: Record<string, string>;
   temperature?: number;
   topP?: number;
   maxTokens?: number;

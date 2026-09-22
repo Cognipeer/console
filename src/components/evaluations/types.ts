@@ -96,6 +96,8 @@ export interface EvalTargetView {
   description?: string;
   kind: 'agent' | 'model' | 'external' | 'rag';
   agentKey?: string;
+  /** Pinned published version; absent/null means "follow the published one". */
+  agentVersion?: number | null;
   modelKey?: string;
   /** `rag` targets: the Knowledge Engine module queried, and how much of it. */
   ragModuleKey?: string;

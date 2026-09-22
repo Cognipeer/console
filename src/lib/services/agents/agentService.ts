@@ -7,7 +7,6 @@
 
 import { randomUUID } from 'node:crypto';
 
-import Mustache from 'mustache';
 import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
@@ -32,6 +31,12 @@ import {
     type ResolvedAgentRuntimeOptions,
 } from './agentRuntimeConfig';
 import type { IAgentSubagent } from '@/lib/database/provider/types.domain';
+import {
+    buildPromptVariables,
+    renderPromptTemplate,
+    shouldRenderInlinePrompt,
+    type RenderedPrompt,
+} from './promptVariables';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
@@ -1340,6 +1345,32 @@ function createConsoleSdkAgent(
             ...(input.threadId ? { threadId: input.threadId } : {}),
         },
     });
+}
+
+/**
+ * Logs which prompt placeholders came from the caller and which nobody filled.
+ *
+ * An unfilled placeholder renders empty, which is exactly the failure this
+ * whole module exists to make visible: the prompt still "works", it just quietly
+ * says less than its author wrote. A warn line is the cheapest way for an
+ * operator to find that from a trace.
+ */
+function reportPromptVariables(
+    rendered: RenderedPrompt,
+    context: { agentKey: string; promptKey?: string },
+): void {
+    if (rendered.unresolved.length > 0) {
+        logger.warn('Prompt has unresolved variables; they rendered empty', {
+            ...context,
+            unresolved: rendered.unresolved,
+        });
+    }
+    if (rendered.fromCaller.length > 0) {
+        logger.debug('Prompt variables filled from caller runtime context', {
+            ...context,
+            variables: rendered.fromCaller,
+        });
+    }
 }
 
 // ── Sub-agent registry ──────────────────────────────────────────────
@@ -2680,12 +2711,25 @@ export async function executeAgentChatLocal(
 
     // 5. Resolve system prompt
     let systemPrompt = config.systemPrompt;
+    const promptVariables = buildPromptVariables({
+        config,
+        agentKey,
+        agentName: agent.name,
+        version: resolvedVersion,
+        runtimeContext: request.runtimeContext,
+        userId: request.userId,
+    });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        // Prompts-feature templates may contain {{variable}} placeholders; agents
-        // don't supply render data today, so this only strips stray placeholders
-        // instead of leaking raw Mustache syntax into the live prompt and traces.
-        if (prompt) systemPrompt = Mustache.render(prompt.template, {});
+        if (prompt) {
+            const rendered = renderPromptTemplate(prompt.template, promptVariables);
+            systemPrompt = rendered.text;
+            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
+        }
+    } else if (systemPrompt && shouldRenderInlinePrompt(config)) {
+        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
+        systemPrompt = rendered.text;
+        reportPromptVariables(rendered, { agentKey });
     }
 
     // 5a. Guardrails. One guard for the whole run — resolving the bindings once
@@ -3031,14 +3075,26 @@ export async function executePlaygroundChatLocal(
         }).modelSettings,
     });
 
-    // Resolve system prompt
+    // Resolve system prompt. Same helper as the live path: a prompt that renders
+    // differently in the playground is a prompt nobody can test.
     let systemPrompt = config.systemPrompt;
+    const promptVariables = buildPromptVariables({
+        config,
+        agentKey,
+        agentName: agent.name,
+        runtimeContext: request.runtimeContext,
+    });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        // Prompts-feature templates may contain {{variable}} placeholders; agents
-        // don't supply render data today, so this only strips stray placeholders
-        // instead of leaking raw Mustache syntax into the live prompt and traces.
-        if (prompt) systemPrompt = Mustache.render(prompt.template, {});
+        if (prompt) {
+            const rendered = renderPromptTemplate(prompt.template, promptVariables);
+            systemPrompt = rendered.text;
+            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
+        }
+    } else if (systemPrompt && shouldRenderInlinePrompt(config)) {
+        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
+        systemPrompt = rendered.text;
+        reportPromptVariables(rendered, { agentKey });
     }
 
     // Guardrails. Same guard and same helper as the live chat path, on purpose:

@@ -500,7 +500,13 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
         conversationId: String(conversation._id),
         userMessage: toUserMessage(item),
         userId,
-        usePublished: true,
+        // A pinned version wins; otherwise follow whatever is published. Both
+        // paths read an immutable snapshot — the draft config is never what a
+        // suite tests, because a half-finished edit in the playground would
+        // otherwise change a scheduled run's result without anyone publishing.
+        ...(typeof target.agentVersion === 'number'
+          ? { version: target.agentVersion }
+          : { usePublished: true }),
       });
       return {
         text: extractAgentText(response),

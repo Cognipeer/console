@@ -87,6 +87,7 @@ import AgentAdvancedSettings, { countAdvancedOverrides } from './studio/AgentAdv
 import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
 import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
 import AgentExportPanel from './studio/AgentExportPanel';
+import PromptVariablesEditor from './studio/PromptVariablesEditor';
 import type {
   IAgentRuntimeConfig,
   IAgentStructuredOutput,
@@ -124,6 +125,7 @@ interface Agent {
     /** @deprecated See `inputGuardrailKey`. */
     outputGuardrailKey?: string;
     toolBindings?: ToolBinding[];
+    promptVariables?: Record<string, string>;
     runtime?: IAgentRuntimeConfig;
     structuredOutput?: IAgentStructuredOutput;
     subagents?: IAgentSubagent[];
@@ -280,6 +282,7 @@ export default function AgentDetailPage() {
   const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
   const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
   const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
+  const [promptVariables, setPromptVariables] = useState<Record<string, string> | undefined>(undefined);
   /** Other agents in the project — the `ref` sub-agent picker's options. */
   const [projectAgents, setProjectAgents] = useState<Array<{ key: string; name: string; publishedVersion?: number | null }>>([]);
 
@@ -350,6 +353,20 @@ export default function AgentDetailPage() {
   /** Badge on the Settings tab: how far this agent strays from the defaults. */
   const advancedOverrideCount = useMemo(() => countAdvancedOverrides(runtimeConfig), [runtimeConfig]);
 
+  /**
+   * The prompt text the agent will actually run, whichever source it comes
+   * from. The variables editor reads it to report which placeholders nobody
+   * filled — the check has to see the same string the server renders.
+   */
+  const resolvedPromptTemplate = useMemo(() => {
+    const values = configForm.getValues();
+    if (values.promptMode === 'prompt') {
+      return prompts.find((prompt) => prompt.key === values.promptKey)?.template ?? '';
+    }
+    return values.systemPrompt ?? '';
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configForm.values.promptMode, configForm.values.promptKey, configForm.values.systemPrompt, prompts]);
+
   const tracingPagination = useMemo(() => {
     const totalPages = Math.max(1, Math.ceil(tracingTotal / tracingPageSize));
     return { totalPages };
@@ -383,6 +400,7 @@ export default function AgentDetailPage() {
         setStructuredOutput(cfg.structuredOutput);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
+        setPromptVariables(cfg.promptVariables);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -644,6 +662,7 @@ export default function AgentDetailPage() {
     nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
     nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
     nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
+    nextConfig.promptVariables = promptVariables && Object.keys(promptVariables).length > 0 ? promptVariables : undefined;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -1233,7 +1252,25 @@ export default function AgentDetailPage() {
             </Tabs.List>
 
             <Tabs.Panel value="basic">
-              <div className={classes.settingsPane}>{renderBasicSettings()}</div>
+              <div className={classes.settingsPane}>
+                {renderBasicSettings()}
+                {!isConnected ? (
+                  <SectionCard
+                    title="Prompt variables"
+                    description="Fill the placeholders this agent's prompt declares."
+                    mt="md"
+                  >
+                    <PromptVariablesEditor
+                      value={promptVariables}
+                      onChange={setPromptVariables}
+                      template={resolvedPromptTemplate}
+                    />
+                    <Group justify="flex-end" mt="md">
+                      <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+                    </Group>
+                  </SectionCard>
+                ) : null}
+              </div>
             </Tabs.Panel>
 
             <Tabs.Panel value="advanced">

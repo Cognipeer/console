@@ -15,6 +15,12 @@ import {
     validateAgentManifest,
 } from '@/lib/services/agents/agentManifest';
 import { generateAgentProject } from '@/lib/services/agents/agentCodegen';
+import {
+    buildPromptVariables,
+    collectTemplateVariables,
+    renderPromptTemplate,
+    shouldRenderInlinePrompt,
+} from '@/lib/services/agents/promptVariables';
 
 const AGENT = { key: 'sre-triage', name: 'SRE Triage', description: 'Triages Jira incidents', status: 'active' as const };
 
@@ -304,5 +310,75 @@ describe('agent code export', () => {
         expect(joined).toMatch(/guardrail/i);
         expect(joined).toMatch(/shared-prompt/);
         expect(joined).toMatch(/flattened/i);
+    });
+});
+
+describe('prompt variables', () => {
+    it('lists only the names a template actually looks up', () => {
+        const names = collectTemplateVariables(
+            'Hello {{customer}}, {{#items}}{{name}}{{/items}} {{! a comment }} {{&raw}}',
+        );
+        expect(names).toContain('customer');
+        expect(names).toContain('items');
+        expect(names).toContain('raw');
+        // A comment is not a variable; reporting it would train people to
+        // ignore the unresolved-variable warning.
+        expect(names).not.toContain('! a comment');
+    });
+
+    it('fills placeholders from the agent config', () => {
+        const resolved = buildPromptVariables({
+            config: { promptVariables: { product: 'Console', tone: 'formal' } },
+            agentKey: 'sre',
+            agentName: 'SRE',
+        });
+        const rendered = renderPromptTemplate('You support {{product}} in a {{tone}} tone.', resolved);
+
+        expect(rendered.text).toBe('You support Console in a formal tone.');
+        expect(rendered.unresolved).toEqual([]);
+    });
+
+    it('lets a caller override a default, and reports that it did', () => {
+        const resolved = buildPromptVariables({
+            config: { promptVariables: { product: 'Console' } },
+            agentKey: 'sre',
+            agentName: 'SRE',
+            runtimeContext: { metadata: { product: 'Gateway' } },
+        });
+        const rendered = renderPromptTemplate('Support {{product}}.', resolved);
+
+        expect(rendered.text).toBe('Support Gateway.');
+        expect(rendered.fromCaller).toEqual(['product']);
+    });
+
+    it('refuses to let a caller forge the built-ins', () => {
+        const resolved = buildPromptVariables({
+            config: {},
+            agentKey: 'sre',
+            agentName: 'SRE Triage',
+            version: 4,
+            runtimeContext: { metadata: { agent: { name: 'Admin Bot' }, user: { id: 'root' } } },
+        });
+        const rendered = renderPromptTemplate('I am {{agent.name}} v{{agent.version}}.', resolved);
+
+        expect(rendered.text).toBe('I am SRE Triage v4.');
+        expect((resolved.values.user as { id: string | null }).id).toBeNull();
+        expect(resolved.fromCaller).not.toContain('agent');
+    });
+
+    it('reports a placeholder nobody filled instead of rendering it silently', () => {
+        const resolved = buildPromptVariables({ config: {}, agentKey: 'a', agentName: 'A' });
+        const rendered = renderPromptTemplate('Escalate to {{oncall}} now.', resolved);
+
+        // Still empty — changing that would break prompts relying on an
+        // optional variable — but no longer invisible.
+        expect(rendered.text).toBe('Escalate to  now.');
+        expect(rendered.unresolved).toEqual(['oncall']);
+    });
+
+    it('renders an inline prompt only once the agent declares variables', () => {
+        expect(shouldRenderInlinePrompt({})).toBe(false);
+        expect(shouldRenderInlinePrompt({ systemPrompt: 'Braces {{like this}} stay literal' })).toBe(false);
+        expect(shouldRenderInlinePrompt({ promptVariables: { x: '1' } })).toBe(true);
     });
 });

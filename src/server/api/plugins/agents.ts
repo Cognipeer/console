@@ -31,6 +31,8 @@ import {
   generateAgentProject,
   type AgentCodegenTarget,
 } from '@/lib/services/agents/agentCodegen';
+import { buildPromptVariables, renderPromptTemplate } from '@/lib/services/agents/promptVariables';
+import { getDatabase } from '@/lib/database';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   readJsonBody,
@@ -407,6 +409,36 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  /**
+   * Flattens `promptKey` + `promptVariables` into a literal `systemPrompt` for
+   * code export. The generated project has no Prompts module and no runtime
+   * context, so anything left unresolved here would stay unresolved forever.
+   */
+  async function resolveConfigForExport(
+    tenantDbName: string,
+    projectId: string,
+    agent: IAgent,
+    config: IAgentConfig,
+  ): Promise<IAgentConfig> {
+    let template = config.systemPrompt;
+    if (!template && config.promptKey) {
+      const db = await getDatabase();
+      await db.switchToTenant(tenantDbName);
+      const prompt = await db.findPromptByKey(config.promptKey, projectId);
+      template = prompt?.template;
+    }
+    if (!template) return config;
+
+    const variables = buildPromptVariables({
+      config,
+      agentKey: agent.key,
+      agentName: agent.name,
+      version: agent.publishedVersion ?? null,
+    });
+    const rendered = renderPromptTemplate(template, variables);
+    return { ...config, systemPrompt: rendered.text, promptKey: undefined };
+  }
+
   // ── Manifest export / import ───────────────────────────────────────────
 
   app.get('/agents/:agentId/export', withApiRequestContext(async (request, reply) => {
@@ -545,7 +577,14 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         config = snapshot.snapshot.config;
       }
 
-      const result = generateAgentProject(agent, config, {
+      // Resolve the prompt the way the runtime does before handing it to the
+      // generator. Without this an agent backed by a shared prompt exports with
+      // no system prompt at all, and one with variables exports the hollow
+      // template — both produce a project that quietly behaves differently from
+      // the agent it was generated from.
+      const exportConfig = await resolveConfigForExport(session.tenantDbName, projectId, agent, config);
+
+      const result = generateAgentProject(agent, exportConfig, {
         target,
         packageName: body?.packageName,
         consoleBaseUrl: body?.consoleBaseUrl,
