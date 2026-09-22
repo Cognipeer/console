@@ -2496,6 +2496,12 @@ export interface AgentChatRequest {
      * connected agents, metadata). Plain data — serializes over the job queue.
      */
     runtimeContext?: AgentRuntimeContext;
+    /**
+     * Incremental answer text. Same queue caveat as the playground's: a
+     * function cannot be serialized to another node, so a routed run simply
+     * streams nothing and the caller still gets the complete result.
+     */
+    onTextChunk?: (text: string) => void;
 }
 
 /** Tool-call progress notification surfaced while an agent run executes. */
@@ -2663,13 +2669,18 @@ export interface AgentChatResponse {
 export async function executeAgentChat(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    // The callback cannot be serialized over the queue — stripped from the
+    // payload, kept on the local fast path. A routed run answers in full; it
+    // just does not stream on the way.
+    const payload = { ...request };
+    delete payload.onTextChunk;
     return routeInstanceCall(
         {
             entityType: 'agent',
             entityId: agentEntityId(request.tenantId, request.agentKey),
             jobName: 'chat',
         },
-        request as unknown as QueuePayload,
+        payload as unknown as QueuePayload,
         () => executeAgentChatLocal(request),
     );
 }
@@ -3030,7 +3041,29 @@ export async function executeAgentChatLocal(
     ];
 
     try {
-        const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
+        // Streaming is opt-in per call: `stream: true` is what actually turns
+        // provider deltas on, and the SDK's terminal `isFinal` callback
+        // repeats the WHOLE answer, so forwarding it would emit the response
+        // twice. Both handled, same as the playground path.
+        const { onTextChunk: onLiveTextChunk } = request;
+        const liveInvokeConfig = onLiveTextChunk
+            ? {
+                stream: true,
+                onStream: (chunk: { text?: string; isFinal?: boolean }) => {
+                    if (chunk.isFinal || !chunk.text) return;
+                    try {
+                        onLiveTextChunk(chunk.text);
+                    } catch (callbackError) {
+                        logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+                    }
+                },
+            }
+            : undefined;
+
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(
+            createConsoleAgentState(inputMessages),
+            liveInvokeConfig,
+        );
 
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;

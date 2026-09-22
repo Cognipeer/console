@@ -36,6 +36,13 @@ import {
     buildPromptVariables,
     renderPromptTemplate,
 } from '@/lib/services/agents/promptVariables';
+import {
+    extractAnswerText,
+    extractLastUserMessage,
+    resolveAgentModel,
+    toChatChunk,
+    toChatCompletion,
+} from '@/server/api/plugins/agent-openai-bridge';
 
 const AGENT = {
     key: 'field-ops',
@@ -342,5 +349,70 @@ describe('agent settings — what a run reports back', () => {
         expect(totals.activeMs).toBe(4200);
         expect(totals.costUsd).toBeCloseTo(0.0182, 6);
         expect(totals.costComplete).toBe(true);
+    });
+});
+
+describe('agent over the OpenAI chat-completions surface', () => {
+    it('never steals a name that belongs to a model', async () => {
+        // The whole point of the ordering: creating an agent keyed like an
+        // existing model must not silently re-route that model's traffic.
+        const agent = await resolveAgentModel(
+            'gpt-5-terra',
+            { tenantDbName: 't', projectId: 'p1' },
+            async () => true,
+        );
+        expect(agent).toBeNull();
+    });
+
+    it('takes the last user turn, not the whole replayed transcript', () => {
+        // The agent owns its history in a conversation record, so replaying
+        // the client's transcript would duplicate every prior turn.
+        expect(extractLastUserMessage([
+            { role: 'user', content: 'first' },
+            { role: 'assistant', content: 'answer' },
+            { role: 'user', content: 'second' },
+        ])).toBe('second');
+    });
+
+    it('reads both the string and the content-part form', () => {
+        expect(extractLastUserMessage([
+            { role: 'user', content: [{ type: 'text', text: 'part one ' }, { type: 'text', text: 'part two' }] },
+        ])).toBe('part one part two');
+        expect(extractLastUserMessage([{ role: 'assistant', content: 'only an answer' }])).toBeUndefined();
+        expect(extractLastUserMessage(undefined)).toBeUndefined();
+    });
+
+    it('answers in the shape every OpenAI client already parses', () => {
+        const completion = toChatCompletion({
+            id: 'chatcmpl-1',
+            model: 'field-ops',
+            content: 'the database is down',
+            conversationId: 'conv-1',
+            usage: { prompt_tokens: 120, completion_tokens: 18, total_tokens: 138 },
+        });
+        expect(completion.object).toBe('chat.completion');
+        expect(completion.choices[0].message).toEqual({ role: 'assistant', content: 'the database is down' });
+        expect(completion.choices[0].finish_reason).toBe('stop');
+        expect(completion.usage?.total_tokens).toBe(138);
+        // An agent is stateful, so the thread handle has to come back.
+        expect(completion.conversation_id).toBe('conv-1');
+    });
+
+    it('emits deltas and a terminating chunk for the streaming form', () => {
+        expect(toChatChunk({ id: 'c1', model: 'field-ops', delta: 'hel' }).choices[0])
+            .toEqual({ index: 0, delta: { content: 'hel' }, finish_reason: null });
+        expect(toChatChunk({ id: 'c1', model: 'field-ops', finish: true }).choices[0])
+            .toEqual({ index: 0, delta: {}, finish_reason: 'stop' });
+    });
+
+    it('returns the answer text without the reasoning items in front of it', () => {
+        // `content` is the answer; pasting a model's thinking before it would
+        // change what every existing client displays.
+        expect(extractAnswerText({
+            output: [
+                { id: 'r1', type: 'reasoning', content: [{ type: 'reasoning_text', text: 'thinking…' }] },
+                { id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'the answer' }] },
+            ],
+        } as never)).toBe('the answer');
     });
 });

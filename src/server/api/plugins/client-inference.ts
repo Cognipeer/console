@@ -12,6 +12,15 @@ import {
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import type { IAgent } from '@/lib/database';
+import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import {
+  resolveAgentModel,
+  runAgentCompletion,
+  toChatChunk,
+  toChatCompletion,
+  type OpenAiMessage,
+} from './agent-openai-bridge';
 import {
   calculateCost,
   logModelUsage,
@@ -151,6 +160,126 @@ function invalidJson(reply: FastifyReply) {
   });
 }
 
+/**
+ * Runs an agent and answers in the chat-completions shape, streaming when
+ * the caller asked for it.
+ *
+ * Quota and usage accounting stay the agent runtime's own: `executeAgentChat`
+ * records the turn against the agent, which is where an agent run belongs.
+ * Charging it again here, as a model call, would double-count every agent
+ * invocation in the tenant's bill.
+ */
+async function handleAgentChatCompletion(input: {
+  agent: IAgent;
+  auth: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    tokenRecord: { _id?: unknown; userId: string };
+  };
+  body: Record<string, unknown>;
+  headers: Record<string, unknown>;
+  model: string;
+  reply: FastifyReply;
+}) {
+  const { agent, auth, body, model, reply } = input;
+  const id = `chatcmpl-${crypto.randomUUID()}`;
+  const streaming = body.stream === true;
+
+  const runtimeContext = buildRuntimeContextFromRequest(
+    body.runtime_context,
+    input.headers as never,
+    {
+      userId: auth.tokenRecord.userId,
+      tokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+      source: 'api',
+    },
+  );
+
+  const common = {
+    agent,
+    model,
+    messages: body.messages as OpenAiMessage[] | undefined,
+    ...(typeof body.conversation_id === 'string' ? { conversationId: body.conversation_id } : {}),
+    ...(typeof body.version === 'number' ? { version: body.version } : {}),
+    runtimeContext,
+    ctx: {
+      tenantDbName: auth.tenantDbName,
+      tenantId: auth.tenantId,
+      projectId: auth.projectId,
+      userId: auth.tokenRecord.userId,
+    },
+  };
+
+  if (!streaming) {
+    const result = await runAgentCompletion(common);
+    if ('error' in result) {
+      return reply.code(result.status).send({
+        error: { message: result.error, type: 'invalid_request_error' },
+      });
+    }
+    return reply.code(200).send(toChatCompletion({
+      id,
+      model,
+      content: result.content,
+      conversationId: result.conversationId,
+      ...(result.usage ? { usage: result.usage } : {}),
+    }));
+  }
+
+  reply.raw.setHeader('Content-Type', 'text/event-stream');
+  reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+  reply.raw.setHeader('Connection', 'keep-alive');
+  reply.raw.setHeader('X-Accel-Buffering', 'no');
+  reply.raw.flushHeaders?.();
+
+  let closed = false;
+  reply.raw.on('close', () => { closed = true; });
+  const send = (payload: unknown) => {
+    if (closed) return;
+    try {
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch {
+      closed = true;
+    }
+  };
+
+  let streamed = '';
+  try {
+    const result = await runAgentCompletion({
+      ...common,
+      onTextChunk: (text) => {
+        streamed += text;
+        send(toChatChunk({ id, model, delta: text }));
+      },
+    });
+
+    if ('error' in result) {
+      send({ error: { message: result.error, type: 'invalid_request_error' } });
+    } else if (!streamed && result.content) {
+      // A routed run streams nothing (the callback cannot cross the job
+      // queue), and a caller that asked for a stream must still receive the
+      // answer rather than an empty one followed by [DONE].
+      send(toChatChunk({ id, model, delta: result.content }));
+    }
+    send(toChatChunk({ id, model, finish: true }));
+  } catch (error) {
+    logger.error('Agent chat completion stream failed', { error });
+    send({
+      error: {
+        message: error instanceof Error ? error.message : 'Agent run failed',
+        type: 'server_error',
+      },
+    });
+  } finally {
+    if (!closed) {
+      reply.raw.write('data: [DONE]\n\n');
+      reply.raw.end();
+    }
+  }
+  return reply;
+}
+
 export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/chat/completions', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const startedAt = Date.now();
@@ -180,6 +309,34 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       modelKey = body.model;
+
+      /*
+       * An agent can be addressed here by key, so any OpenAI client can call
+       * one without knowing this console exists.
+       *
+       * Checked AFTER the model lookup for a bare name (`resolveAgentModel`
+       * asks `modelExists` first): no existing caller may have its traffic
+       * re-routed because someone later created an agent whose key collides
+       * with a model. The run is delegated to `executeAgentChat` — the same
+       * entry point `/responses` uses — so there is one agent runtime, not a
+       * second one hiding behind an OpenAI-shaped door.
+       */
+      const agent = await resolveAgentModel(
+        modelKey,
+        { tenantDbName: auth.tenantDbName, projectId: auth.projectId },
+        async (key) => Boolean(await getModelByKey(auth.tenantDbName, key, auth.projectId)),
+      );
+      if (agent) {
+        return handleAgentChatCompletion({
+          agent,
+          auth,
+          body: body as Record<string, unknown>,
+          headers: request.headers,
+          model: modelKey,
+          reply,
+        });
+      }
+
       const requestedOutputTokens =
         typeof body.max_completion_tokens === 'number'
           ? body.max_completion_tokens
