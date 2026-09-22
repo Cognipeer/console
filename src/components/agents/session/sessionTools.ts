@@ -18,7 +18,7 @@
  * called but the config does not declare — an SDK control-plane tool, or a
  * binding that changed after the turn ran.
  */
-export type ToolOrigin = 'tool' | 'mcp' | 'system' | 'knowledge' | 'runtime';
+export type ToolOrigin = 'tool' | 'mcp' | 'system' | 'knowledge' | 'memory' | 'runtime';
 
 export interface ConfiguredTool {
     name: string;
@@ -32,6 +32,7 @@ export interface AgentToolConfig {
     knowledgeEngineKey?: string;
     subagents?: unknown[];
     skills?: unknown[];
+    memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
 }
 
 /** Bound whenever a knowledge engine is attached — see `agentService.ts`. */
@@ -62,6 +63,18 @@ export function collectConfiguredTools(config: AgentToolConfig | undefined): Con
     if (config.knowledgeEngineKey) {
         for (const name of KNOWLEDGE_TOOLS) {
             tools.push({ name, origin: 'knowledge', sourceKey: config.knowledgeEngineKey });
+        }
+    }
+
+    // Console-side memory tools — see `agentMemoryTools.ts`. Bound whenever
+    // memory is on with a store, unless the operator turned them off.
+    const memoryMode = config.memory?.tools ?? 'readwrite';
+    if (config.memory?.enabled && config.memory.memoryStoreKey && memoryMode !== 'off') {
+        const names = memoryMode === 'readwrite'
+            ? ['memory_search', 'memory_write', 'memory_forget']
+            : ['memory_search'];
+        for (const name of names) {
+            tools.push({ name, origin: 'memory', sourceKey: config.memory.memoryStoreKey });
         }
     }
 

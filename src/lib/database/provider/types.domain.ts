@@ -2140,7 +2140,22 @@ export interface IAgentMemoryConfig {
   scope?: AgentMemoryScope;
   writePolicy?: AgentMemoryWritePolicy;
   readPolicy?: AgentMemoryReadPolicy;
+  /**
+   * Whether the agent also gets memory as callable tools.
+   *
+   * The SDK gives it neither: recall is pre-injected as a system message and
+   * writes only happen when a compaction produces a summary, so an agent can
+   * neither look something up nor record what it was just told. `agentMemoryTools.ts`
+   * adds `memory_search` / `memory_write` / `memory_forget` over the same store.
+   *
+   * Defaults to 'readwrite' when memory is enabled — being told to remember
+   * something and silently not doing so is the worse surprise.
+   */
+  tools?: AgentMemoryToolMode;
 }
+
+/** 'read' drops the write/forget tools, for a curated store the agent must not pollute. */
+export type AgentMemoryToolMode = 'off' | 'read' | 'readwrite';
 
 /**
  * A reusable capability the model can discover and open on demand —

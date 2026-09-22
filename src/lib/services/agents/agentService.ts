@@ -101,6 +101,7 @@ import {
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
+import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const logger = createLogger('agents');
@@ -2923,6 +2924,37 @@ export async function executeAgentChatLocal(
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
 
+    // 5d. Memory as tools the model can actually call. The SDK gives it
+    // neither: recall is pre-injected as a system message and writes only
+    // happen at compaction, so an agent can neither look a fact up nor record
+    // what it was just told. Built from the SAME store the SDK path reads, so
+    // a tool write is visible to next turn's injection.
+    const memoryOption = buildAgentMemoryOption(config.memory, {
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId,
+        userId: request.userId,
+    });
+    const memoryToolMode = config.memory?.tools ?? 'readwrite';
+    if (memoryOption?.store && memoryToolMode !== 'off') {
+        const allowWrites = memoryToolMode === 'readwrite';
+        tools.push(...buildMemoryTools({
+            store: memoryOption.store,
+            // 'workspace' is the SDK's OWN default when a config names no
+            // scope (every runtime profile sets `memory: { scope: 'workspace' }`).
+            // Defaulting to 'session' here would have the tools write where the
+            // SDK's injection never reads — a fact stored and then invisible.
+            scope: memoryOption.scope ?? 'workspace',
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            allowWrites,
+        }));
+        toolDefinitions.push(...memoryToolDefinitions(allowWrites));
+    }
+
     // 6. Build message history
     const now = new Date();
     const existingMessages: AgentSdkMessage[] = (conversation.messages || []).map((m) => ({
@@ -2962,14 +2994,7 @@ export async function executeAgentChatLocal(
         subagents: chatSubagents.subagents,
         skills: chatSkills,
         skillPolicy: resolveAgentSkillPolicy(config),
-        memory: buildAgentMemoryOption(config.memory, {
-            tenantDbName,
-            tenantId,
-            projectId,
-            agentKey,
-            conversationId,
-            userId: request.userId,
-        }),
+        memory: memoryOption,
         tracingMetadata: buildTracingMetadata(request.runtimeContext),
     });
 
@@ -3409,6 +3434,30 @@ export async function executePlaygroundChatLocal(
     playgroundTools.push(...boundPlaygroundTools);
     playgroundToolDefinitions.push(...boundPlaygroundToolDefinitions);
 
+    // Same memory toolset the live path binds — a playground that hands the
+    // agent a different set of tools is not testing the agent.
+    const playgroundMemoryOption = buildAgentMemoryOption(config.memory, {
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId: sessionConversation ? String(sessionConversation._id) : undefined,
+        userId: runtimeContext?.userId,
+    });
+    const playgroundMemoryToolMode = config.memory?.tools ?? 'readwrite';
+    if (playgroundMemoryOption?.store && playgroundMemoryToolMode !== 'off') {
+        const allowWrites = playgroundMemoryToolMode === 'readwrite';
+        playgroundTools.push(...buildMemoryTools({
+            store: playgroundMemoryOption.store,
+            scope: playgroundMemoryOption.scope ?? 'workspace',
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            allowWrites,
+        }));
+        playgroundToolDefinitions.push(...memoryToolDefinitions(allowWrites));
+    }
+
     // Build messages (in-memory history only). The GUARDED message is what the
     // model sees — the single-slot version computed a redaction here and then
     // sent the raw text anyway.
@@ -3453,14 +3502,7 @@ export async function executePlaygroundChatLocal(
         subagents: playgroundSubagents.subagents,
         skills: playgroundSkills,
         skillPolicy: resolveAgentSkillPolicy(config),
-        memory: buildAgentMemoryOption(config.memory, {
-            tenantDbName,
-            tenantId,
-            projectId,
-            agentKey,
-            conversationId: sessionConversation ? String(sessionConversation._id) : undefined,
-            userId: runtimeContext?.userId,
-        }),
+        memory: playgroundMemoryOption,
     });
 
     // Surface tool-call progress to the caller (best-effort; never fails the run).

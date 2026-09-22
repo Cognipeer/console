@@ -413,6 +413,7 @@ function originLabel(origin: string): string {
     if (origin === 'mcp') return 'MCP';
     if (origin === 'system') return 'built-in';
     if (origin === 'knowledge') return 'knowledge engine';
+    if (origin === 'memory') return 'memory';
     if (origin === 'runtime') return 'not in config';
     return 'tool';
 }

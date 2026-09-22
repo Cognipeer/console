@@ -9,11 +9,12 @@
  * own structured-summarization memory pipeline.
  */
 
-import { Alert, Anchor, Group, Select, Stack, Switch, Text } from '@mantine/core';
+import { Alert, Anchor, Code, Group, Select, Stack, Switch, Text } from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
 import type {
     AgentMemoryReadPolicy,
     AgentMemoryScope,
+    AgentMemoryToolMode,
     AgentMemoryWritePolicy,
     IAgentMemoryConfig,
 } from '@/lib/database/provider/types.domain';
@@ -80,18 +81,22 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                                 { value: 'workspace', label: 'workspace — shared by this agent' },
                                 { value: 'tenant', label: 'tenant — shared by the whole store' },
                             ]}
-                            value={value?.scope ?? 'session'}
+                            // 'workspace' is what actually runs when nothing is
+                            // picked — it is the SDK's default in every runtime
+                            // profile. Showing 'session' here said otherwise.
+                            value={value?.scope ?? 'workspace'}
                             onChange={(next) => patch({ scope: (next as AgentMemoryScope) ?? undefined })}
                             disabled={disabled}
                             allowDeselect={false}
                         />
                         <Select
                             label="Write policy"
-                            description="When facts get written back to the store."
+                            description="When the SDK writes facts on its own, apart from the tools below."
                             data={[
-                                // Not "via a tool call" — the SDK exposes no memory
-                                // tool. `manual` simply means the SDK never writes.
-                                { value: 'manual', label: 'manual — the agent never writes' },
+                                // Accurate again now that memory_write exists:
+                                // `manual` means no AUTOMATIC writes, so the
+                                // tool is the only way in.
+                                { value: 'manual', label: 'manual — only via memory_write' },
                                 { value: 'auto_important', label: 'auto_important — only stable facts' },
                                 { value: 'always', label: 'always — every compaction writes facts' },
                             ]}
@@ -124,24 +129,50 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                         </Alert>
                     ) : null}
 
+                    <Select
+                        label="Memory tools"
+                        description="Whether the agent can call memory itself, on top of the facts pre-injected each turn."
+                        data={[
+                            { value: 'readwrite', label: 'search, write and forget' },
+                            { value: 'read', label: 'search only — the agent cannot change stored facts' },
+                            { value: 'off', label: 'no tools — pre-injected recall only' },
+                        ]}
+                        value={value?.tools ?? 'readwrite'}
+                        onChange={(next) => patch({ tools: (next as AgentMemoryToolMode) ?? undefined })}
+                        disabled={disabled}
+                        allowDeselect={false}
+                    />
+
                     {/*
-                      Two things operators reliably assume and are wrong about,
-                      both verified against the SDK rather than its docs.
+                      What the SDK does on its own, verified against its source
+                      rather than its docs — and what the console adds on top.
                     */}
                     <Alert variant="light" color="gray">
                         <Text size="xs">
-                            Memory adds <strong>no tools</strong>. Recalled facts are injected ahead of the
-                            model call as a system message, so the agent never decides to look something up —
-                            it simply already knows it.
+                            The SDK itself gives the agent <strong>no memory tools</strong>: it injects
+                            recalled facts ahead of the model call as a system message, and only writes
+                            facts back <strong>at compaction</strong>, from the summary it produces. A
+                            conversation that never grows past the summarization threshold writes nothing,
+                            however much it was told.
                         </Text>
-                        {value?.writePolicy !== 'manual' ? (
+                        {(value?.tools ?? 'readwrite') !== 'off' ? (
                             <Text size="xs" mt={6}>
-                                Facts are written <strong>at compaction</strong>, from the summary the SDK
-                                produces. A conversation that never grows past the summarization threshold
-                                writes nothing, however much it was told — so a short session can read memory
-                                without ever adding to it.
+                                The tools above close that gap:{' '}
+                                <Code>memory_search</Code> lets the agent look something up when the
+                                pre-injected slice missed it
+                                {(value?.tools ?? 'readwrite') === 'readwrite' ? (
+                                    <>, and <Code>memory_write</Code> / <Code>memory_forget</Code> let it
+                                    record a fact the moment it is told, rather than waiting for a
+                                    compaction that may never come</>
+                                ) : null}
+                                . They read and write the same store, so nothing is stored twice.
                             </Text>
-                        ) : null}
+                        ) : (
+                            <Text size="xs" mt={6}>
+                                With tools off, an agent told &quot;remember that I prefer Turkish&quot; will
+                                agree and then store nothing unless the conversation later compacts.
+                            </Text>
+                        )}
                     </Alert>
                 </>
             ) : null}

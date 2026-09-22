@@ -87,6 +87,7 @@ interface AgentSummary {
         knowledgeEngineKey?: string;
         subagents?: unknown[];
         skills?: unknown[];
+        memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
     };
 }
 

@@ -689,3 +689,38 @@ describe('session tools', () => {
         expect(collectConfiguredTools({})).toEqual([]);
     });
 });
+
+describe('memory tools', () => {
+    const MEM = { enabled: true, memoryStoreKey: 'mem-1' };
+
+    it('gives a memory-enabled agent search, write and forget by default', () => {
+        // The SDK adds none of these — recall is pre-injected and writes only
+        // happen at compaction — so the console binds them itself.
+        expect(collectConfiguredTools({ memory: MEM }).map((tool) => tool.name)).toEqual([
+            'memory_search',
+            'memory_write',
+            'memory_forget',
+        ]);
+    });
+
+    it('drops the mutating tools in read mode', () => {
+        expect(collectConfiguredTools({ memory: { ...MEM, tools: 'read' } }).map((t) => t.name))
+            .toEqual(['memory_search']);
+    });
+
+    it('binds nothing when the operator turns the tools off', () => {
+        expect(collectConfiguredTools({ memory: { ...MEM, tools: 'off' } })).toEqual([]);
+    });
+
+    it('binds nothing when memory is enabled but no store was picked', () => {
+        // buildAgentMemoryOption returns undefined here, so there is no store
+        // for a tool to call — listing them would promise a broken tool.
+        expect(collectConfiguredTools({ memory: { enabled: true } })).toEqual([]);
+        expect(collectConfiguredTools({ memory: { enabled: false, memoryStoreKey: 'mem-1' } })).toEqual([]);
+    });
+
+    it('tags them with the store they read and write', () => {
+        const tools = collectConfiguredTools({ memory: MEM });
+        expect(tools.every((tool) => tool.origin === 'memory' && tool.sourceKey === 'mem-1')).toBe(true);
+    });
+});
