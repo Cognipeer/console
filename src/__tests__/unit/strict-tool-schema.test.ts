@@ -12,7 +12,9 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
-import { makeToolsStrictCompatible, toStrictCompatible } from '@/lib/services/agents/strictToolSchema';
+import { restoreToolCalls, toStrictCompatible, withStrictToolCalling } from '@/lib/services/agents/strictToolSchema';
+import { createSmartAgent, createTool } from '@cognipeer/agent-sdk';
+import { buildMemoryTools } from '@/lib/services/agents/agentMemoryTools';
 import { toolInputSchemaToZod } from '@/lib/services/agents/agentRuntimeConfig';
 
 type JsonSchema = { type?: unknown; properties?: Record<string, JsonSchema>; required?: string[]; additionalProperties?: unknown; items?: JsonSchema };
@@ -87,25 +89,112 @@ describe('strict-compatible tool schemas', () => {
     });
 });
 
-describe('makeToolsStrictCompatible', () => {
-    it('reshapes the schema and restores arguments before the tool runs', async () => {
-        const seen: unknown[] = [];
-        const tool = {
-            name: 'knowledge_read_document_lines',
-            schema: z.object({ documentId: z.string(), offset: z.number().optional() }),
-            invoke: async (input: unknown) => { seen.push(input); return 'ok'; },
-            __lcTool: { stale: true },
+describe('restoreToolCalls', () => {
+    it('restores LangChain-form and raw OpenAI-form tool calls', () => {
+        const restorers = new Map([['read', toStrictCompatible(z.object({ id: z.string(), offset: z.number().optional() })).restore]]);
+        expect(restoreToolCalls({ tool_calls: [{ name: 'read', args: { id: 'a', offset: null } }] }, restorers))
+            .toEqual({ tool_calls: [{ name: 'read', args: { id: 'a' } }] });
+        expect(restoreToolCalls({ tool_calls: [{ function: { name: 'read', arguments: '{"id":"a","offset":null}' } }] }, restorers))
+            .toEqual({ tool_calls: [{ function: { name: 'read', arguments: '{"id":"a"}' } }] });
+    });
+});
+
+/**
+ * The whole point: EVERY tool that reaches the provider — the console's own
+ * and the ones agent-sdk injects for planning, skills and sub-agents — passes
+ * strict mode, and a strict-shaped tool call still runs the tool with its
+ * original arguments.
+ */
+describe('withStrictToolCalling — every tool the provider sees', () => {
+    function fakeStrictModel(script: Array<Record<string, unknown>>) {
+        const bound: Array<{ tools: Array<{ name: string; description?: string; schema: z.ZodTypeAny }>; options?: Record<string, unknown> }> = [];
+        let turn = 0;
+        const model = {
+            capabilities: { structuredOutput: 'native', strictToolCalling: true, provider: 'openai' },
+            bindTools(tools: Array<{ name: string; description?: string; schema: z.ZodTypeAny }>, options?: Record<string, unknown>) {
+                bound.push({ tools, options });
+                return model;
+            },
+            async invoke() {
+                const next = script[Math.min(turn, script.length - 1)];
+                turn += 1;
+                return next;
+            },
         };
-        const [strict] = makeToolsStrictCompatible([tool]) as Array<typeof tool>;
-        expect(violations(strictParams(strict.schema))).toEqual([]);
-        await strict.invoke({ documentId: 'd1', offset: null });
-        expect(seen).toEqual([{ documentId: 'd1' }]);
-        // The SDK's cached LangChain conversion was built from the old schema.
-        expect((strict as { __lcTool?: unknown }).__lcTool).toBeUndefined();
+        return { model, bound };
+    }
+
+    it('binds every tool — console and agent-sdk alike — in strict-valid form', async () => {
+        const { model, bound } = fakeStrictModel([{ role: 'assistant', content: 'done' }]);
+        const guard = { protect: (_spec: unknown, fn: (a: Record<string, unknown>) => Promise<unknown>) => fn };
+        const memory = buildMemoryTools({
+            store: { get: async () => [], upsert: async () => undefined, markObsolete: async () => undefined },
+            scope: 'workspace', createToolFn: createTool, zod: z, guard, allowWrites: true,
+        } as never);
+        const knowledgeLike = createTool({
+            name: 'knowledge_read_document_lines',
+            description: 'read lines',
+            schema: z.object({ documentId: z.string(), offset: z.number().int().optional(), limit: z.number().int().optional() }),
+            func: async () => 'ok',
+        });
+        const openApiLike = createTool({
+            name: 'post_incident_comment',
+            description: 'post',
+            schema: toolInputSchemaToZod({
+                type: 'object',
+                properties: { incidentId: { type: 'string' }, body: { type: 'object' } },
+                required: ['incidentId'],
+            }),
+            func: async () => 'ok',
+        });
+        const agent = createSmartAgent({
+            name: 'strict-probe',
+            model: withStrictToolCalling(model) as never,
+            tools: [knowledgeLike, openApiLike, ...memory],
+            planning: { mode: 'todo' },
+            skills: [{ key: 'triage', title: 'Triage', header: 'How to triage', prompt: 'Look at logs.' }] as never,
+            subagents: [{ name: 'reader', description: 'reads logs', systemPrompt: 'read' }] as never,
+        } as never);
+        await agent.invoke({ messages: [{ role: 'user', content: 'go' }] } as never);
+
+        expect(bound.length).toBeGreaterThan(0);
+        const names = new Set<string>();
+        for (const call of bound) {
+            expect(call.options?.strict).toBe(true);
+            for (const tool of call.tools) {
+                names.add(tool.name);
+                expect({ tool: tool.name, violations: violations(strictParams(tool.schema)) })
+                    .toEqual({ tool: tool.name, violations: [] });
+            }
+        }
+        // The SDK-injected tools that were NOT strict-compatible on their own.
+        expect([...names]).toEqual(expect.arrayContaining([
+            'knowledge_read_document_lines', 'post_incident_comment', 'memory_search', 'memory_write',
+            'manage_plan', 'delegate_to', 'spawn_subagent', 'spawn_subagents_parallel', 'open_skill', 'bind_skill_tools',
+        ]));
     });
 
-    it('leaves a tool without a zod schema alone', () => {
-        const tool = { name: 'raw', invoke: async () => 'x' };
-        expect(makeToolsStrictCompatible([tool])[0]).toBe(tool);
+    it('runs a tool with its original arguments after a strict-shaped call', async () => {
+        const seen: unknown[] = [];
+        const tool = createTool({
+            name: 'knowledge_read_document_lines',
+            description: 'read lines',
+            schema: z.object({ documentId: z.string(), offset: z.number().int().optional() }),
+            func: async (args: unknown) => { seen.push(args); return 'line 1'; },
+        });
+        const { model } = fakeStrictModel([
+            // What a strict provider returns: every argument present, nulls for "not given".
+            { role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 'knowledge_read_document_lines', args: { documentId: 'd1', offset: null } }] },
+            { role: 'assistant', content: 'done' },
+        ]);
+        const agent = createSmartAgent({ name: 'p', model: withStrictToolCalling(model) as never, tools: [tool] } as never);
+        await agent.invoke({ messages: [{ role: 'user', content: 'go' }] } as never);
+        // Without the restore the SDK's own validation rejected `offset: null`.
+        expect(seen).toEqual([{ documentId: 'd1' }]);
+    });
+
+    it('leaves a provider without strict tool calling untouched', () => {
+        const model = { capabilities: { strictToolCalling: false }, bindTools: () => model };
+        expect(withStrictToolCalling(model)).toBe(model);
     });
 });
