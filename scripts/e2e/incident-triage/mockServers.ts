@@ -107,16 +107,28 @@ function matchesInfra(line: InfraLogLine, q: NonNullable<ReturnType<typeof parse
     return q.contains.every((text) => line.line.toLowerCase().includes(text.toLowerCase()));
 }
 
-/** Storage-format XHTML → the plain text a knowledge base should index. */
+/**
+ * Storage-format XHTML → the plain text a knowledge base should index.
+ *
+ * Tags are stripped until none remain (a single pass leaves `<scr<b>ipt>`
+ * as `<script>`), and `&amp;` is decoded LAST — decoding it first would turn
+ * the literal text `&amp;lt;` into `<`, unescaping twice.
+ */
 export function confluenceStorageToText(storage: string): string {
-    return storage
+    let text = storage
         .replace(/<\/(h[1-6]|p|li|ol|ul)>/gi, '\n')
-        .replace(/<li[^>]*>/gi, '- ')
-        .replace(/<[^>]+>/g, '')
+        .replace(/<li[^>]*>/gi, '- ');
+    let previous: string;
+    do {
+        previous = text;
+        text = text.replace(/<[^<>]*>/g, '');
+    } while (text !== previous);
+    return text
+        .replace(/[<>]/g, '')
         .replace(/&nbsp;/g, ' ')
-        .replace(/&amp;/g, '&')
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 }

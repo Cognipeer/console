@@ -41,13 +41,16 @@ const LLM_MODEL = arg('model', process.env.E2E_LLM_MODEL ?? 'gpt-5.6-luna')!;
 const EMBED_MODEL = arg('embed-model', process.env.E2E_EMBED_MODEL ?? 'text-embedding-3-small')!;
 const EMBED_DIM = Number(arg('embed-dim', '1536'));
 const MIN_PASS = Number(arg('min-pass', '0'));
+/** Model provider driver for the LLM: `openai-compatible` (default) or `anthropic`. */
+const LLM_DRIVER = arg('driver', process.env.E2E_LLM_DRIVER ?? 'openai-compatible')!;
 /** Fail the first N comment POSTs of every run with a 503 (delivery-resilience test). */
 const FLAKY_POSTS = Number(arg('flaky-posts', '0'));
 
 // ── 0. LLM credentials — BEFORE the environment is isolated ─────────────
-function resolveLlm(): { baseUrl: string; apiKey: string } {
-    if (process.env.E2E_LLM_BASE_URL && process.env.E2E_LLM_API_KEY) {
-        return { baseUrl: process.env.E2E_LLM_BASE_URL, apiKey: process.env.E2E_LLM_API_KEY };
+/** The local dev tenant's OpenAI-compatible provider — embeddings always come from here. */
+function resolveLocal(): { baseUrl: string; apiKey: string } {
+    if (process.env.E2E_EMBED_BASE_URL && process.env.E2E_EMBED_API_KEY) {
+        return { baseUrl: process.env.E2E_EMBED_BASE_URL, apiKey: process.env.E2E_EMBED_API_KEY };
     }
     const envDir = resolve(process.env.E2E_LOCAL_ENV_DIR ?? '../console-ee/.overlay-build');
     const dbFile = resolve(process.env.E2E_LOCAL_TENANT_DB ?? '../console-main/data/tenant_local-dev.db');
@@ -61,6 +64,19 @@ function resolveLlm(): { baseUrl: string; apiKey: string } {
     if (!parsed.baseUrl || !parsed.apiKey) throw new Error('local provider has no baseUrl/apiKey');
     return { baseUrl: parsed.baseUrl, apiKey: parsed.apiKey };
 }
+const EMBED = resolveLocal();
+/**
+ * The LLM: explicit env wins; otherwise, for the OpenAI-compatible driver, the
+ * same local provider as the embeddings. An Anthropic run needs its own key
+ * (E2E_LLM_API_KEY, optionally E2E_LLM_BASE_URL) — there is no local default.
+ */
+function resolveLlm(): { baseUrl?: string; apiKey: string } {
+    if (process.env.E2E_LLM_API_KEY) {
+        return { baseUrl: process.env.E2E_LLM_BASE_URL, apiKey: process.env.E2E_LLM_API_KEY };
+    }
+    if (LLM_DRIVER === 'openai-compatible') return EMBED;
+    throw new Error(`--driver ${LLM_DRIVER} needs E2E_LLM_API_KEY (and optionally E2E_LLM_BASE_URL)`);
+}
 const LLM = resolveLlm();
 
 // ── 1. Environment isolation (before any '@/' import) ───────────────────
@@ -73,6 +89,7 @@ process.env.CACHE_PROVIDER = 'memory';
 process.env.RATE_LIMIT_PROVIDER = 'memory';
 process.env.JWT_SECRET = 'e2e-triage-jwt-secret-please-ignore-0123456789';
 process.env.JWT_EXPIRES_IN = '7d';
+process.env.PROVIDER_ENCRYPTION_SECRET = 'e2e-triage-provider-secret-please-ignore-0123456789';
 (process.env as Record<string, string>).NODE_ENV = process.env.NODE_ENV ?? 'development';
 // The tools call mock servers on loopback; the outbound guard blocks private
 // addresses by default, which is right in production and wrong here.
@@ -116,7 +133,7 @@ async function main(): Promise<number> {
 
     const log = (msg: string) => console.log(msg);
     log('▶ Incident-triage e2e');
-    log(`  model    : ${LLM_MODEL} via ${new URL(LLM.baseUrl).host}`);
+    log(`  model    : ${LLM_MODEL} (${LLM_DRIVER}) via ${LLM.baseUrl ? new URL(LLM.baseUrl).host : 'default endpoint'}`);
     log(`  data dir : ${dataDir}`);
 
     const world = await startMockWorld();
@@ -150,10 +167,20 @@ async function main(): Promise<number> {
         const providerKey = `e2e-llm-${STAMP}`;
         await must('create model provider', 'POST', '/api/models/providers', [201], {
             key: providerKey,
-            driver: 'openai-compatible',
+            driver: LLM_DRIVER,
             label: 'E2E LLM',
             credentials: { apiKey: LLM.apiKey },
-            settings: { baseUrl: LLM.baseUrl },
+            settings: LLM.baseUrl ? { baseUrl: LLM.baseUrl } : {},
+        });
+        // Embeddings stay on an OpenAI-compatible provider whatever the LLM is:
+        // an Anthropic LLM has no embedding model.
+        const embedProviderKey = `e2e-embed-${STAMP}`;
+        await must('create embedding provider', 'POST', '/api/models/providers', [201], {
+            key: embedProviderKey,
+            driver: 'openai-compatible',
+            label: 'E2E embeddings',
+            credentials: { apiKey: EMBED.apiKey },
+            settings: { baseUrl: EMBED.baseUrl },
         });
         const llm = await must<{ model: Json }>('create LLM', 'POST', '/api/models', [201], {
             name: LLM_MODEL,
@@ -176,7 +203,7 @@ async function main(): Promise<number> {
         await must('create embedding model', 'POST', '/api/models', [201], {
             name: EMBED_MODEL,
             key: 'e2e-embed',
-            providerKey,
+            providerKey: embedProviderKey,
             category: 'embedding',
             modelId: EMBED_MODEL,
             pricing: { currency: 'USD', inputTokenPer1M: 0.02, outputTokenPer1M: 0, cachedTokenPer1M: 0 },
@@ -459,6 +486,8 @@ interface VariantSummary {
     schemaFailures: number;
     infraQueryErrors: number;
     avgLatencyMs: number;
+    /** Median — one slow outlier (e.g. a provider's first call on a new strict schema) skews the mean. */
+    p50LatencyMs: number;
     p95LatencyMs: number;
     avgInputTokens: number;
     avgOutputTokens: number;
@@ -487,6 +516,7 @@ function summarize(runs: Array<Json>): Record<string, VariantSummary> {
             schemaFailures: scores.filter((s) => s.schemaValid === false).length,
             infraQueryErrors: scores.reduce((sum, s) => sum + Number(s.infraQueryErrors ?? 0), 0),
             avgLatencyMs: Math.round(lat.reduce((a, b) => a + b, 0) / Math.max(1, lat.length)),
+            p50LatencyMs: lat[Math.floor((lat.length - 1) / 2)] ?? 0,
             p95LatencyMs: lat[Math.min(lat.length - 1, Math.floor(lat.length * 0.95))] ?? 0,
             avgInputTokens: Math.round(list.reduce((a, r) => a + Number((r.tokens as Json).input), 0) / Math.max(1, list.length)),
             avgOutputTokens: Math.round(list.reduce((a, r) => a + Number((r.tokens as Json).output), 0) / Math.max(1, list.length)),
@@ -504,7 +534,7 @@ function printSummary(summary: Record<string, VariantSummary>, checks: Array<{ n
     console.log('  INCIDENT-TRIAGE E2E');
     console.log('──────────────────────────────────────────────────────────────');
     for (const [v, s] of Object.entries(summary)) {
-        console.log(`  ${v.padEnd(13)} pass ${pct(s.passRate).padStart(4)}  root cause ${pct(s.rootCauseAccuracy).padStart(4)}  kb-first ${pct(s.kbFirstRate).padStart(4)}  both sources ${pct(s.bothSourcesRate).padStart(4)}  delivered-once ${pct(s.deliveredOnceRate).padStart(4)}  avg ${s.avgLatencyMs}ms  tokens ${s.avgInputTokens}/${s.avgOutputTokens}`);
+        console.log(`  ${v.padEnd(13)} pass ${pct(s.passRate).padStart(4)}  root cause ${pct(s.rootCauseAccuracy).padStart(4)}  kb-first ${pct(s.kbFirstRate).padStart(4)}  both sources ${pct(s.bothSourcesRate).padStart(4)}  delivered-once ${pct(s.deliveredOnceRate).padStart(4)}  p50 ${s.p50LatencyMs}ms  avg ${s.avgLatencyMs}ms  tokens ${s.avgInputTokens}/${s.avgOutputTokens}`);
     }
     console.log('');
     for (const check of checks) console.log(`  ${check.ok ? '✓' : '✗'} ${check.name}: ${check.detail}`);
@@ -521,9 +551,9 @@ function writeReports(runs: Array<Json>, summary: Record<string, VariantSummary>
         '',
         `Generated ${generatedAt} · model \`${LLM_MODEL}\` · ${REPS} repetition(s) per scenario`,
         '',
-        '| Variant | Runs | Pass | Root cause | KB first | Both log sources | Delivered once | Duplicates | Schema fails | Avg latency | p95 | Avg tokens in/out | Avg tool calls |',
-        '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
-        ...Object.entries(summary).map(([v, s]) => `| ${v} | ${s.runs} | ${pct(s.passRate)} | ${pct(s.rootCauseAccuracy)} | ${pct(s.kbFirstRate)} | ${pct(s.bothSourcesRate)} | ${pct(s.deliveredOnceRate)} | ${s.duplicateDeliveries} | ${s.schemaFailures} | ${s.avgLatencyMs}ms | ${s.p95LatencyMs}ms | ${s.avgInputTokens}/${s.avgOutputTokens} | ${s.avgToolCalls} |`),
+        '| Variant | Runs | Pass | Root cause | KB first | Both log sources | Delivered once | Duplicates | Schema fails | p50 latency | Avg latency | p95 | Avg tokens in/out | Avg tool calls |',
+        '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+        ...Object.entries(summary).map(([v, s]) => `| ${v} | ${s.runs} | ${pct(s.passRate)} | ${pct(s.rootCauseAccuracy)} | ${pct(s.kbFirstRate)} | ${pct(s.bothSourcesRate)} | ${pct(s.deliveredOnceRate)} | ${s.duplicateDeliveries} | ${s.schemaFailures} | ${s.p50LatencyMs}ms | ${s.avgLatencyMs}ms | ${s.p95LatencyMs}ms | ${s.avgInputTokens}/${s.avgOutputTokens} | ${s.avgToolCalls} |`),
         '',
         '## Checks',
         '',
