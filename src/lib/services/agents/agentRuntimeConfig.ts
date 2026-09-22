@@ -202,7 +202,7 @@ export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentR
  * zod schema. Anything unrecognised degrades to `z.any()` rather than throwing:
  * a half-written schema in the editor must not break the playground.
  */
-export function jsonSchemaToZod(schema: unknown, strict = false): ZodTypeAny {
+export function jsonSchemaToZod(schema: unknown, strict = false, permissive = false): ZodTypeAny {
     if (!schema || typeof schema !== 'object') return z.any();
     const node = schema as Record<string, any>;
 
@@ -213,7 +213,7 @@ export function jsonSchemaToZod(schema: unknown, strict = false): ZodTypeAny {
         }
     }
     if (Array.isArray(node.anyOf) || Array.isArray(node.oneOf)) {
-        const variants = (node.anyOf ?? node.oneOf).map((v: unknown) => jsonSchemaToZod(v, strict));
+        const variants = (node.anyOf ?? node.oneOf).map((v: unknown) => jsonSchemaToZod(v, strict, permissive));
         if (variants.length >= 2) {
             return withDescription(z.union(variants as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]), node);
         }
@@ -241,22 +241,24 @@ export function jsonSchemaToZod(schema: unknown, strict = false): ZodTypeAny {
         case 'boolean':
             return withDescription(z.boolean(), node);
         case 'array':
-            return withDescription(z.array(jsonSchemaToZod(node.items, strict)), node);
+            return withDescription(z.array(jsonSchemaToZod(node.items, strict, permissive)), node);
         case 'object': {
             const properties: Record<string, any> = node.properties ?? {};
             const required: string[] = Array.isArray(node.required) ? node.required : [];
             const shape: Record<string, ZodTypeAny> = {};
             for (const [key, value] of Object.entries(properties)) {
-                const child = jsonSchemaToZod(value, strict);
+                const child = jsonSchemaToZod(value, strict, permissive);
                 // `strict` promotes every declared property to required, which is
                 // what providers with strict JSON mode expect.
                 shape[key] = strict || required.includes(key) ? child : child.optional();
             }
             const object = z.object(shape);
-            return withDescription(
-                strict || node.additionalProperties === false ? object.strict() : object,
-                node,
-            );
+            if (strict || node.additionalProperties === false) return withDescription(object.strict(), node);
+            // `permissive` keeps keys the schema did not declare instead of
+            // stripping them — for TOOL arguments, where the upstream API is
+            // the judge and a property-less `body: { type: object }` would
+            // otherwise arrive empty.
+            return withDescription(permissive ? object.passthrough() : object, node);
         }
         default:
             return z.any();
@@ -267,6 +269,29 @@ function withDescription<T extends ZodTypeAny>(schema: T, node: Record<string, a
     return typeof node.description === 'string' && node.description.length > 0
         ? (schema.describe(node.description) as T)
         : schema;
+}
+
+/**
+ * The argument schema a bound tool shows the model.
+ *
+ * OpenAPI and MCP tools used to be bound with `z.object({}).passthrough()`,
+ * which reaches the model as an object with NO properties: it saw a tool's
+ * name and description and had to guess every argument. The real schema only
+ * went to the trace. This hands the model the action's own input schema —
+ * names, types, enums, descriptions, required fields — permissively, so an
+ * argument the schema did not declare still reaches the upstream API.
+ */
+export function toolInputSchemaToZod(inputSchema: unknown): ZodTypeAny {
+    const fallback = z.object({}).passthrough();
+    if (!inputSchema || typeof inputSchema !== 'object') return fallback;
+    try {
+        const converted = jsonSchemaToZod(inputSchema, false, true);
+        // A tool call's arguments are always an object; a schema that did
+        // not convert to one carries no usable contract.
+        return converted instanceof z.ZodObject ? converted : fallback;
+    } catch {
+        return fallback;
+    }
 }
 
 /** Returns the zod contract for the agent's final answer, or undefined. */

@@ -20,6 +20,7 @@
 # testing
 /coverage
 scripts/smoke/reports/
+scripts/e2e/incident-triage/reports/
 tests/e2e/reports/
 
 # next.js
@@ -78,3 +79,4 @@ tmp/
 .integration-handoff/
 SECURITY_AUDIT.md
 scripts/smoke/reports/
+scripts/e2e/incident-triage/reports/

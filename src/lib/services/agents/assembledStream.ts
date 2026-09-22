@@ -120,3 +120,4 @@ export function withAssembledStream<T extends object>(input: T): T {
 
     return wrapped as unknown as T;
 }
+

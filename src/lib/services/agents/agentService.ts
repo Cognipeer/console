@@ -27,6 +27,7 @@ import type {
 import type { ZodTypeAny } from 'zod';
 import {
     jsonSchemaToZod,
+    toolInputSchemaToZod,
     resolveAgentRuntimeOptions,
     resolveAgentSkillPolicy,
     resolveStructuredOutputSchema,
@@ -102,6 +103,7 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
+import { makeToolsStrictCompatible } from './strictToolSchema';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
@@ -1346,11 +1348,21 @@ function createConsoleSdkAgent(
     createSmartAgentFn: typeof import('@cognipeer/agent-sdk').createSmartAgent,
     input: CreateConsoleSdkAgentInput,
 ) {
+    // With structured output, agent-sdk binds tools in the provider's STRICT
+    // mode wherever the model says it needs it (OpenAI-family). Strict mode
+    // requires every argument to be `required` and every object closed, so
+    // the tools are reshaped to that contract here — optional arguments become
+    // nullable, and the executor gets the original shape back. See
+    // strictToolSchema.ts.
+    const strictTools = Boolean(input.outputSchema)
+        && Boolean((input.model as { capabilities?: { strictToolCalling?: boolean } } | undefined)?.capabilities?.strictToolCalling);
+    const tools = strictTools ? makeToolsStrictCompatible(input.tools) : input.tools;
+
     return createSmartAgentFn({
         name: input.name,
         version: input.version,
         model: input.model,
-        ...(input.tools.length > 0 ? { tools: input.tools } : {}),
+        ...(tools.length > 0 ? { tools } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
         // thing to the host, and the shorter option object is what every other
         // conditional field here does.
@@ -1606,9 +1618,9 @@ async function buildSubagentModel(
  *
  * Also returns trace `definitions` for the bound tools — the menu recorded on
  * each model-call event's `tool_definitions` section. `parameters` carries the
- * source JSON schema (action/MCP inputSchema); the SDK binding itself uses a
- * permissive passthrough zod schema, so the source schema is the meaningful
- * definition to observe.
+ * source JSON schema (action/MCP inputSchema), and the SDK binding is built
+ * from that same schema (`toolInputSchemaToZod`), so the trace and the model
+ * see one contract.
  *
  * ── WHERE `tool.pre` / `tool.post` FIRE, AND WHERE THEY MUST NOT ───────────
  * `guard` wraps the 'tool' and 'system' branches. It deliberately does NOT
@@ -1686,7 +1698,9 @@ export async function buildBoundTools(
                 const tool = createToolFn({
                     name: action.name,
                     description: action.description || `Call ${action.name} on ${toolRecord.name}`,
-                    schema: zod.object({}).passthrough(),
+                    // The action's real input schema, not an empty passthrough —
+                    // see toolInputSchemaToZod.
+                    schema: toolInputSchemaToZod(action.inputSchema),
                     // The guard wraps the WHOLE executor, tool-request logging
                     // included, so a `tool.pre` redaction reaches the upstream
                     // call and the request log identically, and `tool.post`
@@ -1802,7 +1816,7 @@ export async function buildBoundTools(
                 const tool = createToolFn({
                     name: mcpToolDef.name,
                     description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
-                    schema: zod.object({}).passthrough(),
+                    schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
                     // Wrapped in `guard` ONLY when the server has no binding of
                     // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
                     // already fires `tool.pre` and `tool.post` around the dispatch

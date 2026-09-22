@@ -814,3 +814,41 @@ describe('live tool call labels', () => {
         expect(summariseArgs({})).toBeUndefined();
     });
 });
+
+describe('tool argument schemas the model sees', () => {
+    it('exposes an OpenAPI action\'s real parameters instead of an empty object', async () => {
+        const { toolInputSchemaToZod } = await import('@/lib/services/agents/agentRuntimeConfig');
+        const { zodToJsonSchema } = await import('zod-to-json-schema');
+        const schema = toolInputSchemaToZod({
+            type: 'object',
+            properties: {
+                service: { type: 'string', description: 'Service name, e.g. checkout-api' },
+                level: { type: 'string', enum: ['INFO', 'WARN', 'ERROR'] },
+                size: { type: 'integer' },
+            },
+            required: ['service'],
+        });
+        const json = zodToJsonSchema(schema) as { properties: Record<string, { description?: string }>; required?: string[] };
+        // Used to be `{ properties: {} }`: the model saw no argument at all.
+        expect(Object.keys(json.properties)).toEqual(['service', 'level', 'size']);
+        expect(json.properties.service.description).toBe('Service name, e.g. checkout-api');
+        expect(json.required).toEqual(['service']);
+    });
+
+    it('keeps undeclared keys — the upstream API is the judge', async () => {
+        const { toolInputSchemaToZod } = await import('@/lib/services/agents/agentRuntimeConfig');
+        const schema = toolInputSchemaToZod({
+            type: 'object',
+            properties: { body: { type: 'object', description: 'Request body' } },
+        });
+        // A property-less body used to be stripped to {} by z.object().
+        expect(schema.parse({ body: { query: '{app="postgres"}' }, extra: 1 }))
+            .toEqual({ body: { query: '{app="postgres"}' }, extra: 1 });
+    });
+
+    it('falls back to a permissive object for a missing or non-object schema', async () => {
+        const { toolInputSchemaToZod } = await import('@/lib/services/agents/agentRuntimeConfig');
+        expect(toolInputSchemaToZod(undefined).parse({ a: 1 })).toEqual({ a: 1 });
+        expect(toolInputSchemaToZod({ type: 'string' }).parse({ a: 1 })).toEqual({ a: 1 });
+    });
+});

@@ -129,3 +129,4 @@ describe('assembled message', () => {
         });
     });
 });
+
