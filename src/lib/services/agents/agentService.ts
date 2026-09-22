@@ -100,6 +100,7 @@ import {
     type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
+import { normalizePlaygroundUsage } from './playgroundUsage';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const logger = createLogger('agents');
@@ -3141,32 +3142,6 @@ function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundSt
             ...(typeof entry.subagent === 'string' ? { subagent: entry.subagent } : {}),
         };
     });
-}
-
-/** Normalizes the provider-shaped usage object into the playground's fields. */
-function normalizePlaygroundUsage(
-    usage: unknown,
-): { usage: AgentPlaygroundChatResult['usage'] } | undefined {
-    if (!usage || typeof usage !== 'object') return undefined;
-    const raw = usage as Record<string, unknown>;
-    const pick = (...keys: string[]): number | undefined => {
-        for (const key of keys) {
-            const value = raw[key];
-            if (typeof value === 'number' && Number.isFinite(value)) return value;
-        }
-        return undefined;
-    };
-
-    const inputTokens = pick('inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens');
-    const outputTokens = pick('outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens');
-    const cachedInputTokens = pick('cachedInputTokens', 'cached_input_tokens', 'cacheReadInputTokens');
-    const totalTokens = pick('totalTokens', 'total_tokens')
-        ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
-
-    if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) {
-        return undefined;
-    }
-    return { usage: { inputTokens, outputTokens, cachedInputTokens, totalTokens } };
 }
 
 /**

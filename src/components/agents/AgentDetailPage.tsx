@@ -54,16 +54,10 @@ import {
   IconPencil,
   IconWorld,
   IconAlertTriangle,
-  IconUsers,
   IconPackageExport,
   IconCalendarTime,
-  IconFileText,
   IconLayoutDashboard,
   IconPlus,
-  IconBulb,
-  IconBrain,
-  IconAdjustments,
-  IconBraces,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -90,6 +84,7 @@ import StartSessionModal from './studio/StartSessionModal';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
+import ConfigSection from './studio/ConfigSection';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentMemoryConfig,
@@ -317,6 +312,9 @@ export default function AgentDetailPage() {
   // to see than a blank chat box. A deep link (Sessions' "back to agent",
   // a bookmark) can still land on any tab via `?tab=`.
   const [activeTab, setActiveTab] = useState<string | null>(() => resolveTabFromQuery(searchParams.get('tab')));
+  // Configure has no rail any more, so this is no longer "which pane is
+  // showing" — it is "which section a deep link asked for", and the effect
+  // below scrolls to it.
   const [configureTab, setConfigureTab] = useState<string | null>(
     () => resolveSubTabFromQuery(searchParams.get('tab'), 'configure', 'basic'),
   );
@@ -755,6 +753,20 @@ export default function AgentDetailPage() {
       void loadSessions();
     }
   }, [activeTab, agent, loadSessions]);
+
+  /**
+   * Configure is one long page, so "go to the Prompt section" is a scroll,
+   * not a pane switch. Waits a frame because the section only exists once
+   * the tab panel has rendered.
+   */
+  useEffect(() => {
+    if (activeTab !== 'configure' || !configureTab || !agent) return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(`config-${configureTab}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeTab, configureTab, agent]);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
@@ -1293,163 +1305,135 @@ export default function AgentDetailPage() {
         </Tabs.Panel>
 
         {/*
-          Configure — everything that changes what the agent IS, behind one
-          top-level tab with a vertical rail. Thirteen top-level tabs had
-          become a horizontal scroll bar; these seven belong together because
-          every one of them is edited against the same draft config and saved
-          by the same button.
+          Configure — everything that changes what the agent IS, as one page.
+
+          It used to be a vertical rail, which hid six of seven sections
+          behind a click. Wrong trade for a form edited as a whole and saved
+          by one button: you could not see what the agent was without touring
+          it. Deep links still work — `?tab=prompt` scrolls to that section
+          instead of selecting a rail item.
         */}
         <Tabs.Panel value="configure">
-          <Tabs
-            orientation="vertical"
-            value={configureTab}
-            onChange={setConfigureTab}
-            variant="pills"
-            className={classes.verticalTabs}
-          >
-            <Tabs.List className={classes.verticalTabsList}>
-              <Tabs.Tab value="basic" leftSection={<IconSettings size={14} />}>Model &amp; tools</Tabs.Tab>
-              {!isConnected ? (
-                <Tabs.Tab value="prompt" leftSection={<IconFileText size={14} />}>Prompt</Tabs.Tab>
-              ) : null}
-              {!isConnected ? (
-                <Tabs.Tab value="subagents" leftSection={<IconUsers size={14} />}>
-                  Sub-agents
-                  {subagents.length > 0 ? (
-                    <Badge size="xs" variant="light" ml={6}>{subagents.length}</Badge>
-                  ) : null}
-                </Tabs.Tab>
-              ) : null}
-              {!isConnected ? (
-                <Tabs.Tab value="skills" leftSection={<IconBulb size={14} />}>
-                  Skills
-                  {skills.length > 0 ? (
-                    <Badge size="xs" variant="light" ml={6}>{skills.length}</Badge>
-                  ) : null}
-                </Tabs.Tab>
-              ) : null}
-              {!isConnected ? (
-                <Tabs.Tab value="memory" leftSection={<IconBrain size={14} />}>
-                  Memory
-                  {memoryConfig?.enabled ? (
-                    <Badge size="xs" color="teal" variant="light" ml={6}>on</Badge>
-                  ) : null}
-                </Tabs.Tab>
-              ) : null}
-              {!isConnected ? (
-                <Tabs.Tab value="advanced" leftSection={<IconAdjustments size={14} />}>Runtime</Tabs.Tab>
-              ) : null}
-              {!isConnected ? (
-                <Tabs.Tab value="output" leftSection={<IconBraces size={14} />}>Structured output</Tabs.Tab>
-              ) : null}
-            </Tabs.List>
+          <Paper withBorder radius="md" p="xl">
+            <ConfigSection
+              first
+              id="basic"
+              title="General"
+              description="What this agent is, which model answers, and the tools it can call."
+            >
+              {renderBasicSettings()}
+            </ConfigSection>
 
-            <Tabs.Panel value="basic" className={classes.verticalPanel}>
-              <div className={classes.settingsPane}>{renderBasicSettings()}</div>
-            </Tabs.Panel>
+            {!isConnected ? (
+              <ConfigSection
+                id="prompt"
+                title="Prompt"
+                description="Inline text, or a prompt from the Prompts module — editable right here."
+              >
+                <AgentPromptPanel
+                  mode={configForm.values.promptMode}
+                  onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
+                  systemPrompt={configForm.values.systemPrompt}
+                  onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
+                  promptKey={configForm.values.promptKey}
+                  onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
+                  prompts={prompts}
+                  onPromptsChanged={(next) => setPrompts(next)}
+                  onSaveAgentConfig={handleSaveConfig}
+                />
+              </ConfigSection>
+            ) : null}
 
-            <Tabs.Panel value="prompt" className={classes.verticalPanel}>
-          <SectionCard
-            title="Prompt"
-            description="Inline text, or a prompt from the Prompts module — editable right here."
-          >
-            <AgentPromptPanel
-              mode={configForm.values.promptMode}
-              onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
-              systemPrompt={configForm.values.systemPrompt}
-              onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
-              promptKey={configForm.values.promptKey}
-              onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
-              prompts={prompts}
-              onPromptsChanged={(next) => setPrompts(next)}
-              onSaveAgentConfig={handleSaveConfig}
-            />
-          </SectionCard>
-            </Tabs.Panel>
+            {!isConnected ? (
+              <ConfigSection
+                id="subagents"
+                title="Delegation"
+                description="Roles this agent can hand work to, and the guards around that."
+                meta={subagents.length > 0 ? (
+                  <Badge size="xs" variant="light" w="fit-content">{subagents.length} sub-agents</Badge>
+                ) : null}
+              >
+                <AgentSubagentsPanel
+                  subagents={subagents}
+                  policy={subagentPolicy}
+                  agents={projectAgents}
+                  models={models.map((model) => ({ key: model.key, name: model.name }))}
+                  currentAgentKey={agent.key}
+                  onChange={(nextSubagents, nextPolicy) => {
+                    setSubagents(nextSubagents);
+                    setSubagentPolicy(nextPolicy);
+                  }}
+                />
+              </ConfigSection>
+            ) : null}
 
-            <Tabs.Panel value="subagents" className={classes.verticalPanel}>
-          <SectionCard
-            title="Delegation"
-            description="Roles this agent can hand work to, and the guards around that."
-          >
-            <AgentSubagentsPanel
-              subagents={subagents}
-              policy={subagentPolicy}
-              agents={projectAgents}
-              models={models.map((model) => ({ key: model.key, name: model.name }))}
-              currentAgentKey={agent.key}
-              onChange={(nextSubagents, nextPolicy) => {
-                setSubagents(nextSubagents);
-                setSubagentPolicy(nextPolicy);
-              }}
-            />
-            <Group justify="flex-end" mt="md">
-              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-            </Group>
-          </SectionCard>
-            </Tabs.Panel>
+            {!isConnected ? (
+              <ConfigSection
+                id="skills"
+                title="Skills"
+                description="Capabilities this agent can discover and open on demand, from the project's skill library."
+                meta={skills.length > 0 ? (
+                  <Badge size="xs" variant="light" w="fit-content">{skills.length} attached</Badge>
+                ) : null}
+              >
+                <AgentSkillsPanel
+                  skills={skills}
+                  policy={skillPolicy}
+                  library={skillLibrary}
+                  onChange={(nextSkills, nextPolicy) => {
+                    setSkills(nextSkills);
+                    setSkillPolicy(nextPolicy);
+                  }}
+                />
+              </ConfigSection>
+            ) : null}
 
-            <Tabs.Panel value="skills" className={classes.verticalPanel}>
-          <SectionCard
-            title="Skills"
-            description="Capabilities this agent can discover and open on demand, from the project's skill library."
-          >
-            <AgentSkillsPanel
-              skills={skills}
-              policy={skillPolicy}
-              library={skillLibrary}
-              onChange={(nextSkills, nextPolicy) => {
-                setSkills(nextSkills);
-                setSkillPolicy(nextPolicy);
-              }}
-            />
-            <Group justify="flex-end" mt="md">
-              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-            </Group>
-          </SectionCard>
-            </Tabs.Panel>
+            {!isConnected ? (
+              <ConfigSection
+                id="memory"
+                title="Memory"
+                description="What this agent remembers across runs, backed by a store from the Memory module."
+                meta={memoryConfig?.enabled ? (
+                  <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
+                ) : null}
+              >
+                <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
+              </ConfigSection>
+            ) : null}
 
-            <Tabs.Panel value="memory" className={classes.verticalPanel}>
-          <SectionCard
-            title="Memory"
-            description="What this agent remembers across runs, backed by a store from the Memory module."
-          >
-            <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
-            <Group justify="flex-end" mt="md">
-              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-            </Group>
-          </SectionCard>
-            </Tabs.Panel>
-
-            <Tabs.Panel value="advanced" className={classes.verticalPanel}>
-              <SectionCard
+            {!isConnected ? (
+              <ConfigSection
+                id="advanced"
                 title="Runtime"
-                description="How the agent loop behaves: planning, budgets, context handling, reasoning and memory."
+                description="How the agent loop behaves: planning, budgets, context handling and reasoning."
               >
                 <AgentAdvancedSettings
                   value={runtimeConfig}
                   onChange={setRuntimeConfig}
                   toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
                 />
-                <Group justify="flex-end" mt="md">
-                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-                </Group>
-              </SectionCard>
-            </Tabs.Panel>
+              </ConfigSection>
+            ) : null}
 
-            <Tabs.Panel value="output" className={classes.verticalPanel}>
-              <SectionCard
+            {!isConnected ? (
+              <ConfigSection
+                id="output"
                 title="Structured output"
                 description="Make the agent answer with JSON that matches a schema instead of free text."
               >
                 <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />
-                <Group justify="flex-end" mt="md">
-                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-                </Group>
-              </SectionCard>
-            </Tabs.Panel>
+              </ConfigSection>
+            ) : null}
+          </Paper>
 
-          </Tabs>
+          {/*
+            One save for the whole page. Every section above edits the same
+            draft config and the PATCH replaces it wholesale, so six separate
+            "Save" buttons only ever meant "save everything, from here".
+          */}
+          <Group justify="flex-end" className={classes.configSaveBar}>
+            <Button onClick={handleSaveConfig}>{t('config.save')}</Button>
+          </Group>
         </Tabs.Panel>
 
         {/*

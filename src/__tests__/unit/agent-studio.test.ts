@@ -34,6 +34,7 @@ import {
     summariseSession,
 } from '@/components/agents/session/sessionUsage';
 import type { ChatMessage } from '@/components/agents/session/sessionTypes';
+import { normalizePlaygroundUsage } from '@/lib/services/agents/playgroundUsage';
 import { toSdkSkill } from '@/lib/services/agents/agentSkillService';
 
 const AGENT = { key: 'sre-triage', name: 'SRE Triage', description: 'Triages Jira incidents', status: 'active' as const };
@@ -578,5 +579,60 @@ describe('session usage', () => {
         expect(formatCompactTokens(942)).toBe('942');
         expect(formatCompactTokens(5432)).toBe('5.4k');
         expect(formatCompactTokens(2_500_000)).toBe('2.5M');
+    });
+});
+
+describe('playground usage', () => {
+    it('reads the SDK run ledger, which is keyed by model rather than flat', () => {
+        // AgentInvokeResult.metadata.usage is state.usage — this exact shape.
+        // Reading only flat `inputTokens` here recorded every session turn
+        // with no token counts at all.
+        const normalized = normalizePlaygroundUsage({
+            perRequest: [{ id: 'r1', modelName: 'gpt-5-terra', usage: {}, timestamp: 'now', turn: 1 }],
+            totals: { 'gpt-5-terra': { input: 1200, output: 340, total: 1540, cachedInput: 900 } },
+        });
+        expect(normalized?.usage).toEqual({
+            inputTokens: 1200,
+            outputTokens: 340,
+            cachedInputTokens: 900,
+            totalTokens: 1540,
+        });
+    });
+
+    it('sums every model a turn touched, not just the main one', () => {
+        // A summarizer or a sub-agent bills too; reporting only the main model
+        // would under-report the turn.
+        const normalized = normalizePlaygroundUsage({
+            totals: {
+                'gpt-5-terra': { input: 1000, output: 200, total: 1200, cachedInput: 0 },
+                'haiku-summarizer': { input: 400, output: 50, total: 450, cachedInput: 100 },
+            },
+        });
+        expect(normalized?.usage).toEqual({
+            inputTokens: 1400,
+            outputTokens: 250,
+            cachedInputTokens: 100,
+            totalTokens: 1650,
+        });
+    });
+
+    it('still reads a flat provider-shaped usage object', () => {
+        expect(normalizePlaygroundUsage({ input_tokens: 10, output_tokens: 4 })?.usage).toEqual({
+            inputTokens: 10,
+            outputTokens: 4,
+            cachedInputTokens: undefined,
+            totalTokens: 14,
+        });
+        expect(normalizePlaygroundUsage({ promptTokens: 7, completionTokens: 3, cacheReadInputTokens: 2 })?.usage)
+            .toEqual({ inputTokens: 7, outputTokens: 3, cachedInputTokens: 2, totalTokens: 10 });
+    });
+
+    it('reports nothing rather than zeros when a run recorded no usage', () => {
+        expect(normalizePlaygroundUsage(undefined)).toBeUndefined();
+        expect(normalizePlaygroundUsage({})).toBeUndefined();
+        expect(normalizePlaygroundUsage({ totals: {} })).toBeUndefined();
+        // An empty ledger must not beat the flat branch into claiming 0 tokens.
+        expect(normalizePlaygroundUsage({ totals: { m: { input: 0, output: 0, total: 0, cachedInput: 0 } } }))
+            .toBeUndefined();
     });
 });

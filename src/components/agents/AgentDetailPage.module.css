@@ -89,3 +89,15 @@
     width: 100%;
   }
 }
+
+/*
+ * Configure is one long page now, so its single Save follows the content
+ * rather than floating: a sticky bar over a form this tall covers fields
+ * while you edit them.
+ */
+.configSaveBar {
+  position: sticky;
+  bottom: 0;
+  padding: var(--app-space-3) 0;
+  background: linear-gradient(to top, var(--mantine-color-body) 60%, transparent);
+}
