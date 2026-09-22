@@ -165,11 +165,30 @@ interface AgentVersion {
   createdAt: string;
 }
 
+interface PlaygroundStep {
+  id?: string;
+  name: string;
+  args?: unknown;
+  output?: unknown;
+  error?: string;
+  subagent?: string;
+}
+
 interface ChatMessage {
   role: string;
   content: string;
   /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
   reasoning?: string;
+  /** Tool calls the run made, in order. Assistant turns only. */
+  steps?: PlaygroundStep[];
+  /** Parsed structured output, when the agent declares an output schema. */
+  output?: unknown;
+  outputError?: string;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  /** Which config produced this turn: a version number, or null for the draft. */
+  version?: number | null;
+  /** Wall-clock time the request took, measured client-side. */
+  latencyMs?: number;
 }
 
 interface Model {
@@ -266,6 +285,8 @@ export default function AgentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string | null>('playground');
   const [settingsTab, setSettingsTab] = useState<string | null>('basic');
+  /** '' = the draft. Otherwise a published version number, as a string. */
+  const [playgroundVersion, setPlaygroundVersion] = useState<string>('');
 
   // Collapsible section state
   const [knowledgeEngineOpen, setKnowledgeEngineOpen] = useState(false);
@@ -629,7 +650,9 @@ export default function AgentDetailPage() {
   useEffect(() => {
     // Export needs the version list too: it offers "export v3" as a source, and
     // a version the operator cannot pick is a version they will assume is gone.
-    if ((activeTab === 'versions' || activeTab === 'export') && agent) {
+    // Playground needs them for its "run this version instead" selector,
+    // Export for its source picker.
+    if ((activeTab === 'versions' || activeTab === 'export' || activeTab === 'playground') && agent) {
       loadVersions();
     }
   }, [activeTab, agent, loadVersions]);
@@ -769,11 +792,14 @@ export default function AgentDetailPage() {
     if (!chatInput.trim() || chatLoading) return;
 
     const message = chatInput.trim();
+    const startedAt = Date.now();
     setChatLoading(true);
 
     // Connected agents have no editable config; never auto-save (it would
     // overwrite the stored connection with an empty native config).
-    if (agent?.config?.kind !== 'external') {
+    // Running a published version tests a frozen snapshot; saving the draft
+    // first would be both pointless and surprising.
+    if (agent?.config?.kind !== 'external' && !playgroundVersion) {
       const saved = await saveAgentConfig({ notify: false });
       if (!saved) {
         notifications.show({
@@ -801,8 +827,12 @@ export default function AgentDetailPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message,
-          history: chatMessages, // send previous messages as context
+          // Only the conversational fields: the steps/usage we attach to a turn
+          // are display state, and echoing a tool transcript back as history
+          // would both bloat the request and re-teach the model its own output.
+          history: chatMessages.map(({ role, content }) => ({ role, content })),
           runtime_context: parseRuntimeContextJson(runtimeContextJson),
+          ...(playgroundVersion ? { version: Number(playgroundVersion) } : {}),
         }),
       });
 
@@ -820,6 +850,12 @@ export default function AgentDetailPage() {
           ...(typeof data.reasoning === 'string' && data.reasoning
             ? { reasoning: data.reasoning }
             : {}),
+          ...(Array.isArray(data.steps) && data.steps.length > 0 ? { steps: data.steps } : {}),
+          ...(data.output !== undefined ? { output: data.output } : {}),
+          ...(data.outputError ? { outputError: String(data.outputError) } : {}),
+          ...(data.usage ? { usage: data.usage } : {}),
+          version: data.version ?? null,
+          latencyMs: Date.now() - startedAt,
         },
       ]);
     } catch (err: unknown) {
@@ -1386,15 +1422,36 @@ export default function AgentDetailPage() {
                     </Badge>
                   )}
                 </Group>
-                <Button
-                  size="xs"
-                  variant="light"
-                  leftSection={<IconTrash size={14} />}
-                  onClick={clearChat}
-                  disabled={chatMessages.length === 0 && !chatLoading}
-                >
-                  {t('chat.newChat')}
-                </Button>
+                <Group gap="xs">
+                  {!isConnected ? (
+                    <Select
+                      size="xs"
+                      w={190}
+                      data={[
+                        { value: '', label: 'Draft (unsaved config)' },
+                        ...versions.map((version) => ({
+                          value: String(version.version),
+                          label: `v${version.version}${version.version === agent.publishedVersion ? ' · published' : ''}`,
+                        })),
+                      ]}
+                      value={playgroundVersion}
+                      onChange={(next) => setPlaygroundVersion(next ?? '')}
+                      allowDeselect={false}
+                      // Switching mid-thread would attribute earlier turns to the
+                      // wrong config; each turn carries the version that produced it.
+                      disabled={chatLoading}
+                    />
+                  ) : null}
+                  <Button
+                    size="xs"
+                    variant="light"
+                    leftSection={<IconTrash size={14} />}
+                    onClick={clearChat}
+                    disabled={chatMessages.length === 0 && !chatLoading}
+                  >
+                    {t('chat.newChat')}
+                  </Button>
+                </Group>
               </Group>
 
               {/* Chat Messages */}
@@ -1436,9 +1493,27 @@ export default function AgentDetailPage() {
                                   {msg.reasoning ? (
                                     <ReasoningDisclosure reasoning={msg.reasoning} />
                                   ) : null}
+                                  {msg.steps?.length ? <StepTimeline steps={msg.steps} /> : null}
                                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
                                     {msg.content}
                                   </ReactMarkdown>
+                                  {msg.output !== undefined ? (
+                                    <StructuredOutputBlock output={msg.output} />
+                                  ) : null}
+                                  {msg.outputError ? (
+                                    <Alert
+                                      variant="light"
+                                      color="red"
+                                      icon={<IconAlertTriangle size={14} />}
+                                      mt="xs"
+                                      p="xs"
+                                    >
+                                      <Text size="xs">
+                                        The answer did not match the output schema: {msg.outputError}
+                                      </Text>
+                                    </Alert>
+                                  ) : null}
+                                  <TurnFooter message={msg} />
                                 </Box>
                               ) : (
                                 <Text size="sm" className={classes.preWrap}>
@@ -2257,5 +2332,121 @@ function ReasoningDisclosure({ reasoning }: { reasoning: string }) {
         </Text>
       </Collapse>
     </Box>
+  );
+}
+
+/**
+ * The tool calls a turn made, in order.
+ *
+ * Collapsed by default and expanded per step: a run with twelve tool calls is
+ * common, and twelve open JSON payloads would bury the answer they produced.
+ */
+function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
+  const [open, setOpen] = useState(false);
+  const failed = steps.filter((step) => step.error).length;
+
+  return (
+    <Box mb="xs">
+      <Button
+        size="compact-xs"
+        variant="subtle"
+        color={failed > 0 ? 'red' : 'gray'}
+        leftSection={<IconTimeline size={12} />}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {steps.length} tool call{steps.length === 1 ? '' : 's'}
+        {failed > 0 ? ` · ${failed} failed` : ''}
+      </Button>
+
+      <Collapse in={open}>
+        <Stack gap={6} mt="xs">
+          {steps.map((step, index) => (
+            <Paper key={step.id ?? index} withBorder p="xs" radius="sm">
+              <Group gap="xs" mb={4}>
+                <Badge size="xs" variant="light" color={step.error ? 'red' : 'blue'}>
+                  {index + 1}
+                </Badge>
+                <Text size="xs" fw={600} ff="monospace">{step.name}</Text>
+                {step.subagent ? (
+                  <Badge size="xs" variant="outline" color="violet">
+                    via {step.subagent}
+                  </Badge>
+                ) : null}
+              </Group>
+              {step.args !== undefined ? (
+                <StepPayload label="args" value={step.args} />
+              ) : null}
+              {step.error ? (
+                <Text size="xs" c="red" className={classes.preWrap}>{step.error}</Text>
+              ) : step.output !== undefined ? (
+                <StepPayload label="result" value={step.output} />
+              ) : null}
+            </Paper>
+          ))}
+        </Stack>
+      </Collapse>
+    </Box>
+  );
+}
+
+/**
+ * One payload inside a step. Long values are clipped rather than scrolled: a
+ * 50KB tool result inside a chat bubble makes the whole transcript unusable,
+ * and the full value is in the trace.
+ */
+function StepPayload({ label, value }: { label: string; value: unknown }) {
+  const text = useMemo(() => {
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }, [value]);
+
+  const clipped = text.length > 1200;
+
+  return (
+    <Box mb={4}>
+      <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
+      <Code block style={{ fontSize: 11, maxHeight: 220, overflow: 'auto' }}>
+        {clipped ? `${text.slice(0, 1200)}\n… ${text.length - 1200} more characters` : text}
+      </Code>
+    </Box>
+  );
+}
+
+function StructuredOutputBlock({ output }: { output: unknown }) {
+  return (
+    <Box mt="xs">
+      <Text size="10px" c="dimmed" tt="uppercase" fw={600}>structured output</Text>
+      <Code block style={{ fontSize: 11, maxHeight: 260, overflow: 'auto' }}>
+        {JSON.stringify(output, null, 2)}
+      </Code>
+    </Box>
+  );
+}
+
+/** Tokens, latency and which config produced the turn. */
+function TurnFooter({ message }: { message: ChatMessage }) {
+  const parts: string[] = [];
+  if (message.usage?.totalTokens !== undefined) {
+    const { inputTokens, outputTokens, totalTokens } = message.usage;
+    parts.push(
+      inputTokens !== undefined && outputTokens !== undefined
+        ? `${totalTokens} tokens (${inputTokens} in / ${outputTokens} out)`
+        : `${totalTokens} tokens`,
+    );
+  }
+  if (message.latencyMs !== undefined) parts.push(`${(message.latencyMs / 1000).toFixed(1)}s`);
+  if (parts.length === 0 && message.version === undefined) return null;
+
+  return (
+    <Group gap="xs" mt={6}>
+      <Badge size="xs" variant="light" color={message.version ? 'teal' : 'gray'}>
+        {message.version ? `v${message.version}` : 'draft'}
+      </Badge>
+      {parts.length > 0 ? <Text size="10px" c="dimmed">{parts.join(' · ')}</Text> : null}
+    </Group>
   );
 }

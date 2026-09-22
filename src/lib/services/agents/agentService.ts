@@ -2461,6 +2461,12 @@ export interface AgentPlaygroundChatRequest {
     /** Previous messages for context (in-memory only) */
     history?: Array<{ role: string; content: string }>;
     /**
+     * Run a published version instead of the draft. The playground's whole point
+     * is the draft, so absent means draft — but comparing a change against what
+     * is live is the other half of that job.
+     */
+    version?: number;
+    /**
      * Caller-supplied runtime context (headers for downstream tools/MCP/
      * connected agents, metadata). Plain data — serializes over the job queue.
      */
@@ -2472,6 +2478,42 @@ export interface AgentPlaygroundChatRequest {
      * another cluster node the run still works, but no events fire.
      */
     onToolEvent?: (event: AgentToolCallEvent) => void;
+}
+
+/**
+ * One tool call as the playground shows it.
+ *
+ * The playground is where an operator debugs an agent, so a step carries the
+ * arguments and the result — not just the name. The live chat path deliberately
+ * does NOT return these: a tool result can be large and can contain exactly the
+ * data a guardrail redacted from the answer.
+ */
+export interface AgentPlaygroundStep {
+    id?: string;
+    name: string;
+    args?: unknown;
+    output?: unknown;
+    /** Present when the tool threw. */
+    error?: string;
+    /** Sub-agent that made the call, when delegation was involved. */
+    subagent?: string;
+}
+
+export interface AgentPlaygroundChatResult {
+    content: string;
+    reasoning?: string;
+    /** Parsed structured output, when the agent declares an output schema. */
+    output?: unknown;
+    /** Why the structured contract failed, when it did. */
+    outputError?: string;
+    usage?: {
+        inputTokens?: number;
+        outputTokens?: number;
+        totalTokens?: number;
+    };
+    steps?: AgentPlaygroundStep[];
+    /** Which config actually ran: a version number, or null for the draft. */
+    version?: number | null;
 }
 
 /** OpenAI Responses API–compatible output content item */
@@ -2971,7 +3013,7 @@ export async function executeAgentChatLocal(
  */
 export async function executePlaygroundChat(
     request: AgentPlaygroundChatRequest,
-): Promise<{ content: string; reasoning?: string }> {
+): Promise<AgentPlaygroundChatResult> {
     // The callback can't serialize over the queue — keep it out of the payload
     // (the local fast path still receives the full request).
     const payload = { ...request };
@@ -2987,10 +3029,72 @@ export async function executePlaygroundChat(
     );
 }
 
+
+/**
+ * Flattens the SDK's tool history into the playground's step list.
+ *
+ * Reads `state.toolHistory` rather than the event stream: the history survives
+ * summarization (the archived entry keeps its `executionId`), so a long run
+ * still shows every call it made instead of only the ones after the last
+ * compaction.
+ */
+function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundStep[] {
+    const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
+    if (!Array.isArray(history)) return [];
+
+    return history.map((entry) => {
+        const output = entry.output;
+        const isError =
+            output !== null &&
+            typeof output === 'object' &&
+            'error' in (output as Record<string, unknown>);
+        return {
+            id: typeof entry.executionId === 'string' ? entry.executionId : undefined,
+            name: typeof entry.toolName === 'string' ? entry.toolName : 'tool',
+            args: entry.args,
+            output,
+            ...(isError ? { error: String((output as Record<string, unknown>).error) } : {}),
+            ...(typeof entry.subagent === 'string' ? { subagent: entry.subagent } : {}),
+        };
+    });
+}
+
+/** Normalizes the provider-shaped usage object into the playground's fields. */
+function normalizePlaygroundUsage(
+    usage: unknown,
+): { usage: AgentPlaygroundChatResult['usage'] } | undefined {
+    if (!usage || typeof usage !== 'object') return undefined;
+    const raw = usage as Record<string, unknown>;
+    const pick = (...keys: string[]): number | undefined => {
+        for (const key of keys) {
+            const value = raw[key];
+            if (typeof value === 'number' && Number.isFinite(value)) return value;
+        }
+        return undefined;
+    };
+
+    const inputTokens = pick('inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens');
+    const outputTokens = pick('outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens');
+    const totalTokens = pick('totalTokens', 'total_tokens')
+        ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
+
+    if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) {
+        return undefined;
+    }
+    return { usage: { inputTokens, outputTokens, totalTokens } };
+}
+
+function describeStructuredOutputError(error: unknown): string {
+    if (typeof error === 'string') return error;
+    const record = error as { message?: unknown; issues?: unknown } | null;
+    if (record && typeof record.message === 'string') return record.message;
+    return JSON.stringify(error);
+}
+
 /** Local (non-routed) implementation. Exported so the queue consumer can call it. */
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
-): Promise<{ content: string; reasoning?: string }> {
+): Promise<AgentPlaygroundChatResult> {
     const { tenantDbName, tenantId, projectId, agentKey, userMessage, history } = request;
 
     const db = await getDatabase();
@@ -2999,7 +3103,16 @@ export async function executePlaygroundChatLocal(
     const agent = await db.findAgentByKey(agentKey, projectId);
     if (!agent) throw new Error(`Agent "${agentKey}" not found`);
 
-    const { config } = agent;
+    // The draft unless a version is asked for. Reading the published snapshot
+    // is what makes "does my change actually help?" answerable in one screen.
+    let config = agent.config;
+    let ranVersion: number | null = null;
+    if (typeof request.version === 'number') {
+        const snapshot = await db.findAgentVersion(String(agent._id), request.version);
+        if (!snapshot) throw new Error(`Version ${request.version} not found for agent "${agentKey}"`);
+        config = snapshot.snapshot.config;
+        ranVersion = request.version;
+    }
 
     // Connected (external) agent — invoke over HTTP, skip local runtime.
     //
@@ -3254,6 +3367,13 @@ export async function executePlaygroundChatLocal(
         return {
             content: assistantContent,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+            ...(result.output !== undefined ? { output: result.output } : {}),
+            ...(result.outputError
+                ? { outputError: describeStructuredOutputError(result.outputError) }
+                : {}),
+            ...(normalizePlaygroundUsage(result.metadata?.usage) ?? {}),
+            steps: extractPlaygroundSteps(result),
+            version: ranVersion,
         };
     } finally {
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });

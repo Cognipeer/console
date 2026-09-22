@@ -849,6 +849,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
         userMessage: body.message,
+        ...(typeof body.version === 'number' ? { version: body.version } : {}),
       });
 
       return reply.code(200).send(result);
