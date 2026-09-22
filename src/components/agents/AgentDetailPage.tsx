@@ -62,6 +62,8 @@ import {
   IconPlus,
   IconBulb,
   IconBrain,
+  IconAdjustments,
+  IconBraces,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -253,6 +255,47 @@ function seedGuardrailsFromLegacySlots(
   return rows;
 }
 
+/**
+ * Deep-link compatibility for `?tab=`.
+ *
+ * The page used to have thirteen flat tabs; they are now five, with vertical
+ * rails inside Configure / Deploy / Observe. Every old value still resolves —
+ * a bookmark or the Sessions page's own back link must not land on a tab that
+ * no longer exists.
+ */
+const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
+  overview: { top: 'overview' },
+  sessions: { top: 'sessions' },
+  playground: { top: 'sessions' },
+  configure: { top: 'configure' },
+  settings: { top: 'configure', sub: 'basic' },
+  basic: { top: 'configure', sub: 'basic' },
+  prompt: { top: 'configure', sub: 'prompt' },
+  subagents: { top: 'configure', sub: 'subagents' },
+  skills: { top: 'configure', sub: 'skills' },
+  memory: { top: 'configure', sub: 'memory' },
+  advanced: { top: 'configure', sub: 'advanced' },
+  output: { top: 'configure', sub: 'output' },
+  deploy: { top: 'deploy' },
+  versions: { top: 'deploy', sub: 'versions' },
+  publish: { top: 'deploy', sub: 'publish' },
+  schedules: { top: 'deploy', sub: 'schedules' },
+  export: { top: 'deploy', sub: 'export' },
+  observe: { top: 'observe' },
+  traces: { top: 'observe', sub: 'traces' },
+  usage: { top: 'observe', sub: 'usage' },
+};
+
+function resolveTabFromQuery(raw: string | null): string {
+  return TAB_ALIASES[raw ?? '']?.top ?? 'overview';
+}
+
+/** The sub-tab a deep link asks for, or the group's default. */
+function resolveSubTabFromQuery(raw: string | null, group: string, fallback: string): string {
+  const alias = TAB_ALIASES[raw ?? ''];
+  return alias?.top === group && alias.sub ? alias.sub : fallback;
+}
+
 export default function AgentDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -272,8 +315,16 @@ export default function AgentDetailPage() {
   // agent healthy and what has it been doing", which is a better first thing
   // to see than a blank chat box. A deep link (Sessions' "back to agent",
   // a bookmark) can still land on any tab via `?tab=`.
-  const [activeTab, setActiveTab] = useState<string | null>(() => searchParams.get('tab') || 'overview');
-  const [settingsTab, setSettingsTab] = useState<string | null>('basic');
+  const [activeTab, setActiveTab] = useState<string | null>(() => resolveTabFromQuery(searchParams.get('tab')));
+  const [configureTab, setConfigureTab] = useState<string | null>(
+    () => resolveSubTabFromQuery(searchParams.get('tab'), 'configure', 'basic'),
+  );
+  const [deployTab, setDeployTab] = useState<string | null>(
+    () => resolveSubTabFromQuery(searchParams.get('tab'), 'deploy', 'versions'),
+  );
+  const [observeTab, setObserveTab] = useState<string | null>(
+    () => resolveSubTabFromQuery(searchParams.get('tab'), 'observe', 'traces'),
+  );
 
   // Collapsible section state
   const [knowledgeEngineOpen, setKnowledgeEngineOpen] = useState(false);
@@ -659,7 +710,7 @@ export default function AgentDetailPage() {
         setPublishChangelog('');
         // Reload agent to update publishedVersion, and refresh versions list
         await loadAgent();
-        if (activeTab === 'versions') {
+        if (activeTab === 'deploy') {
           await loadVersions();
         }
       } else {
@@ -697,15 +748,17 @@ export default function AgentDetailPage() {
   }, [loadAgent]);
 
   useEffect(() => {
-    if (activeTab === 'traces' && agent) {
+    if (activeTab === 'observe' && observeTab === 'traces' && agent) {
       loadTracingSessions();
     }
-  }, [activeTab, agent, loadTracingSessions]);
+  }, [activeTab, observeTab, agent, loadTracingSessions]);
 
   useEffect(() => {
     // Export needs the version list too: it offers "export v3" as a source, and
     // a version the operator cannot pick is a version they will assume is gone.
-    if ((activeTab === 'versions' || activeTab === 'export') && agent) {
+    // Versions and Export both offer "which snapshot?" pickers, and they now
+    // live behind the same tab — one load covers both.
+    if (activeTab === 'deploy' && agent) {
       loadVersions();
     }
   }, [activeTab, agent, loadVersions]);
@@ -1187,208 +1240,21 @@ export default function AgentDetailPage() {
             Sessions
             {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
           </Tabs.Tab>
-          <Tabs.Tab value="settings" leftSection={<IconSettings size={14} />}>
-            Settings
+          <Tabs.Tab value="configure" leftSection={<IconSettings size={14} />}>
+            Configure
             {advancedOverrideCount > 0 ? (
               <Badge size="xs" variant="light" ml={6}>{advancedOverrideCount}</Badge>
             ) : null}
           </Tabs.Tab>
-          {!isConnected ? (
-            <Tabs.Tab value="prompt" leftSection={<IconFileText size={14} />}>
-              Prompt
-            </Tabs.Tab>
-          ) : null}
-          {!isConnected ? (
-            <Tabs.Tab value="subagents" leftSection={<IconUsers size={14} />}>
-              Sub-agents
-              {subagents.length > 0 ? (
-                <Badge size="xs" variant="light" ml={6}>{subagents.length}</Badge>
-              ) : null}
-            </Tabs.Tab>
-          ) : null}
-          {!isConnected ? (
-            <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
-              {t('tabs.versions')}
-            </Tabs.Tab>
-          ) : null}
-          {!isConnected ? (
-            <Tabs.Tab value="schedules" leftSection={<IconCalendarTime size={14} />}>
-              Schedules
-            </Tabs.Tab>
-          ) : null}
-          {!isConnected ? (
-            <Tabs.Tab value="skills" leftSection={<IconBulb size={14} />}>
-              Skills
-              {skills.length > 0 ? <Badge size="xs" variant="light" ml={6}>{skills.length}</Badge> : null}
-            </Tabs.Tab>
-          ) : null}
-          {!isConnected ? (
-            <Tabs.Tab value="memory" leftSection={<IconBrain size={14} />}>
-              Memory
-              {memoryConfig?.enabled ? <Badge size="xs" color="teal" variant="light" ml={6}>on</Badge> : null}
-            </Tabs.Tab>
-          ) : null}
-          <Tabs.Tab value="export" leftSection={<IconPackageExport size={14} />}>
-            Export
+          <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
+            Deploy
           </Tabs.Tab>
-          <Tabs.Tab value="publish" leftSection={<IconWorld size={14} />}>
-            {t('tabs.publish')}
-          </Tabs.Tab>
-          <Tabs.Tab value="traces" leftSection={<IconTimeline size={14} />}>
-            {t('tabs.traces')}
-          </Tabs.Tab>
-          <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
-            {t('tabs.usage')}
+          <Tabs.Tab value="observe" leftSection={<IconTimeline size={14} />}>
+            Observe
           </Tabs.Tab>
         </Tabs.List>
 
-        {/* ── Settings Tab ────────────────────────────────────── */}
-        {/*
-          Split in two on purpose. Basic is everything an agent needs to answer
-          a question at all; Advanced is the agent-sdk surface, which is deep
-          enough that putting it on the same screen would bury the model picker.
-        */}
-        <Tabs.Panel value="settings">
-          <Tabs value={settingsTab} onChange={setSettingsTab} variant="outline">
-            <Tabs.List mb="md">
-              <Tabs.Tab value="basic">Basic</Tabs.Tab>
-              {!isConnected ? <Tabs.Tab value="advanced">Advanced</Tabs.Tab> : null}
-              {!isConnected ? <Tabs.Tab value="output">Structured output</Tabs.Tab> : null}
-            </Tabs.List>
-
-            <Tabs.Panel value="basic">
-              <div className={classes.settingsPane}>{renderBasicSettings()}</div>
-            </Tabs.Panel>
-
-            <Tabs.Panel value="advanced">
-              <SectionCard
-                title="Runtime"
-                description="How the agent loop behaves: planning, budgets, context handling, reasoning and memory."
-              >
-                <AgentAdvancedSettings
-                  value={runtimeConfig}
-                  onChange={setRuntimeConfig}
-                  toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
-                />
-                <Group justify="flex-end" mt="md">
-                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-                </Group>
-              </SectionCard>
-            </Tabs.Panel>
-
-            <Tabs.Panel value="output">
-              <SectionCard
-                title="Structured output"
-                description="Make the agent answer with JSON that matches a schema instead of free text."
-              >
-                <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />
-                <Group justify="flex-end" mt="md">
-                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-                </Group>
-              </SectionCard>
-            </Tabs.Panel>
-          </Tabs>
-        </Tabs.Panel>
-
-        {/* ── Prompt Tab ──────────────────────────────────────── */}
-        <Tabs.Panel value="prompt">
-          <SectionCard
-            title="Prompt"
-            description="Inline text, or a prompt from the Prompts module — editable right here."
-          >
-            <AgentPromptPanel
-              mode={configForm.values.promptMode}
-              onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
-              systemPrompt={configForm.values.systemPrompt}
-              onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
-              promptKey={configForm.values.promptKey}
-              onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
-              prompts={prompts}
-              onPromptsChanged={(next) => setPrompts(next)}
-              onSaveAgentConfig={handleSaveConfig}
-            />
-          </SectionCard>
-        </Tabs.Panel>
-
-        {/* ── Sub-agents Tab ──────────────────────────────────── */}
-        <Tabs.Panel value="subagents">
-          <SectionCard
-            title="Delegation"
-            description="Roles this agent can hand work to, and the guards around that."
-          >
-            <AgentSubagentsPanel
-              subagents={subagents}
-              policy={subagentPolicy}
-              agents={projectAgents}
-              models={models.map((model) => ({ key: model.key, name: model.name }))}
-              currentAgentKey={agent.key}
-              onChange={(nextSubagents, nextPolicy) => {
-                setSubagents(nextSubagents);
-                setSubagentPolicy(nextPolicy);
-              }}
-            />
-            <Group justify="flex-end" mt="md">
-              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-            </Group>
-          </SectionCard>
-        </Tabs.Panel>
-
-        {/* ── Schedules Tab ───────────────────────────────────── */}
-        <Tabs.Panel value="schedules">
-          <SectionCard
-            title="Recurring runs"
-            description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
-          >
-            <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
-          </SectionCard>
-        </Tabs.Panel>
-
-        {/* ── Skills Tab ──────────────────────────────────────── */}
-        <Tabs.Panel value="skills">
-          <SectionCard
-            title="Skills"
-            description="Capabilities this agent can discover and open on demand, from the project's skill library."
-          >
-            <AgentSkillsPanel
-              skills={skills}
-              policy={skillPolicy}
-              library={skillLibrary}
-              onChange={(nextSkills, nextPolicy) => {
-                setSkills(nextSkills);
-                setSkillPolicy(nextPolicy);
-              }}
-            />
-            <Group justify="flex-end" mt="md">
-              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-            </Group>
-          </SectionCard>
-        </Tabs.Panel>
-
-        {/* ── Memory Tab ──────────────────────────────────────── */}
-        <Tabs.Panel value="memory">
-          <SectionCard
-            title="Memory"
-            description="What this agent remembers across runs, backed by a store from the Memory module."
-          >
-            <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
-            <Group justify="flex-end" mt="md">
-              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
-            </Group>
-          </SectionCard>
-        </Tabs.Panel>
-
-        {/* ── Export Tab ──────────────────────────────────────── */}
-        <Tabs.Panel value="export">
-          <AgentExportPanel
-            agentId={agentId}
-            agentKey={agent.key}
-            versions={versions.map((version) => ({ version: version.version }))}
-            publishedVersion={agent.publishedVersion ?? null}
-            onImported={() => void loadAgent()}
-          />
-        </Tabs.Panel>
-
-        {/* ── Overview Tab ────────────────────────────────────── */}
+        {/* ── Overview ────────────────────────────────────────── */}
         <Tabs.Panel value="overview">
           <AgentOverviewPanel
             agent={agent}
@@ -1401,11 +1267,22 @@ export default function AgentDetailPage() {
             startingSession={startingSession}
             onStartSession={() => void startNewSession()}
             onOpenSession={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
-            onGoToTab={(tab) => setActiveTab(tab)}
+            // Overview links by the OLD flat names on purpose — it should not
+            // have to know how the tabs are grouped, so the alias table that
+            // already exists for deep links resolves the rail for it too.
+            onGoToTab={(tab) => {
+              const alias = TAB_ALIASES[tab];
+              if (!alias) return;
+              setActiveTab(alias.top);
+              if (!alias.sub) return;
+              if (alias.top === 'configure') setConfigureTab(alias.sub);
+              if (alias.top === 'deploy') setDeployTab(alias.sub);
+              if (alias.top === 'observe') setObserveTab(alias.sub);
+            }}
           />
         </Tabs.Panel>
 
-        {/* ── Sessions Tab ────────────────────────────────────── */}
+        {/* ── Sessions ────────────────────────────────────────── */}
         <Tabs.Panel value="sessions">
           <SectionCard
             title="Sessions"
@@ -1431,8 +1308,435 @@ export default function AgentDetailPage() {
           </SectionCard>
         </Tabs.Panel>
 
-        {/* ── Traces Tab ─────────────────────────────────────── */}
-        <Tabs.Panel value="traces">
+        {/*
+          Configure — everything that changes what the agent IS, behind one
+          top-level tab with a vertical rail. Thirteen top-level tabs had
+          become a horizontal scroll bar; these seven belong together because
+          every one of them is edited against the same draft config and saved
+          by the same button.
+        */}
+        <Tabs.Panel value="configure">
+          <Tabs
+            orientation="vertical"
+            value={configureTab}
+            onChange={setConfigureTab}
+            variant="pills"
+            className={classes.verticalTabs}
+          >
+            <Tabs.List className={classes.verticalTabsList}>
+              <Tabs.Tab value="basic" leftSection={<IconSettings size={14} />}>Model &amp; tools</Tabs.Tab>
+              {!isConnected ? (
+                <Tabs.Tab value="prompt" leftSection={<IconFileText size={14} />}>Prompt</Tabs.Tab>
+              ) : null}
+              {!isConnected ? (
+                <Tabs.Tab value="subagents" leftSection={<IconUsers size={14} />}>
+                  Sub-agents
+                  {subagents.length > 0 ? (
+                    <Badge size="xs" variant="light" ml={6}>{subagents.length}</Badge>
+                  ) : null}
+                </Tabs.Tab>
+              ) : null}
+              {!isConnected ? (
+                <Tabs.Tab value="skills" leftSection={<IconBulb size={14} />}>
+                  Skills
+                  {skills.length > 0 ? (
+                    <Badge size="xs" variant="light" ml={6}>{skills.length}</Badge>
+                  ) : null}
+                </Tabs.Tab>
+              ) : null}
+              {!isConnected ? (
+                <Tabs.Tab value="memory" leftSection={<IconBrain size={14} />}>
+                  Memory
+                  {memoryConfig?.enabled ? (
+                    <Badge size="xs" color="teal" variant="light" ml={6}>on</Badge>
+                  ) : null}
+                </Tabs.Tab>
+              ) : null}
+              {!isConnected ? (
+                <Tabs.Tab value="advanced" leftSection={<IconAdjustments size={14} />}>Runtime</Tabs.Tab>
+              ) : null}
+              {!isConnected ? (
+                <Tabs.Tab value="output" leftSection={<IconBraces size={14} />}>Structured output</Tabs.Tab>
+              ) : null}
+            </Tabs.List>
+
+            <Tabs.Panel value="basic" className={classes.verticalPanel}>
+              <div className={classes.settingsPane}>{renderBasicSettings()}</div>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="prompt" className={classes.verticalPanel}>
+          <SectionCard
+            title="Prompt"
+            description="Inline text, or a prompt from the Prompts module — editable right here."
+          >
+            <AgentPromptPanel
+              mode={configForm.values.promptMode}
+              onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
+              systemPrompt={configForm.values.systemPrompt}
+              onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
+              promptKey={configForm.values.promptKey}
+              onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
+              prompts={prompts}
+              onPromptsChanged={(next) => setPrompts(next)}
+              onSaveAgentConfig={handleSaveConfig}
+            />
+          </SectionCard>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="subagents" className={classes.verticalPanel}>
+          <SectionCard
+            title="Delegation"
+            description="Roles this agent can hand work to, and the guards around that."
+          >
+            <AgentSubagentsPanel
+              subagents={subagents}
+              policy={subagentPolicy}
+              agents={projectAgents}
+              models={models.map((model) => ({ key: model.key, name: model.name }))}
+              currentAgentKey={agent.key}
+              onChange={(nextSubagents, nextPolicy) => {
+                setSubagents(nextSubagents);
+                setSubagentPolicy(nextPolicy);
+              }}
+            />
+            <Group justify="flex-end" mt="md">
+              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+            </Group>
+          </SectionCard>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="skills" className={classes.verticalPanel}>
+          <SectionCard
+            title="Skills"
+            description="Capabilities this agent can discover and open on demand, from the project's skill library."
+          >
+            <AgentSkillsPanel
+              skills={skills}
+              policy={skillPolicy}
+              library={skillLibrary}
+              onChange={(nextSkills, nextPolicy) => {
+                setSkills(nextSkills);
+                setSkillPolicy(nextPolicy);
+              }}
+            />
+            <Group justify="flex-end" mt="md">
+              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+            </Group>
+          </SectionCard>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="memory" className={classes.verticalPanel}>
+          <SectionCard
+            title="Memory"
+            description="What this agent remembers across runs, backed by a store from the Memory module."
+          >
+            <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
+            <Group justify="flex-end" mt="md">
+              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+            </Group>
+          </SectionCard>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="advanced" className={classes.verticalPanel}>
+              <SectionCard
+                title="Runtime"
+                description="How the agent loop behaves: planning, budgets, context handling, reasoning and memory."
+              >
+                <AgentAdvancedSettings
+                  value={runtimeConfig}
+                  onChange={setRuntimeConfig}
+                  toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
+                />
+                <Group justify="flex-end" mt="md">
+                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+                </Group>
+              </SectionCard>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="output" className={classes.verticalPanel}>
+              <SectionCard
+                title="Structured output"
+                description="Make the agent answer with JSON that matches a schema instead of free text."
+              >
+                <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />
+                <Group justify="flex-end" mt="md">
+                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+                </Group>
+              </SectionCard>
+            </Tabs.Panel>
+
+          </Tabs>
+        </Tabs.Panel>
+
+        {/*
+          Deploy — the lifecycle of a config that is already written:
+          freeze it (Versions), expose it (Publish), run it on a cadence
+          (Schedules), or take it out of the console entirely (Export).
+        */}
+        <Tabs.Panel value="deploy">
+          <Tabs
+            orientation="vertical"
+            value={deployTab}
+            onChange={setDeployTab}
+            variant="pills"
+            className={classes.verticalTabs}
+          >
+            <Tabs.List className={classes.verticalTabsList}>
+              {!isConnected ? (
+                <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
+                  {t('tabs.versions')}
+                </Tabs.Tab>
+              ) : null}
+              <Tabs.Tab value="publish" leftSection={<IconWorld size={14} />}>
+                {t('tabs.publish')}
+              </Tabs.Tab>
+              {!isConnected ? (
+                <Tabs.Tab value="schedules" leftSection={<IconCalendarTime size={14} />}>Schedules</Tabs.Tab>
+              ) : null}
+              <Tabs.Tab value="export" leftSection={<IconPackageExport size={14} />}>Export</Tabs.Tab>
+            </Tabs.List>
+
+            <Tabs.Panel value="versions" className={classes.verticalPanel}>
+          <Stack gap="md">
+            <SectionCard p="md">
+              <Stack gap="md">
+                <Group justify="space-between" align="center">
+                  <div>
+                    <Text size="lg" fw={600}>{t('versions.title')}</Text>
+                    <Text size="sm" c="dimmed">{t('versions.description')}</Text>
+                  </div>
+                  <Group gap="xs">
+                    <Badge size="sm" variant="light">{versionsTotal} total</Badge>
+                    <Button
+                      size="xs"
+                      variant="light"
+                      leftSection={<IconArrowsExchange size={14} />}
+                      disabled={!compareVersionA || !compareVersionB || compareVersionA === compareVersionB}
+                      onClick={() => setCompareModalOpen(true)}
+                    >
+                      {t('versions.compare')}
+                    </Button>
+                  </Group>
+                </Group>
+
+                {versionsLoading ? (
+                  <LoadingState label="Loading versions..." minHeight={200} />
+                ) : versions.length === 0 ? (
+                  <EmptyState
+                    title={t('versions.noVersions')}
+                    description={t('versions.noVersionsDesc')}
+                    icon={<IconGitBranch size={24} />}
+                    minHeight={220}
+                  />
+                ) : (
+                  <div className="ds-tbl-wrap">
+                  <Table striped highlightOnHover>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th w={40}>
+                          <VisuallyHidden>Select version</VisuallyHidden>
+                        </Table.Th>
+                        <Table.Th>{t('versions.version')}</Table.Th>
+                        <Table.Th>{t('versions.changelog')}</Table.Th>
+                        <Table.Th>{t('versions.publishedAt')}</Table.Th>
+                        <Table.Th />
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {versions.map((v) => {
+                        const isSelected = compareVersionA === String(v.version) || compareVersionB === String(v.version);
+                        return (
+                          <Table.Tr key={v.version}>
+                            <Table.Td>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {
+                                  const vStr = String(v.version);
+                                  if (isSelected) {
+                                    if (compareVersionA === vStr) setCompareVersionA(null);
+                                    if (compareVersionB === vStr) setCompareVersionB(null);
+                                  } else {
+                                    if (!compareVersionA) setCompareVersionA(vStr);
+                                    else if (!compareVersionB) setCompareVersionB(vStr);
+                                    else {
+                                      setCompareVersionA(compareVersionB);
+                                      setCompareVersionB(vStr);
+                                    }
+                                  }
+                                }}
+                              />
+                            </Table.Td>
+                            <Table.Td>
+                              <Group gap="xs">
+                                <Badge size="sm" variant="filled" color="blue">v{v.version}</Badge>
+                                {agent.publishedVersion === v.version && (
+                                  <Badge size="xs" variant="light" color="teal">{t('versions.current')}</Badge>
+                                )}
+                              </Group>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="sm" lineClamp={1}>
+                                {v.changelog || <Text span c="dimmed" fs="italic" size="sm">{t('versions.noChangelog')}</Text>}
+                              </Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="sm">
+                                {v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}
+                              </Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Tooltip label={t('versions.snapshot')}>
+                                <ActionIcon
+                                  size="sm"
+                                  variant="subtle"
+                                  onClick={() => {
+                                    setCompareVersionA(String(v.version));
+                                    setCompareVersionB(null);
+                                    setCompareModalOpen(true);
+                                  }}
+                                >
+                                  <IconCode size={14} />
+                                </ActionIcon>
+                              </Tooltip>
+                            </Table.Td>
+                          </Table.Tr>
+                        );
+                      })}
+                    </Table.Tbody>
+                  </Table>
+                  </div>
+                )}
+              </Stack>
+            </SectionCard>
+          </Stack>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="publish" className={classes.verticalPanel}>
+          <Stack gap="md">
+            <SectionCard p="md">
+              <Stack gap="md">
+                <div>
+                  <Text size="lg" fw={600}>{t('a2a.title')}</Text>
+                  <Text size="sm" c="dimmed">{t('a2a.description')}</Text>
+                </div>
+
+                <Switch
+                  label={t('a2a.toggle')}
+                  checked={a2aEnabled}
+                  disabled={a2aSaving}
+                  onChange={(event) => updateA2a({ enabled: event.currentTarget.checked })}
+                />
+
+                {a2aEnabled && (
+                  <>
+                    <Divider />
+
+                    <div>
+                      <Text size="sm" fw={600} mb={6}>{t('a2a.accessMode')}</Text>
+                      <SegmentedControl
+                        value={a2aAccessMode}
+                        disabled={a2aSaving}
+                        onChange={(value) =>
+                          updateA2a({ accessMode: value === 'public' ? 'public' : 'token' })
+                        }
+                        data={[
+                          { value: 'token', label: t('a2a.accessToken') },
+                          { value: 'public', label: t('a2a.accessPublic') },
+                        ]}
+                      />
+                      <Text size="xs" c="dimmed" mt={6}>
+                        {a2aAccessMode === 'public'
+                          ? t('a2a.accessPublicDesc')
+                          : t('a2a.accessTokenDesc')}
+                      </Text>
+                    </div>
+
+                    {a2aIsPublic && (
+                      <Alert
+                        color="yellow"
+                        variant="light"
+                        icon={<IconAlertTriangle size={16} />}
+                      >
+                        {t('a2a.publicWarning')}
+                      </Alert>
+                    )}
+
+                    <Text size="sm" c="dimmed">{t('a2a.cardLabel')}</Text>
+                    <CopyableCode value={a2aCardUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
+                    <CopyableCode value={a2aEndpointUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
+                    <Code block>
+                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
+  -H "Authorization: Bearer YOUR_API_KEY" \\`}
+  -H "Content-Type: application/json" \\
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{ "kind": "text", "text": "Hello!" }],
+        "messageId": "msg-1"
+      }
+    }
+  }'
+
+# Continue the same conversation: set params.message.contextId
+# to the "contextId" returned in the previous task.`}
+                    </Code>
+                  </>
+                )}
+              </Stack>
+            </SectionCard>
+          </Stack>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="schedules" className={classes.verticalPanel}>
+          <SectionCard
+            title="Recurring runs"
+            description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
+          >
+            <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
+          </SectionCard>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="export" className={classes.verticalPanel}>
+          <AgentExportPanel
+            agentId={agentId}
+            agentKey={agent.key}
+            versions={versions.map((version) => ({ version: version.version }))}
+            publishedVersion={agent.publishedVersion ?? null}
+            onImported={() => void loadAgent()}
+          />
+            </Tabs.Panel>
+
+          </Tabs>
+        </Tabs.Panel>
+
+        {/* ── Observe — what the agent actually did, and what it cost ── */}
+        <Tabs.Panel value="observe">
+          <Tabs
+            orientation="vertical"
+            value={observeTab}
+            onChange={setObserveTab}
+            variant="pills"
+            className={classes.verticalTabs}
+          >
+            <Tabs.List className={classes.verticalTabsList}>
+              <Tabs.Tab value="traces" leftSection={<IconTimeline size={14} />}>
+                {t('tabs.traces')}
+              </Tabs.Tab>
+              <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
+                {t('tabs.usage')}
+              </Tabs.Tab>
+            </Tabs.List>
+
+            <Tabs.Panel value="traces" className={classes.verticalPanel}>
           <Stack gap="md">
             {/* Filters */}
             <SectionCard p="md">
@@ -1526,10 +1830,9 @@ export default function AgentDetailPage() {
               </Stack>
             </SectionCard>
           </Stack>
-        </Tabs.Panel>
+            </Tabs.Panel>
 
-        {/* ── Usage Tab ──────────────────────────────────────── */}
-        <Tabs.Panel value="usage">
+            <Tabs.Panel value="usage" className={classes.verticalPanel}>
           <Stack gap="md">
             <SectionCard p="md">
               <Stack gap="md">
@@ -1685,208 +1988,9 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
               </Stack>
             </SectionCard>
           </Stack>
-        </Tabs.Panel>
+            </Tabs.Panel>
 
-        {/* ── Publish Tab (A2A exposure) ─────────────────────── */}
-        <Tabs.Panel value="publish">
-          <Stack gap="md">
-            <SectionCard p="md">
-              <Stack gap="md">
-                <div>
-                  <Text size="lg" fw={600}>{t('a2a.title')}</Text>
-                  <Text size="sm" c="dimmed">{t('a2a.description')}</Text>
-                </div>
-
-                <Switch
-                  label={t('a2a.toggle')}
-                  checked={a2aEnabled}
-                  disabled={a2aSaving}
-                  onChange={(event) => updateA2a({ enabled: event.currentTarget.checked })}
-                />
-
-                {a2aEnabled && (
-                  <>
-                    <Divider />
-
-                    <div>
-                      <Text size="sm" fw={600} mb={6}>{t('a2a.accessMode')}</Text>
-                      <SegmentedControl
-                        value={a2aAccessMode}
-                        disabled={a2aSaving}
-                        onChange={(value) =>
-                          updateA2a({ accessMode: value === 'public' ? 'public' : 'token' })
-                        }
-                        data={[
-                          { value: 'token', label: t('a2a.accessToken') },
-                          { value: 'public', label: t('a2a.accessPublic') },
-                        ]}
-                      />
-                      <Text size="xs" c="dimmed" mt={6}>
-                        {a2aAccessMode === 'public'
-                          ? t('a2a.accessPublicDesc')
-                          : t('a2a.accessTokenDesc')}
-                      </Text>
-                    </div>
-
-                    {a2aIsPublic && (
-                      <Alert
-                        color="yellow"
-                        variant="light"
-                        icon={<IconAlertTriangle size={16} />}
-                      >
-                        {t('a2a.publicWarning')}
-                      </Alert>
-                    )}
-
-                    <Text size="sm" c="dimmed">{t('a2a.cardLabel')}</Text>
-                    <CopyableCode value={a2aCardUrl} />
-
-                    <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
-                    <CopyableCode value={a2aEndpointUrl} />
-
-                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
-                    <Code block>
-                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
-  -H "Authorization: Bearer YOUR_API_KEY" \\`}
-  -H "Content-Type: application/json" \\
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{ "kind": "text", "text": "Hello!" }],
-        "messageId": "msg-1"
-      }
-    }
-  }'
-
-# Continue the same conversation: set params.message.contextId
-# to the "contextId" returned in the previous task.`}
-                    </Code>
-                  </>
-                )}
-              </Stack>
-            </SectionCard>
-          </Stack>
-        </Tabs.Panel>
-
-        {/* ── Versions Tab ───────────────────────────────────── */}
-        <Tabs.Panel value="versions">
-          <Stack gap="md">
-            <SectionCard p="md">
-              <Stack gap="md">
-                <Group justify="space-between" align="center">
-                  <div>
-                    <Text size="lg" fw={600}>{t('versions.title')}</Text>
-                    <Text size="sm" c="dimmed">{t('versions.description')}</Text>
-                  </div>
-                  <Group gap="xs">
-                    <Badge size="sm" variant="light">{versionsTotal} total</Badge>
-                    <Button
-                      size="xs"
-                      variant="light"
-                      leftSection={<IconArrowsExchange size={14} />}
-                      disabled={!compareVersionA || !compareVersionB || compareVersionA === compareVersionB}
-                      onClick={() => setCompareModalOpen(true)}
-                    >
-                      {t('versions.compare')}
-                    </Button>
-                  </Group>
-                </Group>
-
-                {versionsLoading ? (
-                  <LoadingState label="Loading versions..." minHeight={200} />
-                ) : versions.length === 0 ? (
-                  <EmptyState
-                    title={t('versions.noVersions')}
-                    description={t('versions.noVersionsDesc')}
-                    icon={<IconGitBranch size={24} />}
-                    minHeight={220}
-                  />
-                ) : (
-                  <div className="ds-tbl-wrap">
-                  <Table striped highlightOnHover>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th w={40}>
-                          <VisuallyHidden>Select version</VisuallyHidden>
-                        </Table.Th>
-                        <Table.Th>{t('versions.version')}</Table.Th>
-                        <Table.Th>{t('versions.changelog')}</Table.Th>
-                        <Table.Th>{t('versions.publishedAt')}</Table.Th>
-                        <Table.Th />
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {versions.map((v) => {
-                        const isSelected = compareVersionA === String(v.version) || compareVersionB === String(v.version);
-                        return (
-                          <Table.Tr key={v.version}>
-                            <Table.Td>
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => {
-                                  const vStr = String(v.version);
-                                  if (isSelected) {
-                                    if (compareVersionA === vStr) setCompareVersionA(null);
-                                    if (compareVersionB === vStr) setCompareVersionB(null);
-                                  } else {
-                                    if (!compareVersionA) setCompareVersionA(vStr);
-                                    else if (!compareVersionB) setCompareVersionB(vStr);
-                                    else {
-                                      setCompareVersionA(compareVersionB);
-                                      setCompareVersionB(vStr);
-                                    }
-                                  }
-                                }}
-                              />
-                            </Table.Td>
-                            <Table.Td>
-                              <Group gap="xs">
-                                <Badge size="sm" variant="filled" color="blue">v{v.version}</Badge>
-                                {agent.publishedVersion === v.version && (
-                                  <Badge size="xs" variant="light" color="teal">{t('versions.current')}</Badge>
-                                )}
-                              </Group>
-                            </Table.Td>
-                            <Table.Td>
-                              <Text size="sm" lineClamp={1}>
-                                {v.changelog || <Text span c="dimmed" fs="italic" size="sm">{t('versions.noChangelog')}</Text>}
-                              </Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Text size="sm">
-                                {v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}
-                              </Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Tooltip label={t('versions.snapshot')}>
-                                <ActionIcon
-                                  size="sm"
-                                  variant="subtle"
-                                  onClick={() => {
-                                    setCompareVersionA(String(v.version));
-                                    setCompareVersionB(null);
-                                    setCompareModalOpen(true);
-                                  }}
-                                >
-                                  <IconCode size={14} />
-                                </ActionIcon>
-                              </Tooltip>
-                            </Table.Td>
-                          </Table.Tr>
-                        );
-                      })}
-                    </Table.Tbody>
-                  </Table>
-                  </div>
-                )}
-              </Stack>
-            </SectionCard>
-          </Stack>
+          </Tabs>
         </Tabs.Panel>
       </Tabs>
 
