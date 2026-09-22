@@ -16,6 +16,32 @@ import type { ReactNode } from 'react';
 import { Box, Divider, Group, Stack, Text } from '@mantine/core';
 import classes from './ConfigSection.module.css';
 
+export interface ConfigBlockProps {
+    icon?: ReactNode;
+    title: string;
+    children: ReactNode;
+}
+
+/**
+ * A named group of fields inside a section — what used to be a collapsible.
+ *
+ * Open, always. Each of these held one or two inputs behind a chevron, so
+ * collapsing them saved a few hundred pixels and cost a click per question
+ * ("is a knowledge engine attached?", "which guardrails run?") that reading
+ * the page should answer on its own.
+ */
+export function ConfigBlock({ icon, title, children }: ConfigBlockProps) {
+    return (
+        <Box>
+            <Group gap={6} mb="xs">
+                {icon}
+                <Text size="sm" fw={600}>{title}</Text>
+            </Group>
+            {children}
+        </Box>
+    );
+}
+
 export interface ConfigSectionProps {
     /** Anchor for deep links (`?tab=prompt` scrolls here). */
     id: string;

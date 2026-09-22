@@ -1,21 +1,3 @@
-/* Still used by Settings → Basic, which renders the extracted pane. */
-.configPanel {
-  min-height: 0;
-  overflow: auto;
-}
-
-/*
- * Settings → Basic. The pane was sized for a 21rem sidebar; on a full-width tab
- * it would stretch its inputs across the viewport, so it keeps a reading width.
- */
-.settingsPane {
-  max-width: 44rem;
-}
-
-.sectionToggle {
-  width: 100%;
-}
-
 .filterControlSm {
   min-width: 11.25rem;
 }
@@ -59,10 +41,11 @@
 }
 
 /*
- * Configure / Deploy / Observe each use a vertical rail instead of yet more
- * horizontal tabs — thirteen top-level tabs had turned the tab bar into a
- * scrolling strip. The rail keeps a fixed reading width so the panel beside
- * it does not reflow as the operator moves between sections.
+ * Deploy / Observe each use a vertical rail instead of yet more horizontal
+ * tabs — thirteen top-level tabs had turned the tab bar into a scrolling
+ * strip. The rail keeps a fixed reading width so the panel beside it does not
+ * reflow as the operator moves between sections. (Configure dropped its rail:
+ * it is one form, read top to bottom — see ConfigSection.)
  */
 .verticalTabs {
   align-items: flex-start;

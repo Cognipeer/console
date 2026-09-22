@@ -21,8 +21,6 @@ import {
   Box,
   NumberInput,
   Pagination,
-  Collapse,
-  UnstyledButton,
   Modal,
   Table,
   VisuallyHidden,
@@ -41,8 +39,6 @@ import {
   IconCheck,
   IconCalendar,
   IconRefresh,
-  IconChevronDown,
-  IconChevronRight,
   IconSettings,
   IconDatabase,
   IconShield,
@@ -84,7 +80,7 @@ import StartSessionModal from './studio/StartSessionModal';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
-import ConfigSection from './studio/ConfigSection';
+import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentMemoryConfig,
@@ -325,11 +321,6 @@ export default function AgentDetailPage() {
     () => resolveSubTabFromQuery(searchParams.get('tab'), 'observe', 'traces'),
   );
 
-  // Collapsible section state
-  const [knowledgeEngineOpen, setKnowledgeEngineOpen] = useState(false);
-  const [guardrailsOpen, setGuardrailsOpen] = useState(false);
-  const [toolsOpen, setToolsOpen] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [toolSelectorOpen, setToolSelectorOpen] = useState(false);
   const [toolBindings, setToolBindings] = useState<ToolBinding[]>([]);
 
@@ -386,6 +377,7 @@ export default function AgentDetailPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
 
   // Config form
   const configForm = useForm({
@@ -824,6 +816,17 @@ export default function AgentDetailPage() {
       });
 
       if (!res.ok) {
+        // Used to `return false` in silence, so a rejected save looked
+        // exactly like a button that did nothing — and the operator kept
+        // the config they thought they had stored. Say what the server said.
+        if (notify) {
+          const body = await res.json().catch(() => ({} as { error?: string }));
+          notifications.show({
+            title: t('notifications.error'),
+            message: body?.error || `${t('notifications.saveFailed')} (HTTP ${res.status})`,
+            color: 'red',
+          });
+        }
         return false;
       }
 
@@ -902,7 +905,12 @@ export default function AgentDetailPage() {
   // ── Config Save ──────────────────────────────────────────────
 
   const handleSaveConfig = async () => {
-    await saveAgentConfig();
+    setSavingConfig(true);
+    try {
+      await saveAgentConfig();
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   if (loading) {
@@ -932,193 +940,139 @@ export default function AgentDetailPage() {
    * the conversation no longer share a cramped two-column row: the playground
    * is now full width, and this renders under Settings → Basic.
    */
+  /**
+   * The General section's fields, all open.
+   *
+   * These used to be four collapsibles ("Knowledge Engine", "Guardrails",
+   * "Tools", "Advanced Settings") inside their own card, each hiding one or
+   * two inputs. That is a lot of clicking to answer "what is this agent wired
+   * to", and the answer is short enough to just show — so the accordions are
+   * gone and each group is a labelled block instead.
+   */
   const renderBasicSettings = () => (
-      <Paper
-        withBorder
-        radius="md"
-        p="md"
-        className={classes.configPanel}
-      >
-        <Stack gap="md">
-          <Text size="sm" fw={600}>
-            {t('config.title')}
+    isConnected ? (
+      <Stack gap="sm">
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
+          <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
+        </div>
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
+          <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
+            {connection?.url ?? '—'}
           </Text>
+        </div>
+        {connection?.model ? (
+          <div>
+            <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
+            <Text size="sm" className="ds-mono">{connection.model}</Text>
+          </div>
+        ) : null}
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
+          <Text size="sm">
+            {connection?.hasApiKey
+              ? t('connectModal.apiKey')
+              : connection?.credentialProviderKey
+                ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
+                : '—'}
+          </Text>
+        </div>
+        {connection?.responsePath ? (
+          <div>
+            <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
+            <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
+          </div>
+        ) : null}
+        <Text size="xs" c="dimmed" fs="italic" mt="xs">
+          {t('connectModal.subtitle')}
+        </Text>
+        <Button
+          variant="light"
+          size="xs"
+          leftSection={<IconPencil size={14} />}
+          onClick={() => setEditConnectionOpen(true)}
+          w="fit-content"
+        >
+          {t('connectModal.editButton')}
+        </Button>
+      </Stack>
+    ) : (
+      <Stack gap="xl">
+        <Select
+          label={t('config.model')}
+          placeholder={t('config.modelPlaceholder')}
+          data={models.map((m) => ({
+            value: m.key,
+            label: `${m.name} (${m.modelId})`,
+          }))}
+          searchable
+          {...configForm.getInputProps('modelKey')}
+        />
 
-          {isConnected ? (
-            <Stack gap="sm">
-              <div>
-                <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
-                <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
-              </div>
-              <div>
-                <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
-                <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
-                  {connection?.url ?? '—'}
-                </Text>
-              </div>
-              {connection?.model ? (
-                <div>
-                  <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
-                  <Text size="sm" className="ds-mono">{connection.model}</Text>
-                </div>
-              ) : null}
-              <div>
-                <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
-                <Text size="sm">
-                  {connection?.hasApiKey
-                    ? t('connectModal.apiKey')
-                    : connection?.credentialProviderKey
-                      ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
-                      : '—'}
-                </Text>
-              </div>
-              {connection?.responsePath ? (
-                <div>
-                  <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
-                  <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
-                </div>
-              ) : null}
-              <Text size="xs" c="dimmed" fs="italic" mt="xs">
-                {t('connectModal.subtitle')}
-              </Text>
-              <Button
-                variant="light"
-                size="xs"
-                leftSection={<IconPencil size={14} />}
-                onClick={() => setEditConnectionOpen(true)}
-              >
-                {t('connectModal.editButton')}
-              </Button>
-            </Stack>
-          ) : (
-          <>
+        {/* Prompt configuration (mode / template / managed prompt) lives in
+            its own "Prompt" section — see AgentPromptPanel. Editing the prompt
+            is common and deep enough (switching modes, editing the managed
+            Prompt record's template inline) to earn its own block instead of
+            sharing this one with the model picker. */}
+
+        <ConfigBlock icon={<IconDatabase size={15} />} title={t('config.knowledgeEngine')}>
           <Select
-            label={t('config.model')}
-            placeholder={t('config.modelPlaceholder')}
-            data={models.map((m) => ({
-              value: m.key,
-              label: `${m.name} (${m.modelId})`,
-            }))}
+            description={t('config.knowledgeEngineDescription')}
+            placeholder={t('config.knowledgeEnginePlaceholder')}
+            data={ragModules.map((r) => ({ value: r.key, label: r.name }))}
             searchable
-            {...configForm.getInputProps('modelKey')}
+            clearable
+            leftSection={<IconDatabase size={14} />}
+            {...configForm.getInputProps('knowledgeEngineKey')}
           />
+        </ConfigBlock>
 
-          {/* Prompt configuration (mode / template / managed prompt) moved to
-              its own "Prompt" tab — see AgentPromptPanel. Editing the prompt
-              is common and deep enough (switching modes, editing the managed
-              Prompt record's template inline) to earn its own screen instead
-              of sharing this one with the model picker. */}
+        <ConfigBlock icon={<IconShield size={15} />} title={t('config.guardrails')}>
+          {/*
+            One guardrail per row, each naming the hooks it covers on THIS
+            agent. The tool hooks are the new capability here: an agent's own
+            action tools are the surface a tool policy could never reach
+            through the old direction slots.
+          */}
+          <GuardrailBindingList
+            options={guardrails}
+            value={guardrailBindings}
+            onChange={setGuardrailBindings}
+            surface="agent"
+          />
+        </ConfigBlock>
 
-          {/* ── Knowledge Engine (collapsible) ───────── */}
-          <Divider />
-          <UnstyledButton
-            onClick={() => setKnowledgeEngineOpen((o) => !o)}
-            className={classes.sectionToggle}
-          >
-            <Group gap="xs">
-              {knowledgeEngineOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-              <IconDatabase size={16} />
-              <Text size="sm" fw={600}>{t('config.knowledgeEngine')}</Text>
-            </Group>
-          </UnstyledButton>
+        <ConfigBlock icon={<IconTool size={15} />} title={t('config.tools')}>
+          <Stack gap="sm">
+            <Text size="xs" c="dimmed">{t('config.toolsDescription')}</Text>
 
-          <Collapse in={knowledgeEngineOpen}>
-            <Stack gap="md" mt="xs">
-              <Select
-                label={t('config.knowledgeEngine')}
-                description={t('config.knowledgeEngineDescription')}
-                placeholder={t('config.knowledgeEnginePlaceholder')}
-                data={ragModules.map((r) => ({
-                  value: r.key,
-                  label: r.name,
-                }))}
-                searchable
-                clearable
-                leftSection={<IconDatabase size={14} />}
-                {...configForm.getInputProps('knowledgeEngineKey')}
-              />
-            </Stack>
-          </Collapse>
+            {toolBindings.length > 0 ? (
+              <Stack gap={4}>
+                {toolBindings.map((b) => (
+                  <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
+                    <Badge size="xs" variant="light" color="gray">{b.source.toUpperCase()}</Badge>
+                    <Text size="xs" fw={500}>{b.sourceKey}</Text>
+                    <Badge size="xs" variant="light" color="blue">
+                      {b.toolNames.length} tool(s)
+                    </Badge>
+                  </Group>
+                ))}
+              </Stack>
+            ) : (
+              <Text size="xs" c="dimmed" fs="italic">{t('config.noToolsSelected')}</Text>
+            )}
 
-          {/* ── Guardrails (collapsible) ─────────────── */}
-          <Divider />
-          <UnstyledButton
-            onClick={() => setGuardrailsOpen((o) => !o)}
-            className={classes.sectionToggle}
-          >
-            <Group gap="xs">
-              {guardrailsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-              <IconShield size={16} />
-              <Text size="sm" fw={600}>{t('config.guardrails')}</Text>
-            </Group>
-          </UnstyledButton>
-
-          <Collapse in={guardrailsOpen}>
-            <Stack gap="md" mt="xs">
-              {/*
-                One guardrail per row, each naming the hooks it covers on
-                THIS agent. The tool hooks are the new capability here:
-                an agent's own action tools are the surface a tool policy
-                could never reach through the old direction slots.
-              */}
-              <GuardrailBindingList
-                options={guardrails}
-                value={guardrailBindings}
-                onChange={setGuardrailBindings}
-                surface="agent"
-              />
-            </Stack>
-          </Collapse>
-
-          {/* ── Tools (collapsible) ──────────────────── */}
-          <Divider />
-          <UnstyledButton
-            onClick={() => setToolsOpen((o) => !o)}
-            className={classes.sectionToggle}
-          >
-            <Group gap="xs">
-              {toolsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-              <IconTool size={16} />
-              <Text size="sm" fw={600}>{t('config.tools')}</Text>
-            </Group>
-          </UnstyledButton>
-
-          <Collapse in={toolsOpen}>
-            <Stack gap="md" mt="xs">
-              <Text size="xs" c="dimmed">
-                {t('config.toolsDescription')}
-              </Text>
-
-              {toolBindings.length > 0 ? (
-                <Stack gap={4}>
-                  {toolBindings.map((b) => (
-                    <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
-                      <Badge size="xs" variant="light" color="gray">
-                        {b.source.toUpperCase()}
-                      </Badge>
-                      <Text size="xs" fw={500}>{b.sourceKey}</Text>
-                      <Badge size="xs" variant="light" color="blue">
-                        {b.toolNames.length} tool(s)
-                      </Badge>
-                    </Group>
-                  ))}
-                </Stack>
-              ) : (
-                <Text size="xs" c="dimmed" fs="italic">
-                  {t('config.noToolsSelected')}
-                </Text>
-              )}
-
-              <Button
-                variant="light"
-                size="xs"
-                leftSection={<IconTool size={14} />}
-                onClick={() => setToolSelectorOpen(true)}
-              >
-                {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
-              </Button>
-            </Stack>
-          </Collapse>
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconTool size={14} />}
+              onClick={() => setToolSelectorOpen(true)}
+              w="fit-content"
+            >
+              {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
+            </Button>
+          </Stack>
 
           <ToolSelectorModal
             opened={toolSelectorOpen}
@@ -1126,72 +1080,54 @@ export default function AgentDetailPage() {
             value={toolBindings}
             onChange={handleToolBindingsChange}
           />
+        </ConfigBlock>
 
-          {/* ── Advanced Settings (collapsible) ─────── */}
-          <Divider />
-          <UnstyledButton
-            onClick={() => setAdvancedOpen((o) => !o)}
-            className={classes.sectionToggle}
-          >
-            <Group gap="xs">
-              {advancedOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-              <IconSettings size={16} />
-              <Text size="sm" fw={600}>{t('config.advancedSettings')}</Text>
-            </Group>
-          </UnstyledButton>
-
-          <Collapse in={advancedOpen}>
-            <Stack gap="md" mt="xs">
-              <div>
-                <Text size="sm" mb={4}>
-                  {t('config.temperature')}: {configForm.values.temperature}
-                </Text>
-                <Slider
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  marks={[
-                    { value: 0, label: '0' },
-                    { value: 1, label: '1' },
-                    { value: 2, label: '2' },
-                  ]}
-                  {...configForm.getInputProps('temperature')}
-                />
-              </div>
-
-              <div>
-                <Text size="sm" mb={4}>
-                  {t('config.topP')}: {configForm.values.topP}
-                </Text>
-                <Slider
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  marks={[
-                    { value: 0, label: '0' },
-                    { value: 0.5, label: '0.5' },
-                    { value: 1, label: '1' },
-                  ]}
-                  {...configForm.getInputProps('topP')}
-                />
-              </div>
-
-              <NumberInput
-                label={t('config.maxTokens')}
-                min={1}
-                max={128000}
-                {...configForm.getInputProps('maxTokens')}
+        <ConfigBlock icon={<IconSettings size={15} />} title={t('config.advancedSettings')}>
+          <Stack gap="md">
+            <div>
+              <Text size="sm" mb={4}>
+                {t('config.temperature')}: {configForm.values.temperature}
+              </Text>
+              <Slider
+                min={0}
+                max={2}
+                step={0.1}
+                marks={[
+                  { value: 0, label: '0' },
+                  { value: 1, label: '1' },
+                  { value: 2, label: '2' },
+                ]}
+                {...configForm.getInputProps('temperature')}
               />
-            </Stack>
-          </Collapse>
+            </div>
 
-          <Button onClick={handleSaveConfig} size="sm" fullWidth>
-            {t('config.save')}
-          </Button>
-          </>
-          )}
-        </Stack>
-      </Paper>
+            <div>
+              <Text size="sm" mb={4}>
+                {t('config.topP')}: {configForm.values.topP}
+              </Text>
+              <Slider
+                min={0}
+                max={1}
+                step={0.05}
+                marks={[
+                  { value: 0, label: '0' },
+                  { value: 0.5, label: '0.5' },
+                  { value: 1, label: '1' },
+                ]}
+                {...configForm.getInputProps('topP')}
+              />
+            </div>
+
+            <NumberInput
+              label={t('config.maxTokens')}
+              min={1}
+              max={128000}
+              {...configForm.getInputProps('maxTokens')}
+            />
+          </Stack>
+        </ConfigBlock>
+      </Stack>
+    )
   );
 
   return (
@@ -1432,7 +1368,7 @@ export default function AgentDetailPage() {
             "Save" buttons only ever meant "save everything, from here".
           */}
           <Group justify="flex-end" className={classes.configSaveBar}>
-            <Button onClick={handleSaveConfig}>{t('config.save')}</Button>
+            <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
           </Group>
         </Tabs.Panel>
 
