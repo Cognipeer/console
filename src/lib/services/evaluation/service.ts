@@ -147,6 +147,8 @@ export interface CreateTargetInput {
   description?: string;
   kind: EvaluationTargetKind;
   agentKey?: string;
+  /** Pin to one published agent version; absent/null follows the published one. */
+  agentVersion?: number | null;
   modelKey?: string;
   external?: IEvaluationTarget['external'];
   /** `rag` targets: which Knowledge Engine module to retrieve from, and how much. */

@@ -39,6 +39,7 @@ import { ConfigMixin } from './mongodb/config.mixin';
 import { McpServerMixin } from './mongodb/mcp-server.mixin';
 import { ToolMixin } from './mongodb/tool.mixin';
 import { AgentMixin } from './mongodb/agent.mixin';
+import { SkillMixin } from './mongodb/skill.mixin';
 import { VectorMigrationMixin } from './mongodb/vector-migration.mixin';
 import { BrowserMixin } from './mongodb/browser.mixin';
 import { CrawlerMixin } from './mongodb/crawler.mixin';
@@ -78,7 +79,7 @@ const AlertingBase = IncidentMixin(AlertMixin(PiiPolicyMixin(EvalAnalysisBase)))
 const RagBase = RagReindexMixin(RagMixin(AlertingBase));
 const KnowledgeBase = MemoryMixin(WebSearchMixin(RerankerMixin(RagBase)));
 const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
-const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
+const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AdvancedBase));
 const PricingBase = ExternalModelPricingMixin(BulkBase);

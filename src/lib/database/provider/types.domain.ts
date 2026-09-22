@@ -733,6 +733,20 @@ export interface IEvaluationTarget {
   description?: string;
   kind: EvaluationTargetKind;
   agentKey?: string;
+  /**
+   * `agent` targets: pin the run to one published version instead of following
+   * whatever is published now.
+   *
+   * Absent means "the published version", which is the right default for a
+   * suite that guards production. Pinning is what makes a comparison run
+   * meaningful: two targets on the same agent at v3 and v4 answer "did the new
+   * version regress?", and that question is unanswerable while both silently
+   * follow the same moving pointer.
+   *
+   * `null` is how a PATCH clears an existing pin: both provider mixins treat
+   * `undefined` as "leave this field alone", so an absent key cannot unpin.
+   */
+  agentVersion?: number | null;
   modelKey?: string;
   external?: IEvaluationExternalTarget;
   /** `rag` targets: which module to retrieve from, and how much. */
@@ -2037,11 +2051,244 @@ export interface IExternalAgentConnection {
   runtimeHeaders?: { allow?: boolean; allowedNames?: string[] };
 }
 
+// ── Agent runtime configuration (agent-sdk surface) ──────────────────────
+//
+// Every field below is optional and absent by default: an agent that has never
+// been touched in the Advanced settings tab produces exactly the option object
+// the module used to hard-code, so this is a pure widening of the config.
+
+export type AgentRuntimeProfile = 'fast' | 'balanced' | 'deep' | 'research';
+export type AgentPlanningMode = 'off' | 'todo' | 'planner_executor' | 'reasoning_then_tools';
+export type AgentReplanPolicy = 'never' | 'on_failure' | 'on_conflict' | 'every_n_steps';
+export type AgentContextPolicy = 'raw' | 'summary_only' | 'hybrid';
+export type AgentToolResponsePolicy = 'keep_full' | 'keep_structured' | 'summarize_archive' | 'drop';
+export type AgentChildContextPolicy = 'minimal' | 'scoped' | 'full';
+export type AgentSubagentMode = 'off' | 'registry_only' | 'registry_and_adhoc';
+export type AgentMemoryProvider = 'inMemory' | 'redis' | 'postgres' | 'mongo' | 's3';
+export type AgentMemoryScope = 'session' | 'user' | 'workspace' | 'tenant';
+export type AgentMemoryWritePolicy = 'manual' | 'auto_important' | 'always';
+export type AgentMemoryReadPolicy = 'recent_only' | 'semantic' | 'hybrid';
+export type AgentReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
+export type AgentReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
+
+export interface IAgentLimits {
+  maxToolCalls?: number;
+  maxParallelTools?: number;
+  maxContextTokens?: number;
+  maxTotalOutputTokens?: number;
+  /** Requires a cost estimator on the run; ignored when none is wired. */
+  maxCostUsd?: number;
+  maxWallClockMs?: number;
+}
+
+export interface IAgentSummarizationConfig {
+  enable?: boolean;
+  maxTokens?: number;
+  summaryTriggerTokens?: number;
+  summaryPromptMaxTokens?: number;
+  summaryMode?: 'incremental' | 'full_rewrite';
+  integrityCheck?: boolean;
+}
+
+export interface IAgentContextConfig {
+  policy?: AgentContextPolicy;
+  lastTurnsToKeep?: number;
+  toolResponsePolicy?: AgentToolResponsePolicy;
+}
+
+export interface IAgentPlanningConfig {
+  mode?: AgentPlanningMode;
+  replanPolicy?: AgentReplanPolicy;
+  everyNSteps?: number;
+}
+
+export interface IAgentContextPilotConfig {
+  enabled?: boolean;
+  /** Tool names ContextPilot must never compress (raw payload always kept). */
+  excludeTools?: string[];
+}
+
+export interface IAgentReasoningConfig {
+  enabled?: boolean;
+  level?: AgentReasoningLevel;
+  /** Provider-native effort. `none` is a value that gets SENT, not "off". */
+  effort?: AgentReasoningEffort;
+  budgetTokens?: number;
+  includeThoughts?: boolean;
+  /** SDK reflection pass. Absent = SDK default; `false` disables it. */
+  reflection?: boolean;
+}
+
+/**
+ * Memory backing for an agent — routed through console's OWN memory module
+ * (vector-backed stores manageable at `/dashboard/memory`), not a bare
+ * SDK-provider string. `AgentMemoryProvider`/`AgentMemoryScope` (the raw SDK
+ * provider kinds) are still exported above for anyone constructing the SDK
+ * option object directly, but nothing here asks an operator to pick a
+ * driver — they pick a STORE, the same one the Memory module itself lists.
+ *
+ * At run time this resolves to a `MemoryStore` implementation
+ * (`agentMemoryAdapter.ts`) backed by `recallForChat`/`addMemory` on that
+ * store, passed as `memory.store` to the SDK — so the SDK's own structured
+ * summarization pipeline (`writeSummaryFactsToMemory`) is what decides what
+ * gets remembered, not a bespoke heuristic here.
+ */
+export interface IAgentMemoryConfig {
+  enabled?: boolean;
+  /** Key of an existing `IMemoryStore` (from the Memory module). Required when enabled. */
+  memoryStoreKey?: string;
+  scope?: AgentMemoryScope;
+  writePolicy?: AgentMemoryWritePolicy;
+  readPolicy?: AgentMemoryReadPolicy;
+  /**
+   * Whether the agent also gets memory as callable tools.
+   *
+   * The SDK gives it neither: recall is pre-injected as a system message and
+   * writes only happen when a compaction produces a summary, so an agent can
+   * neither look something up nor record what it was just told. `agentMemoryTools.ts`
+   * adds `memory_search` / `memory_write` / `memory_forget` over the same store.
+   *
+   * Defaults to 'readwrite' when memory is enabled — being told to remember
+   * something and silently not doing so is the worse surprise.
+   */
+  tools?: AgentMemoryToolMode;
+}
+
+/** 'read' drops the write/forget tools, for a curated store the agent must not pollute. */
+export type AgentMemoryToolMode = 'off' | 'read' | 'readwrite';
+
+/**
+ * A reusable capability the model can discover and open on demand —
+ * Anthropic-style progressive disclosure (see agent-sdk's `Skill` type).
+ *
+ * Deliberately NOT the SDK's file-based `SKILL.md` loader
+ * (`loadSkillsFromDisk`/`SkillFs`): there is no filesystem to scan here, a
+ * skill is a console-managed record like a Prompt, edited in the dashboard
+ * and referenced by key from `IAgentConfig.skills`. `agentSkillService.ts`
+ * builds the SDK's `Skill` objects directly from these fields — `header` is
+ * what the model always sees in its catalog, `body` is returned only once
+ * the model opens the skill.
+ */
+export interface IAgentSkill {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  title: string;
+  /** One-line "what it does + when to use it" — always in the model's catalog. */
+  header: string;
+  /** Full instructions, disclosed only once the model opens this skill. */
+  body: string;
+  /** Hide this skill from a small-tier model — see agent-sdk's `SkillModelTier`. */
+  minModelTier?: 'small' | 'large';
+  status: 'active' | 'inactive';
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAgentSkillPolicy {
+  /** Max distinct skills open at once. SDK default: unbounded-ish; console default applied at resolve time. */
+  maxOpenSkills?: number;
+  maxBoundToolsPerSkill?: number;
+  maxBoundToolsTotal?: number;
+  /** 'catalog' (default): every header in the system prompt. 'search': a `search_skills` tool instead. */
+  disclosure?: 'catalog' | 'search';
+}
+
+export interface IAgentToolResponsesConfig {
+  defaultPolicy?: AgentToolResponsePolicy;
+  maxToolResponseChars?: number;
+  maxToolResponseTokens?: number;
+  retentionByTool?: Record<string, AgentToolResponsePolicy>;
+}
+
+/**
+ * Advanced runtime knobs, surfaced in the Settings → Advanced tab. Basic
+ * settings (model, prompt, temperature, tools) stay on `IAgentConfig` itself.
+ */
+export interface IAgentRuntimeConfig {
+  profile?: AgentRuntimeProfile;
+  limits?: IAgentLimits;
+  planning?: IAgentPlanningConfig;
+  summarization?: IAgentSummarizationConfig;
+  context?: IAgentContextConfig;
+  toolResponses?: IAgentToolResponsesConfig;
+  contextPilot?: IAgentContextPilotConfig;
+  reasoning?: IAgentReasoningConfig;
+  /** Expose the SDK `ask_user_question` tool (human-in-the-loop). */
+  askUser?: boolean;
+}
+
+/** JSON-schema contract enforced on the agent's final answer. */
+export interface IAgentStructuredOutput {
+  enabled?: boolean;
+  /** Schema name surfaced to the provider. Defaults to `<agentKey>_output`. */
+  name?: string;
+  /** JSON Schema (draft-07 subset); converted to a zod schema at runtime. */
+  schema?: Record<string, unknown>;
+  /** Forbid extra properties and require every declared property. */
+  strict?: boolean;
+}
+
+/**
+ * A sub-agent the orchestrator may delegate to. Two flavours:
+ *  - `inline` — defined here, inside this agent's config
+ *  - `ref`    — points at another console agent, whose config is loaded at run time
+ */
+export interface IAgentSubagent {
+  kind: 'inline' | 'ref';
+  /** `delegate_to` name. Must be unique within the agent. */
+  name: string;
+  title?: string;
+  /** One-line "what it does + when to use it", shown in the delegation catalog. */
+  header: string;
+  /** inline only — role/system prompt for the child. */
+  systemPrompt?: string;
+  /** inline only — model override; falls back to the parent's model. */
+  modelKey?: string;
+  /** inline only — tool surface for the child. */
+  toolBindings?: IAgentToolBinding[];
+  /** inline only — knowledge engine attached to the child. */
+  knowledgeEngineKey?: string;
+  /** ref only — key of the console agent backing this sub-agent. */
+  agentKey?: string;
+  /** ref only — pin to a published version; absent = the published version. */
+  agentVersion?: number;
+  limits?: IAgentLimits;
+  childContextPolicy?: AgentChildContextPolicy;
+  /** JSON Schema for the child's structured result. */
+  outputSchema?: Record<string, unknown>;
+  /** Absent or true = available to the orchestrator. */
+  enabled?: boolean;
+}
+
+export interface IAgentSubagentPolicy {
+  mode?: AgentSubagentMode;
+  maxDepth?: number;
+  maxChildCalls?: number;
+  maxParallel?: number;
+  childContextPolicy?: AgentChildContextPolicy;
+  allowAdhocTools?: boolean;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
   systemPrompt?: string;
   promptKey?: string;
+  /**
+   * Static values for the `{{placeholders}}` in `promptKey`'s template (or in
+   * an inline `systemPrompt`). A caller can override any of these per run via
+   * `runtimeContext.metadata`; `agent`, `now` and `user` are reserved and
+   * always win.
+   *
+   * Declaring any variable here also switches on Mustache rendering for an
+   * inline `systemPrompt`, which is otherwise left untouched so a prompt
+   * containing literal braces keeps working.
+   */
+  promptVariables?: Record<string, string>;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
@@ -2077,6 +2324,19 @@ export interface IAgentConfig {
   kind?: AgentKind;
   /** Connection settings — present only when kind === 'external'. */
   connection?: IExternalAgentConnection;
+  /** Advanced agent-sdk runtime knobs (Settings → Advanced). */
+  runtime?: IAgentRuntimeConfig;
+  /** JSON-schema contract for the final answer. */
+  structuredOutput?: IAgentStructuredOutput;
+  /** Delegable sub-agents — inline definitions and references to other agents. */
+  subagents?: IAgentSubagent[];
+  /** Guards around delegation. Absent = SDK defaults with `registry_only`. */
+  subagentPolicy?: IAgentSubagentPolicy;
+  /** Skills this agent can discover and open — keys into the project's skill library. */
+  skills?: string[];
+  skillPolicy?: IAgentSkillPolicy;
+  /** Memory — its own tab (Settings → Advanced stays about the loop, not what the agent remembers). */
+  memory?: IAgentMemoryConfig;
 }
 
 /** A single tool-source binding for an agent */
@@ -2089,6 +2349,50 @@ export interface IAgentToolBinding {
   toolNames: string[];
   /** Optional configuration for the binding (e.g. { browserId } for system browser_use) */
   config?: Record<string, unknown>;
+}
+
+/**
+ * A recurring run of an agent.
+ *
+ * Schedules live in `agent.metadata.schedules` rather than their own
+ * collection: they are small, always read alongside the agent, and never
+ * queried independently. A run's record is the conversation it creates —
+ * stamped with the schedule id in its metadata — so history came for free
+ * rather than needing a second write path.
+ *
+ * The timing fields are deliberately identical to `ICrawlerSchedule` so both
+ * features share `schedulePlanner`; cron semantics that diverge between two
+ * schedulers in the same product is a support ticket waiting to happen.
+ */
+export interface IAgentSchedule {
+  /** Stable id, generated on create. Stamped onto every run's conversation. */
+  id: string;
+  name: string;
+  enabled: boolean;
+  mode: CrawlerScheduleMode;
+  /** interval mode: seconds between runs. Minimum 60. */
+  intervalSeconds?: number;
+  /** cron mode: 5- or 6-field cron expression (UTC). */
+  cron?: string;
+  startAt?: Date;
+  endAt?: Date;
+  lastRunAt?: Date;
+  nextRunAt?: Date;
+  /** The message sent to the agent on each fire. Supports prompt variables. */
+  message: string;
+  /**
+   * Per-run values merged into the prompt-variable context, exactly as a live
+   * caller's `runtimeContext.metadata` would be. A nightly digest and an hourly
+   * triage can therefore share one prompt and differ only here.
+   */
+  variables?: Record<string, string>;
+  /** Outcome of the most recent fire, for the schedule list. */
+  lastStatus?: 'ok' | 'error';
+  lastError?: string;
+  /** Conversation created by the most recent fire. */
+  lastConversationId?: string;
+  createdBy?: string;
+  createdAt?: Date;
 }
 
 export interface IAgent {
@@ -2132,19 +2436,79 @@ export interface IAgentVersion {
   createdAt?: Date;
 }
 
+/**
+ * One tool call as a debug session shows it — see `IAgentConversationMessage`.
+ * Kept minimal on purpose: full tool payloads live in tracing, not here.
+ */
+export interface IAgentConversationStep {
+  id?: string;
+  name: string;
+  args?: unknown;
+  /**
+   * What the MODEL saw. With `toolResponsePolicy: 'summarize_archive'` (the
+   * console default) this can be a summary of the real result, not the result
+   * — see `rawOutput`.
+   */
+  output?: unknown;
+  /** The untouched tool result, stored only when it differs from `output`. */
+  rawOutput?: unknown;
+  error?: string;
+  subagent?: string;
+  /**
+   * The SDK's own verdict. Authoritative: the old code sniffed the output for
+   * an `error` key, which both missed a guardrail-`rejected` call and flagged
+   * any tool that legitimately returns a field called `error`.
+   */
+  status?: 'success' | 'error' | 'rejected' | 'handoff';
+  /** Served from the response cache — no upstream call was made. */
+  fromCache?: boolean;
+  /** `output` is a compaction of the result; `originalTokenCount` is its pre-compaction size. */
+  summarized?: boolean;
+  originalTokenCount?: number;
+  timestamp?: string;
+}
+
+export interface IAgentConversationMessage {
+  role: string;
+  content: string;
+  /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
+  reasoning?: string;
+  timestamp: Date;
+  /**
+   * Debug detail for an assistant turn produced by a Session (not the live
+   * `/v1/responses` path, which deliberately returns content only — see
+   * `agentService.ts`'s `AgentPlaygroundChatResult`). Persisted so reopening a
+   * session shows what happened, not just what was said.
+   */
+  steps?: IAgentConversationStep[];
+  output?: unknown;
+  outputError?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedInputTokens?: number;
+    totalTokens?: number;
+    /** Priced from the model's own `pricing` at the time of the run — see `calculateCost`. */
+    costUsd?: number;
+  };
+  /** Which agent config produced this turn: a version number, or null for the draft. */
+  version?: number | null;
+  /** Wall-clock time the turn took, measured server-side. */
+  latencyMs?: number;
+}
+
 export interface IAgentConversation {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
   agentKey: string;
   title?: string;
-  messages: Array<{
-    role: string;
-    content: string;
-    /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
-    reasoning?: string;
-    timestamp: Date;
-  }>;
+  messages: IAgentConversationMessage[];
+  /**
+   * `metadata.runtimeContext` holds the context entered once when the session
+   * is started, merged UNDER every turn's own runtime context (so a
+   * per-message override still wins) — see `executePlaygroundChatLocal`.
+   */
   metadata?: Record<string, unknown>;
   createdBy: string;
   createdAt?: Date;

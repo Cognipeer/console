@@ -26,7 +26,8 @@
     "backfill:rag-project-ids": "node --import tsx scripts/backfill-rag-document-project-ids.ts",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "docs:preview": "vitepress preview docs",
+    "test:e2e:triage": "tsx scripts/e2e/incident-triage/run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.901.0",
@@ -80,6 +81,7 @@
     "ioredis": "^5.9.3",
     "jose": "^6.1.0",
     "jsdom": "^26.1.0",
+    "jszip": "^3.10.1",
     "langchain": "^1.4.0",
     "ldapts": "^7.4.0",
     "mantine-datatable": "^8.2.0",

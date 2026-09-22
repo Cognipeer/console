@@ -30,6 +30,8 @@ interface FormValues {
   kind: 'agent' | 'model' | 'external' | 'rag';
   modelKey: string;
   agentKey: string;
+  /** '' means "follow the published version". Held as a string for Mantine's Select. */
+  agentVersion: string;
   /** Retrieval targets: which Knowledge Engine module to query, and how much. */
   ragModuleKey: string;
   retrievalTopK: number | '';
@@ -76,13 +78,15 @@ function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined
 
 export default function CreateTargetModal({ opened, onClose, onCreated, models = [], editing = null }: CreateTargetModalProps) {
   const [loading, setLoading] = useState(false);
-  const [agents, setAgents] = useState<{ value: string; label: string }[]>([]);
+  const [agents, setAgents] = useState<{ value: string; label: string; _id?: string; publishedVersion?: number | null }[]>([]);
+  const [agentVersionOptions, setAgentVersionOptions] = useState<{ value: string; label: string }[]>([]);
+  const [agentVersionsLoading, setAgentVersionsLoading] = useState(false);
   const [prompts, setPrompts] = useState<{ value: string; label: string }[]>([]);
   const [ragModules, setRagModules] = useState<{ value: string; label: string }[]>([]);
   const isEdit = Boolean(editing);
   const form = useForm<FormValues>({
     initialValues: {
-      name: '', description: '', kind: 'model', modelKey: '', agentKey: '',
+      name: '', description: '', kind: 'model', modelKey: '', agentKey: '', agentVersion: '',
       ragModuleKey: '', retrievalTopK: '', retrievalMinScore: '',
       promptMode: 'none', promptKey: '', systemPrompt: '',
       responseMode: 'none', jsonSchema: '', maxTokens: '',
@@ -114,6 +118,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         kind: editing.kind,
         modelKey: editing.modelKey ?? '',
         agentKey: editing.agentKey ?? '',
+        agentVersion: typeof editing.agentVersion === 'number' ? String(editing.agentVersion) : '',
         ragModuleKey: editing.ragModuleKey ?? '',
         retrievalTopK: editing.retrievalTopK ?? '',
         retrievalMinScore: editing.retrievalMinScore ?? '',
@@ -132,7 +137,10 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         const res = await fetch('/api/agents', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
-          setAgents(((data.agents ?? []) as Array<{ key: string; name: string }>).map((a) => ({ value: a.key, label: a.name })));
+          setAgents(
+            ((data.agents ?? []) as Array<{ _id: string; key: string; name: string; publishedVersion?: number | null }>)
+              .map((a) => ({ value: a.key, label: a.name, _id: a._id, publishedVersion: a.publishedVersion ?? null })),
+          );
         }
       } catch {
         /* non-fatal — agent dropdown stays empty */
@@ -159,6 +167,52 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
+  const selectedAgentKey = form.getValues().agentKey;
+  const selectedKind = form.getValues().kind;
+
+  /**
+   * Versions are fetched per agent rather than bundled into the agent list:
+   * an agent's history can run to dozens of entries, and the list endpoint is
+   * also what the Agents page pages through.
+   */
+  useEffect(() => {
+    if (!opened || selectedKind !== 'agent' || !selectedAgentKey) {
+      setAgentVersionOptions([]);
+      return;
+    }
+    const agentId = agents.find((entry) => entry.value === selectedAgentKey)?._id;
+    if (!agentId) {
+      setAgentVersionOptions([]);
+      return;
+    }
+
+    let cancelled = false;
+    setAgentVersionsLoading(true);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/agents/${agentId}/versions?limit=100`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const published: number | null = data.publishedVersion ?? null;
+        setAgentVersionOptions(
+          ((data.versions ?? []) as Array<{ version: number }>).map((entry) => ({
+            value: String(entry.version),
+            label: `v${entry.version}${entry.version === published ? ' · published' : ''}`,
+          })),
+        );
+      } catch {
+        /* non-fatal — the picker falls back to "published" */
+      } finally {
+        if (!cancelled) setAgentVersionsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, selectedKind, selectedAgentKey, agents.length]);
+
   const handleSubmit = async () => {
     if (form.validate().hasErrors) return;
     const v = form.getValues();
@@ -169,6 +223,9 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         description: v.description || undefined,
         modelKey: v.kind === 'model' ? v.modelKey : undefined,
         agentKey: v.kind === 'agent' ? v.agentKey.trim() : undefined,
+        // `null`, not `undefined`: an absent key means "leave alone" on both DB
+        // providers, so clearing the pin on an edit needs an explicit value.
+        agentVersion: v.kind === 'agent' ? (v.agentVersion ? Number(v.agentVersion) : null) : undefined,
         ragModuleKey: v.kind === 'rag' ? v.ragModuleKey : undefined,
         // Left empty, the module's own defaultTopK / defaultMinScore apply —
         // which is what a suite should test unless it is testing the knobs.
@@ -290,14 +347,41 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
           </FormField>
         )}
         {kind === 'agent' && (
-          <FormField label="Agent" required>
-            <Select
-              placeholder={agents.length ? 'Select an agent…' : 'No registered agents found'}
-              data={agents}
-              searchable
-              {...form.getInputProps('agentKey')}
-            />
-          </FormField>
+          <>
+            <FormField label="Agent" required>
+              <Select
+                placeholder={agents.length ? 'Select an agent…' : 'No registered agents found'}
+                data={agents}
+                searchable
+                {...form.getInputProps('agentKey')}
+                onChange={(next) => {
+                  // A version number is only meaningful for the agent it came
+                  // from, so switching agents clears the pin rather than
+                  // carrying "v4" onto an agent that may only have two.
+                  form.setFieldValue('agentKey', next ?? '');
+                  form.setFieldValue('agentVersion', '');
+                }}
+              />
+            </FormField>
+            <FormField
+              label="Version"
+              hint="Pin the suite to one published version. Left on “published”, the target follows whatever is live — right for a guard suite, wrong for an A/B."
+            >
+              <Select
+                placeholder={
+                  !form.getValues().agentKey
+                    ? 'Select an agent first'
+                    : agentVersionsLoading
+                      ? 'Loading versions…'
+                      : 'Published (follows the live version)'
+                }
+                data={agentVersionOptions}
+                disabled={!form.getValues().agentKey || agentVersionsLoading}
+                clearable
+                {...form.getInputProps('agentVersion')}
+              />
+            </FormField>
+          </>
         )}
         {kind === 'rag' && (
           <FormField label="Knowledge Engine module" required hint="Each dataset item's user message becomes a query against this module.">

@@ -7,7 +7,6 @@
 
 import { randomUUID } from 'node:crypto';
 
-import Mustache from 'mustache';
 import { createLogger } from '@/lib/core/logger';
 import { routeInstanceCall } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
@@ -15,14 +14,34 @@ import { agentEntityId } from './agentEntityId';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     Message as AgentSdkMessage,
-    RuntimeProfile as AgentSdkRuntimeProfile,
+    Skill as AgentSdkSkill,
+    SkillPolicy as AgentSdkSkillPolicy,
     SmartAgentEvent as AgentSdkEvent,
+    SmartAgentMemoryConfig as AgentSdkMemoryConfig,
     SmartState as AgentSdkSmartState,
-    ToolResponseRetentionPolicy as AgentSdkToolResponseRetentionPolicy,
+    SubagentDef as AgentSdkSubagentDef,
     ToolInterface as AgentSdkToolInterface,
     TraceSinkConfig as AgentSdkTraceSinkConfig,
     TraceSessionFile,
 } from '@cognipeer/agent-sdk';
+import type { ZodTypeAny } from 'zod';
+import {
+    jsonSchemaToZod,
+    toolInputSchemaToZod,
+    resolveAgentRuntimeOptions,
+    resolveAgentSkillPolicy,
+    resolveStructuredOutputSchema,
+    type ResolvedAgentRuntimeOptions,
+} from './agentRuntimeConfig';
+import { buildAgentSkills } from './agentSkillService';
+import { buildAgentMemoryOption } from './agentMemoryAdapter';
+import type { IAgentSubagent } from '@/lib/database/provider/types.domain';
+import {
+    buildPromptVariables,
+    renderPromptTemplate,
+    shouldRenderInlinePrompt,
+    type RenderedPrompt,
+} from './promptVariables';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
@@ -82,27 +101,18 @@ import {
     type AgentRuntimeContext,
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
+import { normalizePlaygroundUsage } from './playgroundUsage';
+import { withAssembledStream } from './assembledStream';
+import { makeToolsStrictCompatible } from './strictToolSchema';
+import { withModelUsageLogging } from './modelUsageTap';
+import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const logger = createLogger('agents');
 
-const CONSOLE_AGENT_RUNTIME_PROFILE: AgentSdkRuntimeProfile = 'balanced';
-const CONSOLE_AGENT_MAX_TOOL_CALLS = 12;
-const CONSOLE_AGENT_MAX_CONTEXT_TOKENS = 48_000;
-const CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS = 32_000;
-const CONSOLE_AGENT_SUMMARY_MAX_TOKENS = 48_000;
-const CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS = 8_000;
-const CONSOLE_AGENT_LAST_TURNS_TO_KEEP = 10;
-const CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL: Record<string, AgentSdkToolResponseRetentionPolicy> = {
-    knowledge_search: 'keep_full',
-};
-
-const CONSOLE_AGENT_TOOL_RESPONSES_CONFIG = {
-    defaultPolicy: 'summarize_archive' as const,
-    toolResponseRetentionByTool: CONSOLE_AGENT_TOOL_RESPONSE_RETENTION_BY_TOOL,
-    maxToolResponseChars: 80_000,
-    maxToolResponseTokens: 20_000,
-};
+// The console's runtime defaults moved to `./agentRuntimeConfig` when they
+// became per-agent settings; `CONSOLE_AGENT_DEFAULTS` there holds the same
+// values and is what an agent with no `runtime` block still resolves to.
 
 const CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION =
     'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty. Each match carries a documentId — pass it to knowledge_read_document or knowledge_read_document_lines when the question needs more of that file than the matched passage.';
@@ -1139,6 +1149,31 @@ type CreateConsoleSdkAgentInput = {
     threadId?: string;
     /** Guardrail plugins for the TEXT hooks; see `buildAgentGuardrailPlugins`. */
     plugins?: AgentSdkPlugin[];
+    /**
+     * Attribution tags forwarded to the trace session's own `metadata` field —
+     * separate from prompt variables. This is what lets a scheduled fire, a
+     * live API call, and a playground run show up distinguishably in the
+     * existing Traces/Observability views instead of needing a parallel "run"
+     * record: `?metadataKey=scheduleId&metadataValue=<id>` on the tracing list
+     * finds every fire of one schedule, and `schedule.lastConversationId`
+     * already equals the trace's `threadId` (see below), so a single fire is
+     * one click away without any new API surface.
+     */
+    tracingMetadata?: Record<string, string>;
+    /**
+     * Resolved agent-sdk knobs from `config.runtime`. Absent for callers that
+     * have no agent config to hand (they get the console defaults).
+     */
+    runtimeOptions?: ResolvedAgentRuntimeOptions;
+    /** zod contract for the final answer, from `config.structuredOutput`. */
+    outputSchema?: ZodTypeAny;
+    /** Sub-agent registry built from `config.subagents`. */
+    subagents?: AgentSdkSubagentDef[];
+    /** Discoverable skills built from `config.skills` — see `agentSkillService.ts`. */
+    skills?: AgentSdkSkill[];
+    skillPolicy?: AgentSdkSkillPolicy;
+    /** Console-memory-backed `MemoryStore` — see `agentMemoryAdapter.ts`. Absent when memory is off. */
+    memory?: AgentSdkMemoryConfig;
 };
 
 /**
@@ -1313,45 +1348,264 @@ function createConsoleSdkAgent(
     createSmartAgentFn: typeof import('@cognipeer/agent-sdk').createSmartAgent,
     input: CreateConsoleSdkAgentInput,
 ) {
+    // With structured output, agent-sdk binds tools in the provider's STRICT
+    // mode wherever the model says it needs it (OpenAI-family). Strict mode
+    // requires every argument to be `required` and every object closed, so
+    // the tools are reshaped to that contract here — optional arguments become
+    // nullable, and the executor gets the original shape back. See
+    // strictToolSchema.ts.
+    const strictTools = Boolean(input.outputSchema)
+        && Boolean((input.model as { capabilities?: { strictToolCalling?: boolean } } | undefined)?.capabilities?.strictToolCalling);
+    const tools = strictTools ? makeToolsStrictCompatible(input.tools) : input.tools;
+
     return createSmartAgentFn({
         name: input.name,
         version: input.version,
         model: input.model,
-        ...(input.tools.length > 0 ? { tools: input.tools } : {}),
+        ...(tools.length > 0 ? { tools } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
         // thing to the host, and the shorter option object is what every other
         // conditional field here does.
         ...(input.plugins && input.plugins.length > 0 ? { plugins: input.plugins } : {}),
-        runtimeProfile: CONSOLE_AGENT_RUNTIME_PROFILE,
-        planning: {
-            mode: 'off',
-            replanPolicy: 'on_failure',
-        },
-        limits: {
-            maxToolCalls: CONSOLE_AGENT_MAX_TOOL_CALLS,
-            maxContextTokens: CONSOLE_AGENT_MAX_CONTEXT_TOKENS,
-        },
-        summarization: {
-            enable: true,
-            maxTokens: CONSOLE_AGENT_SUMMARY_MAX_TOKENS,
-            summaryTriggerTokens: CONSOLE_AGENT_SUMMARY_TRIGGER_TOKENS,
-            summaryPromptMaxTokens: CONSOLE_AGENT_SUMMARY_PROMPT_MAX_TOKENS,
-            integrityCheck: true,
-        },
-        context: {
-            policy: 'hybrid',
-            lastTurnsToKeep: CONSOLE_AGENT_LAST_TURNS_TO_KEEP,
-            toolResponsePolicy: 'summarize_archive',
-        },
-        toolResponses: CONSOLE_AGENT_TOOL_RESPONSES_CONFIG,
+        // `runtimeOptions` already carries the module defaults for every knob an
+        // operator left untouched, so spreading it is equivalent to the literal
+        // block this replaced — see `agentRuntimeConfig.CONSOLE_AGENT_DEFAULTS`.
+        ...(input.runtimeOptions ?? resolveAgentRuntimeOptions({})),
+        ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
+        ...(input.subagents && input.subagents.length > 0 ? { subagents: input.subagents } : {}),
+        ...(input.skills && input.skills.length > 0 ? { skills: input.skills } : {}),
+        ...(input.skillPolicy ? { skillPolicy: input.skillPolicy } : {}),
+        ...(input.memory ? { memory: input.memory } : {}),
         ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
         tracing: {
             enabled: true,
             mode: 'batched',
             sink: input.tracingSink,
             ...(input.threadId ? { threadId: input.threadId } : {}),
+            ...(input.tracingMetadata && Object.keys(input.tracingMetadata).length > 0
+                ? { metadata: input.tracingMetadata }
+                : {}),
         },
     });
+}
+
+/**
+ * Reduces `runtimeContext` into the flat string map the trace session's own
+ * `metadata` field accepts.
+ *
+ * Deliberately narrow: `source` and `trigger`/`scheduleId`/`scheduleName` (the
+ * fields the scheduler stamps into `metadata` for prompt variables) are worth
+ * attribution — they are exactly what `?metadataKey=…&metadataValue=…` on the
+ * tracing list is for. The rest of a caller's free-form metadata is left out;
+ * it was sent for prompt rendering, not for a tracing filter, and object/array
+ * values would need a shape decision this call site should not make silently.
+ */
+function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undefined): Record<string, string> | undefined {
+    if (!runtimeContext) return undefined;
+    const out: Record<string, string> = {};
+    if (runtimeContext.source) out.source = runtimeContext.source;
+    const meta = runtimeContext.metadata;
+    for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
+        const value = meta?.[key];
+        if (typeof value === 'string' && value) out[key] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Logs which prompt placeholders came from the caller and which nobody filled.
+ *
+ * An unfilled placeholder renders empty, which is exactly the failure this
+ * whole module exists to make visible: the prompt still "works", it just quietly
+ * says less than its author wrote. A warn line is the cheapest way for an
+ * operator to find that from a trace.
+ */
+function reportPromptVariables(
+    rendered: RenderedPrompt,
+    context: { agentKey: string; promptKey?: string },
+): void {
+    if (rendered.unresolved.length > 0) {
+        logger.warn('Prompt has unresolved variables; they rendered empty', {
+            ...context,
+            unresolved: rendered.unresolved,
+        });
+    }
+    if (rendered.fromCaller.length > 0) {
+        logger.debug('Prompt variables filled from caller runtime context', {
+            ...context,
+            variables: rendered.fromCaller,
+        });
+    }
+}
+
+// ── Sub-agent registry ──────────────────────────────────────────────
+
+type BuildSubagentsInput = {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    subagents: IAgentSubagent[] | undefined;
+    createToolFn: typeof import('@cognipeer/agent-sdk').createTool;
+    zod: typeof import('zod').z;
+    guard: AgentToolGuard;
+    runtimeContext?: AgentRuntimeContext;
+    /** Depth guard: a `ref` sub-agent must not pull in its own `ref` children. */
+    depth?: number;
+};
+
+/**
+ * Turns `config.subagents` into the SDK's sub-agent registry.
+ *
+ * `inline` children are defined entirely in the parent's config. `ref` children
+ * borrow another console agent's prompt, model and tools — resolved from that
+ * agent's PUBLISHED config unless a version is pinned, so editing a draft can
+ * never change what a parent delegates to mid-flight.
+ *
+ * A `ref` child's own sub-agents are deliberately dropped: the SDK already
+ * enforces a depth budget, and expanding a reference tree here would let one
+ * edit in a leaf agent silently multiply every parent's tool surface. Nesting
+ * beyond one level is expressed with the SDK's own `maxDepth`, not by inlining.
+ */
+async function buildAgentSubagents(
+    input: BuildSubagentsInput,
+): Promise<{ subagents: AgentSdkSubagentDef[]; cleanupTasks: Array<() => Promise<void>> }> {
+    const entries = (input.subagents ?? []).filter((entry) => entry.enabled !== false);
+    if (entries.length === 0) return { subagents: [], cleanupTasks: [] };
+
+    const subagents: AgentSdkSubagentDef[] = [];
+    const cleanupTasks: Array<() => Promise<void>> = [];
+    const seen = new Set<string>();
+
+    for (const entry of entries) {
+        if (!entry.name || seen.has(entry.name)) {
+            logger.warn('Skipping sub-agent with missing or duplicate name', { name: entry.name });
+            continue;
+        }
+        seen.add(entry.name);
+
+        let systemPrompt = entry.systemPrompt;
+        let toolBindings = entry.toolBindings;
+        let knowledgeEngineKey = entry.knowledgeEngineKey;
+        let modelKey = entry.modelKey;
+
+        if (entry.kind === 'ref') {
+            if (!entry.agentKey) {
+                logger.warn('Skipping sub-agent reference with no agentKey', { name: entry.name });
+                continue;
+            }
+            try {
+                const resolved = await resolveAgentConfig(
+                    input.tenantDbName,
+                    entry.agentKey,
+                    input.projectId,
+                    entry.agentVersion,
+                );
+                if (resolved.config.kind === 'external') {
+                    // An external agent is an HTTP endpoint, not a set of tools —
+                    // it cannot be flattened into a child of this process.
+                    logger.warn('Skipping connected agent used as sub-agent', {
+                        name: entry.name,
+                        agentKey: entry.agentKey,
+                    });
+                    continue;
+                }
+                systemPrompt = entry.systemPrompt ?? resolved.config.systemPrompt;
+                toolBindings = resolved.config.toolBindings;
+                knowledgeEngineKey = resolved.config.knowledgeEngineKey;
+                modelKey = entry.modelKey ?? resolved.config.modelKey;
+            } catch (error) {
+                logger.warn('Sub-agent reference could not be resolved; skipping', {
+                    name: entry.name,
+                    agentKey: entry.agentKey,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                continue;
+            }
+        }
+
+        const childTools: AgentSdkToolInterface[] = [];
+        if (knowledgeEngineKey) {
+            const knowledge = await buildKnowledgeTools(
+                input.tenantDbName,
+                input.tenantId,
+                knowledgeEngineKey,
+                input.guard,
+            );
+            childTools.push(...knowledge.tools);
+        }
+        if (toolBindings && toolBindings.length > 0) {
+            const bound = await buildBoundTools(
+                input.tenantDbName,
+                input.tenantId,
+                input.projectId,
+                toolBindings,
+                input.createToolFn,
+                input.zod,
+                input.guard,
+                input.runtimeContext,
+            );
+            childTools.push(...bound.tools);
+            cleanupTasks.push(...bound.cleanupTasks);
+        }
+
+        let childModel: unknown;
+        if (modelKey) {
+            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey);
+        }
+
+        subagents.push({
+            name: entry.name,
+            ...(entry.title ? { title: entry.title } : {}),
+            header: entry.header || entry.title || entry.name,
+            ...(systemPrompt ? { systemPrompt } : {}),
+            ...(childTools.length > 0 ? { tools: childTools } : {}),
+            ...(childModel ? { model: childModel } : {}),
+            ...(entry.limits ? { limits: entry.limits } : {}),
+            ...(entry.childContextPolicy ? { childContextPolicy: entry.childContextPolicy } : {}),
+            ...(entry.outputSchema
+                ? { outputSchema: jsonSchemaToZod(entry.outputSchema) }
+                : {}),
+            metadata: { kind: entry.kind, ...(entry.agentKey ? { agentKey: entry.agentKey } : {}) },
+        });
+    }
+
+    return { subagents, cleanupTasks };
+}
+
+/**
+ * Builds the LangChain model for a sub-agent's model override. Returns
+ * undefined when the key no longer resolves, which makes the child fall back to
+ * the parent's model rather than failing the whole run.
+ */
+async function buildSubagentModel(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    modelKey: string,
+): Promise<unknown> {
+    try {
+        const model = await getModelByKey(tenantDbName, modelKey, projectId);
+        if (!model || model.category !== 'llm') return undefined;
+        const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
+        if (!runtime.createChatModel) return undefined;
+        const lcModel = await runtime.createChatModel({
+            modelId: model.modelId,
+            category: 'llm',
+            modelSettings: resolveModelInvocationConfig(model, {}),
+        });
+        const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
+        return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+            tenantDbName,
+            model,
+            route: 'agent.subagent',
+        });
+    } catch (error) {
+        logger.warn('Sub-agent model override could not be built; falling back to parent model', {
+            modelKey,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return undefined;
+    }
 }
 
 // ── Tool Bridge ─────────────────────────────────────────────────────
@@ -1364,9 +1618,9 @@ function createConsoleSdkAgent(
  *
  * Also returns trace `definitions` for the bound tools — the menu recorded on
  * each model-call event's `tool_definitions` section. `parameters` carries the
- * source JSON schema (action/MCP inputSchema); the SDK binding itself uses a
- * permissive passthrough zod schema, so the source schema is the meaningful
- * definition to observe.
+ * source JSON schema (action/MCP inputSchema), and the SDK binding is built
+ * from that same schema (`toolInputSchemaToZod`), so the trace and the model
+ * see one contract.
  *
  * ── WHERE `tool.pre` / `tool.post` FIRE, AND WHERE THEY MUST NOT ───────────
  * `guard` wraps the 'tool' and 'system' branches. It deliberately does NOT
@@ -1444,7 +1698,9 @@ export async function buildBoundTools(
                 const tool = createToolFn({
                     name: action.name,
                     description: action.description || `Call ${action.name} on ${toolRecord.name}`,
-                    schema: zod.object({}).passthrough(),
+                    // The action's real input schema, not an empty passthrough —
+                    // see toolInputSchemaToZod.
+                    schema: toolInputSchemaToZod(action.inputSchema),
                     // The guard wraps the WHOLE executor, tool-request logging
                     // included, so a `tool.pre` redaction reaches the upstream
                     // call and the request log identically, and `tool.post`
@@ -1560,7 +1816,7 @@ export async function buildBoundTools(
                 const tool = createToolFn({
                     name: mcpToolDef.name,
                     description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
-                    schema: zod.object({}).passthrough(),
+                    schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
                     // Wrapped in `guard` ONLY when the server has no binding of
                     // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
                     // already fires `tool.pre` and `tool.post` around the dispatch
@@ -2196,6 +2452,8 @@ export async function createConversation(
     userId: string,
     agentKey: string,
     title?: string,
+    /** Session-level context — applied to every turn, see `executePlaygroundChatLocal`. */
+    metadata?: Record<string, unknown>,
 ): Promise<IAgentConversation> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
@@ -2206,6 +2464,7 @@ export async function createConversation(
         agentKey,
         title: title || 'New conversation',
         messages: [],
+        ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
         createdBy: userId,
     });
 }
@@ -2257,6 +2516,12 @@ export interface AgentChatRequest {
      * connected agents, metadata). Plain data — serializes over the job queue.
      */
     runtimeContext?: AgentRuntimeContext;
+    /**
+     * Incremental answer text. Same queue caveat as the playground's: a
+     * function cannot be serialized to another node, so a routed run simply
+     * streams nothing and the caller still gets the complete result.
+     */
+    onTextChunk?: (text: string) => void;
 }
 
 /** Tool-call progress notification surfaced while an agent run executes. */
@@ -2266,6 +2531,17 @@ export interface AgentToolCallEvent {
     name: string;
     /** Provider tool-call id, when available. */
     id?: string;
+    /**
+     * The call's arguments. Carried so a live row can say WHICH search is
+     * running ("web_search · Cognipeer") rather than just that one is — with
+     * several parallel calls of the same tool, the name alone identifies
+     * nothing.
+     */
+    args?: unknown;
+    /** Filled on the terminal phase. */
+    durationMs?: number;
+    /** Filled on `error`. */
+    error?: string;
 }
 
 /** Ephemeral (playground) chat — no DB conversation required */
@@ -2275,8 +2551,26 @@ export interface AgentPlaygroundChatRequest {
     projectId: string;
     agentKey: string;
     userMessage: string;
-    /** Previous messages for context (in-memory only) */
+    /**
+     * Previous messages for context. Ignored (and the DB history loaded
+     * instead) whenever `conversationId` is set — a caller-supplied history
+     * next to a real conversation id would let the client fabricate turns the
+     * agent never actually produced, and persist them.
+     */
     history?: Array<{ role: string; content: string }>;
+    /**
+     * Backs this run with a persisted Session: history loads from the
+     * conversation instead of `history`, and the exchange (including steps/
+     * usage/output) is written back afterward. Omitted, this behaves exactly
+     * as the stateless playground always has — in-memory, nothing saved.
+     */
+    conversationId?: string;
+    /**
+     * Run a published version instead of the draft. The playground's whole point
+     * is the draft, so absent means draft — but comparing a change against what
+     * is live is the other half of that job.
+     */
+    version?: number;
     /**
      * Caller-supplied runtime context (headers for downstream tools/MCP/
      * connected agents, metadata). Plain data — serializes over the job queue.
@@ -2289,6 +2583,61 @@ export interface AgentPlaygroundChatRequest {
      * another cluster node the run still works, but no events fire.
      */
     onToolEvent?: (event: AgentToolCallEvent) => void;
+    /**
+     * Incremental answer text, for a caller that can render it as it arrives.
+     * Same queue caveat as `onToolEvent` — a function cannot be serialized to
+     * another node, so a routed run simply streams nothing.
+     */
+    onTextChunk?: (text: string) => void;
+}
+
+/**
+ * One tool call as the playground shows it.
+ *
+ * The playground is where an operator debugs an agent, so a step carries the
+ * arguments and the result — not just the name. The live chat path deliberately
+ * does NOT return these: a tool result can be large and can contain exactly the
+ * data a guardrail redacted from the answer.
+ */
+export interface AgentPlaygroundStep {
+    id?: string;
+    name: string;
+    args?: unknown;
+    /** What the MODEL saw — possibly a summary of the result. See `rawOutput`. */
+    output?: unknown;
+    /** The untouched tool result, set only when it differs from `output`. */
+    rawOutput?: unknown;
+    /** Present when the tool threw. */
+    error?: string;
+    /** Sub-agent that made the call, when delegation was involved. */
+    subagent?: string;
+    status?: 'success' | 'error' | 'rejected' | 'handoff';
+    fromCache?: boolean;
+    summarized?: boolean;
+    originalTokenCount?: number;
+    timestamp?: string;
+}
+
+export interface AgentPlaygroundChatResult {
+    content: string;
+    reasoning?: string;
+    /** Parsed structured output, when the agent declares an output schema. */
+    output?: unknown;
+    /** Why the structured contract failed, when it did. */
+    outputError?: string;
+    usage?: {
+        inputTokens?: number;
+        outputTokens?: number;
+        cachedInputTokens?: number;
+        totalTokens?: number;
+        /** Priced from the model's own `pricing`; absent when the model has none. */
+        costUsd?: number;
+    };
+    /** Wall-clock time of the run, measured server-side. */
+    latencyMs?: number;
+    steps?: AgentPlaygroundStep[];
+    /** Which config actually ran: a version number, or null for the draft. */
+    version?: number | null;
 }
 
 /** OpenAI Responses API–compatible output content item */
@@ -2340,13 +2689,18 @@ export interface AgentChatResponse {
 export async function executeAgentChat(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    // The callback cannot be serialized over the queue — stripped from the
+    // payload, kept on the local fast path. A routed run answers in full; it
+    // just does not stream on the way.
+    const payload = { ...request };
+    delete payload.onTextChunk;
     return routeInstanceCall(
         {
             entityType: 'agent',
             entityId: agentEntityId(request.tenantId, request.agentKey),
             jobName: 'chat',
         },
-        request as unknown as QueuePayload,
+        payload as unknown as QueuePayload,
         () => executeAgentChatLocal(request),
     );
 }
@@ -2526,12 +2880,25 @@ export async function executeAgentChatLocal(
 
     // 5. Resolve system prompt
     let systemPrompt = config.systemPrompt;
+    const promptVariables = buildPromptVariables({
+        config,
+        agentKey,
+        agentName: agent.name,
+        version: resolvedVersion,
+        runtimeContext: request.runtimeContext,
+        userId: request.userId,
+    });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        // Prompts-feature templates may contain {{variable}} placeholders; agents
-        // don't supply render data today, so this only strips stray placeholders
-        // instead of leaking raw Mustache syntax into the live prompt and traces.
-        if (prompt) systemPrompt = Mustache.render(prompt.template, {});
+        if (prompt) {
+            const rendered = renderPromptTemplate(prompt.template, promptVariables);
+            systemPrompt = rendered.text;
+            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
+        }
+    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
+        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
+        systemPrompt = rendered.text;
+        reportPromptVariables(rendered, { agentKey });
     }
 
     // 5a. Guardrails. One guard for the whole run — resolving the bindings once
@@ -2613,6 +2980,37 @@ export async function executeAgentChatLocal(
     tools.push(...boundTools);
     toolDefinitions.push(...boundToolDefinitions);
 
+    // 5d. Memory as tools the model can actually call. The SDK gives it
+    // neither: recall is pre-injected as a system message and writes only
+    // happen at compaction, so an agent can neither look a fact up nor record
+    // what it was just told. Built from the SAME store the SDK path reads, so
+    // a tool write is visible to next turn's injection.
+    const memoryOption = buildAgentMemoryOption(config.memory, {
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId,
+        userId: request.userId,
+    });
+    const memoryToolMode = config.memory?.tools ?? 'readwrite';
+    if (memoryOption?.store && memoryToolMode !== 'off') {
+        const allowWrites = memoryToolMode === 'readwrite';
+        tools.push(...buildMemoryTools({
+            store: memoryOption.store,
+            // 'workspace' is the SDK's OWN default when a config names no
+            // scope (every runtime profile sets `memory: { scope: 'workspace' }`).
+            // Defaulting to 'session' here would have the tools write where the
+            // SDK's injection never reads — a fact stored and then invisible.
+            scope: memoryOption.scope ?? 'workspace',
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            allowWrites,
+        }));
+        toolDefinitions.push(...memoryToolDefinitions(allowWrites));
+    }
+
     // 6. Build message history
     const now = new Date();
     const existingMessages: AgentSdkMessage[] = (conversation.messages || []).map((m) => ({
@@ -2621,8 +3019,31 @@ export async function executeAgentChatLocal(
     }));
 
     // 7. Create agent-sdk instance and invoke
-    const sdkModel = fromLangchainModel(lcModel);
+    // Wrapped so a streamed turn keeps its tool calls and usage — see
+    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
+    // Usage-tapped: agent calls bypass the gateway, so without this they
+    // never reached Model Hub or the bill — see modelUsageTap.ts.
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        tenantDbName,
+        model,
+        route: 'agent.chat',
+        agentKey,
+    });
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
+
+    const chatSubagents = await buildAgentSubagents({
+        tenantDbName,
+        tenantId,
+        projectId,
+        subagents: config.subagents,
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        runtimeContext: request.runtimeContext,
+    });
+    cleanupTasks.push(...chatSubagents.cleanupTasks);
+
+    const chatSkills = await buildAgentSkills(tenantDbName, projectId, config.skills);
 
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
@@ -2633,6 +3054,13 @@ export async function executeAgentChatLocal(
         plugins: guardrailPlugins,
         threadId: conversationId,
         version: resolvedVersion !== null ? String(resolvedVersion) : undefined,
+        runtimeOptions: resolveAgentRuntimeOptions(config),
+        outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
+        subagents: chatSubagents.subagents,
+        skills: chatSkills,
+        skillPolicy: resolveAgentSkillPolicy(config),
+        memory: memoryOption,
+        tracingMetadata: buildTracingMetadata(request.runtimeContext),
     });
 
     const userTurnIndex = existingMessages.length;
@@ -2642,7 +3070,29 @@ export async function executeAgentChatLocal(
     ];
 
     try {
-        const result: AgentSdkInvokeResult = await sdkAgent.invoke(createConsoleAgentState(inputMessages));
+        // Streaming is opt-in per call: `stream: true` is what actually turns
+        // provider deltas on, and the SDK's terminal `isFinal` callback
+        // repeats the WHOLE answer, so forwarding it would emit the response
+        // twice. Both handled, same as the playground path.
+        const { onTextChunk: onLiveTextChunk } = request;
+        const liveInvokeConfig = onLiveTextChunk
+            ? {
+                stream: true,
+                onStream: (chunk: { text?: string; isFinal?: boolean }) => {
+                    if (chunk.isFinal || !chunk.text) return;
+                    try {
+                        onLiveTextChunk(chunk.text);
+                    } catch (callbackError) {
+                        logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+                    }
+                },
+            }
+            : undefined;
+
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(
+            createConsoleAgentState(inputMessages),
+            liveInvokeConfig,
+        );
 
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;
@@ -2760,11 +3210,12 @@ export async function executeAgentChatLocal(
  */
 export async function executePlaygroundChat(
     request: AgentPlaygroundChatRequest,
-): Promise<{ content: string; reasoning?: string }> {
+): Promise<AgentPlaygroundChatResult> {
     // The callback can't serialize over the queue — keep it out of the payload
     // (the local fast path still receives the full request).
     const payload = { ...request };
     delete payload.onToolEvent;
+    delete payload.onTextChunk;
     return routeInstanceCall(
         {
             entityType: 'agent',
@@ -2776,11 +3227,124 @@ export async function executePlaygroundChat(
     );
 }
 
+
+/**
+ * Flattens the SDK's tool history into the playground's step list.
+ *
+ * Reads `state.toolHistory` rather than the event stream: the history survives
+ * summarization (the archived entry keeps its `executionId`), so a long run
+ * still shows every call it made instead of only the ones after the last
+ * compaction.
+ *
+ * Carries the whole entry, not just name/args/output. Two of those fields
+ * change what the playground is actually showing you:
+ *
+ *  - `output` is what the MODEL saw, which under the console's default
+ *    `summarize_archive` retention can be a compaction of the real result.
+ *    `rawOutput` is the result itself, kept whenever the two differ, so
+ *    "what did this tool return" and "what did the model get to read" stop
+ *    being the same question with one answer.
+ *  - `status` is the SDK's own verdict. Inferring it by sniffing the output
+ *    for an `error` key — what this did before — both missed a guardrail
+ *    `rejected` call and flagged any tool whose successful result happens to
+ *    carry a field called `error`.
+ */
+/** EXPORTED FOR TESTS — see the failure rules above. */
+export function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundStep[] {
+    const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
+    if (!Array.isArray(history)) return [];
+
+    return history.map((entry) => {
+        const output = entry.output;
+        const status = typeof entry.status === 'string'
+            ? entry.status as AgentPlaygroundStep['status']
+            : undefined;
+        // The SDK records `status: 'error'` only when a tool THROWS. A tool
+        // that catches its own failure and returns `{ ok: false, error }`
+        // instead — `web_search` does — is recorded as a success, so status
+        // alone would show a failed search as a green tick. The payload check
+        // therefore SUPPLEMENTS status rather than being its fallback.
+        //
+        // Narrow on purpose: a truthy `error`, or an explicit `ok: false`. An
+        // `error: null` field, which plenty of successful results carry, is
+        // not a failure, and treating it as one is what made sniffing
+        // untrustworthy in the first place.
+        const record = output !== null && typeof output === 'object'
+            ? output as Record<string, unknown>
+            : undefined;
+        const sniffedError = Boolean(record?.error) || record?.ok === false;
+        const failed = status === 'error' || status === 'rejected' || sniffedError;
+        const errorText = failed
+            ? (status === 'rejected' ? 'Blocked before the tool ran.' : undefined)
+                ?? (record?.error ? String(record.error) : undefined)
+                ?? 'The tool call failed.'
+            : undefined;
+
+        const rawOutput = entry.rawOutput;
+        const rawDiffers = rawOutput !== undefined && rawOutput !== output;
+
+        return {
+            id: typeof entry.executionId === 'string' ? entry.executionId : undefined,
+            name: typeof entry.toolName === 'string' ? entry.toolName : 'tool',
+            args: entry.args,
+            output,
+            ...(rawDiffers ? { rawOutput } : {}),
+            ...(errorText ? { error: errorText } : {}),
+            ...(typeof entry.subagent === 'string' ? { subagent: entry.subagent } : {}),
+            // Reported as an error even when the SDK called it a success,
+            // so the transcript, the Events tab and the per-tool failure
+            // count all agree with the error text above.
+            ...(failed ? { status: 'error' as const } : status ? { status } : {}),
+            ...(entry.fromCache === true ? { fromCache: true } : {}),
+            ...(entry.summarized === true ? { summarized: true } : {}),
+            ...(typeof entry.originalTokenCount === 'number'
+                ? { originalTokenCount: entry.originalTokenCount }
+                : {}),
+            ...(typeof entry.timestamp === 'string' ? { timestamp: entry.timestamp } : {}),
+        };
+    });
+}
+
+/**
+ * Prices a turn from the model's own `pricing` record.
+ *
+ * Returns undefined rather than 0 when the model has no pricing configured —
+ * a displayed "$0.00" reads as "this was free", which is a different claim
+ * from "nobody told the console what this model costs".
+ */
+async function priceTurn(
+    tenantDbName: string,
+    projectId: string,
+    modelKey: string | undefined,
+    usage: AgentPlaygroundChatResult['usage'],
+): Promise<number | undefined> {
+    if (!modelKey || !usage) return undefined;
+    try {
+        const model = await getModelByKey(tenantDbName, modelKey, projectId);
+        if (!model?.pricing) return undefined;
+        const { calculateCost } = await import('@/lib/services/models/usageLogger');
+        return calculateCost(model.pricing, {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cachedInputTokens: usage.cachedInputTokens,
+        }).totalCost;
+    } catch {
+        return undefined;
+    }
+}
+
+function describeStructuredOutputError(error: unknown): string {
+    if (typeof error === 'string') return error;
+    const record = error as { message?: unknown; issues?: unknown } | null;
+    if (record && typeof record.message === 'string') return record.message;
+    return JSON.stringify(error);
+}
+
 /** Local (non-routed) implementation. Exported so the queue consumer can call it. */
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
-): Promise<{ content: string; reasoning?: string }> {
-    const { tenantDbName, tenantId, projectId, agentKey, userMessage, history } = request;
+): Promise<AgentPlaygroundChatResult> {
+    const { tenantDbName, tenantId, projectId, agentKey, userMessage } = request;
 
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
@@ -2788,7 +3352,46 @@ export async function executePlaygroundChatLocal(
     const agent = await db.findAgentByKey(agentKey, projectId);
     if (!agent) throw new Error(`Agent "${agentKey}" not found`);
 
-    const { config } = agent;
+    // A real Session: load its history from storage rather than trusting
+    // whatever the caller sent, and remember the row so the exchange can be
+    // written back once the run finishes. Scoped to this agent+project — a
+    // conversation id for a DIFFERENT agent must 404, not quietly attach.
+    let sessionConversation: IAgentConversation | null = null;
+    if (request.conversationId) {
+        const found = await db.findAgentConversationById(request.conversationId);
+        if (!found || found.agentKey !== agentKey || found.projectId !== projectId) {
+            throw new Error(`Session "${request.conversationId}" not found`);
+        }
+        sessionConversation = found;
+    }
+    const history = sessionConversation
+        ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
+        : request.history;
+
+    // Context entered when the session was started applies to every turn in it.
+    // Merged UNDER the request's own context so a per-message override still
+    // wins — and merged per-key rather than wholesale, or setting one header on
+    // one turn would silently drop the session's whole context for that turn.
+    const sessionContext = sessionConversation?.metadata?.runtimeContext as AgentRuntimeContext | undefined;
+    const runtimeContext: AgentRuntimeContext | undefined = sessionContext
+        ? {
+            ...sessionContext,
+            ...request.runtimeContext,
+            headers: { ...sessionContext.headers, ...request.runtimeContext?.headers },
+            metadata: { ...sessionContext.metadata, ...request.runtimeContext?.metadata },
+        }
+        : request.runtimeContext;
+
+    // The draft unless a version is asked for. Reading the published snapshot
+    // is what makes "does my change actually help?" answerable in one screen.
+    let config = agent.config;
+    let ranVersion: number | null = null;
+    if (typeof request.version === 'number') {
+        const snapshot = await db.findAgentVersion(String(agent._id), request.version);
+        if (!snapshot) throw new Error(`Version ${request.version} not found for agent "${agentKey}"`);
+        config = snapshot.snapshot.config;
+        ranVersion = request.version;
+    }
 
     // Connected (external) agent — invoke over HTTP, skip local runtime.
     //
@@ -2815,11 +3418,13 @@ export async function executePlaygroundChatLocal(
             config.connection,
             [...(history || []), { role: 'user', content: guardedMessage }],
             { tenantDbName, tenantId, projectId },
-            resolveRuntimeHeaders(request.runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
+            resolveRuntimeHeaders(runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
         );
 
-        // The playground persists nothing, so the returned string is the only
-        // copy of the answer — redacting it here is the whole enforcement.
+        // Redacting here is still the only enforcement point for a STATELESS
+        // call (no session) — the returned string is the only copy. For a
+        // Session, persistence below writes this same guarded text, never
+        // the raw upstream `content`.
         const guardedContent = await evaluateBoundGuardrails({
             tenantDbName,
             tenantId,
@@ -2830,8 +3435,13 @@ export async function executePlaygroundChatLocal(
             source: 'agent-playground',
         });
 
+        const externalResult: AgentPlaygroundChatResult = { content: guardedContent, version: ranVersion };
+        if (sessionConversation) {
+            await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
+        }
+
         logger.info('Connected agent playground chat completed', { agentKey });
-        return { content: guardedContent };
+        return externalResult;
     }
 
     // Resolve model
@@ -2862,14 +3472,26 @@ export async function executePlaygroundChatLocal(
         }).modelSettings,
     });
 
-    // Resolve system prompt
+    // Resolve system prompt. Same helper as the live path: a prompt that renders
+    // differently in the playground is a prompt nobody can test.
     let systemPrompt = config.systemPrompt;
+    const promptVariables = buildPromptVariables({
+        config,
+        agentKey,
+        agentName: agent.name,
+        runtimeContext: runtimeContext,
+    });
     if (!systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        // Prompts-feature templates may contain {{variable}} placeholders; agents
-        // don't supply render data today, so this only strips stray placeholders
-        // instead of leaking raw Mustache syntax into the live prompt and traces.
-        if (prompt) systemPrompt = Mustache.render(prompt.template, {});
+        if (prompt) {
+            const rendered = renderPromptTemplate(prompt.template, promptVariables);
+            systemPrompt = rendered.text;
+            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
+        }
+    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
+        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
+        systemPrompt = rendered.text;
+        reportPromptVariables(rendered, { agentKey });
     }
 
     // Guardrails. Same guard and same helper as the live chat path, on purpose:
@@ -2943,10 +3565,34 @@ export async function executePlaygroundChatLocal(
         createTool,
         z,
         toolGuard,
-        request.runtimeContext,
+        runtimeContext,
     );
     playgroundTools.push(...boundPlaygroundTools);
     playgroundToolDefinitions.push(...boundPlaygroundToolDefinitions);
+
+    // Same memory toolset the live path binds — a playground that hands the
+    // agent a different set of tools is not testing the agent.
+    const playgroundMemoryOption = buildAgentMemoryOption(config.memory, {
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId: sessionConversation ? String(sessionConversation._id) : undefined,
+        userId: runtimeContext?.userId,
+    });
+    const playgroundMemoryToolMode = config.memory?.tools ?? 'readwrite';
+    if (playgroundMemoryOption?.store && playgroundMemoryToolMode !== 'off') {
+        const allowWrites = playgroundMemoryToolMode === 'readwrite';
+        playgroundTools.push(...buildMemoryTools({
+            store: playgroundMemoryOption.store,
+            scope: playgroundMemoryOption.scope ?? 'workspace',
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            allowWrites,
+        }));
+        playgroundToolDefinitions.push(...memoryToolDefinitions(allowWrites));
+    }
 
     // Build messages (in-memory history only). The GUARDED message is what the
     // model sees — the single-slot version computed a redaction here and then
@@ -2958,13 +3604,36 @@ export async function executePlaygroundChatLocal(
     ];
 
     // Create agent-sdk instance and invoke (tracing enabled)
-    const sdkModel = fromLangchainModel(lcModel);
+    // Wrapped so a streamed turn keeps its tool calls and usage — see
+    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
+    // Usage-tapped: agent calls bypass the gateway, so without this they
+    // never reached Model Hub or the bill — see modelUsageTap.ts.
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        tenantDbName,
+        model,
+        route: 'agent.playground',
+        agentKey,
+    });
     const tracingSink = await createInternalTracingSink(
         tenantDbName,
         tenantId,
         projectId,
         playgroundToolDefinitions,
     );
+
+    const playgroundSubagents = await buildAgentSubagents({
+        tenantDbName,
+        tenantId,
+        projectId,
+        subagents: config.subagents,
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        runtimeContext: runtimeContext,
+    });
+    cleanupTasks.push(...playgroundSubagents.cleanupTasks);
+
+    const playgroundSkills = await buildAgentSkills(tenantDbName, projectId, config.skills);
 
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
@@ -2973,24 +3642,57 @@ export async function executePlaygroundChatLocal(
         systemPrompt,
         tracingSink,
         plugins: guardrailPlugins,
+        runtimeOptions: resolveAgentRuntimeOptions(config),
+        outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
+        subagents: playgroundSubagents.subagents,
+        skills: playgroundSkills,
+        skillPolicy: resolveAgentSkillPolicy(config),
+        memory: playgroundMemoryOption,
     });
 
-    // Surface tool-call progress to the caller (best-effort; never fails the run).
-    const { onToolEvent } = request;
-    const invokeConfig = onToolEvent
+    // Surface progress to the caller (best-effort; never fails the run).
+    const { onToolEvent, onTextChunk } = request;
+    const invokeConfig = onToolEvent || onTextChunk
         ? {
-            onEvent: (event: AgentSdkEvent) => {
-                if (event.type !== 'tool_call' || !event.name) return;
-                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
-                try {
-                    onToolEvent({ phase: event.phase, name: event.name, id: event.id });
-                } catch (callbackError) {
-                    logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
-                }
-            },
+            ...(onToolEvent ? {
+                onEvent: (event: AgentSdkEvent) => {
+                    if (event.type !== 'tool_call' || !event.name) return;
+                    if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+                    try {
+                        onToolEvent({
+                            phase: event.phase,
+                            name: event.name,
+                            id: event.id,
+                            ...(event.args !== undefined ? { args: event.args } : {}),
+                            ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+                            ...(event.error?.message ? { error: event.error.message } : {}),
+                        });
+                    } catch (callbackError) {
+                        logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
+                    }
+                },
+            } : {}),
+            ...(onTextChunk ? {
+                // `stream: true` is what actually turns provider deltas on —
+                // with only `onStream` the SDK fires it exactly once, at the
+                // end, with the whole answer.
+                stream: true,
+                onStream: (chunk: { text?: string; isFinal?: boolean }) => {
+                    // That same terminal call repeats the FULL content, so
+                    // forwarding it would print the answer twice: once
+                    // streamed, once again in one burst.
+                    if (chunk.isFinal || !chunk.text) return;
+                    try {
+                        onTextChunk(chunk.text);
+                    } catch (callbackError) {
+                        logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+                    }
+                },
+            } : {}),
         }
         : undefined;
 
+    const invokeStartedAt = Date.now();
     try {
         const result: AgentSdkInvokeResult = await sdkAgent.invoke(
             createConsoleAgentState(inputMessages),
@@ -3013,11 +3715,81 @@ export async function executePlaygroundChatLocal(
 
         logger.info('Playground chat completed', { agentKey });
 
-        return {
+        const playgroundResult: AgentPlaygroundChatResult = {
             content: assistantContent,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+            ...(result.output !== undefined ? { output: result.output } : {}),
+            ...(result.outputError
+                ? { outputError: describeStructuredOutputError(result.outputError) }
+                : {}),
+            ...(normalizePlaygroundUsage(result.metadata?.usage) ?? {}),
+            latencyMs: Date.now() - invokeStartedAt,
+            steps: extractPlaygroundSteps(result),
+            version: ranVersion,
         };
+
+        const costUsd = await priceTurn(tenantDbName, projectId, config.modelKey, playgroundResult.usage);
+        if (costUsd !== undefined && playgroundResult.usage) {
+            playgroundResult.usage.costUsd = costUsd;
+        }
+
+        if (sessionConversation) {
+            await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
+        }
+
+        return playgroundResult;
     } finally {
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
+    }
+}
+
+/**
+ * Appends one exchange (user turn + the rich assistant turn) to a Session's
+ * conversation record.
+ *
+ * Best-effort by design: a persistence failure must not turn a successful
+ * model run into an error the caller sees as "the agent failed" — it already
+ * answered. The turn is simply missing on reload, which is recoverable
+ * (retype the question) in a way a lost answer to a guardrail-approved,
+ * already-billed model call is not.
+ */
+async function persistSessionTurn(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    conversation: IAgentConversation,
+    userMessage: string,
+    result: AgentPlaygroundChatResult,
+): Promise<void> {
+    try {
+        const now = new Date();
+        const messages: IAgentConversation['messages'] = [
+            ...conversation.messages,
+            { role: 'user', content: userMessage, timestamp: now },
+            {
+                role: 'assistant',
+                content: result.content,
+                timestamp: now,
+                ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+                ...(result.steps && result.steps.length > 0 ? { steps: result.steps } : {}),
+                ...(result.output !== undefined ? { output: result.output } : {}),
+                ...(result.outputError ? { outputError: result.outputError } : {}),
+                ...(result.usage ? { usage: result.usage } : {}),
+                ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}),
+                version: result.version ?? null,
+            },
+        ];
+        await db.updateAgentConversation(String(conversation._id), {
+            messages,
+            // First exchange in a freshly-created "New session" names itself
+            // after what was actually asked, same convention the live chat
+            // path already uses for its conversation titles.
+            title: (!conversation.title || conversation.title === 'New conversation') && messages.length <= 2
+                ? userMessage.substring(0, 80)
+                : conversation.title,
+        });
+    } catch (error) {
+        logger.error('Failed to persist session turn', {
+            conversationId: String(conversation._id),
+            error: error instanceof Error ? error.message : String(error),
+        });
     }
 }

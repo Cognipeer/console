@@ -1,22 +1,17 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Paper,
   Text,
   Group,
   Stack,
   Button,
-  TextInput,
   Textarea,
   Select,
   Slider,
   ActionIcon,
-  Loader,
-  Center,
-  ScrollArea,
-  ThemeIcon,
   Tabs,
   Divider,
   Badge,
@@ -24,10 +19,7 @@ import {
   CopyButton,
   Tooltip,
   Box,
-  NumberInput,
   Pagination,
-  Collapse,
-  UnstyledButton,
   Modal,
   Table,
   VisuallyHidden,
@@ -39,19 +31,13 @@ import { useForm } from '@mantine/form';
 import { DatePickerInput } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
 import {
-  IconRobot,
-  IconSend,
   IconMessageCircle,
   IconTimeline,
   IconCode,
   IconCopy,
   IconCheck,
-  IconTrash,
   IconCalendar,
   IconRefresh,
-  IconBrain,
-  IconChevronDown,
-  IconChevronRight,
   IconSettings,
   IconDatabase,
   IconShield,
@@ -61,8 +47,9 @@ import {
   IconArrowsExchange,
   IconPlugConnected,
   IconPencil,
-  IconWorld,
   IconAlertTriangle,
+  IconLayoutDashboard,
+  IconPlus,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -74,13 +61,31 @@ import GuardrailBindingList, {
 import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SectionCard from '@/components/common/SectionCard';
 import SessionTable from '@/components/tracing/SessionTable';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
+import AgentAdvancedSettings, { countAdvancedOverrides } from './studio/AgentAdvancedSettings';
+import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
+import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
+import AgentExportPanel from './studio/AgentExportPanel';
+import AgentPromptPanel from './studio/AgentPromptPanel';
+import AgentOverviewPanel from './studio/AgentOverviewPanel';
+import SessionList from './studio/SessionList';
+import StartSessionModal from './studio/StartSessionModal';
+import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
+import AgentSkillsPanel from './studio/AgentSkillsPanel';
+import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
+import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
+import type { SkillView } from '@/components/skills/types';
+import type {
+  IAgentMemoryConfig,
+  IAgentRuntimeConfig,
+  IAgentSkillPolicy,
+  IAgentStructuredOutput,
+  IAgentSubagent,
+  IAgentSubagentPolicy,
+} from '@/lib/database/provider/types.domain';
 import classes from './AgentDetailPage.module.css';
 
 interface A2aMetadata {
@@ -112,6 +117,11 @@ interface Agent {
     /** @deprecated See `inputGuardrailKey`. */
     outputGuardrailKey?: string;
     toolBindings?: ToolBinding[];
+    promptVariables?: Record<string, string>;
+    runtime?: IAgentRuntimeConfig;
+    structuredOutput?: IAgentStructuredOutput;
+    subagents?: IAgentSubagent[];
+    subagentPolicy?: IAgentSubagentPolicy;
     kind?: 'native' | 'external';
     connection?: {
       protocol?: string;
@@ -145,11 +155,22 @@ interface AgentVersion {
   createdAt: string;
 }
 
-interface ChatMessage {
-  role: string;
-  content: string;
-  /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
-  reasoning?: string;
+/** A row in the Sessions list / Overview's "recent sessions" — see AgentSessionView for the full record. */
+/** Mirrors `summariseConversation` on the sessions list route. */
+interface SessionSummary {
+  _id: string;
+  title?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  messageCount?: number;
+  turns?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  costComplete?: boolean;
+  activeMs?: number;
+  hasContext?: boolean;
 }
 
 interface Model {
@@ -164,6 +185,7 @@ interface Prompt {
   _id: string;
   key: string;
   name: string;
+  description?: string;
   template: string;
 }
 
@@ -230,9 +252,53 @@ function seedGuardrailsFromLegacySlots(
   return rows;
 }
 
+/**
+ * Deep-link compatibility for `?tab=`.
+ *
+ * The page used to have thirteen flat tabs; they are now six, and Configure
+ * and Deploy are single pages whose `sub` is a section to scroll to rather
+ * than a pane to show. Every old value still resolves —
+ * a bookmark or the Sessions page's own back link must not land on a tab that
+ * no longer exists.
+ */
+const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
+  overview: { top: 'overview' },
+  sessions: { top: 'sessions' },
+  playground: { top: 'sessions' },
+  configure: { top: 'configure' },
+  settings: { top: 'configure', sub: 'basic' },
+  basic: { top: 'configure', sub: 'basic' },
+  prompt: { top: 'configure', sub: 'prompt' },
+  subagents: { top: 'configure', sub: 'subagents' },
+  skills: { top: 'configure', sub: 'skills' },
+  memory: { top: 'configure', sub: 'memory' },
+  advanced: { top: 'configure', sub: 'advanced' },
+  output: { top: 'configure', sub: 'output' },
+  deploy: { top: 'deploy' },
+  versions: { top: 'deploy', sub: 'versions' },
+  publish: { top: 'deploy', sub: 'publish' },
+  schedules: { top: 'deploy', sub: 'schedules' },
+  export: { top: 'deploy', sub: 'export' },
+  observe: { top: 'observe' },
+  traces: { top: 'observe' },
+  usage: { top: 'usage' },
+  api: { top: 'usage' },
+};
+
+function resolveTabFromQuery(raw: string | null): string {
+  return TAB_ALIASES[raw ?? '']?.top ?? 'overview';
+}
+
+/** The sub-tab a deep link asks for, or the group's default. */
+function resolveSubTabFromQuery(raw: string | null, group: string, fallback: string): string {
+  const alias = TAB_ALIASES[raw ?? ''];
+  return alias?.top === group && alias.sub ? alias.sub : fallback;
+}
+
 export default function AgentDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const agentId = params.agentId as string;
   const t = useTranslations('agents');
 
@@ -244,15 +310,40 @@ export default function AgentDetailPage() {
   const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string }>>([]);
   const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<string | null>('playground');
+  // Overview is the landing tab — it's the one screen that answers "is this
+  // agent healthy and what has it been doing", which is a better first thing
+  // to see than a blank chat box. A deep link (Sessions' "back to agent",
+  // a bookmark) can still land on any tab via `?tab=`.
+  const [activeTab, setActiveTab] = useState<string | null>(() => resolveTabFromQuery(searchParams.get('tab')));
+  // Configure has no rail any more, so this is no longer "which pane is
+  // showing" — it is "which section a deep link asked for", and the effect
+  // below scrolls to it.
+  const [configureTab, setConfigureTab] = useState<string | null>(
+    () => resolveSubTabFromQuery(searchParams.get('tab'), 'configure', 'basic'),
+  );
+  const [deployTab, setDeployTab] = useState<string | null>(
+    () => resolveSubTabFromQuery(searchParams.get('tab'), 'deploy', 'versions'),
+  );
 
-  // Collapsible section state
-  const [knowledgeEngineOpen, setKnowledgeEngineOpen] = useState(false);
-  const [guardrailsOpen, setGuardrailsOpen] = useState(false);
-  const [toolsOpen, setToolsOpen] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [toolSelectorOpen, setToolSelectorOpen] = useState(false);
   const [toolBindings, setToolBindings] = useState<ToolBinding[]>([]);
+
+  // Advanced runtime knobs, structured output and the delegation roster. These
+  // live outside `configForm` for the same reason the guardrail bindings do:
+  // they are nested objects and lists, and `getInputProps` has nothing to offer
+  // them. Absent stays absent — an untouched agent must serialize the same
+  // config it had before these sections existed.
+  const [runtimeConfig, setRuntimeConfig] = useState<IAgentRuntimeConfig>({});
+  const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
+  const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
+  const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
+  /** Other agents in the project — the `ref` sub-agent picker's options. */
+  const [projectAgents, setProjectAgents] = useState<Array<{ key: string; name: string; publishedVersion?: number | null }>>([]);
+  const [skills, setSkills] = useState<string[]>([]);
+  const [skillPolicy, setSkillPolicy] = useState<IAgentSkillPolicy | undefined>(undefined);
+  const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
+  const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
+  const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
 
   // Guardrail bindings live outside `configForm`: they are a list of objects,
   // not a scalar field, and the form's `getInputProps` contract has nothing to
@@ -285,12 +376,12 @@ export default function AgentDetailPage() {
   const [compareVersionB, setCompareVersionB] = useState<string | null>(null);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
 
-  // Chat state (in-memory only — no DB conversations)
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [runtimeContextJson, setRuntimeContextJson] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
-  const chatViewportRef = useRef<HTMLDivElement>(null);
+  // Sessions list (for the Sessions tab — the actual chat now lives at its
+  // own route, see AgentSessionView).
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [startSessionOpen, setStartSessionOpen] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
 
   // Config form
   const configForm = useForm({
@@ -299,9 +390,7 @@ export default function AgentDetailPage() {
       promptMode: 'custom' as 'custom' | 'prompt',
       systemPrompt: '',
       promptKey: '',
-      temperature: 0.7,
       topP: 1,
-      maxTokens: 4096,
       knowledgeEngineKey: '',
       inputGuardrailKey: '',
       outputGuardrailKey: '',
@@ -317,6 +406,10 @@ export default function AgentDetailPage() {
   const [tracingPageSize, setTracingPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [tracingStatusFilter, setTracingStatusFilter] = useState<string | null>(null);
   const [tracingDateRange, setTracingDateRange] = useState<[Date | null, Date | null]>([null, null]);
+
+  /** Badge on the Settings tab: how far this agent strays from the defaults. */
+  const advancedOverrideCount = useMemo(() => countAdvancedOverrides(runtimeConfig), [runtimeConfig]);
+
 
   const tracingPagination = useMemo(() => {
     const totalPages = Math.max(1, Math.ceil(tracingTotal / tracingPageSize));
@@ -339,14 +432,19 @@ export default function AgentDetailPage() {
           promptMode: cfg.promptKey ? 'prompt' : 'custom',
           systemPrompt: cfg.systemPrompt || '',
           promptKey: cfg.promptKey || '',
-          temperature: cfg.temperature ?? 0.7,
           topP: cfg.topP ?? 1,
-          maxTokens: cfg.maxTokens ?? 4096,
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
           inputGuardrailKey: cfg.inputGuardrailKey || '',
           outputGuardrailKey: cfg.outputGuardrailKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
+        setRuntimeConfig(cfg.runtime ?? {});
+        setStructuredOutput(cfg.structuredOutput);
+        setSubagents(cfg.subagents ?? []);
+        setSubagentPolicy(cfg.subagentPolicy);
+        setSkills(cfg.skills ?? []);
+        setSkillPolicy(cfg.skillPolicy);
+        setMemoryConfig(cfg.memory);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -406,6 +504,59 @@ export default function AgentDetailPage() {
       }
     } catch (err) {
       console.error('Failed to load RAG modules', err);
+    }
+  };
+
+  const loadProjectAgents = async () => {
+    try {
+      // Native agents only: a connected agent is an HTTP endpoint, and the
+      // runtime refuses to flatten one into a sub-agent, so offering it here
+      // would only produce a binding that silently drops at run time.
+      const res = await fetch('/api/agents', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setProjectAgents(
+          (data.agents ?? [])
+            .filter((entry: Agent) => entry.config?.kind !== 'external')
+            .map((entry: Agent) => ({
+              key: entry.key,
+              name: entry.name,
+              publishedVersion: entry.publishedVersion ?? null,
+            })),
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load project agents', err);
+    }
+  };
+
+  const loadSkillLibrary = async () => {
+    try {
+      const res = await fetch('/api/skills', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setSkillLibrary(data.skills ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to load skill library', err);
+    }
+  };
+
+  const loadMemoryStores = async () => {
+    try {
+      const res = await fetch('/api/memory/stores', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setMemoryStores(
+          (data.stores ?? []).map((s: { key: string; name: string; status: string }) => ({
+            key: s.key,
+            name: s.name,
+            status: s.status,
+          })),
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load memory stores', err);
     }
   };
 
@@ -486,6 +637,36 @@ export default function AgentDetailPage() {
     }
   }, [agent, agentId]);
 
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/sessions`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to load sessions', err);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [agentId]);
+
+  /**
+   * Sessions are created from StartSessionModal, which collects the name and
+   * the session context before the first message — that context is stored on
+   * the session and applied to every turn, so it has to exist by turn one.
+   *
+   * The chat itself lives at its own route now (AgentSessionView), not on this
+   * page, and the config save-before-chat the old inline playground did is
+   * gone: a Session always runs a real config (the draft, or a version pinned
+   * on the session page), so there is nothing here that needs saving first.
+   */
+  const handleSessionStarted = (sessionId: string, pinnedVersion: string) => {
+    const query = pinnedVersion ? `?version=${encodeURIComponent(pinnedVersion)}` : '';
+    router.push(`/dashboard/agents/${agentId}/sessions/${sessionId}${query}`);
+  };
+
   const handlePublish = async () => {
     setPublishing(true);
     try {
@@ -506,7 +687,7 @@ export default function AgentDetailPage() {
         setPublishChangelog('');
         // Reload agent to update publishedVersion, and refresh versions list
         await loadAgent();
-        if (activeTab === 'versions') {
+        if (activeTab === 'deploy') {
           await loadVersions();
         }
       } else {
@@ -528,37 +709,71 @@ export default function AgentDetailPage() {
   useEffect(() => {
     (async () => {
       setLoading(true);
-      await Promise.all([loadAgent(), loadModels(), loadPrompts(), loadRagModules(), loadGuardrails(), loadProviders()]);
+      await Promise.all([
+        loadAgent(),
+        loadModels(),
+        loadPrompts(),
+        loadRagModules(),
+        loadGuardrails(),
+        loadProviders(),
+        loadProjectAgents(),
+        loadSkillLibrary(),
+        loadMemoryStores(),
+      ]);
       setLoading(false);
     })();
   }, [loadAgent]);
 
   useEffect(() => {
-    if (activeTab === 'traces' && agent) {
+    if (activeTab === 'observe' && agent) {
       loadTracingSessions();
     }
   }, [activeTab, agent, loadTracingSessions]);
 
   useEffect(() => {
-    if (activeTab === 'versions' && agent) {
+    // Export needs the version list too: it offers "export v3" as a source, and
+    // a version the operator cannot pick is a version they will assume is gone.
+    // Versions and Export both offer "which snapshot?" pickers, and they now
+    // live behind the same tab — one load covers both.
+    if (activeTab === 'deploy' && agent) {
       loadVersions();
     }
   }, [activeTab, agent, loadVersions]);
 
-  // ── Chat Actions (in-memory, no DB) ──────────────────────────
+  useEffect(() => {
+    if ((activeTab === 'sessions' || activeTab === 'overview') && agent) {
+      void loadSessions();
+    }
+  }, [activeTab, agent, loadSessions]);
 
-  const clearChat = () => {
-    setChatMessages([]);
-    setChatInput('');
-  };
+  /**
+   * Configure is one long page, so "go to the Prompt section" is a scroll,
+   * not a pane switch. Waits a frame because the section only exists once
+   * the tab panel has rendered.
+   */
+  useEffect(() => {
+    // Configure and Deploy are both single pages now, so either one's
+    // sub-target is a section anchor to scroll to.
+    const section = activeTab === 'configure' ? configureTab : activeTab === 'deploy' ? deployTab : null;
+    if (!section || !agent) return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(`config-${section}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeTab, configureTab, deployTab, agent]);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
     const nextConfig: Record<string, unknown> = {
       modelKey: values.modelKey,
-      temperature: values.temperature,
+      // No temperature / maxTokens. The form used to send 0.7 and 4096 on
+      // every save, so every agent was silently capped at 4096 output tokens
+      // and pinned to a temperature — settings nobody chose and, once the
+      // fields were removed, nobody could see. Leaving them out lets the
+      // model record's own settings govern; the next save clears any value
+      // an older save wrote.
       topP: values.topP,
-      maxTokens: values.maxTokens,
       knowledgeEngineKey: values.knowledgeEngineKey || undefined,
       toolBindings: bindings.length > 0 ? bindings : undefined,
     };
@@ -567,6 +782,22 @@ export default function AgentDetailPage() {
     // deprecated slots from it, so an older console binary on the same tenant
     // database keeps enforcing and the two can never disagree.
     nextConfig.guardrails = guardrailBindings;
+
+    // `undefined` rather than `{}` / `[]` for the untouched case: an empty
+    // object here would be indistinguishable from "operator cleared every knob"
+    // and would start showing up in every manifest and diff for no reason.
+    nextConfig.runtime = Object.keys(runtimeConfig).length > 0 ? runtimeConfig : undefined;
+    nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
+    nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
+    nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
+    nextConfig.skills = skills.length > 0 ? skills : undefined;
+    nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
+    nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey ? memoryConfig : undefined;
+    // No editor writes this from here anymore (see the Prompt tab) — pass
+    // through whatever is already stored so a save from THIS page can never
+    // silently wipe a value an import or the API set, since `config` replaces
+    // the stored object wholesale rather than merging.
+    nextConfig.promptVariables = agent?.config?.promptVariables;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -592,6 +823,17 @@ export default function AgentDetailPage() {
       });
 
       if (!res.ok) {
+        // Used to `return false` in silence, so a rejected save looked
+        // exactly like a button that did nothing — and the operator kept
+        // the config they thought they had stored. Say what the server said.
+        if (notify) {
+          const body = await res.json().catch(() => ({} as { error?: string }));
+          notifications.show({
+            title: t('notifications.error'),
+            message: body?.error || `${t('notifications.saveFailed')} (HTTP ${res.status})`,
+            color: 'red',
+          });
+        }
         return false;
       }
 
@@ -667,88 +909,15 @@ export default function AgentDetailPage() {
     }
   };
 
-  const sendMessage = async () => {
-    if (!chatInput.trim() || chatLoading) return;
-
-    const message = chatInput.trim();
-    setChatLoading(true);
-
-    // Connected agents have no editable config; never auto-save (it would
-    // overwrite the stored connection with an empty native config).
-    if (agent?.config?.kind !== 'external') {
-      const saved = await saveAgentConfig({ notify: false });
-      if (!saved) {
-        notifications.show({
-          title: t('notifications.error'),
-          message: 'Failed to save current agent configuration before chat.',
-          color: 'red',
-        });
-        setChatLoading(false);
-        return;
-      }
-    }
-
-    setChatInput('');
-
-    // Optimistic update: add user message
-    const updatedMessages: ChatMessage[] = [
-      ...chatMessages,
-      { role: 'user', content: message },
-    ];
-    setChatMessages(updatedMessages);
-
-    try {
-      const res = await fetch(`/api/agents/${agentId}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message,
-          history: chatMessages, // send previous messages as context
-          runtime_context: parseRuntimeContextJson(runtimeContextJson),
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Chat failed');
-      }
-
-      const data = await res.json();
-      setChatMessages([
-        ...updatedMessages,
-        {
-          role: 'assistant',
-          content: data.content,
-          ...(typeof data.reasoning === 'string' && data.reasoning
-            ? { reasoning: data.reasoning }
-            : {}),
-        },
-      ]);
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Unknown error';
-      notifications.show({
-        title: t('notifications.error'),
-        message: errMsg,
-        color: 'red',
-      });
-      // Revert optimistic update
-      setChatMessages(chatMessages);
-    } finally {
-      setChatLoading(false);
-    }
-  };
-
-  // Auto-scroll chat
-  useEffect(() => {
-    if (chatViewportRef.current) {
-      chatViewportRef.current.scrollTop = chatViewportRef.current.scrollHeight;
-    }
-  }, [chatMessages]);
-
   // ── Config Save ──────────────────────────────────────────────
 
   const handleSaveConfig = async () => {
-    await saveAgentConfig();
+    setSavingConfig(true);
+    try {
+      await saveAgentConfig();
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   if (loading) {
@@ -772,6 +941,178 @@ export default function AgentDetailPage() {
     ? `${origin}/api/public/a2a/${agent.tenantId}/${a2aConfig?.endpointSlug}`
     : `${origin}/api/client/v1/a2a/${agent.key}`;
   const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
+  const apiOrigin = origin;
+
+  /**
+   * The Basic settings pane. Extracted from the playground so settings and
+   * the conversation no longer share a cramped two-column row: the playground
+   * is now full width, and this renders under Settings → Basic.
+   */
+  /**
+   * The General section's fields, all open.
+   *
+   * These used to be four collapsibles ("Knowledge Engine", "Guardrails",
+   * "Tools", "Advanced Settings") inside their own card, each hiding one or
+   * two inputs. That is a lot of clicking to answer "what is this agent wired
+   * to", and the answer is short enough to just show — so the accordions are
+   * gone and each group is a labelled block instead.
+   */
+  const renderBasicSettings = () => (
+    isConnected ? (
+      <Stack gap="sm">
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
+          <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
+        </div>
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
+          <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
+            {connection?.url ?? '—'}
+          </Text>
+        </div>
+        {connection?.model ? (
+          <div>
+            <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
+            <Text size="sm" className="ds-mono">{connection.model}</Text>
+          </div>
+        ) : null}
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
+          <Text size="sm">
+            {connection?.hasApiKey
+              ? t('connectModal.apiKey')
+              : connection?.credentialProviderKey
+                ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
+                : '—'}
+          </Text>
+        </div>
+        {connection?.responsePath ? (
+          <div>
+            <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
+            <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
+          </div>
+        ) : null}
+        <Text size="xs" c="dimmed" fs="italic" mt="xs">
+          {t('connectModal.subtitle')}
+        </Text>
+        <Button
+          variant="light"
+          size="xs"
+          leftSection={<IconPencil size={14} />}
+          onClick={() => setEditConnectionOpen(true)}
+          w="fit-content"
+        >
+          {t('connectModal.editButton')}
+        </Button>
+      </Stack>
+    ) : (
+      <Stack gap="xl">
+        <Select
+          label={t('config.model')}
+          placeholder={t('config.modelPlaceholder')}
+          data={models.map((m) => ({
+            value: m.key,
+            label: `${m.name} (${m.modelId})`,
+          }))}
+          searchable
+          {...configForm.getInputProps('modelKey')}
+        />
+
+        {/* Prompt configuration (mode / template / managed prompt) lives in
+            its own "Prompt" section — see AgentPromptPanel. Editing the prompt
+            is common and deep enough (switching modes, editing the managed
+            Prompt record's template inline) to earn its own block instead of
+            sharing this one with the model picker. */}
+
+        <ConfigBlock icon={<IconDatabase size={15} />} title={t('config.knowledgeEngine')}>
+          <Select
+            description={t('config.knowledgeEngineDescription')}
+            placeholder={t('config.knowledgeEnginePlaceholder')}
+            data={ragModules.map((r) => ({ value: r.key, label: r.name }))}
+            searchable
+            clearable
+            leftSection={<IconDatabase size={14} />}
+            {...configForm.getInputProps('knowledgeEngineKey')}
+          />
+        </ConfigBlock>
+
+        <ConfigBlock icon={<IconShield size={15} />} title={t('config.guardrails')}>
+          {/*
+            One guardrail per row, each naming the hooks it covers on THIS
+            agent. The tool hooks are the new capability here: an agent's own
+            action tools are the surface a tool policy could never reach
+            through the old direction slots.
+          */}
+          <GuardrailBindingList
+            options={guardrails}
+            value={guardrailBindings}
+            onChange={setGuardrailBindings}
+            surface="agent"
+          />
+        </ConfigBlock>
+
+        <ConfigBlock icon={<IconTool size={15} />} title={t('config.tools')}>
+          <Stack gap="sm">
+            <Text size="xs" c="dimmed">{t('config.toolsDescription')}</Text>
+
+            {toolBindings.length > 0 ? (
+              <Stack gap={4}>
+                {toolBindings.map((b) => (
+                  <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
+                    <Badge size="xs" variant="light" color="gray">{b.source.toUpperCase()}</Badge>
+                    <Text size="xs" fw={500}>{b.sourceKey}</Text>
+                    <Badge size="xs" variant="light" color="blue">
+                      {b.toolNames.length} tool(s)
+                    </Badge>
+                  </Group>
+                ))}
+              </Stack>
+            ) : (
+              <Text size="xs" c="dimmed" fs="italic">{t('config.noToolsSelected')}</Text>
+            )}
+
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconTool size={14} />}
+              onClick={() => setToolSelectorOpen(true)}
+              w="fit-content"
+            >
+              {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
+            </Button>
+          </Stack>
+
+          <ToolSelectorModal
+            opened={toolSelectorOpen}
+            onClose={() => setToolSelectorOpen(false)}
+            value={toolBindings}
+            onChange={handleToolBindingsChange}
+          />
+        </ConfigBlock>
+
+        <ConfigBlock icon={<IconSettings size={15} />} title={t('config.advancedSettings')}>
+          <Stack gap="md">
+            <div>
+              <Text size="sm" mb={4}>
+                {t('config.topP')}: {configForm.values.topP}
+              </Text>
+              <Slider
+                min={0}
+                max={1}
+                step={0.05}
+                marks={[
+                  { value: 0, label: '0' },
+                  { value: 0.5, label: '0.5' },
+                  { value: 1, label: '1' },
+                ]}
+                {...configForm.getInputProps('topP')}
+              />
+            </div>
+          </Stack>
+        </ConfigBlock>
+      </Stack>
+    )
+  );
 
   return (
     <PageContainer>
@@ -811,490 +1152,435 @@ export default function AgentDetailPage() {
 
       <Tabs value={activeTab} onChange={setActiveTab}>
         <Tabs.List mb="md">
-          <Tabs.Tab value="playground" leftSection={<IconMessageCircle size={14} />}>
-            {t('tabs.playground')}
+          <Tabs.Tab value="overview" leftSection={<IconLayoutDashboard size={14} />}>
+            Overview
           </Tabs.Tab>
-          {!isConnected ? (
-            <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
-              {t('tabs.versions')}
-            </Tabs.Tab>
-          ) : null}
-          <Tabs.Tab value="publish" leftSection={<IconWorld size={14} />}>
-            {t('tabs.publish')}
+          <Tabs.Tab value="sessions" leftSection={<IconMessageCircle size={14} />}>
+            Sessions
+            {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
           </Tabs.Tab>
-          <Tabs.Tab value="traces" leftSection={<IconTimeline size={14} />}>
-            {t('tabs.traces')}
+          <Tabs.Tab value="configure" leftSection={<IconSettings size={14} />}>
+            Configure
+            {advancedOverrideCount > 0 ? (
+              <Badge size="xs" variant="light" ml={6}>{advancedOverrideCount}</Badge>
+            ) : null}
+          </Tabs.Tab>
+          <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
+            Deploy
+          </Tabs.Tab>
+          <Tabs.Tab value="observe" leftSection={<IconTimeline size={14} />}>
+            Observe
           </Tabs.Tab>
           <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
             {t('tabs.usage')}
           </Tabs.Tab>
         </Tabs.List>
 
-        {/* ── Playground Tab ──────────────────────────────────── */}
-        <Tabs.Panel value="playground">
-          <div className={classes.playgroundLayout}>
-            {/* Left: Configuration Panel */}
-            <Paper
-              withBorder
-              radius="md"
-              p="md"
-              className={classes.configPanel}
-            >
-              <Stack gap="md">
-                <Text size="sm" fw={600}>
-                  {t('config.title')}
-                </Text>
-
-                {isConnected ? (
-                  <Stack gap="sm">
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
-                      <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
-                    </div>
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
-                      <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
-                        {connection?.url ?? '—'}
-                      </Text>
-                    </div>
-                    {connection?.model ? (
-                      <div>
-                        <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
-                        <Text size="sm" className="ds-mono">{connection.model}</Text>
-                      </div>
-                    ) : null}
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
-                      <Text size="sm">
-                        {connection?.hasApiKey
-                          ? t('connectModal.apiKey')
-                          : connection?.credentialProviderKey
-                            ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
-                            : '—'}
-                      </Text>
-                    </div>
-                    {connection?.responsePath ? (
-                      <div>
-                        <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
-                        <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
-                      </div>
-                    ) : null}
-                    <Text size="xs" c="dimmed" fs="italic" mt="xs">
-                      {t('connectModal.subtitle')}
-                    </Text>
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={<IconPencil size={14} />}
-                      onClick={() => setEditConnectionOpen(true)}
-                    >
-                      {t('connectModal.editButton')}
-                    </Button>
-                  </Stack>
-                ) : (
-                <>
-                <Select
-                  label={t('config.model')}
-                  placeholder={t('config.modelPlaceholder')}
-                  data={models.map((m) => ({
-                    value: m.key,
-                    label: `${m.name} (${m.modelId})`,
-                  }))}
-                  searchable
-                  {...configForm.getInputProps('modelKey')}
-                />
-
-                <Divider label={t('config.promptSection')} labelPosition="center" />
-
-                <Select
-                  label={t('config.promptMode')}
-                  data={[
-                    { value: 'custom', label: t('config.customPrompt') },
-                    { value: 'prompt', label: t('config.selectPrompt') },
-                  ]}
-                  {...configForm.getInputProps('promptMode')}
-                />
-
-                {configForm.values.promptMode === 'custom' ? (
-                  <Textarea
-                    label={t('config.systemPrompt')}
-                    placeholder={t('config.systemPromptPlaceholder')}
-                    minRows={4}
-                    maxRows={12}
-                    autosize
-                    {...configForm.getInputProps('systemPrompt')}
-                  />
-                ) : (
-                  <Select
-                    label={t('config.prompt')}
-                    placeholder={t('config.promptPlaceholder')}
-                    data={prompts.map((p) => ({
-                      value: p.key,
-                      label: p.name,
-                    }))}
-                    searchable
-                    {...configForm.getInputProps('promptKey')}
-                  />
-                )}
-
-                {/* ── Knowledge Engine (collapsible) ───────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setKnowledgeEngineOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {knowledgeEngineOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconDatabase size={16} />
-                    <Text size="sm" fw={600}>{t('config.knowledgeEngine')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={knowledgeEngineOpen}>
-                  <Stack gap="md" mt="xs">
-                    <Select
-                      label={t('config.knowledgeEngine')}
-                      description={t('config.knowledgeEngineDescription')}
-                      placeholder={t('config.knowledgeEnginePlaceholder')}
-                      data={ragModules.map((r) => ({
-                        value: r.key,
-                        label: r.name,
-                      }))}
-                      searchable
-                      clearable
-                      leftSection={<IconDatabase size={14} />}
-                      {...configForm.getInputProps('knowledgeEngineKey')}
-                    />
-                  </Stack>
-                </Collapse>
-
-                {/* ── Guardrails (collapsible) ─────────────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setGuardrailsOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {guardrailsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconShield size={16} />
-                    <Text size="sm" fw={600}>{t('config.guardrails')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={guardrailsOpen}>
-                  <Stack gap="md" mt="xs">
-                    {/*
-                      One guardrail per row, each naming the hooks it covers on
-                      THIS agent. The tool hooks are the new capability here:
-                      an agent's own action tools are the surface a tool policy
-                      could never reach through the old direction slots.
-                    */}
-                    <GuardrailBindingList
-                      options={guardrails}
-                      value={guardrailBindings}
-                      onChange={setGuardrailBindings}
-                      surface="agent"
-                    />
-                  </Stack>
-                </Collapse>
-
-                {/* ── Tools (collapsible) ──────────────────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setToolsOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {toolsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconTool size={16} />
-                    <Text size="sm" fw={600}>{t('config.tools')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={toolsOpen}>
-                  <Stack gap="md" mt="xs">
-                    <Text size="xs" c="dimmed">
-                      {t('config.toolsDescription')}
-                    </Text>
-
-                    {toolBindings.length > 0 ? (
-                      <Stack gap={4}>
-                        {toolBindings.map((b) => (
-                          <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
-                            <Badge size="xs" variant="light" color="gray">
-                              {b.source.toUpperCase()}
-                            </Badge>
-                            <Text size="xs" fw={500}>{b.sourceKey}</Text>
-                            <Badge size="xs" variant="light" color="blue">
-                              {b.toolNames.length} tool(s)
-                            </Badge>
-                          </Group>
-                        ))}
-                      </Stack>
-                    ) : (
-                      <Text size="xs" c="dimmed" fs="italic">
-                        {t('config.noToolsSelected')}
-                      </Text>
-                    )}
-
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={<IconTool size={14} />}
-                      onClick={() => setToolSelectorOpen(true)}
-                    >
-                      {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
-                    </Button>
-                  </Stack>
-                </Collapse>
-
-                <ToolSelectorModal
-                  opened={toolSelectorOpen}
-                  onClose={() => setToolSelectorOpen(false)}
-                  value={toolBindings}
-                  onChange={handleToolBindingsChange}
-                />
-
-                {/* ── Advanced Settings (collapsible) ─────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setAdvancedOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {advancedOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconSettings size={16} />
-                    <Text size="sm" fw={600}>{t('config.advancedSettings')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={advancedOpen}>
-                  <Stack gap="md" mt="xs">
-                    <div>
-                      <Text size="sm" mb={4}>
-                        {t('config.temperature')}: {configForm.values.temperature}
-                      </Text>
-                      <Slider
-                        min={0}
-                        max={2}
-                        step={0.1}
-                        marks={[
-                          { value: 0, label: '0' },
-                          { value: 1, label: '1' },
-                          { value: 2, label: '2' },
-                        ]}
-                        {...configForm.getInputProps('temperature')}
-                      />
-                    </div>
-
-                    <div>
-                      <Text size="sm" mb={4}>
-                        {t('config.topP')}: {configForm.values.topP}
-                      </Text>
-                      <Slider
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        marks={[
-                          { value: 0, label: '0' },
-                          { value: 0.5, label: '0.5' },
-                          { value: 1, label: '1' },
-                        ]}
-                        {...configForm.getInputProps('topP')}
-                      />
-                    </div>
-
-                    <NumberInput
-                      label={t('config.maxTokens')}
-                      min={1}
-                      max={128000}
-                      {...configForm.getInputProps('maxTokens')}
-                    />
-                  </Stack>
-                </Collapse>
-
-                <Button onClick={handleSaveConfig} size="sm" fullWidth>
-                  {t('config.save')}
-                </Button>
-                </>
-                )}
-              </Stack>
-            </Paper>
-
-            {/* Right: Chat Area */}
-            <Paper
-              withBorder
-              radius="md"
-              className={classes.chatPanel}
-            >
-              {/* Chat Header */}
-              <Group
-                p="sm"
-                justify="space-between"
-                className={classes.panelHeader}
-              >
-                <Group gap="xs">
-                  <Text size="sm" fw={600}>
-                    {t('chat.title')}
-                  </Text>
-                  {chatMessages.length > 0 && (
-                    <Badge size="xs" variant="light" color="gray">
-                      {chatMessages.length} {t('chat.messages')}
-                    </Badge>
-                  )}
-                </Group>
-                <Button
-                  size="xs"
-                  variant="light"
-                  leftSection={<IconTrash size={14} />}
-                  onClick={clearChat}
-                  disabled={chatMessages.length === 0 && !chatLoading}
-                >
-                  {t('chat.newChat')}
-                </Button>
-              </Group>
-
-              {/* Chat Messages */}
-              <div className={classes.panelBody}>
-                {chatMessages.length === 0 && !chatLoading ? (
-                  <Center className={classes.chatEmpty}>
-                    <Stack align="center" gap="sm">
-                      <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-                        <IconRobot size={24} />
-                      </ThemeIcon>
-                      <Text fw={600}>{agent.name}</Text>
-                      <Text size="sm" c="dimmed" ta="center" maw={300}>
-                        {agent.description || t('chat.startDescription')}
-                      </Text>
-                    </Stack>
-                  </Center>
-                ) : (
-                  <>
-                    <ScrollArea
-                      className={classes.chatScroll}
-                      viewportRef={chatViewportRef}
-                      p="md"
-                    >
-                      <Stack gap="md">
-                        {chatMessages.map((msg, i) => (
-                          <Group
-                            key={i}
-                            justify={msg.role === 'user' ? 'flex-end' : 'flex-start'}
-                            align="flex-start"
-                          >
-                            <Paper
-                              p="sm"
-                              radius="md"
-                              withBorder={msg.role === 'assistant'}
-                              className={`${classes.chatBubble} ${msg.role === 'user' ? classes.chatBubbleUser : ''}`}
-                            >
-                              {msg.role === 'assistant' ? (
-                                <Box className={classes.chatMarkdown}>
-                                  {msg.reasoning ? (
-                                    <ReasoningDisclosure reasoning={msg.reasoning} />
-                                  ) : null}
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                    {msg.content}
-                                  </ReactMarkdown>
-                                </Box>
-                              ) : (
-                                <Text size="sm" className={classes.preWrap}>
-                                  {msg.content}
-                                </Text>
-                              )}
-                            </Paper>
-                          </Group>
-                        ))}
-                        {chatLoading && (
-                          <Group justify="flex-start">
-                            <Paper p="sm" radius="md" withBorder>
-                              <Loader size="xs" />
-                            </Paper>
-                          </Group>
-                        )}
-                      </Stack>
-                    </ScrollArea>
-
-                    {/* Input */}
-                    <Group
-                      p="sm"
-                      gap="sm"
-                      className={classes.chatInputRow}
-                    >
-                      <TextInput
-                        placeholder={t('chat.inputPlaceholder')}
-                        value={chatInput}
-                        onChange={(e) => setChatInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            sendMessage();
-                          }
-                        }}
-                        className={classes.flexGrow}
-                        disabled={chatLoading}
-                        rightSection={
-                          <ActionIcon
-                            size="sm"
-                            variant="filled"
-                            onClick={sendMessage}
-                            disabled={!chatInput.trim() || chatLoading}
-                          >
-                            <IconSend size={14} />
-                          </ActionIcon>
-                        }
-                      />
-                    </Group>
-                  </>
-                )}
-
-                {/* Always-visible input when no messages */}
-                {chatMessages.length === 0 && !chatLoading && (
-                  <Group
-                    p="sm"
-                    gap="sm"
-                    className={classes.chatInputRow}
-                  >
-                    <TextInput
-                      placeholder={t('chat.inputPlaceholder')}
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          sendMessage();
-                        }
-                      }}
-                      className={classes.flexGrow}
-                      disabled={chatLoading}
-                      rightSection={
-                        <ActionIcon
-                          size="sm"
-                          variant="filled"
-                          onClick={sendMessage}
-                          disabled={!chatInput.trim() || chatLoading}
-                        >
-                          <IconSend size={14} />
-                        </ActionIcon>
-                      }
-                    />
-                  </Group>
-                )}
-
-                {/* Runtime context sent with every playground turn */}
-                <Box px="sm" pb="sm">
-                  <RuntimeContextEditor
-                    value={runtimeContextJson}
-                    onChange={setRuntimeContextJson}
-                  />
-                </Box>
-              </div>
-            </Paper>
-          </div>
+        {/* ── Overview ────────────────────────────────────────── */}
+        <Tabs.Panel value="overview">
+          <AgentOverviewPanel
+            agent={agent}
+            isConnected={isConnected}
+            sessionCount={sessions.length}
+            onStartSession={() => setStartSessionOpen(true)}
+            // Overview links by the OLD flat names on purpose — it should not
+            // have to know how the tabs are grouped, so the alias table that
+            // already exists for deep links resolves the rail for it too.
+            onGoToTab={(tab) => {
+              const alias = TAB_ALIASES[tab];
+              if (!alias) return;
+              setActiveTab(alias.top);
+              if (!alias.sub) return;
+              if (alias.top === 'configure') setConfigureTab(alias.sub);
+              if (alias.top === 'deploy') setDeployTab(alias.sub);
+            }}
+          />
         </Tabs.Panel>
 
-        {/* ── Traces Tab ─────────────────────────────────────── */}
-        <Tabs.Panel value="traces">
+        {/* ── Sessions ────────────────────────────────────────── */}
+        <Tabs.Panel value="sessions">
+          <SectionCard
+            title="Sessions"
+            description="Each session is its own persisted conversation — history, tool calls and token usage all reload with it."
+          >
+            <Group justify="flex-end" mb="md">
+              <Button
+                size="sm"
+                leftSection={<IconPlus size={14} />}
+                onClick={() => setStartSessionOpen(true)}
+              >
+                Start new session
+              </Button>
+            </Group>
+            <SessionList
+              sessions={sessions}
+              loading={sessionsLoading}
+              onOpen={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+              onStart={() => setStartSessionOpen(true)}
+              searchable
+            />
+          </SectionCard>
+        </Tabs.Panel>
+
+        {/*
+          Configure — everything that changes what the agent IS, as one page.
+
+          It used to be a vertical rail, which hid six of seven sections
+          behind a click. Wrong trade for a form edited as a whole and saved
+          by one button: you could not see what the agent was without touring
+          it. Deep links still work — `?tab=prompt` scrolls to that section
+          instead of selecting a rail item.
+        */}
+        <Tabs.Panel value="configure">
+          <Paper withBorder radius="md" p="xl">
+            <ConfigSection
+              first
+              id="basic"
+              title="General"
+              description="What this agent is, which model answers, and the tools it can call."
+            >
+              {renderBasicSettings()}
+            </ConfigSection>
+
+            {!isConnected ? (
+              <ConfigSection
+                id="prompt"
+                title="Prompt"
+                description="Inline text, or a prompt from the Prompts module — editable right here."
+              >
+                <AgentPromptPanel
+                  mode={configForm.values.promptMode}
+                  onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
+                  systemPrompt={configForm.values.systemPrompt}
+                  onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
+                  promptKey={configForm.values.promptKey}
+                  onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
+                  prompts={prompts}
+                  onPromptsChanged={(next) => setPrompts(next)}
+                  onSaveAgentConfig={handleSaveConfig}
+                />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected ? (
+              <ConfigSection
+                id="subagents"
+                title="Delegation"
+                description="Roles this agent can hand work to, and the guards around that."
+                meta={subagents.length > 0 ? (
+                  <Badge size="xs" variant="light" w="fit-content">{subagents.length} sub-agents</Badge>
+                ) : null}
+              >
+                <AgentSubagentsPanel
+                  subagents={subagents}
+                  policy={subagentPolicy}
+                  agents={projectAgents}
+                  models={models.map((model) => ({ key: model.key, name: model.name }))}
+                  currentAgentKey={agent.key}
+                  onChange={(nextSubagents, nextPolicy) => {
+                    setSubagents(nextSubagents);
+                    setSubagentPolicy(nextPolicy);
+                  }}
+                />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected ? (
+              <ConfigSection
+                id="skills"
+                title="Skills"
+                description="Capabilities this agent can discover and open on demand, from the project's skill library."
+                meta={skills.length > 0 ? (
+                  <Badge size="xs" variant="light" w="fit-content">{skills.length} attached</Badge>
+                ) : null}
+              >
+                <AgentSkillsPanel
+                  skills={skills}
+                  policy={skillPolicy}
+                  library={skillLibrary}
+                  onChange={(nextSkills, nextPolicy) => {
+                    setSkills(nextSkills);
+                    setSkillPolicy(nextPolicy);
+                  }}
+                />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected ? (
+              <ConfigSection
+                id="memory"
+                title="Memory"
+                description="What this agent remembers across runs, backed by a store from the Memory module."
+                meta={memoryConfig?.enabled ? (
+                  <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
+                ) : null}
+              >
+                <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected ? (
+              <ConfigSection
+                id="advanced"
+                title="Runtime"
+                description="How the agent loop behaves: planning, budgets, context handling and reasoning."
+              >
+                <AgentAdvancedSettings
+                  value={runtimeConfig}
+                  onChange={setRuntimeConfig}
+                  toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
+                />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected ? (
+              <ConfigSection
+                id="output"
+                title="Structured output"
+                description="Make the agent answer with JSON that matches a schema instead of free text."
+              >
+                <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />
+              </ConfigSection>
+            ) : null}
+          </Paper>
+
+          {/*
+            One save for the whole page. Every section above edits the same
+            draft config and the PATCH replaces it wholesale, so six separate
+            "Save" buttons only ever meant "save everything, from here".
+          */}
+          <Group justify="flex-end" className={classes.configSaveBar}>
+            <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
+          </Group>
+        </Tabs.Panel>
+
+        {/*
+          Deploy — the lifecycle of a config that is already written:
+          freeze it (Versions), expose it (Publish), run it on a cadence
+          (Schedules), or take it out of the console entirely (Export).
+        */}
+        <Tabs.Panel value="deploy">
+          {/*
+            One page, like Configure — the four things you do with a config
+            that is already written sit one under the other, so "is this
+            published, exposed, scheduled?" is answered by scrolling, not by
+            clicking through a rail. `?tab=versions` etc. scroll here.
+          */}
+          <Paper withBorder radius="md" p="xl">
+            {!isConnected ? (
+            <ConfigSection first id="versions" title={t('versions.title')} description={t('versions.description')}>
+              <Stack gap="md">
+                <Group justify="flex-end" align="center">
+                  <Group gap="xs">
+                    <Badge size="sm" variant="light">{versionsTotal} total</Badge>
+                    <Button
+                      size="xs"
+                      variant="light"
+                      leftSection={<IconArrowsExchange size={14} />}
+                      disabled={!compareVersionA || !compareVersionB || compareVersionA === compareVersionB}
+                      onClick={() => setCompareModalOpen(true)}
+                    >
+                      {t('versions.compare')}
+                    </Button>
+                  </Group>
+                </Group>
+
+                {versionsLoading ? (
+                  <LoadingState label="Loading versions..." minHeight={200} />
+                ) : versions.length === 0 ? (
+                  <EmptyState
+                    title={t('versions.noVersions')}
+                    description={t('versions.noVersionsDesc')}
+                    icon={<IconGitBranch size={24} />}
+                    minHeight={220}
+                  />
+                ) : (
+                  <div className="ds-tbl-wrap">
+                  <Table striped highlightOnHover>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th w={40}>
+                          <VisuallyHidden>Select version</VisuallyHidden>
+                        </Table.Th>
+                        <Table.Th>{t('versions.version')}</Table.Th>
+                        <Table.Th>{t('versions.changelog')}</Table.Th>
+                        <Table.Th>{t('versions.publishedAt')}</Table.Th>
+                        <Table.Th />
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {versions.map((v) => {
+                        const isSelected = compareVersionA === String(v.version) || compareVersionB === String(v.version);
+                        return (
+                          <Table.Tr key={v.version}>
+                            <Table.Td>
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {
+                                  const vStr = String(v.version);
+                                  if (isSelected) {
+                                    if (compareVersionA === vStr) setCompareVersionA(null);
+                                    if (compareVersionB === vStr) setCompareVersionB(null);
+                                  } else {
+                                    if (!compareVersionA) setCompareVersionA(vStr);
+                                    else if (!compareVersionB) setCompareVersionB(vStr);
+                                    else {
+                                      setCompareVersionA(compareVersionB);
+                                      setCompareVersionB(vStr);
+                                    }
+                                  }
+                                }}
+                              />
+                            </Table.Td>
+                            <Table.Td>
+                              <Group gap="xs">
+                                <Badge size="sm" variant="filled" color="blue">v{v.version}</Badge>
+                                {agent.publishedVersion === v.version && (
+                                  <Badge size="xs" variant="light" color="teal">{t('versions.current')}</Badge>
+                                )}
+                              </Group>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="sm" lineClamp={1}>
+                                {v.changelog || <Text span c="dimmed" fs="italic" size="sm">{t('versions.noChangelog')}</Text>}
+                              </Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Text size="sm">
+                                {v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}
+                              </Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Tooltip label={t('versions.snapshot')}>
+                                <ActionIcon
+                                  size="sm"
+                                  variant="subtle"
+                                  onClick={() => {
+                                    setCompareVersionA(String(v.version));
+                                    setCompareVersionB(null);
+                                    setCompareModalOpen(true);
+                                  }}
+                                >
+                                  <IconCode size={14} />
+                                </ActionIcon>
+                              </Tooltip>
+                            </Table.Td>
+                          </Table.Tr>
+                        );
+                      })}
+                    </Table.Tbody>
+                  </Table>
+                  </div>
+                )}
+              </Stack>
+            </ConfigSection>
+            ) : null}
+
+            <ConfigSection first={isConnected} id="publish" title={t('a2a.title')} description={t('a2a.description')}>
+              <Stack gap="md">
+
+                <Switch
+                  label={t('a2a.toggle')}
+                  checked={a2aEnabled}
+                  disabled={a2aSaving}
+                  onChange={(event) => updateA2a({ enabled: event.currentTarget.checked })}
+                />
+
+                {a2aEnabled && (
+                  <>
+                    <Divider />
+
+                    <div>
+                      <Text size="sm" fw={600} mb={6}>{t('a2a.accessMode')}</Text>
+                      <SegmentedControl
+                        value={a2aAccessMode}
+                        disabled={a2aSaving}
+                        onChange={(value) =>
+                          updateA2a({ accessMode: value === 'public' ? 'public' : 'token' })
+                        }
+                        data={[
+                          { value: 'token', label: t('a2a.accessToken') },
+                          { value: 'public', label: t('a2a.accessPublic') },
+                        ]}
+                      />
+                      <Text size="xs" c="dimmed" mt={6}>
+                        {a2aAccessMode === 'public'
+                          ? t('a2a.accessPublicDesc')
+                          : t('a2a.accessTokenDesc')}
+                      </Text>
+                    </div>
+
+                    {a2aIsPublic && (
+                      <Alert
+                        color="yellow"
+                        variant="light"
+                        icon={<IconAlertTriangle size={16} />}
+                      >
+                        {t('a2a.publicWarning')}
+                      </Alert>
+                    )}
+
+                    <Text size="sm" c="dimmed">{t('a2a.cardLabel')}</Text>
+                    <CopyableCode value={a2aCardUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
+                    <CopyableCode value={a2aEndpointUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
+                    <Code block>
+                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
+  -H "Authorization: Bearer YOUR_API_KEY" \\`}
+  -H "Content-Type: application/json" \\
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{ "kind": "text", "text": "Hello!" }],
+        "messageId": "msg-1"
+      }
+    }
+  }'
+
+# Continue the same conversation: set params.message.contextId
+# to the "contextId" returned in the previous task.`}
+                    </Code>
+                  </>
+                )}
+              </Stack>
+            </ConfigSection>
+
+            {!isConnected ? (
+              <ConfigSection
+                id="schedules"
+                title="Recurring runs"
+                description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
+              >
+                <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
+              </ConfigSection>
+            ) : null}
+
+            <ConfigSection
+              id="export"
+              title="Export"
+              description="Take the agent out of the console — a manifest to re-import elsewhere, or a runnable agent-sdk project."
+            >
+              <AgentExportPanel
+                agentId={agentId}
+                agentKey={agent.key}
+                versions={versions.map((version) => ({ version: version.version }))}
+                publishedVersion={agent.publishedVersion ?? null}
+                onImported={() => void loadAgent()}
+              />
+            </ConfigSection>
+          </Paper>
+        </Tabs.Panel>
+
+        {/* ── Observe — what the agent actually did, and what it cost ── */}
+        <Tabs.Panel value="observe">
           <Stack gap="md">
             {/* Filters */}
             <SectionCard p="md">
@@ -1390,7 +1676,11 @@ export default function AgentDetailPage() {
           </Stack>
         </Tabs.Panel>
 
-        {/* ── Usage Tab ──────────────────────────────────────── */}
+        {/*
+          Usage — how to call this agent from outside the console. Its own
+          tab because it is what someone integrating the agent opens first,
+          and it had been buried as the second item of Observe's rail.
+        */}
         <Tabs.Panel value="usage">
           <Stack gap="md">
             <SectionCard p="md">
@@ -1544,208 +1834,63 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
   "version": ${agent.publishedVersion || 'null'}
 }`}
                 </Code>
-              </Stack>
-            </SectionCard>
-          </Stack>
-        </Tabs.Panel>
 
-        {/* ── Publish Tab (A2A exposure) ─────────────────────── */}
-        <Tabs.Panel value="publish">
-          <Stack gap="md">
-            <SectionCard p="md">
-              <Stack gap="md">
-                <div>
-                  <Text size="lg" fw={600}>{t('a2a.title')}</Text>
-                  <Text size="sm" c="dimmed">{t('a2a.description')}</Text>
-                </div>
+                {/*
+                  Every other surface the agent is reachable on. They were
+                  built one at a time and only the Responses API was ever
+                  documented here, so an integrator reading this tab would
+                  not know an OpenAI client could call the agent at all.
+                */}
+                <Divider />
+                <Text size="sm" fw={600}>OpenAI-compatible (chat/completions)</Text>
+                <Text size="xs" c="dimmed">
+                  Any OpenAI SDK can call this agent — put its key in <code>model</code> (or <code>agent:{agent.key}</code> if a
+                  model shares the name). Runs the published version. Pass back <code>conversation_id</code> to continue a thread;
+                  set <code>stream: true</code> for token deltas.
+                </Text>
+                <Code block>
+{`from openai import OpenAI
 
-                <Switch
-                  label={t('a2a.toggle')}
-                  checked={a2aEnabled}
-                  disabled={a2aSaving}
-                  onChange={(event) => updateA2a({ enabled: event.currentTarget.checked })}
-                />
+client = OpenAI(base_url="${apiOrigin}/api/client/v1", api_key="YOUR_API_TOKEN")
 
-                {a2aEnabled && (
-                  <>
-                    <Divider />
-
-                    <div>
-                      <Text size="sm" fw={600} mb={6}>{t('a2a.accessMode')}</Text>
-                      <SegmentedControl
-                        value={a2aAccessMode}
-                        disabled={a2aSaving}
-                        onChange={(value) =>
-                          updateA2a({ accessMode: value === 'public' ? 'public' : 'token' })
-                        }
-                        data={[
-                          { value: 'token', label: t('a2a.accessToken') },
-                          { value: 'public', label: t('a2a.accessPublic') },
-                        ]}
-                      />
-                      <Text size="xs" c="dimmed" mt={6}>
-                        {a2aAccessMode === 'public'
-                          ? t('a2a.accessPublicDesc')
-                          : t('a2a.accessTokenDesc')}
-                      </Text>
-                    </div>
-
-                    {a2aIsPublic && (
-                      <Alert
-                        color="yellow"
-                        variant="light"
-                        icon={<IconAlertTriangle size={16} />}
-                      >
-                        {t('a2a.publicWarning')}
-                      </Alert>
-                    )}
-
-                    <Text size="sm" c="dimmed">{t('a2a.cardLabel')}</Text>
-                    <CopyableCode value={a2aCardUrl} />
-
-                    <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
-                    <CopyableCode value={a2aEndpointUrl} />
-
-                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
-                    <Code block>
-                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
-  -H "Authorization: Bearer YOUR_API_KEY" \\`}
+stream = client.chat.completions.create(
+    model="${agent.key}",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")`}
+                </Code>
+                <Code block>
+{`curl -N -X POST ${apiOrigin}/api/client/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{ "kind": "text", "text": "Hello!" }],
-        "messageId": "msg-1"
-      }
-    }
-  }'
+  -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'`}
+                </Code>
 
-# Continue the same conversation: set params.message.contextId
-# to the "contextId" returned in the previous task.`}
-                    </Code>
-                  </>
-                )}
-              </Stack>
-            </SectionCard>
-          </Stack>
-        </Tabs.Panel>
+                <Divider />
+                <Text size="sm" fw={600}>A2A (agent-to-agent)</Text>
+                <Text size="xs" c="dimmed">
+                  {a2aEnabled
+                    ? 'Exposed. Other agents discover it from the card and talk JSON-RPC — settings under Deploy → Publish.'
+                    : 'Not exposed yet — turn it on under Deploy → Publish, then other agents can discover it from the card below.'}
+                </Text>
+                <Code block>{`GET ${a2aCardUrl}`}</Code>
 
-        {/* ── Versions Tab ───────────────────────────────────── */}
-        <Tabs.Panel value="versions">
-          <Stack gap="md">
-            <SectionCard p="md">
-              <Stack gap="md">
-                <Group justify="space-between" align="center">
-                  <div>
-                    <Text size="lg" fw={600}>{t('versions.title')}</Text>
-                    <Text size="sm" c="dimmed">{t('versions.description')}</Text>
-                  </div>
-                  <Group gap="xs">
-                    <Badge size="sm" variant="light">{versionsTotal} total</Badge>
-                    <Button
-                      size="xs"
-                      variant="light"
-                      leftSection={<IconArrowsExchange size={14} />}
-                      disabled={!compareVersionA || !compareVersionB || compareVersionA === compareVersionB}
-                      onClick={() => setCompareModalOpen(true)}
-                    >
-                      {t('versions.compare')}
-                    </Button>
-                  </Group>
-                </Group>
-
-                {versionsLoading ? (
-                  <LoadingState label="Loading versions..." minHeight={200} />
-                ) : versions.length === 0 ? (
-                  <EmptyState
-                    title={t('versions.noVersions')}
-                    description={t('versions.noVersionsDesc')}
-                    icon={<IconGitBranch size={24} />}
-                    minHeight={220}
-                  />
-                ) : (
-                  <div className="ds-tbl-wrap">
-                  <Table striped highlightOnHover>
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th w={40}>
-                          <VisuallyHidden>Select version</VisuallyHidden>
-                        </Table.Th>
-                        <Table.Th>{t('versions.version')}</Table.Th>
-                        <Table.Th>{t('versions.changelog')}</Table.Th>
-                        <Table.Th>{t('versions.publishedAt')}</Table.Th>
-                        <Table.Th />
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {versions.map((v) => {
-                        const isSelected = compareVersionA === String(v.version) || compareVersionB === String(v.version);
-                        return (
-                          <Table.Tr key={v.version}>
-                            <Table.Td>
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => {
-                                  const vStr = String(v.version);
-                                  if (isSelected) {
-                                    if (compareVersionA === vStr) setCompareVersionA(null);
-                                    if (compareVersionB === vStr) setCompareVersionB(null);
-                                  } else {
-                                    if (!compareVersionA) setCompareVersionA(vStr);
-                                    else if (!compareVersionB) setCompareVersionB(vStr);
-                                    else {
-                                      setCompareVersionA(compareVersionB);
-                                      setCompareVersionB(vStr);
-                                    }
-                                  }
-                                }}
-                              />
-                            </Table.Td>
-                            <Table.Td>
-                              <Group gap="xs">
-                                <Badge size="sm" variant="filled" color="blue">v{v.version}</Badge>
-                                {agent.publishedVersion === v.version && (
-                                  <Badge size="xs" variant="light" color="teal">{t('versions.current')}</Badge>
-                                )}
-                              </Group>
-                            </Table.Td>
-                            <Table.Td>
-                              <Text size="sm" lineClamp={1}>
-                                {v.changelog || <Text span c="dimmed" fs="italic" size="sm">{t('versions.noChangelog')}</Text>}
-                              </Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Text size="sm">
-                                {v.createdAt ? new Date(v.createdAt).toLocaleString() : '—'}
-                              </Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Tooltip label={t('versions.snapshot')}>
-                                <ActionIcon
-                                  size="sm"
-                                  variant="subtle"
-                                  onClick={() => {
-                                    setCompareVersionA(String(v.version));
-                                    setCompareVersionB(null);
-                                    setCompareModalOpen(true);
-                                  }}
-                                >
-                                  <IconCode size={14} />
-                                </ActionIcon>
-                              </Tooltip>
-                            </Table.Td>
-                          </Table.Tr>
-                        );
-                      })}
-                    </Table.Tbody>
-                  </Table>
-                  </div>
-                )}
+                <Divider />
+                <Text size="sm" fw={600}>Assistants API</Text>
+                <Text size="xs" c="dimmed">
+                  For clients built on OpenAI Assistants. This agent already IS an assistant — its id is
+                  {' '}<code>asst_{agent.key}</code> — so there is nothing to create; <code>POST /assistants</code> would make
+                  a new, separate agent. Start a thread and run it in one call:
+                </Text>
+                <Code block>
+{`POST ${apiOrigin}/api/client/v1/threads/runs
+{
+  "assistant_id": "asst_${agent.key}",
+  "thread": { "messages": [{ "role": "user", "content": "Hello" }] }
+}`}
+                </Code>
               </Stack>
             </SectionCard>
           </Stack>
@@ -1801,6 +1946,17 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
           t={t}
         />
       </Modal>
+
+      <StartSessionModal
+        opened={startSessionOpen}
+        onClose={() => setStartSessionOpen(false)}
+        agentId={agentId}
+        agentName={agent.name}
+        versions={versions}
+        publishedVersion={agent.publishedVersion ?? null}
+        isConnected={isConnected}
+        onStarted={handleSessionStarted}
+      />
 
       {isConnected ? (
         <ConnectAgentModal
@@ -1979,40 +2135,6 @@ function computeJsonDiff(
   return diffs;
 }
 
-/** Collapsible "thinking" trace shown above an assistant reply from a reasoning model. */
-function ReasoningDisclosure({ reasoning }: { reasoning: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Box mb="xs">
-      <UnstyledButton
-        onClick={() => setOpen((v) => !v)}
-        style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-      >
-        <IconBrain size={13} color="var(--mantine-color-violet-6)" />
-        <Text size="xs" fw={500} c="violet.6">
-          Reasoning
-        </Text>
-        {open ? (
-          <IconChevronDown size={12} color="var(--mantine-color-violet-6)" />
-        ) : (
-          <IconChevronRight size={12} color="var(--mantine-color-violet-6)" />
-        )}
-      </UnstyledButton>
-      <Collapse in={open}>
-        <Text
-          size="xs"
-          c="dimmed"
-          mt={4}
-          pl="xs"
-          style={{
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            borderLeft: '2px solid var(--mantine-color-violet-2)',
-          }}
-        >
-          {reasoning}
-        </Text>
-      </Collapse>
-    </Box>
-  );
-}
+// ReasoningDisclosure / StepTimeline / StepPayload / StructuredOutputBlock /
+// TurnFooter moved to `session/AgentSessionView.tsx` along with the rest of
+// the chat UI they belonged to — see that file.

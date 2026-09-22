@@ -1,12 +1,14 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgent, IAgentConfig, IUser } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
   createConversation,
   deleteAgentRecord,
+  deleteConversation,
   executePlaygroundChat,
   getAgentById,
+  getConversationById,
   getAgentVersion,
   listAgents,
   listAgentVersions,
@@ -17,7 +19,36 @@ import {
   updateAgentRecord,
 } from '@/lib/services/agents';
 // By path: the agents barrel does not export the error class.
-import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
+import {
+  AgentGuardrailBlockedError,
+  // Imported BY PATH: the barrel exports the queue-routing wrapper, and the
+  // streaming route deliberately needs the local one (a progress callback
+  // cannot cross the job queue).
+  executePlaygroundChatLocal,
+} from '@/lib/services/agents/agentService';
+import {
+  AgentManifestError,
+  applyAgentManifest,
+  buildAgentManifest,
+  parseAgentManifest,
+  previewAgentImport,
+  serializeAgentManifest,
+  type AgentManifestFormat,
+} from '@/lib/services/agents/agentManifest';
+import {
+  generateAgentProject,
+  type AgentCodegenTarget,
+} from '@/lib/services/agents/agentCodegen';
+import { buildPromptVariables, renderPromptTemplate } from '@/lib/services/agents/promptVariables';
+import {
+  computeScheduleNextRun,
+  deleteAgentSchedule,
+  readSchedules,
+  runAgentSchedule,
+  upsertAgentSchedule,
+  type AgentScheduleInput,
+} from '@/lib/services/agents/agentScheduleService';
+import { getDatabase } from '@/lib/database';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   readJsonBody,
@@ -394,6 +425,317 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  /**
+   * Flattens `promptKey` + `promptVariables` into a literal `systemPrompt` for
+   * code export. The generated project has no Prompts module and no runtime
+   * context, so anything left unresolved here would stay unresolved forever.
+   */
+  async function resolveConfigForExport(
+    tenantDbName: string,
+    projectId: string,
+    agent: IAgent,
+    config: IAgentConfig,
+  ): Promise<IAgentConfig> {
+    let template = config.systemPrompt;
+    if (!template && config.promptKey) {
+      const db = await getDatabase();
+      await db.switchToTenant(tenantDbName);
+      const prompt = await db.findPromptByKey(config.promptKey, projectId);
+      template = prompt?.template;
+    }
+    if (!template) return config;
+
+    const variables = buildPromptVariables({
+      config,
+      agentKey: agent.key,
+      agentName: agent.name,
+      version: agent.publishedVersion ?? null,
+    });
+    const rendered = renderPromptTemplate(template, variables);
+    return { ...config, systemPrompt: rendered.text, promptKey: undefined };
+  }
+
+  // ── Manifest export / import ───────────────────────────────────────────
+
+  app.get('/agents/:agentId/export', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const query = (request.query ?? {}) as { format?: string; version?: string; download?: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const format: AgentManifestFormat = query.format === 'yaml' ? 'yaml' : 'json';
+
+      // No `version` exports the DRAFT config — what the playground runs. A
+      // version number exports that immutable snapshot instead, which is what
+      // anyone promoting between environments actually wants.
+      let config = agent.config;
+      let version: number | null = null;
+      if (query.version) {
+        const requested = Number.parseInt(query.version, 10);
+        if (!Number.isFinite(requested)) {
+          return reply.code(400).send({ error: 'version must be a number' });
+        }
+        const snapshot = await getAgentVersion(session.tenantDbName, agentId, requested);
+        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
+        config = snapshot.snapshot.config;
+        version = requested;
+      }
+
+      const manifest = buildAgentManifest(agent, config, version);
+      const body = serializeAgentManifest(manifest, format);
+
+      if (query.download === '1') {
+        return reply
+          .code(200)
+          .header('content-type', format === 'yaml' ? 'application/yaml' : 'application/json')
+          .header(
+            'content-disposition',
+            `attachment; filename="${agent.key}${version !== null ? `-v${version}` : ''}.${format}"`,
+          )
+          .send(body);
+      }
+
+      return reply.code(200).send({ format, manifest, content: body });
+    } catch (error) {
+      logger.error('Export agent error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to export agent' });
+    }
+  }));
+
+  app.post('/agents/import', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const body = await readJsonBody<{
+        content?: string;
+        manifest?: unknown;
+        format?: AgentManifestFormat;
+        /** `true` validates and reports only — nothing is written. */
+        dryRun?: boolean;
+        mode?: 'create' | 'update' | 'upsert';
+        key?: string;
+        name?: string;
+        allowMissingDependencies?: boolean;
+      }>(request);
+
+      if (!body?.content && !body?.manifest) {
+        return reply.code(400).send({ error: 'content or manifest is required' });
+      }
+
+      const manifest = body.content
+        ? parseAgentManifest(body.content, body.format)
+        : parseAgentManifest(JSON.stringify(body.manifest), 'json');
+
+      if (body.dryRun) {
+        const preview = await previewAgentImport(session.tenantDbName, projectId, manifest);
+        return reply.code(200).send(preview);
+      }
+
+      const result = await applyAgentManifest(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        String(user._id),
+        manifest,
+        {
+          mode: body.mode,
+          key: body.key,
+          name: body.name,
+          allowMissingDependencies: body.allowMissingDependencies,
+        },
+      );
+
+      return reply.code(result.action === 'created' ? 201 : 200).send({
+        agent: redactAgent(result.agent),
+        action: result.action,
+        missing: result.missing,
+      });
+    } catch (error) {
+      if (error instanceof AgentManifestError) {
+        return reply.code(400).send({ error: error.message, issues: error.issues });
+      }
+      logger.error('Import agent error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to import agent' });
+    }
+  }));
+
+  // ── Schedules ──────────────────────────────────────────────────────────
+
+  app.get('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const schedules = readSchedules(agent);
+      return reply.code(200).send({
+        schedules,
+        // Recomputed for display rather than trusted from storage: a stored
+        // nextRunAt goes stale the moment the cron is edited elsewhere.
+        nextRuns: Object.fromEntries(
+          schedules.map((schedule) => [schedule.id, computeScheduleNextRun(schedule)?.toISOString() ?? null]),
+        ),
+        publishedVersion: agent.publishedVersion ?? null,
+      });
+    } catch (error) {
+      logger.error('List agent schedules error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to list schedules' });
+    }
+  }));
+
+  app.post('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const body = await readJsonBody<AgentScheduleInput>(request);
+      if (!body) return reply.code(400).send({ error: 'A schedule body is required' });
+
+      const { schedule, schedules } = await upsertAgentSchedule(
+        session.tenantDbName,
+        agent,
+        body,
+        String(user._id),
+      );
+      return reply.code(body.id ? 200 : 201).send({ schedule, schedules });
+    } catch (error) {
+      // Validation failures here are the operator's cron, not a server fault.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/^(name|message) is required|cron|interval|schedule/i.test(message)) {
+        return reply.code(400).send({ error: message });
+      }
+      logger.error('Save agent schedule error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to save schedule' });
+    }
+  }));
+
+  app.delete('/agents/:agentId/schedules/:scheduleId', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, scheduleId } = request.params as { agentId: string; scheduleId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const schedules = await deleteAgentSchedule(session.tenantDbName, agent, scheduleId, String(user._id));
+      return reply.code(200).send({ schedules });
+    } catch (error) {
+      logger.error('Delete agent schedule error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to delete schedule' });
+    }
+  }));
+
+  app.post('/agents/:agentId/schedules/:scheduleId/run', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, scheduleId } = request.params as { agentId: string; scheduleId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      if (!agent.publishedVersion) {
+        return reply.code(409).send({
+          error: 'Publish the agent first — a scheduled run always uses the published version',
+        });
+      }
+
+      const schedule = readSchedules(agent).find((entry) => entry.id === scheduleId);
+      if (!schedule) return reply.code(404).send({ error: 'Schedule not found' });
+
+      // A manual run is awaited (the operator is watching) but must NOT advance
+      // `nextRunAt` — testing a schedule should not skip its next real fire.
+      const result = await runAgentSchedule({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId: agent.projectId,
+        agent,
+        schedule,
+        trigger: 'manual',
+        userId: String(user._id),
+      });
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      const guardrail = sendAgentGuardrailBlock(reply, error);
+      if (guardrail) return guardrail;
+      logger.error('Manual schedule run error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to run schedule' });
+    }
+  }));
+
+  // ── Code export ────────────────────────────────────────────────────────
+
+  app.post('/agents/:agentId/codegen', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const body = await readJsonBody<{
+        target?: AgentCodegenTarget;
+        packageName?: string;
+        consoleBaseUrl?: string;
+        includeDockerfile?: boolean;
+        version?: number;
+        /** `zip` streams an archive; anything else returns the file list as JSON. */
+        format?: 'zip' | 'json';
+      }>(request);
+
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const target = body?.target ?? 'server';
+      if (!['cli', 'server', 'worker', 'lambda'].includes(target)) {
+        return reply.code(400).send({ error: `Unknown target "${target}"` });
+      }
+
+      let config = agent.config;
+      if (typeof body?.version === 'number') {
+        const snapshot = await getAgentVersion(session.tenantDbName, agentId, body.version);
+        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
+        config = snapshot.snapshot.config;
+      }
+
+      // Resolve the prompt the way the runtime does before handing it to the
+      // generator. Without this an agent backed by a shared prompt exports with
+      // no system prompt at all, and one with variables exports the hollow
+      // template — both produce a project that quietly behaves differently from
+      // the agent it was generated from.
+      const exportConfig = await resolveConfigForExport(session.tenantDbName, projectId, agent, config);
+
+      const result = generateAgentProject(agent, exportConfig, {
+        target,
+        packageName: body?.packageName,
+        consoleBaseUrl: body?.consoleBaseUrl,
+        includeDockerfile: body?.includeDockerfile,
+      });
+
+      if (body?.format === 'zip') {
+        const { default: JSZip } = await import('jszip');
+        const zip = new JSZip();
+        const root = zip.folder(result.rootDir);
+        for (const file of result.files) root?.file(file.path, file.contents);
+        const buffer = await zip.generateAsync({ type: 'nodebuffer' });
+        return reply
+          .code(200)
+          .header('content-type', 'application/zip')
+          .header('content-disposition', `attachment; filename="${result.rootDir}.zip"`)
+          .send(buffer);
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Agent codegen error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to generate agent code' });
+    }
+  }));
+
   app.post('/agents/:agentId/publish', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
@@ -472,6 +814,260 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── Sessions ─────────────────────────────────────────────────────────
+  //
+  // A Session is the conversation record, presented under the name the
+  // Sessions page uses. Kept as its own route group rather than renaming
+  // `/conversations` above — nothing else in the codebase depends on that
+  // name yet, but adding rather than renaming means neither guess can be
+  // wrong about who else might.
+
+
+/**
+ * One row of the sessions table: what it is, what it cost, how long it worked.
+ *
+ * Totals come from the turns themselves — each one recorded its own tokens,
+ * price and server-measured latency when it ran (`persistSessionTurn`) — so a
+ * session listed months later shows the same numbers it showed live, at the
+ * prices that applied then rather than today's.
+ */
+function summariseConversation(conversation: IAgentConversation) {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let costUsd = 0;
+  let activeMs = 0;
+  let turns = 0;
+  // A turn that reported usage but no price leaves the total a lower bound,
+  // which the UI marks rather than presenting as exact.
+  let costComplete = true;
+
+  for (const message of conversation.messages ?? []) {
+    if (message.role !== 'assistant') continue;
+    turns += 1;
+    inputTokens += message.usage?.inputTokens ?? 0;
+    outputTokens += message.usage?.outputTokens ?? 0;
+    totalTokens += message.usage?.totalTokens ?? 0;
+    activeMs += message.latencyMs ?? 0;
+    if (message.usage?.costUsd === undefined) {
+      if (message.usage) costComplete = false;
+    } else {
+      costUsd += message.usage.costUsd;
+    }
+  }
+
+  return {
+    _id: String(conversation._id),
+    title: conversation.title,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    messageCount: conversation.messages?.length ?? 0,
+    turns,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    costUsd,
+    costComplete,
+    activeMs,
+    hasContext: Boolean(
+      conversation.metadata?.runtimeContext
+      && Object.keys(conversation.metadata.runtimeContext as Record<string, unknown>).length > 0,
+    ),
+  };
+}
+
+  app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const sessions = await listConversations(session.tenantDbName, agent.key, {
+        limit: 100,
+        projectId,
+      });
+      // Summarised here rather than shipped whole: every record carries its
+      // full transcript, and a hundred of those is megabytes of tool payloads
+      // sent so the list can render a row count. The session PAGE fetches the
+      // one transcript it actually shows.
+      return reply.code(200).send({ sessions: sessions.map(summariseConversation) });
+    } catch (error) {
+      logger.error('List agent sessions error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to list sessions' });
+    }
+  }));
+
+  app.post('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      // Session context is stamped with the dashboard user's identity the same
+      // way a per-message one is — `userId`/`source` stay server-owned, so a
+      // client cannot start a session that claims to be someone else.
+      const sessionContext = body.context && typeof body.context === 'object'
+        ? buildRuntimeContextFromRequest(body.context, request.headers, {
+          userId: session.userId,
+          source: 'playground',
+        })
+        : undefined;
+
+      const created = await createConversation(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        session.userId,
+        agent.key,
+        typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
+        sessionContext ? { runtimeContext: sessionContext } : undefined,
+      );
+      return reply.code(201).send({ session: created });
+    } catch (error) {
+      logger.error('Create agent session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to create session' });
+    }
+  }));
+
+  app.get('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, sessionId } = request.params as { agentId: string; sessionId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const found = await getConversationById(session.tenantDbName, sessionId);
+      // Scope check, not just existence — a session id valid for a sibling
+      // agent (or project) in the same tenant must 404 here too.
+      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
+        return reply.code(404).send({ error: 'Session not found' });
+      }
+      return reply.code(200).send({ session: found });
+    } catch (error) {
+      logger.error('Get agent session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to load session' });
+    }
+  }));
+
+  app.delete('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, sessionId } = request.params as { agentId: string; sessionId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const found = await getConversationById(session.tenantDbName, sessionId);
+      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
+        return reply.code(404).send({ error: 'Session not found' });
+      }
+      await deleteConversation(session.tenantDbName, sessionId);
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      logger.error('Delete agent session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to delete session' });
+    }
+  }));
+
+  /**
+   * The same run as `/chat`, reported as it happens.
+   *
+   * A playground that says only "working…" for forty seconds is asking the
+   * operator to trust it. Tool calls are the interesting part of an agent
+   * run — which tool, with what argument, how long — and they are precisely
+   * what a request/response POST cannot show until it is too late to matter.
+   *
+   * SSE over POST (rather than EventSource, which is GET-only) because the
+   * body carries the message, the session and the runtime context. The final
+   * `result` event repeats what `/chat` would have returned, so the client's
+   * completed-turn rendering is identical either way — this endpoint adds
+   * visibility, it does not fork the contract.
+   *
+   * `executePlaygroundChatLocal` is called directly, NOT the queue-routing
+   * `executePlaygroundChat`: the progress callback is a function and cannot
+   * cross the job queue. A run that would have been routed to another node
+   * runs here instead, which is the right trade for a dashboard-only debug
+   * surface and the reason this is not the path production traffic takes.
+   */
+  app.post('/agents/:agentId/chat/stream', withApiRequestContext(async (request, reply) => {
+    const { projectId, user, session } = await requireProjectContextForRequest(request);
+    const { agentId } = request.params as { agentId: string };
+    const body = readJsonBody<Record<string, unknown>>(request);
+
+    if (typeof body.message !== 'string') {
+      return reply.code(400).send({ error: 'Message is required' });
+    }
+    const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+    if (!agent) {
+      return reply.code(404).send({ error: 'Agent not found' });
+    }
+
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    // Proxies that buffer would defeat the whole point of this endpoint.
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    reply.raw.flushHeaders?.();
+
+    let closed = false;
+    reply.raw.on('close', () => { closed = true; });
+    const send = (event: string, data: unknown) => {
+      if (closed) return;
+      try {
+        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        closed = true;
+      }
+    };
+
+    try {
+      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: session.userId,
+        source: 'playground',
+      });
+
+      const result = await executePlaygroundChatLocal({
+        agentKey: agent.key,
+        runtimeContext,
+        projectId,
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        userMessage: body.message,
+        ...(typeof body.version === 'number' ? { version: body.version } : {}),
+        ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+        onToolEvent: (event) => send('tool', event),
+        onTextChunk: (text) => send('text', { text }),
+      });
+
+      send('result', result);
+    } catch (error) {
+      if (error instanceof AgentGuardrailBlockedError) {
+        logger.info('Agent playground stream blocked by guardrail', {
+          guardrailKey: error.guardrailKey,
+          hook: error.hook,
+        });
+      } else {
+        logger.error('Agent playground stream error', { error });
+      }
+      // The status line is long gone by now, so the error travels as an
+      // event. A client that only listened for `result` would otherwise hang
+      // until the socket closed and call it a network fault.
+      send('error', {
+        error: error instanceof Error ? error.message : 'Agent chat failed',
+      });
+    } finally {
+      if (!closed) reply.raw.end();
+    }
+    return reply;
+  }));
+
   app.post('/agents/:agentId/chat', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
@@ -497,6 +1093,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const result = await executePlaygroundChat({
         agentKey: agent.key,
         runtimeContext,
+        // Ignored server-side when conversationId is set (history loads from
+        // the session instead) — still parsed so a stateless call (no
+        // conversationId) keeps working exactly as before.
         history: Array.isArray(body.history)
           ? body.history
             .filter((item): item is { content: string; role: string } =>
@@ -515,6 +1114,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: session.tenantDbName,
         tenantId: session.tenantId,
         userMessage: body.message,
+        ...(typeof body.version === 'number' ? { version: body.version } : {}),
+        ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
       });
 
       return reply.code(200).send(result);

@@ -1,0 +1,35 @@
+.section {
+  /* Deep links land here; clear the sticky page chrome above. */
+  scroll-margin-block-start: 5rem;
+}
+
+.label {
+  width: 14rem;
+  flex-shrink: 0;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  /*
+   * Inputs stop at a reading width even on a wide monitor — a 1600px-wide
+   * text field is harder to scan, not easier.
+   */
+  max-width: 52rem;
+}
+
+@media (max-width: 62em) {
+  .section {
+    flex-direction: column;
+    gap: var(--app-space-2);
+  }
+
+  .label {
+    width: 100%;
+  }
+
+  .content {
+    width: 100%;
+    max-width: none;
+  }
+}

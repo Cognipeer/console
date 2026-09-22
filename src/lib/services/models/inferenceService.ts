@@ -2519,12 +2519,18 @@ export async function handleEmbeddingRequest(params: {
   );
   const latencyMs = Date.now() - start;
 
+  // Embedding APIs reached through LangChain's `embedDocuments` return only
+  // vectors — no usage. The caller-supplied count wins when there is one;
+  // otherwise the input is estimated at ~4 chars/token (the same rule the
+  // chat gateway uses for its pre-flight estimate). Falling back to 0, as
+  // this did, recorded every embedding at 0 tokens and $0 — which is why
+  // Model Hub showed embedding calls with no usage at all.
   const tokenEstimate =
     typeof body.input_tokens === 'number'
       ? body.input_tokens
       : typeof body.inputTokenCount === 'number'
         ? body.inputTokenCount
-        : 0;
+        : inputs.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0);
 
   const usage: TokenUsage = {
     inputTokens: tokenEstimate,

@@ -39,6 +39,7 @@ import { ConfigMixin } from './sqlite/config.mixin';
 import { McpServerMixin } from './sqlite/mcp-server.mixin';
 import { ToolMixin } from './sqlite/tool.mixin';
 import { AgentMixin } from './sqlite/agent.mixin';
+import { SkillMixin } from './sqlite/skill.mixin';
 import { VectorMigrationMixin } from './sqlite/vector-migration.mixin';
 import { BrowserMixin } from './sqlite/browser.mixin';
 import { CrawlerMixin } from './sqlite/crawler.mixin';
@@ -77,7 +78,7 @@ const AlertingBase = IncidentMixin(AlertMixin(PiiPolicyMixin(EvalAnalysisBase)))
 const RagBase = RagReindexMixin(RagMixin(AlertingBase));
 const KnowledgeBase = MemoryMixin(WebSearchMixin(RerankerMixin(RagBase)));
 const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
-const ToolingBase = VectorMigrationMixin(AgentMixin(ToolMixin(PlatformBase)));
+const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
 const BulkBase = UsageRollupMixin(BatchJobMixin(AdvancedBase));
 const PricingBase = ExternalModelPricingMixin(BulkBase);
