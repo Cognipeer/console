@@ -24,6 +24,7 @@ interface PiiPolicyView {
 }
 
 type DefaultAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
+type Engine = 'regex' | 'cognipeer';
 
 interface Props {
   opened: boolean;
@@ -34,10 +35,12 @@ interface Props {
 export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Props) {
   const t = useTranslations('pii');
   const tAct = useTranslations('pii.actions');
+  const tEngine = useTranslations('pii.engines');
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [defaultAction, setDefaultAction] = useState<DefaultAction>('detect');
+  const [engine, setEngine] = useState<Engine>('regex');
   const [enabled, setEnabled] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -52,6 +55,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
     setName('');
     setDescription('');
     setDefaultAction('detect');
+    setEngine('regex');
     setEnabled(true);
   };
 
@@ -66,6 +70,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
           name: name.trim(),
           description: description.trim() || undefined,
           defaultAction,
+          engine,
           enabled,
         }),
       });
@@ -99,6 +104,14 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
         <SummaryKV
           label={t('detail.basics.name')}
           value={name || <span className="ds-faint">—</span>}
+        />
+        <SummaryKV
+          label={t('detail.basics.engine')}
+          value={
+            <span className="ds-badge">
+              {tEngine(engine)}
+            </span>
+          }
         />
         <SummaryKV
           label={t('detail.basics.defaultAction')}
@@ -176,6 +189,22 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
 
       <FormSection
         number={2}
+        title={t('detail.basics.engine')}
+        description={t('detail.basics.engineHelper')}
+        done
+      >
+        <ChipPicker<Engine>
+          options={[
+            { value: 'regex', label: tEngine('regex') },
+            { value: 'cognipeer', label: tEngine('cognipeer') },
+          ]}
+          value={engine}
+          onChange={(v) => setEngine(v as Engine)}
+        />
+      </FormSection>
+
+      <FormSection
+        number={3}
         title={t('detail.basics.defaultAction')}
         description="What should happen when the policy detects PII."
         done
@@ -193,7 +222,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
         />
       </FormSection>
 
-      <FormSection number={3} title={t('detail.basics.enabled')} done>
+      <FormSection number={4} title={t('detail.basics.enabled')} done>
         <ToggleList>
           <ToggleRow
             label={t('detail.basics.enabled')}

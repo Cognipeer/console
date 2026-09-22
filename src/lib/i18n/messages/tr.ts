@@ -462,6 +462,8 @@ export const tr: typeof en = {
         key: 'Politika anahtarı',
         enabled: 'Politika etkin',
         defaultAction: 'Varsayılan aksiyon',
+        engine: 'Tespit motoru',
+        engineHelper: 'Bu politikanın taramasını hangi dedektörün çalıştıracağı. Motor değiştirildiğinde kategoriler yeni motorun kendi varsayılanlarına sıfırlanır — iki motor aynı kategori kelime dağarcığını paylaşmaz.',
         languages: 'Diller',
         languagesHelper: 'Desenleri belirli dillere kısıtlayın. Global desenler her zaman çalışır.',
       },
@@ -523,6 +525,12 @@ export const tr: typeof en = {
       mask: 'Maskele',
       block: 'Engelle',
       tokenize: 'Tokenize (geri alınabilir)',
+    },
+    engines: {
+      regex: 'Regex (yerleşik)',
+      regexDescription: 'Bu konsolun kendi köklü dedektörü — regex/sağlama desenleri, opsiyonel sözlük ve NER katmanlarıyla.',
+      cognipeer: 'cognipeer-pii',
+      cognipeerDescription: 'Çevrimdışı, paket içi @cognipeer/pii — farklı bir kimlik kelime dağarcığına sahip kendi 31 kategorilik katalogu.',
     },
     languages: {
       global: 'Global',

@@ -2525,6 +2525,8 @@ export const en = {
         key: 'Policy key',
         enabled: 'Policy enabled',
         defaultAction: 'Default action',
+        engine: 'Detection engine',
+        engineHelper: 'Which detector runs this policy\'s scan. Switching resets categories to the new engine\'s own defaults — the two engines do not share a category vocabulary.',
         languages: 'Languages',
         languagesHelper: 'Restrict patterns to specific languages. Global patterns always run.',
       },
@@ -2586,6 +2588,12 @@ export const en = {
       mask: 'Mask',
       block: 'Block',
       tokenize: 'Tokenize (reversible)',
+    },
+    engines: {
+      regex: 'Regex (built-in)',
+      regexDescription: 'This console\'s own long-standing detector — regex/checksum patterns, with optional dictionary and NER layers.',
+      cognipeer: 'cognipeer-pii',
+      cognipeerDescription: 'Offline, bundled @cognipeer/pii package — its own 31-category catalog with a different id vocabulary.',
     },
     languages: {
       global: 'Global',

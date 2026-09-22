@@ -3312,6 +3312,31 @@ export interface ICrawlResult {
  */
 export type PiiAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
 
+/**
+ * Which detector actually runs a policy's scan. 'regex' (default, absent on
+ * every policy created before this field existed) is the console's own
+ * long-standing engine (`services/pii/detector.ts`) — regex/checksum,
+ * opt-in dictionary and NER layers, tuned by `IPiiPolicy.detection`.
+ * 'cognipeer' delegates the whole scan to the bundled, offline
+ * `@cognipeer/pii` npm package instead (`services/pii/cognipeerEngine.ts`) —
+ * a genuinely different category catalog (31 ids, its own id vocabulary —
+ * e.g. `tc_kimlik` there vs `tckn` here), so `IPiiPolicy.categories` is
+ * interpreted entirely differently depending on this field. Extensible: a
+ * future third engine (e.g. a cloud PII API) is one more member here plus one
+ * more file under `services/pii/`, same shape as this one.
+ *
+ * DELIBERATELY ONE ENGINE PER POLICY, not a list run together: unlike two
+ * guardrail hook families that can be genuinely complementary (see
+ * `cognipeer_guardrail_moderation`/`_prompt_shield`), two PII engines mostly
+ * cover the SAME ground (email, phone, national id, ...), so running both
+ * would mean the same span gets found — and its redaction proposed — twice,
+ * with no established conflict-resolution for it the way `FAMILY_PRECEDENCE`
+ * resolves an overlap WITHIN one engine's own findings. An operator picks
+ * one; switching later means re-picking categories from the new engine's own
+ * catalog, not merging two.
+ */
+export type PiiEngine = 'regex' | 'cognipeer';
+
 /** Language scope for built-in patterns. 'global' = language-independent. */
 export type PiiLanguage = 'global' | 'en' | 'tr' | 'de' | 'fr' | 'es' | 'it' | 'pt' | 'ar' | 'ja' | 'zh';
 
@@ -3357,7 +3382,11 @@ export interface IPiiPolicy {
   description?: string;
   /** Default action applied to findings from this policy. */
   defaultAction: PiiAction;
-  /** Built-in categories toggled on/off. Keys are category ids (e.g. 'email'). */
+  /** Which detector runs this policy. Absent = 'regex' — see `PiiEngine`'s
+   *  own doc comment for why this changes what `categories` below means. */
+  engine?: PiiEngine;
+  /** Built-in categories toggled on/off. Keys are category ids (e.g. 'email').
+   *  A DIFFERENT id vocabulary per `engine` — see `PiiEngine`. */
   categories: Record<string, boolean>;
   /** Custom regex patterns defined per tenant. */
   customPatterns?: IPiiCustomPattern[];

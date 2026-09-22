@@ -6,11 +6,12 @@ import type {
   IPiiPolicy,
   IPiiCustomPattern,
   PiiAction,
+  PiiEngine,
   PiiLanguage,
 } from '@/lib/database';
 import type { PiiSeverity } from './categories';
 
-export type { PiiAction, PiiLanguage, IPiiCustomPattern };
+export type { PiiAction, PiiEngine, PiiLanguage, IPiiCustomPattern };
 
 /** A single occurrence of PII in scanned text. */
 export interface PiiFinding {
@@ -93,11 +94,27 @@ export interface PiiServicePolicyView extends Omit<IPiiPolicy, '_id'> {
   id: string;
 }
 
+/** One category as shown to an operator — the shape both engines' catalogs
+ *  (`services/pii/categories.ts`'s `PII_CATEGORIES` and
+ *  `cognipeerCategories.ts`'s `COGNIPEER_PII_CATEGORIES`) are normalised
+ *  into, so the UI (`PiiPolicyEditor`) never has to know which one it is
+ *  rendering. */
+export interface CategoryCatalogEntry {
+  id: string;
+  label: string;
+  description: string;
+  languages: PiiLanguage[];
+  severity: 'low' | 'medium' | 'high';
+  defaultEnabled: boolean;
+}
+
 export interface CreatePiiPolicyInput {
   name: string;
   description?: string;
   projectId?: string;
   defaultAction: PiiAction;
+  /** Absent = 'regex'. See `PiiEngine`'s own doc comment. */
+  engine?: PiiEngine;
   categories: Record<string, boolean>;
   customPatterns?: IPiiCustomPattern[];
   languages?: PiiLanguage[];
@@ -109,6 +126,7 @@ export interface UpdatePiiPolicyInput {
   name?: string;
   description?: string;
   defaultAction?: PiiAction;
+  engine?: PiiEngine;
   categories?: Record<string, boolean>;
   customPatterns?: IPiiCustomPattern[];
   languages?: PiiLanguage[];
@@ -126,6 +144,10 @@ export interface DetectInput {
   languages?: PiiLanguage[];
   /** Locale for finding labels/messages. Default: 'en'. */
   locale?: PiiLanguage;
+  /** Which detector runs this ad-hoc scan. Absent = 'regex' — the ad-hoc
+   *  routes have no stored policy to read it from, so a caller testing a
+   *  cognipeer-engine draft (not yet saved) must pass it explicitly. */
+  engine?: PiiEngine;
 }
 
 export interface RedactInput extends DetectInput {

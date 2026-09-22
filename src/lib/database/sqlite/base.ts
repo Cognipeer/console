@@ -1009,6 +1009,11 @@ export class SQLiteProviderBase {
     // `mapPiiPolicyRow` reads back as `undefined` — the detector's default
     // ('pattern' mode) then matches pre-v2 behaviour exactly.
     this.ensureTableColumn(db, TABLES.piiPolicies, 'detection', 'detection TEXT');
+    // PII engine selector: which detector runs the policy's scan ('regex' /
+    // 'cognipeer' — see `PiiEngine`'s own doc comment). Absent on old rows;
+    // `mapPiiPolicyRow` reads that back as `undefined`, which every caller
+    // (`scanWithPolicy`, etc.) treats as 'regex' — pre-existing behaviour.
+    this.ensureTableColumn(db, TABLES.piiPolicies, 'engine', 'engine TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

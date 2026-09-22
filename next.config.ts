@@ -65,6 +65,9 @@ const nextConfig: NextConfig = {
     // correctly when the package is loaded unbundled — webpack rewrites
     // `__dirname` for anything it bundles.
     '@cognipeer/guardrail',
+    // The 'cognipeer' PII engine (services/pii/cognipeerEngine.ts) — same
+    // reason as @cognipeer/guardrail directly above.
+    '@cognipeer/pii',
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),

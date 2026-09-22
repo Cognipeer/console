@@ -309,6 +309,7 @@ export type {
   IPiiPolicy,
   IPiiCustomPattern,
   PiiAction,
+  PiiEngine,
   PiiLanguage,
   PiiDetectionConfig,
   IAlertRule,

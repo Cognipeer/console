@@ -20,10 +20,10 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       db.prepare(`
         INSERT INTO ${TABLES.piiPolicies}
-        (id, tenantId, projectId, key, name, description, defaultAction,
+        (id, tenantId, projectId, key, name, description, defaultAction, engine,
          categories, customPatterns, languages, enabled, metadata, detection,
          createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @defaultAction,
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @defaultAction, @engine,
          @categories, @customPatterns, @languages, @enabled, @metadata, @detection,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
@@ -34,6 +34,7 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         name: policy.name,
         description: policy.description ?? null,
         defaultAction: policy.defaultAction,
+        engine: policy.engine ?? null,
         categories: this.toJson(policy.categories ?? {}),
         customPatterns: this.toJson(policy.customPatterns ?? []),
         languages: this.toJson(policy.languages ?? []),
@@ -61,6 +62,7 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.defaultAction !== undefined) { sets.push('defaultAction = @defaultAction'); params.defaultAction = data.defaultAction; }
+      if (data.engine !== undefined) { sets.push('engine = @engine'); params.engine = data.engine; }
       if (data.categories !== undefined) { sets.push('categories = @categories'); params.categories = this.toJson(data.categories); }
       if (data.customPatterns !== undefined) { sets.push('customPatterns = @customPatterns'); params.customPatterns = this.toJson(data.customPatterns); }
       if (data.languages !== undefined) { sets.push('languages = @languages'); params.languages = this.toJson(data.languages); }
@@ -129,6 +131,7 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         name: r.name as string,
         description: r.description as string | undefined,
         defaultAction: r.defaultAction as IPiiPolicy['defaultAction'],
+        engine: (r.engine as IPiiPolicy['engine']) ?? undefined,
         categories: this.parseJson(r.categories, {}),
         customPatterns: this.parseJson(r.customPatterns, []),
         languages: this.parseJson(r.languages, []),

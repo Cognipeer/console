@@ -51,7 +51,13 @@ interface Props {
   onLanguagesChange: (next: string[]) => void;
   defaultAction: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
   onDefaultActionChange: (next: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize') => void;
-  /** Loaded category catalog from /api/pii/categories. */
+  /** Which detector runs this policy's scan. Changing it is the caller's cue
+   *  to reset `categories` to the new engine's own defaults and reload
+   *  `catalog` — see `PiiEngine`'s own doc comment for why the two engines
+   *  don't share a category vocabulary. */
+  engine: 'regex' | 'cognipeer';
+  onEngineChange: (next: 'regex' | 'cognipeer') => void;
+  /** Loaded category catalog from /api/pii/categories — already scoped to `engine`. */
   catalog: PiiCatalogEntry[];
 }
 
@@ -73,6 +79,7 @@ function isValidRegex(source: string, flags?: string): boolean {
 export default function PiiPolicyEditor(props: Props) {
   const t = useTranslations('pii');
   const tAct = useTranslations('pii.actions');
+  const tEngine = useTranslations('pii.engines');
   const tLang = useTranslations('pii.languages');
   const tSev = useTranslations('pii.severity');
 
@@ -116,9 +123,20 @@ export default function PiiPolicyEditor(props: Props) {
 
   return (
     <Stack gap="lg">
-      {/* Default action + Languages */}
+      {/* Engine + Default action + Languages */}
       <Paper p="md" withBorder radius="sm">
         <Group grow align="flex-start">
+          <Select
+            label={t('detail.basics.engine')}
+            description={t('detail.basics.engineHelper')}
+            value={props.engine}
+            onChange={(v) => v && props.onEngineChange(v as Props['engine'])}
+            data={[
+              { value: 'regex', label: tEngine('regex') },
+              { value: 'cognipeer', label: tEngine('cognipeer') },
+            ]}
+            allowDeselect={false}
+          />
           <Select
             label={t('detail.basics.defaultAction')}
             value={props.defaultAction}
