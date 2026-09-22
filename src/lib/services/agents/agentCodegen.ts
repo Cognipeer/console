@@ -85,12 +85,6 @@ function slug(input: string): string {
     );
 }
 
-/** JS identifier derived from a key, safe to use as a const name. */
-function identifier(input: string, fallback: string): string {
-    const camel = slug(input).replace(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
-    return /^[a-z][a-zA-Z0-9]*$/.test(camel) ? camel : fallback;
-}
-
 /** `JSON.stringify` with the indentation the generated files use. */
 function literal(value: unknown, indent = 2): string {
     return JSON.stringify(value, null, indent) ?? 'undefined';

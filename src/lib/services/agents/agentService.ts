@@ -14,11 +14,9 @@ import { agentEntityId } from './agentEntityId';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     Message as AgentSdkMessage,
-    RuntimeProfile as AgentSdkRuntimeProfile,
     SmartAgentEvent as AgentSdkEvent,
     SmartState as AgentSdkSmartState,
     SubagentDef as AgentSdkSubagentDef,
-    ToolResponseRetentionPolicy as AgentSdkToolResponseRetentionPolicy,
     ToolInterface as AgentSdkToolInterface,
     TraceSinkConfig as AgentSdkTraceSinkConfig,
     TraceSessionFile,

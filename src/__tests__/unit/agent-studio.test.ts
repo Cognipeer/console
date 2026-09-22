@@ -21,6 +21,11 @@ import {
     renderPromptTemplate,
     shouldRenderInlinePrompt,
 } from '@/lib/services/agents/promptVariables';
+import {
+    computeScheduleNextRun,
+    readSchedules,
+    validateAgentSchedule,
+} from '@/lib/services/agents/agentScheduleService';
 
 const AGENT = { key: 'sre-triage', name: 'SRE Triage', description: 'Triages Jira incidents', status: 'active' as const };
 
@@ -380,5 +385,39 @@ describe('prompt variables', () => {
         expect(shouldRenderInlinePrompt({})).toBe(false);
         expect(shouldRenderInlinePrompt({ systemPrompt: 'Braces {{like this}} stay literal' })).toBe(false);
         expect(shouldRenderInlinePrompt({ promptVariables: { x: '1' } })).toBe(true);
+    });
+});
+
+describe('agent schedules', () => {
+    const BASE = { id: 's1', name: 'Nightly digest', message: 'Summarise today.', enabled: true };
+
+    it('rejects a schedule that cannot run', () => {
+        expect(validateAgentSchedule({ ...BASE, name: '', mode: 'cron', cron: '0 2 * * *' })).toMatch(/name/i);
+        expect(validateAgentSchedule({ ...BASE, message: '', mode: 'cron', cron: '0 2 * * *' })).toMatch(/message/i);
+        expect(validateAgentSchedule({ ...BASE, mode: 'cron', cron: 'not a cron' })).toMatch(/cron/i);
+        expect(validateAgentSchedule({ ...BASE, mode: 'cron', cron: '0 2 * * *' })).toBeNull();
+    });
+
+    it('computes the next fire from the cron, after the last run', () => {
+        const from = new Date('2026-09-22T01:00:00.000Z');
+        const next = computeScheduleNextRun({ ...BASE, mode: 'cron', cron: '0 2 * * *' }, from);
+        expect(next?.toISOString()).toBe('2026-09-22T02:00:00.000Z');
+
+        // A run that just happened must not re-fire on the same tick.
+        const after = computeScheduleNextRun(
+            { ...BASE, mode: 'cron', cron: '0 2 * * *', lastRunAt: new Date('2026-09-22T02:00:00.000Z') },
+            new Date('2026-09-22T02:00:01.000Z'),
+        );
+        expect(after?.toISOString()).toBe('2026-09-23T02:00:00.000Z');
+    });
+
+    it('never fires while disabled', () => {
+        expect(computeScheduleNextRun({ ...BASE, enabled: false, mode: 'cron', cron: '0 2 * * *' })).toBeNull();
+    });
+
+    it('reads schedules off agent metadata without disturbing its neighbours', () => {
+        expect(readSchedules({ metadata: undefined })).toEqual([]);
+        expect(readSchedules({ metadata: { a2a: { enabled: true } } })).toEqual([]);
+        expect(readSchedules({ metadata: { schedules: [BASE] } })).toHaveLength(1);
     });
 });

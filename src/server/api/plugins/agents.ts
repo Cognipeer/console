@@ -32,6 +32,14 @@ import {
   type AgentCodegenTarget,
 } from '@/lib/services/agents/agentCodegen';
 import { buildPromptVariables, renderPromptTemplate } from '@/lib/services/agents/promptVariables';
+import {
+  computeScheduleNextRun,
+  deleteAgentSchedule,
+  readSchedules,
+  runAgentSchedule,
+  upsertAgentSchedule,
+  type AgentScheduleInput,
+} from '@/lib/services/agents/agentScheduleService';
 import { getDatabase } from '@/lib/database';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
@@ -543,6 +551,114 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('Import agent error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Failed to import agent' });
+    }
+  }));
+
+  // ── Schedules ──────────────────────────────────────────────────────────
+
+  app.get('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const schedules = readSchedules(agent);
+      return reply.code(200).send({
+        schedules,
+        // Recomputed for display rather than trusted from storage: a stored
+        // nextRunAt goes stale the moment the cron is edited elsewhere.
+        nextRuns: Object.fromEntries(
+          schedules.map((schedule) => [schedule.id, computeScheduleNextRun(schedule)?.toISOString() ?? null]),
+        ),
+        publishedVersion: agent.publishedVersion ?? null,
+      });
+    } catch (error) {
+      logger.error('List agent schedules error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to list schedules' });
+    }
+  }));
+
+  app.post('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const body = await readJsonBody<AgentScheduleInput>(request);
+      if (!body) return reply.code(400).send({ error: 'A schedule body is required' });
+
+      const { schedule, schedules } = await upsertAgentSchedule(
+        session.tenantDbName,
+        agent,
+        body,
+        String(user._id),
+      );
+      return reply.code(body.id ? 200 : 201).send({ schedule, schedules });
+    } catch (error) {
+      // Validation failures here are the operator's cron, not a server fault.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/^(name|message) is required|cron|interval|schedule/i.test(message)) {
+        return reply.code(400).send({ error: message });
+      }
+      logger.error('Save agent schedule error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to save schedule' });
+    }
+  }));
+
+  app.delete('/agents/:agentId/schedules/:scheduleId', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, scheduleId } = request.params as { agentId: string; scheduleId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const schedules = await deleteAgentSchedule(session.tenantDbName, agent, scheduleId, String(user._id));
+      return reply.code(200).send({ schedules });
+    } catch (error) {
+      logger.error('Delete agent schedule error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to delete schedule' });
+    }
+  }));
+
+  app.post('/agents/:agentId/schedules/:scheduleId/run', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, scheduleId } = request.params as { agentId: string; scheduleId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      if (!agent.publishedVersion) {
+        return reply.code(409).send({
+          error: 'Publish the agent first — a scheduled run always uses the published version',
+        });
+      }
+
+      const schedule = readSchedules(agent).find((entry) => entry.id === scheduleId);
+      if (!schedule) return reply.code(404).send({ error: 'Schedule not found' });
+
+      // A manual run is awaited (the operator is watching) but must NOT advance
+      // `nextRunAt` — testing a schedule should not skip its next real fire.
+      const result = await runAgentSchedule({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId: agent.projectId,
+        agent,
+        schedule,
+        trigger: 'manual',
+        userId: String(user._id),
+      });
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      const guardrail = sendAgentGuardrailBlock(reply, error);
+      if (guardrail) return guardrail;
+      logger.error('Manual schedule run error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to run schedule' });
     }
   }));
 

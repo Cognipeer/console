@@ -2277,6 +2277,50 @@ export interface IAgentToolBinding {
   config?: Record<string, unknown>;
 }
 
+/**
+ * A recurring run of an agent.
+ *
+ * Schedules live in `agent.metadata.schedules` rather than their own
+ * collection: they are small, always read alongside the agent, and never
+ * queried independently. A run's record is the conversation it creates —
+ * stamped with the schedule id in its metadata — so history came for free
+ * rather than needing a second write path.
+ *
+ * The timing fields are deliberately identical to `ICrawlerSchedule` so both
+ * features share `schedulePlanner`; cron semantics that diverge between two
+ * schedulers in the same product is a support ticket waiting to happen.
+ */
+export interface IAgentSchedule {
+  /** Stable id, generated on create. Stamped onto every run's conversation. */
+  id: string;
+  name: string;
+  enabled: boolean;
+  mode: CrawlerScheduleMode;
+  /** interval mode: seconds between runs. Minimum 60. */
+  intervalSeconds?: number;
+  /** cron mode: 5- or 6-field cron expression (UTC). */
+  cron?: string;
+  startAt?: Date;
+  endAt?: Date;
+  lastRunAt?: Date;
+  nextRunAt?: Date;
+  /** The message sent to the agent on each fire. Supports prompt variables. */
+  message: string;
+  /**
+   * Per-run values merged into the prompt-variable context, exactly as a live
+   * caller's `runtimeContext.metadata` would be. A nightly digest and an hourly
+   * triage can therefore share one prompt and differ only here.
+   */
+  variables?: Record<string, string>;
+  /** Outcome of the most recent fire, for the schedule list. */
+  lastStatus?: 'ok' | 'error';
+  lastError?: string;
+  /** Conversation created by the most recent fire. */
+  lastConversationId?: string;
+  createdBy?: string;
+  createdAt?: Date;
+}
+
 export interface IAgent {
   _id?: ObjectId | string;
   tenantId: string;

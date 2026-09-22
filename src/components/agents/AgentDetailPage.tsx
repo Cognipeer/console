@@ -65,6 +65,7 @@ import {
   IconAlertTriangle,
   IconUsers,
   IconPackageExport,
+  IconCalendarTime,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -88,6 +89,7 @@ import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
 import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
 import AgentExportPanel from './studio/AgentExportPanel';
 import PromptVariablesEditor from './studio/PromptVariablesEditor';
+import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import type {
   IAgentRuntimeConfig,
   IAgentStructuredOutput,
@@ -1223,6 +1225,11 @@ export default function AgentDetailPage() {
               {t('tabs.versions')}
             </Tabs.Tab>
           ) : null}
+          {!isConnected ? (
+            <Tabs.Tab value="schedules" leftSection={<IconCalendarTime size={14} />}>
+              Schedules
+            </Tabs.Tab>
+          ) : null}
           <Tabs.Tab value="export" leftSection={<IconPackageExport size={14} />}>
             Export
           </Tabs.Tab>
@@ -1323,6 +1330,16 @@ export default function AgentDetailPage() {
             <Group justify="flex-end" mt="md">
               <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
             </Group>
+          </SectionCard>
+        </Tabs.Panel>
+
+        {/* ── Schedules Tab ───────────────────────────────────── */}
+        <Tabs.Panel value="schedules">
+          <SectionCard
+            title="Recurring runs"
+            description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
+          >
+            <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
           </SectionCard>
         </Tabs.Panel>
 

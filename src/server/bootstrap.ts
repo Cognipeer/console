@@ -30,6 +30,7 @@ import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsum
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
+import { startAgentScheduler } from '@/lib/services/agents/agentScheduler';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
 import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
@@ -303,6 +304,7 @@ async function runBootstrap(): Promise<void> {
   startPollScheduler();
   startAlertScheduler();
   startCrawlerScheduler();
+  startAgentScheduler();
   startAnalysisScheduler();
   startRedTeamScheduler();
 

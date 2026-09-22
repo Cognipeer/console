@@ -379,6 +379,7 @@ export type {
   IAgent,
   IAgentConfig,
   IAgentConversation,
+  IAgentSchedule,
   IAgentToolBinding,
   IAgentVersion,
   AgentStatus,
