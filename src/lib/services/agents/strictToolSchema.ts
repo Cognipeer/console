@@ -23,9 +23,9 @@
  *  - a free-form object/record/any becomes a JSON-encoded STRING, which
  *    `restore` parses back into the object the executor expects.
  *
- * Only applied when the provider will actually use strict mode, so agents
- * without structured output — and providers that never go strict — keep their
- * tools exactly as they were.
+ * `withStrictToolCalling` applies it at the model's `bindTools` — the one
+ * point every tool (the agent's and agent-sdk's own) passes through — for
+ * every provider that supports strict tool calling.
  */
 
 import { z, type ZodTypeAny } from 'zod';
@@ -141,39 +141,111 @@ export function toStrictCompatible(schema: ZodTypeAny): StrictTransform {
     }
 }
 
-interface InvokableTool {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyFn = (...args: any[]) => any;
+interface BindableModel {
+    bindTools?: AnyFn;
+    invoke?: AnyFn;
+    stream?: AnyFn;
+    capabilities?: { strictToolCalling?: boolean };
+}
+interface ToolLike {
     name?: string;
     schema?: unknown;
-    invoke?: (input: unknown) => unknown;
     [key: string]: unknown;
+}
+type Restorers = Map<string, StrictTransform['restore']>;
+
+function isZod(schema: unknown): schema is ZodTypeAny {
+    return Boolean(schema) && typeof (schema as { safeParse?: unknown }).safeParse === 'function';
 }
 
 /**
- * Returns the tools with strict-compatible schemas and executors that
- * restore the original argument shape. A tool without a zod schema is
- * passed through unchanged.
+ * Restores one model message's tool-call arguments to the tools' ORIGINAL
+ * shape: the "not given" nulls dropped, JSON-encoded free-form values decoded.
+ * Handles both the LangChain form (`args` object) and the raw OpenAI form
+ * (`function.arguments` string). Exported for tests.
  */
-export function makeToolsStrictCompatible<T>(tools: T[]): T[] {
-    return tools.map((candidate) => {
-        const tool = candidate as unknown as InvokableTool;
-        const schema = tool?.schema as ZodTypeAny | undefined;
-        if (!schema || typeof (schema as { safeParse?: unknown }).safeParse !== 'function' || typeof tool.invoke !== 'function') {
-            return candidate;
+export function restoreToolCalls<M>(message: M, restorers: Restorers): M {
+    const m = message as unknown as { tool_calls?: Array<Record<string, unknown>> } | undefined;
+    if (!m || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) return message;
+    const toolCalls = m.tool_calls.map((call) => {
+        const fn = call.function as { name?: string; arguments?: unknown } | undefined;
+        const name = (call.name as string | undefined) ?? fn?.name;
+        const restore = name ? restorers.get(name) : undefined;
+        if (!restore) return call;
+        if (call.args && typeof call.args === 'object') return { ...call, args: restore(call.args) };
+        if (fn && typeof fn.arguments === 'string') {
+            try {
+                return { ...call, function: { ...fn, arguments: JSON.stringify(restore(JSON.parse(fn.arguments))) } };
+            } catch {
+                return call;
+            }
         }
-        const { schema: strictSchema, restore } = toStrictCompatible(schema);
-        const invoke = tool.invoke.bind(tool);
-        const execute = async (input: unknown) => invoke(restore(input));
-        const next: InvokableTool = {
-            ...tool,
-            schema: strictSchema,
-            invoke: execute,
-            call: execute,
-            run: execute,
-            func: execute,
-        };
-        // The SDK caches a LangChain conversion on the tool; it was built from
-        // the old schema and must not be reused.
-        delete next.__lcTool;
-        return next as unknown as T;
+        return call;
     });
+    return { ...(message as object), tool_calls: toolCalls } as M;
+}
+
+function withRestoredToolArgs<T extends object>(input: T, restorers: Restorers): T {
+    const model = input as T & BindableModel;
+    const wrapped = { ...model } as BindableModel & Record<string, unknown>;
+    if (typeof model.invoke === 'function') {
+        const invoke = model.invoke.bind(model);
+        wrapped.invoke = async (...args: unknown[]) => restoreToolCalls(await invoke(...args), restorers);
+    }
+    if (typeof model.stream === 'function') {
+        const stream = model.stream.bind(model);
+        wrapped.stream = async function* restored(...args: unknown[]) {
+            for await (const chunk of stream(...args) as AsyncIterable<unknown>) {
+                // Raw deltas pass through; the assembled message (the one the
+                // SDK keeps — it carries a role) is where the args are read.
+                const hasRole = Boolean(chunk && typeof chunk === 'object' && (chunk as { role?: unknown }).role);
+                yield hasRole ? restoreToolCalls(chunk, restorers) : chunk;
+            }
+        };
+    }
+    return wrapped as unknown as T;
+}
+
+/**
+ * Binds EVERY tool the provider sees in strict mode — the agent's own tools
+ * and the ones agent-sdk injects itself (manage_plan, open_skill,
+ * search_skills, get_tool_response, spawn_subagent, …), most of which have
+ * optional arguments and were not strict-compatible either. `bindTools` is
+ * the one chokepoint every tool passes through on its way to the provider,
+ * so it is the only place that can guarantee "everything".
+ *
+ * The provider sees the strict-shaped schemas; the model's tool calls are
+ * restored to the ORIGINAL shape before agent-sdk validates and runs them, so
+ * no tool — ours or the SDK's — ever sees a strict-mode null.
+ *
+ * Applied to providers that support strict tool calling (OpenAI-family), and
+ * there ALWAYS, not only with structured output: strict mode is what makes a
+ * tool call's arguments schema-valid by construction, which is worth having on
+ * every call. Providers without strict mode are left untouched.
+ */
+export function withStrictToolCalling<T extends object>(input: T): T {
+    const model = input as T & BindableModel;
+    if (!model || typeof model !== 'object' || typeof model.bindTools !== 'function') return input;
+    if (!model.capabilities?.strictToolCalling) return input;
+    const bindTools = model.bindTools.bind(model);
+    const wrapped = { ...model } as BindableModel & Record<string, unknown>;
+    wrapped.bindTools = (tools: unknown, options?: Record<string, unknown>) => {
+        const restorers: Restorers = new Map();
+        const shaped = (Array.isArray(tools) ? tools : []).map((candidate) => {
+            const tool = candidate as ToolLike;
+            if (!tool || !tool.name || !isZod(tool.schema)) return candidate;
+            const transform = toStrictCompatible(tool.schema);
+            restorers.set(tool.name, transform.restore);
+            const copy: ToolLike = { ...tool, schema: transform.schema };
+            // agent-sdk caches its LangChain conversion on the tool object;
+            // that cache was built from the original schema.
+            delete copy.__lcTool;
+            return copy;
+        });
+        const bound = bindTools(shaped, { ...(options ?? {}), strict: true });
+        return withRestoredToolArgs(bound as object, restorers);
+    };
+    return wrapped as unknown as T;
 }

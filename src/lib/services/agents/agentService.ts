@@ -103,7 +103,7 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
-import { makeToolsStrictCompatible } from './strictToolSchema';
+import { withStrictToolCalling } from './strictToolSchema';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
@@ -1348,21 +1348,11 @@ function createConsoleSdkAgent(
     createSmartAgentFn: typeof import('@cognipeer/agent-sdk').createSmartAgent,
     input: CreateConsoleSdkAgentInput,
 ) {
-    // With structured output, agent-sdk binds tools in the provider's STRICT
-    // mode wherever the model says it needs it (OpenAI-family). Strict mode
-    // requires every argument to be `required` and every object closed, so
-    // the tools are reshaped to that contract here — optional arguments become
-    // nullable, and the executor gets the original shape back. See
-    // strictToolSchema.ts.
-    const strictTools = Boolean(input.outputSchema)
-        && Boolean((input.model as { capabilities?: { strictToolCalling?: boolean } } | undefined)?.capabilities?.strictToolCalling);
-    const tools = strictTools ? makeToolsStrictCompatible(input.tools) : input.tools;
-
     return createSmartAgentFn({
         name: input.name,
         version: input.version,
         model: input.model,
-        ...(tools.length > 0 ? { tools } : {}),
+        ...(input.tools.length > 0 ? { tools: input.tools } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
         // thing to the host, and the shorter option object is what every other
         // conditional field here does.
@@ -1594,7 +1584,7 @@ async function buildSubagentModel(
             modelSettings: resolveModelInvocationConfig(model, {}),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        return withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
             tenantDbName,
             model,
             route: 'agent.subagent',
@@ -3023,7 +3013,7 @@ export async function executeAgentChatLocal(
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+    const sdkModel = withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
         tenantDbName,
         model,
         route: 'agent.chat',
@@ -3608,7 +3598,7 @@ export async function executePlaygroundChatLocal(
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+    const sdkModel = withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
         tenantDbName,
         model,
         route: 'agent.playground',
