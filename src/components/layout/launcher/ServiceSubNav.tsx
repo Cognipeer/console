@@ -575,7 +575,8 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       icon: IconLayoutDashboard,
       matcher: (p) =>
         p.startsWith('/dashboard/agents') &&
-        !p.startsWith('/dashboard/agents/tools'),
+        !p.startsWith('/dashboard/agents/tools') &&
+        !p.startsWith('/dashboard/agents/skills'),
     },
     {
       id: 'tools',
@@ -583,6 +584,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/agents/tools',
       icon: IconTool,
       matcher: (p) => p.startsWith('/dashboard/agents/tools'),
+    },
+    {
+      id: 'skills',
+      label: 'Skills',
+      href: '/dashboard/agents/skills',
+      icon: IconBulb,
+      matcher: (p) => p.startsWith('/dashboard/agents/skills'),
     },
   ],
   mcp: [

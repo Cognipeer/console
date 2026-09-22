@@ -60,6 +60,8 @@ import {
   IconFileText,
   IconLayoutDashboard,
   IconPlus,
+  IconBulb,
+  IconBrain,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -83,8 +85,13 @@ import AgentPromptPanel from './studio/AgentPromptPanel';
 import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList from './studio/SessionList';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
+import AgentSkillsPanel from './studio/AgentSkillsPanel';
+import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
+import type { SkillView } from '@/components/skills/types';
 import type {
+  IAgentMemoryConfig,
   IAgentRuntimeConfig,
+  IAgentSkillPolicy,
   IAgentStructuredOutput,
   IAgentSubagent,
   IAgentSubagentPolicy,
@@ -287,6 +294,11 @@ export default function AgentDetailPage() {
   const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
   /** Other agents in the project — the `ref` sub-agent picker's options. */
   const [projectAgents, setProjectAgents] = useState<Array<{ key: string; name: string; publishedVersion?: number | null }>>([]);
+  const [skills, setSkills] = useState<string[]>([]);
+  const [skillPolicy, setSkillPolicy] = useState<IAgentSkillPolicy | undefined>(undefined);
+  const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
+  const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
+  const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
 
   // Guardrail bindings live outside `configForm`: they are a list of objects,
   // not a scalar field, and the form's `getInputProps` contract has nothing to
@@ -388,6 +400,9 @@ export default function AgentDetailPage() {
         setStructuredOutput(cfg.structuredOutput);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
+        setSkills(cfg.skills ?? []);
+        setSkillPolicy(cfg.skillPolicy);
+        setMemoryConfig(cfg.memory);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -470,6 +485,36 @@ export default function AgentDetailPage() {
       }
     } catch (err) {
       console.error('Failed to load project agents', err);
+    }
+  };
+
+  const loadSkillLibrary = async () => {
+    try {
+      const res = await fetch('/api/skills', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setSkillLibrary(data.skills ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to load skill library', err);
+    }
+  };
+
+  const loadMemoryStores = async () => {
+    try {
+      const res = await fetch('/api/memory/stores', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setMemoryStores(
+          (data.stores ?? []).map((s: { key: string; name: string; status: string }) => ({
+            key: s.key,
+            name: s.name,
+            status: s.status,
+          })),
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load memory stores', err);
     }
   };
 
@@ -644,6 +689,8 @@ export default function AgentDetailPage() {
         loadGuardrails(),
         loadProviders(),
         loadProjectAgents(),
+        loadSkillLibrary(),
+        loadMemoryStores(),
       ]);
       setLoading(false);
     })();
@@ -692,6 +739,9 @@ export default function AgentDetailPage() {
     nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
     nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
     nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
+    nextConfig.skills = skills.length > 0 ? skills : undefined;
+    nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
+    nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey ? memoryConfig : undefined;
     // No editor writes this from here anymore (see the Prompt tab) — pass
     // through whatever is already stored so a save from THIS page can never
     // silently wipe a value an import or the API set, since `config` replaces
@@ -1166,6 +1216,18 @@ export default function AgentDetailPage() {
               Schedules
             </Tabs.Tab>
           ) : null}
+          {!isConnected ? (
+            <Tabs.Tab value="skills" leftSection={<IconBulb size={14} />}>
+              Skills
+              {skills.length > 0 ? <Badge size="xs" variant="light" ml={6}>{skills.length}</Badge> : null}
+            </Tabs.Tab>
+          ) : null}
+          {!isConnected ? (
+            <Tabs.Tab value="memory" leftSection={<IconBrain size={14} />}>
+              Memory
+              {memoryConfig?.enabled ? <Badge size="xs" color="teal" variant="light" ml={6}>on</Badge> : null}
+            </Tabs.Tab>
+          ) : null}
           <Tabs.Tab value="export" leftSection={<IconPackageExport size={14} />}>
             Export
           </Tabs.Tab>
@@ -1278,6 +1340,40 @@ export default function AgentDetailPage() {
             description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
           >
             <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
+          </SectionCard>
+        </Tabs.Panel>
+
+        {/* ── Skills Tab ──────────────────────────────────────── */}
+        <Tabs.Panel value="skills">
+          <SectionCard
+            title="Skills"
+            description="Capabilities this agent can discover and open on demand, from the project's skill library."
+          >
+            <AgentSkillsPanel
+              skills={skills}
+              policy={skillPolicy}
+              library={skillLibrary}
+              onChange={(nextSkills, nextPolicy) => {
+                setSkills(nextSkills);
+                setSkillPolicy(nextPolicy);
+              }}
+            />
+            <Group justify="flex-end" mt="md">
+              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+            </Group>
+          </SectionCard>
+        </Tabs.Panel>
+
+        {/* ── Memory Tab ──────────────────────────────────────── */}
+        <Tabs.Panel value="memory">
+          <SectionCard
+            title="Memory"
+            description="What this agent remembers across runs, backed by a store from the Memory module."
+          >
+            <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
+            <Group justify="flex-end" mt="md">
+              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+            </Group>
           </SectionCard>
         </Tabs.Panel>
 

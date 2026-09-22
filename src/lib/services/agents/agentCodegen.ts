@@ -503,7 +503,6 @@ function writeAgent(
         `    toolResponses: ${literal(runtime.toolResponses, 4)},`,
         ...(runtime.contextPilot ? [`    contextPilot: ${literal(runtime.contextPilot, 4)},`] : []),
         ...(runtime.reasoning ? [`    reasoning: ${literal(runtime.reasoning, 4)},`] : []),
-        ...(runtime.memory ? [`    memory: ${literal(runtime.memory, 4)},`] : []),
         ...(runtime.humanInTheLoop ? [`    humanInTheLoop: ${literal(runtime.humanInTheLoop, 4)},`] : []),
         ...(runtime.subagentPolicy ? [`    subagentPolicy: ${literal(runtime.subagentPolicy, 4)},`] : []),
     ];
@@ -837,6 +836,16 @@ export function generateAgentProject(
     if ((config.subagents ?? []).some((s) => s.kind === 'ref')) {
         warnings.push(
             'Referenced sub-agents were flattened into src/subagents.ts at export time. Editing the referenced agent in the console no longer affects this project.',
+        );
+    }
+    if (config.memory?.enabled) {
+        warnings.push(
+            'Memory is not included in the export: it is backed by this console\'s own Memory module, which the generated project has no credentials or client for. The agent runs without recall/write here.',
+        );
+    }
+    if ((config.skills?.length ?? 0) > 0) {
+        warnings.push(
+            'Skills are not included in the export: the skill library lives in this console. Copy the skill text from Settings → Skills into the generated agent\'s systemPrompt if you need it standalone.',
         );
     }
 

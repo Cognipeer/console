@@ -2119,12 +2119,67 @@ export interface IAgentReasoningConfig {
   reflection?: boolean;
 }
 
+/**
+ * Memory backing for an agent — routed through console's OWN memory module
+ * (vector-backed stores manageable at `/dashboard/memory`), not a bare
+ * SDK-provider string. `AgentMemoryProvider`/`AgentMemoryScope` (the raw SDK
+ * provider kinds) are still exported above for anyone constructing the SDK
+ * option object directly, but nothing here asks an operator to pick a
+ * driver — they pick a STORE, the same one the Memory module itself lists.
+ *
+ * At run time this resolves to a `MemoryStore` implementation
+ * (`agentMemoryAdapter.ts`) backed by `recallForChat`/`addMemory` on that
+ * store, passed as `memory.store` to the SDK — so the SDK's own structured
+ * summarization pipeline (`writeSummaryFactsToMemory`) is what decides what
+ * gets remembered, not a bespoke heuristic here.
+ */
 export interface IAgentMemoryConfig {
   enabled?: boolean;
-  provider?: AgentMemoryProvider;
+  /** Key of an existing `IMemoryStore` (from the Memory module). Required when enabled. */
+  memoryStoreKey?: string;
   scope?: AgentMemoryScope;
   writePolicy?: AgentMemoryWritePolicy;
   readPolicy?: AgentMemoryReadPolicy;
+}
+
+/**
+ * A reusable capability the model can discover and open on demand —
+ * Anthropic-style progressive disclosure (see agent-sdk's `Skill` type).
+ *
+ * Deliberately NOT the SDK's file-based `SKILL.md` loader
+ * (`loadSkillsFromDisk`/`SkillFs`): there is no filesystem to scan here, a
+ * skill is a console-managed record like a Prompt, edited in the dashboard
+ * and referenced by key from `IAgentConfig.skills`. `agentSkillService.ts`
+ * builds the SDK's `Skill` objects directly from these fields — `header` is
+ * what the model always sees in its catalog, `body` is returned only once
+ * the model opens the skill.
+ */
+export interface IAgentSkill {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  title: string;
+  /** One-line "what it does + when to use it" — always in the model's catalog. */
+  header: string;
+  /** Full instructions, disclosed only once the model opens this skill. */
+  body: string;
+  /** Hide this skill from a small-tier model — see agent-sdk's `SkillModelTier`. */
+  minModelTier?: 'small' | 'large';
+  status: 'active' | 'inactive';
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAgentSkillPolicy {
+  /** Max distinct skills open at once. SDK default: unbounded-ish; console default applied at resolve time. */
+  maxOpenSkills?: number;
+  maxBoundToolsPerSkill?: number;
+  maxBoundToolsTotal?: number;
+  /** 'catalog' (default): every header in the system prompt. 'search': a `search_skills` tool instead. */
+  disclosure?: 'catalog' | 'search';
 }
 
 export interface IAgentToolResponsesConfig {
@@ -2147,7 +2202,6 @@ export interface IAgentRuntimeConfig {
   toolResponses?: IAgentToolResponsesConfig;
   contextPilot?: IAgentContextPilotConfig;
   reasoning?: IAgentReasoningConfig;
-  memory?: IAgentMemoryConfig;
   /** Expose the SDK `ask_user_question` tool (human-in-the-loop). */
   askUser?: boolean;
 }
@@ -2263,6 +2317,11 @@ export interface IAgentConfig {
   subagents?: IAgentSubagent[];
   /** Guards around delegation. Absent = SDK defaults with `registry_only`. */
   subagentPolicy?: IAgentSubagentPolicy;
+  /** Skills this agent can discover and open — keys into the project's skill library. */
+  skills?: string[];
+  skillPolicy?: IAgentSkillPolicy;
+  /** Memory — its own tab (Settings → Advanced stays about the loop, not what the agent remembers). */
+  memory?: IAgentMemoryConfig;
 }
 
 /** A single tool-source binding for an agent */

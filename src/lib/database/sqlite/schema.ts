@@ -1547,6 +1547,25 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
 
+  -- Agent skills (a project-scoped library, like prompts/tools — see IAgentSkill)
+  CREATE TABLE IF NOT EXISTS agent_skills (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    header TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    minModelTier TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_askill_project ON agent_skills(projectId);
+  CREATE INDEX IF NOT EXISTS idx_askill_key ON agent_skills(key);
+
   -- Config groups
   CREATE TABLE IF NOT EXISTS config_groups (
     id TEXT PRIMARY KEY,

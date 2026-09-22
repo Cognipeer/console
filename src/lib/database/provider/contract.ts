@@ -7,6 +7,7 @@ import type {
   GuardrailType,
   IAgent,
   IAgentConversation,
+  IAgentSkill,
   IAgentTracingEvent,
   IAgentTracingDashboardAggregate,
   IAgentTracingSession,
@@ -393,6 +394,20 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   listPrompts(filters?: { projectId?: string; search?: string }): Promise<IPrompt[]>;
   findPromptById(id: string, projectId?: string): Promise<IPrompt | null>;
   findPromptByKey(key: string, projectId?: string): Promise<IPrompt | null>;
+
+  // Agent skill library (tenant-specific) — see IAgentSkill
+  createSkill(
+    skill: Omit<IAgentSkill, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAgentSkill>;
+  updateSkill(id: string, data: Partial<IAgentSkill>): Promise<IAgentSkill | null>;
+  deleteSkill(id: string): Promise<boolean>;
+  findSkillById(id: string, projectId?: string): Promise<IAgentSkill | null>;
+  findSkillByKey(key: string, projectId?: string): Promise<IAgentSkill | null>;
+  listSkills(filters?: {
+    projectId?: string;
+    status?: IAgentSkill['status'];
+    search?: string;
+  }): Promise<IAgentSkill[]>;
 
   createPromptVersion(
     version: Omit<IPromptVersion, '_id' | 'createdAt'>,

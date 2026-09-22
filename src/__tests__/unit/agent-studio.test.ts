@@ -5,6 +5,7 @@ import {
     CONSOLE_AGENT_DEFAULTS,
     jsonSchemaToZod,
     resolveAgentRuntimeOptions,
+    resolveAgentSkillPolicy,
     resolveStructuredOutputSchema,
 } from '@/lib/services/agents/agentRuntimeConfig';
 import {
@@ -26,6 +27,8 @@ import {
     readSchedules,
     validateAgentSchedule,
 } from '@/lib/services/agents/agentScheduleService';
+import { buildAgentMemoryOption, toConsoleScope } from '@/lib/services/agents/agentMemoryAdapter';
+import { toSdkSkill } from '@/lib/services/agents/agentSkillService';
 
 const AGENT = { key: 'sre-triage', name: 'SRE Triage', description: 'Triages Jira incidents', status: 'active' as const };
 
@@ -48,7 +51,6 @@ describe('resolveAgentRuntimeOptions', () => {
         // Absent knobs stay absent so the SDK keeps its own profile behaviour.
         expect(resolved.contextPilot).toBeUndefined();
         expect(resolved.reasoning).toBeUndefined();
-        expect(resolved.memory).toBeUndefined();
         expect(resolved.subagentPolicy).toBeUndefined();
     });
 
@@ -60,7 +62,6 @@ describe('resolveAgentRuntimeOptions', () => {
                 limits: { maxToolCalls: 40, maxCostUsd: 2.5 },
                 contextPilot: { enabled: true, excludeTools: ['knowledge_search'] },
                 reasoning: { enabled: true, level: 'high', effort: 'medium' },
-                memory: { enabled: true, provider: 'redis', scope: 'user' },
                 askUser: true,
             },
         });
@@ -73,7 +74,6 @@ describe('resolveAgentRuntimeOptions', () => {
         expect(resolved.limits?.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
         expect(resolved.reasoning).toEqual({ enabled: true, level: 'high', native: { effort: 'medium' } });
-        expect(resolved.memory).toEqual({ provider: 'redis', scope: 'user' });
         expect(resolved.humanInTheLoop).toEqual({ askUser: true });
     });
 
@@ -419,5 +419,103 @@ describe('agent schedules', () => {
         expect(readSchedules({ metadata: undefined })).toEqual([]);
         expect(readSchedules({ metadata: { a2a: { enabled: true } } })).toEqual([]);
         expect(readSchedules({ metadata: { schedules: [BASE] } })).toHaveLength(1);
+    });
+});
+
+describe('agent skills', () => {
+    it('maps a stored record onto the SDK Skill shape — no file loader involved', () => {
+        const sdk = toSdkSkill({
+            tenantId: 't1',
+            key: 'atlassian-triage',
+            title: 'Atlassian triage',
+            header: 'Investigates a Jira ticket against Confluence + logs.',
+            body: '## Steps\n1. Pull the ticket...',
+            minModelTier: 'large',
+            status: 'active',
+            createdBy: 'u1',
+        });
+
+        expect(sdk).toMatchObject({
+            key: 'atlassian-triage',
+            title: 'Atlassian triage',
+            header: 'Investigates a Jira ticket against Confluence + logs.',
+            prompt: '## Steps\n1. Pull the ticket...',
+            minModelTier: 'large',
+        });
+        // No bundled-tool support — see the module doc comment.
+        expect(sdk.listToolIndex()).toEqual([]);
+        expect(sdk.bindTools()).toEqual([]);
+    });
+
+    it('omits minModelTier rather than sending it as undefined when unset', () => {
+        const sdk = toSdkSkill({
+            tenantId: 't1',
+            key: 'k',
+            title: 'T',
+            header: 'H',
+            body: 'B',
+            status: 'active',
+            createdBy: 'u1',
+        });
+        expect('minModelTier' in sdk).toBe(false);
+    });
+
+    it('resolves a skill policy only once the agent actually has skills', () => {
+        expect(resolveAgentSkillPolicy({ modelKey: 'm' })).toBeUndefined();
+        expect(resolveAgentSkillPolicy({ modelKey: 'm', skills: [] })).toBeUndefined();
+    });
+
+    it('fills in console defaults for an unconfigured skill policy', () => {
+        const policy = resolveAgentSkillPolicy({ modelKey: 'm', skills: ['triage'] });
+        expect(policy).toEqual({
+            maxOpenSkills: 3,
+            maxBoundToolsPerSkill: 10,
+            maxBoundToolsTotal: 20,
+        });
+    });
+
+    it('lets an operator override individual skill-policy knobs', () => {
+        const policy = resolveAgentSkillPolicy({
+            modelKey: 'm',
+            skills: ['triage'],
+            skillPolicy: { maxOpenSkills: 1, disclosure: 'search' },
+        });
+        expect(policy?.maxOpenSkills).toBe(1);
+        expect(policy?.disclosure).toBe('search');
+        // untouched knob keeps the console default
+        expect(policy?.maxBoundToolsTotal).toBe(20);
+    });
+});
+
+describe('agent memory', () => {
+    it('maps every SDK scope to a console memory scope', () => {
+        expect(toConsoleScope('session')).toBe('session');
+        expect(toConsoleScope('user')).toBe('user');
+        // "workspace" → this agent, so two agents never share ad-hoc facts.
+        expect(toConsoleScope('workspace')).toBe('agent');
+        // "tenant" → the store itself is already tenant-scoped.
+        expect(toConsoleScope('tenant')).toBe('global');
+    });
+
+    it('is undefined when memory is off or has no store picked', () => {
+        const ctx = { tenantDbName: 't', tenantId: 't1', projectId: 'p1', agentKey: 'a' };
+        expect(buildAgentMemoryOption(undefined, ctx)).toBeUndefined();
+        expect(buildAgentMemoryOption({ enabled: false, memoryStoreKey: 'mem-1' }, ctx)).toBeUndefined();
+        expect(buildAgentMemoryOption({ enabled: true }, ctx)).toBeUndefined();
+    });
+
+    it('builds a real MemoryStore instance once enabled with a store key', () => {
+        const ctx = { tenantDbName: 't', tenantId: 't1', projectId: 'p1', agentKey: 'a', conversationId: 'conv-1', userId: 'u1' };
+        const option = buildAgentMemoryOption(
+            { enabled: true, memoryStoreKey: 'mem-1', scope: 'user', writePolicy: 'manual', readPolicy: 'semantic' },
+            ctx,
+        );
+        expect(option?.scope).toBe('user');
+        expect(option?.writePolicy).toBe('manual');
+        expect(option?.readPolicy).toBe('semantic');
+        expect(typeof option?.store?.get).toBe('function');
+        expect(typeof option?.store?.upsert).toBe('function');
+        expect(typeof option?.store?.markObsolete).toBe('function');
+        expect(typeof option?.store?.semanticSearch).toBe('function');
     });
 });

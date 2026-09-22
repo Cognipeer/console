@@ -59,7 +59,6 @@ export type ResolvedAgentRuntimeOptions = Pick<
     | 'toolResponses'
     | 'contextPilot'
     | 'reasoning'
-    | 'memory'
     | 'humanInTheLoop'
     | 'subagentPolicy'
 >;
@@ -110,16 +109,10 @@ function resolveReasoning(runtime: IAgentRuntimeConfig | undefined) {
     });
 }
 
-function resolveMemory(runtime: IAgentRuntimeConfig | undefined) {
-    const memory = runtime?.memory;
-    if (!memory?.enabled) return undefined;
-    return compact({
-        provider: memory.provider ?? 'inMemory',
-        scope: memory.scope,
-        writePolicy: memory.writePolicy,
-        readPolicy: memory.readPolicy,
-    });
-}
+// Memory is resolved separately, in `agentMemoryAdapter.ts` — it needs a real
+// `MemoryStore` instance (backed by console's own Memory module) that this
+// pure, config-only function has no way to construct, and it moved to its
+// own tab (`IAgentConfig.memory`) rather than living under `runtime`.
 
 export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentRuntimeOptions {
     const runtime = config.runtime;
@@ -183,9 +176,6 @@ export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentR
 
     const reasoning = resolveReasoning(runtime);
     if (reasoning) resolved.reasoning = reasoning;
-
-    const memory = resolveMemory(runtime);
-    if (memory) resolved.memory = memory as ResolvedAgentRuntimeOptions['memory'];
 
     if (runtime?.askUser) resolved.humanInTheLoop = { askUser: true };
 
@@ -288,4 +278,19 @@ export function resolveStructuredOutputSchema(
     // A bare `z.any()` is not a contract — treat it as "not configured" so the
     // agent keeps its normal free-text behaviour instead of silently no-opping.
     return schema._def?.typeName === 'ZodAny' ? undefined : schema;
+}
+
+/**
+ * Skill policy — only meaningful when the agent actually has skills, mirroring
+ * how `subagentPolicy` is only emitted once there are sub-agents.
+ */
+export function resolveAgentSkillPolicy(config: IAgentConfig): SmartAgentOptions['skillPolicy'] {
+    if (!config.skills || config.skills.length === 0) return undefined;
+    const policy = config.skillPolicy;
+    return compact({
+        maxOpenSkills: positive(policy?.maxOpenSkills, 3),
+        maxBoundToolsPerSkill: positive(policy?.maxBoundToolsPerSkill, 10),
+        maxBoundToolsTotal: positive(policy?.maxBoundToolsTotal, 20),
+        disclosure: policy?.disclosure,
+    }) as SmartAgentOptions['skillPolicy'];
 }

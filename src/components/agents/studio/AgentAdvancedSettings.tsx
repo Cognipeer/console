@@ -26,10 +26,6 @@ import { IconInfoCircle } from '@tabler/icons-react';
 
 import type {
     AgentContextPolicy,
-    AgentMemoryProvider,
-    AgentMemoryReadPolicy,
-    AgentMemoryScope,
-    AgentMemoryWritePolicy,
     AgentPlanningMode,
     AgentReasoningEffort,
     AgentReasoningLevel,
@@ -108,7 +104,6 @@ export default function AgentAdvancedSettings({
     const toolResponses = value.toolResponses ?? {};
     const contextPilot = value.contextPilot ?? {};
     const reasoning = value.reasoning ?? {};
-    const memory = value.memory ?? {};
 
     return (
         <Stack gap="md">
@@ -482,82 +477,9 @@ export default function AgentAdvancedSettings({
                     </Accordion.Panel>
                 </Accordion.Item>
 
-                <Accordion.Item value="memory">
-                    <Accordion.Control>
-                        <Group gap="xs">
-                            <Text size="sm" fw={600}>Memory</Text>
-                            {memory.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
-                        </Group>
-                    </Accordion.Control>
-                    <Accordion.Panel>
-                        <Stack gap="sm">
-                            <Switch
-                                label="Remember across runs"
-                                checked={memory.enabled ?? false}
-                                onChange={(event) =>
-                                    patch({ memory: { ...memory, enabled: event.currentTarget.checked } })
-                                }
-                                disabled={disabled}
-                            />
-                            <Group grow>
-                                <Select
-                                    label="Provider"
-                                    data={['inMemory', 'redis', 'postgres', 'mongo', 's3']}
-                                    value={memory.provider ?? 'inMemory'}
-                                    onChange={(next) =>
-                                        patch({ memory: { ...memory, provider: (next as AgentMemoryProvider) ?? undefined } })
-                                    }
-                                    disabled={disabled || !memory.enabled}
-                                    allowDeselect={false}
-                                />
-                                <Select
-                                    label="Scope"
-                                    data={['session', 'user', 'workspace', 'tenant']}
-                                    value={memory.scope ?? 'session'}
-                                    onChange={(next) =>
-                                        patch({ memory: { ...memory, scope: (next as AgentMemoryScope) ?? undefined } })
-                                    }
-                                    disabled={disabled || !memory.enabled}
-                                    allowDeselect={false}
-                                />
-                            </Group>
-                            <Group grow>
-                                <Select
-                                    label="Write policy"
-                                    data={['manual', 'auto_important', 'always']}
-                                    value={memory.writePolicy ?? 'manual'}
-                                    onChange={(next) =>
-                                        patch({
-                                            memory: { ...memory, writePolicy: (next as AgentMemoryWritePolicy) ?? undefined },
-                                        })
-                                    }
-                                    disabled={disabled || !memory.enabled}
-                                    allowDeselect={false}
-                                />
-                                <Select
-                                    label="Read policy"
-                                    data={['recent_only', 'semantic', 'hybrid']}
-                                    value={memory.readPolicy ?? 'recent_only'}
-                                    onChange={(next) =>
-                                        patch({
-                                            memory: { ...memory, readPolicy: (next as AgentMemoryReadPolicy) ?? undefined },
-                                        })
-                                    }
-                                    disabled={disabled || !memory.enabled}
-                                    allowDeselect={false}
-                                />
-                            </Group>
-                            {memory.enabled && (memory.provider ?? 'inMemory') === 'inMemory' ? (
-                                <Alert variant="light" color="yellow">
-                                    <Text size="xs">
-                                        `inMemory` is per-process: the memory is gone when the server restarts, and two
-                                        replicas do not share it. Pick a backed provider for anything real.
-                                    </Text>
-                                </Alert>
-                            ) : null}
-                        </Stack>
-                    </Accordion.Panel>
-                </Accordion.Item>
+                {/* Memory moved to its own tab — see AgentMemoryPanel. It needs a
+                    real backing store picked from the Memory module, which does
+                    not fit this accordion's "knob with a default" shape. */}
 
                 <Accordion.Item value="hitl">
                     <Accordion.Control>
@@ -589,7 +511,6 @@ export function countAdvancedOverrides(runtime: IAgentRuntimeConfig | undefined)
     }
     if (runtime.contextPilot?.enabled) count += 1;
     if (runtime.reasoning?.enabled) count += 1;
-    if (runtime.memory?.enabled) count += 1;
     if (runtime.askUser) count += 1;
     return count;
 }

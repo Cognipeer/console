@@ -14,7 +14,10 @@ import { agentEntityId } from './agentEntityId';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     Message as AgentSdkMessage,
+    Skill as AgentSdkSkill,
+    SkillPolicy as AgentSdkSkillPolicy,
     SmartAgentEvent as AgentSdkEvent,
+    SmartAgentMemoryConfig as AgentSdkMemoryConfig,
     SmartState as AgentSdkSmartState,
     SubagentDef as AgentSdkSubagentDef,
     ToolInterface as AgentSdkToolInterface,
@@ -25,9 +28,12 @@ import type { ZodTypeAny } from 'zod';
 import {
     jsonSchemaToZod,
     resolveAgentRuntimeOptions,
+    resolveAgentSkillPolicy,
     resolveStructuredOutputSchema,
     type ResolvedAgentRuntimeOptions,
 } from './agentRuntimeConfig';
+import { buildAgentSkills } from './agentSkillService';
+import { buildAgentMemoryOption } from './agentMemoryAdapter';
 import type { IAgentSubagent } from '@/lib/database/provider/types.domain';
 import {
     buildPromptVariables,
@@ -1157,6 +1163,11 @@ type CreateConsoleSdkAgentInput = {
     outputSchema?: ZodTypeAny;
     /** Sub-agent registry built from `config.subagents`. */
     subagents?: AgentSdkSubagentDef[];
+    /** Discoverable skills built from `config.skills` — see `agentSkillService.ts`. */
+    skills?: AgentSdkSkill[];
+    skillPolicy?: AgentSdkSkillPolicy;
+    /** Console-memory-backed `MemoryStore` — see `agentMemoryAdapter.ts`. Absent when memory is off. */
+    memory?: AgentSdkMemoryConfig;
 };
 
 /**
@@ -1346,6 +1357,9 @@ function createConsoleSdkAgent(
         ...(input.runtimeOptions ?? resolveAgentRuntimeOptions({})),
         ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
         ...(input.subagents && input.subagents.length > 0 ? { subagents: input.subagents } : {}),
+        ...(input.skills && input.skills.length > 0 ? { skills: input.skills } : {}),
+        ...(input.skillPolicy ? { skillPolicy: input.skillPolicy } : {}),
+        ...(input.memory ? { memory: input.memory } : {}),
         ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
         tracing: {
             enabled: true,
@@ -2923,6 +2937,8 @@ export async function executeAgentChatLocal(
     });
     cleanupTasks.push(...chatSubagents.cleanupTasks);
 
+    const chatSkills = await buildAgentSkills(tenantDbName, projectId, config.skills);
+
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
         model: sdkModel,
@@ -2935,6 +2951,16 @@ export async function executeAgentChatLocal(
         runtimeOptions: resolveAgentRuntimeOptions(config),
         outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
         subagents: chatSubagents.subagents,
+        skills: chatSkills,
+        skillPolicy: resolveAgentSkillPolicy(config),
+        memory: buildAgentMemoryOption(config.memory, {
+            tenantDbName,
+            tenantId,
+            projectId,
+            agentKey,
+            conversationId,
+            userId: request.userId,
+        }),
         tracingMetadata: buildTracingMetadata(request.runtimeContext),
     });
 
@@ -3387,6 +3413,8 @@ export async function executePlaygroundChatLocal(
     });
     cleanupTasks.push(...playgroundSubagents.cleanupTasks);
 
+    const playgroundSkills = await buildAgentSkills(tenantDbName, projectId, config.skills);
+
     const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
         name: agent.name,
         model: sdkModel,
@@ -3397,6 +3425,16 @@ export async function executePlaygroundChatLocal(
         runtimeOptions: resolveAgentRuntimeOptions(config),
         outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
         subagents: playgroundSubagents.subagents,
+        skills: playgroundSkills,
+        skillPolicy: resolveAgentSkillPolicy(config),
+        memory: buildAgentMemoryOption(config.memory, {
+            tenantDbName,
+            tenantId,
+            projectId,
+            agentKey,
+            conversationId: sessionConversation ? String(sessionConversation._id) : undefined,
+            userId: request.runtimeContext?.userId,
+        }),
     });
 
     // Surface tool-call progress to the caller (best-effort; never fails the run).
