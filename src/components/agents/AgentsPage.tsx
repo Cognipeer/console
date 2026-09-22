@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Badge,
@@ -40,9 +40,24 @@ interface Agent {
     promptKey?: string;
     temperature?: number;
     topP?: number;
+    toolBindings?: Array<{ toolNames?: string[] }>;
+    knowledgeEngineKey?: string;
+    memory?: { enabled?: boolean };
+    subagents?: unknown[];
   };
   status: string;
+  publishedVersion?: number | null;
   createdAt: string;
+  updatedAt?: string;
+}
+
+type StatusFilter = 'all' | 'active' | 'inactive' | 'draft';
+type KindFilter = 'all' | 'native' | 'external';
+type PublishFilter = 'all' | 'published' | 'unpublished';
+
+/** Tools the agent can call by name — the bound ones; knowledge/memory are shown as capability chips. */
+function boundToolCount(agent: Agent): number {
+  return (agent.config.toolBindings ?? []).reduce((sum, b) => sum + (b.toolNames?.length ?? 0), 0);
 }
 
 interface Model {
@@ -71,6 +86,10 @@ export default function AgentsPage() {
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
+  const [publishFilter, setPublishFilter] = useState<PublishFilter>('all');
+  const [modelFilter, setModelFilter] = useState('all');
 
   const loadAgents = async () => {
     setLoading(true);
@@ -147,16 +166,41 @@ export default function AgentsPage() {
     }
   };
 
-  const filtered = agents.filter((a) => {
+  // Model options come from the agents actually listed, so the filter never
+  // offers a model no agent uses (an empty result that looks like a bug).
+  const modelOptions = useMemo(() => {
+    const keys = new Set<string>();
+    for (const a of agents) if (a.config.kind !== 'external' && a.config.modelKey) keys.add(a.config.modelKey);
+    return [...keys].sort();
+  }, [agents]);
+
+  const filtered = useMemo(() => agents.filter((a) => {
     const q = query.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      a.name.toLowerCase().includes(q) ||
-      (a.description ?? '').toLowerCase().includes(q) ||
-      (a.config.modelKey ?? '').toLowerCase().includes(q) ||
-      (a.config.connection?.protocol ?? '').toLowerCase().includes(q)
-    );
-  });
+    if (q) {
+      // The key is included: it is what API callers put in `model`, so it is
+      // what someone reading a log or a trace will paste here.
+      const hit =
+        a.name.toLowerCase().includes(q) ||
+        a.key.toLowerCase().includes(q) ||
+        (a.description ?? '').toLowerCase().includes(q) ||
+        (a.config.modelKey ?? '').toLowerCase().includes(q) ||
+        (a.config.connection?.protocol ?? '').toLowerCase().includes(q);
+      if (!hit) return false;
+    }
+    if (statusFilter !== 'all' && a.status !== statusFilter) return false;
+    const kind = a.config.kind === 'external' ? 'external' : 'native';
+    if (kindFilter !== 'all' && kind !== kindFilter) return false;
+    // API channels run the PUBLISHED version, so "never published" is the
+    // set of agents no external caller can actually reach yet.
+    if (publishFilter === 'published' && !a.publishedVersion) return false;
+    if (publishFilter === 'unpublished' && a.publishedVersion) return false;
+    if (modelFilter !== 'all' && a.config.modelKey !== modelFilter) return false;
+    return true;
+  }), [agents, query, statusFilter, kindFilter, publishFilter, modelFilter]);
+
+  const filtersApplied =
+    Boolean(query.trim()) || statusFilter !== 'all' || kindFilter !== 'all'
+    || publishFilter !== 'all' || modelFilter !== 'all';
 
   const columns: DataGridColumn<Agent>[] = [
     {
@@ -204,6 +248,37 @@ export default function AgentsPage() {
             : (agent.config.modelKey ?? '—')}
         </span>
       ),
+    },
+    {
+      key: 'published',
+      label: 'Published',
+      render: (agent) => (
+        agent.config.kind === 'external'
+          ? <span className="ds-faint" style={{ fontSize: 12 }}>—</span>
+          : agent.publishedVersion
+            ? <Badge size="xs" variant="light" color="teal">v{agent.publishedVersion}</Badge>
+            : <Badge size="xs" variant="light" color="gray">draft only</Badge>
+      ),
+    },
+    {
+      key: 'capabilities',
+      label: 'Capabilities',
+      render: (agent) => {
+        const tools = boundToolCount(agent);
+        return (
+          <Group gap={4} wrap="nowrap">
+            {tools > 0 ? <Badge size="xs" variant="outline" color="gray">{tools} tools</Badge> : null}
+            {agent.config.knowledgeEngineKey ? <Badge size="xs" variant="outline" color="blue">knowledge</Badge> : null}
+            {agent.config.memory?.enabled ? <Badge size="xs" variant="outline" color="grape">memory</Badge> : null}
+            {agent.config.subagents?.length ? (
+              <Badge size="xs" variant="outline" color="violet">{agent.config.subagents.length} sub-agents</Badge>
+            ) : null}
+            {!tools && !agent.config.knowledgeEngineKey && !agent.config.memory?.enabled && !agent.config.subagents?.length
+              ? <span className="ds-faint" style={{ fontSize: 12 }}>—</span>
+              : null}
+          </Group>
+        );
+      },
     },
     {
       key: 'status',
@@ -281,8 +356,70 @@ export default function AgentsPage() {
         search={{
           value: query,
           onChange: setQuery,
-          placeholder: 'Search agents…',
+          placeholder: 'Search name, key, model…',
         }}
+        filters={[
+          {
+            value: statusFilter,
+            onChange: (v) => setStatusFilter(v as StatusFilter),
+            ariaLabel: 'Filter by status',
+            width: 130,
+            options: [
+              { value: 'all', label: 'All statuses' },
+              { value: 'active', label: 'Active' },
+              { value: 'draft', label: 'Draft' },
+              { value: 'inactive', label: 'Inactive' },
+            ],
+          },
+          {
+            value: publishFilter,
+            onChange: (v) => setPublishFilter(v as PublishFilter),
+            ariaLabel: 'Filter by published version',
+            width: 150,
+            options: [
+              { value: 'all', label: 'Any version' },
+              { value: 'published', label: 'Published' },
+              { value: 'unpublished', label: 'Never published' },
+            ],
+          },
+          {
+            value: kindFilter,
+            onChange: (v) => setKindFilter(v as KindFilter),
+            ariaLabel: 'Filter by agent kind',
+            width: 130,
+            options: [
+              { value: 'all', label: 'All kinds' },
+              { value: 'native', label: 'Built here' },
+              { value: 'external', label: 'Connected' },
+            ],
+          },
+          {
+            value: modelFilter,
+            onChange: setModelFilter,
+            ariaLabel: 'Filter by model',
+            width: 170,
+            options: [
+              { value: 'all', label: 'All models' },
+              ...modelOptions.map((key) => ({ value: key, label: key })),
+            ],
+          },
+        ]}
+        toolbarRight={filtersApplied ? (
+          <Button
+            size="xs"
+            variant="subtle"
+            color="gray"
+            onClick={() => {
+              setQuery('');
+              setStatusFilter('all');
+              setKindFilter('all');
+              setPublishFilter('all');
+              setModelFilter('all');
+            }}
+          >
+            Clear filters
+          </Button>
+        ) : undefined}
         onRefresh={() => void loadAgents()}
         refreshing={loading}
         empty={{

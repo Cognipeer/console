@@ -48,10 +48,7 @@ import {
   IconArrowsExchange,
   IconPlugConnected,
   IconPencil,
-  IconWorld,
   IconAlertTriangle,
-  IconPackageExport,
-  IconCalendarTime,
   IconLayoutDashboard,
   IconPlus,
 } from '@tabler/icons-react';
@@ -259,8 +256,9 @@ function seedGuardrailsFromLegacySlots(
 /**
  * Deep-link compatibility for `?tab=`.
  *
- * The page used to have thirteen flat tabs; they are now five, with vertical
- * rails inside Configure / Deploy / Observe. Every old value still resolves —
+ * The page used to have thirteen flat tabs; they are now six, and Configure
+ * and Deploy are single pages whose `sub` is a section to scroll to rather
+ * than a pane to show. Every old value still resolves —
  * a bookmark or the Sessions page's own back link must not land on a tab that
  * no longer exists.
  */
@@ -283,8 +281,9 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   schedules: { top: 'deploy', sub: 'schedules' },
   export: { top: 'deploy', sub: 'export' },
   observe: { top: 'observe' },
-  traces: { top: 'observe', sub: 'traces' },
-  usage: { top: 'observe', sub: 'usage' },
+  traces: { top: 'observe' },
+  usage: { top: 'usage' },
+  api: { top: 'usage' },
 };
 
 function resolveTabFromQuery(raw: string | null): string {
@@ -325,9 +324,6 @@ export default function AgentDetailPage() {
   );
   const [deployTab, setDeployTab] = useState<string | null>(
     () => resolveSubTabFromQuery(searchParams.get('tab'), 'deploy', 'versions'),
-  );
-  const [observeTab, setObserveTab] = useState<string | null>(
-    () => resolveSubTabFromQuery(searchParams.get('tab'), 'observe', 'traces'),
   );
 
   const [toolSelectorOpen, setToolSelectorOpen] = useState(false);
@@ -734,10 +730,10 @@ export default function AgentDetailPage() {
   }, [loadAgent]);
 
   useEffect(() => {
-    if (activeTab === 'observe' && observeTab === 'traces' && agent) {
+    if (activeTab === 'observe' && agent) {
       loadTracingSessions();
     }
-  }, [activeTab, observeTab, agent, loadTracingSessions]);
+  }, [activeTab, agent, loadTracingSessions]);
 
   useEffect(() => {
     // Export needs the version list too: it offers "export v3" as a source, and
@@ -761,13 +757,16 @@ export default function AgentDetailPage() {
    * the tab panel has rendered.
    */
   useEffect(() => {
-    if (activeTab !== 'configure' || !configureTab || !agent) return;
+    // Configure and Deploy are both single pages now, so either one's
+    // sub-target is a section anchor to scroll to.
+    const section = activeTab === 'configure' ? configureTab : activeTab === 'deploy' ? deployTab : null;
+    if (!section || !agent) return;
     const frame = requestAnimationFrame(() => {
-      document.getElementById(`config-${configureTab}`)
+      document.getElementById(`config-${section}`)
         ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
     return () => cancelAnimationFrame(frame);
-  }, [activeTab, configureTab, agent]);
+  }, [activeTab, configureTab, deployTab, agent]);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
@@ -943,6 +942,7 @@ export default function AgentDetailPage() {
     ? `${origin}/api/public/a2a/${agent.tenantId}/${a2aConfig?.endpointSlug}`
     : `${origin}/api/client/v1/a2a/${agent.key}`;
   const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
+  const apiOrigin = origin;
 
   /**
    * The Basic settings pane. Extracted from the playground so settings and
@@ -1196,6 +1196,9 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="observe" leftSection={<IconTimeline size={14} />}>
             Observe
           </Tabs.Tab>
+          <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
+            {t('tabs.usage')}
+          </Tabs.Tab>
         </Tabs.List>
 
         {/* ── Overview ────────────────────────────────────────── */}
@@ -1220,7 +1223,6 @@ export default function AgentDetailPage() {
               if (!alias.sub) return;
               if (alias.top === 'configure') setConfigureTab(alias.sub);
               if (alias.top === 'deploy') setDeployTab(alias.sub);
-              if (alias.top === 'observe') setObserveTab(alias.sub);
             }}
           />
         </Tabs.Panel>
@@ -1388,37 +1390,17 @@ export default function AgentDetailPage() {
           (Schedules), or take it out of the console entirely (Export).
         */}
         <Tabs.Panel value="deploy">
-          <Tabs
-            orientation="vertical"
-            value={deployTab}
-            onChange={setDeployTab}
-            variant="pills"
-            className={classes.verticalTabs}
-          >
-            <Tabs.List className={classes.verticalTabsList}>
-              {!isConnected ? (
-                <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
-                  {t('tabs.versions')}
-                </Tabs.Tab>
-              ) : null}
-              <Tabs.Tab value="publish" leftSection={<IconWorld size={14} />}>
-                {t('tabs.publish')}
-              </Tabs.Tab>
-              {!isConnected ? (
-                <Tabs.Tab value="schedules" leftSection={<IconCalendarTime size={14} />}>Schedules</Tabs.Tab>
-              ) : null}
-              <Tabs.Tab value="export" leftSection={<IconPackageExport size={14} />}>Export</Tabs.Tab>
-            </Tabs.List>
-
-            <Tabs.Panel value="versions" className={classes.verticalPanel}>
-          <Stack gap="md">
-            <SectionCard p="md">
+          {/*
+            One page, like Configure — the four things you do with a config
+            that is already written sit one under the other, so "is this
+            published, exposed, scheduled?" is answered by scrolling, not by
+            clicking through a rail. `?tab=versions` etc. scroll here.
+          */}
+          <Paper withBorder radius="md" p="xl">
+            {!isConnected ? (
+            <ConfigSection first id="versions" title={t('versions.title')} description={t('versions.description')}>
               <Stack gap="md">
-                <Group justify="space-between" align="center">
-                  <div>
-                    <Text size="lg" fw={600}>{t('versions.title')}</Text>
-                    <Text size="sm" c="dimmed">{t('versions.description')}</Text>
-                  </div>
+                <Group justify="flex-end" align="center">
                   <Group gap="xs">
                     <Badge size="sm" variant="light">{versionsTotal} total</Badge>
                     <Button
@@ -1522,18 +1504,11 @@ export default function AgentDetailPage() {
                   </div>
                 )}
               </Stack>
-            </SectionCard>
-          </Stack>
-            </Tabs.Panel>
+            </ConfigSection>
+            ) : null}
 
-            <Tabs.Panel value="publish" className={classes.verticalPanel}>
-          <Stack gap="md">
-            <SectionCard p="md">
+            <ConfigSection first={isConnected} id="publish" title={t('a2a.title')} description={t('a2a.description')}>
               <Stack gap="md">
-                <div>
-                  <Text size="lg" fw={600}>{t('a2a.title')}</Text>
-                  <Text size="sm" c="dimmed">{t('a2a.description')}</Text>
-                </div>
 
                 <Switch
                   label={t('a2a.toggle')}
@@ -1606,51 +1581,36 @@ export default function AgentDetailPage() {
                   </>
                 )}
               </Stack>
-            </SectionCard>
-          </Stack>
-            </Tabs.Panel>
+            </ConfigSection>
 
-            <Tabs.Panel value="schedules" className={classes.verticalPanel}>
-          <SectionCard
-            title="Recurring runs"
-            description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
-          >
-            <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
-          </SectionCard>
-            </Tabs.Panel>
+            {!isConnected ? (
+              <ConfigSection
+                id="schedules"
+                title="Recurring runs"
+                description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
+              >
+                <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
+              </ConfigSection>
+            ) : null}
 
-            <Tabs.Panel value="export" className={classes.verticalPanel}>
-          <AgentExportPanel
-            agentId={agentId}
-            agentKey={agent.key}
-            versions={versions.map((version) => ({ version: version.version }))}
-            publishedVersion={agent.publishedVersion ?? null}
-            onImported={() => void loadAgent()}
-          />
-            </Tabs.Panel>
-
-          </Tabs>
+            <ConfigSection
+              id="export"
+              title="Export"
+              description="Take the agent out of the console — a manifest to re-import elsewhere, or a runnable agent-sdk project."
+            >
+              <AgentExportPanel
+                agentId={agentId}
+                agentKey={agent.key}
+                versions={versions.map((version) => ({ version: version.version }))}
+                publishedVersion={agent.publishedVersion ?? null}
+                onImported={() => void loadAgent()}
+              />
+            </ConfigSection>
+          </Paper>
         </Tabs.Panel>
 
         {/* ── Observe — what the agent actually did, and what it cost ── */}
         <Tabs.Panel value="observe">
-          <Tabs
-            orientation="vertical"
-            value={observeTab}
-            onChange={setObserveTab}
-            variant="pills"
-            className={classes.verticalTabs}
-          >
-            <Tabs.List className={classes.verticalTabsList}>
-              <Tabs.Tab value="traces" leftSection={<IconTimeline size={14} />}>
-                {t('tabs.traces')}
-              </Tabs.Tab>
-              <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
-                {t('tabs.usage')}
-              </Tabs.Tab>
-            </Tabs.List>
-
-            <Tabs.Panel value="traces" className={classes.verticalPanel}>
           <Stack gap="md">
             {/* Filters */}
             <SectionCard p="md">
@@ -1744,9 +1704,14 @@ export default function AgentDetailPage() {
               </Stack>
             </SectionCard>
           </Stack>
-            </Tabs.Panel>
+        </Tabs.Panel>
 
-            <Tabs.Panel value="usage" className={classes.verticalPanel}>
+        {/*
+          Usage — how to call this agent from outside the console. Its own
+          tab because it is what someone integrating the agent opens first,
+          and it had been buried as the second item of Observe's rail.
+        */}
+        <Tabs.Panel value="usage">
           <Stack gap="md">
             <SectionCard p="md">
               <Stack gap="md">
@@ -1899,12 +1864,66 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
   "version": ${agent.publishedVersion || 'null'}
 }`}
                 </Code>
+
+                {/*
+                  Every other surface the agent is reachable on. They were
+                  built one at a time and only the Responses API was ever
+                  documented here, so an integrator reading this tab would
+                  not know an OpenAI client could call the agent at all.
+                */}
+                <Divider />
+                <Text size="sm" fw={600}>OpenAI-compatible (chat/completions)</Text>
+                <Text size="xs" c="dimmed">
+                  Any OpenAI SDK can call this agent — put its key in <code>model</code> (or <code>agent:{agent.key}</code> if a
+                  model shares the name). Runs the published version. Pass back <code>conversation_id</code> to continue a thread;
+                  set <code>stream: true</code> for token deltas.
+                </Text>
+                <Code block>
+{`from openai import OpenAI
+
+client = OpenAI(base_url="${apiOrigin}/api/client/v1", api_key="YOUR_API_TOKEN")
+
+stream = client.chat.completions.create(
+    model="${agent.key}",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")`}
+                </Code>
+                <Code block>
+{`curl -N -X POST ${apiOrigin}/api/client/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'`}
+                </Code>
+
+                <Divider />
+                <Text size="sm" fw={600}>A2A (agent-to-agent)</Text>
+                <Text size="xs" c="dimmed">
+                  {a2aEnabled
+                    ? 'Exposed. Other agents discover it from the card and talk JSON-RPC — settings under Deploy → Publish.'
+                    : 'Not exposed yet — turn it on under Deploy → Publish, then other agents can discover it from the card below.'}
+                </Text>
+                <Code block>{`GET ${a2aCardUrl}`}</Code>
+
+                <Divider />
+                <Text size="sm" fw={600}>Assistants API</Text>
+                <Text size="xs" c="dimmed">
+                  For clients built on OpenAI Assistants. This agent already IS an assistant — its id is
+                  {' '}<code>asst_{agent.key}</code> — so there is nothing to create; <code>POST /assistants</code> would make
+                  a new, separate agent. Start a thread and run it in one call:
+                </Text>
+                <Code block>
+{`POST ${apiOrigin}/api/client/v1/threads/runs
+{
+  "assistant_id": "asst_${agent.key}",
+  "thread": { "messages": [{ "role": "user", "content": "Hello" }] }
+}`}
+                </Code>
               </Stack>
             </SectionCard>
           </Stack>
-            </Tabs.Panel>
-
-          </Tabs>
         </Tabs.Panel>
       </Tabs>
 
