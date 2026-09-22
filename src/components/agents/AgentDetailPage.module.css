@@ -9,9 +9,33 @@
   overflow: hidden;
 }
 
+/*
+ * The playground after the settings split: one column, same height budget as
+ * the old two-column grid so the chat pane does not jump when switching tabs.
+ */
+.playgroundFull {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--app-space-3);
+  height: min(52rem, calc(100vh - 13rem));
+  height: min(52rem, calc(100dvh - 13rem));
+  min-height: 37.5rem;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+/* Still used by Settings → Basic, which renders the extracted pane. */
 .configPanel {
   min-height: 0;
   overflow: auto;
+}
+
+/*
+ * Settings → Basic. The pane was sized for a 21rem sidebar; on a full-width tab
+ * it would stretch its inputs across the viewport, so it keeps a reading width.
+ */
+.settingsPane {
+  max-width: 44rem;
 }
 
 .sectionToggle {
@@ -106,7 +130,8 @@
 }
 
 @media (max-width: 75em) {
-  .playgroundLayout {
+  .playgroundLayout,
+  .playgroundFull {
     grid-template-columns: 1fr;
     height: auto;
     min-height: auto;

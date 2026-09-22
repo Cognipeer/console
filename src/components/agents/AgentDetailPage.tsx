@@ -63,6 +63,8 @@ import {
   IconPencil,
   IconWorld,
   IconAlertTriangle,
+  IconUsers,
+  IconPackageExport,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -81,6 +83,16 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
+import AgentAdvancedSettings, { countAdvancedOverrides } from './studio/AgentAdvancedSettings';
+import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
+import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
+import AgentExportPanel from './studio/AgentExportPanel';
+import type {
+  IAgentRuntimeConfig,
+  IAgentStructuredOutput,
+  IAgentSubagent,
+  IAgentSubagentPolicy,
+} from '@/lib/database/provider/types.domain';
 import classes from './AgentDetailPage.module.css';
 
 interface A2aMetadata {
@@ -112,6 +124,10 @@ interface Agent {
     /** @deprecated See `inputGuardrailKey`. */
     outputGuardrailKey?: string;
     toolBindings?: ToolBinding[];
+    runtime?: IAgentRuntimeConfig;
+    structuredOutput?: IAgentStructuredOutput;
+    subagents?: IAgentSubagent[];
+    subagentPolicy?: IAgentSubagentPolicy;
     kind?: 'native' | 'external';
     connection?: {
       protocol?: string;
@@ -245,6 +261,7 @@ export default function AgentDetailPage() {
   const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string | null>('playground');
+  const [settingsTab, setSettingsTab] = useState<string | null>('basic');
 
   // Collapsible section state
   const [knowledgeEngineOpen, setKnowledgeEngineOpen] = useState(false);
@@ -253,6 +270,18 @@ export default function AgentDetailPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [toolSelectorOpen, setToolSelectorOpen] = useState(false);
   const [toolBindings, setToolBindings] = useState<ToolBinding[]>([]);
+
+  // Advanced runtime knobs, structured output and the delegation roster. These
+  // live outside `configForm` for the same reason the guardrail bindings do:
+  // they are nested objects and lists, and `getInputProps` has nothing to offer
+  // them. Absent stays absent — an untouched agent must serialize the same
+  // config it had before these sections existed.
+  const [runtimeConfig, setRuntimeConfig] = useState<IAgentRuntimeConfig>({});
+  const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
+  const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
+  const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
+  /** Other agents in the project — the `ref` sub-agent picker's options. */
+  const [projectAgents, setProjectAgents] = useState<Array<{ key: string; name: string; publishedVersion?: number | null }>>([]);
 
   // Guardrail bindings live outside `configForm`: they are a list of objects,
   // not a scalar field, and the form's `getInputProps` contract has nothing to
@@ -318,6 +347,9 @@ export default function AgentDetailPage() {
   const [tracingStatusFilter, setTracingStatusFilter] = useState<string | null>(null);
   const [tracingDateRange, setTracingDateRange] = useState<[Date | null, Date | null]>([null, null]);
 
+  /** Badge on the Settings tab: how far this agent strays from the defaults. */
+  const advancedOverrideCount = useMemo(() => countAdvancedOverrides(runtimeConfig), [runtimeConfig]);
+
   const tracingPagination = useMemo(() => {
     const totalPages = Math.max(1, Math.ceil(tracingTotal / tracingPageSize));
     return { totalPages };
@@ -347,6 +379,10 @@ export default function AgentDetailPage() {
           outputGuardrailKey: cfg.outputGuardrailKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
+        setRuntimeConfig(cfg.runtime ?? {});
+        setStructuredOutput(cfg.structuredOutput);
+        setSubagents(cfg.subagents ?? []);
+        setSubagentPolicy(cfg.subagentPolicy);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -406,6 +442,29 @@ export default function AgentDetailPage() {
       }
     } catch (err) {
       console.error('Failed to load RAG modules', err);
+    }
+  };
+
+  const loadProjectAgents = async () => {
+    try {
+      // Native agents only: a connected agent is an HTTP endpoint, and the
+      // runtime refuses to flatten one into a sub-agent, so offering it here
+      // would only produce a binding that silently drops at run time.
+      const res = await fetch('/api/agents', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setProjectAgents(
+          (data.agents ?? [])
+            .filter((entry: Agent) => entry.config?.kind !== 'external')
+            .map((entry: Agent) => ({
+              key: entry.key,
+              name: entry.name,
+              publishedVersion: entry.publishedVersion ?? null,
+            })),
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load project agents', err);
     }
   };
 
@@ -528,7 +587,15 @@ export default function AgentDetailPage() {
   useEffect(() => {
     (async () => {
       setLoading(true);
-      await Promise.all([loadAgent(), loadModels(), loadPrompts(), loadRagModules(), loadGuardrails(), loadProviders()]);
+      await Promise.all([
+        loadAgent(),
+        loadModels(),
+        loadPrompts(),
+        loadRagModules(),
+        loadGuardrails(),
+        loadProviders(),
+        loadProjectAgents(),
+      ]);
       setLoading(false);
     })();
   }, [loadAgent]);
@@ -540,7 +607,9 @@ export default function AgentDetailPage() {
   }, [activeTab, agent, loadTracingSessions]);
 
   useEffect(() => {
-    if (activeTab === 'versions' && agent) {
+    // Export needs the version list too: it offers "export v3" as a source, and
+    // a version the operator cannot pick is a version they will assume is gone.
+    if ((activeTab === 'versions' || activeTab === 'export') && agent) {
       loadVersions();
     }
   }, [activeTab, agent, loadVersions]);
@@ -567,6 +636,14 @@ export default function AgentDetailPage() {
     // deprecated slots from it, so an older console binary on the same tenant
     // database keeps enforcing and the two can never disagree.
     nextConfig.guardrails = guardrailBindings;
+
+    // `undefined` rather than `{}` / `[]` for the untouched case: an empty
+    // object here would be indistinguishable from "operator cleared every knob"
+    // and would start showing up in every manifest and diff for no reason.
+    nextConfig.runtime = Object.keys(runtimeConfig).length > 0 ? runtimeConfig : undefined;
+    nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
+    nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
+    nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -773,6 +850,300 @@ export default function AgentDetailPage() {
     : `${origin}/api/client/v1/a2a/${agent.key}`;
   const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
 
+  /**
+   * The Basic settings pane. Extracted from the playground so settings and
+   * the conversation no longer share a cramped two-column row: the playground
+   * is now full width, and this renders under Settings → Basic.
+   */
+  const renderBasicSettings = () => (
+      <Paper
+        withBorder
+        radius="md"
+        p="md"
+        className={classes.configPanel}
+      >
+        <Stack gap="md">
+          <Text size="sm" fw={600}>
+            {t('config.title')}
+          </Text>
+
+          {isConnected ? (
+            <Stack gap="sm">
+              <div>
+                <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
+                <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
+              </div>
+              <div>
+                <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
+                <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
+                  {connection?.url ?? '—'}
+                </Text>
+              </div>
+              {connection?.model ? (
+                <div>
+                  <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
+                  <Text size="sm" className="ds-mono">{connection.model}</Text>
+                </div>
+              ) : null}
+              <div>
+                <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
+                <Text size="sm">
+                  {connection?.hasApiKey
+                    ? t('connectModal.apiKey')
+                    : connection?.credentialProviderKey
+                      ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
+                      : '—'}
+                </Text>
+              </div>
+              {connection?.responsePath ? (
+                <div>
+                  <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
+                  <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
+                </div>
+              ) : null}
+              <Text size="xs" c="dimmed" fs="italic" mt="xs">
+                {t('connectModal.subtitle')}
+              </Text>
+              <Button
+                variant="light"
+                size="xs"
+                leftSection={<IconPencil size={14} />}
+                onClick={() => setEditConnectionOpen(true)}
+              >
+                {t('connectModal.editButton')}
+              </Button>
+            </Stack>
+          ) : (
+          <>
+          <Select
+            label={t('config.model')}
+            placeholder={t('config.modelPlaceholder')}
+            data={models.map((m) => ({
+              value: m.key,
+              label: `${m.name} (${m.modelId})`,
+            }))}
+            searchable
+            {...configForm.getInputProps('modelKey')}
+          />
+
+          <Divider label={t('config.promptSection')} labelPosition="center" />
+
+          <Select
+            label={t('config.promptMode')}
+            data={[
+              { value: 'custom', label: t('config.customPrompt') },
+              { value: 'prompt', label: t('config.selectPrompt') },
+            ]}
+            {...configForm.getInputProps('promptMode')}
+          />
+
+          {configForm.values.promptMode === 'custom' ? (
+            <Textarea
+              label={t('config.systemPrompt')}
+              placeholder={t('config.systemPromptPlaceholder')}
+              minRows={4}
+              maxRows={12}
+              autosize
+              {...configForm.getInputProps('systemPrompt')}
+            />
+          ) : (
+            <Select
+              label={t('config.prompt')}
+              placeholder={t('config.promptPlaceholder')}
+              data={prompts.map((p) => ({
+                value: p.key,
+                label: p.name,
+              }))}
+              searchable
+              {...configForm.getInputProps('promptKey')}
+            />
+          )}
+
+          {/* ── Knowledge Engine (collapsible) ───────── */}
+          <Divider />
+          <UnstyledButton
+            onClick={() => setKnowledgeEngineOpen((o) => !o)}
+            className={classes.sectionToggle}
+          >
+            <Group gap="xs">
+              {knowledgeEngineOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+              <IconDatabase size={16} />
+              <Text size="sm" fw={600}>{t('config.knowledgeEngine')}</Text>
+            </Group>
+          </UnstyledButton>
+
+          <Collapse in={knowledgeEngineOpen}>
+            <Stack gap="md" mt="xs">
+              <Select
+                label={t('config.knowledgeEngine')}
+                description={t('config.knowledgeEngineDescription')}
+                placeholder={t('config.knowledgeEnginePlaceholder')}
+                data={ragModules.map((r) => ({
+                  value: r.key,
+                  label: r.name,
+                }))}
+                searchable
+                clearable
+                leftSection={<IconDatabase size={14} />}
+                {...configForm.getInputProps('knowledgeEngineKey')}
+              />
+            </Stack>
+          </Collapse>
+
+          {/* ── Guardrails (collapsible) ─────────────── */}
+          <Divider />
+          <UnstyledButton
+            onClick={() => setGuardrailsOpen((o) => !o)}
+            className={classes.sectionToggle}
+          >
+            <Group gap="xs">
+              {guardrailsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+              <IconShield size={16} />
+              <Text size="sm" fw={600}>{t('config.guardrails')}</Text>
+            </Group>
+          </UnstyledButton>
+
+          <Collapse in={guardrailsOpen}>
+            <Stack gap="md" mt="xs">
+              {/*
+                One guardrail per row, each naming the hooks it covers on
+                THIS agent. The tool hooks are the new capability here:
+                an agent's own action tools are the surface a tool policy
+                could never reach through the old direction slots.
+              */}
+              <GuardrailBindingList
+                options={guardrails}
+                value={guardrailBindings}
+                onChange={setGuardrailBindings}
+                surface="agent"
+              />
+            </Stack>
+          </Collapse>
+
+          {/* ── Tools (collapsible) ──────────────────── */}
+          <Divider />
+          <UnstyledButton
+            onClick={() => setToolsOpen((o) => !o)}
+            className={classes.sectionToggle}
+          >
+            <Group gap="xs">
+              {toolsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+              <IconTool size={16} />
+              <Text size="sm" fw={600}>{t('config.tools')}</Text>
+            </Group>
+          </UnstyledButton>
+
+          <Collapse in={toolsOpen}>
+            <Stack gap="md" mt="xs">
+              <Text size="xs" c="dimmed">
+                {t('config.toolsDescription')}
+              </Text>
+
+              {toolBindings.length > 0 ? (
+                <Stack gap={4}>
+                  {toolBindings.map((b) => (
+                    <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
+                      <Badge size="xs" variant="light" color="gray">
+                        {b.source.toUpperCase()}
+                      </Badge>
+                      <Text size="xs" fw={500}>{b.sourceKey}</Text>
+                      <Badge size="xs" variant="light" color="blue">
+                        {b.toolNames.length} tool(s)
+                      </Badge>
+                    </Group>
+                  ))}
+                </Stack>
+              ) : (
+                <Text size="xs" c="dimmed" fs="italic">
+                  {t('config.noToolsSelected')}
+                </Text>
+              )}
+
+              <Button
+                variant="light"
+                size="xs"
+                leftSection={<IconTool size={14} />}
+                onClick={() => setToolSelectorOpen(true)}
+              >
+                {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
+              </Button>
+            </Stack>
+          </Collapse>
+
+          <ToolSelectorModal
+            opened={toolSelectorOpen}
+            onClose={() => setToolSelectorOpen(false)}
+            value={toolBindings}
+            onChange={handleToolBindingsChange}
+          />
+
+          {/* ── Advanced Settings (collapsible) ─────── */}
+          <Divider />
+          <UnstyledButton
+            onClick={() => setAdvancedOpen((o) => !o)}
+            className={classes.sectionToggle}
+          >
+            <Group gap="xs">
+              {advancedOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
+              <IconSettings size={16} />
+              <Text size="sm" fw={600}>{t('config.advancedSettings')}</Text>
+            </Group>
+          </UnstyledButton>
+
+          <Collapse in={advancedOpen}>
+            <Stack gap="md" mt="xs">
+              <div>
+                <Text size="sm" mb={4}>
+                  {t('config.temperature')}: {configForm.values.temperature}
+                </Text>
+                <Slider
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  marks={[
+                    { value: 0, label: '0' },
+                    { value: 1, label: '1' },
+                    { value: 2, label: '2' },
+                  ]}
+                  {...configForm.getInputProps('temperature')}
+                />
+              </div>
+
+              <div>
+                <Text size="sm" mb={4}>
+                  {t('config.topP')}: {configForm.values.topP}
+                </Text>
+                <Slider
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  marks={[
+                    { value: 0, label: '0' },
+                    { value: 0.5, label: '0.5' },
+                    { value: 1, label: '1' },
+                  ]}
+                  {...configForm.getInputProps('topP')}
+                />
+              </div>
+
+              <NumberInput
+                label={t('config.maxTokens')}
+                min={1}
+                max={128000}
+                {...configForm.getInputProps('maxTokens')}
+              />
+            </Stack>
+          </Collapse>
+
+          <Button onClick={handleSaveConfig} size="sm" fullWidth>
+            {t('config.save')}
+          </Button>
+          </>
+          )}
+        </Stack>
+      </Paper>
+  );
+
   return (
     <PageContainer>
       <PageHeader
@@ -814,11 +1185,28 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="playground" leftSection={<IconMessageCircle size={14} />}>
             {t('tabs.playground')}
           </Tabs.Tab>
+          <Tabs.Tab value="settings" leftSection={<IconSettings size={14} />}>
+            Settings
+            {advancedOverrideCount > 0 ? (
+              <Badge size="xs" variant="light" ml={6}>{advancedOverrideCount}</Badge>
+            ) : null}
+          </Tabs.Tab>
+          {!isConnected ? (
+            <Tabs.Tab value="subagents" leftSection={<IconUsers size={14} />}>
+              Sub-agents
+              {subagents.length > 0 ? (
+                <Badge size="xs" variant="light" ml={6}>{subagents.length}</Badge>
+              ) : null}
+            </Tabs.Tab>
+          ) : null}
           {!isConnected ? (
             <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
               {t('tabs.versions')}
             </Tabs.Tab>
           ) : null}
+          <Tabs.Tab value="export" leftSection={<IconPackageExport size={14} />}>
+            Export
+          </Tabs.Tab>
           <Tabs.Tab value="publish" leftSection={<IconWorld size={14} />}>
             {t('tabs.publish')}
           </Tabs.Tab>
@@ -830,298 +1218,99 @@ export default function AgentDetailPage() {
           </Tabs.Tab>
         </Tabs.List>
 
+        {/* ── Settings Tab ────────────────────────────────────── */}
+        {/*
+          Split in two on purpose. Basic is everything an agent needs to answer
+          a question at all; Advanced is the agent-sdk surface, which is deep
+          enough that putting it on the same screen would bury the model picker.
+        */}
+        <Tabs.Panel value="settings">
+          <Tabs value={settingsTab} onChange={setSettingsTab} variant="outline">
+            <Tabs.List mb="md">
+              <Tabs.Tab value="basic">Basic</Tabs.Tab>
+              {!isConnected ? <Tabs.Tab value="advanced">Advanced</Tabs.Tab> : null}
+              {!isConnected ? <Tabs.Tab value="output">Structured output</Tabs.Tab> : null}
+            </Tabs.List>
+
+            <Tabs.Panel value="basic">
+              <div className={classes.settingsPane}>{renderBasicSettings()}</div>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="advanced">
+              <SectionCard
+                title="Runtime"
+                description="How the agent loop behaves: planning, budgets, context handling, reasoning and memory."
+              >
+                <AgentAdvancedSettings
+                  value={runtimeConfig}
+                  onChange={setRuntimeConfig}
+                  toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
+                />
+                <Group justify="flex-end" mt="md">
+                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+                </Group>
+              </SectionCard>
+            </Tabs.Panel>
+
+            <Tabs.Panel value="output">
+              <SectionCard
+                title="Structured output"
+                description="Make the agent answer with JSON that matches a schema instead of free text."
+              >
+                <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />
+                <Group justify="flex-end" mt="md">
+                  <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+                </Group>
+              </SectionCard>
+            </Tabs.Panel>
+          </Tabs>
+        </Tabs.Panel>
+
+        {/* ── Sub-agents Tab ──────────────────────────────────── */}
+        <Tabs.Panel value="subagents">
+          <SectionCard
+            title="Delegation"
+            description="Roles this agent can hand work to, and the guards around that."
+          >
+            <AgentSubagentsPanel
+              subagents={subagents}
+              policy={subagentPolicy}
+              agents={projectAgents}
+              models={models.map((model) => ({ key: model.key, name: model.name }))}
+              currentAgentKey={agent.key}
+              onChange={(nextSubagents, nextPolicy) => {
+                setSubagents(nextSubagents);
+                setSubagentPolicy(nextPolicy);
+              }}
+            />
+            <Group justify="flex-end" mt="md">
+              <Button onClick={handleSaveConfig} size="sm">{t('config.save')}</Button>
+            </Group>
+          </SectionCard>
+        </Tabs.Panel>
+
+        {/* ── Export Tab ──────────────────────────────────────── */}
+        <Tabs.Panel value="export">
+          <AgentExportPanel
+            agentId={agentId}
+            agentKey={agent.key}
+            versions={versions.map((version) => ({ version: version.version }))}
+            publishedVersion={agent.publishedVersion ?? null}
+            onImported={() => void loadAgent()}
+          />
+        </Tabs.Panel>
+
         {/* ── Playground Tab ──────────────────────────────────── */}
+        {/*
+          Full width now. The configuration pane that used to sit in the left
+          column moved to Settings → Basic: the two were competing for the same
+          row, and the pane is about to grow (advanced runtime, sub-agents,
+          structured output) far past what a sidebar can hold.
+        */}
         <Tabs.Panel value="playground">
-          <div className={classes.playgroundLayout}>
-            {/* Left: Configuration Panel */}
-            <Paper
-              withBorder
-              radius="md"
-              p="md"
-              className={classes.configPanel}
-            >
-              <Stack gap="md">
-                <Text size="sm" fw={600}>
-                  {t('config.title')}
-                </Text>
+          <div className={classes.playgroundFull}>
 
-                {isConnected ? (
-                  <Stack gap="sm">
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
-                      <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
-                    </div>
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
-                      <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
-                        {connection?.url ?? '—'}
-                      </Text>
-                    </div>
-                    {connection?.model ? (
-                      <div>
-                        <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
-                        <Text size="sm" className="ds-mono">{connection.model}</Text>
-                      </div>
-                    ) : null}
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
-                      <Text size="sm">
-                        {connection?.hasApiKey
-                          ? t('connectModal.apiKey')
-                          : connection?.credentialProviderKey
-                            ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
-                            : '—'}
-                      </Text>
-                    </div>
-                    {connection?.responsePath ? (
-                      <div>
-                        <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
-                        <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
-                      </div>
-                    ) : null}
-                    <Text size="xs" c="dimmed" fs="italic" mt="xs">
-                      {t('connectModal.subtitle')}
-                    </Text>
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={<IconPencil size={14} />}
-                      onClick={() => setEditConnectionOpen(true)}
-                    >
-                      {t('connectModal.editButton')}
-                    </Button>
-                  </Stack>
-                ) : (
-                <>
-                <Select
-                  label={t('config.model')}
-                  placeholder={t('config.modelPlaceholder')}
-                  data={models.map((m) => ({
-                    value: m.key,
-                    label: `${m.name} (${m.modelId})`,
-                  }))}
-                  searchable
-                  {...configForm.getInputProps('modelKey')}
-                />
-
-                <Divider label={t('config.promptSection')} labelPosition="center" />
-
-                <Select
-                  label={t('config.promptMode')}
-                  data={[
-                    { value: 'custom', label: t('config.customPrompt') },
-                    { value: 'prompt', label: t('config.selectPrompt') },
-                  ]}
-                  {...configForm.getInputProps('promptMode')}
-                />
-
-                {configForm.values.promptMode === 'custom' ? (
-                  <Textarea
-                    label={t('config.systemPrompt')}
-                    placeholder={t('config.systemPromptPlaceholder')}
-                    minRows={4}
-                    maxRows={12}
-                    autosize
-                    {...configForm.getInputProps('systemPrompt')}
-                  />
-                ) : (
-                  <Select
-                    label={t('config.prompt')}
-                    placeholder={t('config.promptPlaceholder')}
-                    data={prompts.map((p) => ({
-                      value: p.key,
-                      label: p.name,
-                    }))}
-                    searchable
-                    {...configForm.getInputProps('promptKey')}
-                  />
-                )}
-
-                {/* ── Knowledge Engine (collapsible) ───────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setKnowledgeEngineOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {knowledgeEngineOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconDatabase size={16} />
-                    <Text size="sm" fw={600}>{t('config.knowledgeEngine')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={knowledgeEngineOpen}>
-                  <Stack gap="md" mt="xs">
-                    <Select
-                      label={t('config.knowledgeEngine')}
-                      description={t('config.knowledgeEngineDescription')}
-                      placeholder={t('config.knowledgeEnginePlaceholder')}
-                      data={ragModules.map((r) => ({
-                        value: r.key,
-                        label: r.name,
-                      }))}
-                      searchable
-                      clearable
-                      leftSection={<IconDatabase size={14} />}
-                      {...configForm.getInputProps('knowledgeEngineKey')}
-                    />
-                  </Stack>
-                </Collapse>
-
-                {/* ── Guardrails (collapsible) ─────────────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setGuardrailsOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {guardrailsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconShield size={16} />
-                    <Text size="sm" fw={600}>{t('config.guardrails')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={guardrailsOpen}>
-                  <Stack gap="md" mt="xs">
-                    {/*
-                      One guardrail per row, each naming the hooks it covers on
-                      THIS agent. The tool hooks are the new capability here:
-                      an agent's own action tools are the surface a tool policy
-                      could never reach through the old direction slots.
-                    */}
-                    <GuardrailBindingList
-                      options={guardrails}
-                      value={guardrailBindings}
-                      onChange={setGuardrailBindings}
-                      surface="agent"
-                    />
-                  </Stack>
-                </Collapse>
-
-                {/* ── Tools (collapsible) ──────────────────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setToolsOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {toolsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconTool size={16} />
-                    <Text size="sm" fw={600}>{t('config.tools')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={toolsOpen}>
-                  <Stack gap="md" mt="xs">
-                    <Text size="xs" c="dimmed">
-                      {t('config.toolsDescription')}
-                    </Text>
-
-                    {toolBindings.length > 0 ? (
-                      <Stack gap={4}>
-                        {toolBindings.map((b) => (
-                          <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
-                            <Badge size="xs" variant="light" color="gray">
-                              {b.source.toUpperCase()}
-                            </Badge>
-                            <Text size="xs" fw={500}>{b.sourceKey}</Text>
-                            <Badge size="xs" variant="light" color="blue">
-                              {b.toolNames.length} tool(s)
-                            </Badge>
-                          </Group>
-                        ))}
-                      </Stack>
-                    ) : (
-                      <Text size="xs" c="dimmed" fs="italic">
-                        {t('config.noToolsSelected')}
-                      </Text>
-                    )}
-
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={<IconTool size={14} />}
-                      onClick={() => setToolSelectorOpen(true)}
-                    >
-                      {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
-                    </Button>
-                  </Stack>
-                </Collapse>
-
-                <ToolSelectorModal
-                  opened={toolSelectorOpen}
-                  onClose={() => setToolSelectorOpen(false)}
-                  value={toolBindings}
-                  onChange={handleToolBindingsChange}
-                />
-
-                {/* ── Advanced Settings (collapsible) ─────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setAdvancedOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {advancedOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconSettings size={16} />
-                    <Text size="sm" fw={600}>{t('config.advancedSettings')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={advancedOpen}>
-                  <Stack gap="md" mt="xs">
-                    <div>
-                      <Text size="sm" mb={4}>
-                        {t('config.temperature')}: {configForm.values.temperature}
-                      </Text>
-                      <Slider
-                        min={0}
-                        max={2}
-                        step={0.1}
-                        marks={[
-                          { value: 0, label: '0' },
-                          { value: 1, label: '1' },
-                          { value: 2, label: '2' },
-                        ]}
-                        {...configForm.getInputProps('temperature')}
-                      />
-                    </div>
-
-                    <div>
-                      <Text size="sm" mb={4}>
-                        {t('config.topP')}: {configForm.values.topP}
-                      </Text>
-                      <Slider
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        marks={[
-                          { value: 0, label: '0' },
-                          { value: 0.5, label: '0.5' },
-                          { value: 1, label: '1' },
-                        ]}
-                        {...configForm.getInputProps('topP')}
-                      />
-                    </div>
-
-                    <NumberInput
-                      label={t('config.maxTokens')}
-                      min={1}
-                      max={128000}
-                      {...configForm.getInputProps('maxTokens')}
-                    />
-                  </Stack>
-                </Collapse>
-
-                <Button onClick={handleSaveConfig} size="sm" fullWidth>
-                  {t('config.save')}
-                </Button>
-                </>
-                )}
-              </Stack>
-            </Paper>
-
-            {/* Right: Chat Area */}
+            {/* Chat Area */}
             <Paper
               withBorder
               radius="md"
