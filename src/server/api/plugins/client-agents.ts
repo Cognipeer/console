@@ -14,6 +14,8 @@ import {
   publishAgent,
   updateAgentRecord,
 } from '@/lib/services/agents';
+import { invalidConfigBody, validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
+import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -235,7 +237,10 @@ function createResponsesHandler(usePublished: boolean) {
         return sendAgentGuardrailBlock(reply, error);
       }
       logger.error('Client agent responses error', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
+      // Which failure it was — a provider rejecting its key, a model that no
+      // longer exists, a rate limit — instead of one opaque 500 for all.
+      const classified = classifyAgentRunError(error);
+      return reply.code(classified.status).send({ error: classified.error });
     }
   });
 }
@@ -344,6 +349,11 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       if (bindings.patch) Object.assign(config, bindings.patch);
 
+      const validation = await validateAgentConfig({ tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, config });
+      if (validation.errors.length > 0) {
+        return reply.code(400).send(invalidConfigBody(validation));
+      }
+
       const agent = await createAgentRecord(
         ctx.tenantDbName,
         ctx.tenantId,
@@ -427,6 +437,16 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           // The config replaces the stored one wholesale, so the projected
           // legacy slots must ride along on the SAME object.
           if (bindings.patch) Object.assign(cfg, bindings.patch);
+
+          const validation = await validateAgentConfig({
+            tenantDbName: ctx.tenantDbName,
+            projectId: ctx.projectId,
+            config: cfg as IAgentConfig,
+            agentKey: existing.key,
+          });
+          if (validation.errors.length > 0) {
+            return reply.code(400).send(invalidConfigBody(validation));
+          }
         }
       }
 
@@ -489,6 +509,16 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       const existing = await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId);
       if (!existing) {
         return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      const validation = await validateAgentConfig({
+        tenantDbName: ctx.tenantDbName,
+        projectId: ctx.projectId,
+        config: existing.config,
+        agentKey: existing.key,
+      });
+      if (validation.errors.length > 0) {
+        return reply.code(400).send(invalidConfigBody(validation));
       }
 
       const body = readJsonBody<Record<string, unknown>>(request);

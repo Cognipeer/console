@@ -158,6 +158,16 @@ export interface AgentCompletionUsage {
     total_tokens: number;
 }
 
+/**
+ * `finish_reason` for an agent run. `length` when a run limit (tokens, time,
+ * cost) cut it short — the answer is partial, and `length` is the value every
+ * OpenAI client already treats as "truncated". Everything else is `stop`; the
+ * precise reason travels in the non-OpenAI `stop_reason` field.
+ */
+export function agentFinishReason(stopReason: AgentChatResponse['stop_reason']): 'stop' | 'length' {
+    return stopReason === 'limit' ? 'length' : 'stop';
+}
+
 /** The OpenAI chat-completion envelope, filled from an agent run. */
 export function toChatCompletion(input: {
     id: string;
@@ -165,6 +175,8 @@ export function toChatCompletion(input: {
     content: string;
     usage?: AgentCompletionUsage;
     conversationId: string;
+    stopReason?: AgentChatResponse['stop_reason'];
+    stopDetail?: string;
 }) {
     return {
         id: input.id,
@@ -174,9 +186,13 @@ export function toChatCompletion(input: {
         choices: [{
             index: 0,
             message: { role: 'assistant' as const, content: input.content },
-            finish_reason: 'stop' as const,
+            finish_reason: agentFinishReason(input.stopReason),
         }],
         ...(input.usage ? { usage: input.usage } : {}),
+        // Not OpenAI fields either: why a run ended without a final answer.
+        ...(input.stopReason && input.stopReason !== 'completed'
+            ? { stop_reason: input.stopReason, ...(input.stopDetail ? { stop_detail: input.stopDetail } : {}) }
+            : {}),
         // Not an OpenAI field. An agent is stateful and the caller needs the
         // handle to continue the thread; hiding it would make every call a
         // fresh conversation with no way to say otherwise.
@@ -190,6 +206,7 @@ export function toChatChunk(input: {
     model: string;
     delta?: string;
     finish?: boolean;
+    stopReason?: AgentChatResponse['stop_reason'];
 }) {
     return {
         id: input.id,
@@ -199,7 +216,7 @@ export function toChatChunk(input: {
         choices: [{
             index: 0,
             delta: input.finish ? {} : { content: input.delta ?? '' },
-            finish_reason: input.finish ? 'stop' as const : null,
+            finish_reason: input.finish ? agentFinishReason(input.stopReason) : null,
         }],
     };
 }
@@ -218,7 +235,13 @@ export interface RunAgentCompletionInput {
 
 export async function runAgentCompletion(input: RunAgentCompletionInput): Promise<
     | { error: string; status: number }
-    | { content: string; conversationId: string; usage?: AgentCompletionUsage }
+    | {
+        content: string;
+        conversationId: string;
+        usage?: AgentCompletionUsage;
+        stopReason?: AgentChatResponse['stop_reason'];
+        stopDetail?: string;
+    }
 > {
     const userMessage = extractLastUserMessage(input.messages);
     if (!userMessage) {
@@ -247,6 +270,8 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     return {
         content: extractAnswerText(result),
         conversationId: conversation.conversationId,
+        ...(result.stop_reason ? { stopReason: result.stop_reason } : {}),
+        ...(result.stop_detail ? { stopDetail: result.stop_detail } : {}),
         ...(result.usage ? {
             // The Responses API names these input/output; chat/completions
             // names them prompt/completion. Same numbers, different contract.

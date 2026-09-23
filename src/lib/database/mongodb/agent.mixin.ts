@@ -5,7 +5,7 @@
  */
 
 import { ObjectId } from 'mongodb';
-import type { IAgent, AgentStatus, IAgentConversation, IAgentVersion } from '../provider.interface';
+import type { IAgent, AgentStatus, IAgentConversation, IAgentConversationState, IAgentVersion } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
@@ -201,9 +201,39 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
+      await db.collection(COLLECTIONS.agentConversationStates).deleteOne({ conversationId: id });
       const result = await db
         .collection(COLLECTIONS.agentConversations)
         .deleteOne({ _id: new ObjectId(id) });
+      return result.deletedCount === 1;
+    }
+
+    async findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null> {
+      const db = this.getTenantDb();
+      const doc = await db
+        .collection(COLLECTIONS.agentConversationStates)
+        .findOne({ conversationId });
+      if (!doc) return null;
+      return { ...doc, _id: doc._id?.toString() } as unknown as IAgentConversationState;
+    }
+
+    async saveAgentConversationState(
+      state: Omit<IAgentConversationState, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      const now = new Date();
+      await db.collection(COLLECTIONS.agentConversationStates).updateOne(
+        { conversationId: state.conversationId },
+        { $set: { ...state, updatedAt: now }, $setOnInsert: { createdAt: now } },
+        { upsert: true },
+      );
+    }
+
+    async deleteAgentConversationState(conversationId: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.agentConversationStates)
+        .deleteOne({ conversationId });
       return result.deletedCount === 1;
     }
 

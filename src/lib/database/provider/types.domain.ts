@@ -2217,7 +2217,12 @@ export interface IAgentRuntimeConfig {
   toolResponses?: IAgentToolResponsesConfig;
   contextPilot?: IAgentContextPilotConfig;
   reasoning?: IAgentReasoningConfig;
-  /** Expose the SDK `ask_user_question` tool (human-in-the-loop). */
+  /**
+   * @deprecated IGNORED. Used to expose the SDK's `ask_user_question` tool,
+   * but no console channel can deliver the answer back: the agent paused on a
+   * question nobody could see, and the conversation stayed locked. Kept on the
+   * type only because stored configs may still carry it.
+   */
   askUser?: boolean;
 }
 
@@ -2495,6 +2500,44 @@ export interface IAgentConversationMessage {
   version?: number | null;
   /** Wall-clock time the turn took, measured server-side. */
   latencyMs?: number;
+  /**
+   * Set when the run ended WITHOUT a final answer: a `limits` budget, a
+   * cancellation, or a pause no channel can resume. `content` is then the
+   * last text the agent wrote, if any. Absent on a normal answer.
+   */
+  stopReason?: 'limit' | 'cancelled' | 'paused';
+  /** The runtime's wording, e.g. "maxWallClockMs (30000ms) exceeded". */
+  stopDetail?: string;
+  /** Context summarizations that ran during this turn — see `IAgentTurnCompaction`. */
+  compactions?: IAgentTurnCompaction[];
+  /** The tool results those summarizations replaced with a placeholder. */
+  compactedTools?: Array<{ toolName: string; toolCallId: string }>;
+  /**
+   * Things that went wrong without failing the turn — a memory lookup that
+   * failed, a knowledge search that errored — so an answer built without them
+   * is not mistaken for one built with them.
+   */
+  warnings?: string[];
+}
+
+/** One context summarization during a turn, as the session view shows it. */
+export interface IAgentTurnCompaction {
+  at: string;
+  messagesCompressed?: number;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  durationMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  summary?: {
+    userDirectives?: string[];
+    facts?: Array<{ key: string; value: string }>;
+    goals?: string[];
+    openQuestions?: string[];
+    discarded?: string[];
+  };
+  integrityNotes?: string[];
+  failed?: boolean;
 }
 
 export interface IAgentConversation {
@@ -2511,6 +2554,41 @@ export interface IAgentConversation {
    */
   metadata?: Record<string, unknown>;
   createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/**
+ * The agent runtime's own state for a conversation, carried between turns.
+ *
+ * `messages` on the conversation is the transcript people read: user and
+ * assistant TEXT. It is not what the agent worked from. Rebuilding the agent's
+ * state from it each turn dropped the tool calls and results it had already
+ * made (it re-queried them), the context summaries it had built, and — with a
+ * summarizing policy — the standing instructions those summaries carried.
+ * This record is the agent-sdk snapshot of the state a turn ended in, restored
+ * at the start of the next one.
+ *
+ * Kept out of the conversation record on purpose: it can be large (tool
+ * results) and the session list reads conversations in bulk.
+ */
+export interface IAgentConversationState {
+  _id?: ObjectId | string;
+  conversationId: string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  /** `JSON.stringify` of the agent-sdk `AgentSnapshot`. */
+  snapshot: string;
+  /**
+   * `conversation.messages.length` right after the turn that produced the
+   * snapshot. A mismatch at load time means the transcript was written by
+   * something that did not save state (an older build, a connected agent) and
+   * the snapshot no longer describes it — the runtime then falls back to the
+   * transcript rather than resume from a stale state.
+   */
+  messageCount: number;
+  sizeBytes: number;
   createdAt?: Date;
   updatedAt?: Date;
 }

@@ -1547,6 +1547,20 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
 
+  -- Agent runtime state per conversation (see IAgentConversationState)
+  CREATE TABLE IF NOT EXISTS agent_conversation_states (
+    id TEXT PRIMARY KEY,
+    conversationId TEXT NOT NULL UNIQUE,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentKey TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    messageCount INTEGER NOT NULL DEFAULT 0,
+    sizeBytes INTEGER NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
   -- Agent skills (a project-scoped library, like prompts/tools — see IAgentSkill)
   CREATE TABLE IF NOT EXISTS agent_skills (
     id TEXT PRIMARY KEY,

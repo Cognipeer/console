@@ -24,10 +24,11 @@ import {
     Tooltip,
     UnstyledButton,
 } from '@mantine/core';
-import { IconCheck, IconCopy, IconList, IconSettings, IconTool } from '@tabler/icons-react';
+import { IconArrowsMinimize, IconCheck, IconCopy, IconList, IconSettings, IconTool } from '@tabler/icons-react';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
-import type { ChatMessage, PlaygroundStep } from './sessionTypes';
-import { formatCost, summariseSession } from './sessionUsage';
+import type { ChatMessage, PlaygroundStep, TurnCompaction } from './sessionTypes';
+import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
+import ContextCompactionCard, { compactionSavings } from './ContextCompactionCard';
 import {
     collectConfiguredTools,
     countUnnamedToolSurfaces,
@@ -130,6 +131,24 @@ export default function SessionSidePanel({
 
     const unnamedSurfaces = useMemo(() => countUnnamedToolSurfaces(agentConfig), [agentConfig]);
 
+    /**
+     * Every summarization in the session, oldest first. The LAST one is what
+     * the agent works from now: its summary is the agent's memory of
+     * everything before it.
+     */
+    const compactions = useMemo(() => {
+        const flat: Array<{ turnIndex: number; compaction: TurnCompaction }> = [];
+        messages.forEach((message, turnIndex) => {
+            message.compactions?.forEach((compaction) => flat.push({ turnIndex, compaction }));
+        });
+        return flat;
+    }, [messages]);
+    const reclaimedTokens = compactions.reduce(
+        (sum, { compaction }) => sum + Math.max(0, (compaction.tokensBefore ?? 0) - (compaction.tokensAfter ?? 0)),
+        0,
+    );
+    const latestCompaction = compactions[compactions.length - 1]?.compaction;
+
     /** Per-turn cost bars — the shape of the spend, not just its total. */
     const costSeries = useMemo(() => {
         const points = messages
@@ -150,6 +169,10 @@ export default function SessionSidePanel({
                 <Tabs.Tab value="tools" leftSection={<IconTool size={13} />}>
                     Tools
                     {tools.length > 0 ? <Badge size="xs" variant="light" ml={6}>{tools.length}</Badge> : null}
+                </Tabs.Tab>
+                <Tabs.Tab value="context" leftSection={<IconArrowsMinimize size={13} />}>
+                    Context
+                    {compactions.length > 0 ? <Badge size="xs" variant="light" color="indigo" ml={6}>{compactions.length}</Badge> : null}
                 </Tabs.Tab>
             </Tabs.List>
 
@@ -299,6 +322,79 @@ export default function SessionSidePanel({
                                     </Group>
                                 </UnstyledButton>
                             ))}
+                        </Stack>
+                    )}
+                </Tabs.Panel>
+
+                <Tabs.Panel value="context" p="md">
+                    {compactions.length === 0 ? (
+                        <Text size="xs" c="dimmed">
+                            The agent has not summarized its context in this session — everything said and every
+                            tool result is still in front of it. When a run outgrows its context budget, the
+                            summaries it makes show up here.
+                        </Text>
+                    ) : (
+                        <Stack gap="lg">
+                            <Group gap="lg">
+                                <Box>
+                                    <Text size="10px" c="dimmed" tt="uppercase" fw={600}>Summarizations</Text>
+                                    <Text size="lg" fw={600}>{compactions.length}</Text>
+                                </Box>
+                                <Box>
+                                    <Text size="10px" c="dimmed" tt="uppercase" fw={600}>Tokens reclaimed</Text>
+                                    <Text size="lg" fw={600}>{formatCompactTokens(reclaimedTokens)}</Text>
+                                </Box>
+                            </Group>
+
+                            {latestCompaction ? (
+                                <Box>
+                                    <Text size="xs" fw={600} mb={4}>What the agent works from now</Text>
+                                    <Text size="10px" c="dimmed" mb="xs">
+                                        The latest summary stands in for everything before it.
+                                    </Text>
+                                    <ContextCompactionCard compaction={latestCompaction} defaultOpen />
+                                </Box>
+                            ) : null}
+
+                            <Box>
+                                <Text size="xs" fw={600} mb={6}>History</Text>
+                                <Stack gap={4}>
+                                    {compactions.map(({ turnIndex, compaction }, index) => {
+                                        const savings = compactionSavings(compaction);
+                                        return (
+                                            <UnstyledButton
+                                                key={`${turnIndex}-${index}`}
+                                                onClick={() => onGoToTurn(turnIndex)}
+                                                className={classes.eventRow}
+                                            >
+                                                <Group gap="xs" wrap="nowrap">
+                                                    <Badge
+                                                        size="xs"
+                                                        variant="light"
+                                                        color={compaction.failed ? 'orange' : 'indigo'}
+                                                        className={classes.eventBadge}
+                                                    >
+                                                        {index + 1}
+                                                    </Badge>
+                                                    <Box className={classes.eventName}>
+                                                        <Text size="xs">
+                                                            {compaction.tokensBefore !== undefined && compaction.tokensAfter !== undefined
+                                                                ? `${formatCompactTokens(compaction.tokensBefore)} → ${formatCompactTokens(compaction.tokensAfter)}`
+                                                                : 'Context summarized'}
+                                                            {savings !== undefined ? ` (−${savings}%)` : ''}
+                                                        </Text>
+                                                        <Text size="10px" c="dimmed">
+                                                            Turn {Math.floor(turnIndex / 2) + 1}
+                                                            {compaction.messagesCompressed ? ` · ${compaction.messagesCompressed} results compacted` : ''}
+                                                            {compaction.failed ? ' · fallback' : ''}
+                                                        </Text>
+                                                    </Box>
+                                                </Group>
+                                            </UnstyledButton>
+                                        );
+                                    })}
+                                </Stack>
+                            </Box>
                         </Stack>
                     )}
                 </Tabs.Panel>

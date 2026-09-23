@@ -356,6 +356,34 @@ describe('#10 a guardrail block is a 4xx policy answer, not a 500', () => {
       payload: { model: 'partner-agent', input: 'hi' },
     });
     expect(res.statusCode).toBe(500);
-    expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Internal server error');
+    // Classified, but an unrecognized failure's own message stays in the
+    // server log — it may describe internals.
+    expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toEqual({
+      message: 'The agent run failed.',
+      type: 'server_error',
+      code: 'agent_run_failed',
+    });
+  });
+
+  it('a provider rejecting its API key is a 502 that says so, not a 500', async () => {
+    const providerError = Object.assign(new Error('401 Incorrect API key provided: sk-live-abcdefghijkl'), {
+      status: 401,
+      agentModelKey: 'gpt-main',
+      agentProviderKey: 'azure-prod',
+    });
+    hoisted.executeAgentChat.mockRejectedValue(providerError);
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: TOKEN_HEADERS,
+      payload: { model: 'partner-agent', input: 'hi' },
+    });
+    expect(res.statusCode).toBe(502);
+    const body = parseJsonBody<{ error: Record<string, string> }>(res.body);
+    expect(body.error.type).toBe('provider_authentication_error');
+    expect(body.error.message).toContain('model "gpt-main"');
+    expect(body.error.message).toContain('provider "azure-prod"');
+    // The provider's own text — which can echo the key — never reaches the caller.
+    expect(res.body).not.toContain('sk-live');
   });
 });

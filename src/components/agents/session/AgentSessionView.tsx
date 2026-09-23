@@ -55,7 +55,10 @@ import {
     IconClock,
     IconCopy,
     IconCoin,
+    IconHandStop,
+    IconInfoCircle,
     IconMessageCircle,
+    IconRefresh,
     IconPlayerPlay,
     IconRobot,
     IconSearch,
@@ -76,7 +79,8 @@ import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import SessionSidePanel from './SessionSidePanel';
 import LiveToolCalls, { summariseArgs, type LiveToolCall } from './LiveToolCalls';
 import { consumeSse } from './consumeSse';
-import type { ChatMessage, PlaygroundStep } from './sessionTypes';
+import ContextCompactionCard from './ContextCompactionCard';
+import type { ChatMessage, PlaygroundStep, TurnCompaction } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
 import classes from './AgentSessionView.module.css';
 
@@ -114,6 +118,37 @@ const PAYLOAD_CLIP_CHARS = 1200;
 const ZOOM_LEVELS = [2, 6, 18, 54];
 const DEFAULT_ZOOM = 1;
 
+/** A failed run, with the server's classification of what failed. */
+class TurnFailure extends Error {
+    constructor(message: string, readonly type?: string) {
+        super(message);
+    }
+}
+
+/** What an operator can do about each kind of failure. */
+function failureHint(type: string | undefined): string | undefined {
+    switch (type) {
+        case 'provider_authentication_error':
+            return 'Fix the API key on the model’s provider (Model Hub → Providers), then retry.';
+        case 'provider_permission_error':
+            return 'The provider account cannot use this model or deployment. Check its access, then retry.';
+        case 'agent_config_error':
+            return 'The agent’s configuration is broken — open Configure and fix the highlighted field.';
+        case 'rate_limit_error':
+            return 'The provider is rate limiting. Wait a moment and retry.';
+        case 'guardrail_block':
+            return 'A guardrail blocked this message.';
+        default:
+            return undefined;
+    }
+}
+
+const STOP_LABELS: Record<NonNullable<ChatMessage['stopReason']>, string> = {
+    limit: 'Stopped by a run limit',
+    cancelled: 'Run cancelled',
+    paused: 'Run paused',
+};
+
 export default function AgentSessionView({ agentId, sessionId }: AgentSessionViewProps) {
     const router = useRouter();
     const searchParams = useSearchParams();
@@ -139,6 +174,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [liveCalls, setLiveCalls] = useState<LiveToolCall[]>([]);
     const [generating, setGenerating] = useState(false);
     const [streamText, setStreamText] = useState('');
+    const [liveCompactions, setLiveCompactions] = useState<TurnCompaction[]>([]);
 
     const viewportRef = useRef<HTMLDivElement>(null);
     const turnRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -215,7 +251,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         () =>
             messages
                 .map((message, index) => ({ index, message }))
-                .filter(({ message }) => message.role === 'assistant'),
+                .filter(({ message }) => message.role === 'assistant' || message.role === 'error'),
         [messages],
     );
 
@@ -251,6 +287,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         setLiveCalls([]);
         setGenerating(false);
         setStreamText('');
+        setLiveCompactions([]);
 
         const optimistic: ChatMessage[] = [...messages, { role: 'user', content: message }];
         setMessages(optimistic);
@@ -275,6 +312,17 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     ...(data.output !== undefined ? { output: data.output } : {}),
                     ...(data.outputError ? { outputError: String(data.outputError) } : {}),
                     ...(data.usage ? { usage: data.usage as ChatMessage['usage'] } : {}),
+                    ...(typeof data.stopReason === 'string' ? { stopReason: data.stopReason as ChatMessage['stopReason'] } : {}),
+                    ...(typeof data.stopDetail === 'string' ? { stopDetail: data.stopDetail } : {}),
+                    ...(Array.isArray(data.compactions) && data.compactions.length > 0
+                        ? { compactions: data.compactions as TurnCompaction[] }
+                        : {}),
+                    ...(Array.isArray(data.compactedTools) && data.compactedTools.length > 0
+                        ? { compactedTools: data.compactedTools as ChatMessage['compactedTools'] }
+                        : {}),
+                    ...(Array.isArray(data.warnings) && data.warnings.length > 0
+                        ? { warnings: data.warnings as string[] }
+                        : {}),
                     version: (data.version as number | null) ?? null,
                     // The server times the invoke itself; the round trip is the
                     // fallback for an older response that carries no latency.
@@ -284,13 +332,18 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setSessionUpdatedAt(new Date().toISOString());
         };
 
+        // The failure stays in the transcript, under the message that caused
+        // it — a toast that vanishes after a few seconds, with the question
+        // itself rolled back, read as "nothing happened". Not persisted: the
+        // server stored neither the question nor an answer, so a reload shows
+        // the session as it really is.
         const fail = (error: unknown) => {
-            notifications.show({
-                title: 'Message failed',
-                message: error instanceof Error ? error.message : String(error),
-                color: 'red',
-            });
-            setMessages(messages);
+            const text = error instanceof Error ? error.message : String(error);
+            const type = error instanceof TurnFailure ? error.type : undefined;
+            setMessages([
+                ...optimistic,
+                { role: 'error', content: text, ...(type ? { errorType: type } : {}) },
+            ]);
         };
 
         try {
@@ -306,7 +359,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 // twice; only a missing route is worth falling back for.
                 if (res.status !== 404) {
                     const err = await res.json().catch(() => ({}));
-                    throw new Error(err.error || `Chat failed (HTTP ${res.status})`);
+                    throw new TurnFailure(err.error || `Chat failed (HTTP ${res.status})`, err.type);
                 }
                 const plain = await fetch(`/api/agents/${agentId}/chat`, {
                     method: 'POST',
@@ -315,7 +368,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 });
                 if (!plain.ok) {
                     const err = await plain.json().catch(() => ({}));
-                    throw new Error(err.error || 'Chat failed');
+                    throw new TurnFailure(err.error || 'Chat failed', err.type);
                 }
                 applyResult(await plain.json());
                 return;
@@ -364,10 +417,13 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     // stop being the thing to watch.
                     setGenerating(false);
                     setStreamText((current) => current + String((data as { text?: string }).text ?? ''));
+                } else if (event === 'summary') {
+                    setLiveCompactions((current) => [...current, data as TurnCompaction]);
                 } else if (event === 'result') {
                     applyResult(data as Record<string, unknown>);
                 } else if (event === 'error') {
-                    throw new Error(String((data as { error?: string }).error || 'Chat failed'));
+                    const payload = data as { error?: string; type?: string };
+                    throw new TurnFailure(String(payload.error || 'Chat failed'), payload.type);
                 }
             });
         } catch (err) {
@@ -375,6 +431,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         } finally {
             setSending(false);
             setLiveCalls([]);
+            setLiveCompactions([]);
             setGenerating(false);
             // Cleared only now: dropping it the moment `result` lands would
             // blank the answer for the frame between the two state updates.
@@ -552,7 +609,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             <Group gap={2} wrap="nowrap" px="xs" py={6}>
                                 {timeline.map(({ index, message }) => {
                                     const seconds = (message.latencyMs ?? 0) / 1000;
-                                    const failed = message.steps?.some((step) => step.error);
+                                    const failed = message.role === 'error'
+                                        || Boolean(message.stopReason)
+                                        || message.steps?.some((step) => step.error);
                                     return (
                                         <Tooltip
                                             key={index}
@@ -589,6 +648,27 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 <Stack gap="lg">
                                     {messages.map((msg, i) => {
                                         if (matchedIndexes && !matchedIndexes.has(i)) return null;
+                                        if (msg.role === 'error') {
+                                            const previous = messages[i - 1];
+                                            return (
+                                                <Box
+                                                    key={i}
+                                                    ref={(node: HTMLDivElement | null) => { turnRefs.current[i] = node; }}
+                                                    className={`${classes.turn} ${classes.errorTurn}`}
+                                                >
+                                                    <FailedTurn
+                                                        message={msg}
+                                                        onRetry={previous?.role === 'user'
+                                                            ? () => {
+                                                                setInput(previous.content);
+                                                                setMessages(messages.slice(0, i - 1));
+                                                                composerRef.current?.focus();
+                                                            }
+                                                            : undefined}
+                                                    />
+                                                </Box>
+                                            );
+                                        }
                                         return (
                                             <Box
                                                 key={i}
@@ -614,6 +694,16 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                             <ReasoningDisclosure reasoning={msg.reasoning} latencyMs={msg.latencyMs} />
                                                         ) : null}
                                                         {msg.steps?.length ? <StepTimeline steps={msg.steps} /> : null}
+                                                        {msg.compactions?.map((compaction, index) => (
+                                                            <ContextCompactionCard
+                                                                key={`${compaction.at}-${index}`}
+                                                                compaction={compaction}
+                                                                // The tool list is per turn; shown on the
+                                                                // last pass so it is not repeated.
+                                                                compactedTools={index === msg.compactions!.length - 1 ? msg.compactedTools : undefined}
+                                                            />
+                                                        ))}
+                                                        {msg.stopReason ? <StopNotice message={msg} /> : null}
                                                         {/*
                                                       Wrapped so headings, lists and tables
                                                       in an answer actually look like
@@ -630,6 +720,16 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                         {msg.outputError ? (
                                                             <Alert variant="light" color="red" icon={<IconAlertTriangle size={14} />} mt="xs" p="xs">
                                                                 <Text size="xs">The answer did not match the output schema: {msg.outputError}</Text>
+                                                            </Alert>
+                                                        ) : null}
+                                                        {msg.warnings?.length ? (
+                                                            <Alert variant="light" color="yellow" icon={<IconInfoCircle size={14} />} mt="xs" p="xs">
+                                                                <Stack gap={2}>
+                                                                    <Text size="xs" fw={600}>This answer was produced without everything it should have had:</Text>
+                                                                    {msg.warnings.map((warning) => (
+                                                                        <Text key={warning} size="xs">{warning}</Text>
+                                                                    ))}
+                                                                </Stack>
                                                             </Alert>
                                                         ) : null}
                                                     </Box>
@@ -656,6 +756,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                     {agent.name}
                                                 </Badge>
                                             </Group>
+                                            {liveCompactions.map((compaction, index) => (
+                                                <ContextCompactionCard key={`live-${index}`} compaction={compaction} live />
+                                            ))}
                                             {liveCalls.length === 0 && !generating && !streamText ? (
                                                 <Group gap="xs">
                                                     <Loader size="xs" />
@@ -772,6 +875,60 @@ function TurnPills({ message }: { message: ChatMessage }) {
             ) : null}
             {parts.length > 0 ? <Text size="10px" c="dimmed">{parts.join(' · ')}</Text> : null}
         </>
+    );
+}
+
+/**
+ * A run that ended without a final answer. Says why, and what the text below
+ * it is — the agent's progress up to the stop, not its answer.
+ */
+function StopNotice({ message }: { message: ChatMessage }) {
+    if (!message.stopReason) return null;
+    const hasText = Boolean(message.content?.trim());
+    return (
+        <Alert
+            variant="light"
+            color={message.stopReason === 'limit' ? 'orange' : 'gray'}
+            icon={<IconHandStop size={14} />}
+            mb="xs"
+            p="xs"
+        >
+            <Text size="xs" fw={600}>
+                {STOP_LABELS[message.stopReason]}
+                {message.stopDetail ? ` — ${message.stopDetail}` : ''}
+            </Text>
+            <Text size="xs" c="dimmed">
+                {hasText
+                    ? 'The text below is how far the agent got before it stopped, not a final answer.'
+                    : 'The agent stopped before writing an answer.'}
+                {message.stopReason === 'limit' ? ' Raise the limit in Configure → Advanced if this run needs more.' : ''}
+            </Text>
+        </Alert>
+    );
+}
+
+function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () => void }) {
+    const hint = failureHint(message.errorType);
+    return (
+        <Stack gap={6}>
+            <Group gap={6}>
+                <Badge size="xs" variant="light" color="red" leftSection={<IconAlertTriangle size={10} />}>
+                    Run failed
+                </Badge>
+                {message.errorType ? (
+                    <Text size="10px" c="dimmed" ff="monospace">{message.errorType}</Text>
+                ) : null}
+            </Group>
+            <Text size="sm" className={classes.preWrap}>{message.content}</Text>
+            {hint ? <Text size="xs" c="dimmed">{hint}</Text> : null}
+            {onRetry ? (
+                <Group>
+                    <Button size="compact-xs" variant="light" leftSection={<IconRefresh size={12} />} onClick={onRetry}>
+                        Edit and retry
+                    </Button>
+                </Group>
+            ) : null}
+        </Stack>
     );
 }
 

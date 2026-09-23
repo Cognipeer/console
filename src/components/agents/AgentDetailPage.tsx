@@ -50,6 +50,7 @@ import {
   IconAlertTriangle,
   IconLayoutDashboard,
   IconPlus,
+  IconPlugConnectedX,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -382,6 +383,22 @@ export default function AgentDetailPage() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
+  /**
+   * What the server's config check said on the last save: errors blocked it,
+   * warnings did not. Shown next to the Save button, where the operator is
+   * looking — a toast alone listed one problem and disappeared.
+   */
+  const [configIssues, setConfigIssues] = useState<{
+    errors: Array<{ field: string; message: string }>;
+    warnings: Array<{ field: string; message: string }>;
+  } | null>(null);
+  /** The last "test connection" result for the selected model. */
+  const [modelCheck, setModelCheck] = useState<
+    | { state: 'checking' }
+    | { state: 'ok'; latencyMs: number }
+    | { state: 'error'; message: string; type?: string }
+    | null
+  >(null);
 
   // Config form
   const configForm = useForm({
@@ -826,11 +843,17 @@ export default function AgentDetailPage() {
         // Used to `return false` in silence, so a rejected save looked
         // exactly like a button that did nothing — and the operator kept
         // the config they thought they had stored. Say what the server said.
+        const body = await res.json().catch(() => ({} as {
+          error?: string;
+          validation?: { errors: Array<{ field: string; message: string }>; warnings: Array<{ field: string; message: string }> };
+        }));
+        if (body?.validation) setConfigIssues(body.validation);
         if (notify) {
-          const body = await res.json().catch(() => ({} as { error?: string }));
           notifications.show({
             title: t('notifications.error'),
-            message: body?.error || `${t('notifications.saveFailed')} (HTTP ${res.status})`,
+            message: body?.validation?.errors?.length
+              ? `The config has ${body.validation.errors.length} problem${body.validation.errors.length === 1 ? '' : 's'} — see the list above Save.`
+              : body?.error || `${t('notifications.saveFailed')} (HTTP ${res.status})`,
             color: 'red',
           });
         }
@@ -839,6 +862,9 @@ export default function AgentDetailPage() {
 
       const data = await res.json();
       setAgent(data.agent);
+      setConfigIssues(Array.isArray(data.warnings) && data.warnings.length > 0
+        ? { errors: [], warnings: data.warnings }
+        : null);
       if (notify) {
         notifications.show({
           title: t('notifications.saved'),
@@ -910,6 +936,28 @@ export default function AgentDetailPage() {
   };
 
   // ── Config Save ──────────────────────────────────────────────
+
+  const checkModelConnection = async (modelKey: string) => {
+    if (!modelKey) return;
+    setModelCheck({ state: 'checking' });
+    try {
+      const res = await fetch('/api/agents/model-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelKey }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setModelCheck({ state: 'error', message: data?.error || `Check failed (HTTP ${res.status})` });
+        return;
+      }
+      setModelCheck(data.ok
+        ? { state: 'ok', latencyMs: data.latencyMs }
+        : { state: 'error', message: data.error?.message ?? 'The model did not answer.', type: data.error?.type });
+    } catch {
+      setModelCheck({ state: 'error', message: 'Could not reach the server.' });
+    }
+  };
 
   const handleSaveConfig = async () => {
     setSavingConfig(true);
@@ -1007,16 +1055,56 @@ export default function AgentDetailPage() {
       </Stack>
     ) : (
       <Stack gap="xl">
-        <Select
-          label={t('config.model')}
-          placeholder={t('config.modelPlaceholder')}
-          data={models.map((m) => ({
-            value: m.key,
-            label: `${m.name} (${m.modelId})`,
-          }))}
-          searchable
-          {...configForm.getInputProps('modelKey')}
-        />
+        <Stack gap={6}>
+          <Group align="flex-end" gap="xs" wrap="nowrap">
+            <Select
+              label={t('config.model')}
+              placeholder={t('config.modelPlaceholder')}
+              data={models.map((m) => ({
+                value: m.key,
+                label: `${m.name} (${m.modelId})`,
+              }))}
+              searchable
+              style={{ flex: 1 }}
+              {...configForm.getInputProps('modelKey')}
+              onChange={(value) => {
+                configForm.setFieldValue('modelKey', value ?? '');
+                // A verdict about the previous model says nothing about this one.
+                setModelCheck(null);
+              }}
+            />
+            {/*
+              A wrong provider key used to surface as an agent that "doesn't
+              answer" in its first session. One tiny completion through the
+              agent's own model path answers "is this model reachable with the
+              stored credentials" before anyone opens a session.
+            */}
+            <Button
+              variant="default"
+              leftSection={<IconPlugConnected size={14} />}
+              loading={modelCheck?.state === 'checking'}
+              disabled={!configForm.values.modelKey}
+              onClick={() => void checkModelConnection(configForm.values.modelKey)}
+            >
+              Test connection
+            </Button>
+          </Group>
+          {modelCheck?.state === 'ok' ? (
+            <Text size="xs" c="teal.7">
+              <IconCheck size={12} style={{ verticalAlign: 'middle' }} /> The model answered in {modelCheck.latencyMs} ms.
+            </Text>
+          ) : null}
+          {modelCheck?.state === 'error' ? (
+            <Alert variant="light" color="red" p="xs" icon={<IconPlugConnectedX size={14} />}>
+              <Text size="xs" fw={600}>
+                {modelCheck.type === 'provider_authentication_error'
+                  ? 'The provider rejected its API key'
+                  : 'The model could not be reached'}
+              </Text>
+              <Text size="xs">{modelCheck.message}</Text>
+            </Alert>
+          ) : null}
+        </Stack>
 
         {/* Prompt configuration (mode / template / managed prompt) lives in
             its own "Prompt" section — see AgentPromptPanel. Editing the prompt
@@ -1349,6 +1437,33 @@ export default function AgentDetailPage() {
             draft config and the PATCH replaces it wholesale, so six separate
             "Save" buttons only ever meant "save everything, from here".
           */}
+          {configIssues && (configIssues.errors.length > 0 || configIssues.warnings.length > 0) ? (
+            <Alert
+              mt="md"
+              variant="light"
+              color={configIssues.errors.length > 0 ? 'red' : 'yellow'}
+              icon={<IconAlertTriangle size={16} />}
+              title={configIssues.errors.length > 0
+                ? `Not saved — ${configIssues.errors.length} problem${configIssues.errors.length === 1 ? '' : 's'} to fix`
+                : 'Saved, with warnings'}
+              withCloseButton
+              onClose={() => setConfigIssues(null)}
+            >
+              <Stack gap={4}>
+                {[...configIssues.errors.map((issue) => ({ ...issue, level: 'error' as const })),
+                  ...configIssues.warnings.map((issue) => ({ ...issue, level: 'warning' as const }))]
+                  .map((issue) => (
+                    <Group key={`${issue.level}-${issue.field}-${issue.message}`} gap={6} wrap="nowrap" align="flex-start">
+                      <Badge size="xs" variant="light" color={issue.level === 'error' ? 'red' : 'yellow'}>
+                        {issue.level}
+                      </Badge>
+                      <Text size="xs" ff="monospace" c="dimmed">{issue.field}</Text>
+                      <Text size="xs">{issue.message}</Text>
+                    </Group>
+                  ))}
+              </Stack>
+            </Alert>
+          ) : null}
           <Group justify="flex-end" className={classes.configSaveBar}>
             <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
           </Group>

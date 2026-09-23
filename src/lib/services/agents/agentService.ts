@@ -18,7 +18,6 @@ import type {
     SkillPolicy as AgentSdkSkillPolicy,
     SmartAgentEvent as AgentSdkEvent,
     SmartAgentMemoryConfig as AgentSdkMemoryConfig,
-    SmartState as AgentSdkSmartState,
     SubagentDef as AgentSdkSubagentDef,
     ToolInterface as AgentSdkToolInterface,
     TraceSinkConfig as AgentSdkTraceSinkConfig,
@@ -42,7 +41,7 @@ import {
     shouldRenderInlinePrompt,
     type RenderedPrompt,
 } from './promptVariables';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion } from '@/lib/database';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -106,6 +105,18 @@ import { withAssembledStream } from './assembledStream';
 import { withStrictToolCalling } from './strictToolSchema';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
+import { annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import {
+    buildCostEstimator,
+    buildTurnInputState,
+    compactedToolResults,
+    compactionFromEvent,
+    describeTurnOutcome,
+    loadConversationState,
+    saveConversationState,
+    type AgentStopReason,
+    type AgentTurnCompaction,
+} from './agentTurnState';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const logger = createLogger('agents');
@@ -1174,6 +1185,8 @@ type CreateConsoleSdkAgentInput = {
     skillPolicy?: AgentSdkSkillPolicy;
     /** Console-memory-backed `MemoryStore` — see `agentMemoryAdapter.ts`. Absent when memory is off. */
     memory?: AgentSdkMemoryConfig;
+    /** Prices model calls for `limits.maxCostUsd` — see `buildAgentCostEstimator`. */
+    costEstimator?: ReturnType<typeof buildCostEstimator>;
 };
 
 /**
@@ -1308,14 +1321,35 @@ export const __testables = {
     persistedUserTurn,
 };
 
-function createConsoleAgentState(messages: AgentSdkMessage[]): AgentSdkSmartState {
-    return {
-        messages,
-        toolHistory: [],
-        toolHistoryArchived: [],
-        summaries: [],
-        summaryRecords: [],
-    };
+/**
+ * `limits.maxCostUsd` is enforced by the SDK only through a `costEstimator`;
+ * without one the limit did nothing at all. Built only when the limit is set,
+ * from the pricing of the agent's model and of every sub-agent model override
+ * — a delegated call spends from the same budget.
+ */
+async function buildAgentCostEstimator(
+    tenantDbName: string,
+    projectId: string,
+    config: IAgentConfig,
+    primary: { key?: string; modelId?: string; pricing?: IModelPricing | null },
+): Promise<ReturnType<typeof buildCostEstimator>> {
+    if (!(Number(config.runtime?.limits?.maxCostUsd) > 0)) return undefined;
+    const { calculateCost } = await import('@/lib/services/models/usageLogger');
+    const models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }> = [
+        { names: [primary.key, primary.modelId], pricing: primary.pricing },
+    ];
+    for (const entry of config.subagents ?? []) {
+        if (!entry.modelKey || entry.modelKey === primary.key) continue;
+        const child = await getModelByKey(tenantDbName, entry.modelKey, projectId).catch(() => null);
+        if (child) models.push({ names: [child.key, child.modelId], pricing: child.pricing });
+    }
+    const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
+    if (!estimator) {
+        logger.warn('maxCostUsd is set but the agent model has no pricing; the cost limit cannot be enforced', {
+            modelKey: primary.key,
+        });
+    }
+    return estimator;
 }
 
 /**
@@ -1366,6 +1400,7 @@ function createConsoleSdkAgent(
         ...(input.skills && input.skills.length > 0 ? { skills: input.skills } : {}),
         ...(input.skillPolicy ? { skillPolicy: input.skillPolicy } : {}),
         ...(input.memory ? { memory: input.memory } : {}),
+        ...(input.costEstimator ? { costEstimator: input.costEstimator } : {}),
         ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
         tracing: {
             enabled: true,
@@ -2433,6 +2468,54 @@ export async function resolveAgentConfig(
     };
 }
 
+// ── Model connection check ───────────────────────────────────────────
+
+export interface AgentModelCheckResult {
+    ok: boolean;
+    latencyMs: number;
+    /** Set when the check failed — see `classifyAgentRunError`. */
+    error?: { message: string; type: string; code?: string | null };
+}
+
+/**
+ * One tiny completion through exactly the path an agent run uses (the model's
+ * provider runtime and invocation settings), so a wrong API key or a deleted
+ * deployment shows up on the Configure page — not as an agent that "doesn't
+ * answer" in its first session.
+ */
+export async function checkAgentModel(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    modelKey: string,
+): Promise<AgentModelCheckResult> {
+    const startedAt = Date.now();
+    try {
+        const model = await getModelByKey(tenantDbName, modelKey, projectId);
+        if (!model) throw new Error(`Model "${modelKey}" not found`);
+        if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
+        const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
+        if (!runtime.createChatModel) throw new Error('Provider runtime does not support chat model creation');
+        const lcModel = await runtime.createChatModel({
+            modelId: model.modelId,
+            category: model.category,
+            modelSettings: resolveModelInvocationConfig(model, {}).modelSettings,
+        });
+        await (lcModel as { invoke: (input: unknown) => Promise<unknown> })
+            .invoke([{ role: 'user', content: 'Reply with the single word OK.' }])
+            .catch((error: unknown) => {
+                throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
+            });
+        return { ok: true, latencyMs: Date.now() - startedAt };
+    } catch (error) {
+        logger.info('Agent model check failed', {
+            modelKey,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return { ok: false, latencyMs: Date.now() - startedAt, error: classifyAgentRunError(error, { exposeInternal: true }).error };
+    }
+}
+
 // ── Conversation CRUD ────────────────────────────────────────────────
 
 export async function createConversation(
@@ -2579,6 +2662,11 @@ export interface AgentPlaygroundChatRequest {
      * another node, so a routed run simply streams nothing.
      */
     onTextChunk?: (text: string) => void;
+    /**
+     * Fires when the agent summarizes its context mid-run. Same queue caveat
+     * as `onToolEvent`.
+     */
+    onCompaction?: (compaction: AgentTurnCompaction) => void;
 }
 
 /**
@@ -2628,6 +2716,14 @@ export interface AgentPlaygroundChatResult {
     steps?: AgentPlaygroundStep[];
     /** Which config actually ran: a version number, or null for the draft. */
     version?: number | null;
+    /** Set when the run ended without a final answer — see `describeTurnOutcome`. */
+    stopReason?: Exclude<AgentStopReason, 'completed'>;
+    stopDetail?: string;
+    /** Context summarizations during this turn. */
+    compactions?: AgentTurnCompaction[];
+    compactedTools?: Array<{ toolName: string; toolCallId: string }>;
+    /** Non-fatal problems during the turn (a failed memory lookup, …). */
+    warnings?: string[];
 }
 
 /** OpenAI Responses API–compatible output content item */
@@ -2666,7 +2762,17 @@ export interface AgentChatResponse {
     object: 'response';
     model: string;
     output: ResponseOutputItem[];
-    status: 'completed' | 'failed';
+    /**
+     * `incomplete` when a run limit, a cancellation or a pause ended the run
+     * before a final answer — see `incomplete_details` and `stop_reason`.
+     */
+    status: 'completed' | 'failed' | 'incomplete';
+    /** OpenAI Responses convention: why the response is `incomplete`. */
+    incomplete_details?: { reason: string } | null;
+    /** How the agent run ended; `completed` for a normal final answer. */
+    stop_reason?: AgentStopReason;
+    /** The runtime's own wording for a non-`completed` stop, e.g. which limit. */
+    stop_detail?: string;
     usage: ResponseUsage;
     created_at: number;
     previous_response_id: string | null;
@@ -2674,6 +2780,21 @@ export interface AgentChatResponse {
     version: number | null;
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
+}
+
+/**
+ * `incomplete_details.reason` for a run that stopped early. `max_output_tokens`
+ * is OpenAI's own value, so a stock client recognizes the output-token cap;
+ * the rest are this API's, named after the limit that fired.
+ */
+export function incompleteReason(stopReason: AgentStopReason, stopDetail?: string): string {
+    if (stopReason === 'limit') {
+        if (stopDetail?.startsWith('maxTotalOutputTokens')) return 'max_output_tokens';
+        if (stopDetail?.startsWith('maxCostUsd')) return 'max_cost';
+        if (stopDetail?.startsWith('maxWallClockMs')) return 'max_duration';
+        return 'run_limit';
+    }
+    return stopReason;
 }
 
 export async function executeAgentChat(
@@ -2975,6 +3096,8 @@ export async function executeAgentChatLocal(
     // happen at compaction, so an agent can neither look a fact up nor record
     // what it was just told. Built from the SAME store the SDK path reads, so
     // a tool write is visible to next turn's injection.
+    // Non-fatal failures during the run (memory today), reported with the answer.
+    const warnings = new Set<string>();
     const memoryOption = buildAgentMemoryOption(config.memory, {
         tenantDbName,
         tenantId,
@@ -2982,6 +3105,7 @@ export async function executeAgentChatLocal(
         agentKey,
         conversationId,
         userId: request.userId,
+        onWarning: (message) => warnings.add(message),
     });
     const memoryToolMode = config.memory?.tools ?? 'readwrite';
     if (memoryOption?.store && memoryToolMode !== 'off') {
@@ -3001,12 +3125,11 @@ export async function executeAgentChatLocal(
         toolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
 
-    // 6. Build message history
+    // 6. What the agent resumes from: the state the conversation's last turn
+    // ended in (its tool calls and results, summaries, plan), or the text
+    // transcript when there is none — see agentTurnState.ts.
     const now = new Date();
-    const existingMessages: AgentSdkMessage[] = (conversation.messages || []).map((m) => ({
-        role: m.role,
-        content: m.content,
-    }));
+    const carried = await loadConversationState(db, conversation);
 
     // 7. Create agent-sdk instance and invoke
     // Wrapped so a streamed turn keeps its tool calls and usage — see
@@ -3051,13 +3174,15 @@ export async function executeAgentChatLocal(
         skillPolicy: resolveAgentSkillPolicy(config),
         memory: memoryOption,
         tracingMetadata: buildTracingMetadata(request.runtimeContext),
+        costEstimator: await buildAgentCostEstimator(tenantDbName, projectId, config, model),
     });
 
-    const userTurnIndex = existingMessages.length;
-    const inputMessages: AgentSdkMessage[] = [
-        ...existingMessages,
-        { role: 'user', content: userMessage },
-    ];
+    const inputState = buildTurnInputState({
+        carried,
+        transcript: conversation.messages || [],
+        userMessage,
+    });
+    const userTurnIndex = inputState.messages.length - 1;
 
     try {
         // Streaming is opt-in per call: `stream: true` is what actually turns
@@ -3065,24 +3190,30 @@ export async function executeAgentChatLocal(
         // repeats the WHOLE answer, so forwarding it would emit the response
         // twice. Both handled, same as the playground path.
         const { onTextChunk: onLiveTextChunk } = request;
-        const liveInvokeConfig = onLiveTextChunk
-            ? {
-                stream: true,
-                onStream: (chunk: { text?: string; isFinal?: boolean }) => {
-                    if (chunk.isFinal || !chunk.text) return;
-                    try {
-                        onLiveTextChunk(chunk.text);
-                    } catch (callbackError) {
-                        logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
-                    }
-                },
-            }
-            : undefined;
+        const compactions: AgentTurnCompaction[] = [];
+        const liveInvokeConfig = {
+            onEvent: (event: AgentSdkEvent) => {
+                if (event.type === 'summarization') compactions.push(compactionFromEvent(event));
+            },
+            ...(onLiveTextChunk
+                ? {
+                    stream: true,
+                    onStream: (chunk: { text?: string; isFinal?: boolean }) => {
+                        if (chunk.isFinal || !chunk.text) return;
+                        try {
+                            onLiveTextChunk(chunk.text);
+                        } catch (callbackError) {
+                            logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+                        }
+                    },
+                }
+                : {}),
+        };
 
-        const result: AgentSdkInvokeResult = await sdkAgent.invoke(
-            createConsoleAgentState(inputMessages),
-            liveInvokeConfig,
-        );
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(inputState, liveInvokeConfig)
+            .catch((error: unknown) => {
+                throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
+            });
 
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;
@@ -3114,17 +3245,31 @@ export async function executeAgentChatLocal(
         // host's own payload rather than handing a copy back — which is what
         // makes the redaction reach the user instead of only the log. A BLOCK
         // surfaces as a thrown invoke, handled by the catch below.
-        const assistantContent = result.content || '';
+        //
+        // A run a limit or a cancellation cut short has no final answer; the
+        // outcome carries why, and the last text the agent did write.
+        const outcome = describeTurnOutcome(result, inputState.messages.length);
+        const assistantContent = outcome.content;
+        const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        const compactedTools = compactions.length > 0
+            ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
+            : [];
 
         // 8. Update conversation with new messages — the REWRITTEN user turn,
         // and the title cut from the same string.
-        const updatedMessages = [
+        const updatedMessages: IAgentConversation['messages'] = [
             ...(conversation.messages || []),
             { role: 'user', content: persistedUserMessage, timestamp: now },
             {
                 role: 'assistant',
                 content: assistantContent,
                 ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+                ...(outcome.stopReason !== 'completed'
+                    ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
+                    : {}),
+                ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+                ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+                ...(usage ? { usage } : {}),
                 timestamp: new Date(),
             },
         ];
@@ -3135,11 +3280,20 @@ export async function executeAgentChatLocal(
                 ? persistedUserMessage.substring(0, 80)
                 : conversation.title,
         });
+        await saveConversationState(db, {
+            conversationId,
+            tenantId,
+            projectId,
+            agentKey,
+            state: result.state,
+            messageCount: updatedMessages.length,
+        });
 
         logger.info('Agent chat completed', {
             agentKey,
             conversationId,
             messageCount: updatedMessages.length,
+            ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
         const responseId = `resp_${conversationId}`;
@@ -3178,11 +3332,18 @@ export async function executeAgentChatLocal(
                     ],
                 },
             ],
-            status: 'completed' as const,
+            status: outcome.stopReason === 'completed' ? 'completed' as const : 'incomplete' as const,
+            ...(outcome.stopReason !== 'completed'
+                ? {
+                    incomplete_details: { reason: incompleteReason(outcome.stopReason, outcome.stopDetail) },
+                    stop_reason: outcome.stopReason,
+                    ...(outcome.stopDetail ? { stop_detail: outcome.stopDetail } : {}),
+                }
+                : { stop_reason: 'completed' as const }),
             usage: {
-                input_tokens: 0,
-                output_tokens: 0,
-                total_tokens: 0,
+                input_tokens: usage?.inputTokens ?? 0,
+                output_tokens: usage?.outputTokens ?? 0,
+                total_tokens: usage?.totalTokens ?? ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)),
             },
             created_at: Math.floor(Date.now() / 1000),
             previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
@@ -3240,11 +3401,21 @@ export async function executePlaygroundChat(
  *    carry a field called `error`.
  */
 /** EXPORTED FOR TESTS — see the failure rules above. */
-export function extractPlaygroundSteps(result: AgentSdkInvokeResult): AgentPlaygroundStep[] {
+export function extractPlaygroundSteps(
+    result: AgentSdkInvokeResult,
+    /**
+     * Execution ids the run STARTED with. A turn resumed from a stored state
+     * carries the earlier turns' tool history; those calls belong to the turns
+     * that made them, not to this one.
+     */
+    priorExecutionIds?: ReadonlySet<string>,
+): AgentPlaygroundStep[] {
     const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
     if (!Array.isArray(history)) return [];
 
-    return history.map((entry) => {
+    return history
+        .filter((entry) => !(priorExecutionIds && typeof entry.executionId === 'string' && priorExecutionIds.has(entry.executionId)))
+        .map((entry) => {
         const output = entry.output;
         const status = typeof entry.status === 'string'
             ? entry.status as AgentPlaygroundStep['status']
@@ -3357,6 +3528,10 @@ export async function executePlaygroundChatLocal(
     const history = sessionConversation
         ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
         : request.history;
+    // A Session resumes from the state its last turn ended in (tool results,
+    // summaries, plan) — the text transcript alone lost all of that. A
+    // stateless call has only the history it was handed.
+    const carried = sessionConversation ? await loadConversationState(db, sessionConversation) : null;
 
     // Context entered when the session was started applies to every turn in it.
     // Merged UNDER the request's own context so a per-message override still
@@ -3562,6 +3737,8 @@ export async function executePlaygroundChatLocal(
 
     // Same memory toolset the live path binds — a playground that hands the
     // agent a different set of tools is not testing the agent.
+    // Non-fatal failures during the run (memory today), reported with the answer.
+    const warnings = new Set<string>();
     const playgroundMemoryOption = buildAgentMemoryOption(config.memory, {
         tenantDbName,
         tenantId,
@@ -3569,6 +3746,7 @@ export async function executePlaygroundChatLocal(
         agentKey,
         conversationId: sessionConversation ? String(sessionConversation._id) : undefined,
         userId: runtimeContext?.userId,
+        onWarning: (message) => warnings.add(message),
     });
     const playgroundMemoryToolMode = config.memory?.tools ?? 'readwrite';
     if (playgroundMemoryOption?.store && playgroundMemoryToolMode !== 'off') {
@@ -3584,14 +3762,19 @@ export async function executePlaygroundChatLocal(
         playgroundToolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
 
-    // Build messages (in-memory history only). The GUARDED message is what the
-    // model sees — the single-slot version computed a redaction here and then
-    // sent the raw text anyway.
-    const inputMessages: AgentSdkMessage[] = [
-        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-        ...(history || []),
-        { role: 'user', content: guardedUserMessage },
-    ];
+    // The GUARDED message is what the model sees — the single-slot version
+    // computed a redaction here and then sent the raw text anyway.
+    const inputState = buildTurnInputState({
+        carried,
+        transcript: history || [],
+        userMessage: guardedUserMessage,
+        systemPrompt,
+    });
+    const priorExecutionIds = new Set(
+        (carried?.toolHistory ?? [])
+            .map((entry) => (entry as { executionId?: unknown }).executionId)
+            .filter((id): id is string => typeof id === 'string'),
+    );
 
     // Create agent-sdk instance and invoke (tracing enabled)
     // Wrapped so a streamed turn keeps its tool calls and usage — see
@@ -3638,56 +3821,66 @@ export async function executePlaygroundChatLocal(
         skills: playgroundSkills,
         skillPolicy: resolveAgentSkillPolicy(config),
         memory: playgroundMemoryOption,
+        costEstimator: await buildAgentCostEstimator(tenantDbName, projectId, config, model),
     });
 
     // Surface progress to the caller (best-effort; never fails the run).
-    const { onToolEvent, onTextChunk } = request;
-    const invokeConfig = onToolEvent || onTextChunk
-        ? {
-            ...(onToolEvent ? {
-                onEvent: (event: AgentSdkEvent) => {
-                    if (event.type !== 'tool_call' || !event.name) return;
-                    if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
-                    try {
-                        onToolEvent({
-                            phase: event.phase,
-                            name: event.name,
-                            id: event.id,
-                            ...(event.args !== undefined ? { args: event.args } : {}),
-                            ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
-                            ...(event.error?.message ? { error: event.error.message } : {}),
-                        });
-                    } catch (callbackError) {
-                        logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
-                    }
-                },
-            } : {}),
-            ...(onTextChunk ? {
-                // `stream: true` is what actually turns provider deltas on —
-                // with only `onStream` the SDK fires it exactly once, at the
-                // end, with the whole answer.
-                stream: true,
-                onStream: (chunk: { text?: string; isFinal?: boolean }) => {
-                    // That same terminal call repeats the FULL content, so
-                    // forwarding it would print the answer twice: once
-                    // streamed, once again in one burst.
-                    if (chunk.isFinal || !chunk.text) return;
-                    try {
-                        onTextChunk(chunk.text);
-                    } catch (callbackError) {
-                        logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
-                    }
-                },
-            } : {}),
-        }
-        : undefined;
+    const { onToolEvent, onTextChunk, onCompaction } = request;
+    const compactions: AgentTurnCompaction[] = [];
+    const invokeConfig = {
+        onEvent: (event: AgentSdkEvent) => {
+            if (event.type === 'summarization') {
+                // Collected for the turn record either way; forwarded live
+                // so a session shows the compaction as it happens.
+                const compaction = compactionFromEvent(event);
+                compactions.push(compaction);
+                try {
+                    onCompaction?.(compaction);
+                } catch (callbackError) {
+                    logger.warn('onCompaction callback failed', { agentKey, error: callbackError });
+                }
+                return;
+            }
+            if (!onToolEvent || event.type !== 'tool_call' || !event.name) return;
+            if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+            try {
+                onToolEvent({
+                    phase: event.phase,
+                    name: event.name,
+                    id: event.id,
+                    ...(event.args !== undefined ? { args: event.args } : {}),
+                    ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+                    ...(event.error?.message ? { error: event.error.message } : {}),
+                });
+            } catch (callbackError) {
+                logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
+            }
+        },
+        ...(onTextChunk ? {
+            // `stream: true` is what actually turns provider deltas on —
+            // with only `onStream` the SDK fires it exactly once, at the
+            // end, with the whole answer.
+            stream: true,
+            onStream: (chunk: { text?: string; isFinal?: boolean }) => {
+                // That same terminal call repeats the FULL content, so
+                // forwarding it would print the answer twice: once
+                // streamed, once again in one burst.
+                if (chunk.isFinal || !chunk.text) return;
+                try {
+                    onTextChunk(chunk.text);
+                } catch (callbackError) {
+                    logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+                }
+            },
+        } : {}),
+    };
 
     const invokeStartedAt = Date.now();
     try {
-        const result: AgentSdkInvokeResult = await sdkAgent.invoke(
-            createConsoleAgentState(inputMessages),
-            invokeConfig,
-        );
+        const result: AgentSdkInvokeResult = await sdkAgent.invoke(inputState, invokeConfig)
+            .catch((error: unknown) => {
+                throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
+            });
 
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;
@@ -3701,12 +3894,21 @@ export async function executePlaygroundChatLocal(
         // fired, and it dropped any redaction. All three meant a policy
         // verified in the playground was not the policy production ran.
         // Already adjudicated by the plugin's `postModelCall`; see the live path.
-        const assistantContent = result.content || '';
+        //
+        // A run a limit or a cancellation cut short has no final answer; the
+        // outcome carries why, and the last text the agent did write.
+        const outcome = describeTurnOutcome(result, inputState.messages.length);
+        const compactedTools = compactions.length > 0
+            ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
+            : [];
 
-        logger.info('Playground chat completed', { agentKey });
+        logger.info('Playground chat completed', {
+            agentKey,
+            ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
+        });
 
         const playgroundResult: AgentPlaygroundChatResult = {
-            content: assistantContent,
+            content: outcome.content,
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
             ...(result.output !== undefined ? { output: result.output } : {}),
             ...(result.outputError
@@ -3714,8 +3916,14 @@ export async function executePlaygroundChatLocal(
                 : {}),
             ...(normalizePlaygroundUsage(result.metadata?.usage) ?? {}),
             latencyMs: Date.now() - invokeStartedAt,
-            steps: extractPlaygroundSteps(result),
+            steps: extractPlaygroundSteps(result, priorExecutionIds),
             version: ranVersion,
+            ...(outcome.stopReason !== 'completed'
+                ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
+                : {}),
+            ...(compactions.length > 0 ? { compactions } : {}),
+            ...(compactedTools.length > 0 ? { compactedTools } : {}),
+            ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
         };
 
         const costUsd = await priceTurn(tenantDbName, projectId, config.modelKey, playgroundResult.usage);
@@ -3724,7 +3932,17 @@ export async function executePlaygroundChatLocal(
         }
 
         if (sessionConversation) {
-            await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
+            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
+            if (messageCount !== undefined) {
+                await saveConversationState(db, {
+                    conversationId: String(sessionConversation._id),
+                    tenantId,
+                    projectId,
+                    agentKey,
+                    state: result.state,
+                    messageCount,
+                });
+            }
         }
 
         return playgroundResult;
@@ -3748,7 +3966,7 @@ async function persistSessionTurn(
     conversation: IAgentConversation,
     userMessage: string,
     result: AgentPlaygroundChatResult,
-): Promise<void> {
+): Promise<number | undefined> {
     try {
         const now = new Date();
         const messages: IAgentConversation['messages'] = [
@@ -3764,6 +3982,11 @@ async function persistSessionTurn(
                 ...(result.outputError ? { outputError: result.outputError } : {}),
                 ...(result.usage ? { usage: result.usage } : {}),
                 ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}),
+                ...(result.stopReason ? { stopReason: result.stopReason } : {}),
+                ...(result.stopDetail ? { stopDetail: result.stopDetail } : {}),
+                ...(result.compactions?.length ? { compactions: result.compactions } : {}),
+                ...(result.compactedTools?.length ? { compactedTools: result.compactedTools } : {}),
+                ...(result.warnings?.length ? { warnings: result.warnings } : {}),
                 version: result.version ?? null,
             },
         ];
@@ -3776,6 +3999,7 @@ async function persistSessionTurn(
                 ? userMessage.substring(0, 80)
                 : conversation.title,
         });
+        return messages.length;
     } catch (error) {
         logger.error('Failed to persist session turn', {
             conversationId: String(conversation._id),

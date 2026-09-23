@@ -486,3 +486,72 @@ describe('channel: OpenAI chat/completions', () => {
     });
 });
 
+
+// ── A run a limit stopped, on every channel ─────────────────────────────
+
+describe('a run stopped by a limit reports why, on every channel', () => {
+    const STOPPED = {
+        ...ANSWER,
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_duration' },
+        stop_reason: 'limit',
+        stop_detail: 'maxWallClockMs (60000ms) exceeded',
+        output: [
+            { id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Checking the infra logs next…' }] },
+        ],
+    };
+
+    it('Responses: status incomplete with incomplete_details', async () => {
+        setRunResult(STOPPED);
+        const { clientAgentsApiPlugin } = await import('@/server/api/plugins/client-agents');
+        const app = await createFastifyApiTestApp(clientAgentsApiPlugin);
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/responses',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', input: 'dig deeper' },
+        });
+        const body = parseJsonBody<Record<string, unknown>>(res.body);
+        expect(body.status).toBe('incomplete');
+        expect(body.incomplete_details).toEqual({ reason: 'max_duration' });
+        expect(body.stop_reason).toBe('limit');
+    });
+
+    it('chat/completions: finish_reason "length" plus the precise reason', async () => {
+        setRunResult(STOPPED);
+        const { clientInferenceApiPlugin } = await import('@/server/api/plugins/client-inference');
+        const app = await createFastifyApiTestApp(clientInferenceApiPlugin);
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/chat/completions',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', messages: [{ role: 'user', content: 'dig deeper' }] },
+        });
+        const body = parseJsonBody<Record<string, unknown>>(res.body);
+        const choice = (body.choices as Array<Record<string, unknown>>)[0];
+        expect(choice.finish_reason).toBe('length');
+        expect((choice.message as { content: string }).content).toBe('Checking the infra logs next…');
+        expect(body.stop_reason).toBe('limit');
+        expect(body.stop_detail).toMatch(/^maxWallClockMs/);
+    });
+
+    it('A2A: the task carries the stop reason in its status message and metadata', async () => {
+        setRunResult(STOPPED);
+        const { clientA2aApiPlugin } = await import('@/server/api/plugins/client-a2a');
+        const app = await createFastifyApiTestApp(clientA2aApiPlugin);
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/a2a/field-ops',
+            headers: { authorization: 'Bearer tok' },
+            payload: {
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'message/send',
+                params: { message: { role: 'user', parts: [{ kind: 'text', text: 'dig deeper' }] } },
+            },
+        });
+        const task = parseJsonBody<{ result: Record<string, any> }>(res.body).result;
+        expect(task.metadata).toEqual({ stopReason: 'limit', stopDetail: 'maxWallClockMs (60000ms) exceeded' });
+        expect(task.status.message.parts[0].text).toContain('maxWallClockMs');
+    });
+});

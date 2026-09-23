@@ -161,6 +161,7 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [{ key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } }],
+  agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
   mcp_request_logs: [
     { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },

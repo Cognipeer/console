@@ -112,7 +112,9 @@ describe('agent settings — runtime resolution', () => {
         expect(resolved.limits?.maxCostUsd).toBe(1.5);
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
         expect(resolved.reasoning).toEqual({ enabled: true, level: 'high', native: { effort: 'high' } });
-        expect(resolved.humanInTheLoop).toEqual({ askUser: true });
+        // A stored `askUser: true` is ignored: no console channel can answer
+        // the question, so offering the tool only ever locked the conversation.
+        expect((resolved as Record<string, unknown>).humanInTheLoop).toBeUndefined();
     });
 
     it('keeps the module default for a limit the operator did not touch', () => {

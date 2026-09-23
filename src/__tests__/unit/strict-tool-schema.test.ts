@@ -193,6 +193,44 @@ describe('withStrictToolCalling — every tool the provider sees', () => {
         expect(seen).toEqual([{ documentId: 'd1' }]);
     });
 
+    it('binds a tool with NO parameters (and one with an unknown schema) strict-valid', async () => {
+        // Found by the agent-findings e2e: a parameterless OpenAPI operation
+        // became a top-level string, LangChain wrapped it as `{ input }` with
+        // no `required`, and the provider rejected EVERY call of the agent.
+        const { model, bound } = fakeStrictModel([
+            { role: 'assistant', content: '', tool_calls: [
+                { id: 'c1', name: 'list_errors', args: {} },
+                { id: 'c2', name: 'legacy_mcp', args: { input: '{"q":"502"}' } },
+            ] },
+            { role: 'assistant', content: 'done' },
+        ]);
+        const seen: Record<string, unknown> = {};
+        const noParams = createTool({
+            name: 'list_errors',
+            description: 'no parameters',
+            schema: toolInputSchemaToZod({ type: 'object', properties: {} }),
+            func: async (args: unknown) => { seen.list_errors = args; return 'ok'; },
+        });
+        const unknownSchema = createTool({
+            name: 'legacy_mcp',
+            description: 'no declared schema',
+            schema: toolInputSchemaToZod(undefined),
+            func: async (args: unknown) => { seen.legacy_mcp = args; return 'ok'; },
+        });
+        const agent = createSmartAgent({
+            name: 'p', model: withStrictToolCalling(model) as never, tools: [noParams, unknownSchema],
+        } as never);
+        await agent.invoke({ messages: [{ role: 'user', content: 'go' }] } as never);
+
+        for (const tool of bound[0].tools.filter((t) => t.name === 'list_errors' || t.name === 'legacy_mcp')) {
+            expect({ tool: tool.name, violations: violations(strictParams(tool.schema)) })
+                .toEqual({ tool: tool.name, violations: [] });
+        }
+        expect(seen.list_errors).toEqual({});
+        // The unknown-schema tool gets its arguments decoded back into an object.
+        expect(seen.legacy_mcp).toEqual({ q: '502' });
+    });
+
     it('leaves a provider without strict tool calling untouched', () => {
         const model = { capabilities: { strictToolCalling: false }, bindTools: () => model };
         expect(withStrictToolCalling(model)).toBe(model);

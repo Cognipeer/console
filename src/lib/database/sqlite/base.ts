@@ -88,6 +88,7 @@ export const TABLES = {
   agents: 'agents',
   agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
+  agentConversationStates: 'agent_conversation_states',
   agentSkills: 'agent_skills',
   vectorCounters: 'vector_counters',
   vectorMigrations: 'vector_migrations',
