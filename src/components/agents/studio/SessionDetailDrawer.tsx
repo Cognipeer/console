@@ -10,7 +10,7 @@
  * person started from the console to try the agent offers Continue.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
     Alert,
     Badge,
@@ -21,6 +21,7 @@ import {
     Group,
     Loader,
     Paper,
+    SegmentedControl,
     Stack,
     Table,
     Tabs,
@@ -42,7 +43,7 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import MessageBlock from '@/components/common/ui/MessageBlock';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
 import PropertiesPanel from '@/components/common/ui/PropertiesPanel';
-import ThreadDetailView from '@/components/tracing/ThreadDetailView';
+import SessionDetailView from '@/components/tracing/SessionDetailView';
 import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import type { ChatMessage, PlaygroundStep } from '../session/sessionTypes';
@@ -138,15 +139,15 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                     ) : null}
 
                     {/*
-                      Agent turns are traced with threadId = conversationId, so
-                      the Observability thread view is this session. Sessions
-                      with no trace (tracing off, or older than it) fall back
-                      to the stored transcript.
+                      Each agent turn is one traced run, grouped under
+                      threadId = conversationId. Pick a turn, see it in Agent
+                      Observability's own session view. Sessions with no trace
+                      (tracing off, or older than it) fall back to the stored
+                      transcript.
                     */}
-                    <ThreadDetailView
+                    <TracedTurns
                         key={session._id}
-                        threadId={session._id}
-                        embedded
+                        conversationId={session._id}
                         actions={continuable ? (
                             <Button
                                 size="xs"
@@ -156,7 +157,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                                 Continue
                             </Button>
                         ) : null}
-                        emptyFallback={
+                        fallback={
                             <Stack gap="md">
                                 {continuable ? (
                                     <Group justify="flex-end">
@@ -322,5 +323,65 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                 </Stack>
             ) : null}
         </Drawer>
+    );
+}
+
+interface ThreadTurn {
+    sessionId: string;
+    status?: string;
+    startedAt?: string;
+    durationMs?: number;
+}
+
+function TracedTurns({
+    conversationId,
+    actions,
+    fallback,
+}: {
+    conversationId: string;
+    actions?: ReactNode;
+    fallback: ReactNode;
+}) {
+    const [turns, setTurns] = useState<ThreadTurn[] | null>(null);
+    const [selected, setSelected] = useState<string | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        fetch(`/api/tracing/threads/${encodeURIComponent(conversationId)}`, { cache: 'no-store' })
+            .then(async (res) => (res.ok ? res.json() : null))
+            .then((data: { sessions?: ThreadTurn[] } | null) => {
+                if (cancelled) return;
+                const list = [...(data?.sessions ?? [])].sort(
+                    (a, b) => new Date(a.startedAt ?? 0).getTime() - new Date(b.startedAt ?? 0).getTime(),
+                );
+                setTurns(list);
+                // The latest turn is usually the one someone came to look at.
+                setSelected(list.length > 0 ? list[list.length - 1].sessionId : null);
+            })
+            .catch(() => { if (!cancelled) setTurns([]); });
+        return () => { cancelled = true; };
+    }, [conversationId]);
+
+    if (turns === null) return <Center py="xl"><Loader size="sm" /></Center>;
+    if (turns.length === 0 || !selected) return <>{fallback}</>;
+
+    return (
+        <Stack gap="md">
+            {turns.length > 1 ? (
+                <Group gap="xs">
+                    <Text size="xs" c="dimmed" fw={600} tt="uppercase">Turn</Text>
+                    <SegmentedControl
+                        size="xs"
+                        value={selected}
+                        onChange={setSelected}
+                        data={turns.map((turn, index) => ({
+                            value: turn.sessionId,
+                            label: `${index + 1} · ${turn.startedAt ? new Date(turn.startedAt).toLocaleTimeString() : '—'}`,
+                        }))}
+                    />
+                </Group>
+            ) : null}
+            <SessionDetailView key={selected} sessionId={selected} embedded actions={actions} />
+        </Stack>
     );
 }
