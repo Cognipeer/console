@@ -199,6 +199,12 @@ function buildPrimers(): Record<string, Mock> {
       _id: `mock-agent-run-${Math.random().toString(36).slice(2, 10)}`,
       ...record,
     })),
+    // Lookups a real provider answers with `null` when nothing matches (the
+    // name-based default would be `undefined`). `listAgentRuns`,
+    // `listQueuedAgentRuns`, `countActiveAgentRuns` and `deleteAgentRun`
+    // already get `[]` / `0` / `true` from `defaultReturnFor`.
+    getAgentRunById: vi.fn().mockResolvedValue(null),
+    getAgentRunByIdempotencyKey: vi.fn().mockResolvedValue(null),
   };
 }
 

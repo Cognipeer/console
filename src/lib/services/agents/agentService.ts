@@ -2311,9 +2311,11 @@ export async function updateAgentRecord(
 ): Promise<IAgent | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    if (data.config?.sandbox) {
+    if (data.config?.sandbox || data.config?.execution) {
         // `config` replaces the stored one wholesale; masked secret values
-        // must resolve against what is stored, not be saved as the mask.
+        // must resolve against what is stored, not be saved as the mask —
+        // and a plaintext secret (sandbox secrets, the execution callback
+        // secret) must be sealed before it is written.
         const current = await db.findAgentById(agentId);
         data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
     }

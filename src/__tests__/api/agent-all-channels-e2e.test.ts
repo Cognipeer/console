@@ -30,7 +30,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
     return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
 });
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', async () => {
+  const errors = await import('@/lib/database/provider/errors');
+  return {
+    getDatabase: vi.fn(),
+    AgentRunConflictError: errors.AgentRunConflictError,
+    AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
+  };
+});
 
 vi.mock('@/lib/security/rbac', () => ({
     getPermissionServiceForPath: vi.fn(),
@@ -166,6 +173,13 @@ const ANSWER = {
 
 const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
 
+// Turns on an existing conversation hold its single active-run slot (a
+// `mode: 'sync'` AgentRun reservation) for their whole duration.
+const agentRunReservation = {
+  create: vi.fn(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record })),
+  remove: vi.fn(async () => true),
+};
+
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
     return fn as ReturnType<typeof vi.fn>;
 }
@@ -201,7 +215,11 @@ function runCalls() {
 beforeEach(() => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({ runWithTenant });
+    mockFn(getDatabase).mockResolvedValue({
+        runWithTenant,
+        createAgentRun: agentRunReservation.create,
+        deleteAgentRun: agentRunReservation.remove,
+    });
     mockFn(getPermissionServiceForPath).mockReturnValue(null);
     mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
     mockFn(getModelByKey).mockResolvedValue(null);
@@ -381,6 +399,22 @@ describe('channel: OpenAI chat/completions', () => {
         // An agent is stateful, so the thread handle comes back.
         expect(body.conversation_id).toBe('conv-1');
         expect((body.usage as { total_tokens: number }).total_tokens).toBe(1242);
+    });
+
+    it('REGRESSION: a conversation busy with another run gets 409 agent_run_conflict and never runs concurrently', async () => {
+        const { AgentRunConflictError } = await import('@/lib/database/provider/errors');
+        agentRunReservation.create.mockRejectedValueOnce(new AgentRunConflictError('conv-1'));
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/chat/completions',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', conversation_id: 'conv-1', messages: [{ role: 'user', content: 'hi' }] },
+        });
+
+        expect(res.statusCode).toBe(409);
+        expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('agent_run_conflict');
+        expect(runCalls()).toHaveLength(0);
     });
 
     it('API traffic runs the published version', async () => {

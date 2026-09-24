@@ -15,6 +15,11 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   executeAgentChatLocal: vi.fn(),
   getDatabase: vi.fn(),
+  publish: vi.fn(),
+}));
+
+vi.mock('@/lib/core/queue', () => ({
+  getQueue: vi.fn(async () => ({ publish: hoisted.publish })),
 }));
 
 vi.mock('@/lib/services/agents/agentService', () => ({
@@ -30,7 +35,10 @@ vi.mock('@/lib/database', async (importOriginal) => {
 import { getDatabase } from '@/lib/database';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { reloadConfig } from '@/lib/core/config';
-import { createBackgroundAgentRun } from '@/lib/services/agents/agentRunService';
+import {
+  createBackgroundAgentRun,
+  lookupIdempotentAgentRun,
+} from '@/lib/services/agents/agentRunService';
 
 let db: SQLiteProvider;
 let tmpDir: string;
@@ -68,6 +76,7 @@ beforeEach(async () => {
   });
   tenantId = String(tenant._id);
   await db.switchToTenant(dbName);
+  hoisted.publish.mockResolvedValue(undefined);
   process.env.AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT = '2';
   reloadConfig();
 });
@@ -147,6 +156,73 @@ describe('Idempotency-Key (§12.15)', () => {
   });
 });
 
+describe('Idempotency-Key — races and the pre-conversation lookup', () => {
+  it('REGRESSION: concurrent same-key requests — exactly one run is created, the other replays it', async () => {
+    const results = await Promise.all([
+      createBackgroundAgentRun(baseInput('conv-race-1', { idempotencyKey: 'idem-race' })),
+      createBackgroundAgentRun(baseInput('conv-race-2', { idempotencyKey: 'idem-race' })),
+    ]);
+    const kinds = results.map((r) => r.kind).sort();
+    expect(kinds).toEqual(['created', 'idempotent_replay']);
+    const created = results.find((r) => r.kind === 'created');
+    const replay = results.find((r) => r.kind === 'idempotent_replay');
+    if (created?.kind === 'created' && replay?.kind === 'idempotent_replay') {
+      expect(String(replay.run._id)).toBe(String(created.run._id));
+    }
+    expect(await db.countActiveAgentRuns(tenantId)).toBe(1);
+    expect(hoisted.publish.mock.calls.filter(([, name]) => name === 'run')).toHaveLength(1);
+  });
+
+  it('REGRESSION: an insert that loses the race on the unique key (AgentRunIdempotencyKeyTakenError) resolves to a replay, not a 500', async () => {
+    const first = await createBackgroundAgentRun(baseInput('conv-taken-1', { idempotencyKey: 'idem-taken' }));
+    expect(first.kind).toBe('created');
+
+    // Make the pre-check miss, as it does when two requests read before
+    // either writes — the insert itself must then catch the duplicate.
+    const lookup = vi.spyOn(db, 'getAgentRunByIdempotencyKey');
+    lookup.mockResolvedValueOnce(null);
+    const second = await createBackgroundAgentRun(baseInput('conv-taken-2', { idempotencyKey: 'idem-taken' }));
+
+    expect(second.kind).toBe('idempotent_replay');
+    if (first.kind === 'created' && second.kind === 'idempotent_replay') {
+      expect(String(second.run._id)).toBe(String(first.run._id));
+    }
+    // The losing insert left nothing behind.
+    expect(await db.countActiveAgentRuns(tenantId)).toBe(1);
+  });
+
+  it('the same race with a DIFFERENT body resolves to idempotency_conflict', async () => {
+    await createBackgroundAgentRun(baseInput('conv-taken-3', { idempotencyKey: 'idem-taken-2' }));
+    vi.spyOn(db, 'getAgentRunByIdempotencyKey').mockResolvedValueOnce(null);
+    const second = await createBackgroundAgentRun(
+      baseInput('conv-taken-4', { idempotencyKey: 'idem-taken-2', userMessage: 'something else' }),
+    );
+    expect(second.kind).toBe('idempotency_conflict');
+  });
+
+  it('lookupIdempotentAgentRun (run before a conversation is created) answers replay / conflict / none', async () => {
+    const created = await createBackgroundAgentRun(baseInput('conv-lookup', { idempotencyKey: 'idem-lookup' }));
+    if (created.kind !== 'created') throw new Error('expected created');
+    const common = {
+      tenantDbName: dbName,
+      tenantId,
+      projectId: PROJECT_ID,
+      agentKey: AGENT_KEY,
+      idempotencyConversationScope: null,
+    };
+
+    const replay = await lookupIdempotentAgentRun({ ...common, userMessage: 'hello', idempotencyKey: 'idem-lookup' });
+    expect(replay.kind).toBe('replay');
+    if (replay.kind === 'replay') expect(String(replay.run._id)).toBe(String(created.run._id));
+
+    const conflict = await lookupIdempotentAgentRun({ ...common, userMessage: 'different', idempotencyKey: 'idem-lookup' });
+    expect(conflict.kind).toBe('conflict');
+
+    const none = await lookupIdempotentAgentRun({ ...common, userMessage: 'hello', idempotencyKey: 'idem-unused' });
+    expect(none.kind).toBe('none');
+  });
+});
+
 describe('Concurrency cap (§12.8)', () => {
   it('rejects a new background run once the tenant is at its configured concurrent-run cap', async () => {
     const first = await createBackgroundAgentRun(baseInput('conv-a'));
@@ -160,7 +236,70 @@ describe('Concurrency cap (§12.8)', () => {
     expect(third.kind).toBe('concurrency_limit');
     if (third.kind === 'concurrency_limit') {
       expect(third.limit).toBe(2);
+      expect(third.scope).toBe('tenant');
     }
+    // REGRESSION: the cap is checked AFTER the insert; the row that tipped it
+    // over is deleted again (never queued, conversation not left locked).
+    expect(await db.countActiveAgentRuns(tenantId)).toBe(2);
+    expect((await db.listAgentRuns({ tenantId, projectId: PROJECT_ID, conversationId: 'conv-c' }))).toHaveLength(0);
+    expect(hoisted.publish.mock.calls.filter(([, name]) => name === 'run')).toHaveLength(2);
+    const retry = await createBackgroundAgentRun(baseInput('conv-c', { limits: { backgroundMaxDurationMs: 60_000, maxConcurrentRunsPerTenant: 3, maxConcurrentRunsPerProject: 0 } }));
+    expect(retry.kind).toBe('created');
+  });
+
+  it('REGRESSION: sync reservations (interactive turns) do not count against the background cap', async () => {
+    for (const conversationId of ['conv-sync-1', 'conv-sync-2', 'conv-sync-3']) {
+      await db.createAgentRun({
+        mode: 'sync',
+        tenantId,
+        tenantDbName: dbName,
+        projectId: PROJECT_ID,
+        agentKey: AGENT_KEY,
+        conversationId,
+        userMessage: 'hello',
+        status: 'running',
+        startedAt: new Date(),
+        callbackAttempts: 0,
+      });
+    }
+    const first = await createBackgroundAgentRun(baseInput('conv-a'));
+    const second = await createBackgroundAgentRun(baseInput('conv-b'));
+    expect(first.kind).toBe('created');
+    expect(second.kind).toBe('created');
+  });
+
+  it('concurrent submissions cannot all slip past the cap (count is taken after each insert)', async () => {
+    const results = await Promise.all(
+      ['p-1', 'p-2', 'p-3', 'p-4', 'p-5'].map((c) => createBackgroundAgentRun(baseInput(c))),
+    );
+    expect(results.filter((r) => r.kind === 'created').length).toBeLessThanOrEqual(2);
+    expect(await db.countActiveAgentRuns(tenantId, undefined, 'background')).toBeLessThanOrEqual(2);
+  });
+
+  it('a per-project cap rejects with scope "project" while the tenant still has room', async () => {
+    const limits = { backgroundMaxDurationMs: 60_000, maxConcurrentRunsPerTenant: 10, maxConcurrentRunsPerProject: 1 };
+    expect((await createBackgroundAgentRun(baseInput('conv-p1', { limits }))).kind).toBe('created');
+
+    const overProject = await createBackgroundAgentRun(baseInput('conv-p2', { limits }));
+    expect(overProject).toEqual({ kind: 'concurrency_limit', limit: 1, scope: 'project' });
+
+    // Another project in the same tenant is unaffected.
+    const otherProject = await createBackgroundAgentRun(baseInput('conv-p3', { limits, projectId: 'proj-2' }));
+    expect(otherProject.kind).toBe('created');
+  });
+
+  it('a cap of 0 means no cap', async () => {
+    const limits = { backgroundMaxDurationMs: 60_000, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 };
+    for (const c of ['z-1', 'z-2', 'z-3', 'z-4']) {
+      expect((await createBackgroundAgentRun(baseInput(c, { limits }))).kind).toBe('created');
+    }
+  });
+
+  it('a publish failure deletes the row (the conversation is not left locked) and rethrows', async () => {
+    hoisted.publish.mockRejectedValueOnce(new Error('queue down'));
+    await expect(createBackgroundAgentRun(baseInput('conv-publish-fail'))).rejects.toThrow('queue down');
+    expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
+    expect((await createBackgroundAgentRun(baseInput('conv-publish-fail'))).kind).toBe('created');
   });
 
   it('does not count terminal (finalized) runs against the cap', async () => {
@@ -190,7 +329,7 @@ describe('Retention (§12.10)', () => {
     reloadConfig();
   });
 
-  it('the creation write path cleans up rows past their own expiresAt (mirrors cleanupAgentTracingRetention)', async () => {
+  it('retention is no longer done on the creation write path (it is the reconciler\'s hourly job)', async () => {
     // A prior, already-terminal run whose retention window has elapsed.
     const stale = await db.createAgentRun({
       mode: 'background',
@@ -206,10 +345,13 @@ describe('Retention (§12.10)', () => {
     });
 
     await createBackgroundAgentRun(baseInput('conv-new'));
-    // The cleanup is fire-and-forgotten (non-blocking) on the creation
-    // write path — give its microtask a turn to run.
     await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await db.getAgentRunById(String(stale._id), tenantId, PROJECT_ID)).not.toBeNull();
 
+    // The sweep the reconciler runs deletes it (and never an active row).
+    await db.cleanupAgentRunRetention({ olderThan: new Date(), batchSize: 1000 });
     expect(await db.getAgentRunById(String(stale._id), tenantId, PROJECT_ID)).toBeNull();
+    expect(await db.countActiveAgentRuns(tenantId)).toBe(1);
   });
+
 });
