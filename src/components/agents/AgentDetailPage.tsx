@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Paper,
@@ -49,6 +49,7 @@ import {
   IconAlertTriangle,
   IconLayoutDashboard,
   IconPlus,
+  IconArrowsLeftRight,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -72,6 +73,11 @@ import AgentPromptPanel from './studio/AgentPromptPanel';
 import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
+import SessionDetailDrawer from './studio/SessionDetailDrawer';
+import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentRunsTable from './studio/AgentRunsTable';
+import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections } from './studio/configSections';
+import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
@@ -81,6 +87,7 @@ import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentMemoryConfig,
   IAgentSandboxConfig,
+  IAgentExecutionConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
@@ -171,6 +178,8 @@ interface SessionSummary {
   costUsd?: number;
   costComplete?: boolean;
   activeMs?: number;
+  /** `metadata.source` — only `console` (or unset, legacy) sessions can be continued. */
+  source?: string;
   hasContext?: boolean;
 }
 
@@ -267,6 +276,9 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   sessions: { top: 'sessions' },
   playground: { top: 'sessions' },
   configure: { top: 'configure' },
+  build: { top: 'configure' },
+  ship: { top: 'deploy' },
+  operate: { top: 'observe' },
   settings: { top: 'configure', sub: 'basic' },
   basic: { top: 'configure', sub: 'basic' },
   prompt: { top: 'configure', sub: 'prompt' },
@@ -274,6 +286,7 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   skills: { top: 'configure', sub: 'skills' },
   memory: { top: 'configure', sub: 'memory' },
   sandbox: { top: 'configure', sub: 'sandbox' },
+  execution: { top: 'configure', sub: 'execution' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
   deploy: { top: 'deploy' },
@@ -346,6 +359,14 @@ export default function AgentDetailPage() {
   const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
+  const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
+  // Build page: the published snapshot (to flag changed sections) and which
+  // sections are folded to their one-line summary.
+  const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
+  const [publishedLoaded, setPublishedLoaded] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const [onlyChanged, setOnlyChanged] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
 
   // Guardrail bindings live outside `configForm`: they are a list of objects,
@@ -384,6 +405,9 @@ export default function AgentDetailPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
+  const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
+  const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
+  const [activeRunCount, setActiveRunCount] = useState(0);
   const [savingConfig, setSavingConfig] = useState(false);
   /**
    * What the server's config check said on the last save: errors blocked it,
@@ -455,6 +479,7 @@ export default function AgentDetailPage() {
         setSkillPolicy(cfg.skillPolicy);
         setMemoryConfig(cfg.memory);
         setSandboxConfig(cfg.sandbox);
+        setExecutionConfig(cfg.execution);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -766,12 +791,130 @@ export default function AgentDetailPage() {
     // sub-target is a section anchor to scroll to.
     const section = activeTab === 'configure' ? configureTab : activeTab === 'deploy' ? deployTab : null;
     if (!section || !agent) return;
+    // A deep link to a folded section opens it before scrolling to it.
+    setCollapsedSections((prev) => {
+      if (!prev.has(section)) return prev;
+      const next = new Set(prev);
+      next.delete(section);
+      return next;
+    });
     const frame = requestAnimationFrame(() => {
       document.getElementById(`config-${section}`)
         ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
     return () => cancelAnimationFrame(frame);
   }, [activeTab, configureTab, deployTab, agent]);
+
+  const publishedVersionNumber = agent?.publishedVersion ?? null;
+  useEffect(() => {
+    let cancelled = false;
+    setPublishedLoaded(false);
+    if (!publishedVersionNumber) {
+      setPublishedConfig(null);
+      setPublishedLoaded(true);
+      return;
+    }
+    fetch(`/api/agents/${agentId}/versions?version=${publishedVersionNumber}`, { cache: 'no-store' })
+      .then(async (res) => (res.ok ? res.json() : null))
+      .then((data: { version?: AgentVersion } | null) => {
+        if (cancelled) return;
+        setPublishedConfig((data?.version?.snapshot?.config as Record<string, unknown> | undefined) ?? null);
+      })
+      .catch(() => { if (!cancelled) setPublishedConfig(null); })
+      .finally(() => { if (!cancelled) setPublishedLoaded(true); });
+    return () => { cancelled = true; };
+  }, [agentId, publishedVersionNumber]);
+
+  const changedSections = useMemo(
+    () => changedConfigSections(agent?.config as Record<string, unknown> | undefined, publishedConfig),
+    [agent?.config, publishedConfig],
+  );
+
+  // Initial fold, once per agent: changed sections (what a reviewer came to
+  // look at) stay open, settled ones fold to their summary. Never published →
+  // everything is new, so only the essentials open.
+  const initialFoldFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!agent || !publishedLoaded || initialFoldFor.current === agent._id) return;
+    initialFoldFor.current = agent._id;
+    const all = Object.keys(CONFIG_SECTION_KEYS);
+    const open = new Set(publishedConfig ? changedSections : ['basic', 'prompt']);
+    if (configureTab) open.add(configureTab);
+    setCollapsedSections(new Set(all.filter((id) => !open.has(id))));
+  }, [agent, publishedLoaded, publishedConfig, changedSections, configureTab]);
+
+  const toggleSection = (id: string) => setCollapsedSections((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  /** What a folded section shows instead of its fields. */
+  const sectionSummary = (id: string): string => {
+    const values = configForm.values;
+    switch (id) {
+      case 'basic': {
+        const model = models.find((m) => m.key === values.modelKey)?.name ?? values.modelKey ?? 'No model';
+        const toolCount = toolBindings.reduce((sum, binding) => sum + (binding.toolNames?.length ?? 1), 0);
+        return [
+          model,
+          values.knowledgeEngineKey ? `Knowledge: ${values.knowledgeEngineKey}` : 'No knowledge base',
+          `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
+          `${guardrailBindings.length} guardrail${guardrailBindings.length === 1 ? '' : 's'}`,
+        ].join(' · ');
+      }
+      case 'prompt':
+        return values.promptMode === 'prompt' && values.promptKey
+          ? `Managed prompt: ${values.promptKey}`
+          : `${(values.systemPrompt ?? '').length.toLocaleString()} characters inline`;
+      case 'subagents':
+        return subagents.length > 0 ? subagents.map((sub) => sub.name).join(', ') : 'No sub-agents';
+      case 'skills':
+        return skills.length > 0 ? skills.join(', ') : 'No skills';
+      case 'memory':
+        return memoryConfig?.enabled ? 'On' : 'Off';
+      case 'sandbox':
+        return sandboxConfig?.enabled
+          ? [
+            sandboxConfig.mode === 'persist' ? 'Persistent' : 'Ephemeral',
+            sandboxConfig.templateKey ?? 'default template',
+            sandboxConfig.preview?.enabled ? 'preview links on' : null,
+          ].filter(Boolean).join(' · ')
+          : 'Off';
+      case 'execution': {
+        if (executionConfig?.backgroundEnabled === false) {
+          return executionConfig.syncTimeoutSeconds ? `Sync only · ${executionConfig.syncTimeoutSeconds}s timeout` : 'Sync only';
+        }
+        return [
+          executionConfig?.defaultMode === 'background' ? 'Background by default' : 'Sync by default',
+          executionConfig?.syncTimeoutSeconds ? `${executionConfig.syncTimeoutSeconds}s timeout` : 'default timeout',
+          executionConfig?.backgroundMaxDurationMinutes ? `runs up to ${executionConfig.backgroundMaxDurationMinutes} min` : null,
+          executionConfig?.callbackUrl ? 'callback set' : null,
+        ].filter(Boolean).join(' · ');
+      }
+      case 'advanced':
+        return advancedOverrideCount > 0
+          ? `${advancedOverrideCount} setting${advancedOverrideCount === 1 ? '' : 's'} changed from defaults`
+          : 'Defaults';
+      case 'output':
+        return structuredOutput?.enabled ? 'JSON schema' : 'Free text';
+      default:
+        return '';
+    }
+  };
+
+  /** Props every Build section shares: fold state, summary and changed flag. */
+  const sectionProps = (id: string) => ({
+    collapsed: collapsedSections.has(id),
+    onToggle: () => toggleSection(id),
+    summary: sectionSummary(id),
+    changed: changedSections.has(id),
+    first: id === firstVisibleSection,
+  });
+  const sectionVisible = (id: string) => !onlyChanged || changedSections.has(id);
+  // The divider above a section is skipped for the first one SHOWN — with
+  // "only changed" on, that is not always General.
+  const firstVisibleSection = (agent?.config?.kind === 'external' ? ['basic'] : Object.keys(CONFIG_SECTION_KEYS)).find(sectionVisible);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
@@ -806,6 +949,7 @@ export default function AgentDetailPage() {
     // the template, limits and secrets someone set up. Secrets come back from
     // the server masked; sending the mask back keeps the stored value.
     nextConfig.sandbox = sandboxConfig && Object.keys(sandboxConfig).length > 0 ? sandboxConfig : undefined;
+    nextConfig.execution = executionConfig && Object.keys(executionConfig).length > 0 ? executionConfig : undefined;
     // No editor writes this from here anymore (see the Prompt tab) — pass
     // through whatever is already stored so a save from THIS page can never
     // silently wipe a value an import or the API set, since `config` replaces
@@ -1124,6 +1268,24 @@ export default function AgentDetailPage() {
         subtitle={agent.description || agent.key}
         actions={
           <Group gap="sm">
+            {!isConnected && (agent.latestVersion ?? 0) > 0 ? (
+              <Button
+                size="xs"
+                variant="default"
+                leftSection={<IconArrowsLeftRight size={14} />}
+                onClick={() => setCompareOpen(true)}
+              >
+                Compare
+              </Button>
+            ) : null}
+            <Button
+              size="xs"
+              variant="light"
+              leftSection={<IconPlus size={14} />}
+              onClick={() => setStartSessionOpen(true)}
+            >
+              Start session
+            </Button>
             {isConnected ? (
               <Badge size="sm" variant="light" color="violet" leftSection={<IconPlugConnected size={12} />}>
                 {connection?.protocol ?? t('connectedBadge')}
@@ -1162,16 +1324,18 @@ export default function AgentDetailPage() {
             {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
           </Tabs.Tab>
           <Tabs.Tab value="configure" leftSection={<IconSettings size={14} />}>
-            Configure
-            {advancedOverrideCount > 0 ? (
-              <Badge size="xs" variant="light" ml={6}>{advancedOverrideCount}</Badge>
+            Build
+            {changedSections.size > 0 ? (
+              <Tooltip label={`${changedSections.size} section${changedSections.size === 1 ? '' : 's'} changed since v${agent.publishedVersion}`} withArrow>
+                <Badge size="xs" variant="light" color="orange" ml={6}>{changedSections.size}</Badge>
+              </Tooltip>
             ) : null}
           </Tabs.Tab>
           <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
-            Deploy
+            Ship
           </Tabs.Tab>
           <Tabs.Tab value="observe" leftSection={<IconTimeline size={14} />}>
-            Observe
+            Operate
           </Tabs.Tab>
           <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
             {t('tabs.usage')}
@@ -1203,23 +1367,44 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="sessions">
           <SectionCard
             title="Sessions"
-            description="Each session is its own persisted conversation — history, tool calls and token usage all reload with it."
+            description="Every conversation with this agent — console tests, API, A2A and scheduled runs. Click one to inspect it; sessions started here can be continued."
           >
-            <Group justify="flex-end" mb="md">
-              <Button
-                size="sm"
-                leftSection={<IconPlus size={14} />}
-                onClick={() => setStartSessionOpen(true)}
-              >
-                Start new session
-              </Button>
-            </Group>
-            <SessionList
-              sessions={sessions}
-              loading={sessionsLoading}
-              onOpen={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
-              onStart={() => setStartSessionOpen(true)}
-              searchable
+            <SegmentedControl
+              mb="md"
+              size="sm"
+              w="fit-content"
+              value={sessionsView}
+              onChange={(value) => setSessionsView(value as 'sessions' | 'runs')}
+              data={[
+                { value: 'sessions', label: `Sessions · ${sessions.length}` },
+                { value: 'runs', label: activeRunCount > 0 ? `Background runs · ${activeRunCount} active` : 'Background runs' },
+              ]}
+            />
+            {sessionsView === 'sessions' ? (
+              <SessionList
+                sessions={sessions}
+                loading={sessionsLoading}
+                onOpen={(id) => setViewedSessionId(id)}
+                onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+                onStart={() => setStartSessionOpen(true)}
+                searchable
+              />
+            ) : null}
+            {/* Mounted even while hidden so the active-run count stays live for the toggle label. */}
+            <div style={{ display: sessionsView === 'runs' ? 'block' : 'none' }}>
+              <AgentRunsTable
+                agentId={agentId}
+                onOpenConversation={(conversationId) => setViewedSessionId(conversationId)}
+                onActiveCountChange={setActiveRunCount}
+              />
+            </div>
+            <SessionDetailDrawer
+              agentId={agentId}
+              session={viewedSessionId
+                ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId, source: 'api' }
+                : null}
+              onClose={() => setViewedSessionId(null)}
+              onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
             />
           </SectionCard>
         </Tabs.Panel>
@@ -1234,19 +1419,53 @@ export default function AgentDetailPage() {
           instead of selecting a rail item.
         */}
         <Tabs.Panel value="configure">
+          <Group justify="space-between" mb="sm">
+            <Text size="sm" c="dimmed">
+              {isConnected ? 1 : Object.keys(CONFIG_SECTION_KEYS).length} sections
+              {agent.publishedVersion
+                ? ` · ${changedSections.size} changed since v${agent.publishedVersion}`
+                : ' · never published'}
+            </Text>
+            <Group gap="xs">
+              <Button
+                size="compact-sm"
+                variant="subtle"
+                color="gray"
+                onClick={() => setCollapsedSections(
+                  collapsedSections.size > 0 ? new Set() : new Set(Object.keys(CONFIG_SECTION_KEYS)),
+                )}
+              >
+                {collapsedSections.size > 0 ? 'Expand all' : 'Collapse all'}
+              </Button>
+              {agent.publishedVersion ? (
+                <Button
+                  size="compact-sm"
+                  variant={onlyChanged ? 'light' : 'subtle'}
+                  color={onlyChanged ? 'orange' : 'gray'}
+                  disabled={changedSections.size === 0 && !onlyChanged}
+                  onClick={() => setOnlyChanged((value) => !value)}
+                >
+                  {onlyChanged ? 'Show all sections' : 'Show only changed'}
+                </Button>
+              ) : null}
+            </Group>
+          </Group>
           <Paper withBorder radius="md" p="xl">
+            {sectionVisible('basic') ? (
             <ConfigSection
-              first
               id="basic"
+              {...sectionProps('basic')}
               title="General"
               description="What this agent is, which model answers, and the tools it can call."
             >
               {renderBasicSettings()}
             </ConfigSection>
+            ) : null}
 
-            {!isConnected ? (
+            {!isConnected && sectionVisible('prompt') ? (
               <ConfigSection
                 id="prompt"
+                {...sectionProps('prompt')}
                 title="Prompt"
                 description="Inline text, or a prompt from the Prompts module — editable right here."
               >
@@ -1264,9 +1483,10 @@ export default function AgentDetailPage() {
               </ConfigSection>
             ) : null}
 
-            {!isConnected ? (
+            {!isConnected && sectionVisible('subagents') ? (
               <ConfigSection
                 id="subagents"
+                {...sectionProps('subagents')}
                 title="Delegation"
                 description="Roles this agent can hand work to, and the guards around that."
                 meta={subagents.length > 0 ? (
@@ -1287,9 +1507,10 @@ export default function AgentDetailPage() {
               </ConfigSection>
             ) : null}
 
-            {!isConnected ? (
+            {!isConnected && sectionVisible('skills') ? (
               <ConfigSection
                 id="skills"
+                {...sectionProps('skills')}
                 title="Skills"
                 description="Capabilities this agent can discover and open on demand, from the project's skill library."
                 meta={skills.length > 0 ? (
@@ -1308,9 +1529,10 @@ export default function AgentDetailPage() {
               </ConfigSection>
             ) : null}
 
-            {!isConnected ? (
+            {!isConnected && sectionVisible('memory') ? (
               <ConfigSection
                 id="memory"
+                {...sectionProps('memory')}
                 title="Memory"
                 description="What this agent remembers across runs, backed by a store from the Memory module."
                 meta={memoryConfig?.enabled ? (
@@ -1321,9 +1543,10 @@ export default function AgentDetailPage() {
               </ConfigSection>
             ) : null}
 
-            {!isConnected ? (
+            {!isConnected && sectionVisible('sandbox') ? (
               <ConfigSection
                 id="sandbox"
+                {...sectionProps('sandbox')}
                 title="Sandbox"
                 description="An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets."
                 meta={sandboxConfig?.enabled ? (
@@ -1336,9 +1559,24 @@ export default function AgentDetailPage() {
               </ConfigSection>
             ) : null}
 
-            {!isConnected ? (
+            {!isConnected && sectionVisible('execution') ? (
+              <ConfigSection
+                id="execution"
+                {...sectionProps('execution')}
+                title="Execution"
+                description="How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling."
+                meta={executionConfig?.defaultMode === 'background' ? (
+                  <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+                ) : null}
+              >
+                <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected && sectionVisible('advanced') ? (
               <ConfigSection
                 id="advanced"
+                {...sectionProps('advanced')}
                 title="Runtime"
                 description="How the agent loop behaves: planning, budgets, context handling and reasoning."
               >
@@ -1350,9 +1588,10 @@ export default function AgentDetailPage() {
               </ConfigSection>
             ) : null}
 
-            {!isConnected ? (
+            {!isConnected && sectionVisible('output') ? (
               <ConfigSection
                 id="output"
+                {...sectionProps('output')}
                 title="Structured output"
                 description="Make the agent answer with JSON that matches a schema instead of free text."
               >
@@ -2048,6 +2287,14 @@ for chunk in stream:
         />
       </Modal>
 
+      <CompareVersionsDrawer
+        opened={compareOpen}
+        onClose={() => setCompareOpen(false)}
+        agentId={agentId}
+        publishedVersion={agent.publishedVersion ?? null}
+        versions={Array.from({ length: agent.latestVersion ?? 0 }, (_, index) => (agent.latestVersion ?? 0) - index)}
+        changedSections={[...changedSections].map((id) => CONFIG_SECTION_TITLES[id] ?? id)}
+      />
       <StartSessionModal
         opened={startSessionOpen}
         onClose={() => setStartSessionOpen(false)}

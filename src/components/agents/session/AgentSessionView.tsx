@@ -68,6 +68,7 @@ import {
     IconUser,
     IconZoomIn,
     IconZoomOut,
+    IconArrowsLeftRight,
 } from '@tabler/icons-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -76,6 +77,8 @@ import LoadingState from '@/components/common/LoadingState';
 import EmptyState from '@/components/common/EmptyState';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
+import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList';
+import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import SessionSidePanel from './SessionSidePanel';
 import LiveToolCalls, { summariseArgs, type LiveToolCall } from './LiveToolCalls';
 import { consumeSse } from './consumeSse';
@@ -171,6 +174,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
     const [sending, setSending] = useState(false);
+    const [compareOpen, setCompareOpen] = useState(false);
+    // API / A2A / scheduled sessions are real traffic: shown, never extended
+    // from here. Only console sessions (or legacy ones without a source) take
+    // new messages — the same rule the Sessions panel applies to Continue.
+    const [sessionSource, setSessionSource] = useState<string | undefined>(undefined);
+    const readOnly = !isContinuableSession(sessionSource);
     const [search, setSearch] = useState('');
     const [zoom, setZoom] = useState(DEFAULT_ZOOM);
     const [overrideOpen, setOverrideOpen] = useState(false);
@@ -214,6 +223,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             const sessionData = await sessionRes.json();
             setAgent(agentData.agent);
             setSessionTitle(sessionData.session.title ?? '');
+            setSessionSource(
+                typeof sessionData.session.metadata?.source === 'string' ? sessionData.session.metadata.source : undefined,
+            );
             setSessionCreatedAt(sessionData.session.createdAt ?? undefined);
             setSessionUpdatedAt(sessionData.session.updatedAt ?? undefined);
             setSessionContext(
@@ -285,7 +297,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
      * a message is a breakage, and the two should not be the same failure.
      */
     const sendMessage = async () => {
-        if (!input.trim() || sending) return;
+        if (!input.trim() || sending || readOnly) return;
         const message = input.trim();
         const startedAt = Date.now();
         setSending(true);
@@ -545,6 +557,16 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                       the "pick this back up" affordance the sessions table
                       links straight to.
                     */}
+                    {!isConnected && versions.length > 0 ? (
+                        <Button
+                            size="xs"
+                            variant="default"
+                            leftSection={<IconArrowsLeftRight size={14} />}
+                            onClick={() => setCompareOpen(true)}
+                        >
+                            Compare
+                        </Button>
+                    ) : null}
                     <Button
                         size="xs"
                         variant="light"
@@ -791,7 +813,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         <Box p="sm" className={classes.composer}>
                             <Textarea
                                 ref={composerRef}
-                                placeholder="Send a message to the agent"
+                                placeholder={readOnly
+                                    ? `Read-only — this session came in via ${sessionSourceLabel(sessionSource)}`
+                                    : 'Send a message to the agent'}
                                 value={input}
                                 onChange={(event) => setInput(event.currentTarget.value)}
                                 onKeyDown={(event) => {
@@ -803,13 +827,13 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 autosize
                                 minRows={1}
                                 maxRows={8}
-                                disabled={sending}
+                                disabled={sending || readOnly}
                                 rightSection={
                                     <ActionIcon
                                         size="sm"
                                         variant="filled"
                                         onClick={() => void sendMessage()}
-                                        disabled={!input.trim() || sending}
+                                        disabled={!input.trim() || sending || readOnly}
                                     >
                                         <IconSend size={14} />
                                     </ActionIcon>
@@ -854,6 +878,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     />
                 </Paper>
             </Group>
+            <CompareVersionsDrawer
+                opened={compareOpen}
+                onClose={() => setCompareOpen(false)}
+                agentId={agentId}
+                publishedVersion={agent?.publishedVersion ?? null}
+                versions={versions.map((v) => v.version)}
+                initialMessage={[...messages].reverse().find((m) => m.role === 'user')?.content}
+            />
         </DetailShell>
     );
 }

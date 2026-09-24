@@ -323,6 +323,8 @@ function createResponsesHandler(usePublished: boolean) {
           ctx.projectId,
           ctx.tokenRecord.userId,
           agent.key,
+          undefined,
+          { source: 'api' },
         );
         conversationId = String(conversation._id);
       }

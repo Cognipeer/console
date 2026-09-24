@@ -149,6 +149,8 @@ export async function resolveConversation(
         ctx.projectId,
         ctx.userId,
         agent.key,
+        undefined,
+        { source: 'api' },
     );
     return { conversationId: String(created._id) };
 }

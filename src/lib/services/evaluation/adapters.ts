@@ -490,6 +490,7 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
         userId,
         target.agentKey,
         `Eval ${target.key} · ${item.id}`,
+        { source: 'evaluation' },
       );
       const started = Date.now();
       const response = await executeAgentChat({

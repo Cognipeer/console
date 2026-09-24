@@ -148,6 +148,7 @@ export async function runAgentSchedule(ctx: RunScheduleContext): Promise<Schedul
         ctx.userId,
         ctx.agent.key,
         `${ctx.schedule.name} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+        { source: 'schedule' },
     );
 
     const response = await executeAgentChat({

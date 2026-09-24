@@ -1048,6 +1048,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         session.userId,
         agent.key,
         typeof body.title === 'string' ? body.title : undefined,
+        { source: 'console' },
       );
 
       return reply.code(201).send({ conversation });
@@ -1066,6 +1067,19 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // name yet, but adding rather than renaming means neither guess can be
   // wrong about who else might.
 
+
+/**
+ * Dashboard chat may only extend a console session. API / A2A / scheduled /
+ * eval sessions are real traffic — the UI shows them read-only, and this keeps
+ * a hand-crafted request from appending to them. Legacy sessions (no source)
+ * stay writable, matching `isContinuableSession` on the client.
+ */
+async function readOnlySessionSource(tenantDbName: string, conversationId: unknown): Promise<string | null> {
+  if (typeof conversationId !== 'string') return null;
+  const conversation = await getConversationById(tenantDbName, conversationId);
+  const source = conversation?.metadata?.source;
+  return typeof source === 'string' && source !== 'console' ? source : null;
+}
 
 /**
  * One row of the sessions table: what it is, what it cost, how long it worked.
@@ -1113,6 +1127,7 @@ function summariseConversation(conversation: IAgentConversation) {
     costUsd,
     costComplete,
     activeMs,
+    source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
     hasContext: Boolean(
       conversation.metadata?.runtimeContext
       && Object.keys(conversation.metadata.runtimeContext as Record<string, unknown>).length > 0,
@@ -1169,7 +1184,7 @@ function summariseConversation(conversation: IAgentConversation) {
         session.userId,
         agent.key,
         typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
-        sessionContext ? { runtimeContext: sessionContext } : undefined,
+        { source: 'console', ...(sessionContext ? { runtimeContext: sessionContext } : {}) },
       );
       return reply.code(201).send({ session: created });
     } catch (error) {
@@ -1252,6 +1267,15 @@ function summariseConversation(conversation: IAgentConversation) {
     if (!agent) {
       return reply.code(404).send({ error: 'Agent not found' });
     }
+    const readOnlySource = await readOnlySessionSource(session.tenantDbName, body.conversationId);
+    if (readOnlySource) {
+      return reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
+    }
+
+    const reservation = await reserveDashboardSession({
+      session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
+    });
+    if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
 
     const reservation = await reserveDashboardSession({
       session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
@@ -1337,6 +1361,10 @@ function summariseConversation(conversation: IAgentConversation) {
       const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });
+      }
+      const readOnlySource = await readOnlySessionSource(session.tenantDbName, body.conversationId);
+      if (readOnlySource) {
+        return reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
       }
 
       // Playground JSON editor: caller-supplied runtime context (downstream

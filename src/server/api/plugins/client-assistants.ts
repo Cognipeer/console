@@ -519,7 +519,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     const agent = await getAgentByKey(tenantDbName, agentKey, projectId);
     if (!agent) return { error: `No assistant with id "${body.assistant_id}"` };
 
-    const conversation = await createConversation(tenantDbName, tenantId, projectId, userId, agentKey);
+    const conversation = await createConversation(tenantDbName, tenantId, projectId, userId, agentKey, undefined, { source: 'api' });
 
     const seedMessages = Array.isArray(body.messages) ? body.messages : [];
     if (seedMessages.length > 0) {

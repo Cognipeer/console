@@ -2564,6 +2564,15 @@ export async function checkAgentModel(
 
 // ── Conversation CRUD ────────────────────────────────────────────────
 
+/**
+ * Where a conversation came from, stored as `metadata.source`. Only
+ * `console` sessions — the ones a person started from the dashboard to try the
+ * agent — can be continued from the UI; the rest are real traffic (or a
+ * run's own bookkeeping) and are shown read-only. Records written before this
+ * existed carry no source.
+ */
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'schedule' | 'evaluation' | 'redteam';
+
 export async function createConversation(
     tenantDbName: string,
     tenantId: string,
@@ -3990,6 +3999,10 @@ export async function executePlaygroundChatLocal(
         systemPrompt,
         tracingSink,
         plugins: guardrailPlugins,
+        // A session's turns group under one Observability thread, the same way
+        // API turns do — the agent Sessions drawer renders that thread.
+        ...(request.conversationId ? { threadId: request.conversationId } : {}),
+        tracingMetadata: buildTracingMetadata(runtimeContext),
         runtimeOptions: resolveAgentRuntimeOptions(config),
         outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
         subagents: playgroundSubagents.subagents,
