@@ -100,7 +100,7 @@ jobs:
 
       - name: Create release automation token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.RELEASE_AUTOMATION_APP_ID }}
           private-key: ${{ secrets.RELEASE_AUTOMATION_PRIVATE_KEY }}
