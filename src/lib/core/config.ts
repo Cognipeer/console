@@ -344,6 +344,28 @@ export interface AppConfig {
     defaultAttempts: number;
     defaultBackoffMs: number;
   };
+
+  /**
+   * Agent background execution (docs/guide/agent-background-execution.md).
+   * Both timeouts are server-operated ceilings, distinct from the agent's
+   * own `runtime.limits.maxWallClockMs` (§5, §12.5/§12.13) — deploy-time
+   * config must keep `syncTimeoutMs` below the shortest infrastructure
+   * timeout in the deployment (Decision 6).
+   */
+  agent: {
+    /** Hard wall-clock ceiling for a synchronous (non-background) agent turn. */
+    syncTimeoutMs: number;
+    /** Server-operated upper bound on a background run, independent of the agent's own limit. */
+    backgroundMaxDurationMs: number;
+    /** Simple per-tenant cap on simultaneous queued+running background runs (§12.8). */
+    backgroundMaxConcurrentRunsPerTenant: number;
+    /** Retention TTL for AgentRun records (§12.10), following the tracing-retention precedent. */
+    runRetentionDays: number;
+    /** How often a background worker writes heartbeatAt while a run is `running`. */
+    runHeartbeatIntervalMs: number;
+    /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
+    runHeartbeatStaleMs: number;
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -641,6 +663,19 @@ function buildConfig(source: ConfigSource): AppConfig {
       },
       defaultAttempts: int(source, 'QUEUE_DEFAULT_ATTEMPTS', 3),
       defaultBackoffMs: int(source, 'QUEUE_DEFAULT_BACKOFF_MS', 1_000),
+    },
+
+    agent: {
+      syncTimeoutMs: int(source, 'AGENT_SYNC_TIMEOUT_MS', 180_000),
+      backgroundMaxDurationMs: int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000),
+      backgroundMaxConcurrentRunsPerTenant: int(
+        source,
+        'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT',
+        10,
+      ),
+      runRetentionDays: int(source, 'AGENT_RUN_RETENTION_DAYS', 30),
+      runHeartbeatIntervalMs: int(source, 'AGENT_RUN_HEARTBEAT_INTERVAL_MS', 15_000),
+      runHeartbeatStaleMs: int(source, 'AGENT_RUN_HEARTBEAT_STALE_MS', 45_000),
     },
   };
 }

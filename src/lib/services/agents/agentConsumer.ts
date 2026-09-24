@@ -16,6 +16,7 @@ import {
   type AgentChatRequest,
   type AgentPlaygroundChatRequest,
 } from './agentService';
+import { runAgentJobLocal, deliverAgentRunCallbackJob } from './agentRunService';
 
 const log = createLogger('agent.consumer');
 let started = false;
@@ -38,6 +39,12 @@ export async function startAgentQueueConsumer(): Promise<void> {
     }
     if (ctx.name === 'playground') {
       return executePlaygroundChatLocal(ctx.data as unknown as AgentPlaygroundChatRequest);
+    }
+    if (ctx.name === 'run') {
+      return runAgentJobLocal(ctx.data as unknown as { runId: string; tenantId: string; tenantDbName: string });
+    }
+    if (ctx.name === 'callback') {
+      return deliverAgentRunCallbackJob(ctx.data as unknown as Parameters<typeof deliverAgentRunCallbackJob>[0]);
     }
     throw new Error(`Unknown agent job: ${ctx.name}`);
   }, { concurrency: CONCURRENCY });

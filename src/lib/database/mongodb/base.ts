@@ -99,6 +99,7 @@ export const COLLECTIONS = {
   ocrJobItems: 'ocr_job_items',
   batchJobs: 'batch_jobs',
   batchJobItems: 'batch_job_items',
+  agentRuns: 'agent_runs',
   realtimeModels: 'realtime_models',
   realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────

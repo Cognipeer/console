@@ -31,6 +31,7 @@ import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evalu
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
 import { startAgentScheduler } from '@/lib/services/agents/agentScheduler';
+import { reconcileOrphanedAgentRuns, startAgentRunReconciler } from '@/lib/services/agents/agentRunReconciler';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
 import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
@@ -284,6 +285,17 @@ async function runBootstrap(): Promise<void> {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+
+    // Same "must complete before new work starts" requirement as the crawl
+    // reconciler above, for the identical reason: a run created after this
+    // point must never be observable as orphaned here.
+    try {
+      await reconcileOrphanedAgentRuns();
+    } catch (error) {
+      logger.warn('Agent run reconciliation failed during startup', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   })();
 
   await Promise.all([coreInfraInit, tenantReconciliation]);
@@ -305,6 +317,7 @@ async function runBootstrap(): Promise<void> {
   startAlertScheduler();
   startCrawlerScheduler();
   startAgentScheduler();
+  startAgentRunReconciler();
   startAnalysisScheduler();
   startRedTeamScheduler();
 
