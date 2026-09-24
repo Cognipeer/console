@@ -65,6 +65,17 @@ vi.mock('@/lib/services/agents/agentScheduleService', async (importOriginal) => 
     return { ...actual, upsertAgentSchedule: vi.fn(), deleteAgentSchedule: vi.fn(), runAgentSchedule: vi.fn() };
 });
 
+vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
+    return {
+        ...actual,
+        resolveAgentExecutionLimits: vi.fn(),
+        listAgentRuns: vi.fn(),
+        getAgentRunStatus: vi.fn(),
+        requestAgentRunCancellation: vi.fn(),
+    };
+});
+
 vi.mock('@/lib/services/agents/skillService', () => ({
     createSkill: vi.fn(),
     deleteSkill: vi.fn(),
@@ -89,6 +100,12 @@ import { createSkill, deleteSkill, getSkillById, listSkills, updateSkill } from 
 import { checkAgentModel } from '@/lib/services/agents/agentService';
 import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
+import {
+    getAgentRunStatus,
+    listAgentRuns,
+    requestAgentRunCancellation,
+    resolveAgentExecutionLimits,
+} from '@/lib/services/agents/agentRunService';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { skillsApiPlugin } from '@/server/api/plugins/skills';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -406,5 +423,83 @@ describe('sandbox secrets in API responses', () => {
         expect(res.body).not.toContain(sealed.secretsSealed!);
         const body = parseJsonBody<{ agent: { config: { sandbox: { secrets: Record<string, string> } } } }>(res.body);
         expect(body.agent.config.sandbox.secrets).toEqual({ API_TOKEN: '••••••' });
+    });
+});
+
+describe('execution limits and background runs', () => {
+    const RUN = {
+        _id: 'run-1',
+        mode: 'background',
+        status: 'running',
+        agentKey: AGENT.key,
+        conversationId: 'conv-1',
+        tenantId: 'tenant-1',
+        projectId: 'proj-1',
+        callbackUrl: 'https://example.com/hook',
+        callbackSecret: 'sealed-secret',
+        runtimeContext: { sealed: 'x' },
+        createdAt: new Date('2026-09-24T10:00:00Z'),
+    };
+
+    it('GET /agents/execution/limits returns the effective ceilings for this project', async () => {
+        mockFn(resolveAgentExecutionLimits).mockResolvedValue({
+            syncTimeoutMs: 120_000,
+            backgroundEnabled: true,
+            backgroundMaxDurationMs: 600_000,
+            defaultMode: 'sync',
+            maxConcurrentRunsPerTenant: 5,
+            maxConcurrentRunsPerProject: 0,
+        });
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/execution/limits' });
+        expect(res.statusCode).toBe(200);
+        expect(parseJsonBody(res.body)).toEqual({
+            syncTimeoutSeconds: 120,
+            backgroundMaxDurationMinutes: 10,
+            maxConcurrentRunsPerTenant: 5,
+            maxConcurrentRunsPerProject: 0,
+        });
+        const call = mockFn(resolveAgentExecutionLimits).mock.calls[0][0];
+        expect(call.quotaContext).toMatchObject({ tenantId: 'tenant-1', projectId: 'proj-1' });
+    });
+
+    it('GET /agents/:agentId/runs lists this agent\'s background runs without secrets or caller headers', async () => {
+        mockFn(listAgentRuns).mockResolvedValue([RUN]);
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/agent-1/runs?status=running,bogus' });
+        expect(res.statusCode).toBe(200);
+        const body = parseJsonBody<{ runs: Array<Record<string, unknown>> }>(res.body);
+        expect(body.runs[0].id).toBe('run_run-1');
+        expect(JSON.stringify(body)).not.toContain('sealed-secret');
+        expect(JSON.stringify(body)).not.toContain('runtimeContext');
+        expect(mockFn(listAgentRuns)).toHaveBeenCalledWith('tenant_acme', expect.objectContaining({
+            agentKey: 'field-ops', projectId: 'proj-1', mode: 'background', status: ['running'],
+        }));
+    });
+
+    it('GET /agents/:agentId/runs 404s for another project\'s agent', async () => {
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/agent-9/runs' });
+        expect(res.statusCode).toBe(404);
+        expect(mockFn(listAgentRuns)).not.toHaveBeenCalled();
+    });
+
+    it('POST cancel refuses a run that belongs to a different agent, before touching it', async () => {
+        mockFn(getAgentRunStatus).mockResolvedValue({ ...RUN, agentKey: 'someone-else' });
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/runs/run_run-1/cancel' });
+        expect(res.statusCode).toBe(404);
+        expect(mockFn(requestAgentRunCancellation)).not.toHaveBeenCalled();
+    });
+
+    it('POST cancel accepts this agent\'s active run and 409s a finished one', async () => {
+        mockFn(getAgentRunStatus).mockResolvedValue(RUN);
+        mockFn(requestAgentRunCancellation).mockResolvedValueOnce({ kind: 'accepted', run: { ...RUN, cancelRequestedAt: new Date() } });
+        const app = await agentsApp();
+        const ok = await app.inject({ method: 'POST', url: '/api/agents/agent-1/runs/run_run-1/cancel' });
+        expect(ok.statusCode).toBe(200);
+        mockFn(requestAgentRunCancellation).mockResolvedValueOnce({ kind: 'already_terminal', run: { ...RUN, status: 'succeeded' } });
+        const done = await app.inject({ method: 'POST', url: '/api/agents/agent-1/runs/run_run-1/cancel' });
+        expect(done.statusCode).toBe(409);
     });
 });
