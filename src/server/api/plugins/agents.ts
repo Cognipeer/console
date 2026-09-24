@@ -1,4 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
+import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -91,7 +93,15 @@ function sendAgentGuardrailBlock(
  * Strip secret material (encrypted inline API keys) from an agent before it
  * leaves the API. The presence of a key is surfaced as `connection.hasApiKey`.
  */
-function redactAgent<T extends IAgent>(agent: T): T {
+/** A version snapshot carries the config it froze — sandbox secrets included. */
+function redactVersion<T extends { snapshot?: { config?: IAgentConfig } }>(version: T): T {
+  if (!version?.snapshot?.config?.sandbox) return version;
+  return { ...version, snapshot: maskAgentSandboxSecrets(version.snapshot) } as T;
+}
+
+function redactAgent<T extends IAgent>(input: T): T {
+  // Sandbox secrets: keys with a masked value, never the sealed payload.
+  const agent = maskAgentSandboxSecrets(input);
   const connection = agent.config?.connection;
   if (!connection) return agent;
   const { apiKeyEnc, ...rest } = connection;
@@ -236,7 +246,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: bindingError });
       }
 
-      const validation = await validateAgentConfig({ tenantDbName: session.tenantDbName, projectId, config });
+      const validation = await validateAgentConfig({ tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, config });
       if (validation.errors.length > 0) {
         return reply.code(400).send(invalidConfigBody(validation));
       }
@@ -350,6 +360,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             // runtime would skip the broken parts silently.
             const validation = await validateAgentConfig({
               tenantDbName: session.tenantDbName,
+              tenantId: session.tenantId,
               projectId,
               config: cfg as IAgentConfig,
               agentKey: scoped.key,
@@ -428,7 +439,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: 'Version not found' });
         }
 
-        return reply.code(200).send({ version });
+        return reply.code(200).send({ version: redactVersion(version) });
       }
 
       const result = await listAgentVersions(session.tenantDbName, agentId, {
@@ -439,7 +450,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({
         publishedVersion: agent.publishedVersion ?? null,
         total: result.total,
-        versions: result.versions,
+        versions: result.versions.map(redactVersion),
       });
     } catch (error) {
       logger.error('List agent versions error', { error });
@@ -773,6 +784,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       // since) must not become what every API caller runs.
       const validation = await validateAgentConfig({
         tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
         projectId,
         config: scoped.config,
         agentKey: scoped.key,
@@ -803,6 +815,32 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    * so a wrong provider key is caught on the Configure page instead of in the
    * agent's first session. Always 200: the check's own verdict is the body.
    */
+  /**
+   * What the Sandbox section of an agent can offer: whether this deployment
+   * has the sandbox module, whether the tenant's license unlocks it, and the
+   * templates to pick from. Always 200 — `available: false` with a `reason`
+   * is an answer the UI renders, not a failure.
+   */
+  app.get('/agents/sandbox/capabilities', withApiRequestContext(async (request, reply) => {
+    try {
+      const { session } = await requireProjectContextForRequest(request);
+      const availability = await resolveSandboxAvailability(session.tenantId);
+      if (!availability.available) {
+        return reply.code(200).send({ available: false, reason: availability.reason, templates: [] });
+      }
+      const templates = await availability.runner.listTemplates(session.tenantDbName, session.tenantId)
+        .catch((error: unknown) => {
+          logger.warn('Could not list sandbox templates', { error });
+          return [];
+        });
+      return reply.code(200).send({ available: true, templates });
+    } catch (error) {
+      logger.error('Agent sandbox capabilities error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to read sandbox capabilities' });
+    }
+  }));
+
   app.post('/agents/model-check', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -838,6 +876,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         : scoped.config;
       const validation = await validateAgentConfig({
         tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
         projectId,
         config,
         agentKey: scoped.key,

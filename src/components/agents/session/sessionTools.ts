@@ -18,7 +18,7 @@
  * called but the config does not declare — an SDK control-plane tool, or a
  * binding that changed after the turn ran.
  */
-export type ToolOrigin = 'tool' | 'mcp' | 'system' | 'knowledge' | 'memory' | 'runtime';
+export type ToolOrigin = 'tool' | 'mcp' | 'system' | 'knowledge' | 'memory' | 'sandbox' | 'runtime';
 
 export interface ConfiguredTool {
     name: string;
@@ -33,6 +33,7 @@ export interface AgentToolConfig {
     subagents?: unknown[];
     skills?: unknown[];
     memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
+    sandbox?: { enabled?: boolean; templateKey?: string; tools?: { exec?: boolean; code?: boolean; files?: boolean } };
 }
 
 /** Bound whenever a knowledge engine is attached — see `agentService.ts`. */
@@ -75,6 +76,20 @@ export function collectConfiguredTools(config: AgentToolConfig | undefined): Con
             : ['memory_search'];
         for (const name of names) {
             tools.push({ name, origin: 'memory', sourceKey: config.memory.memoryStoreKey });
+        }
+    }
+
+    // Sandbox tools — see `agentSandboxTools.ts`. Bound when sandbox access is
+    // on (and licensed, which only the run can tell; a refused run says so).
+    if (config.sandbox?.enabled) {
+        const groups = { exec: true, code: true, files: true, ...(config.sandbox.tools ?? {}) };
+        const names = [
+            ...(groups.exec ? ['sandbox_exec'] : []),
+            ...(groups.code ? ['sandbox_run_code'] : []),
+            ...(groups.files ? ['sandbox_read_file', 'sandbox_write_file', 'sandbox_list_files'] : []),
+        ];
+        for (const name of names) {
+            tools.push({ name, origin: 'sandbox', sourceKey: config.sandbox.templateKey ?? 'default template' });
         }
     }
 

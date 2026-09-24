@@ -38,8 +38,11 @@ import type { FastifyInstance } from 'fastify';
  *     `McpGuardrailContext` gained `guardrailKey`, and `mcpGuardrailHook`
  *     is now claimed by the community bridge rather than assigned by the
  *     overlay.
+ * 4 — `agentSandboxRunner` added: agents with sandbox access run their
+ *     sandbox tools through it. A seam-3 overlay does not export it, and
+ *     community `agentSandboxTools.ts` imports it.
  */
-export const SEAM_CONTRACT_VERSION = 3;
+export const SEAM_CONTRACT_VERSION = 4;
 
 
 
@@ -206,6 +209,77 @@ export interface McpSandboxRunner {
 }
 
 export const mcpSandboxRunner: { current: McpSandboxRunner | null } = { current: null };
+
+// ── Agent sandbox runner seam ─────────────────────────────────────────────
+// Gives agents a sandbox (enterprise sandbox module) to run commands, code
+// and file operations in. The overlay assigns `agentSandboxRunner.current`;
+// community leaves it null and an agent configured with sandbox access runs
+// without those tools, reporting why. Licensing is checked by the community
+// caller (`agentSandboxTools.ts`), not here.
+export interface AgentSandboxRef {
+  tenantDbName: string;
+  tenantId: string;
+  projectId?: string;
+  agentKey: string;
+  /** Present for a per-conversation (`persist`) sandbox. */
+  conversationId?: string;
+}
+
+export interface AgentSandboxSpec {
+  templateKey?: string;
+  /** `persist`: survives stop and the idle reaper. `ephemeral`: deleted on stop. */
+  persist: boolean;
+  resources?: { cpuCores?: number; memoryMb?: number };
+  blockNetwork?: boolean;
+  /** Non-secret variables set on the instance. Secrets go per call. */
+  env?: Record<string, string>;
+  /** Reuse this instance when it still exists (starting it if stopped). */
+  instanceId?: string;
+}
+
+export interface AgentSandboxExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface AgentSandboxFileEntry {
+  name: string;
+  path: string;
+  type: 'file' | 'directory' | 'other';
+  size?: number;
+}
+
+export interface AgentSandboxTemplateInfo {
+  key: string;
+  name: string;
+  description?: string;
+}
+
+export interface AgentSandboxRunner {
+  listTemplates(tenantDbName: string, tenantId: string): Promise<AgentSandboxTemplateInfo[]>;
+  /** Returns a running, exec-ready instance; `created` when a new one was made. */
+  ensureInstance(ref: AgentSandboxRef, spec: AgentSandboxSpec): Promise<{ instanceId: string; created: boolean }>;
+  exec(
+    ref: AgentSandboxRef,
+    instanceId: string,
+    input: { command: string; cwd?: string; env?: Record<string, string>; timeoutSec?: number },
+  ): Promise<AgentSandboxExecResult>;
+  runCode(
+    ref: AgentSandboxRef,
+    instanceId: string,
+    input: { code: string; language: 'python' | 'javascript' | 'typescript' | 'bash'; env?: Record<string, string>; timeoutSec?: number },
+  ): Promise<AgentSandboxExecResult>;
+  readFile(ref: AgentSandboxRef, instanceId: string, path: string): Promise<string>;
+  writeFile(ref: AgentSandboxRef, instanceId: string, path: string, content: string): Promise<void>;
+  listFiles(ref: AgentSandboxRef, instanceId: string, path: string): Promise<AgentSandboxFileEntry[]>;
+  /** Stop, keeping the disk (a persistent instance can be started again). */
+  stop(ref: AgentSandboxRef, instanceId: string): Promise<void>;
+  /** Delete the instance and its data. */
+  destroy(ref: AgentSandboxRef, instanceId: string): Promise<void>;
+}
+
+export const agentSandboxRunner: { current: AgentSandboxRunner | null } = { current: null };
 
 // ── MCP guardrail seam ────────────────────────────────────────────────────
 // Pre/post hooks around every MCP tool call. This USED to be an enterprise-only

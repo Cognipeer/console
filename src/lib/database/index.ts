@@ -387,6 +387,8 @@ export type {
   IAgentSkill,
   IAgentSkillPolicy,
   IAgentMemoryConfig,
+  IAgentSandboxConfig,
+  AgentSandboxMode,
   IAgentToolBinding,
   IAgentVersion,
   AgentStatus,

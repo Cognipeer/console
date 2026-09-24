@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
 import type { AgentStatus, IAgent, IAgentConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
@@ -58,7 +59,9 @@ function sendAgentGuardrailBlock(
  * leaves the API. Mirrors the dashboard `agents.ts` helper — the presence of a
  * key is surfaced as `connection.hasApiKey`.
  */
-function redactAgent<T extends IAgent>(agent: T): T {
+function redactAgent<T extends IAgent>(input: T): T {
+  // Sandbox secrets: keys with a masked value, never the sealed payload.
+  const agent = maskAgentSandboxSecrets(input);
   const connection = agent.config?.connection;
   if (!connection) return agent;
   const { apiKeyEnc, ...rest } = connection;
@@ -349,7 +352,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       if (bindings.patch) Object.assign(config, bindings.patch);
 
-      const validation = await validateAgentConfig({ tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, config });
+      const validation = await validateAgentConfig({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, config });
       if (validation.errors.length > 0) {
         return reply.code(400).send(invalidConfigBody(validation));
       }
@@ -440,6 +443,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
 
           const validation = await validateAgentConfig({
             tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
             projectId: ctx.projectId,
             config: cfg as IAgentConfig,
             agentKey: existing.key,
@@ -513,6 +517,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const validation = await validateAgentConfig({
         tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
         projectId: ctx.projectId,
         config: existing.config,
         agentKey: existing.key,

@@ -18,6 +18,8 @@ import YAML from 'yaml';
 import { getDatabase } from '@/lib/database';
 import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
+
 
 const logger = createLogger('agent-manifest');
 
@@ -59,6 +61,11 @@ function sanitizeConfig(config: IAgentConfig): IAgentConfig {
         // Encrypted with the source tenant's key — useless elsewhere, and a
         // manifest is a document people paste into pull requests.
         delete spec.connection.apiKeyEnc;
+    }
+    if (spec.sandbox) {
+        // Same reasoning for sandbox secrets: the keys travel (so an importer
+        // sees which secrets to fill in), the sealed values never do.
+        spec.sandbox = maskAgentSandboxConfig(spec.sandbox);
     }
     return spec;
 }
@@ -373,7 +380,8 @@ export async function applyAgentManifest(
         const updated = await db.updateAgent(String(existing._id), {
             name,
             description: manifest.metadata.description,
-            config: sanitizeConfig(manifest.spec),
+            // Masked secret values keep what this agent already stores.
+            config: sealAgentConfigSecrets(sanitizeConfig(manifest.spec), existing.config),
             updatedBy: userId,
         });
         if (!updated) throw new AgentManifestError(`Agent "${key}" could not be updated`);
@@ -389,7 +397,7 @@ export async function applyAgentManifest(
         key,
         name,
         description: manifest.metadata.description,
-        config: sanitizeConfig(manifest.spec),
+        config: sealAgentConfigSecrets(sanitizeConfig(manifest.spec), undefined),
         // Imported agents start inactive: an import is a proposal until someone
         // opens it, checks the dependency list and publishes.
         status: 'draft',

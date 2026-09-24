@@ -2417,6 +2417,52 @@ export interface IAgentConfig {
   skillPolicy?: IAgentSkillPolicy;
   /** Memory — its own tab (Settings → Advanced stays about the loop, not what the agent remembers). */
   memory?: IAgentMemoryConfig;
+  /** Sandbox access — an isolated machine the agent can run commands in (Enterprise). */
+  sandbox?: IAgentSandboxConfig;
+}
+
+/**
+ * How long an agent's sandbox lives.
+ *  - `ephemeral`: a fresh sandbox per run (turn), created on the first
+ *    sandbox tool call and deleted when the run ends. Nothing carries over.
+ *  - `persist`: one sandbox per conversation. Files and installed packages
+ *    carry over from turn to turn; the machine is stopped between turns (its
+ *    disk kept) and deleted with the conversation, or when it has not been
+ *    used for `retentionHours`.
+ */
+export type AgentSandboxMode = 'ephemeral' | 'persist';
+
+/**
+ * Gives an agent a sandbox (the enterprise Agent Runtime Sandbox module) and
+ * the tools to use it: run a command, run code, read/write/list files.
+ *
+ * `secrets` are write-only. On save they are sealed into `secretsSealed`
+ * (AES-256-GCM) and the plaintext is dropped; every read returns the keys
+ * with a masked value. At run time they are decrypted and passed as
+ * environment variables to each command — never stored on the sandbox
+ * instance — and scrubbed from what the tools return to the model.
+ */
+export interface IAgentSandboxConfig {
+  enabled?: boolean;
+  /** Sandbox template key. Absent → the tenant's default (`multi-base`). */
+  templateKey?: string;
+  /** Default `ephemeral`. */
+  mode?: AgentSandboxMode;
+  /** Per-command timeout. Default 60, max 600. */
+  commandTimeoutSec?: number;
+  /** `persist` only: an unused sandbox older than this is replaced by a fresh one. Default 24. */
+  retentionHours?: number;
+  resources?: { cpuCores?: number; memoryMb?: number };
+  /** Cut the sandbox off from the network. */
+  blockNetwork?: boolean;
+  /** Plain (non-secret) environment variables. */
+  env?: Record<string, string>;
+  /** Secret environment variables — write-only, see above. */
+  secrets?: Record<string, string>;
+  /** Sealed form of `secrets`; never leaves the server. */
+  secretsSealed?: string;
+  /** Which tool groups to give the agent. All on by default. */
+  tools?: { exec?: boolean; code?: boolean; files?: boolean };
 }
 
 /** A single tool-source binding for an agent */
