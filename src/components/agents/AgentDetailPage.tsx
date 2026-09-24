@@ -10,7 +10,6 @@ import {
   Button,
   Textarea,
   Select,
-  Slider,
   ActionIcon,
   Tabs,
   Divider,
@@ -402,7 +401,6 @@ export default function AgentDetailPage() {
       promptMode: 'custom' as 'custom' | 'prompt',
       systemPrompt: '',
       promptKey: '',
-      topP: 1,
       knowledgeEngineKey: '',
       inputGuardrailKey: '',
       outputGuardrailKey: '',
@@ -444,7 +442,6 @@ export default function AgentDetailPage() {
           promptMode: cfg.promptKey ? 'prompt' : 'custom',
           systemPrompt: cfg.systemPrompt || '',
           promptKey: cfg.promptKey || '',
-          topP: cfg.topP ?? 1,
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
           inputGuardrailKey: cfg.inputGuardrailKey || '',
           outputGuardrailKey: cfg.outputGuardrailKey || '',
@@ -785,8 +782,7 @@ export default function AgentDetailPage() {
       // and pinned to a temperature — settings nobody chose and, once the
       // fields were removed, nobody could see. Leaving them out lets the
       // model record's own settings govern; the next save clears any value
-      // an older save wrote.
-      topP: values.topP,
+      // an older save wrote. topP went the same way.
       knowledgeEngineKey: values.knowledgeEngineKey || undefined,
       toolBindings: bindings.length > 0 ? bindings : undefined,
     };
@@ -1116,26 +1112,6 @@ export default function AgentDetailPage() {
           />
         </ConfigBlock>
 
-        <ConfigBlock icon={<IconSettings size={15} />} title={t('config.advancedSettings')}>
-          <Stack gap="md">
-            <div>
-              <Text size="sm" mb={4}>
-                {t('config.topP')}: {configForm.values.topP}
-              </Text>
-              <Slider
-                min={0}
-                max={1}
-                step={0.05}
-                marks={[
-                  { value: 0, label: '0' },
-                  { value: 0.5, label: '0.5' },
-                  { value: 1, label: '1' },
-                ]}
-                {...configForm.getInputProps('topP')}
-              />
-            </div>
-          </Stack>
-        </ConfigBlock>
       </Stack>
     )
   );
