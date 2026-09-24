@@ -66,7 +66,10 @@ export type SandboxAvailability =
 
 /** Whether this deployment and tenant can give agents a sandbox at all. */
 export async function resolveSandboxAvailability(tenantId: string): Promise<SandboxAvailability> {
-    const runner = agentSandboxRunner.current;
+    // Optional chaining on the REF too: an overlay registry from before seam 4
+    // replaces this file without exporting `agentSandboxRunner` at all, and
+    // that mismatch must read as "no sandbox module", not crash every agent.
+    const runner = agentSandboxRunner?.current;
     if (!runner) return { available: false, reason: 'edition' };
     if (!(await isTenantEnterpriseLicensed(tenantId))) return { available: false, reason: 'license' };
     return { available: true, runner };
@@ -349,7 +352,7 @@ export async function destroyConversationSandbox(input: {
     conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'metadata'>;
 }): Promise<void> {
     const record = input.conversation.metadata?.sandbox as ConversationSandboxRecord | undefined;
-    const runner = agentSandboxRunner.current;
+    const runner = agentSandboxRunner?.current;
     if (!record?.instanceId || !runner) return;
     try {
         await runner.destroy({

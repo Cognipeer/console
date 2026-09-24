@@ -36,7 +36,9 @@ export const SANDBOX_SECRET_MASK = '••••••';
 
 interface SandboxCapabilities {
     available: boolean;
-    reason?: 'edition' | 'license';
+    /** `unreachable`: the capability check itself failed — not the same as "no module". */
+    reason?: 'edition' | 'license' | 'unreachable';
+    detail?: string;
     templates: Array<{ key: string; name: string; description?: string }>;
 }
 
@@ -64,10 +66,26 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
 
     useEffect(() => {
         let cancelled = false;
+        // A failed check is reported as a failed check. It used to read as
+        // "this edition has no sandbox module", which sent an Enterprise
+        // tenant looking for a license problem that was a server error.
         fetch('/api/agents/sandbox/capabilities', { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data) => { if (!cancelled) setCapabilities(data ?? { available: false, reason: 'edition', templates: [] }); })
-            .catch(() => { if (!cancelled) setCapabilities({ available: false, reason: 'edition', templates: [] }); });
+            .then(async (res) => {
+                if (res.ok) return res.json();
+                const body = await res.json().catch(() => ({}));
+                return { available: false, reason: 'unreachable', templates: [], detail: body?.error ?? `HTTP ${res.status}` };
+            })
+            .then((data) => { if (!cancelled) setCapabilities(data); })
+            .catch((error: unknown) => {
+                if (!cancelled) {
+                    setCapabilities({
+                        available: false,
+                        reason: 'unreachable',
+                        templates: [],
+                        detail: error instanceof Error ? error.message : 'network error',
+                    });
+                }
+            });
         return () => { cancelled = true; };
     }, []);
 
@@ -76,11 +94,17 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
     return (
         <Stack gap="md">
             {unavailable ? (
-                <Alert variant="light" color={capabilities.reason === 'license' ? 'orange' : 'gray'} icon={<IconLock size={16} />}>
+                <Alert
+                    variant="light"
+                    color={capabilities.reason === 'license' ? 'orange' : capabilities.reason === 'unreachable' ? 'red' : 'gray'}
+                    icon={<IconLock size={16} />}
+                >
                     <Text size="sm">
                         {capabilities.reason === 'license'
                             ? 'Sandbox access is an Enterprise feature. Activate an Enterprise license to give agents a sandbox.'
-                            : 'This edition has no sandbox module.'}
+                            : capabilities.reason === 'unreachable'
+                                ? `Could not check sandbox availability (${capabilities.detail ?? 'unknown error'}). Reload to retry.`
+                                : 'This edition has no sandbox module.'}
                         {enabled ? ' The agent runs without its sandbox tools until then.' : ''}
                     </Text>
                 </Alert>
@@ -91,7 +115,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                 description="An isolated Linux machine the agent can run commands and code in, and read and write files on. Provisioned only when the agent first uses it."
                 checked={enabled}
                 onChange={(event) => patch({ enabled: event.currentTarget.checked })}
-                disabled={disabled || (Boolean(unavailable) && !enabled)}
+                disabled={disabled || (Boolean(unavailable) && capabilities?.reason !== 'unreachable' && !enabled)}
             />
 
             {enabled ? (
