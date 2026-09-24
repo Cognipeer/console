@@ -2,6 +2,7 @@ import { ReactNode } from 'react';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import DashboardLayout from '@/components/layout/DashboardLayout';
+import { getConfig } from '@/lib/core/config';
 import { getDatabase } from '@/lib/database';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { isSupportEntryPointEnabled } from '@/lib/services/support/supportHandoff';
@@ -55,6 +56,7 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
   return (
     <DashboardLayout
       supportEnabled={isSupportEntryPointEnabled()}
+      isOnPrem={getConfig().deployment.isOnPrem}
       user={{
         name: email ? email.split('@')[0] : 'Account',
         email,

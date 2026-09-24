@@ -26,6 +26,15 @@ export interface EnterpriseApiRule {
    * self-auth and never reach this guard; listed here as defence-in-depth.)
    */
   exemptPrefixes?: string[];
+  /**
+   * True when this module only makes sense on a self-hosted (onprem)
+   * deployment — e.g. LDAP, which requires the SERVER itself to reach an
+   * arbitrary customer-network directory. Unlike OIDC/SSO (a browser-redirect
+   * flow with no server-to-customer-network connection), letting a SaaS
+   * backend dial an admin-supplied host:port is an SSRF-shaped risk, so the
+   * module is blocked outright rather than merely license-gated on SaaS.
+   */
+  requiresOnPrem?: boolean;
 }
 
 /**
@@ -59,9 +68,12 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     // The login path itself is /auth/login (not under /api/ldap), so it is never
     // gated here — authentication must work to issue a session. A non-enterprise
     // tenant therefore cannot configure LDAP (402), and with no config the
-    // external-auth seam simply skips to local password.
+    // external-auth seam simply skips to local password. Also onprem-only (404
+    // on SaaS) — see `requiresOnPrem`'s doc comment; `ldapAuthenticator` applies
+    // the matching check at login time, since that path isn't under `/api/ldap/`.
     module: 'ldap',
     prefixes: ['/api/ldap/'],
+    requiresOnPrem: true,
   },
   {
     // OIDC single sign-on: same shape as LDAP above. The admin CONFIG/TEST
@@ -134,27 +146,31 @@ export interface EnterpriseDenial {
     error: string;
     message: string;
     module: string;
-    requiresEnterprise: true;
-  };
+  } & ({ requiresEnterprise: true } | { requiresOnPrem: true });
 }
 
-/** Returns the enterprise module owning `pathname`, or null if not gated. */
-export function getEnterpriseModuleForPath(pathname: string): string | null {
+function getEnterpriseRuleForPath(pathname: string): EnterpriseApiRule | null {
   for (const rule of ENTERPRISE_API_RULES) {
     if (rule.exemptPrefixes?.some((p) => pathname === p || pathname.startsWith(p))) {
       continue;
     }
     if (rule.prefixes.some((p) => pathname === p || pathname.startsWith(p))) {
-      return rule.module;
+      return rule;
     }
   }
   return null;
 }
 
+/** Returns the enterprise module owning `pathname`, or null if not gated. */
+export function getEnterpriseModuleForPath(pathname: string): string | null {
+  return getEnterpriseRuleForPath(pathname)?.module ?? null;
+}
+
 /**
- * The per-request decision. Returns a denial when the path is enterprise-gated
- * and the effective license is not an active ENTERPRISE license, or null when
- * the request may proceed.
+ * The per-request decision. Returns a denial when the path is gated and
+ * either (a) the deployment mode doesn't match the module's `requiresOnPrem`
+ * requirement, or (b) the effective license is not an active ENTERPRISE
+ * license; returns null when the request may proceed.
  *
  * Always enforced. In the community edition the gated routes do not exist
  * (404 before this guard), so this only ever bites in the enterprise edition,
@@ -164,10 +180,22 @@ export function checkEnterpriseApiAccess(
   pathname: string,
   effectiveLicenseType: LicenseType | string | undefined,
   expiresAt?: Date | string | number | null,
+  isOnPrem?: boolean,
 ): EnterpriseDenial | null {
-  const enterpriseModule = getEnterpriseModuleForPath(pathname);
-  if (!enterpriseModule) {
+  const rule = getEnterpriseRuleForPath(pathname);
+  if (!rule) {
     return null;
+  }
+  if (rule.requiresOnPrem && !isOnPrem) {
+    return {
+      status: 404,
+      body: {
+        error: 'Not Found',
+        message: `The "${rule.module}" module is only available on a self-hosted (on-premises) deployment.`,
+        module: rule.module,
+        requiresOnPrem: true,
+      },
+    };
   }
   // buildSessionHeaders already collapses an expired license to FREE, so the
   // type check usually suffices; isEnterpriseActive re-checks expiry+grace when
@@ -182,8 +210,8 @@ export function checkEnterpriseApiAccess(
     status: 402,
     body: {
       error: 'Payment Required',
-      message: `The "${enterpriseModule}" module requires an active ENTERPRISE license.`,
-      module: enterpriseModule,
+      message: `The "${rule.module}" module requires an active ENTERPRISE license.`,
+      module: rule.module,
       requiresEnterprise: true,
     },
   };
