@@ -32,7 +32,7 @@ const PLANNING_MODES = new Set(['off', 'todo', 'planner_executor', 'reasoning_th
 const REPLAN_POLICIES = new Set(['never', 'on_failure', 'on_conflict', 'every_n_steps']);
 const PROFILES = new Set(['fast', 'balanced', 'deep', 'research']);
 const TOOL_RESPONSE_POLICIES = new Set(['keep_full', 'keep_structured', 'summarize_archive', 'drop']);
-const SYSTEM_TOOLS = new Set(['browser_use']);
+const SYSTEM_TOOLS = new Set(['browser_use', 'web_search']);
 
 type Issues = AgentConfigValidation;
 
