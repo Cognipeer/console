@@ -17,6 +17,7 @@ import {
     Anchor,
     Button,
     Checkbox,
+    Code,
     Group,
     NumberInput,
     PasswordInput,
@@ -36,7 +37,9 @@ export const SANDBOX_SECRET_MASK = '••••••';
 
 interface SandboxCapabilities {
     available: boolean;
-    reason?: 'edition' | 'license';
+    /** `unreachable`: the capability check itself failed — not the same as "no module". */
+    reason?: 'edition' | 'license' | 'unreachable';
+    detail?: string;
     templates: Array<{ key: string; name: string; description?: string }>;
 }
 
@@ -64,10 +67,26 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
 
     useEffect(() => {
         let cancelled = false;
+        // A failed check is reported as a failed check. It used to read as
+        // "this edition has no sandbox module", which sent an Enterprise
+        // tenant looking for a license problem that was a server error.
         fetch('/api/agents/sandbox/capabilities', { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data) => { if (!cancelled) setCapabilities(data ?? { available: false, reason: 'edition', templates: [] }); })
-            .catch(() => { if (!cancelled) setCapabilities({ available: false, reason: 'edition', templates: [] }); });
+            .then(async (res) => {
+                if (res.ok) return res.json();
+                const body = await res.json().catch(() => ({}));
+                return { available: false, reason: 'unreachable', templates: [], detail: body?.error ?? `HTTP ${res.status}` };
+            })
+            .then((data) => { if (!cancelled) setCapabilities(data); })
+            .catch((error: unknown) => {
+                if (!cancelled) {
+                    setCapabilities({
+                        available: false,
+                        reason: 'unreachable',
+                        templates: [],
+                        detail: error instanceof Error ? error.message : 'network error',
+                    });
+                }
+            });
         return () => { cancelled = true; };
     }, []);
 
@@ -76,11 +95,17 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
     return (
         <Stack gap="md">
             {unavailable ? (
-                <Alert variant="light" color={capabilities.reason === 'license' ? 'orange' : 'gray'} icon={<IconLock size={16} />}>
+                <Alert
+                    variant="light"
+                    color={capabilities.reason === 'license' ? 'orange' : capabilities.reason === 'unreachable' ? 'red' : 'gray'}
+                    icon={<IconLock size={16} />}
+                >
                     <Text size="sm">
                         {capabilities.reason === 'license'
                             ? 'Sandbox access is an Enterprise feature. Activate an Enterprise license to give agents a sandbox.'
-                            : 'This edition has no sandbox module.'}
+                            : capabilities.reason === 'unreachable'
+                                ? `Could not check sandbox availability (${capabilities.detail ?? 'unknown error'}). Reload to retry.`
+                                : 'This edition has no sandbox module.'}
                         {enabled ? ' The agent runs without its sandbox tools until then.' : ''}
                     </Text>
                 </Alert>
@@ -91,7 +116,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                 description="An isolated Linux machine the agent can run commands and code in, and read and write files on. Provisioned only when the agent first uses it."
                 checked={enabled}
                 onChange={(event) => patch({ enabled: event.currentTarget.checked })}
-                disabled={disabled || (Boolean(unavailable) && !enabled)}
+                disabled={disabled || (Boolean(unavailable) && capabilities?.reason !== 'unreachable' && !enabled)}
             />
 
             {enabled ? (
@@ -215,20 +240,42 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                     </ConfigBlock>
 
                     <ConfigBlock title="Environment variables">
-                        <KeyValueEditor
-                            value={value?.env}
-                            onChange={(env) => patch({ env })}
-                            disabled={disabled}
-                            addLabel="Add variable"
-                        />
+                        <Stack gap="xs">
+                            <Text size="xs" c="dimmed">
+                                For non-sensitive settings — <Code>APP_ENV</Code>, <Code>LOG_LEVEL</Code>, a region.
+                                Stored in plain text, visible here and in the API, and set on the sandbox machine
+                                itself, so every command and process sees them. The agent is not told their names;
+                                it can list them with <Code>env</Code>, and their values appear unmasked in anything it prints.
+                            </Text>
+                            <KeyValueEditor
+                                value={value?.env}
+                                onChange={(env) => patch({ env })}
+                                disabled={disabled}
+                                addLabel="Add variable"
+                            />
+                        </Stack>
                     </ConfigBlock>
 
                     <ConfigBlock title="Secrets">
                         <Stack gap="xs">
                             <Text size="xs" c="dimmed">
-                                Stored encrypted and never shown again. Passed to each command as an environment
-                                variable — not stored on the sandbox — and masked in what the tools return to the model.
+                                For API keys, tokens and passwords. Stored encrypted and never shown again — here and
+                                in the API only the name is visible; leave a field empty to keep the stored value,
+                                type to replace it. Not set on the sandbox machine: each <Code>sandbox_exec</Code> /
+                                {' '}<Code>sandbox_run_code</Code> call gets them as environment variables for that
+                                command only. The agent is told the names (so it can write <Code>$API_TOKEN</Code>)
+                                but never the values, and any value that shows up in command output or a file it
+                                reads is replaced with <Code>••••••</Code> before the model sees it.
                             </Text>
+                            <Alert variant="light" color="yellow" p="xs" icon={<IconInfoCircle size={14} />}>
+                                <Text size="xs">
+                                    Masking catches the value as written, not transformed (base64, split, a few
+                                    characters at a time), and cannot stop a script from sending it over the
+                                    network. For sensitive keys, block network access above, use short-lived
+                                    least-privilege keys, or add a <Code>tool.pre</Code> guardrail on
+                                    {' '}<Code>agent.sandbox.*</Code>.
+                                </Text>
+                            </Alert>
                             <KeyValueEditor
                                 value={value?.secrets}
                                 onChange={(secrets) => patch({ secrets: secrets ?? {} })}
