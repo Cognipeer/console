@@ -74,6 +74,8 @@ import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
+import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
@@ -85,6 +87,7 @@ import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentMemoryConfig,
   IAgentSandboxConfig,
+  IAgentExecutionConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
@@ -283,6 +286,7 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   skills: { top: 'configure', sub: 'skills' },
   memory: { top: 'configure', sub: 'memory' },
   sandbox: { top: 'configure', sub: 'sandbox' },
+  execution: { top: 'configure', sub: 'execution' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
   deploy: { top: 'deploy' },
@@ -355,6 +359,7 @@ export default function AgentDetailPage() {
   const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
+  const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
   // Build page: the published snapshot (to flag changed sections) and which
   // sections are folded to their one-line summary.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
@@ -401,6 +406,8 @@ export default function AgentDetailPage() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
+  const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
+  const [activeRunCount, setActiveRunCount] = useState(0);
   const [savingConfig, setSavingConfig] = useState(false);
   /**
    * What the server's config check said on the last save: errors blocked it,
@@ -472,6 +479,7 @@ export default function AgentDetailPage() {
         setSkillPolicy(cfg.skillPolicy);
         setMemoryConfig(cfg.memory);
         setSandboxConfig(cfg.sandbox);
+        setExecutionConfig(cfg.execution);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -873,6 +881,17 @@ export default function AgentDetailPage() {
             sandboxConfig.preview?.enabled ? 'preview links on' : null,
           ].filter(Boolean).join(' · ')
           : 'Off';
+      case 'execution': {
+        if (executionConfig?.backgroundEnabled === false) {
+          return executionConfig.syncTimeoutSeconds ? `Sync only · ${executionConfig.syncTimeoutSeconds}s timeout` : 'Sync only';
+        }
+        return [
+          executionConfig?.defaultMode === 'background' ? 'Background by default' : 'Sync by default',
+          executionConfig?.syncTimeoutSeconds ? `${executionConfig.syncTimeoutSeconds}s timeout` : 'default timeout',
+          executionConfig?.backgroundMaxDurationMinutes ? `runs up to ${executionConfig.backgroundMaxDurationMinutes} min` : null,
+          executionConfig?.callbackUrl ? 'callback set' : null,
+        ].filter(Boolean).join(' · ');
+      }
       case 'advanced':
         return advancedOverrideCount > 0
           ? `${advancedOverrideCount} setting${advancedOverrideCount === 1 ? '' : 's'} changed from defaults`
@@ -930,6 +949,7 @@ export default function AgentDetailPage() {
     // the template, limits and secrets someone set up. Secrets come back from
     // the server masked; sending the mask back keeps the stored value.
     nextConfig.sandbox = sandboxConfig && Object.keys(sandboxConfig).length > 0 ? sandboxConfig : undefined;
+    nextConfig.execution = executionConfig && Object.keys(executionConfig).length > 0 ? executionConfig : undefined;
     // No editor writes this from here anymore (see the Prompt tab) — pass
     // through whatever is already stored so a save from THIS page can never
     // silently wipe a value an import or the API set, since `config` replaces
@@ -1349,17 +1369,40 @@ export default function AgentDetailPage() {
             title="Sessions"
             description="Every conversation with this agent — console tests, API, A2A and scheduled runs. Click one to inspect it; sessions started here can be continued."
           >
-            <SessionList
-              sessions={sessions}
-              loading={sessionsLoading}
-              onOpen={(id) => setViewedSessionId(id)}
-              onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
-              onStart={() => setStartSessionOpen(true)}
-              searchable
+            <SegmentedControl
+              mb="md"
+              size="sm"
+              w="fit-content"
+              value={sessionsView}
+              onChange={(value) => setSessionsView(value as 'sessions' | 'runs')}
+              data={[
+                { value: 'sessions', label: `Sessions · ${sessions.length}` },
+                { value: 'runs', label: activeRunCount > 0 ? `Background runs · ${activeRunCount} active` : 'Background runs' },
+              ]}
             />
+            {sessionsView === 'sessions' ? (
+              <SessionList
+                sessions={sessions}
+                loading={sessionsLoading}
+                onOpen={(id) => setViewedSessionId(id)}
+                onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+                onStart={() => setStartSessionOpen(true)}
+                searchable
+              />
+            ) : null}
+            {/* Mounted even while hidden so the active-run count stays live for the toggle label. */}
+            <div style={{ display: sessionsView === 'runs' ? 'block' : 'none' }}>
+              <AgentRunsTable
+                agentId={agentId}
+                onOpenConversation={(conversationId) => setViewedSessionId(conversationId)}
+                onActiveCountChange={setActiveRunCount}
+              />
+            </div>
             <SessionDetailDrawer
               agentId={agentId}
-              session={sessions.find((s) => s._id === viewedSessionId) ?? null}
+              session={viewedSessionId
+                ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId, source: 'api' }
+                : null}
               onClose={() => setViewedSessionId(null)}
               onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
             />
@@ -1513,6 +1556,20 @@ export default function AgentDetailPage() {
                 ) : null}
               >
                 <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected && sectionVisible('execution') ? (
+              <ConfigSection
+                id="execution"
+                {...sectionProps('execution')}
+                title="Execution"
+                description="How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling."
+                meta={executionConfig?.defaultMode === 'background' ? (
+                  <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+                ) : null}
+              >
+                <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />
               </ConfigSection>
             ) : null}
 

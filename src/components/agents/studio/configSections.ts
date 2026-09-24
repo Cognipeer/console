@@ -16,6 +16,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
     skills: 'Skills',
     memory: 'Memory',
     sandbox: 'Sandbox',
+    execution: 'Execution',
     advanced: 'Runtime',
     output: 'Structured output',
 };
@@ -27,6 +28,7 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     skills: ['skills', 'skillPolicy'],
     memory: ['memory'],
     sandbox: ['sandbox'],
+    execution: ['execution'],
     advanced: ['runtime'],
     output: ['structuredOutput'],
 };
