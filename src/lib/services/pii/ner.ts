@@ -39,7 +39,16 @@
  * empty-catch fallback this guards against.
  */
 
-import { pipeline, env } from '@huggingface/transformers';
+// Loaded lazily, on the first NER call. The detector module (and through it
+// the usage-log PII scrubber) is imported on every server boot, and a static
+// import would pull transformers + onnxruntime-node native binaries into
+// memory even when no NER model is configured — the default.
+type Transformers = typeof import('@huggingface/transformers');
+let transformers: Promise<Transformers> | null = null;
+function loadTransformers(): Promise<Transformers> {
+  transformers ??= import('@huggingface/transformers');
+  return transformers;
+}
 import type { Candidate } from './confidence';
 import { createLogger } from '@/lib/core/logger';
 
@@ -78,7 +87,7 @@ const SEVERITY_BY_CATEGORY: Record<NerCategory, 'low' | 'medium' | 'high'> = {
 // ── Environment + lazy pipeline loading ────────────────────────────────────
 
 let configuredPath: string | null = null;
-function ensureEnv(nerModelPath: string): void {
+function ensureEnv(env: Transformers['env'], nerModelPath: string): void {
   if (configuredPath === nerModelPath) return;
   env.allowRemoteModels = false; // never phone home to huggingface.co at runtime
   env.allowLocalModels = true;
@@ -92,12 +101,15 @@ type Pipeline = any;
 const pipelineCache = new Map<string, Promise<Pipeline>>();
 
 function getPipeline(modelId: string, nerModelPath: string): Promise<Pipeline> {
-  ensureEnv(nerModelPath);
   const cacheKey = `${nerModelPath}::${modelId}`;
   let loading = pipelineCache.get(cacheKey);
   if (!loading) {
     const t0 = Date.now();
-    loading = pipeline('token-classification', modelId, { dtype: 'fp32' })
+    loading = loadTransformers()
+      .then(({ pipeline, env }) => {
+        ensureEnv(env, nerModelPath);
+        return pipeline('token-classification', modelId, { dtype: 'fp32' });
+      })
       .then((pl) => {
         logger.info('PII NER model loaded', { modelId, ms: Date.now() - t0 });
         return pl;

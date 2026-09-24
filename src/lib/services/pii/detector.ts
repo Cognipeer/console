@@ -693,7 +693,7 @@ export function tokenize(
   const tokenized: PiiFinding[] = [];
 
   for (const f of sorted) {
-    const key = `${f.category} ${f.value}`;
+    const key = `${f.category}\u0000${f.value}`;
     let token = tokenByKey.get(key);
     if (!token) {
       const prefix = tokenPrefix(f.category);
