@@ -13,11 +13,10 @@
  * (`summariseConversation`), so no transcript is shipped just to draw a row.
  */
 
-import { Fragment, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
     ActionIcon,
     Badge,
-    Box,
     Button,
     CopyButton,
     Group,
@@ -34,8 +33,6 @@ import {
     IconArrowDown,
     IconArrowUp,
     IconCheck,
-    IconChevronDown,
-    IconChevronRight,
     IconCopy,
     IconExternalLink,
     IconMessageCircle,
@@ -184,7 +181,7 @@ export interface SessionListProps {
     searchable?: boolean;
 }
 
-function messageCountOf(session: SessionListItem): number {
+export function messageCountOf(session: SessionListItem): number {
     return session.messageCount ?? session.messages?.length ?? 0;
 }
 
@@ -198,7 +195,6 @@ export default function SessionList({
     limit,
     searchable,
 }: SessionListProps) {
-    const [expanded, setExpanded] = useState<string | null>(null);
     const [query, setQuery] = useState('');
     // Not named `window`: that shadows the global inside this component,
     // which is a trap waiting for the first line that needs the real one.
@@ -340,7 +336,6 @@ export default function SessionList({
             <Table highlightOnHover verticalSpacing={6} className={classes.table}>
                 <Table.Thead>
                     <Table.Tr>
-                        <Table.Th w={28} />
                         <Table.Th>
                             <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>
                         </Table.Th>
@@ -369,19 +364,8 @@ export default function SessionList({
                     </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                    {rows.map((session) => {
-                        const open = expanded === session._id;
-                        return (
-                            <Fragment key={session._id}>
-                                <Table.Tr className={classes.row}>
-                                    <Table.Td>
-                                        <UnstyledButton
-                                            onClick={() => setExpanded(open ? null : session._id)}
-                                            aria-label={open ? 'Collapse' : 'Expand'}
-                                        >
-                                            {open ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-                                        </UnstyledButton>
-                                    </Table.Td>
+                    {rows.map((session) => (
+                                <Table.Tr key={session._id} className={classes.row}>
                                     <Table.Td>
                                         <UnstyledButton onClick={() => onOpen(session._id)} className={classes.nameButton}>
                                             <Text size="sm" fw={500} lineClamp={1}>
@@ -455,45 +439,7 @@ export default function SessionList({
                                         )}
                                     </Table.Td>
                                 </Table.Tr>
-
-                                {open ? (
-                                    <Table.Tr>
-                                        <Table.Td colSpan={10} className={classes.detailCell}>
-                                            <Group gap="xl" align="flex-start" wrap="wrap">
-                                                <Detail label="Messages" value={String(messageCountOf(session))} />
-                                                <Detail
-                                                    label="Input tokens"
-                                                    value={session.inputTokens ? formatNumber(session.inputTokens) : '—'}
-                                                />
-                                                <Detail
-                                                    label="Output tokens"
-                                                    value={session.outputTokens ? formatNumber(session.outputTokens) : '—'}
-                                                />
-                                                <Detail
-                                                    label="Average turn"
-                                                    value={session.activeMs && session.turns
-                                                        ? formatDuration(Math.round(session.activeMs / session.turns))
-                                                        : '—'}
-                                                />
-                                                <Detail
-                                                    label="Created"
-                                                    value={session.createdAt
-                                                        ? new Date(session.createdAt).toLocaleString()
-                                                        : '—'}
-                                                />
-                                                <Detail
-                                                    label="Session context"
-                                                    value={session.hasContext
-                                                        ? <Badge size="xs" variant="light">set</Badge>
-                                                        : <Text size="xs" c="dimmed">none</Text>}
-                                                />
-                                            </Group>
-                                        </Table.Td>
-                                    </Table.Tr>
-                                ) : null}
-                            </Fragment>
-                        );
-                    })}
+                    ))}
                 </Table.Tbody>
             </Table>
             )}
@@ -501,11 +447,3 @@ export default function SessionList({
     );
 }
 
-function Detail({ label, value }: { label: string; value: React.ReactNode }) {
-    return (
-        <Box>
-            <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
-            {typeof value === 'string' ? <Text size="xs">{value}</Text> : value}
-        </Box>
-    );
-}

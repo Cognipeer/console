@@ -35,15 +35,17 @@ import {
     IconClock,
     IconTool,
     IconHash,
+    IconInfoCircle,
 } from '@tabler/icons-react';
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import MessageBlock from '@/components/common/ui/MessageBlock';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
+import PropertiesPanel from '@/components/common/ui/PropertiesPanel';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import type { ChatMessage, PlaygroundStep } from '../session/sessionTypes';
-import { isContinuableSession, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
+import { isContinuableSession, messageCountOf, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
 
 interface SessionRecord {
     _id: string;
@@ -184,6 +186,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                                 <Tabs.Tab value="tools" leftSection={<IconTool size={14} />}>
                                     Tools{toolUsage.length > 0 ? ` · ${toolUsage.length}` : ''}
                                 </Tabs.Tab>
+                                <Tabs.Tab value="details" leftSection={<IconInfoCircle size={14} />}>Details</Tabs.Tab>
                                 <Tabs.Tab value="raw" leftSection={<IconCode size={14} />}>Raw</Tabs.Tab>
                             </Tabs.List>
 
@@ -256,6 +259,41 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                                         </Table.Tbody>
                                     </Table>
                                 )}
+                            </Tabs.Panel>
+
+                            <Tabs.Panel value="details" pt="md">
+                                <PropertiesPanel
+                                    title="Session"
+                                    rows={[
+                                        { key: 'source', label: 'Source', value: sessionSourceLabel(session.source) },
+                                        { key: 'messages', label: 'Messages', value: String(messageCountOf(session)) },
+                                        { key: 'in', label: 'Input tokens', value: session.inputTokens ? formatNumber(session.inputTokens) : '—' },
+                                        { key: 'out', label: 'Output tokens', value: session.outputTokens ? formatNumber(session.outputTokens) : '—' },
+                                        {
+                                            key: 'avg',
+                                            label: 'Average turn',
+                                            value: session.activeMs && session.turns
+                                                ? formatDuration(Math.round(session.activeMs / session.turns))
+                                                : '—',
+                                        },
+                                        {
+                                            key: 'created',
+                                            label: 'Created',
+                                            value: session.createdAt ? new Date(session.createdAt).toLocaleString() : '—',
+                                        },
+                                        {
+                                            key: 'ctx',
+                                            label: 'Session context',
+                                            value: session.hasContext ? <Badge size="xs" variant="light">set</Badge> : 'none',
+                                        },
+                                    ]}
+                                />
+                                {record.metadata?.runtimeContext ? (
+                                    <Stack gap={6} mt="md">
+                                        <Text size="xs" fw={700} c="dimmed" tt="uppercase">Runtime context</Text>
+                                        <JsonTreeViewer data={record.metadata.runtimeContext} initialExpandLevel={1} />
+                                    </Stack>
+                                ) : null}
                             </Tabs.Panel>
 
                             <Tabs.Panel value="raw" pt="md">
