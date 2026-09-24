@@ -244,6 +244,8 @@ export async function handleA2aRpc(
           ctx.projectId,
           ctx.userId,
           agent.key,
+          undefined,
+          { source: 'a2a' },
         );
         conversationId = String(conversation._id);
       }

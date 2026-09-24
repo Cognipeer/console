@@ -130,6 +130,8 @@ export interface SessionListItem {
     /** False when a turn reported usage but no price — the total is a lower bound. */
     costComplete?: boolean;
     activeMs?: number;
+    /** Where the session came from (`metadata.source`) — see AgentConversationSource. */
+    source?: string;
     hasContext?: boolean;
     /**
      * Only the older, unsummarised shape carries this. Kept so a cached page
@@ -139,10 +141,41 @@ export interface SessionListItem {
     messages?: Array<{ role: string }>;
 }
 
+const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
+    console: { label: 'Test', color: 'teal' },
+    api: { label: 'API', color: 'gray' },
+    a2a: { label: 'A2A', color: 'violet' },
+    schedule: { label: 'Schedule', color: 'orange' },
+    evaluation: { label: 'Evaluation', color: 'blue' },
+    redteam: { label: 'Red team', color: 'red' },
+};
+
+export function sessionSourceLabel(source: string | undefined): string {
+    return source ? SOURCE_LABELS[source]?.label ?? source : 'unknown source';
+}
+
+/**
+ * Only a console session can be continued from the UI — the rest are real
+ * traffic. Sessions recorded before sources existed have none; they keep the
+ * old behaviour (continuable) rather than suddenly locking.
+ */
+export function isContinuableSession(source: string | undefined): boolean {
+    return source === undefined || source === 'console';
+}
+
+export function SessionSourceBadge({ source }: { source: string | undefined }) {
+    if (!source) return null;
+    const meta = SOURCE_LABELS[source] ?? { label: source, color: 'gray' };
+    return <Badge size="xs" variant="light" color={meta.color}>{meta.label}</Badge>;
+}
+
 export interface SessionListProps {
     sessions: SessionListItem[];
     loading?: boolean;
+    /** Row click — shows the session (read-only). */
     onOpen: (sessionId: string) => void;
+    /** Resume a console session in the chat view. */
+    onContinue?: (sessionId: string) => void;
     onStart: () => void;
     starting?: boolean;
     /** Cap how many rows render — Overview shows a handful, the Sessions tab shows all. */
@@ -159,6 +192,7 @@ export default function SessionList({
     sessions,
     loading,
     onOpen,
+    onContinue,
     onStart,
     starting,
     limit,
@@ -310,6 +344,7 @@ export default function SessionList({
                         <Table.Th>
                             <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>
                         </Table.Th>
+                        <Table.Th w={100}>Source</Table.Th>
                         <Table.Th w={190}>Session ID</Table.Th>
                         <Table.Th w={70} ta="right">
                             <SortHeader column="turns" sort={sort} onSort={toggleSort} align="right">Turns</SortHeader>
@@ -353,6 +388,9 @@ export default function SessionList({
                                                 {session.title || 'New session'}
                                             </Text>
                                         </UnstyledButton>
+                                    </Table.Td>
+                                    <Table.Td>
+                                        <SessionSourceBadge source={session.source} />
                                     </Table.Td>
                                     <Table.Td>
                                         <Group gap={4} wrap="nowrap">
@@ -402,22 +440,25 @@ export default function SessionList({
                                         </Tooltip>
                                     </Table.Td>
                                     <Table.Td>
-                                        <Tooltip
-                                            label={(session.turns ?? 0) > 0 ? 'Continue session' : 'Open session'}
-                                            withArrow
-                                        >
-                                            <ActionIcon size="sm" variant="subtle" onClick={() => onOpen(session._id)}>
-                                                {(session.turns ?? 0) > 0
-                                                    ? <IconPlayerPlay size={14} />
-                                                    : <IconExternalLink size={14} />}
-                                            </ActionIcon>
-                                        </Tooltip>
+                                        {onContinue && isContinuableSession(session.source) ? (
+                                            <Tooltip label="Continue session" withArrow>
+                                                <ActionIcon size="sm" variant="subtle" onClick={() => onContinue(session._id)}>
+                                                    <IconPlayerPlay size={14} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        ) : (
+                                            <Tooltip label="View session" withArrow>
+                                                <ActionIcon size="sm" variant="subtle" color="gray" onClick={() => onOpen(session._id)}>
+                                                    <IconExternalLink size={14} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        )}
                                     </Table.Td>
                                 </Table.Tr>
 
                                 {open ? (
                                     <Table.Tr>
-                                        <Table.Td colSpan={9} className={classes.detailCell}>
+                                        <Table.Td colSpan={10} className={classes.detailCell}>
                                             <Group gap="xl" align="flex-start" wrap="wrap">
                                                 <Detail label="Messages" value={String(messageCountOf(session))} />
                                                 <Detail

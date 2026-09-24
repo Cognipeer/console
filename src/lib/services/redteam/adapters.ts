@@ -80,6 +80,7 @@ export function buildTargetInvoker(target: RedTeamTargetSpec, ctx: RedTeamModelC
           ctx.userId ?? 'redteam',
           target.agentKey,
           `redteam: ${target.key}`,
+          { source: 'redteam' },
         );
         conversationId = String(convo._id);
       }

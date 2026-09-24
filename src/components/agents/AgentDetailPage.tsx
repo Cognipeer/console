@@ -72,6 +72,7 @@ import AgentPromptPanel from './studio/AgentPromptPanel';
 import AgentOverviewPanel from './studio/AgentOverviewPanel';
 import SessionList from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
+import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
@@ -171,6 +172,8 @@ interface SessionSummary {
   costUsd?: number;
   costComplete?: boolean;
   activeMs?: number;
+  /** `metadata.source` — only `console` (or unset, legacy) sessions can be continued. */
+  source?: string;
   hasContext?: boolean;
 }
 
@@ -384,6 +387,7 @@ export default function AgentDetailPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
+  const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
   /**
    * What the server's config check said on the last save: errors blocked it,
@@ -1124,6 +1128,14 @@ export default function AgentDetailPage() {
         subtitle={agent.description || agent.key}
         actions={
           <Group gap="sm">
+            <Button
+              size="xs"
+              variant="light"
+              leftSection={<IconPlus size={14} />}
+              onClick={() => setStartSessionOpen(true)}
+            >
+              Start session
+            </Button>
             {isConnected ? (
               <Badge size="sm" variant="light" color="violet" leftSection={<IconPlugConnected size={12} />}>
                 {connection?.protocol ?? t('connectedBadge')}
@@ -1203,23 +1215,21 @@ export default function AgentDetailPage() {
         <Tabs.Panel value="sessions">
           <SectionCard
             title="Sessions"
-            description="Each session is its own persisted conversation — history, tool calls and token usage all reload with it."
+            description="Every conversation with this agent — console tests, API, A2A and scheduled runs. Click one to inspect it; sessions started here can be continued."
           >
-            <Group justify="flex-end" mb="md">
-              <Button
-                size="sm"
-                leftSection={<IconPlus size={14} />}
-                onClick={() => setStartSessionOpen(true)}
-              >
-                Start new session
-              </Button>
-            </Group>
             <SessionList
               sessions={sessions}
               loading={sessionsLoading}
-              onOpen={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+              onOpen={(id) => setViewedSessionId(id)}
+              onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
               onStart={() => setStartSessionOpen(true)}
               searchable
+            />
+            <SessionDetailDrawer
+              agentId={agentId}
+              session={sessions.find((s) => s._id === viewedSessionId) ?? null}
+              onClose={() => setViewedSessionId(null)}
+              onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
             />
           </SectionCard>
         </Tabs.Panel>
