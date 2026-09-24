@@ -43,6 +43,7 @@ import { SkillMixin } from './sqlite/skill.mixin';
 import { VectorMigrationMixin } from './sqlite/vector-migration.mixin';
 import { BrowserMixin } from './sqlite/browser.mixin';
 import { CrawlerMixin } from './sqlite/crawler.mixin';
+import { AgentRunMixin } from './sqlite/agent-run.mixin';
 import { OcrJobMixin } from './sqlite/ocr-jobs.mixin';
 import { BatchJobMixin } from './sqlite/batch.mixin';
 import { UsageRollupMixin } from './sqlite/usage.mixin';
@@ -80,7 +81,7 @@ const KnowledgeBase = MemoryMixin(WebSearchMixin(RerankerMixin(RagBase)));
 const PlatformBase = McpServerMixin(ConfigMixin(KnowledgeBase));
 const ToolingBase = VectorMigrationMixin(SkillMixin(AgentMixin(ToolMixin(PlatformBase))));
 const AdvancedBase = OcrJobMixin(CrawlerMixin(AuditMixin(BrowserMixin(ToolingBase))));
-const BulkBase = UsageRollupMixin(BatchJobMixin(AdvancedBase));
+const BulkBase = UsageRollupMixin(BatchJobMixin(AgentRunMixin(AdvancedBase)));
 const PricingBase = ExternalModelPricingMixin(BulkBase);
 
 // Group 6 – Cluster (system-wide; uses main DB). Single-node node registry

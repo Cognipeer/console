@@ -30,7 +30,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
     return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
 });
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', async () => {
+  const errors = await import('@/lib/database/provider/errors');
+  return {
+    getDatabase: vi.fn(),
+    AgentRunConflictError: errors.AgentRunConflictError,
+    AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
+  };
+});
 
 vi.mock('@/lib/security/rbac', () => ({
     getPermissionServiceForPath: vi.fn(),
@@ -58,27 +65,49 @@ vi.mock('@/lib/services/agents/agentService', () => ({
     },
 }));
 
-vi.mock('@/lib/services/agents', () => ({
-    getAgentByKey: vi.fn(),
-    executeAgentChat: vi.fn(),
-    createConversation: vi.fn(),
-    getConversationById: vi.fn(),
-    // The dashboard plugin pulls a wider slice of the barrel; every name it
-    // imports has to exist here or the module fails to load.
-    createAgentRecord: vi.fn(),
-    deleteAgentRecord: vi.fn(),
-    deleteConversation: vi.fn(),
-    executePlaygroundChat: vi.fn(),
-    getAgentById: vi.fn(),
-    getAgentVersion: vi.fn(),
-    listAgents: vi.fn(),
-    listAgentVersions: vi.fn(),
-    listConversations: vi.fn(),
-    normalizeA2aMetadataUpdate: vi.fn(),
-    prepareConnectionForStorage: vi.fn(),
-    publishAgent: vi.fn(),
-    updateAgentRecord: vi.fn(),
-}));
+vi.mock('@/lib/services/agents', () => {
+    const executeAgentChat = vi.fn();
+    return {
+        getAgentByKey: vi.fn(),
+        executeAgentChat,
+        createConversation: vi.fn(),
+        getConversationById: vi.fn(),
+        // The dashboard plugin pulls a wider slice of the barrel; every name it
+        // imports has to exist here or the module fails to load.
+        createAgentRecord: vi.fn(),
+        deleteAgentRecord: vi.fn(),
+        deleteConversation: vi.fn(),
+        executePlaygroundChat: vi.fn(),
+        getAgentById: vi.fn(),
+        getAgentVersion: vi.fn(),
+        listAgents: vi.fn(),
+        listAgentVersions: vi.fn(),
+        listConversations: vi.fn(),
+        normalizeA2aMetadataUpdate: vi.fn(),
+        prepareConnectionForStorage: vi.fn(),
+        publishAgent: vi.fn(),
+        updateAgentRecord: vi.fn(),
+        // Background execution (docs/guide/agent-background-execution.md):
+        // `runSyncAgentTurn` delegates to the SAME `executeAgentChat` mock
+        // above so `runCalls()` (which reads `executeAgentChat.mock.calls`)
+        // keeps observing exactly what each channel asked the runtime to do
+        // — these tests are about the CHANNEL wiring, not the sync-ceiling
+        // orchestration itself (covered by agent-run-sync-ceiling.test.ts).
+        runSyncAgentTurn: vi.fn(async ({ request }: { request: unknown }) => ({
+            kind: 'ok',
+            response: await executeAgentChat(request),
+        })),
+        createBackgroundAgentRun: vi.fn(),
+        getAgentRunStatus: vi.fn(),
+        requestAgentRunCancellation: vi.fn(),
+        isBackgroundModeRequested: vi.fn().mockReturnValue(false),
+        agentRunConflictErrorBody: vi.fn(() => ({ error: { type: 'agent_run_conflict', message: 'conflict' } })),
+        agentSyncTimeoutErrorBody: vi.fn(() => ({ error: { type: 'timeout', message: 'timed out' } })),
+        idempotencyKeyRequiresBackgroundErrorBody: vi.fn(() => ({
+            error: { type: 'invalid_request_error', message: 'Idempotency-Key requires background: true' },
+        })),
+    };
+});
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
@@ -144,6 +173,13 @@ const ANSWER = {
 
 const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
 
+// Turns on an existing conversation hold its single active-run slot (a
+// `mode: 'sync'` AgentRun reservation) for their whole duration.
+const agentRunReservation = {
+  create: vi.fn(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record })),
+  remove: vi.fn(async () => true),
+};
+
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
     return fn as ReturnType<typeof vi.fn>;
 }
@@ -179,7 +215,11 @@ function runCalls() {
 beforeEach(() => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({ runWithTenant });
+    mockFn(getDatabase).mockResolvedValue({
+        runWithTenant,
+        createAgentRun: agentRunReservation.create,
+        deleteAgentRun: agentRunReservation.remove,
+    });
     mockFn(getPermissionServiceForPath).mockReturnValue(null);
     mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
     mockFn(getModelByKey).mockResolvedValue(null);
@@ -359,6 +399,22 @@ describe('channel: OpenAI chat/completions', () => {
         // An agent is stateful, so the thread handle comes back.
         expect(body.conversation_id).toBe('conv-1');
         expect((body.usage as { total_tokens: number }).total_tokens).toBe(1242);
+    });
+
+    it('REGRESSION: a conversation busy with another run gets 409 agent_run_conflict and never runs concurrently', async () => {
+        const { AgentRunConflictError } = await import('@/lib/database/provider/errors');
+        agentRunReservation.create.mockRejectedValueOnce(new AgentRunConflictError('conv-1'));
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/chat/completions',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', conversation_id: 'conv-1', messages: [{ role: 'user', content: 'hi' }] },
+        });
+
+        expect(res.statusCode).toBe(409);
+        expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('agent_run_conflict');
+        expect(runCalls()).toHaveLength(0);
     });
 
     it('API traffic runs the published version', async () => {

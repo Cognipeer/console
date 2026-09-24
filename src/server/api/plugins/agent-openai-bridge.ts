@@ -1,3 +1,4 @@
+import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
 /**
  * An agent, answered as an OpenAI chat completion.
  *
@@ -251,7 +252,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     const conversation = await resolveConversation(input.conversationId, input.agent, input.ctx);
     if ('error' in conversation) return { error: conversation.error, status: 404 };
 
-    const result = await executeAgentChat({
+    const result = await executeAgentChatExclusive({
         agentKey: input.agent.key,
         conversationId: conversation.conversationId,
         projectId: input.ctx.projectId,

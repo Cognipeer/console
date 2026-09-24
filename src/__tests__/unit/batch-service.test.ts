@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // batchService transitively imports the file service (input/output JSONL in
 // buckets); stub it so the pure helpers under test load without the
@@ -8,10 +8,33 @@ vi.mock('@/lib/services/files/fileService', () => ({
   uploadFile: vi.fn(),
 }));
 
-import type { IBatchJobItem } from '@/lib/database';
+import type { IBatchJob, IBatchJobItem } from '@/lib/database';
+
+// `getBatch`/`cancelBatch`/`getBatchItems` go through `getDatabase()` — stub
+// it with an in-memory fake so the project-scoping check can be exercised
+// without a real tenant DB.
+const fakeBatchJobs = new Map<string, IBatchJob>();
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(async () => ({
+    switchToTenant: vi.fn(async () => {}),
+    findBatchJobById: vi.fn(async (id: string) => fakeBatchJobs.get(id) ?? null),
+    updateBatchJob: vi.fn(async (id: string, data: Partial<IBatchJob>) => {
+      const existing = fakeBatchJobs.get(id);
+      if (!existing) return null;
+      const updated = { ...existing, ...data };
+      fakeBatchJobs.set(id, updated);
+      return updated;
+    }),
+    listBatchJobItems: vi.fn(async () => []),
+  })),
+}));
+
 import {
   BatchValidationError,
   buildResultsJsonl,
+  cancelBatch,
+  getBatch,
+  getBatchItems,
   isSupportedBatchEndpoint,
   parseBatchJsonl,
   toOutputLine,
@@ -114,5 +137,41 @@ describe('toOutputLine / buildResultsJsonl', () => {
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0]).id).toBe('batch_req_item-1');
     expect(JSON.parse(lines[1]).id).toBe('batch_req_item-4');
+  });
+});
+
+describe('project isolation (getBatch / cancelBatch / getBatchItems)', () => {
+  const ctxProjectA = { tenantDbName: 'tenant_x', tenantId: 't1', projectId: 'proj-a' };
+  const ctxProjectB = { tenantDbName: 'tenant_x', tenantId: 't1', projectId: 'proj-b' };
+
+  beforeEach(() => {
+    fakeBatchJobs.clear();
+    fakeBatchJobs.set('batch-1', {
+      _id: 'batch-1',
+      tenantId: 't1',
+      projectId: 'proj-a',
+      endpoint: '/v1/chat/completions',
+      status: 'in_progress',
+      itemsTotal: 1,
+      itemsSucceeded: 0,
+      itemsFailed: 0,
+      itemsCancelled: 0,
+    } as IBatchJob);
+  });
+
+  it('getBatch: a token from a different project in the SAME tenant cannot read the batch', async () => {
+    await expect(getBatch(ctxProjectA, 'batch-1')).resolves.not.toBeNull();
+    await expect(getBatch(ctxProjectB, 'batch-1')).resolves.toBeNull();
+  });
+
+  it('cancelBatch: a token from a different project cannot cancel the batch', async () => {
+    await expect(cancelBatch(ctxProjectB, 'batch-1')).resolves.toBeNull();
+    // Untouched — still in_progress, not cancelling.
+    expect(fakeBatchJobs.get('batch-1')?.status).toBe('in_progress');
+  });
+
+  it('getBatchItems: a token from a different project cannot list items', async () => {
+    await expect(getBatchItems(ctxProjectB, 'batch-1')).resolves.toBeNull();
+    await expect(getBatchItems(ctxProjectA, 'batch-1')).resolves.not.toBeNull();
   });
 });

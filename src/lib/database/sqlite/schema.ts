@@ -117,6 +117,7 @@ export const OCR_TENANT_SCHEMA_SQL = `
     pdfMaxPages INTEGER,
     callbackUrl TEXT,
     callbackSecret TEXT,
+    maxDurationMs INTEGER,
     callbackEvents TEXT,
     itemsTotal INTEGER NOT NULL DEFAULT 0,
     itemsProcessed INTEGER NOT NULL DEFAULT 0,
@@ -2086,6 +2087,54 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId ON crawl_results(jobId);
   CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId_createdAt ON crawl_results(jobId, createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_crawl_results_tenant_url ON crawl_results(tenantId, url);
+
+  -- Agent runs (background execution) — see
+  -- docs/guide/agent-background-execution.md §6/§7/§12.
+  CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL,
+    tenantId TEXT NOT NULL,
+    tenantDbName TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    agentKey TEXT NOT NULL,
+    conversationId TEXT NOT NULL,
+    userMessage TEXT NOT NULL,
+    version INTEGER,
+    usePublished INTEGER,
+    runtimeContext TEXT,
+    idempotencyKey TEXT,
+    idempotencyRequestHash TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    errorReason TEXT,
+    result TEXT,
+    errorMessage TEXT,
+    cancelRequestedAt TEXT,
+    workerId TEXT,
+    heartbeatAt TEXT,
+    callbackUrl TEXT,
+    callbackSecret TEXT,
+    callbackStatus TEXT,
+    callbackAttempts INTEGER NOT NULL DEFAULT 0,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
+    createdAt TEXT NOT NULL,
+    startedAt TEXT,
+    completedAt TEXT,
+    expiresAt TEXT,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_tenantId ON agent_runs(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project ON agent_runs(tenantId, projectId);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_status_heartbeat ON agent_runs(status, heartbeatAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_expiresAt ON agent_runs(expiresAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project_idempotencyKey ON agent_runs(tenantId, projectId, idempotencyKey);
+  -- Enforces "at most one queued/running run per conversation" at the DB
+  -- layer (§6/§12.14) — a partial unique index, not a read-then-write
+  -- application check, so the guard is race-free (SQLite partial indexes
+  -- supported since 3.8.0).
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_active_per_conversation
+    ON agent_runs(conversationId) WHERE status IN ('queued', 'running');
 
   ${OCR_TENANT_SCHEMA_SQL}
 

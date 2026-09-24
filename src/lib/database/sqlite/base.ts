@@ -105,6 +105,7 @@ export const TABLES = {
   ocrJobItems: 'ocr_job_items',
   batchJobs: 'batch_jobs',
   batchJobItems: 'batch_job_items',
+  agentRuns: 'agent_runs',
   realtimeModels: 'realtime_models',
   realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────
@@ -1016,6 +1017,13 @@ export class SQLiteProviderBase {
     // `mapPiiPolicyRow` reads that back as `undefined`, which every caller
     // (`scanWithPolicy`, etc.) treats as 'regex' — pre-existing behaviour.
     this.ensureTableColumn(db, TABLES.piiPolicies, 'engine', 'engine TEXT');
+    // Sealed HMAC secret for agent-run callbacks (agentRunService).
+    this.ensureTableColumn(db, TABLES.agentRuns, 'callbackSecret', 'callbackSecret TEXT');
+    this.ensureTableColumn(db, TABLES.agentRuns, 'maxDurationMs', 'maxDurationMs INTEGER');
+    // One run per Idempotency-Key per project, race-free (two concurrent
+    // requests with the same key must not both execute).
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency_unique
+      ON ${TABLES.agentRuns}(tenantId, projectId, idempotencyKey) WHERE idempotencyKey IS NOT NULL`);
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

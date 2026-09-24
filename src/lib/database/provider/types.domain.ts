@@ -2353,6 +2353,23 @@ export interface IAgentSubagentPolicy {
   allowAdhocTools?: boolean;
 }
 
+export interface IAgentExecutionConfig {
+  /** Synchronous ceiling for this agent, seconds. */
+  syncTimeoutSeconds?: number;
+  /** false = API calls may not run this agent in the background. Default true. */
+  backgroundEnabled?: boolean;
+  /** Longest a background run of this agent may take, minutes. */
+  backgroundMaxDurationMinutes?: number;
+  /** What an API call that does not say `background` gets. Default 'sync'. */
+  defaultMode?: 'sync' | 'background';
+  /** Callback for background runs started without their own `callback_url`. */
+  callbackUrl?: string;
+  /** Write-only HMAC secret for that callback: plaintext in, masked out. */
+  callbackSecret?: string;
+  /** Sealed `callbackSecret`; never returned by the API. */
+  callbackSecretSealed?: string;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
@@ -2419,6 +2436,12 @@ export interface IAgentConfig {
   memory?: IAgentMemoryConfig;
   /** Sandbox access — an isolated machine the agent can run commands in (Enterprise). */
   sandbox?: IAgentSandboxConfig;
+  /**
+   * How API calls to this agent execute (docs/guide/agent-background-execution.md).
+   * Every limit here is an upper bound the agent opts into; the effective
+   * value is min(env ceiling, tenant quota, this).
+   */
+  execution?: IAgentExecutionConfig;
 }
 
 /**
@@ -3625,4 +3648,114 @@ export interface IPrescriptionReport {
   createdAt?: Date;
   updatedAt?: Date;
   finishedAt?: Date | null;
+}
+
+// ── Agent Runs (background execution) types ───────────────────────────────
+// See docs/guide/agent-background-execution.md for the full design. Diverges
+// deliberately from the ICrawlJob precedent on crash recovery/retry (§12.1):
+// agent turns can carry irreversible tool side effects that crawl jobs do not.
+
+/**
+ * Which path created this row. A `'sync'` row exists only to hold the
+ * single-active-run reservation (see the partial unique index on
+ * `conversationId`, §6/§12.14) for the duration of an inline call — it is
+ * always deleted when the call ends (success, timeout, or error), never left
+ * in a terminal state and never intended to be polled.
+ */
+export type AgentRunMode = 'sync' | 'background';
+
+/**
+ * No `'timeout'` state — timeouts only happen in synchronous mode, which
+ * never creates a run record (§6).
+ */
+export type AgentRunStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+
+/**
+ * Distinguishes an agent-side failure, a worker that died mid-run (§12.1),
+ * the server-side background ceiling firing (§12.13), and an explicit caller
+ * cancel — three different causes should not collapse into one generic value.
+ */
+export type AgentRunErrorReason =
+  | 'agent_error'
+  | 'worker_lost'
+  | 'max_duration_exceeded'
+  | 'canceled_by_caller'
+  /** The agent was disabled/deleted, or the submitting API token revoked, before the worker started it. */
+  | 'precondition_failed'
+  | null;
+
+/** Durable delivery state for the optional callback webhook (§12.6). */
+export type AgentRunCallbackStatus = 'pending' | 'delivered' | 'failed';
+
+export interface IAgentRun extends IUsageAttributionFields {
+  _id?: ObjectId | string;
+  mode: AgentRunMode;
+  tenantId: string;
+  tenantDbName: string;
+  /** Required, checked on every read/write path (§12.11) — never optional. */
+  projectId: string;
+  agentKey: string;
+  /**
+   * Conversation this turn is appended to. Guarded by a partial unique index
+   * so at most one active (`queued`/`running`) run can exist per conversation
+   * regardless of mode (§6, §12.14).
+   */
+  conversationId: string;
+  userMessage: string;
+  /**
+   * Reconstructs the exact `AgentChatRequest` the worker needs to actually
+   * execute the turn (§7 step 2: "the worker loads everything else from the
+   * AgentRun record itself"). Opaque JSON, owned by `agentRunService.ts` —
+   * the DB layer never reads inside it. Not part of the §6 field table
+   * verbatim but required for the execution path to function at all: the
+   * queue payload is only `{ runId }`.
+   */
+  version?: number | null;
+  usePublished?: boolean;
+  /** Serialized `AgentRuntimeContext` (already plain data — see its own doc comment). */
+  runtimeContext?: Record<string, unknown> | null;
+  /**
+   * Caller-supplied, from an `Idempotency-Key` header — background mode only
+   * (§12.15). Scoped by tenantId+projectId at lookup time.
+   */
+  idempotencyKey?: string | null;
+  /** Hash of `{ agentKey, conversationId, userMessage, version }` (§12.15). */
+  idempotencyRequestHash?: string | null;
+  status: AgentRunStatus;
+  errorReason?: AgentRunErrorReason;
+  /** The same response payload a synchronous call would have returned. */
+  result?: Record<string, unknown> | null;
+  errorMessage?: string | null;
+  /**
+   * Set by a cancel request possibly arriving on a different node than the
+   * one executing the run; the owning worker observes it on its next poll
+   * (crawler-proven pattern, `ICrawlJob.cancelRequestedAt`).
+   */
+  cancelRequestedAt?: Date | null;
+  /** The node currently (or last) executing this run — see the reconciler. */
+  workerId?: string | null;
+  /** Updated periodically by the executing worker while `status = running`. */
+  heartbeatAt?: Date | null;
+  callbackUrl?: string | null;
+  /**
+   * Sealed (`encryptSecretValue`) shared secret the callback is HMAC-signed
+   * with. Never returned by the API.
+   */
+  callbackSecret?: string | null;
+  /** Effective background ceiling resolved at submit time (env ∧ tenant quota ∧ agent). */
+  maxDurationMs?: number | null;
+  callbackStatus?: AgentRunCallbackStatus | null;
+  /** Incremented per delivery attempt, persisted so a restart doesn't lose count. */
+  callbackAttempts?: number;
+  createdAt?: Date;
+  startedAt?: Date | null;
+  completedAt?: Date | null;
+  /** Retention cutoff (§12.10) — userMessage/result are not kept indefinitely. */
+  expiresAt?: Date | null;
+  updatedAt?: Date;
 }

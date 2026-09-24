@@ -16,6 +16,8 @@ import {
   type AgentChatRequest,
   type AgentPlaygroundChatRequest,
 } from './agentService';
+import { getConfig } from '@/lib/core/config';
+import { AGENT_RUN_QUEUE, runAgentJobLocal, deliverAgentRunCallbackJob } from './agentRunService';
 
 const log = createLogger('agent.consumer');
 let started = false;
@@ -39,8 +41,28 @@ export async function startAgentQueueConsumer(): Promise<void> {
     if (ctx.name === 'playground') {
       return executePlaygroundChatLocal(ctx.data as unknown as AgentPlaygroundChatRequest);
     }
+    // Background runs moved to their own queue; still drained here for jobs
+    // published by a previous release during a rolling deploy.
+    if (ctx.name === 'run') {
+      return runAgentJobLocal(ctx.data as unknown as { runId: string; tenantId: string; tenantDbName: string });
+    }
+    if (ctx.name === 'callback') {
+      return deliverAgentRunCallbackJob(ctx.data as unknown as Parameters<typeof deliverAgentRunCallbackJob>[0]);
+    }
     throw new Error(`Unknown agent job: ${ctx.name}`);
   }, { concurrency: CONCURRENCY });
+
+  // Background runs + their callbacks, with their own concurrency: a run can
+  // take 30 minutes, and sharing the chat queue's slots blocked chat.
+  queue.consume(AGENT_RUN_QUEUE, async (ctx: JobContext<QueuePayload>) => {
+    if (ctx.name === 'run') {
+      return runAgentJobLocal(ctx.data as unknown as { runId: string; tenantId: string; tenantDbName: string });
+    }
+    if (ctx.name === 'callback') {
+      return deliverAgentRunCallbackJob(ctx.data as unknown as Parameters<typeof deliverAgentRunCallbackJob>[0]);
+    }
+    throw new Error(`Unknown agent-run job: ${ctx.name}`);
+  }, { concurrency: getConfig().agent.runConcurrency });
   started = true;
   log.info('Agent queue consumer registered', { concurrency: CONCURRENCY });
 }

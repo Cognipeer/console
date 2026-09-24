@@ -25,9 +25,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   };
 });
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', async () => {
+  const errors = await import('@/lib/database/provider/errors');
+  return {
+    getDatabase: vi.fn(),
+    AgentRunConflictError: errors.AgentRunConflictError,
+    AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
+  };
+});
 
 vi.mock('@/lib/security/rbac', () => ({
   getPermissionServiceForPath: vi.fn(),
@@ -80,6 +85,9 @@ const EXPOSED_AGENT = {
 };
 
 const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
+// message/send holds the conversation's single active-run slot for the turn.
+const createAgentRun = vi.fn();
+const deleteAgentRun = vi.fn();
 
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
   return fn as ReturnType<typeof vi.fn>;
@@ -92,7 +100,9 @@ async function buildApp() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-  mockFn(getDatabase).mockResolvedValue({ runWithTenant });
+  createAgentRun.mockImplementation(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record }));
+  deleteAgentRun.mockResolvedValue(true);
+  mockFn(getDatabase).mockResolvedValue({ runWithTenant, createAgentRun, deleteAgentRun });
   mockFn(getPermissionServiceForPath).mockReturnValue(null);
   mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
   mockFn(getAgentByKey).mockResolvedValue(EXPOSED_AGENT);
@@ -214,6 +224,70 @@ describe('message/send', () => {
       },
     });
     expect(parseJsonBody<{ error: { code: number } }>(bad.body).error.code).toBe(-32602);
+  });
+});
+
+describe('message/send — one active turn per conversation', () => {
+  it('holds a sync reservation for the conversation during the turn and releases it afterwards', async () => {
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
+    mockFn(executeAgentChat).mockImplementation(async () => {
+      // While the turn runs, the slot is held and not yet released.
+      expect(createAgentRun).toHaveBeenCalledWith(expect.objectContaining({
+        mode: 'sync',
+        conversationId: 'conv-9',
+        status: 'running',
+      }));
+      expect(deleteAgentRun).not.toHaveBeenCalled();
+      return {
+        output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
+        _conversation_messages: [{}, {}],
+      };
+    });
+
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 1, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
+    });
+
+    expect(parseJsonBody<{ result: { contextId: string } }>(res.body).result.contextId).toBe('conv-9');
+    expect(deleteAgentRun).toHaveBeenCalledWith('reservation-1');
+  });
+
+  it('REGRESSION: a conversation busy with another run (e.g. a background run) is refused with agent_run_conflict, never run concurrently', async () => {
+    const { AgentRunConflictError } = await import('@/lib/database/provider/errors');
+    createAgentRun.mockRejectedValue(new AgentRunConflictError('conv-9'));
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
+
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 5, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
+    });
+
+    const body = parseJsonBody<{ error: { code: number; data: { type: string; code: string } } }>(res.body);
+    expect(body.error.data.type).toBe('agent_run_conflict');
+    expect(body.error.data.code).toBe('agent_run_conflict');
+    expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
+  });
+
+  it('releases the reservation even when the turn throws', async () => {
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
+    mockFn(executeAgentChat).mockRejectedValue(new Error('provider exploded'));
+
+    const app = await buildApp();
+    await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 6, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
+    });
+
+    expect(deleteAgentRun).toHaveBeenCalledWith('reservation-1');
   });
 });
 

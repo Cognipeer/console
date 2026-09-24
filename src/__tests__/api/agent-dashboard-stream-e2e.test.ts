@@ -23,7 +23,14 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
     };
 });
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', async () => {
+    const errors = await import('@/lib/database/provider/errors');
+    return {
+        getDatabase: vi.fn(),
+        AgentRunConflictError: errors.AgentRunConflictError,
+        AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
+    };
+});
 
 vi.mock('@/lib/services/agents', () => ({
     createAgentRecord: vi.fn(),
@@ -50,7 +57,8 @@ vi.mock('@/lib/services/agents/agentService', () => ({
 
 import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
 import { getDatabase } from '@/lib/database';
-import { getAgentById } from '@/lib/services/agents';
+import { executePlaygroundChat, getAgentById } from '@/lib/services/agents';
+import { AgentRunConflictError } from '@/lib/database/provider/errors';
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
@@ -87,10 +95,17 @@ const PLAYGROUND_RESULT = {
     steps: [{ id: 'e1', name: 'web_search', args: { query: 'db status' }, status: 'success' }],
 };
 
+// A session turn holds the conversation's run slot (a `mode: 'sync'`
+// AgentRun reservation) for its whole duration.
+const createAgentRun = vi.fn();
+const deleteAgentRun = vi.fn();
+
 beforeEach(() => {
     vi.clearAllMocks();
     mockFn(requireProjectContextForRequest).mockResolvedValue(SESSION_CTX);
-    mockFn(getDatabase).mockResolvedValue({});
+    createAgentRun.mockImplementation(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record }));
+    deleteAgentRun.mockResolvedValue(true);
+    mockFn(getDatabase).mockResolvedValue({ createAgentRun, deleteAgentRun });
     mockFn(getAgentById).mockResolvedValue(AGENT);
     mockFn(executePlaygroundChatLocal).mockResolvedValue(PLAYGROUND_RESULT);
 });
@@ -241,5 +256,95 @@ describe('channel: dashboard session stream', () => {
             payload: {},
         });
         expect(res.statusCode).toBe(400);
+    });
+});
+
+describe('dashboard session turns share the conversation run slot', () => {
+    it('reserves the session for the streamed turn and releases it when the stream ends', async () => {
+        mockFn(executePlaygroundChatLocal).mockImplementation(async () => {
+            expect(deleteAgentRun).not.toHaveBeenCalled();
+            return PLAYGROUND_RESULT;
+        });
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi', conversationId: 'conv-1' },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(createAgentRun).toHaveBeenCalledWith(expect.objectContaining({
+            mode: 'sync',
+            conversationId: 'conv-1',
+            agentKey: 'field-ops',
+            projectId: 'proj-1',
+            tenantId: 'tenant-1',
+        }));
+        expect(deleteAgentRun).toHaveBeenCalledWith('reservation-1');
+    });
+
+    it('releases the reservation when the streamed turn fails', async () => {
+        mockFn(executePlaygroundChatLocal).mockRejectedValue(new Error('model unavailable'));
+        const app = await build();
+        await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi', conversationId: 'conv-1' },
+        });
+        expect(deleteAgentRun).toHaveBeenCalledWith('reservation-1');
+    });
+
+    it('REGRESSION: a session busy with another run (e.g. a background run) gets 409 and the turn never starts', async () => {
+        createAgentRun.mockRejectedValue(new AgentRunConflictError('conv-1'));
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi', conversationId: 'conv-1' },
+        });
+
+        expect(res.statusCode).toBe(409);
+        expect(JSON.parse(res.body).code).toBe('agent_run_conflict');
+        expect(executePlaygroundChatLocal).not.toHaveBeenCalled();
+        expect(deleteAgentRun).not.toHaveBeenCalled();
+    });
+
+    it('a stateless turn (no session) takes no reservation', async () => {
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi' },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(createAgentRun).not.toHaveBeenCalled();
+    });
+
+    it('the non-streamed /chat route also refuses a busy session with 409, and releases after a turn', async () => {
+        const app = await build();
+        mockFn(executePlaygroundChat).mockResolvedValue(PLAYGROUND_RESULT);
+        const ok = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi', conversationId: 'conv-1' },
+        });
+        expect(ok.statusCode).toBe(200);
+        expect(deleteAgentRun).toHaveBeenCalledWith('reservation-1');
+
+        mockFn(executePlaygroundChat).mockClear();
+        createAgentRun.mockRejectedValue(new AgentRunConflictError('conv-1'));
+        const busy = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi', conversationId: 'conv-1' },
+        });
+        expect(busy.statusCode).toBe(409);
+        expect(executePlaygroundChat).not.toHaveBeenCalled();
     });
 });

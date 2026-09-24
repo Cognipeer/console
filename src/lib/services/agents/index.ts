@@ -24,6 +24,24 @@ export {
 } from './externalAgent';
 
 export {
+  runSyncAgentTurn,
+  createBackgroundAgentRun,
+  getAgentRunStatus,
+  requestAgentRunCancellation,
+  isBackgroundModeRequested,
+  agentRunConflictErrorBody,
+  agentSyncTimeoutErrorBody,
+  idempotencyKeyRequiresBackgroundErrorBody,
+  idempotencyKeyConflictErrorBody,
+  agentRunConcurrencyLimitErrorBody,
+} from './agentRunService';
+export type {
+  SyncRunOutcome,
+  CreateBackgroundAgentRunOutcome,
+  RequestAgentRunCancellationOutcome,
+} from './agentRunService';
+
+export {
   generateA2aEndpointSlug,
   isA2aEnabled,
   isA2aPublic,
