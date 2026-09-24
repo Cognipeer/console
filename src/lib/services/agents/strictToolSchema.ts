@@ -209,6 +209,31 @@ function withRestoredToolArgs<T extends object>(input: T, restorers: Restorers):
 }
 
 /**
+ * A tool's arguments must be an OBJECT schema. An open object with no declared
+ * properties (a tool whose contract is unknown) transforms to a JSON string,
+ * and a bare string at the top level got wrapped by LangChain into
+ * `{ input }` with no `required` — which strict mode rejects outright
+ * ("Missing 'input'"), failing every call of the agent, not just this tool's.
+ * Here the string is carried as an explicit required `input` field instead,
+ * and unwrapped back into the object the tool expects.
+ */
+function topLevelObject(transform: StrictTransform): StrictTransform {
+    if ((transform.schema._def as AnyDef)?.typeName === 'ZodObject') return transform;
+    return {
+        schema: z.object({
+            input: transform.schema.describe(
+                transform.schema.description ?? 'The tool arguments as a JSON object, encoded as a string',
+            ),
+        }),
+        restore: (value) => {
+            const input = (value && typeof value === 'object' ? (value as { input?: unknown }).input : undefined);
+            const restored = transform.restore(input);
+            return restored && typeof restored === 'object' ? restored : {};
+        },
+    };
+}
+
+/**
  * Binds EVERY tool the provider sees in strict mode — the agent's own tools
  * and the ones agent-sdk injects itself (manage_plan, open_skill,
  * search_skills, get_tool_response, spawn_subagent, …), most of which have
@@ -236,7 +261,7 @@ export function withStrictToolCalling<T extends object>(input: T): T {
         const shaped = (Array.isArray(tools) ? tools : []).map((candidate) => {
             const tool = candidate as ToolLike;
             if (!tool || !tool.name || !isZod(tool.schema)) return candidate;
-            const transform = toStrictCompatible(tool.schema);
+            const transform = topLevelObject(toStrictCompatible(tool.schema));
             restorers.set(tool.name, transform.restore);
             const copy: ToolLike = { ...tool, schema: transform.schema };
             // agent-sdk caches its LangChain conversion on the tool object;

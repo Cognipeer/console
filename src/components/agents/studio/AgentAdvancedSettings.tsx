@@ -481,20 +481,6 @@ export default function AgentAdvancedSettings({
                     real backing store picked from the Memory module, which does
                     not fit this accordion's "knob with a default" shape. */}
 
-                <Accordion.Item value="hitl">
-                    <Accordion.Control>
-                        <Text size="sm" fw={600}>Human in the loop</Text>
-                    </Accordion.Control>
-                    <Accordion.Panel>
-                        <Switch
-                            label="Let the agent ask the user a question mid-run"
-                            description="Adds the `ask_user_question` tool. The caller must be able to answer — useful in the playground, a dead end for an unattended scheduled run."
-                            checked={value.askUser ?? false}
-                            onChange={(event) => patch({ askUser: event.currentTarget.checked })}
-                            disabled={disabled}
-                        />
-                    </Accordion.Panel>
-                </Accordion.Item>
             </Accordion>
         </Stack>
     );
@@ -511,6 +497,5 @@ export function countAdvancedOverrides(runtime: IAgentRuntimeConfig | undefined)
     }
     if (runtime.contextPilot?.enabled) count += 1;
     if (runtime.reasoning?.enabled) count += 1;
-    if (runtime.askUser) count += 1;
     return count;
 }

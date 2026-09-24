@@ -50,6 +50,17 @@ export interface AgentMemoryContext {
         workspace?: string;
         /** "tenant" → no scopeId at all; the store itself is already tenant-scoped. */
     };
+    /**
+     * Told about every memory operation that failed. The failure still does
+     * not fail the run — but an answer given without the recalled context (or
+     * a "remembered" fact that was never written) must not look like one that
+     * had it, so the run reports it alongside the answer.
+     */
+    onWarning?: (message: string) => void;
+}
+
+function describeFailure(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }
 
 /** Exported for direct testing — a silent scope mismatch would leak facts across sessions/users. */
@@ -111,6 +122,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                 // A memory read failing must not fail the run — the agent still
                 // answers, it just does so without recalled context this turn.
                 logger.warn('Memory read failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
+                ctx.onWarning?.(`Memory read failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
                 return [];
             }
         },
@@ -150,6 +162,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                 }
             } catch (error) {
                 logger.warn('Memory write failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
+                ctx.onWarning?.(`Memory write failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
             }
         },
 
@@ -173,6 +186,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                 }
             } catch (error) {
                 logger.warn('Memory markObsolete failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
+                ctx.onWarning?.(`Memory update failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
             }
         },
 
@@ -198,6 +212,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                 );
             } catch (error) {
                 logger.warn('Memory semantic search failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
+                ctx.onWarning?.(`Memory search failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
                 return [];
             }
         },
@@ -219,6 +234,7 @@ export function buildAgentMemoryOption(
         agentKey: string;
         conversationId?: string;
         userId?: string;
+        onWarning?: (message: string) => void;
     },
 ): SmartAgentMemoryConfig | undefined {
     if (!memory?.enabled || !memory.memoryStoreKey) return undefined;
@@ -233,6 +249,7 @@ export function buildAgentMemoryOption(
             user: ctx.userId,
             workspace: ctx.agentKey,
         },
+        ...(ctx.onWarning ? { onWarning: ctx.onWarning } : {}),
     });
 
     return {

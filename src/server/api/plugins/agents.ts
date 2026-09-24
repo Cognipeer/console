@@ -21,11 +21,14 @@ import {
 // By path: the agents barrel does not export the error class.
 import {
   AgentGuardrailBlockedError,
+  checkAgentModel,
   // Imported BY PATH: the barrel exports the queue-routing wrapper, and the
   // streaming route deliberately needs the local one (a progress callback
   // cannot cross the job queue).
   executePlaygroundChatLocal,
 } from '@/lib/services/agents/agentService';
+import { invalidConfigBody, validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
+import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import {
   AgentManifestError,
   applyAgentManifest,
@@ -233,6 +236,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: bindingError });
       }
 
+      const validation = await validateAgentConfig({ tenantDbName: session.tenantDbName, projectId, config });
+      if (validation.errors.length > 0) {
+        return reply.code(400).send(invalidConfigBody(validation));
+      }
+
       const agent = await createAgentRecord(
         session.tenantDbName,
         session.tenantId,
@@ -245,7 +253,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       );
 
-      return reply.code(201).send({ agent: redactAgent(agent) });
+      return reply.code(201).send({ agent: redactAgent(agent), warnings: validation.warnings });
     } catch (error) {
       logger.error('Create agent error', { error });
       return sendProjectContextError(reply, error)
@@ -276,10 +284,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
-      if (!(await agentInProjectScope(session.tenantDbName, agentId, projectId, user))) {
+      const scoped = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!scoped) {
         return reply.code(404).send({ error: 'Agent not found' });
       }
       const body = readJsonBody<Record<string, unknown>>(request);
+      let warnings: Array<{ field: string; message: string }> = [];
 
       if (body.config && typeof body.config === 'object') {
         const cfg = body.config as Record<string, unknown>;
@@ -335,6 +345,19 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             // legacy slots must be written on the SAME object — leaving them
             // out would clear the columns an older binary still reads.
             if (resolved.patch) Object.assign(cfg, resolved.patch);
+
+            // A config that would not run as configured is not saved: the
+            // runtime would skip the broken parts silently.
+            const validation = await validateAgentConfig({
+              tenantDbName: session.tenantDbName,
+              projectId,
+              config: cfg as IAgentConfig,
+              agentKey: scoped.key,
+            });
+            if (validation.errors.length > 0) {
+              return reply.code(400).send(invalidConfigBody(validation));
+            }
+            warnings = validation.warnings;
           }
         }
       }
@@ -354,7 +377,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
-      return reply.code(200).send({ agent: redactAgent(agent) });
+      return reply.code(200).send({ agent: redactAgent(agent), warnings });
     } catch (error) {
       logger.error('Update agent error', { error });
       return sendProjectContextError(reply, error)
@@ -740,10 +763,22 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
-      if (!(await agentInProjectScope(session.tenantDbName, agentId, projectId, user))) {
+      const scoped = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!scoped) {
         // Same failure an unknown id already raises inside publishAgent, so the
         // route cannot confirm that another project's agent exists.
         throw new Error(`Agent "${agentId}" not found`);
+      }
+      // A draft saved before validation existed (or whose tool was deleted
+      // since) must not become what every API caller runs.
+      const validation = await validateAgentConfig({
+        tenantDbName: session.tenantDbName,
+        projectId,
+        config: scoped.config,
+        agentKey: scoped.key,
+      });
+      if (validation.errors.length > 0) {
+        return reply.code(400).send(invalidConfigBody(validation));
       }
       const body = readJsonBody<Record<string, unknown>>(request);
       const version = await publishAgent(
@@ -760,6 +795,58 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Failed to publish agent',
         });
+    }
+  }));
+
+  /**
+   * Sends one tiny completion to a model through the agent runtime's own path,
+   * so a wrong provider key is caught on the Configure page instead of in the
+   * agent's first session. Always 200: the check's own verdict is the body.
+   */
+  app.post('/agents/model-check', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (typeof body.modelKey !== 'string' || !body.modelKey) {
+        return reply.code(400).send({ error: 'modelKey is required' });
+      }
+      const result = await checkAgentModel(session.tenantDbName, session.tenantId, projectId, body.modelKey);
+      return reply.code(200).send(result);
+    } catch (error) {
+      logger.error('Agent model check error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to check the model' });
+    }
+  }));
+
+  /**
+   * Validates a config without saving it — the stored draft, or the `config`
+   * in the body (what the editor currently holds). The Configure page calls
+   * this to mark broken fields before Save.
+   */
+  app.post('/agents/:agentId/validate', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const scoped = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!scoped) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const config = body.config && typeof body.config === 'object'
+        ? body.config as IAgentConfig
+        : scoped.config;
+      const validation = await validateAgentConfig({
+        tenantDbName: session.tenantDbName,
+        projectId,
+        config,
+        agentKey: scoped.key,
+      });
+      return reply.code(200).send({ valid: validation.errors.length === 0, ...validation });
+    } catch (error) {
+      logger.error('Validate agent config error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to validate agent config' });
     }
   }));
 
@@ -1044,6 +1131,9 @@ function summariseConversation(conversation: IAgentConversation) {
         ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
         onToolEvent: (event) => send('tool', event),
         onTextChunk: (text) => send('text', { text }),
+        // The agent summarized its context mid-run: shown in the transcript
+        // as it happens, not only once the turn is over.
+        onCompaction: (compaction) => send('summary', compaction),
       });
 
       send('result', result);
@@ -1059,9 +1149,12 @@ function summariseConversation(conversation: IAgentConversation) {
       // The status line is long gone by now, so the error travels as an
       // event. A client that only listened for `result` would otherwise hang
       // until the socket closed and call it a network fault.
-      send('error', {
-        error: error instanceof Error ? error.message : 'Agent chat failed',
-      });
+      if (error instanceof AgentGuardrailBlockedError) {
+        send('error', { error: error.message, type: 'guardrail_block' });
+      } else {
+        const classified = classifyAgentRunError(error, { exposeInternal: true });
+        send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+      }
     } finally {
       if (!closed) reply.raw.end();
     }
@@ -1131,10 +1224,13 @@ function summariseConversation(conversation: IAgentConversation) {
       } else {
         logger.error('Agent playground chat error', { error });
       }
+      const classified = classifyAgentRunError(error, { exposeInternal: true });
       return sendAgentGuardrailBlock(reply, error)
         ?? sendProjectContextError(reply, error)
-        ?? reply.code(500).send({
-          error: error instanceof Error ? error.message : 'Agent chat failed',
+        ?? reply.code(classified.status).send({
+          error: classified.error.message,
+          type: classified.error.type,
+          code: classified.error.code,
         });
     }
   }));

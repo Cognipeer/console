@@ -503,7 +503,6 @@ function writeAgent(
         `    toolResponses: ${literal(runtime.toolResponses, 4)},`,
         ...(runtime.contextPilot ? [`    contextPilot: ${literal(runtime.contextPilot, 4)},`] : []),
         ...(runtime.reasoning ? [`    reasoning: ${literal(runtime.reasoning, 4)},`] : []),
-        ...(runtime.humanInTheLoop ? [`    humanInTheLoop: ${literal(runtime.humanInTheLoop, 4)},`] : []),
         ...(runtime.subagentPolicy ? [`    subagentPolicy: ${literal(runtime.subagentPolicy, 4)},`] : []),
     ];
 

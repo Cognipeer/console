@@ -175,6 +175,63 @@ describe('channel: dashboard session stream', () => {
         expect(res.body).toContain('model unavailable');
     });
 
+    it('narrates a context summarization as it happens, and a limit stop on the result', async () => {
+        const compaction = {
+            at: '2026-09-23T10:00:00.000Z',
+            messagesCompressed: 6,
+            tokensBefore: 41000,
+            tokensAfter: 7800,
+            summary: { userDirectives: ['Always answer in Turkish.'], facts: [{ key: 'db_host', value: 'db-7' }] },
+        };
+        mockFn(executePlaygroundChatLocal).mockImplementation(
+            async (request: { onCompaction?: (c: Record<string, unknown>) => void }) => {
+                request.onCompaction?.(compaction);
+                return {
+                    ...PLAYGROUND_RESULT,
+                    content: 'Checking the infra logs next…',
+                    stopReason: 'limit',
+                    stopDetail: 'maxWallClockMs (60000ms) exceeded',
+                    compactions: [compaction],
+                };
+            },
+        );
+
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'dig deeper', conversationId: 'conv-1' },
+        });
+        const events = readEvents(res.body);
+
+        const summary = events.find((e) => e.event === 'summary');
+        expect(summary?.data.summary.userDirectives).toEqual(['Always answer in Turkish.']);
+        // Live, before the turn finished — not only in the result.
+        expect(events.findIndex((e) => e.event === 'summary')).toBeLessThan(events.findIndex((e) => e.event === 'result'));
+
+        const result = events.find((e) => e.event === 'result');
+        expect(result?.data.stopReason).toBe('limit');
+        expect(result?.data.stopDetail).toMatch(/^maxWallClockMs/);
+        expect(result?.data.compactions).toHaveLength(1);
+    });
+
+    it('classifies a provider key failure on the error event', async () => {
+        mockFn(executePlaygroundChatLocal).mockRejectedValue(
+            Object.assign(new Error('401 Incorrect API key provided'), { status: 401, agentModelKey: 'gpt-5-terra' }),
+        );
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'hi' },
+        });
+        const error = readEvents(res.body).find((e) => e.event === 'error');
+        expect(error?.data.type).toBe('provider_authentication_error');
+        expect(error?.data.error).toContain('model "gpt-5-terra"');
+    });
+
     it('refuses a message with no text', async () => {
         const app = await build();
         const res = await app.inject({

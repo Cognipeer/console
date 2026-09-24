@@ -27,7 +27,8 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
-    "test:e2e:triage": "tsx scripts/e2e/incident-triage/run.ts"
+    "test:e2e:triage": "tsx scripts/e2e/incident-triage/run.ts",
+    "test:e2e:agent-findings": "tsx scripts/e2e/agent-findings/run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.901.0",
@@ -37,7 +38,7 @@
     "@aws-sdk/client-textract": "^3.901.0",
     "@aws-sdk/util-stream-node": "^3.370.0",
     "@azure/search-documents": "^12.2.0",
-    "@cognipeer/agent-sdk": "^0.10.0",
+    "@cognipeer/agent-sdk": "^0.10.3",
     "@cognipeer/to-markdown": "^3.4.2",
     "@elastic/elasticsearch": "^8.19.1",
     "@fastify/cookie": "^11.0.2",

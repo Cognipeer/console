@@ -35,6 +35,7 @@
  *    Knowledge Engine module; Console's own tool/MCP/system catalog is
  *    reachable through the `console_tool` extension below.
  */
+import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
@@ -87,10 +88,13 @@ interface PendingMessage {
 
 interface RunRecord {
   id: string;
-  status: 'completed' | 'failed';
+  /** `incomplete`: a run limit, a cancellation or a pause ended it without a final answer. */
+  status: 'completed' | 'failed' | 'incomplete';
   created_at: number;
   completed_at?: number;
   failed_at?: number;
+  incomplete_at?: number;
+  incomplete_details?: { reason: string };
   assistant_id: string;
   last_error?: { code: string; message: string };
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
@@ -189,6 +193,8 @@ export function toRunObject(threadIdValue: string, run: RunRecord) {
     started_at: run.created_at,
     completed_at: run.completed_at ?? null,
     failed_at: run.failed_at ?? null,
+    incomplete_at: run.incomplete_at ?? null,
+    incomplete_details: run.incomplete_details ?? null,
     last_error: run.last_error ?? null,
     usage: run.usage ?? null,
     // Always null: every run this engine produces is already terminal by the
@@ -763,7 +769,13 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       // `executeAgentChat` just persisted the (user, assistant) pair itself —
       // the pending entry is now redundant history, so it comes off the queue
       // rather than being replayed on the next run.
-      record.completed_at = Math.floor(Date.now() / 1000);
+      if (result.status === 'incomplete') {
+        record.status = 'incomplete';
+        record.incomplete_at = Math.floor(Date.now() / 1000);
+        record.incomplete_details = result.incomplete_details ?? { reason: result.stop_reason ?? 'incomplete' };
+      } else {
+        record.completed_at = Math.floor(Date.now() / 1000);
+      }
       record.usage = {
         prompt_tokens: result.usage.input_tokens,
         completion_tokens: result.usage.output_tokens,
@@ -789,7 +801,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       } else {
         record.status = 'failed';
         record.failed_at = Math.floor(Date.now() / 1000);
-        record.last_error = { code: 'server_error', message: error instanceof Error ? error.message : 'Run failed' };
+        const classified = classifyAgentRunError(error);
+        record.last_error = { code: classified.error.code ?? classified.error.type, message: classified.error.message };
       }
       const existingRuns = readAssistantsMetadata(conversation).runs ?? [];
       await writeAssistantsMetadata(conversationId, conversation, { runs: [...existingRuns, record].slice(-50) });
