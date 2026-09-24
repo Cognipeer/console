@@ -7,6 +7,7 @@ import type {
   GuardrailType,
   IAgent,
   IAgentConversation,
+  IAgentConversationState,
   IAgentSkill,
   IAgentTracingEvent,
   IAgentTracingDashboardAggregate,
@@ -1356,6 +1357,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     agentKey: string,
     filters?: { projectId?: string; limit?: number; skip?: number },
   ): Promise<IAgentConversation[]>;
+  /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
+  findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
+  /** Upsert by `conversationId`. */
+  saveAgentConversationState(
+    state: Omit<IAgentConversationState, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<void>;
+  deleteAgentConversationState(conversationId: string): Promise<boolean>;
 
   // ── MCP Server operations (tenant-specific) ──
   createMcpServer(

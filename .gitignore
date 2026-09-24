@@ -21,6 +21,7 @@
 /coverage
 scripts/smoke/reports/
 scripts/e2e/incident-triage/reports/
+scripts/e2e/agent-findings/reports/
 tests/e2e/reports/
 
 # next.js

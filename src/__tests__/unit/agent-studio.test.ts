@@ -87,7 +87,9 @@ describe('resolveAgentRuntimeOptions', () => {
         expect(resolved.limits?.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
         expect(resolved.reasoning).toEqual({ enabled: true, level: 'high', native: { effort: 'medium' } });
-        expect(resolved.humanInTheLoop).toEqual({ askUser: true });
+        // A stored `askUser: true` is ignored: no console channel can answer
+        // the question, so offering the tool only ever locked the conversation.
+        expect((resolved as Record<string, unknown>).humanInTheLoop).toBeUndefined();
     });
 
     it('drops everyNSteps unless the replan policy asks for it', () => {

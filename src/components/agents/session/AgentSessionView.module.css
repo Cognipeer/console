@@ -275,3 +275,113 @@
   color: var(--mantine-color-dimmed);
   flex-shrink: 0;
 }
+
+/*
+ * A context summarization, inline in the turn where it happened. Indigo so it
+ * reads as a system event — distinct from tool calls (blue), reasoning
+ * (violet) and failures (red) — with a before/after bar that shows at a
+ * glance how much of the context the agent let go of.
+ */
+.compactionCard {
+  border: 1px dashed var(--mantine-color-indigo-3);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-indigo-0);
+  overflow: hidden;
+}
+
+.compactionCardWarn {
+  border-color: var(--mantine-color-orange-3);
+  background: var(--mantine-color-orange-0);
+}
+
+.compactionHeader {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+}
+
+.compactionHeader:disabled {
+  cursor: default;
+}
+
+.compactionIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: var(--mantine-color-white);
+  background: var(--mantine-color-indigo-5);
+}
+
+.compactionIcon[data-tone='orange'] {
+  background: var(--mantine-color-orange-5);
+}
+
+.compactionBar {
+  position: relative;
+  flex: 1;
+  max-width: 220px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--mantine-color-gray-3);
+  overflow: hidden;
+}
+
+.compactionBarAfter {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--mantine-color-indigo-5);
+}
+
+.compactionBarAfter[data-tone='orange'] {
+  background: var(--mantine-color-orange-5);
+}
+
+.compactionBody {
+  padding: 4px 12px 12px 42px;
+}
+
+.compactionSectionIcon {
+  display: flex;
+}
+
+.compactionDirective {
+  white-space: pre-wrap;
+  padding: 4px 8px;
+  border-left: 3px solid var(--mantine-color-indigo-5);
+  border-radius: 2px;
+  background: var(--mantine-color-white);
+}
+
+.compactionFactKey {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow-wrap: anywhere;
+}
+
+/* A failed turn stays in the transcript, where the question was asked. */
+.errorTurn {
+  border-left: 3px solid var(--mantine-color-red-5);
+  padding-left: 10px;
+}
+
+[data-mantine-color-scheme='dark'] .compactionCard {
+  border-color: var(--mantine-color-indigo-8);
+  background: rgba(76, 110, 245, 0.08);
+}
+
+[data-mantine-color-scheme='dark'] .compactionCardWarn {
+  border-color: var(--mantine-color-orange-8);
+  background: rgba(253, 126, 20, 0.08);
+}
+
+[data-mantine-color-scheme='dark'] .compactionBar {
+  background: var(--mantine-color-dark-4);
+}
+
+[data-mantine-color-scheme='dark'] .compactionDirective {
+  background: var(--mantine-color-dark-6);
+}

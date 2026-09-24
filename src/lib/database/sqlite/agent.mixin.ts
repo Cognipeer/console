@@ -4,7 +4,7 @@
  * Includes agent CRUD and conversation management.
  */
 
-import type { IAgent, AgentStatus, IAgentConversation, IAgentVersion } from '../provider.interface';
+import type { IAgent, AgentStatus, IAgentConversation, IAgentConversationState, IAgentVersion } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -238,7 +238,62 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
+      db.prepare(`DELETE FROM ${TABLES.agentConversationStates} WHERE conversationId = @id`).run({ id });
       return db.prepare(`DELETE FROM ${TABLES.agentConversations} WHERE id = @id`).run({ id }).changes === 1;
+    }
+
+    async findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null> {
+      const db = this.getTenantDb();
+      const row = db.prepare(
+        `SELECT * FROM ${TABLES.agentConversationStates} WHERE conversationId = @conversationId`,
+      ).get({ conversationId }) as SqliteRow | undefined;
+      if (!row) return null;
+      return {
+        _id: String(row.id),
+        conversationId: String(row.conversationId),
+        tenantId: String(row.tenantId),
+        projectId: String(row.projectId ?? ''),
+        agentKey: String(row.agentKey),
+        snapshot: String(row.snapshot),
+        messageCount: Number(row.messageCount) || 0,
+        sizeBytes: Number(row.sizeBytes) || 0,
+        createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
+        updatedAt: row.updatedAt ? new Date(row.updatedAt as string) : undefined,
+      };
+    }
+
+    async saveAgentConversationState(
+      state: Omit<IAgentConversationState, '_id' | 'createdAt' | 'updatedAt'>,
+    ): Promise<void> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      db.prepare(`
+        INSERT INTO ${TABLES.agentConversationStates}
+        (id, conversationId, tenantId, projectId, agentKey, snapshot, messageCount, sizeBytes, createdAt, updatedAt)
+        VALUES (@id, @conversationId, @tenantId, @projectId, @agentKey, @snapshot, @messageCount, @sizeBytes, @now, @now)
+        ON CONFLICT(conversationId) DO UPDATE SET
+          snapshot = excluded.snapshot,
+          messageCount = excluded.messageCount,
+          sizeBytes = excluded.sizeBytes,
+          updatedAt = excluded.updatedAt
+      `).run({
+        id: this.newId(),
+        conversationId: state.conversationId,
+        tenantId: state.tenantId,
+        projectId: state.projectId,
+        agentKey: state.agentKey,
+        snapshot: state.snapshot,
+        messageCount: state.messageCount,
+        sizeBytes: state.sizeBytes,
+        now,
+      });
+    }
+
+    async deleteAgentConversationState(conversationId: string): Promise<boolean> {
+      const db = this.getTenantDb();
+      return db.prepare(
+        `DELETE FROM ${TABLES.agentConversationStates} WHERE conversationId = @conversationId`,
+      ).run({ conversationId }).changes === 1;
     }
 
     async findAgentConversationById(id: string): Promise<IAgentConversation | null> {

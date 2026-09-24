@@ -381,6 +381,8 @@ export type {
   IAgent,
   IAgentConfig,
   IAgentConversation,
+  IAgentConversationState,
+  IAgentTurnCompaction,
   IAgentSchedule,
   IAgentSkill,
   IAgentSkillPolicy,

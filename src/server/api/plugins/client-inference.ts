@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { AgentGuardrailBlockedError, type AgentChatResponse } from '@/lib/services/agents/agentService';
 import { createLogger } from '@/lib/core/logger';
 import {
   GuardrailBlockError,
@@ -11,6 +12,7 @@ import {
   handleImageRequest,
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -212,7 +214,26 @@ async function handleAgentChatCompletion(input: {
   };
 
   if (!streaming) {
-    const result = await runAgentCompletion(common);
+    let result: Awaited<ReturnType<typeof runAgentCompletion>>;
+    try {
+      result = await runAgentCompletion(common);
+    } catch (error) {
+      if (error instanceof AgentGuardrailBlockedError) {
+        return reply.code(error.status).send({
+          error: {
+            type: 'guardrail_block',
+            action: 'block',
+            message: error.message,
+            reason: error.reason,
+            guardrail_key: error.guardrailKey ?? null,
+            hook: error.hook ?? null,
+          },
+        });
+      }
+      logger.error('Agent chat completion failed', { error });
+      const classified = classifyAgentRunError(error);
+      return reply.code(classified.status).send({ error: classified.error });
+    }
     if ('error' in result) {
       return reply.code(result.status).send({
         error: { message: result.error, type: 'invalid_request_error' },
@@ -224,6 +245,8 @@ async function handleAgentChatCompletion(input: {
       content: result.content,
       conversationId: result.conversationId,
       ...(result.usage ? { usage: result.usage } : {}),
+      ...(result.stopReason ? { stopReason: result.stopReason } : {}),
+      ...(result.stopDetail ? { stopDetail: result.stopDetail } : {}),
     }));
   }
 
@@ -245,6 +268,7 @@ async function handleAgentChatCompletion(input: {
   };
 
   let streamed = '';
+  let stopReason: AgentChatResponse['stop_reason'];
   try {
     const result = await runAgentCompletion({
       ...common,
@@ -262,15 +286,11 @@ async function handleAgentChatCompletion(input: {
       // answer rather than an empty one followed by [DONE].
       send(toChatChunk({ id, model, delta: result.content }));
     }
-    send(toChatChunk({ id, model, finish: true }));
+    if (!('error' in result)) stopReason = result.stopReason;
+    send(toChatChunk({ id, model, finish: true, stopReason }));
   } catch (error) {
     logger.error('Agent chat completion stream failed', { error });
-    send({
-      error: {
-        message: error instanceof Error ? error.message : 'Agent run failed',
-        type: 'server_error',
-      },
-    });
+    send({ error: classifyAgentRunError(error).error });
   } finally {
     if (!closed) {
       reply.raw.write('data: [DONE]\n\n');

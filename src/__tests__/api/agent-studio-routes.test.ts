@@ -41,8 +41,14 @@ vi.mock('@/lib/services/agents', () => ({
 
 vi.mock('@/lib/services/agents/agentService', () => ({
     executePlaygroundChatLocal: vi.fn(),
+    checkAgentModel: vi.fn(),
     AgentGuardrailBlockedError: class AgentGuardrailBlockedError extends Error {},
 }));
+
+vi.mock('@/lib/services/agents/agentConfigValidation', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/agentConfigValidation')>();
+    return { ...actual, validateAgentConfig: vi.fn() };
+});
 
 vi.mock('@/lib/services/agents/agentManifest', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/services/agents/agentManifest')>();
@@ -74,6 +80,8 @@ import {
 import { applyAgentManifest, previewAgentImport } from '@/lib/services/agents/agentManifest';
 import { deleteAgentSchedule, runAgentSchedule, upsertAgentSchedule } from '@/lib/services/agents/agentScheduleService';
 import { createSkill, deleteSkill, getSkillById, listSkills, updateSkill } from '@/lib/services/agents/skillService';
+import { checkAgentModel } from '@/lib/services/agents/agentService';
+import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { skillsApiPlugin } from '@/server/api/plugins/skills';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -292,5 +300,61 @@ describe('skill library', () => {
         const app = await skillsApp();
         expect((await app.inject({ method: 'DELETE', url: '/api/skills/s1' })).statusCode).toBe(200);
         expect((await app.inject({ method: 'DELETE', url: '/api/skills/s2' })).statusCode).toBe(404);
+    });
+});
+
+describe('config validation and model check', () => {
+    it('POST /agents/:agentId/validate checks the stored draft, or the config in the body', async () => {
+        mockFn(validateAgentConfig).mockResolvedValue({
+            errors: [{ field: 'modelKey', message: 'Model "x" does not exist in this project' }],
+            warnings: [],
+        });
+        const app = await agentsApp();
+
+        const stored = await app.inject({ method: 'POST', url: '/api/agents/agent-1/validate', payload: {} });
+        expect(stored.statusCode).toBe(200);
+        expect(parseJsonBody<{ valid: boolean }>(stored.body).valid).toBe(false);
+        expect(mockFn(validateAgentConfig).mock.calls[0][0]).toMatchObject({
+            projectId: 'proj-1',
+            agentKey: 'field-ops',
+            config: AGENT.config,
+        });
+
+        const draft = { modelKey: 'other' };
+        await app.inject({ method: 'POST', url: '/api/agents/agent-1/validate', payload: { config: draft } });
+        expect(mockFn(validateAgentConfig).mock.calls[1][0].config).toEqual(draft);
+    });
+
+    it('POST /agents/:agentId/validate 404s for another project\'s agent', async () => {
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-9/validate', payload: {} });
+        expect(res.statusCode).toBe(404);
+        expect(mockFn(validateAgentConfig)).not.toHaveBeenCalled();
+    });
+
+    it('POST /agents/model-check needs a modelKey and returns the check verbatim', async () => {
+        const app = await agentsApp();
+        expect((await app.inject({ method: 'POST', url: '/api/agents/model-check', payload: {} })).statusCode).toBe(400);
+
+        mockFn(checkAgentModel).mockResolvedValue({
+            ok: false,
+            latencyMs: 12,
+            error: { message: 'The model provider rejected its credentials', type: 'provider_authentication_error' },
+        });
+        const res = await app.inject({ method: 'POST', url: '/api/agents/model-check', payload: { modelKey: 'gpt-5-terra' } });
+        expect(res.statusCode).toBe(200);
+        expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('provider_authentication_error');
+        expect(mockFn(checkAgentModel)).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'gpt-5-terra');
+    });
+
+    it('POST /agents/:agentId/publish refuses a draft that fails validation', async () => {
+        mockFn(validateAgentConfig).mockResolvedValue({
+            errors: [{ field: 'toolBindings[0]', message: 'Tool "gone" does not exist' }],
+            warnings: [],
+        });
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/publish', payload: {} });
+        expect(res.statusCode).toBe(400);
+        expect(parseJsonBody<{ error: string }>(res.body).error).toContain('toolBindings[0]');
     });
 });

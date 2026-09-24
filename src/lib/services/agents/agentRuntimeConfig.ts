@@ -59,7 +59,6 @@ export type ResolvedAgentRuntimeOptions = Pick<
     | 'toolResponses'
     | 'contextPilot'
     | 'reasoning'
-    | 'humanInTheLoop'
     | 'subagentPolicy'
 >;
 
@@ -177,7 +176,12 @@ export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentR
     const reasoning = resolveReasoning(runtime);
     if (reasoning) resolved.reasoning = reasoning;
 
-    if (runtime?.askUser) resolved.humanInTheLoop = { askUser: true };
+    // `runtime.askUser` is deliberately NOT mapped to `humanInTheLoop`. The SDK
+    // would add an `ask_user_question` tool and PAUSE the run on it — but no
+    // console channel (sessions, the client API, A2A, schedules) can show the
+    // question or resume with an answer, so the conversation stopped with an
+    // empty reply and stayed stuck. Until a channel can answer, the agent is
+    // never offered a question it cannot get answered.
 
     // Only meaningful when the agent actually has sub-agents; the caller decides
     // whether to pass it, but the resolved values live here so codegen matches.
@@ -284,6 +288,18 @@ function withDescription<T extends ZodTypeAny>(schema: T, node: Record<string, a
 export function toolInputSchemaToZod(inputSchema: unknown): ZodTypeAny {
     const fallback = z.object({}).passthrough();
     if (!inputSchema || typeof inputSchema !== 'object') return fallback;
+    // A schema that DECLARES an object with no properties is a tool that takes
+    // no arguments (an OpenAPI operation with no parameters, an MCP tool with
+    // an empty input) — a closed empty object, not "anything goes". The open
+    // form has no strict-mode encoding at the top level, and providers in
+    // strict mode rejected the whole request over it.
+    const declared = inputSchema as { type?: unknown; properties?: unknown; additionalProperties?: unknown };
+    if (declared.type === 'object'
+        && (!declared.properties || Object.keys(declared.properties as object).length === 0)
+        && declared.additionalProperties !== true
+        && typeof declared.additionalProperties !== 'object') {
+        return z.object({}).strict();
+    }
     try {
         const converted = jsonSchemaToZod(inputSchema, false, true);
         // A tool call's arguments are always an object; a schema that did
