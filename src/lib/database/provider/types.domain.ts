@@ -51,23 +51,48 @@ export interface IGuardrailModerationPolicy {
    * Which detector runs this policy.
    *  - `llm` (default): the chat model named by `modelKey` judges the text.
    *  - `model`: the moderation-category model named by `modelKey` classifies it.
+   *  - `lexicon`: no model call at all — `moderationLexicon.ts`'s built-in,
+   *    category-scoped keyword lists (reusing the word-filter matcher) plus
+   *    a structural `child_safety` check. Zero cost/latency, materially
+   *    lower recall on figurative/coded/novel phrasing than either model
+   *    path — see `moderationLexicon.ts`'s header for the categories it
+   *    covers and the ones it deliberately doesn't.
    *
-   * The judge is the universal fallback — it works against any chat model — but
-   * it costs a full completion on the hot path of every guarded request, and it
-   * can only report a coarse severity. Where the provider has a real
-   * classifier, `model` is both far cheaper and the only path that yields true
-   * per-category probabilities.
+   * The judge is the universal fallback — it works against any chat model —
+   * but it costs a full completion on the hot path of every guarded
+   * request, and it can only report a coarse severity. Where the provider
+   * has a real classifier, `model` is both far cheaper and the only path
+   * that yields true per-category probabilities. `lexicon` is cheaper
+   * still, and — per `families/llm.ts`'s `runIf` gating — a natural
+   * pre-filter for either model path rather than only a standalone choice.
    */
-  detector?: 'llm' | 'model';
-  /** Chat model (detector `llm`) or moderation model (detector `model`). */
+  detector?: 'llm' | 'model' | 'lexicon';
+  /** Chat model (detector `llm`) or moderation model (detector `model`). Unused by `lexicon`. */
   modelKey?: string;
   categories: Record<string, boolean>;
+  /**
+   * detector `lexicon` only: tenant word-list keys (the existing
+   * `guardrail_word_lists` feature) mapped onto a moderation category id.
+   * This is how `hate`/`harassment`/`sexual`/`sexual/minors` — which ship
+   * with no built-in lexicon, see `moderationWordLists.ts` — get real
+   * coverage, and how any built-in category's seed list can be extended.
+   */
+  lexiconCustomLists?: Record<string, string[]>;
 }
 
 export interface IGuardrailPromptShieldPolicy {
   enabled: boolean;
   modelKey?: string;
   sensitivity: 'low' | 'balanced' | 'high';
+  /**
+   * `llm` (default): the judge in `llmEvaluator.ts`. `pattern`: no model
+   * call — `promptShieldLexicon.ts`'s mechanical/structural pattern set
+   * (override phrases, fake system blocks, exfiltration requests, encoding
+   * tricks). Covers roughly a third of `PROMPT_SHIELD_ISSUES` — the
+   * categories that turn on textual SHAPE rather than intent; see that
+   * file's header for exactly which and why the rest stay LLM-only.
+   */
+  detector?: 'llm' | 'pattern';
 }
 
 export interface IGuardrailPresetPolicy {
@@ -165,7 +190,7 @@ export type GuardrailMode = 'enforce' | 'monitor' | 'disabled';
  */
 export type GuardrailSafetyAction = 'allow' | GuardrailAction;
 
-/** The nine policy families a hook can run. */
+/** The eleven policy families a hook can run. */
 export type GuardrailPolicyFamily =
   | 'pii'
   | 'secrets'
@@ -175,7 +200,9 @@ export type GuardrailPolicyFamily =
   | 'prompt_shield'
   | 'custom'
   | 'tool_access'
-  | 'webhook';
+  | 'webhook'
+  | 'cognipeer_guardrail_moderation'
+  | 'cognipeer_guardrail_prompt_shield';
 
 export interface GuardrailPolicyBase<F extends GuardrailPolicyFamily> {
   /** Stable within the guardrail and never reused — it appears on every finding. */
@@ -351,14 +378,18 @@ export interface GuardrailRegexPolicyConfig extends GuardrailPolicyBase<'regex'>
 
 export interface GuardrailModerationPolicyConfig extends GuardrailPolicyBase<'moderation'> {
   /** See `IGuardrailModerationPolicy.detector`. */
-  detector?: 'llm' | 'model';
+  detector?: 'llm' | 'model' | 'lexicon';
   modelKey?: string;
   categories: Record<string, boolean>;
+  /** See `IGuardrailModerationPolicy.lexiconCustomLists`. */
+  lexiconCustomLists?: Record<string, string[]>;
 }
 
 export interface GuardrailPromptShieldPolicyConfig extends GuardrailPolicyBase<'prompt_shield'> {
   modelKey?: string;
   sensitivity: 'low' | 'balanced' | 'high';
+  /** See `IGuardrailPromptShieldPolicy.detector`. */
+  detector?: 'llm' | 'pattern';
 }
 
 export interface GuardrailCustomPolicyConfig extends GuardrailPolicyBase<'custom'> {
@@ -469,6 +500,48 @@ export interface GuardrailWebhookPolicyConfig extends GuardrailPolicyBase<'webho
   retries?: 0 | 1 | 2;
 }
 
+/**
+ * Two bundled, offline classifiers — split across TWO families rather than
+ * one, deliberately mirroring the `moderation` / `prompt_shield` split above
+ * even though both run the SAME `@cognipeer/guardrail` npm package model:
+ * an operator configures, binds, and enables/disables the content gate and
+ * the injection gate independently (same reason a hosted moderation model and
+ * an LLM prompt-shield judge are two separate policies today, not one), and
+ * this pair is meant to sit ALONGSIDE `moderation`/`prompt_shield` — an
+ * additional, no-model detector an operator can turn on next to them — not to
+ * be folded into either.
+ *
+ * The model itself answers both gates from ONE inference regardless of which
+ * family calls it — see `families/cognipeerGuardrail.ts`'s shared instance
+ * cache — so running both costs one extra classifier call, not two model
+ * loads.
+ *
+ * NO `modelKey` on either: the model ships inside the npm package, so there
+ * is nothing for an operator to register or point at.
+ */
+export interface GuardrailCognipeerGuardrailModerationPolicyConfig
+  extends GuardrailPolicyBase<'cognipeer_guardrail_moderation'> {
+  /** Six content category ids, verbatim from the package's `manifest.json`:
+   *  `insult`, `hate`, `sexual`, `violence`, `self_harm`, `illegal`. */
+  categories: Record<string, boolean>;
+  /**
+   * A false-positive BUDGET, not a raw cutoff — see `Guardrail.load`'s own doc
+   * comment in the package. `sexual`/`violence`/`self_harm`/`illegal` score
+   * identically in every profile; only the noisier `insult`/`hate` move.
+   */
+  profile: 'strict' | 'balanced' | 'sensitive';
+}
+
+export interface GuardrailCognipeerGuardrailPromptShieldPolicyConfig
+  extends GuardrailPolicyBase<'cognipeer_guardrail_prompt_shield'> {
+  /** Three prompt-shield category ids, verbatim from the package's
+   *  `manifest.json`: `jailbreak`, `prompt_injection`, `data_exfiltration`. */
+  categories: Record<string, boolean>;
+  /** Same budget as the moderation twin; here it is the shield categories
+   *  that move between profiles. */
+  profile: 'strict' | 'balanced' | 'sensitive';
+}
+
 export type GuardrailPolicy =
   | GuardrailPiiPolicyConfig
   | GuardrailSecretsPolicyConfig
@@ -478,7 +551,9 @@ export type GuardrailPolicy =
   | GuardrailPromptShieldPolicyConfig
   | GuardrailCustomPolicyConfig
   | GuardrailToolAccessPolicyConfig
-  | GuardrailWebhookPolicyConfig;
+  | GuardrailWebhookPolicyConfig
+  | GuardrailCognipeerGuardrailModerationPolicyConfig
+  | GuardrailCognipeerGuardrailPromptShieldPolicyConfig;
 
 export interface GuardrailHookBinding {
   enabled: boolean;
@@ -3315,6 +3390,31 @@ export interface ICrawlResult {
  */
 export type PiiAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
 
+/**
+ * Which detector actually runs a policy's scan. 'regex' (default, absent on
+ * every policy created before this field existed) is the console's own
+ * long-standing engine (`services/pii/detector.ts`) — regex/checksum,
+ * opt-in dictionary and NER layers, tuned by `IPiiPolicy.detection`.
+ * 'cognipeer' delegates the whole scan to the bundled, offline
+ * `@cognipeer/pii` npm package instead (`services/pii/cognipeerEngine.ts`) —
+ * a genuinely different category catalog (31 ids, its own id vocabulary —
+ * e.g. `tc_kimlik` there vs `tckn` here), so `IPiiPolicy.categories` is
+ * interpreted entirely differently depending on this field. Extensible: a
+ * future third engine (e.g. a cloud PII API) is one more member here plus one
+ * more file under `services/pii/`, same shape as this one.
+ *
+ * DELIBERATELY ONE ENGINE PER POLICY, not a list run together: unlike two
+ * guardrail hook families that can be genuinely complementary (see
+ * `cognipeer_guardrail_moderation`/`_prompt_shield`), two PII engines mostly
+ * cover the SAME ground (email, phone, national id, ...), so running both
+ * would mean the same span gets found — and its redaction proposed — twice,
+ * with no established conflict-resolution for it the way `FAMILY_PRECEDENCE`
+ * resolves an overlap WITHIN one engine's own findings. An operator picks
+ * one; switching later means re-picking categories from the new engine's own
+ * catalog, not merging two.
+ */
+export type PiiEngine = 'regex' | 'cognipeer';
+
 /** Language scope for built-in patterns. 'global' = language-independent. */
 export type PiiLanguage = 'global' | 'en' | 'tr' | 'de' | 'fr' | 'es' | 'it' | 'pt' | 'ar' | 'ja' | 'zh';
 
@@ -3360,7 +3460,11 @@ export interface IPiiPolicy {
   description?: string;
   /** Default action applied to findings from this policy. */
   defaultAction: PiiAction;
-  /** Built-in categories toggled on/off. Keys are category ids (e.g. 'email'). */
+  /** Which detector runs this policy. Absent = 'regex' — see `PiiEngine`'s
+   *  own doc comment for why this changes what `categories` below means. */
+  engine?: PiiEngine;
+  /** Built-in categories toggled on/off. Keys are category ids (e.g. 'email').
+   *  A DIFFERENT id vocabulary per `engine` — see `PiiEngine`. */
   categories: Record<string, boolean>;
   /** Custom regex patterns defined per tenant. */
   customPatterns?: IPiiCustomPattern[];
@@ -3369,10 +3473,52 @@ export interface IPiiPolicy {
   /** Whether the policy is enabled overall. */
   enabled: boolean;
   metadata?: Record<string, unknown>;
+  /**
+   * PII v2: opt-in NLP layers on top of the pattern engine. Absent/undefined
+   * on every policy created before this field existed, and the detector's
+   * default ('pattern' mode, no dictionary/NER pass, no confidence filter)
+   * reproduces the pre-v2 behaviour exactly — this is additive, not a
+   * migration.
+   */
+  detection?: PiiDetectionConfig;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * Config for the PII v2 detection pipeline (`services/pii/detector.ts`).
+ * See `internal-notes/pii-v2-nlp-ve-asset-registry-plani.md` for the full
+ * 5-layer design; this is the subset implemented against local model/dict
+ * files rather than the (not-yet-built) GitHub asset registry.
+ */
+export interface PiiDetectionConfig {
+  /**
+   * 'pattern' (default): regex + checksum only, identical to pre-v2 output.
+   * 'pattern+dictionary': adds the Aho-Corasick gazetteer pass (person/org/
+   * location candidates).
+   * 'pattern+dictionary+ner': also runs the local ONNX NER model.
+   */
+  mode?: 'pattern' | 'pattern+dictionary' | 'pattern+dictionary+ner';
+  /** Findings below this confidence are dropped. 0 = no filtering (default). */
+  minConfidence?: number;
+  /** Boost a finding's confidence when a category's context word appears
+   *  within ±60 chars. Default true; has no effect on categories with no
+   *  configured context words. */
+  contextBoost?: boolean;
+  ner?: {
+    /** Local model ids to run, e.g. ['tr-ner']. See `pii/ner.ts` NER_MODELS. */
+    models?: string[];
+    /** Hard cap on characters sent to the model per scan. Default 4000. */
+    maxChars?: number;
+    /** Per-window soft timeout; a window that misses it is skipped and
+     *  reported as degraded rather than blocking the scan. Default 1500. */
+    timeoutMs?: number;
+    /** 'open' (default): a model error/timeout lets that window's NER
+     *  findings pass silently. 'closed': surfaces as a scan-level warning. */
+    failMode?: 'open' | 'closed';
+  };
 }
 
 // ── Prescriptions (automated analysis reports) types ─────────────────────

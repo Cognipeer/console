@@ -1005,6 +1005,16 @@ export class SQLiteProviderBase {
     // canLogin=false have no password login capability. Missing/undefined is
     // treated as true everywhere it's read, so existing rows default to 1.
     this.ensureTableColumn(db, TABLES.users, 'canLogin', 'canLogin INTEGER NOT NULL DEFAULT 1');
+    // PII v2 (NLP/dictionary/NER layers): opt-in detection config living
+    // alongside categories/customPatterns. Absent/null on old rows, which
+    // `mapPiiPolicyRow` reads back as `undefined` — the detector's default
+    // ('pattern' mode) then matches pre-v2 behaviour exactly.
+    this.ensureTableColumn(db, TABLES.piiPolicies, 'detection', 'detection TEXT');
+    // PII engine selector: which detector runs the policy's scan ('regex' /
+    // 'cognipeer' — see `PiiEngine`'s own doc comment). Absent on old rows;
+    // `mapPiiPolicyRow` reads that back as `undefined`, which every caller
+    // (`scanWithPolicy`, etc.) treats as 'regex' — pre-existing behaviour.
+    this.ensureTableColumn(db, TABLES.piiPolicies, 'engine', 'engine TEXT');
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

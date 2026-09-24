@@ -16,6 +16,7 @@ import type {
   IPiiCustomPattern,
   IPiiPolicy,
   PiiAction,
+  PiiEngine,
   PiiLanguage,
 } from '@/lib/database';
 import {
@@ -26,12 +27,15 @@ import {
   filterCategoriesByLanguages,
   type PiiCategoryDefinition,
 } from './categories';
-import { detect, applyReplacements, tokenize, detokenize, explainCustomPatternError } from './detector';
+import { detect, detectAsync, applyReplacements, tokenize, detokenize, explainCustomPatternError } from './detector';
+import { scanWithCognipeer } from './cognipeerEngine';
+import { COGNIPEER_PII_CATEGORIES, buildCognipeerDefaultCategories } from './cognipeerCategories';
 import type {
   PiiFinding,
   PiiScanResult,
   PiiVault,
   PiiServicePolicyView,
+  CategoryCatalogEntry,
   CreatePiiPolicyInput,
   UpdatePiiPolicyInput,
   DetectInput,
@@ -82,7 +86,8 @@ async function generateUniqueKey(
 
 // ── Default policy builder ────────────────────────────────────────────────
 
-export function buildDefaultPolicyCategories(): Record<string, boolean> {
+export function buildDefaultPolicyCategories(engine: PiiEngine = 'regex'): Record<string, boolean> {
+  if (engine === 'cognipeer') return buildCognipeerDefaultCategories();
   const out: Record<string, boolean> = {};
   for (const cat of PII_CATEGORIES) {
     out[cat.id] = cat.defaultEnabled;
@@ -147,6 +152,7 @@ export async function createPiiPolicy(
     name: input.name,
     description: input.description,
     defaultAction: input.defaultAction,
+    engine: input.engine ?? 'regex',
     categories: input.categories,
     customPatterns: input.customPatterns ?? [],
     languages: input.languages ?? [],
@@ -213,23 +219,27 @@ export async function listPiiPolicies(
 
 // ── Catalog helpers (for UI/API) ──────────────────────────────────────────
 
-export interface CategoryCatalogEntry {
-  id: string;
-  label: string;
-  description: string;
-  languages: PiiLanguage[];
-  severity: 'low' | 'medium' | 'high';
-  defaultEnabled: boolean;
-}
+export type { CategoryCatalogEntry } from './types';
 
 /**
  * Return the catalog in the requested locale. If `languages` is given, only
- * categories matching that language set are returned.
+ * categories matching that language set are returned. `engine` picks which
+ * catalog: the regex engine's locale-aware `PII_CATEGORIES`, or the
+ * cognipeer engine's own (English-only, different id vocabulary — see
+ * `PiiEngine`'s doc comment) `COGNIPEER_PII_CATEGORIES`.
  */
 export function getCategoryCatalog(
   locale: PiiLanguage = 'en',
   languages?: PiiLanguage[],
+  engine: PiiEngine = 'regex',
 ): CategoryCatalogEntry[] {
+  if (engine === 'cognipeer') {
+    if (!languages || languages.length === 0) return COGNIPEER_PII_CATEGORIES;
+    const set = new Set<PiiLanguage>(languages);
+    return COGNIPEER_PII_CATEGORIES.filter(
+      (c) => c.languages.includes('global') || c.languages.some((l) => set.has(l)),
+    );
+  }
   const list = filterCategoriesByLanguages(languages);
   return list.map((c) => ({
     id: c.id,
@@ -243,17 +253,40 @@ export function getCategoryCatalog(
 
 // ── Detect / Redact / Mask (stateless) ────────────────────────────────────
 
-export function detectPii(input: DetectInput): PiiScanResult {
-  const findings = detect(
-    input.text,
-    {
-      categories: input.categories,
-      customPatterns: input.customPatterns,
-      languages: input.languages,
-      locale: input.locale ?? 'en',
-    },
-    'detect',
-  );
+/** Shared by every stateless entry point below and by `scanWithPolicy`'s
+ *  cognipeer branch: run whichever engine is requested and normalise the
+ *  result to `{findings, degraded}`, so the rest of each function (output-text
+ *  stitching, tokenize, block-remapping) stays identical for either engine. */
+async function runDetection(
+  text: string,
+  engine: PiiEngine,
+  options: { categories?: Record<string, boolean>; customPatterns?: IPiiCustomPattern[]; languages?: PiiLanguage[]; locale?: PiiLanguage },
+  action: PiiAction,
+): Promise<{ findings: PiiFinding[]; degraded: string[] }> {
+  if (engine === 'cognipeer') {
+    return scanWithCognipeer(
+      text,
+      { categories: options.categories, customPatterns: options.customPatterns, languages: options.languages },
+      action,
+    );
+  }
+  return {
+    findings: detect(
+      text,
+      {
+        categories: options.categories,
+        customPatterns: options.customPatterns,
+        languages: options.languages,
+        locale: options.locale ?? 'en',
+      },
+      action,
+    ),
+    degraded: [],
+  };
+}
+
+export async function detectPii(input: DetectInput): Promise<PiiScanResult> {
+  const { findings, degraded } = await runDetection(input.text, input.engine ?? 'regex', input, 'detect');
   return {
     inputLength: input.text.length,
     findings,
@@ -261,21 +294,13 @@ export function detectPii(input: DetectInput): PiiScanResult {
     hasBlocking: false,
     action: 'detect',
     languages: input.languages ?? ['global'],
+    ...(degraded.length > 0 ? { degraded } : {}),
   };
 }
 
-export function redactPii(input: RedactInput): PiiScanResult {
+export async function redactPii(input: RedactInput): Promise<PiiScanResult> {
   const action: PiiAction = input.action === 'mask' ? 'mask' : 'redact';
-  const findings = detect(
-    input.text,
-    {
-      categories: input.categories,
-      customPatterns: input.customPatterns,
-      languages: input.languages,
-      locale: input.locale ?? 'en',
-    },
-    action,
-  );
+  const { findings, degraded } = await runDetection(input.text, input.engine ?? 'regex', input, action);
   const outputText = applyReplacements(input.text, findings);
   return {
     inputLength: input.text.length,
@@ -284,10 +309,11 @@ export function redactPii(input: RedactInput): PiiScanResult {
     hasBlocking: false,
     action,
     languages: input.languages ?? ['global'],
+    ...(degraded.length > 0 ? { degraded } : {}),
   };
 }
 
-export function maskPii(input: DetectInput): PiiScanResult {
+export async function maskPii(input: DetectInput): Promise<PiiScanResult> {
   return redactPii({ ...input, action: 'mask' });
 }
 
@@ -300,17 +326,8 @@ export function maskPii(input: DetectInput): PiiScanResult {
  * call — tokenize the prompt, send it to the model, then `detokenizePii` the
  * model's response with the same vault.
  */
-export function tokenizePii(input: TokenizeInput): PiiScanResult & { vault: PiiVault } {
-  const findings = detect(
-    input.text,
-    {
-      categories: input.categories,
-      customPatterns: input.customPatterns,
-      languages: input.languages,
-      locale: input.locale ?? 'en',
-    },
-    'tokenize',
-  );
+export async function tokenizePii(input: TokenizeInput): Promise<PiiScanResult & { vault: PiiVault }> {
+  const { findings, degraded } = await runDetection(input.text, input.engine ?? 'regex', input, 'tokenize');
   const { outputText, vault, findings: tokenized } = tokenize(input.text, findings);
   return {
     inputLength: input.text.length,
@@ -320,6 +337,7 @@ export function tokenizePii(input: TokenizeInput): PiiScanResult & { vault: PiiV
     action: 'tokenize',
     languages: input.languages ?? ['global'],
     vault,
+    ...(degraded.length > 0 ? { degraded } : {}),
   };
 }
 
@@ -363,16 +381,38 @@ export async function scanWithPolicy(params: {
   }
 
   const action: PiiAction = params.actionOverride ?? policy.defaultAction;
-  const findings = detect(
-    params.text,
-    {
+  const engine: PiiEngine = policy.engine ?? 'regex';
+
+  let findings: PiiFinding[];
+  let degraded: string[];
+  if (engine === 'cognipeer') {
+    ({ findings, degraded } = await scanWithCognipeer(
+      params.text,
+      { categories: policy.categories, customPatterns: policy.customPatterns, languages: policy.languages },
+      action,
+    ));
+  } else {
+    const detectorConfig = {
       categories: policy.categories,
       customPatterns: policy.customPatterns,
       languages: policy.languages,
       locale: params.locale ?? 'en',
-    },
-    action,
-  );
+      // PII v2: absent on every policy created before this field existed, so
+      // `detectAsync`'s fast path (`mode` defaulting to 'pattern') makes this
+      // branch call `detect()` with identical output to the line this
+      // replaced — see `detectAsync`'s own doc comment.
+      detection: policy.detection,
+    };
+    // `detect()` stays the entry point whenever no NLP layer is requested —
+    // not just an optimization: it keeps a plain policy's call stack (and
+    // therefore its latency) completely unchanged, which is what makes the
+    // load test's 'pattern' arm a true baseline rather than `detectAsync`
+    // doing slightly more work to reach the same answer.
+    const usesNlpLayers = policy.detection?.mode && policy.detection.mode !== 'pattern';
+    ({ findings, degraded } = usesNlpLayers
+      ? await detectAsync(params.text, detectorConfig, action)
+      : { findings: detect(params.text, detectorConfig, action), degraded: [] as string[] });
+  }
 
   if (action === 'tokenize') {
     const { outputText, vault, findings: tokenized } = tokenize(params.text, findings);
@@ -386,6 +426,7 @@ export async function scanWithPolicy(params: {
       vault,
       policyKey: policy.key,
       policyName: policy.name,
+      ...(degraded.length > 0 ? { degraded } : {}),
     };
   }
 
@@ -404,6 +445,7 @@ export async function scanWithPolicy(params: {
     languages: policy.languages ?? [],
     policyKey: policy.key,
     policyName: policy.name,
+    ...(degraded.length > 0 ? { degraded } : {}),
   };
 }
 

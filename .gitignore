@@ -81,3 +81,11 @@ tmp/
 SECURITY_AUDIT.md
 scripts/smoke/reports/
 scripts/e2e/incident-triage/reports/
+
+# PII v2 local NER model(s) — downloaded directly from Hugging Face for local
+# testing (see internal-notes/pii-v2-local-benchmark-*.md). Not committed:
+# large binaries, and this is a stand-in for the planned signed asset
+# registry, not itself meant to ship. Point PII_NER_MODEL_PATH at wherever
+# you've downloaded a model locally.
+.models-local/
+ner-spike*.mjs

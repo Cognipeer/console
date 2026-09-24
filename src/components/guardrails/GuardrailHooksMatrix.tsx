@@ -493,6 +493,12 @@ function defaultPolicyFor(
       return { ...base, family, modelKey, categories: {} };
     case 'prompt_shield':
       return { ...base, family, modelKey, sensitivity: 'balanced' };
+    // No `modelKey` on either: the model ships inside the `@cognipeer/
+    // guardrail` npm package, so there is nothing here to invent for the
+    // operator the way a PII policy key or an LLM model key would need to be.
+    case 'cognipeer_guardrail_moderation':
+    case 'cognipeer_guardrail_prompt_shield':
+      return { ...base, family, categories: {}, profile: 'strict' };
     case 'custom':
       return {
         ...base,

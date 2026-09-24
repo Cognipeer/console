@@ -171,6 +171,47 @@ export const PROMPT_SHIELD_ISSUES: PromptShieldIssueDefinition[] = [
   { id: 'other', label: 'Other jailbreak technique' },
 ];
 
+// ── @cognipeer/guardrail category definitions ────────────────────────────
+
+export interface CognipeerGuardrailCategoryDefinition {
+  /**
+   * Verbatim from the `@cognipeer/guardrail` npm package's `model/manifest.json`
+   * (`categories`) — NOT remapped onto `MODERATION_CATEGORIES` /
+   * `PROMPT_SHIELD_ISSUES`, because these two families are one classifier the
+   * console has no reason to re-taxonomise: an operator configuring either is
+   * choosing from the model's own labels, not the OpenAI-shaped category set
+   * `moderation`/`prompt_shield` inherited from a hosted API.
+   */
+  id: string;
+  label: string;
+  /** Which of the model's two gates this category belongs to — and therefore
+   *  which of the two `cognipeer_guardrail_*` families owns it. */
+  gate: 'moderation' | 'prompt_shield';
+  defaultEnabled: boolean;
+}
+
+/** The full nine, in manifest order. Most callers want the gate-split lists
+ *  below instead — this exists mainly so both are derived from ONE table. */
+export const COGNIPEER_GUARDRAIL_CATEGORIES: CognipeerGuardrailCategoryDefinition[] = [
+  { id: 'insult', label: 'Insult', gate: 'moderation', defaultEnabled: true },
+  { id: 'hate', label: 'Hate speech', gate: 'moderation', defaultEnabled: true },
+  { id: 'sexual', label: 'Sexual content', gate: 'moderation', defaultEnabled: true },
+  { id: 'violence', label: 'Violence', gate: 'moderation', defaultEnabled: true },
+  { id: 'self_harm', label: 'Self-harm', gate: 'moderation', defaultEnabled: true },
+  { id: 'illegal', label: 'Illegal activity', gate: 'moderation', defaultEnabled: true },
+  { id: 'jailbreak', label: 'Jailbreak persona', gate: 'prompt_shield', defaultEnabled: true },
+  { id: 'prompt_injection', label: 'Prompt injection', gate: 'prompt_shield', defaultEnabled: true },
+  { id: 'data_exfiltration', label: 'Data exfiltration attempt', gate: 'prompt_shield', defaultEnabled: true },
+];
+
+/** What `cognipeer_guardrail_moderation`'s `categories` map may hold. */
+export const COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES: CognipeerGuardrailCategoryDefinition[] =
+  COGNIPEER_GUARDRAIL_CATEGORIES.filter((category) => category.gate === 'moderation');
+
+/** What `cognipeer_guardrail_prompt_shield`'s `categories` map may hold. */
+export const COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES: CognipeerGuardrailCategoryDefinition[] =
+  COGNIPEER_GUARDRAIL_CATEGORIES.filter((category) => category.gate === 'prompt_shield');
+
 // ── Word filter list definitions ──────────────────────────────────────────
 
 export interface WordFilterListDefinition {

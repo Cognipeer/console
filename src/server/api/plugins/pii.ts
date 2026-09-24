@@ -17,7 +17,7 @@
  */
 
 import type { FastifyPluginAsync } from 'fastify';
-import type { IUser, PiiAction, PiiLanguage } from '@/lib/database';
+import type { IUser, PiiAction, PiiEngine, PiiLanguage } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   buildDefaultPolicyCategories,
@@ -50,6 +50,15 @@ const logger = createLogger('api:pii');
 const VALID_ACTIONS: PiiAction[] = ['detect', 'redact', 'mask', 'block', 'tokenize'];
 const ACTIONS_HINT = 'detect, redact, mask, block, or tokenize';
 const VALID_LANGS: PiiLanguage[] = ['global', 'en', 'tr', 'de', 'fr', 'es', 'it', 'pt', 'ar', 'ja', 'zh'];
+const VALID_ENGINES: PiiEngine[] = ['regex', 'cognipeer'];
+const ENGINES_HINT = 'regex or cognipeer';
+
+function parseEngine(value: unknown): PiiEngine {
+  if (typeof value === 'string' && (VALID_ENGINES as string[]).includes(value)) {
+    return value as PiiEngine;
+  }
+  return 'regex';
+}
 
 function parseLanguages(input: unknown): PiiLanguage[] | undefined {
   if (input === undefined || input === null) return undefined;
@@ -102,13 +111,15 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/pii/categories', withApiRequestContext(async (request, reply) => {
     try {
       requireSessionContext(request);
-      const query = (request.query ?? {}) as { locale?: string; languages?: string };
+      const query = (request.query ?? {}) as { locale?: string; languages?: string; engine?: string };
       const locale = parseLocale(query.locale);
       const languages = parseLanguages(query.languages);
+      const engine = parseEngine(query.engine);
       return reply.code(200).send({
-        categories: getCategoryCatalog(locale, languages),
-        defaults: buildDefaultPolicyCategories(),
+        categories: getCategoryCatalog(locale, languages, engine),
+        defaults: buildDefaultPolicyCategories(engine),
         supportedLanguages: VALID_LANGS,
+        supportedEngines: VALID_ENGINES,
       });
     } catch (error) {
       return sendProjectContextError(reply, error)
@@ -145,8 +156,12 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       if (!VALID_ACTIONS.includes(defaultAction)) {
         return reply.code(400).send({ error: `defaultAction must be ${ACTIONS_HINT}` });
       }
+      if (body.engine !== undefined && !(VALID_ENGINES as string[]).includes(body.engine as string)) {
+        return reply.code(400).send({ error: `engine must be ${ENGINES_HINT}` });
+      }
+      const engine = parseEngine(body.engine);
       const categories = (body.categories as Record<string, boolean> | undefined)
-        ?? buildDefaultPolicyCategories();
+        ?? buildDefaultPolicyCategories(engine);
       const customPatterns = parseCustomPatternsInput(body.customPatterns);
       if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
       const policy = await createPiiPolicy(
@@ -157,6 +172,7 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
           name: body.name.trim(),
           description: typeof body.description === 'string' ? body.description.trim() : undefined,
           defaultAction,
+          engine,
           categories,
           customPatterns: customPatterns.patterns ?? [],
           languages: parseLanguages(body.languages),
@@ -201,12 +217,16 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.defaultAction !== undefined && !VALID_ACTIONS.includes(body.defaultAction as PiiAction)) {
         return reply.code(400).send({ error: `defaultAction must be ${ACTIONS_HINT}` });
       }
+      if (body.engine !== undefined && !(VALID_ENGINES as string[]).includes(body.engine as string)) {
+        return reply.code(400).send({ error: `engine must be ${ENGINES_HINT}` });
+      }
       const customPatterns = parseCustomPatternsInput(body.customPatterns);
       if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
       const policy = await updatePiiPolicy(session.tenantDbName, id, session.userId, {
         name: body.name as string | undefined,
         description: body.description as string | undefined,
         defaultAction: body.defaultAction as PiiAction | undefined,
+        engine: body.engine as PiiEngine | undefined,
         categories: body.categories as Record<string, boolean> | undefined,
         customPatterns: customPatterns.patterns,
         languages: parseLanguages(body.languages),
@@ -249,6 +269,9 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
         if (typeof body.text !== 'string') {
           return reply.code(400).send({ error: 'text is required' });
         }
+        if (body.engine !== undefined && !(VALID_ENGINES as string[]).includes(body.engine as string)) {
+          return reply.code(400).send({ error: `engine must be ${ENGINES_HINT}` });
+        }
         const customPatterns = parseCustomPatternsInput(body.customPatterns);
         if (customPatterns.error) return reply.code(400).send({ error: customPatterns.error });
         const payload = {
@@ -259,14 +282,15 @@ export const piiApiPlugin: FastifyPluginAsync = async (app) => {
           customPatterns: customPatterns.patterns,
           languages: parseLanguages(body.languages),
           locale: parseLocale(body.locale),
+          engine: body.engine !== undefined ? parseEngine(body.engine) : undefined,
         };
         const result = op === 'detect'
-          ? detectPii(payload)
+          ? await detectPii(payload)
           : op === 'redact'
-            ? redactPii(payload)
+            ? await redactPii(payload)
             : op === 'mask'
-              ? maskPii(payload)
-              : tokenizePii(payload);
+              ? await maskPii(payload)
+              : await tokenizePii(payload);
         return reply.code(200).send(result);
       } catch (error) {
         logger.error(`PII ${op} error`, { error });

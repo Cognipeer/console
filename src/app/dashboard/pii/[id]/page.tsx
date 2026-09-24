@@ -40,6 +40,8 @@ interface PolicyView {
   name: string;
   description?: string;
   defaultAction: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
+  /** Absent on any policy created before this field existed = 'regex'. */
+  engine?: 'regex' | 'cognipeer';
   categories: Record<string, boolean>;
   customPatterns?: PiiCustomPatternForm[];
   languages?: string[];
@@ -51,6 +53,7 @@ export default function PiiPolicyDetailPage() {
   const router = useRouter();
   const t = useTranslations('pii');
   const tAct = useTranslations('pii.actions');
+  const tEngine = useTranslations('pii.engines');
   const locale = useLocale();
 
   const [policy, setPolicy] = useState<PolicyView | null>(null);
@@ -67,6 +70,7 @@ export default function PiiPolicyDetailPage() {
   const [description, setDescription] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [defaultAction, setDefaultAction] = useState<PolicyView['defaultAction']>('detect');
+  const [engine, setEngine] = useState<'regex' | 'cognipeer'>('regex');
   const [categories, setCategories] = useState<Record<string, boolean>>({});
   const [customPatterns, setCustomPatterns] = useState<PiiCustomPatternForm[]>([]);
   const [languages, setLanguages] = useState<string[]>([]);
@@ -74,10 +78,7 @@ export default function PiiPolicyDetailPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const [polRes, catRes] = await Promise.all([
-        fetch(`/api/pii/policies/${params.id}`, { cache: 'no-store' }),
-        fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}`, { cache: 'no-store' }),
-      ]);
+      const polRes = await fetch(`/api/pii/policies/${params.id}`, { cache: 'no-store' });
       if (!polRes.ok) {
         if (polRes.status === 404) {
           router.replace('/dashboard/pii');
@@ -87,11 +88,13 @@ export default function PiiPolicyDetailPage() {
       }
       const polData = await polRes.json();
       const p: PolicyView = polData.policy;
+      const loadedEngine = p.engine ?? 'regex';
       setPolicy(p);
       setName(p.name);
       setDescription(p.description ?? '');
       setEnabled(p.enabled);
       setDefaultAction(p.defaultAction);
+      setEngine(loadedEngine);
       setCategories(p.categories ?? {});
       setCustomPatterns(
         (p.customPatterns ?? []).map((cp) => ({
@@ -101,6 +104,7 @@ export default function PiiPolicyDetailPage() {
       );
       setLanguages(p.languages ?? []);
 
+      const catRes = await fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}&engine=${loadedEngine}`, { cache: 'no-store' });
       if (catRes.ok) {
         const catData = await catRes.json();
         setCatalog(catData.categories ?? []);
@@ -117,12 +121,12 @@ export default function PiiPolicyDetailPage() {
     }
   };
 
-  useEffect(() => { void load(); }, [params.id, locale]);
+  useEffect(() => { void load(); }, [params.id, locale]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reload catalog when locale changes so labels update without full reload
   useEffect(() => {
     if (!policy) return;
-    void fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}`)
+    void fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}&engine=${engine}`)
       .then((r) => r.json())
       .then((d) => {
         if (d?.categories) setCatalog(d.categories);
@@ -130,6 +134,32 @@ export default function PiiPolicyDetailPage() {
       })
       .catch(() => {});
   }, [locale]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Switching engines is a full reset of category selection, not a merge —
+   * the two engines don't share a category id vocabulary (`tc_kimlik` vs
+   * `tckn`, etc. — see `PiiEngine`'s own doc comment), so a category map
+   * built under one engine is meaningless under the other. Falls straight
+   * back to that engine's own defaults, matching what a brand-new policy
+   * created with this engine would start with.
+   */
+  const handleEngineChange = async (next: 'regex' | 'cognipeer') => {
+    setEngine(next);
+    try {
+      const res = await fetch(`/api/pii/categories?locale=${encodeURIComponent(locale)}&engine=${next}`);
+      if (!res.ok) throw new Error('Failed to load catalog');
+      const data = await res.json();
+      setCatalog(data.categories ?? []);
+      setDefaultCategories(data.defaults ?? {});
+      setCategories(data.defaults ?? {});
+    } catch (err) {
+      notifications.show({
+        title: t('notifications.loadError'),
+        message: err instanceof Error ? err.message : '',
+        color: 'red',
+      });
+    }
+  };
 
   // Make sure all catalog ids exist in `categories` map (default for new keys)
   useEffect(() => {
@@ -159,6 +189,7 @@ export default function PiiPolicyDetailPage() {
           description,
           enabled,
           defaultAction,
+          engine,
           categories,
           customPatterns,
           languages,
@@ -284,6 +315,7 @@ export default function PiiPolicyDetailPage() {
             label={enabled ? 'Enabled' : 'Disabled'}
           />
           <span className="ds-badge ds-badge-info">{tAct(defaultAction)}</span>
+          <span className="ds-badge">{tEngine(engine)}</span>
         </>
       }
       meta={
@@ -341,6 +373,8 @@ export default function PiiPolicyDetailPage() {
             onLanguagesChange={setLanguages}
             defaultAction={defaultAction}
             onDefaultActionChange={setDefaultAction}
+            engine={engine}
+            onEngineChange={(next) => void handleEngineChange(next)}
             catalog={catalog}
           />
 
@@ -357,6 +391,7 @@ export default function PiiPolicyDetailPage() {
           categories={categories}
           customPatterns={customPatterns}
           languages={languages}
+          engine={engine}
         />
       ) : null}
 

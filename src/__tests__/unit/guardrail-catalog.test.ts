@@ -50,6 +50,8 @@ import {
   writeGuardrailMode,
 } from '@/lib/services/guardrail/hooks/contract';
 import type {
+  CognipeerGuardrailModerationPolicyConfig,
+  CognipeerGuardrailPromptShieldPolicyConfig,
   CustomPolicyConfig,
   GuardrailEnforcement,
   GuardrailHooksConfig,
@@ -255,8 +257,8 @@ const REGEX_RULE_KEYS = [
   'captureGroup',
   'maxMatchChars',
 ] as const;
-const MODERATION_KEYS = ['detector', 'modelKey', 'categories'] as const;
-const PROMPT_SHIELD_KEYS = ['modelKey', 'sensitivity'] as const;
+const MODERATION_KEYS = ['detector', 'modelKey', 'categories', 'lexiconCustomLists'] as const;
+const PROMPT_SHIELD_KEYS = ['detector', 'modelKey', 'sensitivity'] as const;
 const CUSTOM_KEYS = ['modelKey', 'prompt', 'onMissingModel'] as const;
 const TOOL_ACCESS_KEYS = [
   'allow',
@@ -288,6 +290,7 @@ const WEBHOOK_KEYS = [
   'redactBeforeSend',
   'retries',
 ] as const;
+const COGNIPEER_GUARDRAIL_KEYS = ['categories', 'profile'] as const;
 
 /**
  * `id`, `family` and `schedule` are the base fields `COMMON_POLICY_FIELDS`
@@ -324,6 +327,8 @@ function assertEveryConfigKeyIsDescribed(
     Expect<Equal<FamilyKeys<CustomPolicyConfig>, (typeof CUSTOM_KEYS)[number]>>,
     Expect<Equal<FamilyKeys<ToolAccessPolicyConfig>, (typeof TOOL_ACCESS_KEYS)[number]>>,
     Expect<Equal<FamilyKeys<WebhookPolicyConfig>, (typeof WEBHOOK_KEYS)[number]>>,
+    Expect<Equal<FamilyKeys<CognipeerGuardrailModerationPolicyConfig>, (typeof COGNIPEER_GUARDRAIL_KEYS)[number]>>,
+    Expect<Equal<FamilyKeys<CognipeerGuardrailPromptShieldPolicyConfig>, (typeof COGNIPEER_GUARDRAIL_KEYS)[number]>>,
     Expect<
       Equal<
         keyof PolicyBase<PolicyFamily>,
@@ -354,6 +359,8 @@ describe('every field of every configuration has a control', () => {
       true,
       true,
       true,
+      true,
+      true,
     ]);
     expect(true).toBe(true);
   });
@@ -368,6 +375,8 @@ describe('every field of every configuration has a control', () => {
     ['custom', CUSTOM_KEYS],
     ['tool_access', TOOL_ACCESS_KEYS],
     ['webhook', WEBHOOK_KEYS],
+    ['cognipeer_guardrail_moderation', COGNIPEER_GUARDRAIL_KEYS],
+    ['cognipeer_guardrail_prompt_shield', COGNIPEER_GUARDRAIL_KEYS],
   ] as const)('describes every %s field exactly once', (family, expected) => {
     const keys = keysOf(fieldsOf(family));
     expect(keys.slice().sort()).toEqual([...expected].slice().sort());

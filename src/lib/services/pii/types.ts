@@ -6,11 +6,12 @@ import type {
   IPiiPolicy,
   IPiiCustomPattern,
   PiiAction,
+  PiiEngine,
   PiiLanguage,
 } from '@/lib/database';
 import type { PiiSeverity } from './categories';
 
-export type { PiiAction, PiiLanguage, IPiiCustomPattern };
+export type { PiiAction, PiiEngine, PiiLanguage, IPiiCustomPattern };
 
 /** A single occurrence of PII in scanned text. */
 export interface PiiFinding {
@@ -37,6 +38,21 @@ export interface PiiFinding {
   /** Suggested replacement when redacting/masking. Always present so the caller
    *  can stitch the output with a single pass even in detect-only mode. */
   replacement: string;
+
+  // ── PII v2 (additive — undefined on any pre-v2 caller/test) ──────────────
+  /**
+   * 0–1 confidence, this category's `baseScore` plus a context-word boost
+   * (see `confidence.ts`), or the noisy-OR of multiple detectors agreeing on
+   * the same span (`detectAsync`'s fusion). NOT used to filter `detect()`'s
+   * output unless a policy sets `detection.minConfidence > 0` — its absence
+   * of effect on the default path is what keeps every pre-v2 policy's
+   * findings identical to before this field existed.
+   */
+  confidence?: number;
+  /** Which layer raised this finding. `detect()` (sync, pattern-only) always reports 'pattern'; `detectAsync` can also report 'dictionary' or 'ner'. */
+  detector?: 'pattern' | 'dictionary' | 'ner';
+  /** Short human-readable reasons (context word matched, sequence pattern, checksum) — the confidence number's audit trail. */
+  evidence?: string[];
 }
 
 /** A single vault entry: maps a token back to its original value. */
@@ -70,10 +86,26 @@ export interface PiiScanResult {
   languages: PiiLanguage[];
   /** Token → original-value vault. Present only when action === 'tokenize'. */
   vault?: PiiVault;
+  /** PII v2: present (non-empty) only when `detectAsync` ran and something didn't complete as requested — a NER model unavailable, a window timing out, input clipped. Absent on the `detect()` (pattern-only) path. */
+  degraded?: string[];
 }
 
 export interface PiiServicePolicyView extends Omit<IPiiPolicy, '_id'> {
   id: string;
+}
+
+/** One category as shown to an operator — the shape both engines' catalogs
+ *  (`services/pii/categories.ts`'s `PII_CATEGORIES` and
+ *  `cognipeerCategories.ts`'s `COGNIPEER_PII_CATEGORIES`) are normalised
+ *  into, so the UI (`PiiPolicyEditor`) never has to know which one it is
+ *  rendering. */
+export interface CategoryCatalogEntry {
+  id: string;
+  label: string;
+  description: string;
+  languages: PiiLanguage[];
+  severity: 'low' | 'medium' | 'high';
+  defaultEnabled: boolean;
 }
 
 export interface CreatePiiPolicyInput {
@@ -81,6 +113,8 @@ export interface CreatePiiPolicyInput {
   description?: string;
   projectId?: string;
   defaultAction: PiiAction;
+  /** Absent = 'regex'. See `PiiEngine`'s own doc comment. */
+  engine?: PiiEngine;
   categories: Record<string, boolean>;
   customPatterns?: IPiiCustomPattern[];
   languages?: PiiLanguage[];
@@ -92,6 +126,7 @@ export interface UpdatePiiPolicyInput {
   name?: string;
   description?: string;
   defaultAction?: PiiAction;
+  engine?: PiiEngine;
   categories?: Record<string, boolean>;
   customPatterns?: IPiiCustomPattern[];
   languages?: PiiLanguage[];
@@ -109,6 +144,10 @@ export interface DetectInput {
   languages?: PiiLanguage[];
   /** Locale for finding labels/messages. Default: 'en'. */
   locale?: PiiLanguage;
+  /** Which detector runs this ad-hoc scan. Absent = 'regex' — the ad-hoc
+   *  routes have no stored policy to read it from, so a caller testing a
+   *  cognipeer-engine draft (not yet saved) must pass it explicitly. */
+  engine?: PiiEngine;
 }
 
 export interface RedactInput extends DetectInput {

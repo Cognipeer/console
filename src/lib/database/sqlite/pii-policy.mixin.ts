@@ -20,11 +20,11 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
 
       db.prepare(`
         INSERT INTO ${TABLES.piiPolicies}
-        (id, tenantId, projectId, key, name, description, defaultAction,
-         categories, customPatterns, languages, enabled, metadata,
+        (id, tenantId, projectId, key, name, description, defaultAction, engine,
+         categories, customPatterns, languages, enabled, metadata, detection,
          createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @defaultAction,
-         @categories, @customPatterns, @languages, @enabled, @metadata,
+        VALUES (@id, @tenantId, @projectId, @key, @name, @description, @defaultAction, @engine,
+         @categories, @customPatterns, @languages, @enabled, @metadata, @detection,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -34,11 +34,13 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         name: policy.name,
         description: policy.description ?? null,
         defaultAction: policy.defaultAction,
+        engine: policy.engine ?? null,
         categories: this.toJson(policy.categories ?? {}),
         customPatterns: this.toJson(policy.customPatterns ?? []),
         languages: this.toJson(policy.languages ?? []),
         enabled: this.toBoolInt(policy.enabled),
         metadata: this.toJson(policy.metadata ?? {}),
+        detection: policy.detection ? this.toJson(policy.detection) : null,
         createdBy: policy.createdBy,
         updatedBy: policy.updatedBy ?? null,
         createdAt: now,
@@ -60,11 +62,13 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       if (data.name !== undefined) { sets.push('name = @name'); params.name = data.name; }
       if (data.description !== undefined) { sets.push('description = @description'); params.description = data.description; }
       if (data.defaultAction !== undefined) { sets.push('defaultAction = @defaultAction'); params.defaultAction = data.defaultAction; }
+      if (data.engine !== undefined) { sets.push('engine = @engine'); params.engine = data.engine; }
       if (data.categories !== undefined) { sets.push('categories = @categories'); params.categories = this.toJson(data.categories); }
       if (data.customPatterns !== undefined) { sets.push('customPatterns = @customPatterns'); params.customPatterns = this.toJson(data.customPatterns); }
       if (data.languages !== undefined) { sets.push('languages = @languages'); params.languages = this.toJson(data.languages); }
       if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = this.toBoolInt(data.enabled); }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
+      if (data.detection !== undefined) { sets.push('detection = @detection'); params.detection = data.detection ? this.toJson(data.detection) : null; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
       if (data.projectId !== undefined) { sets.push('projectId = @projectId'); params.projectId = data.projectId; }
 
@@ -127,11 +131,13 @@ export function PiiPolicyMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
         name: r.name as string,
         description: r.description as string | undefined,
         defaultAction: r.defaultAction as IPiiPolicy['defaultAction'],
+        engine: (r.engine as IPiiPolicy['engine']) ?? undefined,
         categories: this.parseJson(r.categories, {}),
         customPatterns: this.parseJson(r.customPatterns, []),
         languages: this.parseJson(r.languages, []),
         enabled: this.fromBoolInt(r.enabled),
         metadata: this.parseJson(r.metadata, {}),
+        detection: r.detection ? this.parseJson(r.detection, undefined) : undefined,
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),
