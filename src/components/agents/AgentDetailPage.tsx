@@ -1974,6 +1974,63 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
 }`}
                 </Code>
 
+                <Divider />
+
+                {/* ── Background execution ─────────────────── */}
+                <Text size="sm" fw={600}>Background execution (long-running turns)</Text>
+                <Text size="xs" c="dimmed">
+                  For turns that may run past a normal HTTP timeout (deep research, long tool chains), add{' '}
+                  <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call. Instead of
+                  the completed answer, you immediately get back a run id to poll — the turn keeps executing
+                  server-side even if you disconnect. Optionally set <code>Idempotency-Key</code> so a retried
+                  request replays the same run instead of starting a second one, or <code>callback_url</code> to
+                  get an HMAC-signed webhook when it finishes instead of polling.
+                </Text>
+                <Code block>
+{`# 1. Start it in the background — returns immediately with 202
+curl -X POST ${apiOrigin}/api/client/v1/responses \\
+  -H "Authorization: ******" \\
+  -H "Content-Type: application/json" \\
+  -H "x-cognipeer-background: true" \\
+  -H "Idempotency-Key: <a-client-generated-uuid>" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Research this topic in depth and summarize the findings",
+    "callback_url": "https://your-server.com/webhooks/agent-run"
+  }'
+
+# → 202 { "id": "run_<run_id>", "object": "agent.run", "status": "queued", "created_at": 1719500000 }
+
+# 2. Poll status until it leaves "queued"/"running"
+curl ${apiOrigin}/api/client/v1/agents/runs/run_<run_id> \\
+  -H "Authorization: ******"
+
+# → 200 { "id": "run_<run_id>", "object": "agent.run", "status": "succeeded",
+#         "result": { ...same shape as a synchronous response... }, "error": null,
+#         "created_at": ..., "started_at": ..., "completed_at": ... }
+# status is one of: queued | running | succeeded | failed | canceled
+
+# 3. (optional) Cancel it before it finishes
+curl -X POST ${apiOrigin}/api/client/v1/agents/runs/run_<run_id>/cancel \\
+  -H "Authorization: ******"
+
+# Once succeeded, continue the conversation with a normal (synchronous) call —
+# the run's own "resp_" id inside "result.id" works as previous_response_id too:
+curl -X POST ${apiOrigin}/api/client/v1/responses \\
+  -H "Authorization: ******" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Now write it up as a one-pager",
+    "previous_response_id": "run_<run_id>"
+  }'`}
+                </Code>
+                <Text size="xs" c="dimmed">
+                  Only one background (or synchronous) run may be in flight per conversation at a time — a
+                  second request against the same conversation is rejected with <code>409 agent_run_conflict</code>{' '}
+                  until the first one finishes.
+                </Text>
+
                 {/*
                   Every other surface the agent is reachable on. They were
                   built one at a time and only the Responses API was ever
