@@ -1277,11 +1277,6 @@ function summariseConversation(conversation: IAgentConversation) {
     });
     if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
 
-    const reservation = await reserveDashboardSession({
-      session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
-    });
-    if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
-
     reply.raw.setHeader('Content-Type', 'text/event-stream');
     reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
     reply.raw.setHeader('Connection', 'keep-alive');
