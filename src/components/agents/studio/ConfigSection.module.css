@@ -18,6 +18,16 @@
   max-width: 52rem;
 }
 
+.summary {
+  display: block;
+  width: 100%;
+  padding-block: 2px;
+}
+
+.summary:hover p {
+  color: var(--mantine-color-text);
+}
+
 @media (max-width: 62em) {
   .section {
     flex-direction: column;

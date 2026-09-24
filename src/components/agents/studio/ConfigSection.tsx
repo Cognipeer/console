@@ -13,7 +13,8 @@
  */
 
 import type { ReactNode } from 'react';
-import { Box, Divider, Group, Stack, Text } from '@mantine/core';
+import { Badge, Box, Divider, Group, Stack, Text, UnstyledButton } from '@mantine/core';
+import { IconChevronDown, IconChevronRight } from '@tabler/icons-react';
 import classes from './ConfigSection.module.css';
 
 export interface ConfigBlockProps {
@@ -52,6 +53,16 @@ export interface ConfigSectionProps {
     children: ReactNode;
     /** Sections render a divider above themselves except the first. */
     first?: boolean;
+    /**
+     * Collapsible mode: pass `onToggle`. Collapsed, the section shows
+     * `summary` (what is set) in place of its fields — the page still reads
+     * top to bottom, it just stops making you scroll past settled sections.
+     */
+    collapsed?: boolean;
+    onToggle?: () => void;
+    summary?: ReactNode;
+    /** Differs from the published version — flagged so a reviewer finds it. */
+    changed?: boolean;
 }
 
 export default function ConfigSection({
@@ -61,7 +72,21 @@ export default function ConfigSection({
     meta,
     children,
     first,
+    collapsed,
+    onToggle,
+    summary,
+    changed,
 }: ConfigSectionProps) {
+    const collapsible = Boolean(onToggle);
+    const heading = (
+        <Group gap={6} wrap="nowrap">
+            {collapsible ? (collapsed ? <IconChevronRight size={14} /> : <IconChevronDown size={14} />) : null}
+            <Text fw={600}>{title}</Text>
+            {changed ? (
+                <Badge size="xs" variant="light" color="orange">Changed</Badge>
+            ) : null}
+        </Group>
+    );
     return (
         <>
             {!first ? <Divider my="xl" /> : null}
@@ -73,11 +98,21 @@ export default function ConfigSection({
                 className={classes.section}
             >
                 <Stack gap={4} className={classes.label}>
-                    <Text fw={600}>{title}</Text>
+                    {collapsible ? (
+                        <UnstyledButton onClick={onToggle} aria-expanded={!collapsed} aria-controls={`config-${id}-body`}>
+                            {heading}
+                        </UnstyledButton>
+                    ) : heading}
                     {description ? <Text size="sm" c="dimmed">{description}</Text> : null}
                     {meta}
                 </Stack>
-                <Box className={classes.content}>{children}</Box>
+                <Box id={`config-${id}-body`} className={classes.content}>
+                    {collapsed ? (
+                        <UnstyledButton onClick={onToggle} className={classes.summary}>
+                            <Text size="sm" c="dimmed">{summary ?? 'Click to edit'}</Text>
+                        </UnstyledButton>
+                    ) : children}
+                </Box>
             </Group>
         </>
     );
