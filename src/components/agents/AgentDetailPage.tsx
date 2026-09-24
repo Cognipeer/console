@@ -50,7 +50,6 @@ import {
   IconAlertTriangle,
   IconLayoutDashboard,
   IconPlus,
-  IconPlugConnectedX,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
@@ -396,14 +395,6 @@ export default function AgentDetailPage() {
     errors: Array<{ field: string; message: string }>;
     warnings: Array<{ field: string; message: string }>;
   } | null>(null);
-  /** The last "test connection" result for the selected model. */
-  const [modelCheck, setModelCheck] = useState<
-    | { state: 'checking' }
-    | { state: 'ok'; latencyMs: number }
-    | { state: 'error'; message: string; type?: string }
-    | null
-  >(null);
-
   // Config form
   const configForm = useForm({
     initialValues: {
@@ -946,28 +937,6 @@ export default function AgentDetailPage() {
 
   // ── Config Save ──────────────────────────────────────────────
 
-  const checkModelConnection = async (modelKey: string) => {
-    if (!modelKey) return;
-    setModelCheck({ state: 'checking' });
-    try {
-      const res = await fetch('/api/agents/model-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelKey }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setModelCheck({ state: 'error', message: data?.error || `Check failed (HTTP ${res.status})` });
-        return;
-      }
-      setModelCheck(data.ok
-        ? { state: 'ok', latencyMs: data.latencyMs }
-        : { state: 'error', message: data.error?.message ?? 'The model did not answer.', type: data.error?.type });
-    } catch {
-      setModelCheck({ state: 'error', message: 'Could not reach the server.' });
-    }
-  };
-
   const handleSaveConfig = async () => {
     setSavingConfig(true);
     try {
@@ -1064,56 +1033,16 @@ export default function AgentDetailPage() {
       </Stack>
     ) : (
       <Stack gap="xl">
-        <Stack gap={6}>
-          <Group align="flex-end" gap="xs" wrap="nowrap">
-            <Select
-              label={t('config.model')}
-              placeholder={t('config.modelPlaceholder')}
-              data={models.map((m) => ({
-                value: m.key,
-                label: `${m.name} (${m.modelId})`,
-              }))}
-              searchable
-              style={{ flex: 1 }}
-              {...configForm.getInputProps('modelKey')}
-              onChange={(value) => {
-                configForm.setFieldValue('modelKey', value ?? '');
-                // A verdict about the previous model says nothing about this one.
-                setModelCheck(null);
-              }}
-            />
-            {/*
-              A wrong provider key used to surface as an agent that "doesn't
-              answer" in its first session. One tiny completion through the
-              agent's own model path answers "is this model reachable with the
-              stored credentials" before anyone opens a session.
-            */}
-            <Button
-              variant="default"
-              leftSection={<IconPlugConnected size={14} />}
-              loading={modelCheck?.state === 'checking'}
-              disabled={!configForm.values.modelKey}
-              onClick={() => void checkModelConnection(configForm.values.modelKey)}
-            >
-              Test connection
-            </Button>
-          </Group>
-          {modelCheck?.state === 'ok' ? (
-            <Text size="xs" c="teal.7">
-              <IconCheck size={12} style={{ verticalAlign: 'middle' }} /> The model answered in {modelCheck.latencyMs} ms.
-            </Text>
-          ) : null}
-          {modelCheck?.state === 'error' ? (
-            <Alert variant="light" color="red" p="xs" icon={<IconPlugConnectedX size={14} />}>
-              <Text size="xs" fw={600}>
-                {modelCheck.type === 'provider_authentication_error'
-                  ? 'The provider rejected its API key'
-                  : 'The model could not be reached'}
-              </Text>
-              <Text size="xs">{modelCheck.message}</Text>
-            </Alert>
-          ) : null}
-        </Stack>
+        <Select
+          label={t('config.model')}
+          placeholder={t('config.modelPlaceholder')}
+          data={models.map((m) => ({
+            value: m.key,
+            label: `${m.name} (${m.modelId})`,
+          }))}
+          searchable
+          {...configForm.getInputProps('modelKey')}
+        />
 
         {/* Prompt configuration (mode / template / managed prompt) lives in
             its own "Prompt" section — see AgentPromptPanel. Editing the prompt
