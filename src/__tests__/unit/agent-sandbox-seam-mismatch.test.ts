@@ -5,7 +5,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('@/enterprise/registry', () => ({}));
+// The real registry, minus the seam-4 export — what a pre-seam-4 overlay
+// looks like to community code.
+vi.mock('@/enterprise/registry', async (importOriginal) => ({
+    ...(await importOriginal<Record<string, unknown>>()),
+    agentSandboxRunner: undefined,
+}));
 vi.mock('@/lib/license/tenantLicense', () => ({ isTenantEnterpriseLicensed: vi.fn(async () => true) }));
 
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
