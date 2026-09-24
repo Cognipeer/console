@@ -23,6 +23,17 @@ import {
   idempotencyKeyConflictErrorBody,
   agentRunConcurrencyLimitErrorBody,
 } from '@/lib/services/agents';
+import {
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  agentDefaultCallback,
+  backgroundDisabledErrorBody,
+  invalidRequestErrorBody,
+  lookupIdempotentAgentRun,
+  resolveAgentExecutionLimits,
+  serializeAgentRun,
+  validateCallbackRequest,
+} from '@/lib/services/agents/agentRunService';
+import type { LicenseType } from '@/lib/license/license-manager';
 import { invalidConfigBody, validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 // By path: the agents barrel does not export the error class.
@@ -247,6 +258,64 @@ function createResponsesHandler(usePublished: boolean) {
         idempotencyConversationScope = resolvedConversationId;
       }
 
+      // Effective execution limits: min(env ceiling, tenant quota, the
+      // agent's own Execution settings). Execution settings are operational
+      // and apply without publishing, so they are read from the live agent.
+      const limits = await resolveAgentExecutionLimits({
+        agentConfig: agent.config,
+        quotaContext: {
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          licenseType: ctx.tenant.licenseType as LicenseType,
+          userId: ctx.tokenRecord.userId,
+          tokenId: ctx.tokenRecord._id?.toString(),
+        },
+      });
+
+      const idempotencyKey = getHeaderValue(request, 'idempotency-key');
+      const background = isBackgroundModeRequested(
+        getHeaderValue(request, 'x-cognipeer-background'),
+        body,
+        limits.defaultMode,
+      );
+      // §9/§12.15: Idempotency-Key is background-only — sync mode persists
+      // nothing to key a retry against, so honoring it would silently do
+      // nothing. Rejected loudly instead.
+      if (idempotencyKey && !background) {
+        return reply.code(400).send(idempotencyKeyRequiresBackgroundErrorBody());
+      }
+      if (idempotencyKey && idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+        return reply.code(400).send(invalidRequestErrorBody(`Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`, 'idempotency_key_too_long'));
+      }
+      if (background && !limits.backgroundEnabled) {
+        return reply.code(400).send(backgroundDisabledErrorBody());
+      }
+
+      let callback: { url?: string; secret?: string } = {};
+      if (background) {
+        const requested = await validateCallbackRequest(body.callback_url, body.callback_secret);
+        if (!requested.ok) return reply.code(400).send(invalidRequestErrorBody(requested.message, 'invalid_callback'));
+        callback = requested.url ? { url: requested.url, secret: requested.secret } : agentDefaultCallback(agent.config);
+      }
+
+      // A replayed request must not mint a fresh conversation first — every
+      // retry of "start a new conversation" would leave an orphan behind.
+      if (background && idempotencyKey) {
+        const prior = await lookupIdempotentAgentRun({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentKey: agent.key,
+          userMessage,
+          version: requestedVersion,
+          idempotencyKey,
+          idempotencyConversationScope,
+        });
+        if (prior.kind === 'conflict') return reply.code(409).send(idempotencyKeyConflictErrorBody());
+        if (prior.kind === 'replay') return reply.code(200).send(serializeAgentRun(prior.run));
+      }
+
       if (!conversationId) {
         const conversation = await createConversation(
           ctx.tenantDbName,
@@ -264,19 +333,6 @@ function createResponsesHandler(usePublished: boolean) {
         source: 'api',
       });
 
-      // §9/§12.15: Idempotency-Key is a background-mode-only concept —
-      // synchronous mode persists no record to key a retry against, so
-      // honoring the header there would silently do nothing. Rejected
-      // loudly instead.
-      const idempotencyKey = getHeaderValue(request, 'idempotency-key');
-      const background = isBackgroundModeRequested(
-        getHeaderValue(request, 'x-cognipeer-background'),
-        body,
-      );
-      if (idempotencyKey && !background) {
-        return reply.code(400).send(idempotencyKeyRequiresBackgroundErrorBody());
-      }
-
       const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
 
       if (background) {
@@ -292,9 +348,11 @@ function createResponsesHandler(usePublished: boolean) {
           usePublished,
           runtimeContext,
           apiTokenId,
-          callbackUrl: typeof body.callback_url === 'string' ? body.callback_url : undefined,
+          callbackUrl: callback.url,
+          callbackSecret: callback.secret,
           idempotencyKey: idempotencyKey ?? undefined,
           idempotencyConversationScope,
+          limits,
         });
         if (outcome.kind === 'conflict') {
           return reply.code(409).send(agentRunConflictErrorBody());
@@ -303,16 +361,11 @@ function createResponsesHandler(usePublished: boolean) {
           return reply.code(409).send(idempotencyKeyConflictErrorBody());
         }
         if (outcome.kind === 'concurrency_limit') {
-          return reply.code(429).send(agentRunConcurrencyLimitErrorBody(outcome.limit));
+          return reply.code(429).send(agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope));
         }
         // `idempotent_replay` returns the SAME run a prior identical request
         // already created — 200, not 202, since no new work was queued here.
-        return reply.code(outcome.kind === 'idempotent_replay' ? 200 : 202).send({
-          id: `run_${outcome.run._id}`,
-          object: 'agent.run' as const,
-          status: outcome.run.status,
-          created_at: Math.floor((outcome.run.createdAt ?? new Date()).getTime() / 1000),
-        });
+        return reply.code(outcome.kind === 'idempotent_replay' ? 200 : 202).send(serializeAgentRun(outcome.run));
       }
 
       // §3.2/§12.14: the same single-active-run check runs against
@@ -332,6 +385,7 @@ function createResponsesHandler(usePublished: boolean) {
           version: requestedVersion,
           runtimeContext,
         },
+        syncTimeoutMs: limits.syncTimeoutMs,
       });
       if (syncOutcome.kind === 'conflict') {
         return reply.code(409).send(agentRunConflictErrorBody());

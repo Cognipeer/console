@@ -7,23 +7,33 @@
  * afterwards).
  *
  * Mirrors the crawler's job-runner shape (`crawlerJobService.ts`): claim
- * (CAS), heartbeat + piggy-backed cancel poll, finalize (CAS), notify. The
+ * (CAS), heartbeat + a separate cancel poll, finalize (CAS), notify. The
  * deliberate divergence is crash-recovery policy (see `agentRunReconciler.ts`,
  * §7.1/§12.1), not the execution shape itself.
+ *
+ * Limits resolve as min(env ceiling, tenant quota, agent `execution`
+ * setting) — `resolveAgentExecutionLimits` — once, at submit time; a
+ * background run carries its resolved ceiling on the row (`maxDurationMs`).
  */
 
-import crypto, { randomUUID } from 'node:crypto';
-import axios from 'axios';
+import crypto from 'node:crypto';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
-import { getDatabase, type DatabaseProvider, AgentRunConflictError } from '@/lib/database';
-import type { IAgentRun, AgentRunErrorReason } from '@/lib/database';
+import {
+  getDatabase,
+  type DatabaseProvider,
+  AgentRunConflictError,
+  AgentRunIdempotencyKeyTakenError,
+} from '@/lib/database';
+import type { IAgentConfig, IAgentRun, AgentRunErrorReason } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
-import { queueNameFor } from '@/lib/core/cluster';
 import { getThisNodeName } from '@/lib/core/cluster/nodeRegistry';
-import { fireAndForget } from '@/lib/core/asyncTask';
-import { assertSafeUrl } from '@/lib/services/crawler/engine/ssrf';
+import { runWithRequestContext } from '@/lib/core/requestContext';
+import { assertPublicUrl, safeFetch } from '@/lib/security/outboundFetch';
+import { decryptObject, encryptObject } from '@/lib/utils/crypto';
+import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { classifyAgentRunError } from './agentErrors';
+import { openAgentCallbackSecret } from './agentSandboxSecrets';
 import {
   executeAgentChat,
   executeAgentChatLocal,
@@ -35,6 +45,13 @@ import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 
 const logger = createLogger('agent-run');
 
+/**
+ * Background runs (and their callbacks) get a queue of their own, with its
+ * own per-node concurrency (`AGENT_RUN_CONCURRENCY`) — sharing `cluster.agent`
+ * let four 30-minute runs block every routed chat turn on the node.
+ */
+export const AGENT_RUN_QUEUE = 'agent-runs';
+
 async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
@@ -44,23 +61,14 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
 /**
  * Bind `fn` to the tenant DB for its ENTIRE execution via a real
  * AsyncLocalStorage scope (`db.runWithTenant`), not the bare
- * `switchToTenant` (`enterWith` + a process-global fallback field) that
- * short CRUD helpers in this file use. A background run — or even a
- * synchronous one racing a multi-minute ceiling — can legitimately still be
- * executing when a concurrent request for a DIFFERENT tenant calls
- * `switchToTenant` and flips that global fallback; without this, the flip
- * would redirect this run's still-in-flight writes (heartbeat, finalize,
- * and everything `executeAgentChatLocal` itself does) into the wrong
- * tenant's database.
+ * `switchToTenant` (`enterWith` + a process-global fallback field). A run can
+ * still be executing when a concurrent request for a DIFFERENT tenant flips
+ * that global fallback; without this, the flip would redirect the run's
+ * in-flight writes into the wrong tenant's database.
  *
- * NOTE: intentionally NOT `@/lib/database`'s `runWithTenantScope`, even
- * though it exists for exactly this purpose and its own doc comment warns
- * against hand-rolling clones. `runWithTenantScope`'s internal `getDatabase()`
- * call is bound to that module's own top-level `getDatabase`, which a test's
- * `vi.mock('@/lib/database', factory)` cannot override for a re-exported
- * REAL function without also breaking every OTHER caller of the mocked
- * module in this file — only a DIRECT top-level `import { getDatabase }`
- * inside this file is what vitest's per-module mock actually rebinds.
+ * NOTE: intentionally NOT `@/lib/database`'s `runWithTenantScope`: its
+ * internal `getDatabase()` is bound to that module's own import, which a
+ * test's `vi.mock('@/lib/database', factory)` cannot rebind.
  */
 async function runWithTenantDb<T>(
   tenantDbName: string,
@@ -73,34 +81,92 @@ async function runWithTenantDb<T>(
 }
 
 /** Resolves once `ms` has elapsed, with the given sentinel — never rejects. */
-function delaySentinel<T>(ms: number, sentinel: T): Promise<T> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(sentinel), Math.max(0, ms));
+function delaySentinel<T>(ms: number, sentinel: T): { promise: Promise<T>; clear: () => void } {
+  let timer: NodeJS.Timeout | undefined;
+  const promise = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(sentinel), Math.max(0, ms));
     timer.unref?.();
   });
+  return { promise, clear: () => { if (timer) clearTimeout(timer); } };
 }
 
-/** A value no real `AgentChatResponse`/finalize decision can equal — used to detect which side of a race won. */
+/** A value no real `AgentChatResponse` can equal — used to detect which side of a race won. */
 const TIMEOUT_SENTINEL = Symbol('agent-run-deadline-timeout');
-/** Wins the race the instant a cancel request is OBSERVED (heartbeat-cadence poll), not when `invoke()` eventually settles or the max-duration deadline fires. */
+/** Wins the race the instant a cancel request is OBSERVED (tight poll), not when `invoke()` settles. */
 const CANCEL_SENTINEL = Symbol('agent-run-cancel-observed');
+/** Wraps an `invoke()` rejection so the race can finalize it instead of throwing past the timers. */
+const FAILURE_TAG = Symbol('agent-run-invoke-failed');
+interface InvokeFailure { [FAILURE_TAG]: true; error: unknown }
+function isInvokeFailure(value: unknown): value is InvokeFailure {
+  return typeof value === 'object' && value !== null && FAILURE_TAG in value;
+}
+
 /**
- * How often the worker checks `cancelRequestedAt`, INDEPENDENT of the (much
- * slower, configurable) heartbeat write interval. The heartbeat exists for
- * liveness/staleness reporting to the crash reconciler (§7.1) and
- * legitimately only needs to be infrequent; cancellation responsiveness is a
- * different concern entirely — piggy-backing it onto a 15s+ heartbeat meant
- * a turn that naturally finishes in a few seconds (the common case for a
- * simple, tool-free turn) could settle and get WRITTEN before the flag was
- * ever observed, silently defeating cancel. Mirrors the crawler's own
- * `cancelPollTimer` precedent (`crawlerJobService.ts`, 250ms) of a tight,
- * dedicated poll rather than reusing a slower unrelated timer.
+ * How often the worker checks `cancelRequestedAt`, independent of the slower
+ * heartbeat write — a turn that finishes in a few seconds must still see a
+ * cancel (the crawler's `cancelPollTimer` precedent).
  */
 const CANCEL_POLL_INTERVAL_MS = 1_000;
 
+/** A sync reservation older than its own ceiling plus this is abandoned, not live. */
+const SYNC_RESERVATION_GRACE_MS = 60_000;
+
+const MAX_CALLBACK_URL_LENGTH = 2_048;
+const MIN_CALLBACK_SECRET_LENGTH = 16;
+const MAX_CALLBACK_SECRET_LENGTH = 256;
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
+
+// ── Ids ─────────────────────────────────────────────────────────────────
+
+/**
+ * The API hands a run out as `run_<id>` and embeds its result as
+ * `resp_<id>`; the store only knows `<id>`. Every lookup by a caller-supplied
+ * id goes through this, or polling with the id the API itself returned 404s.
+ */
+export function normalizeAgentRunId(id: string): string {
+  if (id.startsWith('run_')) return id.slice(4);
+  if (id.startsWith('resp_')) return id.slice(5);
+  return id;
+}
+
+export function publicAgentRunId(run: Pick<IAgentRun, '_id'>): string {
+  return `run_${String(run._id)}`;
+}
+
+/**
+ * An `AgentRun` as the client API (§8 status shape) and the dashboard return
+ * it — never the sealed callback secret or the caller's runtime headers.
+ */
+export function serializeAgentRun(run: IAgentRun) {
+  const toEpochSeconds = (value: Date | string | null | undefined) =>
+    (value ? Math.floor(new Date(value).getTime() / 1000) : null);
+  return {
+    id: publicAgentRunId(run),
+    object: 'agent.run' as const,
+    status: run.status,
+    agent: run.agentKey,
+    conversation_id: run.conversationId,
+    result: run.status === 'succeeded' ? run.result ?? null : null,
+    error: run.status === 'failed' || run.status === 'canceled'
+      ? { type: run.errorReason ?? 'agent_error', message: run.errorMessage ?? null }
+      : null,
+    created_at: toEpochSeconds(run.createdAt),
+    started_at: toEpochSeconds(run.startedAt),
+    completed_at: toEpochSeconds(run.completedAt),
+    cancel_requested_at: toEpochSeconds(run.cancelRequestedAt),
+    max_duration_ms: run.maxDurationMs ?? null,
+    callback: run.callbackUrl
+      ? {
+        url: run.callbackUrl,
+        status: run.callbackStatus ?? null,
+        attempts: run.callbackAttempts ?? 0,
+        signed: Boolean(run.callbackSecret),
+      }
+      : null,
+  };
+}
+
 // ── Error envelopes ─────────────────────────────────────────────────────
-// Matches the `{ error: { type, message, ... } }` shape already used by
-// `classifyAgentRunError`/guardrail blocks in `client-agents.ts` (Group G).
 
 export function agentRunConflictErrorBody() {
   return {
@@ -146,38 +212,166 @@ export function idempotencyKeyConflictErrorBody() {
   };
 }
 
-/** §12.8 — a simple per-tenant cap on simultaneous queued+running background runs. */
-export function agentRunConcurrencyLimitErrorBody(limit: number) {
+export function agentRunConcurrencyLimitErrorBody(limit: number, scope: 'tenant' | 'project' = 'tenant') {
   return {
     error: {
       type: 'rate_limit_error',
-      message: `This tenant already has ${limit} background agent run(s) queued or running, the configured limit.`,
+      message: `This ${scope} already has ${limit} background agent run(s) queued or running, the configured limit.`,
       code: 'agent_run_concurrency_limit',
     },
   };
 }
 
+export function backgroundDisabledErrorBody() {
+  return {
+    error: {
+      type: 'invalid_request_error',
+      message: 'Background execution is disabled for this agent.',
+      code: 'agent_background_disabled',
+    },
+  };
+}
+
+export function invalidRequestErrorBody(message: string, code = 'invalid_request') {
+  return { error: { type: 'invalid_request_error', message, code } };
+}
+
+export function agentRunNotFoundErrorBody() {
+  return { error: { type: 'not_found_error', message: 'Agent run not found', code: 'agent_run_not_found' } };
+}
+
 // ── §4: shared background-signal detection ──────────────────────────────
 
 /**
- * Resolution order (§4): header is canonical (invocation-shape-agnostic);
- * the body field exists so an unmodified OpenAI SDK client that already
- * knows how to set `background: true` gets the same behavior. Either
- * present and truthy → background mode. Callers resolve the header value
- * themselves (e.g. Fastify's `getHeaderValue(request, 'x-cognipeer-background')`)
- * so this stays usable from every current/future entry point without
- * depending on any one wire framework's request shape.
+ * Header is canonical; the body field exists so an unmodified OpenAI SDK
+ * client that sets `background: true` behaves the same. `defaultMode` is the
+ * agent's own choice for a call that says neither — an explicit
+ * `background: false` still wins over it.
  */
 export function isBackgroundModeRequested(
   headerValue: string | null | undefined,
   body: Record<string, unknown> | undefined,
+  defaultMode: 'sync' | 'background' = 'sync',
 ): boolean {
-  if (typeof headerValue === 'string' && /^true$/i.test(headerValue.trim())) return true;
+  if (typeof headerValue === 'string') {
+    const value = headerValue.trim();
+    if (/^true$/i.test(value)) return true;
+    if (/^false$/i.test(value)) return false;
+  }
   if (body?.background === true) return true;
-  return false;
+  if (body?.background === false) return false;
+  return defaultMode === 'background';
 }
 
-// ── §5: synchronous ceiling ───────────────────────────────────────────────
+// ── Effective limits ────────────────────────────────────────────────────
+
+export interface EffectiveAgentExecutionLimits {
+  syncTimeoutMs: number;
+  backgroundEnabled: boolean;
+  backgroundMaxDurationMs: number;
+  defaultMode: 'sync' | 'background';
+  /** 0 = no cap. */
+  maxConcurrentRunsPerTenant: number;
+  maxConcurrentRunsPerProject: number;
+}
+
+function positiveMin(...values: Array<number | undefined | null>): number | undefined {
+  const usable = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+  return usable.length > 0 ? Math.min(...usable) : undefined;
+}
+
+/**
+ * min(env ceiling, tenant quota, agent setting) for every execution knob.
+ * The env value is the hard ceiling nothing can raise; a quota or agent
+ * setting of 0/unset means "no tighter bound here".
+ */
+export async function resolveAgentExecutionLimits(input: {
+  agentConfig?: IAgentConfig | null;
+  quotaContext?: Omit<QuotaContext, 'domain'> | null;
+}): Promise<EffectiveAgentExecutionLimits> {
+  const env = getConfig().agent;
+  let quotas: { maxAgentSyncTimeoutSeconds?: number; maxAgentBackgroundDurationMinutes?: number; maxConcurrentAgentRuns?: number } = {};
+  if (input.quotaContext) {
+    try {
+      const limits = await resolveEffectiveLimits({ ...input.quotaContext, domain: 'global' });
+      quotas = limits.quotas ?? {};
+    } catch (error) {
+      logger.warn('Could not resolve tenant quota for agent execution limits; using env ceilings', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const execution = input.agentConfig?.execution;
+  const secondsToMs = (s?: number) => (typeof s === 'number' ? s * 1000 : undefined);
+  const minutesToMs = (m?: number) => (typeof m === 'number' ? m * 60_000 : undefined);
+  return {
+    syncTimeoutMs: positiveMin(env.syncTimeoutMs, secondsToMs(quotas.maxAgentSyncTimeoutSeconds), secondsToMs(execution?.syncTimeoutSeconds))
+      ?? env.syncTimeoutMs,
+    backgroundEnabled: execution?.backgroundEnabled !== false,
+    backgroundMaxDurationMs: positiveMin(
+      env.backgroundMaxDurationMs,
+      minutesToMs(quotas.maxAgentBackgroundDurationMinutes),
+      minutesToMs(execution?.backgroundMaxDurationMinutes),
+    ) ?? env.backgroundMaxDurationMs,
+    defaultMode: execution?.defaultMode === 'background' && execution?.backgroundEnabled !== false ? 'background' : 'sync',
+    maxConcurrentRunsPerTenant: positiveMin(env.backgroundMaxConcurrentRunsPerTenant, quotas.maxConcurrentAgentRuns) ?? 0,
+    maxConcurrentRunsPerProject: env.backgroundMaxConcurrentRunsPerProject,
+  };
+}
+
+// ── Callback validation ─────────────────────────────────────────────────
+
+/**
+ * Submit-time check of a caller's callback: http(s), bounded, and resolving
+ * to a public address — rejected with 400 now rather than accepted with 202
+ * and silently failing (or worse, reaching an internal service) later.
+ * Delivery re-checks through `safeFetch` (DNS pinning, per-hop checks), so a
+ * name that is public now and rebinds later is still refused.
+ */
+export async function validateCallbackRequest(
+  url: unknown,
+  secret: unknown,
+): Promise<{ ok: true; url?: string; secret?: string } | { ok: false; message: string }> {
+  if (url === undefined || url === null || url === '') {
+    if (secret !== undefined && secret !== null && secret !== '') {
+      return { ok: false, message: 'callback_secret requires callback_url' };
+    }
+    return { ok: true };
+  }
+  if (typeof url !== 'string' || url.length > MAX_CALLBACK_URL_LENGTH) {
+    return { ok: false, message: `callback_url must be a string of at most ${MAX_CALLBACK_URL_LENGTH} characters` };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, message: 'callback_url is not a valid URL' };
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return { ok: false, message: 'callback_url must use http or https' };
+  }
+  try {
+    await assertPublicUrl(url);
+  } catch {
+    return { ok: false, message: 'callback_url must resolve to a public address' };
+  }
+  if (secret !== undefined && secret !== null && secret !== '') {
+    if (typeof secret !== 'string' || secret.length < MIN_CALLBACK_SECRET_LENGTH || secret.length > MAX_CALLBACK_SECRET_LENGTH) {
+      return { ok: false, message: `callback_secret must be ${MIN_CALLBACK_SECRET_LENGTH}–${MAX_CALLBACK_SECRET_LENGTH} characters` };
+    }
+    return { ok: true, url, secret };
+  }
+  return { ok: true, url };
+}
+
+/** The agent's own default callback (Build → Execution), with its sealed secret opened. */
+export function agentDefaultCallback(agentConfig?: IAgentConfig | null): { url?: string; secret?: string } {
+  const execution = agentConfig?.execution;
+  if (!execution?.callbackUrl) return {};
+  return { url: execution.callbackUrl, secret: openAgentCallbackSecret(execution) };
+}
+
+// ── §5: synchronous ceiling + conversation reservation ──────────────────
 
 export type SyncRunOutcome =
   | { kind: 'ok'; response: AgentChatResponse }
@@ -186,87 +380,144 @@ export type SyncRunOutcome =
 
 export interface RunSyncAgentTurnInput {
   request: AgentChatRequest;
+  /** Effective ceiling (`resolveAgentExecutionLimits`); defaults to the env value. */
+  syncTimeoutMs?: number;
 }
 
 /**
- * Runs a turn inline, enforced with a hard wall-clock ceiling (§5).
- *
- * - Atomically reserves the single-active-run slot for this conversation
- *   first (§12.14) — a `mode: 'sync'` row, `status: 'running'`, deleted
- *   unconditionally on every exit path below (§6).
- * - Races `executeAgentChat` against the deadline (§12.13) rather than
- *   awaiting it — the deadline timer winning does NOT wait for the
- *   turn to actually stop; `executeAgentChatLocal`'s own
- *   `cancellationCell` guard (§12.12, Group B) is what keeps a late
- *   result from being persisted once that happens.
+ * Reserve the conversation's single active-run slot with a `mode: 'sync'`
+ * row. Returns `null` when a run (sync or background) already holds it.
+ * `release` is idempotent.
  */
-export async function runSyncAgentTurn(input: RunSyncAgentTurnInput): Promise<SyncRunOutcome> {
-  const { request } = input;
-  return runWithTenantDb(request.tenantDbName, async (db) => {
-    const cfg = getConfig();
-    const deadlineAt = Date.now() + cfg.agent.syncTimeoutMs;
-
-    let reservation: IAgentRun;
-    try {
-      reservation = await db.createAgentRun({
-        mode: 'sync',
-        tenantId: request.tenantId,
-        tenantDbName: request.tenantDbName,
-        projectId: request.projectId,
-        agentKey: request.agentKey,
-        conversationId: request.conversationId,
-        userMessage: request.userMessage,
-        status: 'running',
-        startedAt: new Date(),
-        heartbeatAt: new Date(),
-        callbackAttempts: 0,
-        userId: request.userId,
-      });
-    } catch (error) {
-      if (error instanceof AgentRunConflictError) return { kind: 'conflict' };
-      throw error;
-    }
-
-    const cancellationCell: AgentRunCancellationCell = { deadlineAt, cancelled: false };
-    const requestWithCell: AgentChatRequest = { ...request, cancellationCell };
-
-    try {
-      const invokePromise = executeAgentChat(requestWithCell);
-      // Attach a rejection handler immediately and unconditionally — if the
-      // deadline wins the race below, this promise keeps running server-side
-      // (Node cannot cancel it) and an eventual rejection must never become an
-      // unhandled rejection. `executeAgentChatLocal`'s own guard (Group B) has
-      // already ensured its SETTLED value (success or failure) is never
-      // persisted once `deadlineAt` has passed, regardless of this handler.
-      invokePromise.catch((error) => {
-        logger.warn('Abandoned synchronous agent turn settled after the sync ceiling had already timed it out', {
-          conversationId: request.conversationId,
-          agentKey: request.agentKey,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-
-      const remainingMs = deadlineAt - Date.now();
-      const raced = await Promise.race([
-        invokePromise,
-        delaySentinel(remainingMs, TIMEOUT_SENTINEL),
-      ]);
-      if (raced === TIMEOUT_SENTINEL) {
-        return { kind: 'timeout' };
-      }
-      return { kind: 'ok', response: raced as AgentChatResponse };
-    } finally {
-      // Unconditional, on every exit path (success, timeout, thrown error) —
-      // a `mode: 'sync'` row is a reservation slot, never a terminal record
-      // (§6). Freed immediately so a caller is never blocked behind their own
-      // just-terminated call.
+export async function reserveConversationForSyncTurn(
+  db: DatabaseProvider,
+  request: Pick<AgentChatRequest, 'tenantId' | 'tenantDbName' | 'projectId' | 'agentKey' | 'conversationId' | 'userMessage' | 'userId'>,
+): Promise<{ run: IAgentRun; release: () => Promise<void> } | null> {
+  let reservation: IAgentRun;
+  try {
+    reservation = await db.createAgentRun({
+      mode: 'sync',
+      tenantId: request.tenantId,
+      tenantDbName: request.tenantDbName,
+      projectId: request.projectId,
+      agentKey: request.agentKey,
+      conversationId: request.conversationId,
+      userMessage: request.userMessage,
+      status: 'running',
+      startedAt: new Date(),
+      heartbeatAt: new Date(),
+      callbackAttempts: 0,
+      userId: request.userId,
+    });
+  } catch (error) {
+    if (error instanceof AgentRunConflictError) return null;
+    throw error;
+  }
+  let released = false;
+  return {
+    run: reservation,
+    release: async () => {
+      if (released) return;
+      released = true;
       await db.deleteAgentRun(String(reservation._id)).catch((error) => {
         logger.warn('Failed to delete sync AgentRun reservation row', {
           runId: reservation._id,
           error: error instanceof Error ? error.message : String(error),
         });
       });
+    },
+  };
+}
+
+/**
+ * Hold the conversation's slot for the whole of `fn` — for entry points that
+ * run a turn on an EXISTING conversation outside `runSyncAgentTurn` (OpenAI
+ * bridge, A2A, Assistants, the dashboard chat). Without it those turns could
+ * overlap a background run on the same conversation and one would overwrite
+ * the other's history.
+ */
+export async function withConversationReservation<T>(
+  request: Pick<AgentChatRequest, 'tenantId' | 'tenantDbName' | 'projectId' | 'agentKey' | 'conversationId' | 'userMessage' | 'userId'>,
+  fn: () => Promise<T>,
+): Promise<{ kind: 'ok'; value: T } | { kind: 'conflict' }> {
+  const db = await getDatabase();
+  const reservation = await reserveConversationForSyncTurn(db, request);
+  if (!reservation) return { kind: 'conflict' };
+  try {
+    return { kind: 'ok', value: await fn() };
+  } finally {
+    await reservation.release();
+  }
+}
+
+/**
+ * `executeAgentChat` holding the conversation's slot for the whole turn;
+ * throws `AgentRunConflictError` (→ 409 via `classifyAgentRunError`) when
+ * another run holds it. For entry points outside the /responses ceiling.
+ */
+export async function executeAgentChatExclusive(request: AgentChatRequest): Promise<AgentChatResponse> {
+  const outcome = await withConversationReservation(request, () => executeAgentChat(request));
+  if (outcome.kind === 'conflict') throw new AgentRunConflictError(request.conversationId);
+  return outcome.value;
+}
+
+/**
+ * Runs a turn inline with a hard wall-clock ceiling (§5).
+ *
+ * - Reserves the conversation first (§12.14).
+ * - Races the turn against the deadline (§12.13). When the deadline wins the
+ *   caller gets 504 at once, but the reservation is held until the abandoned
+ *   turn actually settles: freeing it earlier let the next request start a
+ *   turn on the same conversation while the old one's tools were still
+ *   running. The cancellation cell (deadlineAt) keeps the late result from
+ *   being persisted and aborts the SDK loop at its next step.
+ */
+export async function runSyncAgentTurn(input: RunSyncAgentTurnInput): Promise<SyncRunOutcome> {
+  const { request } = input;
+  return runWithTenantDb(request.tenantDbName, async (db) => {
+    const syncTimeoutMs = input.syncTimeoutMs ?? getConfig().agent.syncTimeoutMs;
+    const deadlineAt = Date.now() + syncTimeoutMs;
+
+    const reservation = await reserveConversationForSyncTurn(db, request);
+    if (!reservation) return { kind: 'conflict' };
+
+    const cancellationCell: AgentRunCancellationCell = { deadlineAt, cancelled: false };
+    const requestWithCell: AgentChatRequest = { ...request, cancellationCell };
+
+    let invokePromise: Promise<AgentChatResponse>;
+    try {
+      invokePromise = executeAgentChat(requestWithCell);
+    } catch (error) {
+      await reservation.release();
+      throw error;
     }
+    const settled = invokePromise.then(() => undefined, (error) => {
+      logger.warn('Synchronous agent turn failed or was abandoned after its ceiling', {
+        conversationId: request.conversationId,
+        agentKey: request.agentKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+
+    const timer = delaySentinel(deadlineAt - Date.now(), TIMEOUT_SENTINEL);
+    let raced: AgentChatResponse | typeof TIMEOUT_SENTINEL;
+    try {
+      raced = await Promise.race([invokePromise, timer.promise]);
+    } catch (error) {
+      timer.clear();
+      await reservation.release();
+      throw error;
+    }
+    timer.clear();
+
+    if (raced === TIMEOUT_SENTINEL) {
+      cancellationCell.cancelled = true;
+      // Released when the abandoned turn really stops — see the doc above.
+      void settled.finally(() => reservation.release());
+      return { kind: 'timeout' };
+    }
+    await reservation.release();
+    return { kind: 'ok', response: raced as AgentChatResponse };
   });
 }
 
@@ -285,20 +536,18 @@ export interface CreateBackgroundAgentRunInput {
   runtimeContext?: AgentRuntimeContext;
   apiTokenId?: string;
   callbackUrl?: string;
+  /** Plaintext; sealed before it is stored. */
+  callbackSecret?: string;
   /** §9/§12.15 — background-mode-only; a caller-supplied `Idempotency-Key` header. */
   idempotencyKey?: string;
   /**
-   * The conversationId to fold into the idempotency comparison hash, or
-   * `null` when `conversationId` above is a BRAND NEW conversation created
-   * fresh for this specific attempt (no `previous_response_id` supplied).
-   * A caller retrying "start a new conversation" gets a different, fresh
-   * `conversationId` every attempt — hashing that would make the exact same
-   * logical retry never match itself. Only set this to the real
-   * conversationId when the caller explicitly continued an EXISTING
-   * conversation, so a genuine retry (same key, same existing conversation,
-   * same message) still compares correctly.
+   * The conversationId folded into the idempotency hash, or `null` when the
+   * run starts a brand-new conversation (a fresh id per attempt would make a
+   * retry never match itself).
    */
   idempotencyConversationScope?: string | null;
+  /** From `resolveAgentExecutionLimits`; default = env. */
+  limits?: Pick<EffectiveAgentExecutionLimits, 'backgroundMaxDurationMs' | 'maxConcurrentRunsPerTenant' | 'maxConcurrentRunsPerProject'>;
 }
 
 export type CreateBackgroundAgentRunOutcome =
@@ -306,22 +555,15 @@ export type CreateBackgroundAgentRunOutcome =
   | { kind: 'idempotent_replay'; run: IAgentRun }
   | { kind: 'idempotency_conflict' }
   | { kind: 'conflict' }
-  | { kind: 'concurrency_limit'; limit: number };
+  | { kind: 'concurrency_limit'; limit: number; scope: 'tenant' | 'project' };
 
-/** Queue job payload for a background run — the worker loads everything else off the AgentRun row (§7 step 2). */
+/** Queue job payload for a background run — the worker loads everything else off the AgentRun row. */
 interface AgentRunJobPayload extends QueuePayload {
   runId: string;
   tenantId: string;
   tenantDbName: string;
 }
 
-/**
- * §12.15's comparison key: same `Idempotency-Key` + same request body (this
- * hash) replays the existing run; same key + a DIFFERENT body is a genuine
- * conflict, not silently resolved either way. `conversationScope` is
- * deliberately NOT the raw, possibly-freshly-minted `conversationId` — see
- * `CreateBackgroundAgentRunInput.idempotencyConversationScope`.
- */
 function idempotencyRequestHash(input: {
   agentKey: string;
   conversationScope: string | null;
@@ -338,23 +580,75 @@ function idempotencyRequestHash(input: {
 }
 
 /**
- * Creates the `AgentRun` reservation (atomic insert, §12.14) and hands the
- * turn to the queue as a fire-and-forget job (§7 steps 1-2). A losing
- * request never creates a row and never reaches the queue — there is no
- * "stuck in queued forever" state (§12.14).
+ * Header values in a runtime context are downstream credentials (bearer
+ * tokens for tools/MCP) and must never sit in the store in plaintext
+ * (runtimeContext.ts: "never logged or persisted"). The worker needs them,
+ * so the row keeps them sealed and the finalize step erases them.
+ */
+function sealRuntimeContext(context: AgentRuntimeContext | undefined): Record<string, unknown> | null {
+  if (!context) return null;
+  return { sealed: encryptObject(context) };
+}
+
+function openRuntimeContext(stored: Record<string, unknown> | null | undefined): AgentRuntimeContext | undefined {
+  if (!stored) return undefined;
+  if (typeof stored.sealed === 'string') {
+    try {
+      return decryptObject<AgentRuntimeContext>(stored.sealed);
+    } catch {
+      return undefined;
+    }
+  }
+  // Rows written before sealing existed.
+  return stored as AgentRuntimeContext;
+}
+
+/**
+ * Replay/conflict check for an `Idempotency-Key` BEFORE the caller creates a
+ * conversation — otherwise every retry of "start a new conversation" leaves
+ * an orphan conversation behind even though the run itself is replayed.
+ */
+export async function lookupIdempotentAgentRun(input: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  userMessage: string;
+  version?: number;
+  idempotencyKey: string;
+  idempotencyConversationScope: string | null;
+}): Promise<{ kind: 'replay'; run: IAgentRun } | { kind: 'conflict' } | { kind: 'none' }> {
+  const db = await withTenantDb(input.tenantDbName);
+  const existing = await db.getAgentRunByIdempotencyKey(input.tenantId, input.projectId, input.idempotencyKey);
+  if (!existing) return { kind: 'none' };
+  const hash = idempotencyRequestHash({
+    agentKey: input.agentKey,
+    conversationScope: input.idempotencyConversationScope,
+    userMessage: input.userMessage,
+    version: input.version,
+  });
+  return existing.idempotencyRequestHash === hash ? { kind: 'replay', run: existing } : { kind: 'conflict' };
+}
+
+/**
+ * Creates the `AgentRun` (atomic, §12.14) and queues it.
  *
- * Order of checks, each a distinct v1-minimum-bar concern (§11):
- *  1. Idempotency-Key replay/conflict (§12.15) — resolved BEFORE the
- *     concurrency cap and the single-active-run insert, since a replay of
- *     an already-accepted request must not be newly rejected by either.
- *  2. Concurrency cap (§12.8) — a simple per-tenant count check.
- *  3. The atomic single-active-run insert itself (§12.14).
+ * Order: idempotency (a replay must never be newly rejected by the other
+ * checks) → the insert itself (conversation lock + unique idempotency key) →
+ * concurrency caps, checked AFTER the insert against the real count so a
+ * burst of parallel requests cannot all pass a read-then-write check; the
+ * row that tips a cap over is deleted again and reported as 429.
  */
 export async function createBackgroundAgentRun(
   input: CreateBackgroundAgentRunInput,
 ): Promise<CreateBackgroundAgentRunOutcome> {
   const db = await withTenantDb(input.tenantDbName);
   const cfg = getConfig();
+  const limits = input.limits ?? {
+    backgroundMaxDurationMs: cfg.agent.backgroundMaxDurationMs,
+    maxConcurrentRunsPerTenant: cfg.agent.backgroundMaxConcurrentRunsPerTenant,
+    maxConcurrentRunsPerProject: cfg.agent.backgroundMaxConcurrentRunsPerProject,
+  };
   const requestHash = idempotencyRequestHash({
     agentKey: input.agentKey,
     conversationScope: input.idempotencyConversationScope ?? null,
@@ -362,24 +656,17 @@ export async function createBackgroundAgentRun(
     version: input.version,
   });
 
-  if (input.idempotencyKey) {
-    const existing = await db.getAgentRunByIdempotencyKey(
-      input.tenantId,
-      input.projectId,
-      input.idempotencyKey,
-    );
-    if (existing) {
-      if (existing.idempotencyRequestHash === requestHash) {
-        return { kind: 'idempotent_replay', run: existing };
-      }
-      return { kind: 'idempotency_conflict' };
-    }
-  }
+  const resolveIdempotencyClash = async (): Promise<CreateBackgroundAgentRunOutcome> => {
+    const existing = input.idempotencyKey
+      ? await db.getAgentRunByIdempotencyKey(input.tenantId, input.projectId, input.idempotencyKey)
+      : null;
+    if (existing && existing.idempotencyRequestHash === requestHash) return { kind: 'idempotent_replay', run: existing };
+    return { kind: 'idempotency_conflict' };
+  };
 
-  const activeCount = await db.countActiveAgentRuns(input.tenantId);
-  const limit = cfg.agent.backgroundMaxConcurrentRunsPerTenant;
-  if (limit > 0 && activeCount >= limit) {
-    return { kind: 'concurrency_limit', limit };
+  if (input.idempotencyKey) {
+    const existing = await db.getAgentRunByIdempotencyKey(input.tenantId, input.projectId, input.idempotencyKey);
+    if (existing) return resolveIdempotencyClash();
   }
 
   const expiresAt = new Date(Date.now() + cfg.agent.runRetentionDays * 86_400_000);
@@ -396,38 +683,57 @@ export async function createBackgroundAgentRun(
       userMessage: input.userMessage,
       version: input.version ?? null,
       usePublished: input.usePublished,
-      runtimeContext: (input.runtimeContext as Record<string, unknown> | undefined) ?? null,
+      runtimeContext: sealRuntimeContext(input.runtimeContext),
       status: 'queued',
       idempotencyKey: input.idempotencyKey ?? null,
       idempotencyRequestHash: input.idempotencyKey ? requestHash : null,
       callbackUrl: input.callbackUrl ?? null,
+      callbackSecret: input.callbackSecret ? encryptObject(input.callbackSecret) : null,
       callbackStatus: input.callbackUrl ? 'pending' : null,
       callbackAttempts: 0,
+      maxDurationMs: limits.backgroundMaxDurationMs,
       userId: input.userId,
       apiTokenId: input.apiTokenId,
       actorType: 'api_token',
       expiresAt,
     });
   } catch (error) {
+    if (error instanceof AgentRunIdempotencyKeyTakenError) return resolveIdempotencyClash();
     if (error instanceof AgentRunConflictError) return { kind: 'conflict' };
     throw error;
   }
 
-  const queue = await getQueue();
-  const payload: AgentRunJobPayload = {
-    runId: String(run._id),
-    tenantId: input.tenantId,
-    tenantDbName: input.tenantDbName,
+  const overCap = async (): Promise<{ limit: number; scope: 'tenant' | 'project' } | null> => {
+    if (limits.maxConcurrentRunsPerTenant > 0) {
+      const active = await db.countActiveAgentRuns(input.tenantId, undefined, 'background');
+      if (active > limits.maxConcurrentRunsPerTenant) return { limit: limits.maxConcurrentRunsPerTenant, scope: 'tenant' };
+    }
+    if (limits.maxConcurrentRunsPerProject > 0) {
+      const active = await db.countActiveAgentRuns(input.tenantId, input.projectId, 'background');
+      if (active > limits.maxConcurrentRunsPerProject) return { limit: limits.maxConcurrentRunsPerProject, scope: 'project' };
+    }
+    return null;
   };
-  await queue.publish(queueNameFor('agent'), 'run', payload, { attempts: 1 });
+  const cap = await overCap();
+  if (cap) {
+    await db.deleteAgentRun(String(run._id)).catch(() => undefined);
+    return { kind: 'concurrency_limit', ...cap };
+  }
 
-  // §12.10 — best-effort, non-blocking; each row already carries its own
-  // `expiresAt` set above, so this is simply "delete anything already past
-  // its own expiry", the same write-path trigger `cleanupAgentTracingRetention`
-  // uses in client-tracing.ts.
-  fireAndForget('agent-run-retention-cleanup', async () => {
-    await db.cleanupAgentRunRetention({ projectId: input.projectId, olderThan: new Date() });
-  });
+  try {
+    const queue = await getQueue();
+    const payload: AgentRunJobPayload = {
+      runId: String(run._id),
+      tenantId: input.tenantId,
+      tenantDbName: input.tenantDbName,
+    };
+    await queue.publish(AGENT_RUN_QUEUE, 'run', payload, { attempts: 1 });
+  } catch (error) {
+    // Nothing will ever pick this row up — free the conversation instead of
+    // leaving it locked until a reconciler notices.
+    await db.deleteAgentRun(String(run._id)).catch(() => undefined);
+    throw error;
+  }
 
   return { kind: 'created', run };
 }
@@ -439,7 +745,15 @@ export async function getAgentRunStatus(
   runId: string,
 ): Promise<IAgentRun | null> {
   const db = await withTenantDb(tenantDbName);
-  return db.getAgentRunById(runId, tenantId, projectId);
+  return db.getAgentRunById(normalizeAgentRunId(runId), tenantId, projectId);
+}
+
+export async function listAgentRuns(
+  tenantDbName: string,
+  filter: Parameters<DatabaseProvider['listAgentRuns']>[0],
+): Promise<IAgentRun[]> {
+  const db = await withTenantDb(tenantDbName);
+  return db.listAgentRuns(filter);
 }
 
 export type RequestAgentRunCancellationOutcome =
@@ -448,28 +762,30 @@ export type RequestAgentRunCancellationOutcome =
   | { kind: 'accepted'; run: IAgentRun };
 
 /**
- * §12.11's scoping check first (a run belonging to a different tenant or
- * project never even reaches the cancel-request write), THEN distinguishes
- * "no such run" (404) from "found, but already in a terminal state" (409) —
- * two different callers' mistakes, not one collapsed error.
+ * Scoped lookup first, then "no such run" (404) vs "already terminal" (409).
+ * A run canceled while still queued never reaches a worker, so its callback
+ * is fired here.
  */
 export async function requestAgentRunCancellation(
   tenantDbName: string,
   tenantId: string,
   projectId: string,
-  runId: string,
+  runIdInput: string,
 ): Promise<RequestAgentRunCancellationOutcome> {
+  const runId = normalizeAgentRunId(runIdInput);
   const db = await withTenantDb(tenantDbName);
   const owned = await db.getAgentRunById(runId, tenantId, projectId);
-  if (!owned) return { kind: 'not_found' };
+  if (!owned || owned.mode !== 'background') return { kind: 'not_found' };
   if (owned.status !== 'queued' && owned.status !== 'running') {
     return { kind: 'already_terminal', run: owned };
   }
   const result = await db.requestAgentRunCancel(runId, tenantId, projectId);
-  // Only reachable if a concurrent finalize raced this exact call between
-  // the status check above and the CAS write — vanishingly narrow, but
-  // still "already terminal" from this caller's point of view, not "gone".
   if (!result) return { kind: 'already_terminal', run: owned };
+  if (result.status === 'canceled') {
+    await fireAgentRunCallback(result, 'canceled', {}).catch((error) => {
+      logger.warn('Could not queue the canceled callback', { runId, error: error instanceof Error ? error.message : String(error) });
+    });
+  }
   return { kind: 'accepted', run: result };
 }
 
@@ -484,18 +800,43 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     userId: run.userId ?? '',
     version: run.version ?? undefined,
     usePublished: run.usePublished,
-    runtimeContext: (run.runtimeContext as AgentRuntimeContext | null) ?? undefined,
+    runtimeContext: openRuntimeContext(run.runtimeContext),
     cancellationCell,
   };
 }
 
 /**
- * §7 steps 3-8: claim, race against `AGENT_BACKGROUND_MAX_DURATION_MS`,
- * heartbeat (liveness) + a separate tight cancel poll, finalize, notify.
- *
- * Called by the queue consumer with only `{ runId, tenantId, tenantDbName }`
- * — everything else (agent, conversation, message, runtime context) is
- * loaded from the `AgentRun` row itself (§7 step 2).
+ * The submit-time checks, repeated when the worker picks the run up: a run
+ * queued before its agent was disabled or its token revoked must not still
+ * execute on the strength of a check that is no longer true.
+ */
+async function preconditionFailure(db: DatabaseProvider, run: IAgentRun): Promise<string | null> {
+  const agent = await db.findAgentByKey(run.agentKey, run.projectId);
+  if (!agent) return 'The agent no longer exists.';
+  if (agent.status !== 'active') return 'The agent is not active.';
+  if (run.apiTokenId) {
+    const tokens = await db.listProjectApiTokens(run.tenantId, run.projectId).catch(() => null);
+    if (tokens) {
+      const token = tokens.find((t) => String(t._id) === run.apiTokenId);
+      if (!token) return 'The API token that started this run was revoked.';
+      if (token.expiresAt && new Date(token.expiresAt).getTime() < Date.now()) return 'The API token that started this run has expired.';
+    }
+  }
+  return null;
+}
+
+/** Client-facing text for a failed run: classified errors keep their message, anything else is generic. */
+function publicFailureMessage(error: unknown): string {
+  const classified = classifyAgentRunError(error);
+  const internal = classified.error.type === 'api_error' || classified.error.type === 'server_error' || classified.status >= 500;
+  return internal ? 'The agent run failed. See the run trace for details.' : classified.error.message;
+}
+
+/**
+ * §7 steps 3-8: claim, race against the run's ceiling, heartbeat (liveness)
+ * + a separate tight cancel poll, finalize, notify. Every exit path stops the
+ * timers and finalizes exactly once; an `invoke()` rejection is a finalized
+ * `failed` run, never an escaped exception that leaves the row `running`.
  */
 export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<void> {
   const { runId, tenantId, tenantDbName } = payload;
@@ -504,9 +845,6 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
     const workerId = getThisNodeName();
     const startedAt = new Date();
 
-    // Atomic queued -> running CAS (§7 step 4). A redelivered/duplicate queue
-    // message must never double-execute the same run and repeat its tool
-    // side effects.
     const claimed = await db.claimAgentRun(runId, tenantId, workerId, startedAt);
     if (!claimed) {
       logger.info('Agent run already claimed or not queued; skipping duplicate delivery', { runId });
@@ -514,44 +852,77 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
     }
     logger.info('Agent run started', { runId, agentKey: claimed.agentKey, conversationId: claimed.conversationId });
 
-    const cancellationCell: AgentRunCancellationCell = { cancelled: false };
-    // Resolved the instant a cancel request is OBSERVED (via the tight
-    // cancel-poll timer below) so the race further down can finalize
-    // immediately — NOT wait for `invoke()` to naturally settle or for the
-    // (up to 30-minute) max-duration deadline. Cancellation only stops the
-    // SDK's own loop between steps (§12.2) — it does not interrupt an
-    // in-flight call — but the RUN's own recorded status must not depend on
-    // that call ever returning: the same "race, don't await" principle
-    // §12.13 already applies to the deadline applies here too.
+    const finalize = async (
+      data: Parameters<DatabaseProvider['finalizeAgentRun']>[2],
+      event: 'succeeded' | 'failed' | 'canceled',
+      callbackData: Record<string, unknown>,
+    ) => {
+      // The sealed caller headers are only needed while the turn runs.
+      const finalized = await db.finalizeAgentRun(runId, tenantId, { ...data, runtimeContext: null });
+      if (finalized) {
+        await fireAgentRunCallback(finalized, event, callbackData).catch((error) => {
+          logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+        });
+      }
+      return finalized;
+    };
+
+    const blocked = await preconditionFailure(db, claimed).catch(() => null);
+    if (blocked) {
+      await finalize({
+        status: 'failed',
+        errorReason: 'precondition_failed' as AgentRunErrorReason,
+        errorMessage: blocked,
+        completedAt: new Date(),
+      }, 'failed', { errorReason: 'precondition_failed', message: blocked });
+      return;
+    }
+
+    const maxDurationMs = claimed.maxDurationMs && claimed.maxDurationMs > 0
+      ? Math.min(claimed.maxDurationMs, cfg.agent.backgroundMaxDurationMs)
+      : cfg.agent.backgroundMaxDurationMs;
+    const deadlineAt = Date.now() + maxDurationMs;
+    // deadlineAt makes the turn itself stop at the ceiling (SDK timeout +
+    // no conversation write), not just the run record.
+    const cancellationCell: AgentRunCancellationCell = { cancelled: false, deadlineAt };
+
     let resolveCancelObserved: (() => void) | undefined;
     const cancelObservedPromise = new Promise<typeof CANCEL_SENTINEL>((resolve) => {
       resolveCancelObserved = () => resolve(CANCEL_SENTINEL);
     });
+    const markSuperseded = () => {
+      if (cancellationCell.cancelled) return;
+      cancellationCell.cancelled = true;
+      resolveCancelObserved?.();
+    };
 
-    let heartbeatStopped = false;
     const heartbeatTimer = setInterval(() => {
-      void db.updateAgentRunHeartbeat(runId, workerId, new Date()).catch((error) => {
-        logger.warn('Agent run heartbeat update failed', {
-          runId,
-          error: error instanceof Error ? error.message : String(error),
+      void db.updateAgentRunHeartbeat(runId, workerId, new Date())
+        .then((updated) => {
+          // Null = the row is no longer ours and running (the reconciler
+          // failed it as worker_lost, or it was finalized elsewhere). Stop
+          // the turn instead of letting it write a result nobody will record.
+          if (!updated) {
+            logger.warn('Agent run is no longer owned by this worker; stopping the turn', { runId });
+            markSuperseded();
+          }
+        })
+        .catch((error) => {
+          logger.warn('Agent run heartbeat update failed', {
+            runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         });
-      });
     }, cfg.agent.runHeartbeatIntervalMs);
     heartbeatTimer.unref?.();
 
-    // Cross-node cancellation: a cancel request may have been recorded by a
-    // different node than the one running this job (§7 step 6) — checked on
-    // its OWN tight cadence (§ note on `CANCEL_POLL_INTERVAL_MS` above),
-    // deliberately not the heartbeat's slower one.
-    let cancelPollStopped = false;
     const cancelPollTimer = setInterval(() => {
       void (async () => {
         try {
           const current = await db.getAgentRunById(runId, tenantId, claimed.projectId);
           if (current?.cancelRequestedAt && !cancellationCell.cancelled) {
-            logger.info('Cancel request observed; finalizing without waiting for invoke() or the max-duration deadline', { runId });
-            cancellationCell.cancelled = true;
-            resolveCancelObserved?.();
+            logger.info('Cancel request observed; finalizing without waiting for invoke()', { runId });
+            markSuperseded();
           }
         } catch (error) {
           logger.warn('Agent run cancel poll failed', {
@@ -563,133 +934,98 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
     }, CANCEL_POLL_INTERVAL_MS);
     cancelPollTimer.unref?.();
 
-    const stopHeartbeat = () => {
-      if (heartbeatStopped) return;
-      heartbeatStopped = true;
-      clearInterval(heartbeatTimer);
-    };
-    const stopCancelPoll = () => {
-      if (cancelPollStopped) return;
-      cancelPollStopped = true;
-      clearInterval(cancelPollTimer);
-    };
+    const deadlineTimer = delaySentinel(deadlineAt - Date.now(), TIMEOUT_SENTINEL);
     const stopAllTimers = () => {
-      stopHeartbeat();
-      stopCancelPoll();
+      clearInterval(heartbeatTimer);
+      clearInterval(cancelPollTimer);
+      deadlineTimer.clear();
     };
-
-    const request = buildRequestFromRun(claimed, cancellationCell);
-    const deadlineAt = Date.now() + cfg.agent.backgroundMaxDurationMs;
-
-    const invokePromise = executeAgentChatLocal(request);
-    invokePromise.catch((error) => {
-      logger.warn('Abandoned background agent turn settled after the max-duration ceiling had already timed it out', {
-        runId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-
-    const raced = await Promise.race([
-      invokePromise,
-      delaySentinel(Math.max(0, deadlineAt - Date.now()), TIMEOUT_SENTINEL),
-      cancelObservedPromise,
-    ]);
-
-    if (raced === CANCEL_SENTINEL) {
-      // §12.12: finalize as canceled WITHOUT waiting for the abandoned
-      // `invoke()` call — its eventual result (success or failure) is
-      // discarded regardless (the cancellationCell guard inside
-      // `executeAgentChatLocal` already skips the conversation write).
-      stopAllTimers();
-      const finalized = await db.finalizeAgentRun(runId, tenantId, {
-        status: 'canceled',
-        errorReason: 'canceled_by_caller' as AgentRunErrorReason,
-        completedAt: new Date(),
-      });
-      if (finalized) {
-        await fireAgentRunCallback(finalized, 'canceled', {});
-      }
-      return;
-    }
-
-    if (raced === TIMEOUT_SENTINEL) {
-      // Stop the heartbeat immediately so the reconciler does not separately
-      // fail this run later as `worker_lost` once its heartbeat goes stale —
-      // one run, one terminal cause (§7 step 5, §12.13).
-      stopAllTimers();
-      const finalized = await db.finalizeAgentRun(runId, tenantId, {
-        status: 'failed',
-        errorReason: 'max_duration_exceeded' as AgentRunErrorReason,
-        errorMessage: 'The background run exceeded AGENT_BACKGROUND_MAX_DURATION_MS and was terminated.',
-        completedAt: new Date(),
-      });
-      if (finalized) {
-        await fireAgentRunCallback(finalized, 'failed', { errorReason: 'max_duration_exceeded' });
-      }
-      return;
-    }
-
-    stopAllTimers();
-
-    // §12.12: a cancel recorded in the same tick invoke() resolved wins
-    // regardless of whether `invoke()` itself ended up resolving cleanly or
-    // throwing — "canceled" is the honest outcome, not "succeeded" just
-    // because the call happened to finish before the race above noticed
-    // (belt-and-suspenders backstop; the CANCEL_SENTINEL branch above is
-    // what normally catches this).
-    if (cancellationCell.cancelled) {
-      const finalized = await db.finalizeAgentRun(runId, tenantId, {
-        status: 'canceled',
-        errorReason: 'canceled_by_caller' as AgentRunErrorReason,
-        completedAt: new Date(),
-      });
-      if (finalized) {
-        await fireAgentRunCallback(finalized, 'canceled', {});
-      }
-      return;
-    }
 
     try {
-      const response = raced as AgentChatResponse;
-      // §8: background/run responses get a per-run id, unique per run —
-      // unlike the synchronous scheme's conversation-scoped
-      // `resp_<conversationId>`. `_conversation_messages` is a
-      // dashboard-playground-only field (see its own doc comment on
-      // `AgentChatResponse`) and must never leave the client API surface —
-      // stripped here exactly like the synchronous handler already strips
-      // it in `client-agents.ts` before persisting/returning.
-      const { _conversation_messages: _omitted, ...responseWithoutTranscript } = response;
+      const request = buildRequestFromRun(claimed, cancellationCell);
+      // Attribution: usage recorded by the turn reads the request context,
+      // which a queue worker otherwise has none of.
+      const invokePromise: Promise<AgentChatResponse | InvokeFailure> = runWithRequestContext(
+        {
+          tenantId: claimed.tenantId,
+          projectId: claimed.projectId,
+          userId: claimed.userId,
+          apiTokenId: claimed.apiTokenId,
+          actorType: claimed.actorType ?? 'api_token',
+          source: 'api',
+        },
+        () => executeAgentChatLocal(request),
+      ).catch((error: unknown): InvokeFailure => ({ [FAILURE_TAG]: true, error }));
+
+      const raced = await Promise.race([invokePromise, deadlineTimer.promise, cancelObservedPromise]);
+      stopAllTimers();
+
+      if (raced === CANCEL_SENTINEL || (cancellationCell.cancelled && raced !== TIMEOUT_SENTINEL)) {
+        await finalize({
+          status: 'canceled',
+          errorReason: 'canceled_by_caller' as AgentRunErrorReason,
+          completedAt: new Date(),
+        }, 'canceled', {});
+        return;
+      }
+
+      if (raced === TIMEOUT_SENTINEL) {
+        cancellationCell.cancelled = true;
+        const minutes = Math.round(maxDurationMs / 60_000);
+        await finalize({
+          status: 'failed',
+          errorReason: 'max_duration_exceeded' as AgentRunErrorReason,
+          errorMessage: `The background run exceeded its ${minutes}-minute limit and was stopped.`,
+          completedAt: new Date(),
+        }, 'failed', { errorReason: 'max_duration_exceeded' });
+        return;
+      }
+
+      if (isInvokeFailure(raced)) {
+        logger.warn('Background agent turn failed', {
+          runId,
+          error: raced.error instanceof Error ? raced.error.message : String(raced.error),
+        });
+        const message = publicFailureMessage(raced.error);
+        await finalize({
+          status: 'failed',
+          errorReason: 'agent_error' as AgentRunErrorReason,
+          errorMessage: message,
+          completedAt: new Date(),
+        }, 'failed', { errorReason: 'agent_error', message });
+        return;
+      }
+
+      const { _conversation_messages: _omitted, ...responseWithoutTranscript } = raced as AgentChatResponse;
       const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}` };
-      const finalized = await db.finalizeAgentRun(runId, tenantId, {
+      await finalize({
         status: 'succeeded',
         result: responseWithRunId as unknown as Record<string, unknown>,
         completedAt: new Date(),
-      });
-      if (finalized) {
-        await fireAgentRunCallback(finalized, 'succeeded', { result: responseWithRunId });
-      }
+      }, 'succeeded', { result: responseWithRunId });
     } catch (error) {
-      const classified = classifyAgentRunError(error);
-      const finalized = await db.finalizeAgentRun(runId, tenantId, {
+      stopAllTimers();
+      logger.error('Agent run worker failed unexpectedly', {
+        runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await finalize({
         status: 'failed',
         errorReason: 'agent_error' as AgentRunErrorReason,
-        errorMessage: classified.error.message,
+        errorMessage: 'The agent run failed. See the run trace for details.',
         completedAt: new Date(),
-      });
-      if (finalized) {
-        await fireAgentRunCallback(finalized, 'failed', { errorReason: 'agent_error', message: classified.error.message });
-      }
+      }, 'failed', { errorReason: 'agent_error' }).catch(() => undefined);
     }
   });
 }
 
 // ── §7 step 8 / §12.6: callback notify — durable, queue-driven retry ──
 
-/** Job name for callback delivery, sharing the `agent` queue with `chat`/`playground`/`run`. */
 const CALLBACK_JOB_NAME = 'callback';
-/** Exponential backoff (2s, 4s, 8s, 16s, 32s) — durable via the queue's own `attempts`/`backoff`, not an in-process `setTimeout` chain. */
+/** Exponential backoff (2s, 4s, 8s, 16s, 32s) via the queue's own `attempts`/`backoff`. */
 const CALLBACK_ATTEMPTS = 5;
 const CALLBACK_BACKOFF_MS = 2_000;
+const CALLBACK_TIMEOUT_MS = 10_000;
 
 interface AgentRunCallbackJobPayload extends QueuePayload {
   runId: string;
@@ -702,17 +1038,17 @@ interface AgentRunCallbackJobPayload extends QueuePayload {
   data: Record<string, unknown>;
 }
 
-/**
- * Enqueues callback delivery as a fire-and-forget queue job (§12.6) rather
- * than delivering in-process — the queue's own `attempts`/`backoff` is what
- * makes delivery durable across a process restart mid-retry, not an
- * in-process `setTimeout` chain (the crawler's `sendCrawlerWebhook`
- * precedent, deliberately not repeated here).
- *
- * NOT HMAC-signed: `IAgentRun` has no per-run/per-tenant secret field to
- * sign with (unlike `ICrawlerWebhookConfig.secret`) — an open follow-up
- * pending a secret-storage decision, unchanged from the original v1 note.
- */
+/** `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>` — the crawler/OCR webhook scheme. */
+export function signAgentRunCallback(secret: string, body: string, timestamp = Math.floor(Date.now() / 1000)): string {
+  const signature = crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+  return `t=${timestamp},v1=${signature}`;
+}
+
+/** Stable per run+event, so a receiver can dedupe retries and queue redeliveries. */
+export function agentRunCallbackEventId(runId: string, event: string): string {
+  return `evt_${runId}_${event}`;
+}
+
 export async function fireAgentRunCallback(
   run: IAgentRun,
   event: 'succeeded' | 'failed' | 'canceled',
@@ -730,72 +1066,99 @@ export async function fireAgentRunCallback(
     event,
     data,
   };
-  await queue.publish(queueNameFor('agent'), CALLBACK_JOB_NAME, payload, {
+  await queue.publish(AGENT_RUN_QUEUE, CALLBACK_JOB_NAME, payload, {
     attempts: CALLBACK_ATTEMPTS,
     backoffMs: CALLBACK_BACKOFF_MS,
   });
 }
 
 /**
- * The callback queue job's actual handler (registered in `agentConsumer.ts`).
- * Re-reads `callbackAttempts` fresh from the DB on every invocation (rather
- * than trusting the original payload) since the QUEUE itself calls this
- * function again on each retry — persisting cumulative attempts here is
- * what survives a process restart mid-retry (§12.6).
- *
- * Throws on delivery failure so the queue's own `attempts`/`backoff`
- * retries the job; the LAST attempt's failure is what remains as the
- * durable `callbackStatus: 'failed'` record once retries are exhausted.
+ * The callback job handler. Delivers through `safeFetch` (DNS-resolved,
+ * pinned, every redirect hop re-checked — a callback URL is caller-supplied
+ * and must never reach an internal service), signs with the run's secret
+ * when it has one, and throws on failure so the queue retries.
  */
 export async function deliverAgentRunCallbackJob(
   payload: AgentRunCallbackJobPayload,
 ): Promise<void> {
-  const db = await withTenantDb(payload.tenantDbName);
-  const current = await db.getAgentRunById(payload.runId, payload.tenantId, payload.projectId);
-  const nextAttempts = (current?.callbackAttempts ?? 0) + 1;
+  return runWithTenantDb(payload.tenantDbName, async (db) => {
+    const current = await db.getAgentRunById(payload.runId, payload.tenantId, payload.projectId);
+    const nextAttempts = (current?.callbackAttempts ?? 0) + 1;
+    const publicRunId = `run_${payload.runId}`;
+    const eventName = `agent_run.${payload.event}`;
+    const eventId = agentRunCallbackEventId(payload.runId, payload.event);
 
-  let delivered = false;
-  let deliveryError: unknown;
-  try {
-    assertSafeUrl(payload.callbackUrl, false);
-    const body = {
-      id: `evt_${randomUUID().replace(/-/g, '')}`,
-      event: `agent_run.${payload.event}`,
-      createdAt: new Date().toISOString(),
-      runId: payload.runId,
-      tenantId: payload.tenantId,
-      projectId: payload.projectId,
-      conversationId: payload.conversationId,
-      data: payload.data,
-    };
-    await axios.post(payload.callbackUrl, body, {
-      headers: { 'content-type': 'application/json', 'user-agent': 'cognipeer-agent-runs/1.0' },
-      timeout: 10_000,
-      validateStatus: (s) => s >= 200 && s < 300,
-      maxRedirects: 0,
-    });
-    delivered = true;
-  } catch (error) {
-    deliveryError = error;
-    logger.warn('Agent-run webhook delivery attempt failed', {
-      runId: payload.runId,
-      event: payload.event,
-      attempt: nextAttempts,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+    let delivered = false;
+    let deliveryError: unknown;
+    try {
+      const body = JSON.stringify({
+        id: eventId,
+        event: eventName,
+        createdAt: new Date().toISOString(),
+        runId: publicRunId,
+        conversationId: payload.conversationId,
+        data: payload.data,
+      });
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        'user-agent': 'cognipeer-agent-runs/1.0',
+        'x-cognipeer-event': eventName,
+        'x-cognipeer-event-id': eventId,
+      };
+      let secret: string | undefined;
+      if (current?.callbackSecret) {
+        try {
+          secret = decryptObject<string>(current.callbackSecret);
+        } catch {
+          secret = undefined;
+        }
+      }
+      if (secret) headers['x-cognipeer-signature'] = signAgentRunCallback(secret, body);
 
-  // Callback bookkeeping only — deliberately NOT via `finalizeAgentRun`,
-  // whose `status = 'running'` CAS guard would silently no-op here since
-  // the run's lifecycle status has already moved on by this point.
-  await db.updateAgentRunCallback(payload.runId, payload.tenantId, {
-    callbackStatus: delivered ? 'delivered' : 'failed',
-    callbackAttempts: nextAttempts,
-  }).catch(() => undefined);
+      const response = await safeFetch(payload.callbackUrl, { method: 'POST', headers, body }, { timeoutMs: CALLBACK_TIMEOUT_MS });
+      await response.body?.cancel().catch(() => undefined);
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Callback endpoint answered HTTP ${response.status}`);
+      }
+      delivered = true;
+    } catch (error) {
+      deliveryError = error;
+      logger.warn('Agent-run webhook delivery attempt failed', {
+        runId: payload.runId,
+        event: payload.event,
+        attempt: nextAttempts,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
-  if (!delivered) {
-    throw deliveryError instanceof Error
-      ? deliveryError
-      : new Error(`Agent-run webhook delivery failed for run ${payload.runId}`);
-  }
+    // Callback bookkeeping only — not `finalizeAgentRun`, whose `running` CAS
+    // would no-op on a run that already finished.
+    await db.updateAgentRunCallback(payload.runId, payload.tenantId, {
+      callbackStatus: delivered ? 'delivered' : 'failed',
+      callbackAttempts: nextAttempts,
+    }).catch(() => undefined);
+
+    if (!delivered) {
+      throw deliveryError instanceof Error
+        ? deliveryError
+        : new Error(`Agent-run webhook delivery failed for run ${payload.runId}`);
+    }
+  });
+}
+
+/** Publishes a run's job again — the reconciler's recovery for a queued run no worker picked up. */
+export async function republishAgentRun(run: IAgentRun): Promise<void> {
+  const queue = await getQueue();
+  await queue.publish(AGENT_RUN_QUEUE, 'run', {
+    runId: String(run._id),
+    tenantId: run.tenantId,
+    tenantDbName: run.tenantDbName,
+  } satisfies AgentRunJobPayload, { attempts: 1 });
+}
+
+/** A sync reservation this old is abandoned, not live — see `SYNC_RESERVATION_GRACE_MS`. */
+export function isAbandonedSyncReservation(run: IAgentRun, now = Date.now()): boolean {
+  if (run.mode !== 'sync') return false;
+  const started = run.startedAt ? new Date(run.startedAt).getTime() : 0;
+  return now - started > getConfig().agent.syncTimeoutMs + SYNC_RESERVATION_GRACE_MS;
 }

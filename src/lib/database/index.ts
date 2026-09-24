@@ -162,7 +162,7 @@ export async function disconnectDatabase(): Promise<void> {
 
 // Export the provider interface for type safety
 export type { DatabaseProvider } from './provider.interface';
-export { AgentRunConflictError } from './provider.interface';
+export { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from './provider.interface';
 export type {
   IUser,
   IUserProject,
@@ -394,6 +394,7 @@ export type {
   IAgentSkillPolicy,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
+  IAgentExecutionConfig,
   AgentSandboxMode,
   IAgentToolBinding,
   IAgentVersion,

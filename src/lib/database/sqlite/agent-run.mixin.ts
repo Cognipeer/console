@@ -9,7 +9,7 @@
  */
 
 import type { IAgentRun } from '../provider.interface';
-import { AgentRunConflictError } from '../provider/errors';
+import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -40,14 +40,14 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
            userMessage, version, usePublished, runtimeContext,
            idempotencyKey, idempotencyRequestHash, status, errorReason,
            result, errorMessage, cancelRequestedAt, workerId, heartbeatAt,
-           callbackUrl, callbackStatus, callbackAttempts,
+           callbackUrl, callbackSecret, maxDurationMs, callbackStatus, callbackAttempts,
            userId, apiTokenId, actorType,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
            @userMessage, @version, @usePublished, @runtimeContext,
            @idempotencyKey, @idempotencyRequestHash, @status, @errorReason,
            @result, @errorMessage, @cancelRequestedAt, @workerId, @heartbeatAt,
-           @callbackUrl, @callbackStatus, @callbackAttempts,
+           @callbackUrl, @callbackSecret, @maxDurationMs, @callbackStatus, @callbackAttempts,
            @userId, @apiTokenId, @actorType,
            @createdAt, @startedAt, @completedAt, @expiresAt, @updatedAt)
         `).run({
@@ -72,6 +72,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           workerId: record.workerId ?? null,
           heartbeatAt: record.heartbeatAt ? new Date(record.heartbeatAt).toISOString() : null,
           callbackUrl: record.callbackUrl ?? null,
+          callbackSecret: record.callbackSecret ?? null,
+          maxDurationMs: record.maxDurationMs ?? null,
           callbackStatus: record.callbackStatus ?? null,
           callbackAttempts: record.callbackAttempts ?? 0,
           userId: record.userId ?? null,
@@ -85,6 +87,11 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         });
       } catch (error) {
         if (isSqliteUniqueConstraintError(error)) {
+          // Two unique indexes can fire here — tell them apart by the columns
+          // SQLite names in the message.
+          if (record.idempotencyKey && /idempotencyKey/.test(String((error as Error).message))) {
+            throw new AgentRunIdempotencyKeyTakenError(record.idempotencyKey);
+          }
           throw new AgentRunConflictError(record.conversationId);
         }
         throw error;
@@ -202,7 +209,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const params: Record<string, unknown> = { id, updatedAt: now };
       const scalarFields = [
         'status', 'errorReason', 'errorMessage', 'workerId',
-        'callbackUrl', 'callbackStatus', 'projectId',
+        'callbackUrl', 'callbackSecret', 'callbackStatus', 'projectId',
         'idempotencyKey', 'idempotencyRequestHash',
       ];
       for (const f of scalarFields) {
@@ -210,6 +217,15 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           sets.push(`${f} = @${f}`);
           params[f] = (data as Record<string, unknown>)[f] ?? null;
         }
+      }
+      if (data.maxDurationMs !== undefined) {
+        sets.push('maxDurationMs = @maxDurationMs');
+        params.maxDurationMs = data.maxDurationMs ?? null;
+      }
+      if ((data as { runtimeContext?: unknown }).runtimeContext !== undefined) {
+        sets.push('runtimeContext = @runtimeContext');
+        const rc = (data as { runtimeContext?: unknown }).runtimeContext;
+        params.runtimeContext = rc === null ? null : this.toJson(rc);
       }
       if (data.callbackAttempts !== undefined) {
         sets.push('callbackAttempts = @callbackAttempts');
@@ -282,13 +298,49 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return rows.map((r) => this.mapAgentRun(r));
     }
 
-    async listQueuedAgentRuns(tenantId: string): Promise<IAgentRun[]> {
+    async listQueuedAgentRuns(
+      tenantId: string,
+      options?: { createdBefore?: Date; limit?: number },
+    ): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
-      const rows = db.prepare(`
-        SELECT * FROM ${TABLES.agentRuns}
-        WHERE tenantId = @tenantId AND status = 'queued'
-        ORDER BY createdAt ASC
-      `).all({ tenantId }) as SqliteRow[];
+      let sql = `SELECT * FROM ${TABLES.agentRuns} WHERE tenantId = @tenantId AND status = 'queued'`;
+      const params: Record<string, unknown> = { tenantId };
+      if (options?.createdBefore) {
+        sql += ' AND createdAt < @createdBefore';
+        params.createdBefore = options.createdBefore.toISOString();
+      }
+      sql += ' ORDER BY createdAt ASC';
+      if (options?.limit && options.limit > 0) {
+        sql += ' LIMIT @limit';
+        params.limit = options.limit;
+      }
+      const rows = db.prepare(sql).all(params) as SqliteRow[];
+      return rows.map((r) => this.mapAgentRun(r));
+    }
+
+    async listAgentRuns(filter: {
+      tenantId: string;
+      projectId: string;
+      agentKey?: string;
+      conversationId?: string;
+      status?: IAgentRun['status'][];
+      mode?: IAgentRun['mode'];
+      limit?: number;
+    }): Promise<IAgentRun[]> {
+      const db = this.getTenantDb();
+      const conds = ['tenantId = @tenantId', 'projectId = @projectId'];
+      const params: Record<string, unknown> = { tenantId: filter.tenantId, projectId: filter.projectId };
+      if (filter.agentKey) { conds.push('agentKey = @agentKey'); params.agentKey = filter.agentKey; }
+      if (filter.conversationId) { conds.push('conversationId = @conversationId'); params.conversationId = filter.conversationId; }
+      if (filter.mode) { conds.push('mode = @mode'); params.mode = filter.mode; }
+      if (filter.status && filter.status.length > 0) {
+        const keys = filter.status.map((status, i) => { params[`status${i}`] = status; return `@status${i}`; });
+        conds.push(`status IN (${keys.join(', ')})`);
+      }
+      params.limit = Math.min(Math.max(filter.limit ?? 50, 1), 500);
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.agentRuns} WHERE ${conds.join(' AND ')} ORDER BY createdAt DESC LIMIT @limit`,
+      ).all(params) as SqliteRow[];
       return rows.map((r) => this.mapAgentRun(r));
     }
 
@@ -297,10 +349,14 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return db.prepare(`DELETE FROM ${TABLES.agentRuns} WHERE id = @id`).run({ id }).changes === 1;
     }
 
-    async countActiveAgentRuns(tenantId: string, projectId?: string): Promise<number> {
+    async countActiveAgentRuns(tenantId: string, projectId?: string, mode?: IAgentRun['mode']): Promise<number> {
       const db = this.getTenantDb();
       let sql = `SELECT COUNT(*) AS cnt FROM ${TABLES.agentRuns} WHERE tenantId = @tenantId AND status IN ('queued', 'running')`;
       const params: Record<string, unknown> = { tenantId };
+      if (mode) {
+        sql += ' AND mode = @mode';
+        params.mode = mode;
+      }
       if (projectId) {
         sql += ' AND projectId = @projectId';
         params.projectId = projectId;
@@ -315,7 +371,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       batchSize?: number;
     }): Promise<{ deletedCount: number }> {
       const db = this.getTenantDb();
-      const conds: string[] = ['expiresAt IS NOT NULL', 'expiresAt < @olderThan'];
+      // Active rows are never retention's to delete, whatever expiresAt says.
+      const conds: string[] = ['expiresAt IS NOT NULL', 'expiresAt < @olderThan', "status NOT IN ('queued', 'running')"];
       const params: Record<string, unknown> = { olderThan: options.olderThan.toISOString() };
       if (options.projectId) {
         conds.push('projectId = @projectId');
@@ -368,6 +425,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         workerId: (row.workerId as string) ?? null,
         heartbeatAt: this.toDate(row.heartbeatAt) ?? null,
         callbackUrl: (row.callbackUrl as string) ?? null,
+        callbackSecret: (row.callbackSecret as string) ?? null,
+        maxDurationMs: row.maxDurationMs === null || row.maxDurationMs === undefined ? null : Number(row.maxDurationMs),
         callbackStatus: (row.callbackStatus as IAgentRun['callbackStatus']) ?? null,
         callbackAttempts: Number(row.callbackAttempts) || 0,
         userId: (row.userId as string) ?? undefined,

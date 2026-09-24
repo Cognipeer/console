@@ -14,6 +14,7 @@
  */
 
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { AgentRunConflictError } from '@/lib/database/provider/errors';
 
 export interface AgentRunErrorBody {
     message: string;
@@ -75,6 +76,18 @@ export function classifyAgentRunError(
     },
 ): ClassifiedAgentRunError {
     const message = error instanceof Error ? error.message : String(error ?? '');
+
+    // Another turn (sync or background) already holds this conversation.
+    if (error instanceof AgentRunConflictError) {
+        return {
+            status: 409,
+            error: {
+                message: 'An active run (queued or running) already exists for this conversation.',
+                type: 'agent_run_conflict',
+                code: 'agent_run_conflict',
+            },
+        };
+    }
 
     for (const entry of CONFIG_ERRORS) {
         if (entry.pattern.test(message)) {

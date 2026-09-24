@@ -37,9 +37,7 @@ import type { DatabaseProvider } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
-import { getQueue, type QueuePayload } from '@/lib/core/queue';
-import { queueNameFor } from '@/lib/core/cluster';
-import { fireAgentRunCallback } from './agentRunService';
+import { fireAgentRunCallback, isAbandonedSyncReservation, republishAgentRun } from './agentRunService';
 
 const logger = createLogger('agent-run:reconcile');
 
@@ -61,12 +59,23 @@ let lastLockProvider = 'unknown';
 let lastProcessedTenants = 0;
 let lastFailedRunningRuns = 0;
 let lastDeletedSyncRuns = 0;
+let lastRequeuedRuns = 0;
+let lastRetentionDeleted = 0;
+let lastRetentionAt = 0;
+/** Retention is a housekeeping sweep, not a per-tick one — hourly is plenty. */
+const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
+/** Bound on how many queued runs one tick republishes per tenant. */
+const REQUEUE_BATCH = 100;
 
 interface SweepResult {
   tenantsScanned: number;
   failedRunningRuns: number;
   deletedSyncRuns: number;
+  requeuedRuns: number;
+  retentionDeleted: number;
 }
+
+const EMPTY_SWEEP: SweepResult = { tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, retentionDeleted: 0 };
 
 /**
  * Binds `fn` to `tenantDbName` for its whole execution via the ALREADY-
@@ -96,15 +105,32 @@ async function runWithTenantDb<T>(
  * The heartbeat-staleness sweep itself — shared by both the one-shot boot
  * call and the periodic scheduler.
  */
-async function sweepStaleRunningAgentRuns(): Promise<SweepResult> {
+/**
+ * One pass over every tenant:
+ *  - `running` background runs whose heartbeat went stale → `worker_lost`;
+ *  - sync reservations past their own ceiling (+ grace) → deleted. A sync
+ *    row never heartbeats, so "stale heartbeat" alone would delete a live
+ *    long turn's reservation and let a second turn start on its conversation;
+ *  - `queued` runs older than `runRequeueAfterMs` → republished (a lost queue
+ *    message, a memory queue on a pod that died). Safe: the claim is a CAS,
+ *    a duplicate delivery just no-ops;
+ *  - hourly, retention.
+ */
+async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean } = {}): Promise<SweepResult> {
   const mainDb = await getDatabase();
   const tenants = await mainDb.listTenants();
   const cfg = getConfig();
-  const staleBefore = new Date(Date.now() - cfg.agent.runHeartbeatStaleMs);
+  const now = Date.now();
+  const staleBefore = new Date(now - cfg.agent.runHeartbeatStaleMs);
+  const requeueBefore = options.requeueAllQueued ? new Date(now) : new Date(now - cfg.agent.runRequeueAfterMs);
+  const doRetention = now - lastRetentionAt > RETENTION_INTERVAL_MS;
+  if (doRetention) lastRetentionAt = now;
 
   let tenantsScanned = 0;
   let failedRunningRuns = 0;
   let deletedSyncRuns = 0;
+  let requeuedRuns = 0;
+  let retentionDeleted = 0;
 
   for (const tenant of tenants) {
     if (!tenant.dbName || !tenant._id) continue;
@@ -119,7 +145,10 @@ async function sweepStaleRunningAgentRuns(): Promise<SweepResult> {
           if (run.mode === 'sync') {
             // A reservation slot, not a terminal record — nothing to
             // finalize, no caller left polling it. Deleting frees the
-            // conversationId's active-run slot for future requests.
+            // conversationId's active-run slot for future requests. Only once
+            // it is past its own ceiling: a live long sync turn has a stale
+            // heartbeat too (sync rows never heartbeat).
+            if (!isAbandonedSyncReservation(run, now)) continue;
             const deleted = await tenantDb.deleteAgentRun(runId);
             if (deleted) deletedSyncRuns += 1;
             continue;
@@ -141,6 +170,24 @@ async function sweepStaleRunningAgentRuns(): Promise<SweepResult> {
             });
           }
         }
+
+        const queued = await tenantDb.listQueuedAgentRuns(tenantId, { createdBefore: requeueBefore, limit: REQUEUE_BATCH });
+        for (const run of queued) {
+          try {
+            await republishAgentRun(run);
+            requeuedRuns += 1;
+          } catch (error) {
+            logger.warn('Failed to republish a queued agent run', {
+              runId: String(run._id),
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        if (doRetention) {
+          const { deletedCount } = await tenantDb.cleanupAgentRunRetention({ olderThan: new Date(now), batchSize: 1000 });
+          retentionDeleted += deletedCount;
+        }
       });
     } catch (error) {
       logger.warn('Failed to reconcile tenant agent runs', {
@@ -151,7 +198,7 @@ async function sweepStaleRunningAgentRuns(): Promise<SweepResult> {
     }
   }
 
-  return { tenantsScanned, failedRunningRuns, deletedSyncRuns };
+  return { tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, retentionDeleted };
 }
 
 /**
@@ -161,51 +208,19 @@ async function sweepStaleRunningAgentRuns(): Promise<SweepResult> {
  * lost, then runs one immediate heartbeat-staleness sweep pass so a crash
  * is recovered from without waiting for the first periodic tick.
  */
-export async function reconcileOrphanedAgentRuns(): Promise<
-  SweepResult & { requeuedRuns: number }
-> {
-  const mainDb = await getDatabase();
-  const tenants = await mainDb.listTenants();
-  const queue = await getQueue();
-
-  let requeuedRuns = 0;
-
-  for (const tenant of tenants) {
-    if (!tenant.dbName || !tenant._id) continue;
-    const tenantId = String(tenant._id);
-
-    try {
-      await runWithTenantDb(mainDb, tenant.dbName, async (tenantDb) => {
-        const queuedRuns = await tenantDb.listQueuedAgentRuns(tenantId);
-        for (const run of queuedRuns) {
-          const payload = {
-            runId: String(run._id),
-            tenantId,
-            tenantDbName: tenant.dbName,
-          } as unknown as QueuePayload;
-          await queue.publish(queueNameFor('agent'), 'run', payload, { attempts: 1 });
-          requeuedRuns += 1;
-        }
-      });
-    } catch (error) {
-      logger.warn('Failed to requeue orphaned agent runs for tenant', {
-        error: error instanceof Error ? error.message : String(error),
-        tenantDbName: tenant.dbName,
-        tenantSlug: tenant.slug,
-      });
-    }
+export async function reconcileOrphanedAgentRuns(): Promise<SweepResult> {
+  // At boot every queued run is republished, not just old ones: an in-memory
+  // queue lost them all with the previous process.
+  const sweep = await sweepStaleRunningAgentRuns({ requeueAllQueued: true });
+  if (sweep.failedRunningRuns > 0 || sweep.deletedSyncRuns > 0 || sweep.requeuedRuns > 0) {
+    logger.info('Reconciled orphaned agent runs at boot', { ...sweep });
   }
-
-  const sweep = await sweepStaleRunningAgentRuns();
-  if (sweep.failedRunningRuns > 0 || sweep.deletedSyncRuns > 0 || requeuedRuns > 0) {
-    logger.info('Reconciled orphaned agent runs at boot', { ...sweep, requeuedRuns });
-  }
-  return { ...sweep, requeuedRuns };
+  return sweep;
 }
 
 async function runOnce(manual = false): Promise<SweepResult> {
-  if (paused && !manual) return { tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0 };
-  if (running) return { tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0 };
+  if (paused && !manual) return EMPTY_SWEEP;
+  if (running) return EMPTY_SWEEP;
   running = true;
   let lockToken: string | undefined;
   const startedAt = new Date();
@@ -220,7 +235,7 @@ async function runOnce(manual = false): Promise<SweepResult> {
     // lock sweeps on a given tick, exactly like crawlerScheduler's
     // unassigned-bucket lock.
     if (!lockToken) {
-      return { tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0 };
+      return EMPTY_SWEEP;
     }
 
     const result = await sweepStaleRunningAgentRuns();
@@ -228,7 +243,9 @@ async function runOnce(manual = false): Promise<SweepResult> {
     lastProcessedTenants = result.tenantsScanned;
     lastFailedRunningRuns = result.failedRunningRuns;
     lastDeletedSyncRuns = result.deletedSyncRuns;
-    if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0) {
+    lastRequeuedRuns = result.requeuedRuns;
+    if (result.retentionDeleted > 0) lastRetentionDeleted = result.retentionDeleted;
+    if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0 || result.requeuedRuns > 0) {
       logger.info('Reconciled orphaned agent runs', result);
     }
     return result;
@@ -296,5 +313,7 @@ export function getAgentRunReconcilerStatus() {
     lastProcessedTenants,
     lastFailedRunningRuns,
     lastDeletedSyncRuns,
+    lastRequeuedRuns,
+    lastRetentionDeleted,
   };
 }

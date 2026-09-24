@@ -14,6 +14,7 @@
  *  - warnings do not: it runs, but something is probably not what was meant.
  */
 
+import { getConfig } from '@/lib/core/config';
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 
@@ -159,6 +160,41 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         } else if (!schema.properties || typeof schema.properties !== 'object'
             || Object.keys(schema.properties as object).length === 0) {
             issues.errors.push({ field: 'structuredOutput.schema', message: 'The schema declares no properties' });
+        }
+    }
+
+    const execution = config.execution;
+    if (execution) {
+        const env = getConfig().agent;
+        const syncMaxSeconds = Math.floor(env.syncTimeoutMs / 1000);
+        const backgroundMaxMinutes = Math.max(1, Math.floor(env.backgroundMaxDurationMs / 60_000));
+        checkNumber(issues, 'execution.syncTimeoutSeconds', execution.syncTimeoutSeconds, { min: 5, max: syncMaxSeconds, integer: true });
+        checkNumber(issues, 'execution.backgroundMaxDurationMinutes', execution.backgroundMaxDurationMinutes, { min: 1, max: backgroundMaxMinutes, integer: true });
+        if (execution.defaultMode !== undefined && execution.defaultMode !== 'sync' && execution.defaultMode !== 'background') {
+            issues.errors.push({ field: 'execution.defaultMode', message: 'must be one of: sync, background' });
+        }
+        if (execution.defaultMode === 'background' && execution.backgroundEnabled === false) {
+            issues.errors.push({ field: 'execution.defaultMode', message: 'cannot be background while background execution is disabled' });
+        }
+        if (execution.callbackUrl !== undefined && execution.callbackUrl !== '') {
+            let parsed: URL | null = null;
+            try {
+                parsed = new URL(execution.callbackUrl);
+            } catch {
+                parsed = null;
+            }
+            if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || execution.callbackUrl.length > 2048) {
+                issues.errors.push({ field: 'execution.callbackUrl', message: 'must be an http(s) URL of at most 2048 characters' });
+            } else if (parsed.protocol === 'http:') {
+                issues.warnings.push({ field: 'execution.callbackUrl', message: 'Callbacks over plain http can be read in transit; prefer https.' });
+            }
+        }
+        if (typeof execution.callbackSecret === 'string' && execution.callbackSecret !== '' && execution.callbackSecret !== '••••••'
+            && (execution.callbackSecret.length < 16 || execution.callbackSecret.length > 256)) {
+            issues.errors.push({ field: 'execution.callbackSecret', message: 'must be 16–256 characters' });
+        }
+        if (execution.callbackSecret && !execution.callbackUrl) {
+            issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
         }
     }
 

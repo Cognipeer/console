@@ -2353,6 +2353,23 @@ export interface IAgentSubagentPolicy {
   allowAdhocTools?: boolean;
 }
 
+export interface IAgentExecutionConfig {
+  /** Synchronous ceiling for this agent, seconds. */
+  syncTimeoutSeconds?: number;
+  /** false = API calls may not run this agent in the background. Default true. */
+  backgroundEnabled?: boolean;
+  /** Longest a background run of this agent may take, minutes. */
+  backgroundMaxDurationMinutes?: number;
+  /** What an API call that does not say `background` gets. Default 'sync'. */
+  defaultMode?: 'sync' | 'background';
+  /** Callback for background runs started without their own `callback_url`. */
+  callbackUrl?: string;
+  /** Write-only HMAC secret for that callback: plaintext in, masked out. */
+  callbackSecret?: string;
+  /** Sealed `callbackSecret`; never returned by the API. */
+  callbackSecretSealed?: string;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
@@ -2419,6 +2436,12 @@ export interface IAgentConfig {
   memory?: IAgentMemoryConfig;
   /** Sandbox access — an isolated machine the agent can run commands in (Enterprise). */
   sandbox?: IAgentSandboxConfig;
+  /**
+   * How API calls to this agent execute (docs/guide/agent-background-execution.md).
+   * Every limit here is an upper bound the agent opts into; the effective
+   * value is min(env ceiling, tenant quota, this).
+   */
+  execution?: IAgentExecutionConfig;
 }
 
 /**
@@ -3639,6 +3662,8 @@ export type AgentRunErrorReason =
   | 'worker_lost'
   | 'max_duration_exceeded'
   | 'canceled_by_caller'
+  /** The agent was disabled/deleted, or the submitting API token revoked, before the worker started it. */
+  | 'precondition_failed'
   | null;
 
 /** Durable delivery state for the optional callback webhook (§12.6). */
@@ -3694,6 +3719,13 @@ export interface IAgentRun extends IUsageAttributionFields {
   /** Updated periodically by the executing worker while `status = running`. */
   heartbeatAt?: Date | null;
   callbackUrl?: string | null;
+  /**
+   * Sealed (`encryptSecretValue`) shared secret the callback is HMAC-signed
+   * with. Never returned by the API.
+   */
+  callbackSecret?: string | null;
+  /** Effective background ceiling resolved at submit time (env ∧ tenant quota ∧ agent). */
+  maxDurationMs?: number | null;
   callbackStatus?: AgentRunCallbackStatus | null;
   /** Incremented per delivery attempt, persisted so a restart doesn't lose count. */
   callbackAttempts?: number;

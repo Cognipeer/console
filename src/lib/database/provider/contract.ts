@@ -1706,7 +1706,23 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * message the in-memory queue provider lost on process restart is safe to
    * republish as-is, since a `queued` run never started executing.
    */
-  listQueuedAgentRuns(tenantId: string): Promise<IAgentRun[]>;
+  listQueuedAgentRuns(
+    tenantId: string,
+    options?: { createdBefore?: Date; limit?: number },
+  ): Promise<IAgentRun[]>;
+  /**
+   * Dashboard listing, newest first. Always tenant+project scoped;
+   * `agentKey`/`conversationId`/`status`/`mode` narrow it further.
+   */
+  listAgentRuns(filter: {
+    tenantId: string;
+    projectId: string;
+    agentKey?: string;
+    conversationId?: string;
+    status?: IAgentRun['status'][];
+    mode?: IAgentRun['mode'];
+    limit?: number;
+  }): Promise<IAgentRun[]>;
   /**
    * Sync-mode cleanup (§6): unconditional delete, not a finalize — a
    * `mode: 'sync'` row is a reservation slot, never a terminal record, and
@@ -1715,7 +1731,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    */
   deleteAgentRun(id: string): Promise<boolean>;
   /** §12.8 concurrency-cap input: count of `queued`+`running` rows. */
-  countActiveAgentRuns(tenantId: string, projectId?: string): Promise<number>;
+  countActiveAgentRuns(tenantId: string, projectId?: string, mode?: IAgentRun['mode']): Promise<number>;
   /** §12.10 retention, following the `cleanupAgentTracingRetention` precedent. */
   cleanupAgentRunRetention(options: {
     projectId?: string;

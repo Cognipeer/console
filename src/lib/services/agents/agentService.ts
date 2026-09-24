@@ -2923,6 +2923,12 @@ export async function executeAgentChat(
         },
         payload as unknown as QueuePayload,
         () => executeAgentChatLocal(request),
+        // A routed turn with a ceiling waits exactly as long as the ceiling
+        // allows and is never retried: the queue default (60s, 3 attempts)
+        // cut long turns off early and could re-run a turn's tool calls.
+        request.cancellationCell?.deadlineAt !== undefined
+            ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
+            : undefined,
     );
 }
 

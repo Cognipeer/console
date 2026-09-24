@@ -365,12 +365,36 @@ export interface AppConfig {
     runHeartbeatIntervalMs: number;
     /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
     runHeartbeatStaleMs: number;
+    /** Per-project cap on simultaneous queued+running background runs; 0 = only the tenant cap applies. */
+    backgroundMaxConcurrentRunsPerProject: number;
+    /** Background runs executed at once per node (own queue, so they never starve chat). */
+    runConcurrency: number;
+    /** A `queued` run older than this with no worker is republished by the reconciler. */
+    runRequeueAfterMs: number;
   };
 }
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
+
+/**
+ * The run-timing knobs, clamped to values that cannot wedge the system: a 0
+ * heartbeat would spin a hot interval, a stale window at or below the
+ * heartbeat would fail every live run as `worker_lost`, and a 0 sync timeout
+ * would 504 every call before it starts.
+ */
+function boundedAgentRunConfig(source: ConfigSource) {
+  const atLeast = (value: number, min: number) => (Number.isFinite(value) ? Math.max(value, min) : min);
+  const runHeartbeatIntervalMs = atLeast(int(source, 'AGENT_RUN_HEARTBEAT_INTERVAL_MS', 15_000), 1_000);
+  return {
+    runHeartbeatIntervalMs,
+    runHeartbeatStaleMs: atLeast(int(source, 'AGENT_RUN_HEARTBEAT_STALE_MS', 45_000), runHeartbeatIntervalMs * 3),
+    backgroundMaxConcurrentRunsPerProject: atLeast(int(source, 'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT', 0), 0),
+    runConcurrency: atLeast(int(source, 'AGENT_RUN_CONCURRENCY', 4), 1),
+    runRequeueAfterMs: atLeast(int(source, 'AGENT_RUN_REQUEUE_AFTER_MS', 120_000), 10_000),
+  };
+}
 
 function str(source: ConfigSource, key: string, fallback: string): string {
   return source.get(key) ?? fallback;
@@ -666,16 +690,15 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     agent: {
-      syncTimeoutMs: int(source, 'AGENT_SYNC_TIMEOUT_MS', 180_000),
-      backgroundMaxDurationMs: int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000),
+      syncTimeoutMs: Math.max(int(source, 'AGENT_SYNC_TIMEOUT_MS', 180_000), 5_000),
+      backgroundMaxDurationMs: Math.max(int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000), 10_000),
       backgroundMaxConcurrentRunsPerTenant: int(
         source,
         'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT',
         10,
       ),
-      runRetentionDays: int(source, 'AGENT_RUN_RETENTION_DAYS', 30),
-      runHeartbeatIntervalMs: int(source, 'AGENT_RUN_HEARTBEAT_INTERVAL_MS', 15_000),
-      runHeartbeatStaleMs: int(source, 'AGENT_RUN_HEARTBEAT_STALE_MS', 45_000),
+      runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
+      ...boundedAgentRunConfig(source),
     },
   };
 }

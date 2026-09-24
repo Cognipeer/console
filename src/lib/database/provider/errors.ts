@@ -13,6 +13,22 @@
  * callers can map it directly to `409 Conflict` without inspecting
  * driver-specific error shapes.
  */
+/**
+ * Thrown when an `AgentRun` insert reuses an `Idempotency-Key` another run in
+ * the same tenant+project already holds. The service resolves it to a replay
+ * (same request) or a 409 (different request); it exists so two CONCURRENT
+ * requests with one key cannot both execute.
+ */
+export class AgentRunIdempotencyKeyTakenError extends Error {
+  readonly idempotencyKey: string;
+
+  constructor(idempotencyKey: string) {
+    super(`Idempotency-Key "${idempotencyKey}" is already bound to another agent run`);
+    this.name = 'AgentRunIdempotencyKeyTakenError';
+    this.idempotencyKey = idempotencyKey;
+  }
+}
+
 export class AgentRunConflictError extends Error {
   readonly conversationId: string;
 
