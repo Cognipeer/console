@@ -1,3 +1,4 @@
+import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
 /**
  * Inbound A2A (Agent2Agent) server — exposes Cognipeer agents to external
  * A2A clients over JSON-RPC 2.0 (spec v1.0).
@@ -25,7 +26,6 @@ import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
 import {
   createConversation,
-  executeAgentChat,
   getAgentByKey,
   getConversationById,
 } from '@/lib/services/agents/agentService';
@@ -260,7 +260,7 @@ export async function handleA2aRpc(
         },
       );
 
-      const result = await executeAgentChat({
+      const result = await executeAgentChatExclusive({
         agentKey: agent.key,
         conversationId,
         projectId: ctx.projectId,

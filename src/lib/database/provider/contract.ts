@@ -29,6 +29,7 @@ import type {
   ICrawlResult,
   CrawlJobStatus,
   CrawlerStatus,
+  IAgentRun,
   IOcrJob,
   IOcrJobItem,
   OcrJobStatus,
@@ -1602,6 +1603,141 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
       limit?: number;
     },
   ): Promise<ICrawlJob[]>;
+
+  // ── Agent Runs (background execution, tenant-specific) ──
+  // See docs/guide/agent-background-execution.md §6, §7, §12.
+  /**
+   * Insert a new AgentRun row. The `conversationId` + active-status partial
+   * unique index (§6/§12.14) enforces "at most one queued/running run per
+   * conversation" at the DB layer, for both `mode: 'sync'` and
+   * `mode: 'background'` rows alike. A violation MUST be caught by the
+   * implementation and re-thrown as `AgentRunConflictError` (see
+   * `./errors.ts`), never left as a raw driver error, so callers can map it
+   * directly to `409 Conflict` without a TOCTOU check-then-insert.
+   */
+  createAgentRun(
+    record: Omit<IAgentRun, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IAgentRun>;
+  /**
+   * Atomically transition a `queued` run to `running`, stamping `workerId`,
+   * `startedAt`, and `heartbeatAt`. Returns `null` if the run was not
+   * `queued` (e.g. a duplicate/redelivered queue message tried to claim a
+   * run another consumer already started) — callers MUST treat `null` as
+   * "do not run this job" (§7 step 4).
+   */
+  claimAgentRun(
+    id: string,
+    tenantId: string,
+    workerId: string,
+    startedAt: Date,
+  ): Promise<IAgentRun | null>;
+  /**
+   * Update `heartbeatAt` for a run this worker still owns. Guarded by
+   * `status = 'running' AND workerId = ?` so a worker that has already been
+   * superseded (e.g. reclaimed by the reconciler) cannot resurrect a run by
+   * writing a fresh heartbeat to it.
+   */
+  updateAgentRunHeartbeat(
+    id: string,
+    workerId: string,
+    heartbeatAt: Date,
+  ): Promise<IAgentRun | null>;
+  /**
+   * Record a cancellation request, scoped by tenantId + projectId (§12.11).
+   * Mirrors `requestCrawlJobCancel`: a `queued` run transitions straight to
+   * `canceled` (nothing is executing it yet); a `running` run only has
+   * `cancelRequestedAt` stamped so the owning worker's own poll loop
+   * observes it and performs its own guarded transition (§7 step 6).
+   */
+  requestAgentRunCancel(
+    id: string,
+    tenantId: string,
+    projectId: string,
+  ): Promise<IAgentRun | null>;
+  /**
+   * Persist a run's terminal status, guarded so it only applies while the
+   * run is still `running`. This is what prevents a deadline-timer-driven
+   * `failed` transition (§12.13) from later being clobbered back to
+   * `succeeded` by an abandoned `invoke()` call that eventually settles
+   * (§12.12) — the CAS guard, not the caller's discretion, is the actual
+   * protection.
+   */
+  finalizeAgentRun(
+    id: string,
+    tenantId: string,
+    data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IAgentRun | null>;
+  /**
+   * Updates callback delivery bookkeeping ONLY (`callbackStatus`,
+   * `callbackAttempts`) — deliberately NOT guarded by `status = 'running'`
+   * the way `finalizeAgentRun` is, because a callback delivery attempt (and
+   * its retries, §12.6) happens AFTER the run has already reached its
+   * terminal status. Reusing `finalizeAgentRun`'s CAS here would silently
+   * no-op every callback bookkeeping write once the run is no longer
+   * `running` — which is always, since finalize runs first.
+   */
+  updateAgentRunCallback(
+    id: string,
+    tenantId: string,
+    data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number },
+  ): Promise<IAgentRun | null>;
+  getAgentRunById(
+    id: string,
+    tenantId: string,
+    projectId: string,
+  ): Promise<IAgentRun | null>;
+  /** Background-mode-only idempotency lookup (§9, §12.15), scoped by tenantId+projectId. */
+  getAgentRunByIdempotencyKey(
+    tenantId: string,
+    projectId: string,
+    idempotencyKey: string,
+  ): Promise<IAgentRun | null>;
+  /**
+   * Heartbeat-sweep input for the crash-recovery reconciler (§7.1): `running`
+   * rows in this tenant whose `heartbeatAt` is older than `heartbeatBefore`.
+   */
+  listStaleAgentRuns(
+    tenantId: string,
+    heartbeatBefore: Date,
+    limit?: number,
+  ): Promise<IAgentRun[]>;
+  /**
+   * Boot-time recovery input (§7.1): `queued` rows in this tenant — a
+   * message the in-memory queue provider lost on process restart is safe to
+   * republish as-is, since a `queued` run never started executing.
+   */
+  listQueuedAgentRuns(
+    tenantId: string,
+    options?: { createdBefore?: Date; limit?: number },
+  ): Promise<IAgentRun[]>;
+  /**
+   * Dashboard listing, newest first. Always tenant+project scoped;
+   * `agentKey`/`conversationId`/`status`/`mode` narrow it further.
+   */
+  listAgentRuns(filter: {
+    tenantId: string;
+    projectId: string;
+    agentKey?: string;
+    conversationId?: string;
+    status?: IAgentRun['status'][];
+    mode?: IAgentRun['mode'];
+    limit?: number;
+  }): Promise<IAgentRun[]>;
+  /**
+   * Sync-mode cleanup (§6): unconditional delete, not a finalize — a
+   * `mode: 'sync'` row is a reservation slot, never a terminal record, and
+   * an orphaned one (process crash mid-call) is freed the same way by the
+   * reconciler.
+   */
+  deleteAgentRun(id: string): Promise<boolean>;
+  /** §12.8 concurrency-cap input: count of `queued`+`running` rows. */
+  countActiveAgentRuns(tenantId: string, projectId?: string, mode?: IAgentRun['mode']): Promise<number>;
+  /** §12.10 retention, following the `cleanupAgentTracingRetention` precedent. */
+  cleanupAgentRunRetention(options: {
+    projectId?: string;
+    olderThan: Date;
+    batchSize?: number;
+  }): Promise<{ deletedCount: number }>;
 
   // ── Crawl results (tenant-specific) ──
   createCrawlResult(

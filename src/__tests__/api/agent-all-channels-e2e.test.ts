@@ -58,27 +58,49 @@ vi.mock('@/lib/services/agents/agentService', () => ({
     },
 }));
 
-vi.mock('@/lib/services/agents', () => ({
-    getAgentByKey: vi.fn(),
-    executeAgentChat: vi.fn(),
-    createConversation: vi.fn(),
-    getConversationById: vi.fn(),
-    // The dashboard plugin pulls a wider slice of the barrel; every name it
-    // imports has to exist here or the module fails to load.
-    createAgentRecord: vi.fn(),
-    deleteAgentRecord: vi.fn(),
-    deleteConversation: vi.fn(),
-    executePlaygroundChat: vi.fn(),
-    getAgentById: vi.fn(),
-    getAgentVersion: vi.fn(),
-    listAgents: vi.fn(),
-    listAgentVersions: vi.fn(),
-    listConversations: vi.fn(),
-    normalizeA2aMetadataUpdate: vi.fn(),
-    prepareConnectionForStorage: vi.fn(),
-    publishAgent: vi.fn(),
-    updateAgentRecord: vi.fn(),
-}));
+vi.mock('@/lib/services/agents', () => {
+    const executeAgentChat = vi.fn();
+    return {
+        getAgentByKey: vi.fn(),
+        executeAgentChat,
+        createConversation: vi.fn(),
+        getConversationById: vi.fn(),
+        // The dashboard plugin pulls a wider slice of the barrel; every name it
+        // imports has to exist here or the module fails to load.
+        createAgentRecord: vi.fn(),
+        deleteAgentRecord: vi.fn(),
+        deleteConversation: vi.fn(),
+        executePlaygroundChat: vi.fn(),
+        getAgentById: vi.fn(),
+        getAgentVersion: vi.fn(),
+        listAgents: vi.fn(),
+        listAgentVersions: vi.fn(),
+        listConversations: vi.fn(),
+        normalizeA2aMetadataUpdate: vi.fn(),
+        prepareConnectionForStorage: vi.fn(),
+        publishAgent: vi.fn(),
+        updateAgentRecord: vi.fn(),
+        // Background execution (docs/guide/agent-background-execution.md):
+        // `runSyncAgentTurn` delegates to the SAME `executeAgentChat` mock
+        // above so `runCalls()` (which reads `executeAgentChat.mock.calls`)
+        // keeps observing exactly what each channel asked the runtime to do
+        // — these tests are about the CHANNEL wiring, not the sync-ceiling
+        // orchestration itself (covered by agent-run-sync-ceiling.test.ts).
+        runSyncAgentTurn: vi.fn(async ({ request }: { request: unknown }) => ({
+            kind: 'ok',
+            response: await executeAgentChat(request),
+        })),
+        createBackgroundAgentRun: vi.fn(),
+        getAgentRunStatus: vi.fn(),
+        requestAgentRunCancellation: vi.fn(),
+        isBackgroundModeRequested: vi.fn().mockReturnValue(false),
+        agentRunConflictErrorBody: vi.fn(() => ({ error: { type: 'agent_run_conflict', message: 'conflict' } })),
+        agentSyncTimeoutErrorBody: vi.fn(() => ({ error: { type: 'timeout', message: 'timed out' } })),
+        idempotencyKeyRequiresBackgroundErrorBody: vi.fn(() => ({
+            error: { type: 'invalid_request_error', message: 'Idempotency-Key requires background: true' },
+        })),
+    };
+});
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';

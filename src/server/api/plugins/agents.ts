@@ -54,6 +54,15 @@ import {
   type AgentScheduleInput,
 } from '@/lib/services/agents/agentScheduleService';
 import { getDatabase } from '@/lib/database';
+import {
+  getAgentRunStatus,
+  listAgentRuns,
+  requestAgentRunCancellation,
+  reserveConversationForSyncTurn,
+  resolveAgentExecutionLimits,
+  serializeAgentRun,
+} from '@/lib/services/agents/agentRunService';
+import type { LicenseType } from '@/lib/license/license-manager';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   readJsonBody,
@@ -198,6 +207,37 @@ async function agentInProjectScope(
   if (!agent.projectId) return agent;
   return String(agent.projectId) === String(projectId) ? agent : null;
 }
+
+/**
+ * A dashboard turn on a session holds that conversation's run slot, the same
+ * one API and background runs take — two turns writing one conversation at
+ * once lose one turn's history. `undefined` = stateless (no session), `null`
+ * = the slot is taken.
+ */
+async function reserveDashboardSession(input: {
+  session: { tenantId: string; tenantDbName: string; userId: string };
+  projectId: string;
+  agentKey: string;
+  conversationId: unknown;
+  userMessage: string;
+}) {
+  if (typeof input.conversationId !== 'string') return undefined;
+  return reserveConversationForSyncTurn(await getDatabase(), {
+    tenantId: input.session.tenantId,
+    tenantDbName: input.session.tenantDbName,
+    projectId: input.projectId,
+    agentKey: input.agentKey,
+    conversationId: input.conversationId,
+    userMessage: input.userMessage,
+    userId: input.session.userId,
+  });
+}
+
+const SESSION_BUSY_BODY = {
+  error: 'This session already has a run in progress. Wait for it to finish or start a new session.',
+  type: 'agent_run_conflict',
+  code: 'agent_run_conflict',
+};
 
 export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents', withApiRequestContext(async (request, reply) => {
@@ -841,6 +881,84 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // Effective execution ceilings for this tenant/project (env ∧ quota) —
+  // the Build → Execution card shows them as the maximum an agent may set.
+  app.get('/agents/execution/limits', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const limits = await resolveAgentExecutionLimits({
+        quotaContext: {
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          projectId,
+          licenseType: session.licenseType as LicenseType,
+          userId: session.userId,
+        },
+      });
+      return reply.code(200).send({
+        syncTimeoutSeconds: Math.floor(limits.syncTimeoutMs / 1000),
+        backgroundMaxDurationMinutes: Math.floor(limits.backgroundMaxDurationMs / 60_000),
+        maxConcurrentRunsPerTenant: limits.maxConcurrentRunsPerTenant,
+        maxConcurrentRunsPerProject: limits.maxConcurrentRunsPerProject,
+      });
+    } catch (error) {
+      logger.error('Agent execution limits error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to read execution limits' });
+    }
+  }));
+
+  // Background runs of one agent, newest first (Sessions → Background runs).
+  app.get('/agents/:agentId/runs', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
+      const allowed = new Set(['queued', 'running', 'succeeded', 'failed', 'canceled']);
+      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'>;
+      const runs = await listAgentRuns(session.tenantDbName, {
+        tenantId: session.tenantId,
+        projectId,
+        agentKey: agent.key,
+        mode: 'background',
+        ...(status.length > 0 ? { status } : {}),
+        ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+        limit: Math.min(Number(query.limit) || 100, 500),
+      });
+      return reply.code(200).send({ runs: runs.map(serializeAgentRun) });
+    } catch (error) {
+      logger.error('List agent runs error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to list runs' });
+    }
+  }));
+
+  app.post('/agents/:agentId/runs/:runId/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId, runId } = request.params as { agentId: string; runId: string };
+      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      // Ownership first: the run must belong to THIS agent, not merely to the project.
+      const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
+      if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
+        return reply.code(404).send({ error: 'Run not found' });
+      }
+      const outcome = await requestAgentRunCancellation(session.tenantDbName, session.tenantId, projectId, runId);
+      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Run not found' });
+      if (outcome.kind === 'already_terminal') {
+        return reply.code(409).send({ error: `Run is already ${outcome.run.status}` });
+      }
+      return reply.code(200).send({ run: serializeAgentRun(outcome.run) });
+    } catch (error) {
+      logger.error('Cancel agent run error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to cancel run' });
+    }
+  }));
+
   app.post('/agents/model-check', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
@@ -1154,6 +1272,11 @@ function summariseConversation(conversation: IAgentConversation) {
       return reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
     }
 
+    const reservation = await reserveDashboardSession({
+      session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
+    });
+    if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
+
     reply.raw.setHeader('Content-Type', 'text/event-stream');
     reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
     reply.raw.setHeader('Connection', 'keep-alive');
@@ -1214,6 +1337,7 @@ function summariseConversation(conversation: IAgentConversation) {
         send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
     } finally {
+      await reservation?.release();
       if (!closed) reply.raw.end();
     }
     return reply;
@@ -1245,33 +1369,43 @@ function summariseConversation(conversation: IAgentConversation) {
         source: 'playground',
       });
 
-      const result = await executePlaygroundChat({
-        agentKey: agent.key,
-        runtimeContext,
-        // Ignored server-side when conversationId is set (history loads from
-        // the session instead) — still parsed so a stateless call (no
-        // conversationId) keeps working exactly as before.
-        history: Array.isArray(body.history)
-          ? body.history
-            .filter((item): item is { content: string; role: string } =>
-              Boolean(
-                item
-                && typeof item === 'object'
-                && 'content' in item
-                && 'role' in item
-                && typeof (item as { content?: unknown }).content === 'string'
-                && typeof (item as { role?: unknown }).role === 'string',
-              ),
-            )
-            .map((item) => ({ content: item.content, role: item.role }))
-          : undefined,
-        projectId,
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        userMessage: body.message,
-        ...(typeof body.version === 'number' ? { version: body.version } : {}),
-        ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+      const reservation = await reserveDashboardSession({
+        session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
       });
+      if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
+
+      let result: Awaited<ReturnType<typeof executePlaygroundChat>>;
+      try {
+        result = await executePlaygroundChat({
+          agentKey: agent.key,
+          runtimeContext,
+          // Ignored server-side when conversationId is set (history loads from
+          // the session instead) — still parsed so a stateless call (no
+          // conversationId) keeps working exactly as before.
+          history: Array.isArray(body.history)
+            ? body.history
+              .filter((item): item is { content: string; role: string } =>
+                Boolean(
+                  item
+                  && typeof item === 'object'
+                  && 'content' in item
+                  && 'role' in item
+                  && typeof (item as { content?: unknown }).content === 'string'
+                  && typeof (item as { role?: unknown }).role === 'string',
+                ),
+              )
+              .map((item) => ({ content: item.content, role: item.role }))
+            : undefined,
+          projectId,
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userMessage: body.message,
+          ...(typeof body.version === 'number' ? { version: body.version } : {}),
+          ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+        });
+      } finally {
+        await reservation?.release();
+      }
 
       return reply.code(200).send(result);
     } catch (error) {

@@ -38,6 +38,7 @@
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync } from 'fastify';
+import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type {
@@ -49,7 +50,6 @@ import type {
 import {
   createAgentRecord,
   createConversation,
-  executeAgentChat,
   getAgentByKey,
   getConversationById,
   listAgents,
@@ -754,7 +754,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
         source: 'api',
       });
 
-      const result = await executeAgentChat({
+      const result = await executeAgentChatExclusive({
         agentKey: agent.key,
         conversationId,
         projectId: ctx.projectId,

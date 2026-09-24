@@ -983,6 +983,43 @@ export function QuotaPolicyModal({
                 </FormField>
               </FormRow>
             ) : null}
+            {currentDomain === 'global' ? (
+              <FormRow cols={3}>
+                <FormField label={t('quotas.maxAgentSyncTimeoutSeconds')} optional>
+                  <NumberInput
+                    placeholder={t('planLimit')}
+                    min={5}
+                    allowDecimal={false}
+                    value={toFormValue(limits.quotas?.maxAgentSyncTimeoutSeconds)}
+                    onChange={(v) =>
+                      form.setFieldValue('limits.quotas.maxAgentSyncTimeoutSeconds', fromFormValue(v))
+                    }
+                  />
+                </FormField>
+                <FormField label={t('quotas.maxAgentBackgroundDurationMinutes')} optional>
+                  <NumberInput
+                    placeholder={t('planLimit')}
+                    min={1}
+                    allowDecimal={false}
+                    value={toFormValue(limits.quotas?.maxAgentBackgroundDurationMinutes)}
+                    onChange={(v) =>
+                      form.setFieldValue('limits.quotas.maxAgentBackgroundDurationMinutes', fromFormValue(v))
+                    }
+                  />
+                </FormField>
+                <FormField label={t('quotas.maxConcurrentAgentRuns')} optional>
+                  <NumberInput
+                    placeholder={t('planLimit')}
+                    min={0}
+                    allowDecimal={false}
+                    value={toFormValue(limits.quotas?.maxConcurrentAgentRuns)}
+                    onChange={(v) =>
+                      form.setFieldValue('limits.quotas.maxConcurrentAgentRuns', fromFormValue(v))
+                    }
+                  />
+                </FormField>
+              </FormRow>
+            ) : null}
           </>
         ) : null}
 

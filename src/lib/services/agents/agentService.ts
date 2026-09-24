@@ -2630,6 +2630,60 @@ export async function deleteConversation(
 
 // ── Agent Chat Execution ─────────────────────────────────────────────
 
+/**
+ * Shared mutable reference threaded through `executeAgentChatLocal` so a
+ * deadline (synchronous ceiling, §5) or an asynchronously-flipped cancel flag
+ * (background mode, §7 step 6) can stop a turn's outcome from being
+ * persisted — WITHOUT waiting for `sdkAgent.invoke()` itself to return early,
+ * which the SDK's own cancellation primitives cannot reliably do (an
+ * in-flight tool/model call runs to completion regardless — see the
+ * promoted spike in `__tests__/unit/agent-sdk-cancellation.test.ts`, §12.2).
+ *
+ * `deadlineAt` (sync path) and `cancelled` (background path, flipped by the
+ * worker's own heartbeat-cadence poll of `cancelRequestedAt`) are checked
+ * together, once, immediately before the conversation write (§12.12) — not
+ * relied on to actually interrupt the in-flight call.
+ */
+export interface AgentRunCancellationCell {
+    /** Absolute epoch-ms deadline. When set and already passed, the turn is superseded. */
+    deadlineAt?: number;
+    /** Flipped to `true` asynchronously by an external caller (e.g. a background worker's cancel poll). */
+    cancelled: boolean;
+}
+
+/** True once a deadline has passed or an explicit cancel has been recorded. */
+function isCancellationCellTripped(cell: AgentRunCancellationCell | undefined): boolean {
+    if (!cell) return false;
+    if (cell.cancelled) return true;
+    if (cell.deadlineAt !== undefined && Date.now() > cell.deadlineAt) return true;
+    return false;
+}
+
+/**
+ * Bridges the mutable `cancellationCell.cancelled` flag into an `AbortSignal`
+ * the SDK's `InvokeConfig.cancellationToken` understands. A short poll
+ * interval is the only way to observe a plain boolean flipping asynchronously
+ * from the outside during an in-flight `invoke()` call — this is a
+ * best-effort inner control (§12.2: it stops the loop before its NEXT step,
+ * it does not interrupt a call already in flight), not the mechanism that
+ * actually bounds the caller's wait (that is the `Promise.race` at the call
+ * site, §5/§7 step 5).
+ */
+const CANCELLATION_CELL_POLL_MS = 250;
+
+function bridgeCancellationCell(
+    cell: AgentRunCancellationCell | undefined,
+): { signal?: AbortSignal; stop: () => void } {
+    if (!cell) return { stop: () => undefined };
+    const controller = new AbortController();
+    if (cell.cancelled) controller.abort();
+    const timer = setInterval(() => {
+        if (cell.cancelled && !controller.signal.aborted) controller.abort();
+    }, CANCELLATION_CELL_POLL_MS);
+    timer.unref?.();
+    return { signal: controller.signal, stop: () => clearInterval(timer) };
+}
+
 export interface AgentChatRequest {
     tenantDbName: string;
     tenantId: string;
@@ -2653,6 +2707,13 @@ export interface AgentChatRequest {
      * streams nothing and the caller still gets the complete result.
      */
     onTextChunk?: (text: string) => void;
+    /**
+     * Shared deadline/cancel reference for the synchronous ceiling (§5) and
+     * background max-duration/cancel (§7) — see `AgentRunCancellationCell`.
+     * Absent for ordinary calls (dashboard, playground-adjacent callers),
+     * which keep today's unconditional-persist behavior.
+     */
+    cancellationCell?: AgentRunCancellationCell;
 }
 
 /** Tool-call progress notification surfaced while an agent run executes. */
@@ -2871,6 +2932,12 @@ export async function executeAgentChat(
         },
         payload as unknown as QueuePayload,
         () => executeAgentChatLocal(request),
+        // A routed turn with a ceiling waits exactly as long as the ceiling
+        // allows and is never retried: the queue default (60s, 3 attempts)
+        // cut long turns off early and could re-run a turn's tool calls.
+        request.cancellationCell?.deadlineAt !== undefined
+            ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
+            : undefined,
     );
 }
 
@@ -2982,12 +3049,17 @@ export async function executeAgentChatLocal(
             { role: 'user', content: userMessage, timestamp: now },
             { role: 'assistant', content: assistantContent, timestamp: new Date() },
         ];
-        await db.updateAgentConversation(conversationId, {
-            messages: updatedMessages,
-            title: conversation.title === 'New conversation' && updatedMessages.length <= 2
-                ? userMessage.substring(0, 80)
-                : conversation.title,
-        });
+        // §12.12: a deadline/cancel decision made about this turn while the
+        // external HTTP call was in flight must not be overwritten by a late
+        // write once it finally returns.
+        if (!isCancellationCellTripped(request.cancellationCell)) {
+            await db.updateAgentConversation(conversationId, {
+                messages: updatedMessages,
+                title: conversation.title === 'New conversation' && updatedMessages.length <= 2
+                    ? userMessage.substring(0, 80)
+                    : conversation.title,
+            });
+        }
 
         const responseId = `resp_${conversationId}`;
         const msgId = `msg_${Date.now().toString(36)}`;
@@ -3267,6 +3339,7 @@ export async function executeAgentChatLocal(
         // twice. Both handled, same as the playground path.
         const { onTextChunk: onLiveTextChunk } = request;
         const compactions: AgentTurnCompaction[] = [];
+        const cancellationBridge = bridgeCancellationCell(request.cancellationCell);
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 if (event.type === 'summarization') compactions.push(compactionFromEvent(event));
@@ -3284,12 +3357,17 @@ export async function executeAgentChatLocal(
                     },
                 }
                 : {}),
+            ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
+            ...(request.cancellationCell?.deadlineAt !== undefined
+                ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
+                : {}),
         };
 
         const result: AgentSdkInvokeResult = await sdkAgent.invoke(inputState, liveInvokeConfig)
             .catch((error: unknown) => {
                 throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
-            });
+            })
+            .finally(() => cancellationBridge.stop());
 
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;
@@ -3350,25 +3428,34 @@ export async function executeAgentChatLocal(
             },
         ];
 
-        await db.updateAgentConversation(conversationId, {
-            messages: updatedMessages,
-            title: conversation.title === 'New conversation' && updatedMessages.length <= 2
-                ? persistedUserMessage.substring(0, 80)
-                : conversation.title,
-        });
-        await saveConversationState(db, {
-            conversationId,
-            tenantId,
-            projectId,
-            agentKey,
-            state: result.state,
-            messageCount: updatedMessages.length,
-        });
+        // §12.12: the deadline (sync ceiling, §5) or an async cancel flag
+        // (background mode, §7 step 6) may have already decided this turn's
+        // outcome while `sdkAgent.invoke()` was in flight — a late-arriving
+        // result here must never overwrite that decision by persisting
+        // anyway, however complete the answer looks.
+        const supersededByDeadlineOrCancel = isCancellationCellTripped(request.cancellationCell);
+        if (!supersededByDeadlineOrCancel) {
+            await db.updateAgentConversation(conversationId, {
+                messages: updatedMessages,
+                title: conversation.title === 'New conversation' && updatedMessages.length <= 2
+                    ? persistedUserMessage.substring(0, 80)
+                    : conversation.title,
+            });
+            await saveConversationState(db, {
+                conversationId,
+                tenantId,
+                projectId,
+                agentKey,
+                state: result.state,
+                messageCount: updatedMessages.length,
+            });
+        }
 
-        logger.info('Agent chat completed', {
+        logger.info(supersededByDeadlineOrCancel ? 'Agent chat completed but superseded (not persisted)' : 'Agent chat completed', {
             agentKey,
             conversationId,
             messageCount: updatedMessages.length,
+            persisted: !supersededByDeadlineOrCancel,
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 

@@ -344,11 +344,57 @@ export interface AppConfig {
     defaultAttempts: number;
     defaultBackoffMs: number;
   };
+
+  /**
+   * Agent background execution (docs/guide/agent-background-execution.md).
+   * Both timeouts are server-operated ceilings, distinct from the agent's
+   * own `runtime.limits.maxWallClockMs` (§5, §12.5/§12.13) — deploy-time
+   * config must keep `syncTimeoutMs` below the shortest infrastructure
+   * timeout in the deployment (Decision 6).
+   */
+  agent: {
+    /** Hard wall-clock ceiling for a synchronous (non-background) agent turn. */
+    syncTimeoutMs: number;
+    /** Server-operated upper bound on a background run, independent of the agent's own limit. */
+    backgroundMaxDurationMs: number;
+    /** Simple per-tenant cap on simultaneous queued+running background runs (§12.8). */
+    backgroundMaxConcurrentRunsPerTenant: number;
+    /** Retention TTL for AgentRun records (§12.10), following the tracing-retention precedent. */
+    runRetentionDays: number;
+    /** How often a background worker writes heartbeatAt while a run is `running`. */
+    runHeartbeatIntervalMs: number;
+    /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
+    runHeartbeatStaleMs: number;
+    /** Per-project cap on simultaneous queued+running background runs; 0 = only the tenant cap applies. */
+    backgroundMaxConcurrentRunsPerProject: number;
+    /** Background runs executed at once per node (own queue, so they never starve chat). */
+    runConcurrency: number;
+    /** A `queued` run older than this with no worker is republished by the reconciler. */
+    runRequeueAfterMs: number;
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
+
+/**
+ * The run-timing knobs, clamped to values that cannot wedge the system: a 0
+ * heartbeat would spin a hot interval, a stale window at or below the
+ * heartbeat would fail every live run as `worker_lost`, and a 0 sync timeout
+ * would 504 every call before it starts.
+ */
+function boundedAgentRunConfig(source: ConfigSource) {
+  const atLeast = (value: number, min: number) => (Number.isFinite(value) ? Math.max(value, min) : min);
+  const runHeartbeatIntervalMs = atLeast(int(source, 'AGENT_RUN_HEARTBEAT_INTERVAL_MS', 15_000), 1_000);
+  return {
+    runHeartbeatIntervalMs,
+    runHeartbeatStaleMs: atLeast(int(source, 'AGENT_RUN_HEARTBEAT_STALE_MS', 45_000), runHeartbeatIntervalMs * 3),
+    backgroundMaxConcurrentRunsPerProject: atLeast(int(source, 'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT', 0), 0),
+    runConcurrency: atLeast(int(source, 'AGENT_RUN_CONCURRENCY', 4), 1),
+    runRequeueAfterMs: atLeast(int(source, 'AGENT_RUN_REQUEUE_AFTER_MS', 120_000), 10_000),
+  };
+}
 
 function str(source: ConfigSource, key: string, fallback: string): string {
   return source.get(key) ?? fallback;
@@ -641,6 +687,18 @@ function buildConfig(source: ConfigSource): AppConfig {
       },
       defaultAttempts: int(source, 'QUEUE_DEFAULT_ATTEMPTS', 3),
       defaultBackoffMs: int(source, 'QUEUE_DEFAULT_BACKOFF_MS', 1_000),
+    },
+
+    agent: {
+      syncTimeoutMs: Math.max(int(source, 'AGENT_SYNC_TIMEOUT_MS', 180_000), 5_000),
+      backgroundMaxDurationMs: Math.max(int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000), 10_000),
+      backgroundMaxConcurrentRunsPerTenant: int(
+        source,
+        'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT',
+        10,
+      ),
+      runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
+      ...boundedAgentRunConfig(source),
     },
   };
 }
