@@ -3910,6 +3910,10 @@ export async function executePlaygroundChatLocal(
         systemPrompt,
         tracingSink,
         plugins: guardrailPlugins,
+        // A session's turns group under one Observability thread, the same way
+        // API turns do — the agent Sessions drawer renders that thread.
+        ...(request.conversationId ? { threadId: request.conversationId } : {}),
+        tracingMetadata: buildTracingMetadata(runtimeContext),
         runtimeOptions: resolveAgentRuntimeOptions(config),
         outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
         subagents: playgroundSubagents.subagents,

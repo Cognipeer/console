@@ -42,7 +42,8 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import MessageBlock from '@/components/common/ui/MessageBlock';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
 import PropertiesPanel from '@/components/common/ui/PropertiesPanel';
-import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
+import ThreadDetailView from '@/components/tracing/ThreadDetailView';
+import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import type { ChatMessage, PlaygroundStep } from '../session/sessionTypes';
 import { isContinuableSession, messageCountOf, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
@@ -117,7 +118,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             opened={Boolean(session)}
             onClose={onClose}
             position="right"
-            size="xl"
+            size="80%"
             title={
                 <Group gap="xs" wrap="nowrap">
                     <Text fw={600} lineClamp={1}>{session?.title || 'New session'}</Text>
@@ -127,24 +128,6 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         >
             {session ? (
                 <Stack gap="md">
-                    <Group justify="space-between" wrap="nowrap" align="flex-start">
-                        <Stack gap={2}>
-                            <Text size="xs" c="dimmed">
-                                Started {formatRelativeTime(session.createdAt)} · last activity {formatRelativeTime(session.updatedAt ?? session.createdAt)}
-                            </Text>
-                            <Text size="xs" c="dimmed" ff="monospace">{session._id}</Text>
-                        </Stack>
-                        {continuable ? (
-                            <Button
-                                size="xs"
-                                leftSection={<IconPlayerPlay size={14} />}
-                                onClick={() => onContinue(session._id)}
-                            >
-                                Continue
-                            </Button>
-                        ) : null}
-                    </Group>
-
                     {!continuable ? (
                         <Alert variant="light" color="gray" p="xs">
                             <Text size="xs">
@@ -154,153 +137,188 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                         </Alert>
                     ) : null}
 
-                    <div className="ds-stat-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
-                        <StatTile label="Turns" icon={<IconHash size={14} stroke={1.7} />} value={session.turns ?? 0} />
-                        <StatTile
-                            label="Tokens"
-                            icon={<IconActivity size={14} stroke={1.7} />}
-                            value={session.totalTokens ? formatNumber(session.totalTokens) : '—'}
-                        />
-                        <StatTile
-                            label="Cost"
-                            icon={<IconCoin size={14} stroke={1.7} />}
-                            value={session.costUsd ? formatCost(session.costUsd) : '—'}
-                        />
-                        <StatTile
-                            label="Active"
-                            icon={<IconClock size={14} stroke={1.7} />}
-                            value={session.activeMs ? formatDuration(session.activeMs) : '—'}
-                        />
-                    </div>
-
-                    {loading ? (
-                        <Center py="xl"><Loader size="sm" /></Center>
-                    ) : error ? (
-                        <Alert color="red" variant="light">Could not load the session: {error}</Alert>
-                    ) : record ? (
-                        <Tabs defaultValue="conversation">
-                            <Tabs.List>
-                                <Tabs.Tab value="conversation" leftSection={<IconMessageCircle size={14} />}>
-                                    Conversation
-                                </Tabs.Tab>
-                                <Tabs.Tab value="tools" leftSection={<IconTool size={14} />}>
-                                    Tools{toolUsage.length > 0 ? ` · ${toolUsage.length}` : ''}
-                                </Tabs.Tab>
-                                <Tabs.Tab value="details" leftSection={<IconInfoCircle size={14} />}>Details</Tabs.Tab>
-                                <Tabs.Tab value="raw" leftSection={<IconCode size={14} />}>Raw</Tabs.Tab>
-                            </Tabs.List>
-
-                            <Tabs.Panel value="conversation" pt="md">
-                                {(record.messages ?? []).length === 0 ? (
-                                    <Text size="sm" c="dimmed">No messages yet.</Text>
-                                ) : (
-                                    <Stack gap="sm">
-                                        {(record.messages ?? []).map((message, index) => (
-                                            <Paper key={index} withBorder radius="md" p="sm">
-                                                <Stack gap="xs">
-                                                    <MessageBlock messageRole={message.role} content={message.content} />
-                                                    {(message.steps ?? []).length > 0 ? (
-                                                        <Stack gap={4}>
-                                                            {(message.steps ?? []).map((step, stepIndex) => (
-                                                                <Group key={step.id ?? stepIndex} gap="xs" wrap="nowrap">
-                                                                    <StatusBadge status={stepStatus(step)} label={step.status ?? 'success'} />
-                                                                    <Code>{step.name}</Code>
-                                                                    {step.error ? (
-                                                                        <Text size="xs" c="red" lineClamp={1}>{step.error}</Text>
-                                                                    ) : null}
-                                                                </Group>
-                                                            ))}
-                                                        </Stack>
-                                                    ) : null}
-                                                    {message.role === 'assistant' && message.usage ? (
-                                                        <Group gap="md">
-                                                            {message.latencyMs ? (
-                                                                <Text size="xs" c="dimmed">{formatDuration(message.latencyMs)}</Text>
-                                                            ) : null}
-                                                            {message.usage.totalTokens ? (
-                                                                <Text size="xs" c="dimmed">{formatNumber(message.usage.totalTokens)} tokens</Text>
-                                                            ) : null}
-                                                            {message.usage.costUsd ? (
-                                                                <Text size="xs" c="dimmed">{formatCost(message.usage.costUsd)}</Text>
-                                                            ) : null}
-                                                        </Group>
-                                                    ) : null}
-                                                </Stack>
-                                            </Paper>
-                                        ))}
-                                    </Stack>
-                                )}
-                            </Tabs.Panel>
-
-                            <Tabs.Panel value="tools" pt="md">
-                                {toolUsage.length === 0 ? (
-                                    <Text size="sm" c="dimmed">No tool calls in this session.</Text>
-                                ) : (
-                                    <Table verticalSpacing={6}>
-                                        <Table.Thead>
-                                            <Table.Tr>
-                                                <Table.Th>Tool</Table.Th>
-                                                <Table.Th ta="right">Calls</Table.Th>
-                                                <Table.Th ta="right">Errors</Table.Th>
-                                            </Table.Tr>
-                                        </Table.Thead>
-                                        <Table.Tbody>
-                                            {toolUsage.map(([name, stats]) => (
-                                                <Table.Tr key={name}>
-                                                    <Table.Td><Code>{name}</Code></Table.Td>
-                                                    <Table.Td ta="right"><Text size="xs">{stats.calls}</Text></Table.Td>
-                                                    <Table.Td ta="right">
-                                                        {stats.errors > 0
-                                                            ? <Badge size="xs" color="red" variant="light">{stats.errors}</Badge>
-                                                            : <Text size="xs" c="dimmed">0</Text>}
-                                                    </Table.Td>
-                                                </Table.Tr>
-                                            ))}
-                                        </Table.Tbody>
-                                    </Table>
-                                )}
-                            </Tabs.Panel>
-
-                            <Tabs.Panel value="details" pt="md">
-                                <PropertiesPanel
-                                    title="Session"
-                                    rows={[
-                                        { key: 'source', label: 'Source', value: sessionSourceLabel(session.source) },
-                                        { key: 'messages', label: 'Messages', value: String(messageCountOf(session)) },
-                                        { key: 'in', label: 'Input tokens', value: session.inputTokens ? formatNumber(session.inputTokens) : '—' },
-                                        { key: 'out', label: 'Output tokens', value: session.outputTokens ? formatNumber(session.outputTokens) : '—' },
-                                        {
-                                            key: 'avg',
-                                            label: 'Average turn',
-                                            value: session.activeMs && session.turns
-                                                ? formatDuration(Math.round(session.activeMs / session.turns))
-                                                : '—',
-                                        },
-                                        {
-                                            key: 'created',
-                                            label: 'Created',
-                                            value: session.createdAt ? new Date(session.createdAt).toLocaleString() : '—',
-                                        },
-                                        {
-                                            key: 'ctx',
-                                            label: 'Session context',
-                                            value: session.hasContext ? <Badge size="xs" variant="light">set</Badge> : 'none',
-                                        },
-                                    ]}
-                                />
-                                {record.metadata?.runtimeContext ? (
-                                    <Stack gap={6} mt="md">
-                                        <Text size="xs" fw={700} c="dimmed" tt="uppercase">Runtime context</Text>
-                                        <JsonTreeViewer data={record.metadata.runtimeContext} initialExpandLevel={1} />
-                                    </Stack>
+                    {/*
+                      Agent turns are traced with threadId = conversationId, so
+                      the Observability thread view is this session. Sessions
+                      with no trace (tracing off, or older than it) fall back
+                      to the stored transcript.
+                    */}
+                    <ThreadDetailView
+                        key={session._id}
+                        threadId={session._id}
+                        embedded
+                        actions={continuable ? (
+                            <Button
+                                size="xs"
+                                leftSection={<IconPlayerPlay size={14} />}
+                                onClick={() => onContinue(session._id)}
+                            >
+                                Continue
+                            </Button>
+                        ) : null}
+                        emptyFallback={
+                            <Stack gap="md">
+                                {continuable ? (
+                                    <Group justify="flex-end">
+                                        <Button
+                                            size="xs"
+                                            leftSection={<IconPlayerPlay size={14} />}
+                                            onClick={() => onContinue(session._id)}
+                                        >
+                                            Continue
+                                        </Button>
+                                    </Group>
                                 ) : null}
-                            </Tabs.Panel>
-
-                            <Tabs.Panel value="raw" pt="md">
-                                <JsonTreeViewer data={record} initialExpandLevel={1} />
-                            </Tabs.Panel>
-                        </Tabs>
-                    ) : null}
+                                                <div className="ds-stat-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+                                                    <StatTile label="Turns" icon={<IconHash size={14} stroke={1.7} />} value={session.turns ?? 0} />
+                                                    <StatTile
+                                                        label="Tokens"
+                                                        icon={<IconActivity size={14} stroke={1.7} />}
+                                                        value={session.totalTokens ? formatNumber(session.totalTokens) : '—'}
+                                                    />
+                                                    <StatTile
+                                                        label="Cost"
+                                                        icon={<IconCoin size={14} stroke={1.7} />}
+                                                        value={session.costUsd ? formatCost(session.costUsd) : '—'}
+                                                    />
+                                                    <StatTile
+                                                        label="Active"
+                                                        icon={<IconClock size={14} stroke={1.7} />}
+                                                        value={session.activeMs ? formatDuration(session.activeMs) : '—'}
+                                                    />
+                                                </div>
+                            
+                                                {loading ? (
+                                                    <Center py="xl"><Loader size="sm" /></Center>
+                                                ) : error ? (
+                                                    <Alert color="red" variant="light">Could not load the session: {error}</Alert>
+                                                ) : record ? (
+                                                    <Tabs defaultValue="conversation">
+                                                        <Tabs.List>
+                                                            <Tabs.Tab value="conversation" leftSection={<IconMessageCircle size={14} />}>
+                                                                Conversation
+                                                            </Tabs.Tab>
+                                                            <Tabs.Tab value="tools" leftSection={<IconTool size={14} />}>
+                                                                Tools{toolUsage.length > 0 ? ` · ${toolUsage.length}` : ''}
+                                                            </Tabs.Tab>
+                                                            <Tabs.Tab value="details" leftSection={<IconInfoCircle size={14} />}>Details</Tabs.Tab>
+                                                            <Tabs.Tab value="raw" leftSection={<IconCode size={14} />}>Raw</Tabs.Tab>
+                                                        </Tabs.List>
+                            
+                                                        <Tabs.Panel value="conversation" pt="md">
+                                                            {(record.messages ?? []).length === 0 ? (
+                                                                <Text size="sm" c="dimmed">No messages yet.</Text>
+                                                            ) : (
+                                                                <Stack gap="sm">
+                                                                    {(record.messages ?? []).map((message, index) => (
+                                                                        <Paper key={index} withBorder radius="md" p="sm">
+                                                                            <Stack gap="xs">
+                                                                                <MessageBlock messageRole={message.role} content={message.content} />
+                                                                                {(message.steps ?? []).length > 0 ? (
+                                                                                    <Stack gap={4}>
+                                                                                        {(message.steps ?? []).map((step, stepIndex) => (
+                                                                                            <Group key={step.id ?? stepIndex} gap="xs" wrap="nowrap">
+                                                                                                <StatusBadge status={stepStatus(step)} label={step.status ?? 'success'} />
+                                                                                                <Code>{step.name}</Code>
+                                                                                                {step.error ? (
+                                                                                                    <Text size="xs" c="red" lineClamp={1}>{step.error}</Text>
+                                                                                                ) : null}
+                                                                                            </Group>
+                                                                                        ))}
+                                                                                    </Stack>
+                                                                                ) : null}
+                                                                                {message.role === 'assistant' && message.usage ? (
+                                                                                    <Group gap="md">
+                                                                                        {message.latencyMs ? (
+                                                                                            <Text size="xs" c="dimmed">{formatDuration(message.latencyMs)}</Text>
+                                                                                        ) : null}
+                                                                                        {message.usage.totalTokens ? (
+                                                                                            <Text size="xs" c="dimmed">{formatNumber(message.usage.totalTokens)} tokens</Text>
+                                                                                        ) : null}
+                                                                                        {message.usage.costUsd ? (
+                                                                                            <Text size="xs" c="dimmed">{formatCost(message.usage.costUsd)}</Text>
+                                                                                        ) : null}
+                                                                                    </Group>
+                                                                                ) : null}
+                                                                            </Stack>
+                                                                        </Paper>
+                                                                    ))}
+                                                                </Stack>
+                                                            )}
+                                                        </Tabs.Panel>
+                            
+                                                        <Tabs.Panel value="tools" pt="md">
+                                                            {toolUsage.length === 0 ? (
+                                                                <Text size="sm" c="dimmed">No tool calls in this session.</Text>
+                                                            ) : (
+                                                                <Table verticalSpacing={6}>
+                                                                    <Table.Thead>
+                                                                        <Table.Tr>
+                                                                            <Table.Th>Tool</Table.Th>
+                                                                            <Table.Th ta="right">Calls</Table.Th>
+                                                                            <Table.Th ta="right">Errors</Table.Th>
+                                                                        </Table.Tr>
+                                                                    </Table.Thead>
+                                                                    <Table.Tbody>
+                                                                        {toolUsage.map(([name, stats]) => (
+                                                                            <Table.Tr key={name}>
+                                                                                <Table.Td><Code>{name}</Code></Table.Td>
+                                                                                <Table.Td ta="right"><Text size="xs">{stats.calls}</Text></Table.Td>
+                                                                                <Table.Td ta="right">
+                                                                                    {stats.errors > 0
+                                                                                        ? <Badge size="xs" color="red" variant="light">{stats.errors}</Badge>
+                                                                                        : <Text size="xs" c="dimmed">0</Text>}
+                                                                                </Table.Td>
+                                                                            </Table.Tr>
+                                                                        ))}
+                                                                    </Table.Tbody>
+                                                                </Table>
+                                                            )}
+                                                        </Tabs.Panel>
+                            
+                                                        <Tabs.Panel value="details" pt="md">
+                                                            <PropertiesPanel
+                                                                title="Session"
+                                                                rows={[
+                                                                    { key: 'source', label: 'Source', value: sessionSourceLabel(session.source) },
+                                                                    { key: 'messages', label: 'Messages', value: String(messageCountOf(session)) },
+                                                                    { key: 'in', label: 'Input tokens', value: session.inputTokens ? formatNumber(session.inputTokens) : '—' },
+                                                                    { key: 'out', label: 'Output tokens', value: session.outputTokens ? formatNumber(session.outputTokens) : '—' },
+                                                                    {
+                                                                        key: 'avg',
+                                                                        label: 'Average turn',
+                                                                        value: session.activeMs && session.turns
+                                                                            ? formatDuration(Math.round(session.activeMs / session.turns))
+                                                                            : '—',
+                                                                    },
+                                                                    {
+                                                                        key: 'created',
+                                                                        label: 'Created',
+                                                                        value: session.createdAt ? new Date(session.createdAt).toLocaleString() : '—',
+                                                                    },
+                                                                    {
+                                                                        key: 'ctx',
+                                                                        label: 'Session context',
+                                                                        value: session.hasContext ? <Badge size="xs" variant="light">set</Badge> : 'none',
+                                                                    },
+                                                                ]}
+                                                            />
+                                                            {record.metadata?.runtimeContext ? (
+                                                                <Stack gap={6} mt="md">
+                                                                    <Text size="xs" fw={700} c="dimmed" tt="uppercase">Runtime context</Text>
+                                                                    <JsonTreeViewer data={record.metadata.runtimeContext} initialExpandLevel={1} />
+                                                                </Stack>
+                                                            ) : null}
+                                                        </Tabs.Panel>
+                            
+                                                        <Tabs.Panel value="raw" pt="md">
+                                                            <JsonTreeViewer data={record} initialExpandLevel={1} />
+                                                        </Tabs.Panel>
+                                                    </Tabs>
+                                                ) : null}
+                            </Stack>
+                        }
+                    />
                 </Stack>
             ) : null}
         </Drawer>

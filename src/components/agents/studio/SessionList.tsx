@@ -140,7 +140,7 @@ export interface SessionListItem {
 
 const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
     console: { label: 'Test', color: 'teal' },
-    api: { label: 'API', color: 'gray' },
+    api: { label: 'API', color: 'indigo' },
     a2a: { label: 'A2A', color: 'violet' },
     schedule: { label: 'Schedule', color: 'orange' },
     evaluation: { label: 'Evaluation', color: 'blue' },
@@ -340,7 +340,7 @@ export default function SessionList({
                             <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>
                         </Table.Th>
                         <Table.Th w={100}>Source</Table.Th>
-                        <Table.Th w={190}>Session ID</Table.Th>
+                        <Table.Th w={130}>Session ID</Table.Th>
                         <Table.Th w={70} ta="right">
                             <SortHeader column="turns" sort={sort} onSort={toggleSort} align="right">Turns</SortHeader>
                         </Table.Th>
@@ -378,7 +378,9 @@ export default function SessionList({
                                     </Table.Td>
                                     <Table.Td>
                                         <Group gap={4} wrap="nowrap">
-                                            <Text size="xs" ff="monospace" c="dimmed" truncate>{session._id}</Text>
+                                            <Tooltip label={session._id} withArrow>
+                                                <Text size="xs" ff="monospace" c="dimmed">{session._id.slice(0, 8)}…</Text>
+                                            </Tooltip>
                                             <CopyButton value={session._id}>
                                                 {({ copied, copy }) => (
                                                     <Tooltip label={copied ? 'Copied' : 'Copy id'} withArrow>
