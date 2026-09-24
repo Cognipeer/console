@@ -15,6 +15,7 @@
  */
 
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
+import { resolveSandboxAvailability } from './agentSandboxTools';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -161,6 +162,32 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
     }
 
+    const sandbox = config.sandbox;
+    if (sandbox?.enabled) {
+        if (sandbox.mode !== undefined && sandbox.mode !== 'ephemeral' && sandbox.mode !== 'persist') {
+            issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: ephemeral, persist' });
+        }
+        checkNumber(issues, 'sandbox.commandTimeoutSec', sandbox.commandTimeoutSec, { min: 1, max: 600, integer: true });
+        checkNumber(issues, 'sandbox.retentionHours', sandbox.retentionHours, { min: 1, max: 24 * 30, integer: true });
+        checkNumber(issues, 'sandbox.resources.cpuCores', sandbox.resources?.cpuCores, { min: 0, exclusiveMin: true, max: 64 });
+        checkNumber(issues, 'sandbox.resources.memoryMb', sandbox.resources?.memoryMb, { min: 128, max: 262_144, integer: true });
+        const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
+        for (const [group, map] of [['env', sandbox.env], ['secrets', sandbox.secrets]] as const) {
+            for (const key of Object.keys(map ?? {})) {
+                if (!envName.test(key)) {
+                    issues.errors.push({ field: `sandbox.${group}.${key}`, message: 'must be a valid environment variable name (letters, digits, _)' });
+                }
+            }
+        }
+        const clash = Object.keys(sandbox.env ?? {}).filter((key) => key in (sandbox.secrets ?? {}));
+        if (clash.length > 0) {
+            issues.errors.push({ field: 'sandbox.secrets', message: `Defined both as a variable and a secret: ${clash.join(', ')}` });
+        }
+        if (sandbox.tools && sandbox.tools.exec === false && sandbox.tools.code === false && sandbox.tools.files === false) {
+            issues.warnings.push({ field: 'sandbox.tools', message: 'Sandbox access is on but every sandbox tool is off' });
+        }
+    }
+
     const memory = config.memory;
     if (memory?.enabled && !memory.memoryStoreKey) {
         issues.errors.push({ field: 'memory.memoryStoreKey', message: 'Pick a memory store, or turn memory off' });
@@ -231,6 +258,8 @@ export async function validateAgentConfig(input: {
     config: IAgentConfig;
     /** The agent being saved, so a sub-agent that references it can be caught. */
     agentKey?: string;
+    /** For the license-gated parts (sandbox access). */
+    tenantId?: string;
 }): Promise<AgentConfigValidation> {
     const { config, projectId } = input;
     const issues = validateAgentConfigShape(config);
@@ -255,6 +284,23 @@ export async function validateAgentConfig(input: {
             });
         }
     };
+
+    if (config.sandbox?.enabled && input.tenantId) {
+        const availability = await resolveSandboxAvailability(input.tenantId);
+        if (!availability.available) {
+            issues.errors.push({
+                field: 'sandbox.enabled',
+                message: availability.reason === 'license'
+                    ? 'Sandbox access requires an Enterprise license'
+                    : 'This edition has no sandbox module',
+            });
+        } else if (config.sandbox.templateKey) {
+            const templates = await availability.runner.listTemplates(input.tenantDbName, input.tenantId).catch(() => null);
+            if (templates && !templates.some((template) => template.key === config.sandbox!.templateKey)) {
+                issues.errors.push({ field: 'sandbox.templateKey', message: `Sandbox template "${config.sandbox.templateKey}" does not exist` });
+            }
+        }
+    }
 
     const wantsCost = isNumber(config.runtime?.limits?.maxCostUsd) && config.runtime!.limits!.maxCostUsd! > 0;
     if (config.modelKey) await checkModel('modelKey', config.modelKey, wantsCost);

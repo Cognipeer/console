@@ -107,6 +107,8 @@ import { withStrictToolCalling } from './strictToolSchema';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
+import { sealAgentConfigSecrets } from './agentSandboxSecrets';
 import {
     buildCostEstimator,
     buildTurnInputState,
@@ -2290,7 +2292,9 @@ export async function createAgentRecord(
         key,
         name: data.name,
         description: data.description,
-        config: data.config,
+        // Sandbox secrets are sealed here, the one write path every creator
+        // (dashboard, client API, Assistants) goes through.
+        config: sealAgentConfigSecrets(data.config, undefined),
         status: data.status || 'active',
         createdBy: userId,
     });
@@ -2307,6 +2311,12 @@ export async function updateAgentRecord(
 ): Promise<IAgent | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
+    if (data.config?.sandbox) {
+        // `config` replaces the stored one wholesale; masked secret values
+        // must resolve against what is stored, not be saved as the mask.
+        const current = await db.findAgentById(agentId);
+        data = { ...data, config: sealAgentConfigSecrets(data.config, current?.config) };
+    }
     return db.updateAgent(agentId, { ...data, updatedBy: userId });
 }
 
@@ -2601,6 +2611,11 @@ export async function deleteConversation(
 ): Promise<boolean> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
+    // A persistent agent sandbox belongs to its conversation and goes with it.
+    const conversation = await db.findAgentConversationById(conversationId);
+    if (conversation?.metadata?.sandbox) {
+        await destroyConversationSandbox({ tenantDbName, tenantId: conversation.tenantId, conversation });
+    }
     return db.deleteAgentConversation(conversationId);
 }
 
@@ -3158,6 +3173,24 @@ export async function executeAgentChatLocal(
         }));
         toolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
+
+    // 5e. Sandbox access (Enterprise). Provisioned on first use; cleaned up
+    // with the other bound tools once the run is over.
+    const sandboxTools = await buildAgentSandboxTools({
+        sandbox: config.sandbox,
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversation,
+        createToolFn: createTool,
+        zod: z,
+        protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
+        onWarning: (message) => warnings.add(message),
+    });
+    tools.push(...sandboxTools.tools);
+    toolDefinitions.push(...sandboxTools.definitions);
+    cleanupTasks.push(sandboxTools.cleanup);
 
     // 6. What the agent resumes from: the state the conversation's last turn
     // ended in (its tool calls and results, summaries, plan), or the text
@@ -3795,6 +3828,25 @@ export async function executePlaygroundChatLocal(
         }));
         playgroundToolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
+
+    // Same sandbox access the live path gives the agent — a Session keeps
+    // a persistent sandbox across its turns, a stateless call gets a
+    // throwaway one.
+    const playgroundSandboxTools = await buildAgentSandboxTools({
+        sandbox: config.sandbox,
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversation: sessionConversation,
+        createToolFn: createTool,
+        zod: z,
+        protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
+        onWarning: (message) => warnings.add(message),
+    });
+    playgroundTools.push(...playgroundSandboxTools.tools);
+    playgroundToolDefinitions.push(...playgroundSandboxTools.definitions);
+    cleanupTasks.push(playgroundSandboxTools.cleanup);
 
     // The GUARDED message is what the model sees — the single-slot version
     // computed a redaction here and then sent the raw text anyway.

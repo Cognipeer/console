@@ -6,13 +6,9 @@ import type {
 } from 'fastify';
 import { isApplicationReady } from '@/server/bootstrap';
 import { getConfig } from '@/lib/core/config';
-import { getDatabase } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
+import { resolveLiveLicenseForTenant } from '@/lib/license/tenantLicense';
 import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
-import {
-  getCachedEnterpriseLicense,
-  setCachedEnterpriseLicense,
-} from '@/lib/license/enterprise-license-cache';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
@@ -218,24 +214,6 @@ function unauthorized(
  * endpoints invalidate that cache entry immediately on change, so both
  * upgrades and downgrades are visible on the very next request.
  */
-async function resolveLiveLicenseForTenant(
-  tenantId: string,
-): Promise<{ licenseType: string; licenseExpiresAt?: string }> {
-  const cached = await getCachedEnterpriseLicense(tenantId);
-  if (cached) {
-    return cached;
-  }
-
-  const db = await getDatabase();
-  const tenant = await db.findTenantById(tenantId);
-  const effective = LicenseManager.getEffectiveLicenseForTenant(tenant);
-  const resolved = {
-    licenseExpiresAt: effective.expiresAt?.toISOString(),
-    licenseType: effective.licenseType,
-  };
-  await setCachedEnterpriseLicense(tenantId, resolved);
-  return resolved;
-}
 
 function getAuditOutcome(
   statusCode: number,

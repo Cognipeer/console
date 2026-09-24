@@ -20,6 +20,11 @@ const db = {
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
 
+const sandboxAvailability = vi.hoisted(() => ({ value: { available: true } as Record<string, unknown> }));
+vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
+    resolveSandboxAvailability: vi.fn(async () => sandboxAvailability.value),
+}));
+
 import {
     invalidConfigBody,
     validateAgentConfig,
@@ -167,5 +172,49 @@ describe('validateAgentConfig', () => {
         });
         expect(body.error).toBe('Invalid agent config — modelKey: A model is required (and 1 more)');
         expect(body.validation.errors).toHaveLength(2);
+    });
+
+    it('sandbox: rejects bad limits, env names and a variable defined twice', () => {
+        const result = validateAgentConfigShape({
+            modelKey: 'gpt-main',
+            sandbox: {
+                enabled: true,
+                mode: 'forever' as never,
+                commandTimeoutSec: 900,
+                resources: { memoryMb: 16 },
+                env: { 'BAD-NAME': 'x', SHARED: 'a' },
+                secrets: { SHARED: 'b' },
+            },
+        });
+        expect(fields(result.errors)).toEqual(expect.arrayContaining([
+            'sandbox.mode',
+            'sandbox.commandTimeoutSec',
+            'sandbox.resources.memoryMb',
+            'sandbox.env.BAD-NAME',
+            'sandbox.secrets',
+        ]));
+    });
+
+    it('sandbox: LICENSE — refused for a tenant without Enterprise', async () => {
+        sandboxAvailability.value = { available: false, reason: 'license' };
+        const result = await validateAgentConfig({
+            tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p', agentKey: 'me',
+            config: { modelKey: 'gpt-main', sandbox: { enabled: true } },
+        });
+        expect(result.errors).toContainEqual({ field: 'sandbox.enabled', message: 'Sandbox access requires an Enterprise license' });
+        sandboxAvailability.value = { available: true };
+    });
+
+    it('sandbox: an unknown template is an error', async () => {
+        sandboxAvailability.value = {
+            available: true,
+            runner: { listTemplates: async () => [{ key: 'multi-base', name: 'Multi base' }] },
+        };
+        const result = await validateAgentConfig({
+            tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p', agentKey: 'me',
+            config: { modelKey: 'gpt-main', sandbox: { enabled: true, templateKey: 'gpu-xl' } },
+        });
+        expect(fields(result.errors)).toContain('sandbox.templateKey');
+        sandboxAvailability.value = { available: true };
     });
 });

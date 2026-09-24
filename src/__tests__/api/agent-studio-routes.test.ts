@@ -45,6 +45,11 @@ vi.mock('@/lib/services/agents/agentService', () => ({
     AgentGuardrailBlockedError: class AgentGuardrailBlockedError extends Error {},
 }));
 
+vi.mock('@/lib/services/agents/agentSandboxTools', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/agentSandboxTools')>();
+    return { ...actual, resolveSandboxAvailability: vi.fn() };
+});
+
 vi.mock('@/lib/services/agents/agentConfigValidation', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/lib/services/agents/agentConfigValidation')>();
     return { ...actual, validateAgentConfig: vi.fn() };
@@ -74,6 +79,7 @@ import {
     createConversation,
     deleteConversation,
     getAgentById,
+    updateAgentRecord,
     getConversationById,
     listConversations,
 } from '@/lib/services/agents';
@@ -82,6 +88,7 @@ import { deleteAgentSchedule, runAgentSchedule, upsertAgentSchedule } from '@/li
 import { createSkill, deleteSkill, getSkillById, listSkills, updateSkill } from '@/lib/services/agents/skillService';
 import { checkAgentModel } from '@/lib/services/agents/agentService';
 import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
+import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { skillsApiPlugin } from '@/server/api/plugins/skills';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -356,5 +363,48 @@ describe('config validation and model check', () => {
         const res = await app.inject({ method: 'POST', url: '/api/agents/agent-1/publish', payload: {} });
         expect(res.statusCode).toBe(400);
         expect(parseJsonBody<{ error: string }>(res.body).error).toContain('toolBindings[0]');
+    });
+});
+
+describe('sandbox capabilities', () => {
+    it('GET /agents/sandbox/capabilities lists templates when the module and the license allow it', async () => {
+        mockFn(resolveSandboxAvailability).mockResolvedValue({
+            available: true,
+            runner: { listTemplates: vi.fn().mockResolvedValue([{ key: 'multi-base', name: 'Multi base' }]) },
+        });
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/sandbox/capabilities' });
+        expect(res.statusCode).toBe(200);
+        expect(parseJsonBody(res.body)).toEqual({ available: true, templates: [{ key: 'multi-base', name: 'Multi base' }] });
+        expect(mockFn(resolveSandboxAvailability)).toHaveBeenCalledWith('tenant-1');
+    });
+
+    it('GET /agents/sandbox/capabilities reports an unlicensed tenant as unavailable, with the reason', async () => {
+        mockFn(resolveSandboxAvailability).mockResolvedValue({ available: false, reason: 'license' });
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/sandbox/capabilities' });
+        expect(res.statusCode).toBe(200);
+        expect(parseJsonBody(res.body)).toEqual({ available: false, reason: 'license', templates: [] });
+    });
+});
+
+describe('sandbox secrets in API responses', () => {
+    it('PATCH /agents/:agentId answers with secret keys masked and never the sealed payload', async () => {
+        const { sealAgentSandboxConfig } = await import('@/lib/services/agents/agentSandboxSecrets');
+        const sealed = sealAgentSandboxConfig({ enabled: true, secrets: { API_TOKEN: 'tok-123456' } }, undefined)!;
+        mockFn(validateAgentConfig).mockResolvedValue({ errors: [], warnings: [] });
+        mockFn(updateAgentRecord).mockResolvedValue({ ...AGENT, config: { ...AGENT.config, sandbox: sealed } });
+        mockFn(getDatabase).mockResolvedValue({});
+        const app = await agentsApp();
+        const res = await app.inject({
+            method: 'PATCH',
+            url: '/api/agents/agent-1',
+            payload: { config: { modelKey: 'gpt-5-terra', sandbox: { enabled: true, secrets: { API_TOKEN: 'tok-123456' } } } },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(res.body).not.toContain('tok-123456');
+        expect(res.body).not.toContain(sealed.secretsSealed!);
+        const body = parseJsonBody<{ agent: { config: { sandbox: { secrets: Record<string, string> } } } }>(res.body);
+        expect(body.agent.config.sandbox.secrets).toEqual({ API_TOKEN: '••••••' });
     });
 });

@@ -77,10 +77,12 @@ import StartSessionModal from './studio/StartSessionModal';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
+import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentMemoryConfig,
+  IAgentSandboxConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
@@ -273,6 +275,7 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   subagents: { top: 'configure', sub: 'subagents' },
   skills: { top: 'configure', sub: 'skills' },
   memory: { top: 'configure', sub: 'memory' },
+  sandbox: { top: 'configure', sub: 'sandbox' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
   deploy: { top: 'deploy' },
@@ -344,6 +347,7 @@ export default function AgentDetailPage() {
   const [skillPolicy, setSkillPolicy] = useState<IAgentSkillPolicy | undefined>(undefined);
   const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
+  const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
   const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
 
   // Guardrail bindings live outside `configForm`: they are a list of objects,
@@ -462,6 +466,7 @@ export default function AgentDetailPage() {
         setSkills(cfg.skills ?? []);
         setSkillPolicy(cfg.skillPolicy);
         setMemoryConfig(cfg.memory);
+        setSandboxConfig(cfg.sandbox);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -810,6 +815,10 @@ export default function AgentDetailPage() {
     nextConfig.skills = skills.length > 0 ? skills : undefined;
     nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
     nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey ? memoryConfig : undefined;
+    // Kept even when disabled, so turning the sandbox off does not throw away
+    // the template, limits and secrets someone set up. Secrets come back from
+    // the server masked; sending the mask back keeps the stored value.
+    nextConfig.sandbox = sandboxConfig && Object.keys(sandboxConfig).length > 0 ? sandboxConfig : undefined;
     // No editor writes this from here anymore (see the Prompt tab) — pass
     // through whatever is already stored so a save from THIS page can never
     // silently wipe a value an import or the API set, since `config` replaces
@@ -1404,6 +1413,21 @@ export default function AgentDetailPage() {
                 ) : null}
               >
                 <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
+              </ConfigSection>
+            ) : null}
+
+            {!isConnected ? (
+              <ConfigSection
+                id="sandbox"
+                title="Sandbox"
+                description="An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets."
+                meta={sandboxConfig?.enabled ? (
+                  <Badge size="xs" color="grape" variant="light" w="fit-content">
+                    {sandboxConfig.mode === 'persist' ? 'persistent' : 'ephemeral'}
+                  </Badge>
+                ) : null}
+              >
+                <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} />
               </ConfigSection>
             ) : null}
 
