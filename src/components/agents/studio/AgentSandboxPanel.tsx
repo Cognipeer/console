@@ -216,6 +216,56 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                         </Stack>
                     </ConfigBlock>
 
+                    <ConfigBlock title="Preview">
+                        <Stack gap="sm">
+                            <Switch
+                                label="Allow preview links"
+                                description="The agent can serve something from the sandbox — a web app, a report, a dashboard on a port — and give the user a link to it (sandbox_preview_link)."
+                                checked={value?.preview?.enabled ?? false}
+                                onChange={(event) => patch({ preview: { ...(value?.preview ?? {}), enabled: event.currentTarget.checked } })}
+                                disabled={disabled}
+                            />
+                            {value?.preview?.enabled ? (
+                                <>
+                                    <Switch
+                                        label="Public links"
+                                        description="Anyone who has the link can open it, without signing in, until it expires. Off: links open only for signed-in console users with sandbox access. Public links need SANDBOX_PREVIEW_SECRET on the server; without it the agent gets a private link and is told why."
+                                        checked={value.preview.public ?? false}
+                                        onChange={(event) => patch({ preview: { ...value.preview, public: event.currentTarget.checked } })}
+                                        disabled={disabled}
+                                    />
+                                    <Group grow align="flex-start">
+                                        {value.preview.public ? (
+                                            <NumberInput
+                                                label="Link valid for (hours)"
+                                                description="Max 168 (7 days)."
+                                                placeholder="24"
+                                                min={1}
+                                                max={168}
+                                                value={value.preview.linkTtlHours ?? ''}
+                                                onChange={(next) => patch({ preview: { ...value.preview, linkTtlHours: typeof next === 'number' ? next : undefined } })}
+                                                disabled={disabled}
+                                            />
+                                        ) : null}
+                                        <NumberInput
+                                            label="Keep running while idle (minutes)"
+                                            description="A machine with a live preview is not stopped when the reply ends; it stops after this long without activity."
+                                            placeholder="30"
+                                            min={5}
+                                            max={1440}
+                                            value={value.preview.keepAliveMinutes ?? ''}
+                                            onChange={(next) => patch({ preview: { ...value.preview, keepAliveMinutes: typeof next === 'number' ? next : undefined } })}
+                                            disabled={disabled}
+                                        />
+                                    </Group>
+                                    {value.blockNetwork ? (
+                                        <Text size="xs" c="orange.7">Preview links do not work while the network is blocked.</Text>
+                                    ) : null}
+                                </>
+                            ) : null}
+                        </Stack>
+                    </ConfigBlock>
+
                     <ConfigBlock title="Tools">
                         <Group gap="lg">
                             <Checkbox

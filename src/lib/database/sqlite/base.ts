@@ -604,6 +604,7 @@ export class SQLiteProviderBase {
     // same failure mode imageRef exists to prevent for docker-mode snapshots).
     this.ensureTableColumn(db, 'sandbox_instances', 'studioTemplateKey', 'studioTemplateKey TEXT');
     this.ensureTableColumn(db, 'sandbox_instances', 'studioTemplateVersion', 'studioTemplateVersion INTEGER');
+    this.ensureTableColumn(db, 'sandbox_instances', 'idleStopSeconds', 'idleStopSeconds INTEGER');
     // Promoting a builder instance now upserts a real sandbox_templates row
     // (see instanceService.promoteInstanceToTemplate) so Template Studio
     // output shows up directly in the normal template list/picker — these

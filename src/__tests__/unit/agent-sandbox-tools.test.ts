@@ -58,6 +58,13 @@ function fakeRunner() {
         readFile: async (...args) => { calls.push({ op: 'readFile', args }); return 'file body'; },
         writeFile: async (...args) => { calls.push({ op: 'writeFile', args }); },
         listFiles: async (...args) => { calls.push({ op: 'listFiles', args }); return []; },
+        previewLink: async (...args) => {
+            calls.push({ op: 'previewLink', args });
+            const input = args[2];
+            return input.public
+                ? { url: `https://console.test/api/sandbox/preview/tok-${input.port}/`, public: true, expiresAt: '2026-09-25T00:00:00.000Z', listening: input.port !== 9999 }
+                : { url: `https://console.test/api/sandbox/instances/${args[1]}/preview/${input.port}/`, public: false, listening: true };
+        },
         stop: async (...args) => { calls.push({ op: 'stop', args }); },
         destroy: async (...args) => { calls.push({ op: 'destroy', args }); },
     };
@@ -224,5 +231,50 @@ describe('persistent sandbox', () => {
             conversation: { _id: 'conv-3', agentKey: 'builder', projectId: 'p1', metadata: { sandbox: { instanceId: 'sbx-9' } } },
         });
         expect(fake.calls).toEqual([{ op: 'destroy', args: [expect.objectContaining({ conversationId: 'conv-3' }), 'sbx-9'] }]);
+    });
+});
+
+describe('preview', () => {
+    it('no preview tool unless preview is enabled', async () => {
+        expect((await build({ enabled: true })).tools.map((t: { name: string }) => t.name)).not.toContain('sandbox_preview_link');
+        expect((await build({ enabled: true, preview: { enabled: true } })).tools.map((t: { name: string }) => t.name)).toContain('sandbox_preview_link');
+    });
+
+    it('provisions the machine with the preview flags and an idle stop', async () => {
+        const { byName } = await build({ enabled: true, preview: { enabled: true, public: true, keepAliveMinutes: 45 } });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        expect(fake.calls[0].args[1]).toMatchObject({ preview: { enabled: true, public: true }, idleStopSeconds: 2700 });
+    });
+
+    it('issues a public link with the configured lifetime and keeps an ephemeral machine alive after the reply', async () => {
+        const { byName, cleanup } = await build({ enabled: true, preview: { enabled: true, public: true, linkTtlHours: 2 } });
+        const link = await byName('sandbox_preview_link').invoke({ port: 8000 }) as Record<string, unknown>;
+        await cleanup();
+        expect(link).toMatchObject({ public: true, url: 'https://console.test/api/sandbox/preview/tok-8000/' });
+        expect(fake.calls.find((c) => c.op === 'previewLink')!.args[2]).toEqual({ port: 8000, public: true, ttlSeconds: 7200 });
+        // Not destroyed: the link would die with it. The reaper stops it once idle.
+        expect(fake.ops()).not.toContain('destroy');
+    });
+
+    it('a persistent machine with a live preview is not stopped after the turn, but still recorded', async () => {
+        conversations.set('conv-p', { _id: 'conv-p', metadata: {} });
+        const { byName, cleanup } = await build({ enabled: true, mode: 'persist', preview: { enabled: true } }, { conversation: { _id: 'conv-p' } });
+        await byName('sandbox_preview_link').invoke({ port: 3000 });
+        await cleanup();
+        expect(fake.ops()).not.toContain('stop');
+        expect((conversations.get('conv-p')!.metadata as Record<string, any>).sandbox.instanceId).toBe('sbx-1');
+    });
+
+    it('without a link the usual cleanup applies', async () => {
+        const { byName, cleanup } = await build({ enabled: true, preview: { enabled: true } });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        await cleanup();
+        expect(fake.ops()).toContain('destroy');
+    });
+
+    it('warns the agent when nothing listens on the port yet', async () => {
+        const { byName } = await build({ enabled: true, preview: { enabled: true, public: true } });
+        const link = await byName('sandbox_preview_link').invoke({ port: 9999 }) as Record<string, unknown>;
+        expect(String(link.warning)).toMatch(/Nothing answered on port 9999/);
     });
 });

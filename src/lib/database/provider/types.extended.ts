@@ -1002,6 +1002,14 @@ export interface ISandboxInstance extends IUsageAttributionFields {
    * Public links additionally require SANDBOX_PREVIEW_SECRET. Defaults to false.
    */
   previewPublic?: boolean;
+  /**
+   * Stop this instance after this many seconds without activity — applies
+   * even to a persistent instance (which the tenant-wide idle reap skips).
+   * Set by agents whose sandbox is serving a preview: the machine must
+   * outlive the reply that issued the link, but not forever. Null/absent =
+   * the tenant-wide rules alone.
+   */
+  idleStopSeconds?: number | null;
   /** Per-instance resource limit override ({cpuCores,memoryMb,diskMb,pids}); null = use the template's. */
   resources: Record<string, unknown> | null;
   /** True while this is an unassigned pre-warmed pool container (hidden from users). */

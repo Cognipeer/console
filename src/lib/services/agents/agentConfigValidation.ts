@@ -183,6 +183,22 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         if (clash.length > 0) {
             issues.errors.push({ field: 'sandbox.secrets', message: `Defined both as a variable and a secret: ${clash.join(', ')}` });
         }
+        if (sandbox.preview?.enabled) {
+            checkNumber(issues, 'sandbox.preview.linkTtlHours', sandbox.preview.linkTtlHours, { min: 1, max: 168 });
+            checkNumber(issues, 'sandbox.preview.keepAliveMinutes', sandbox.preview.keepAliveMinutes, { min: 5, max: 24 * 60, integer: true });
+            if (sandbox.blockNetwork) {
+                issues.warnings.push({
+                    field: 'sandbox.preview',
+                    message: 'Preview links do not work while the sandbox network is blocked',
+                });
+            }
+            if (sandbox.tools?.exec === false && sandbox.tools?.code === false) {
+                issues.warnings.push({
+                    field: 'sandbox.preview',
+                    message: 'Preview is on, but the agent has no tool to start a server (commands and code are both off)',
+                });
+            }
+        }
         if (sandbox.tools && sandbox.tools.exec === false && sandbox.tools.code === false && sandbox.tools.files === false) {
             issues.warnings.push({ field: 'sandbox.tools', message: 'Sandbox access is on but every sandbox tool is off' });
         }

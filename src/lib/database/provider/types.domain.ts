@@ -2463,6 +2463,29 @@ export interface IAgentSandboxConfig {
   secretsSealed?: string;
   /** Which tool groups to give the agent. All on by default. */
   tools?: { exec?: boolean; code?: boolean; files?: boolean };
+  /**
+   * Preview: lets the agent serve something from its sandbox (a web app, a
+   * report, a dashboard on a port) and hand out a link to it with the
+   * `sandbox_preview_link` tool.
+   *
+   * A machine the agent issued a link for is NOT stopped/deleted when the
+   * reply ends — the link would die with it. It keeps running while the
+   * preview is used and is stopped after `keepAliveMinutes` without activity
+   * (an ephemeral machine is then deleted, a persistent one keeps its disk).
+   */
+  preview?: {
+    enabled?: boolean;
+    /**
+     * Public links: a signed URL anyone with the link can open, for
+     * `linkTtlHours` (needs SANDBOX_PREVIEW_SECRET on the server). Otherwise
+     * links open only for signed-in console users with sandbox access.
+     */
+    public?: boolean;
+    /** Public link lifetime. Default 24, max 168. */
+    linkTtlHours?: number;
+    /** Idle time after which a previewed machine is stopped. Default 30. */
+    keepAliveMinutes?: number;
+  };
 }
 
 /** A single tool-source binding for an agent */

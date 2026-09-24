@@ -235,6 +235,22 @@ export interface AgentSandboxSpec {
   env?: Record<string, string>;
   /** Reuse this instance when it still exists (starting it if stopped). */
   instanceId?: string;
+  /** Preview flags applied to the instance (also re-applied on reuse). */
+  preview?: { enabled: boolean; public: boolean };
+  /** See `ISandboxInstance.idleStopSeconds`. */
+  idleStopSeconds?: number | null;
+}
+
+export interface AgentSandboxPreviewLink {
+  /** Absolute URL. */
+  url: string;
+  /** True for a signed share link anyone can open. */
+  public: boolean;
+  expiresAt?: string;
+  /** Whether something answered on the port when the link was issued. */
+  listening: boolean;
+  /** Why the link differs from what was asked (e.g. public sharing not configured). */
+  note?: string;
 }
 
 export interface AgentSandboxExecResult {
@@ -273,6 +289,12 @@ export interface AgentSandboxRunner {
   readFile(ref: AgentSandboxRef, instanceId: string, path: string): Promise<string>;
   writeFile(ref: AgentSandboxRef, instanceId: string, path: string, content: string): Promise<void>;
   listFiles(ref: AgentSandboxRef, instanceId: string, path: string): Promise<AgentSandboxFileEntry[]>;
+  /** A link to what the sandbox serves on `port`. */
+  previewLink(
+    ref: AgentSandboxRef,
+    instanceId: string,
+    input: { port: number; public: boolean; ttlSeconds?: number },
+  ): Promise<AgentSandboxPreviewLink>;
   /** Stop, keeping the disk (a persistent instance can be started again). */
   stop(ref: AgentSandboxRef, instanceId: string): Promise<void>;
   /** Delete the instance and its data. */
