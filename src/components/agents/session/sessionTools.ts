@@ -33,7 +33,12 @@ export interface AgentToolConfig {
     subagents?: unknown[];
     skills?: unknown[];
     memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
-    sandbox?: { enabled?: boolean; templateKey?: string; tools?: { exec?: boolean; code?: boolean; files?: boolean } };
+    sandbox?: {
+        enabled?: boolean;
+        templateKey?: string;
+        tools?: { exec?: boolean; code?: boolean; files?: boolean };
+        preview?: { enabled?: boolean };
+    };
 }
 
 /** Bound whenever a knowledge engine is attached — see `agentService.ts`. */
@@ -87,6 +92,7 @@ export function collectConfiguredTools(config: AgentToolConfig | undefined): Con
             ...(groups.exec ? ['sandbox_exec'] : []),
             ...(groups.code ? ['sandbox_run_code'] : []),
             ...(groups.files ? ['sandbox_read_file', 'sandbox_write_file', 'sandbox_list_files'] : []),
+            ...(config.sandbox.preview?.enabled ? ['sandbox_preview_link'] : []),
         ];
         for (const name of names) {
             tools.push({ name, origin: 'sandbox', sourceKey: config.sandbox.templateKey ?? 'default template' });

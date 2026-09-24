@@ -42,7 +42,12 @@ export const SANDBOX_TOOL_NAMES = [
     'sandbox_read_file',
     'sandbox_write_file',
     'sandbox_list_files',
+    'sandbox_preview_link',
 ] as const;
+
+const DEFAULT_LINK_TTL_HOURS = 24;
+const MAX_LINK_TTL_HOURS = 168;
+const DEFAULT_KEEP_ALIVE_MINUTES = 30;
 
 const DEFAULT_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 600;
@@ -151,6 +156,15 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     const retentionHours = config.retentionHours && config.retentionHours > 0 ? config.retentionHours : DEFAULT_RETENTION_HOURS;
     const secrets = openAgentSandboxSecrets(config);
     const scrub = (text: string) => scrubSecretValues(text, secrets);
+    const preview = config.preview?.enabled
+        ? {
+            public: config.preview.public === true,
+            ttlSeconds: Math.round(Math.min(MAX_LINK_TTL_HOURS, Math.max(1, config.preview.linkTtlHours ?? DEFAULT_LINK_TTL_HOURS)) * 3600),
+            keepAliveSeconds: Math.round(Math.max(1, config.preview.keepAliveMinutes ?? DEFAULT_KEEP_ALIVE_MINUTES) * 60),
+        }
+        : null;
+    /** Set once the agent hands out a link: the machine must outlive the reply. */
+    let previewIssued = false;
 
     // ── The instance, provisioned on first use ───────────────────────────
     let instance: Promise<string> | null = null;
@@ -180,6 +194,10 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             ...(config.blockNetwork ? { blockNetwork: true } : {}),
             ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {}),
             ...(previous?.instanceId ? { instanceId: previous.instanceId } : {}),
+            preview: { enabled: Boolean(preview), public: preview?.public ?? false },
+            // A previewing machine is stopped by the sandbox module's reaper
+            // once idle, not by this run — see `cleanup`.
+            idleStopSeconds: preview ? preview.keepAliveSeconds : null,
         });
         createdAt = created || !previous ? new Date().toISOString() : previous.createdAt;
         logger.info('Agent sandbox ready', { agentKey: input.agentKey, instanceId, created, persist });
@@ -293,6 +311,33 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         }));
     }
 
+    if (preview) {
+        add(input.createToolFn({
+            name: 'sandbox_preview_link',
+            description: `Get a link to something your sandbox serves on a port — a web app, an HTML report, a dashboard — to give to the user. Start the server first, in the background and bound to 0.0.0.0 (e.g. sandbox_exec "nohup python3 -m http.server 8000 --bind 0.0.0.0 > /tmp/server.log 2>&1 &"), then call this with the port. ${preview.public
+                ? `The link is public: anyone who has it can open it for ${Math.round(preview.ttlSeconds / 3600)}h.`
+                : 'The link opens only for signed-in console users.'} The sandbox keeps running after your reply while the preview is in use, and stops after ${Math.round(preview.keepAliveSeconds / 60)} idle minutes.`,
+            schema: z.object({
+                port: z.number().int().min(1).max(65535).describe('The port the server listens on inside the sandbox.'),
+            }),
+            func: async (args: { port: number }) => {
+                const instanceId = await getInstance();
+                const link = await runner.previewLink(ref, instanceId, {
+                    port: args.port,
+                    public: preview.public,
+                    ttlSeconds: preview.ttlSeconds,
+                });
+                previewIssued = true;
+                return {
+                    ...link,
+                    ...(link.listening ? {} : {
+                        warning: `Nothing answered on port ${args.port} yet — start the server (bound to 0.0.0.0) before sharing the link.`,
+                    }),
+                };
+            },
+        }));
+    }
+
     const cleanup = async () => {
         if (!used || !instance) return;
         let instanceId: string;
@@ -302,8 +347,15 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             return; // never provisioned
         }
         try {
+            if (previewIssued) {
+                // The link must keep working after the reply: leave the
+                // machine running. The sandbox module stops it once the
+                // preview has been idle for `keepAliveMinutes`
+                // (idleStopSeconds on the instance).
+                logger.info('Agent sandbox left running for its preview', { agentKey: input.agentKey, instanceId });
+            }
             if (persist && conversationId) {
-                await runner.stop(ref, instanceId);
+                if (!previewIssued) await runner.stop(ref, instanceId);
                 const db = await getDatabase();
                 await db.switchToTenant(input.tenantDbName);
                 // Re-read: the transcript write for this turn happened after
@@ -319,7 +371,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 await db.updateAgentConversation(conversationId, {
                     metadata: { ...(latest?.metadata ?? {}), sandbox: record },
                 });
-            } else {
+            } else if (!previewIssued) {
                 await runner.destroy(ref, instanceId);
             }
         } catch (error) {

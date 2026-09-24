@@ -99,7 +99,12 @@ interface AgentSummary {
         subagents?: unknown[];
         skills?: unknown[];
         memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
-        sandbox?: { enabled?: boolean; templateKey?: string; tools?: { exec?: boolean; code?: boolean; files?: boolean } };
+        sandbox?: {
+            enabled?: boolean;
+            templateKey?: string;
+            tools?: { exec?: boolean; code?: boolean; files?: boolean };
+            preview?: { enabled?: boolean };
+        };
     };
 }
 
