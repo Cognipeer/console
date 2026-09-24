@@ -8310,6 +8310,98 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /sandbox/sandboxes/{id}/fs/download:
+    post:
+      tags:
+        - Sandbox
+      summary: Download a file (raw bytes)
+      description: "Enterprise (EE) sandbox toolbox operation. Streams one regular file out of the sandbox as raw bytes — no JSON, no base64 — so binary artifacts (PPTX, PDF, ZIP, media) arrive byte-exact at any size up to the deployment's SANDBOX_FILE_DOWNLOAD_MAX_BYTES (default 100 MiB). Prefer this over fs/read for binary files. POST (not GET) so it requires the same sandbox permission level as fs/read. Guardrail-enforced on metadata only ({ path, operation } before, { path, size, operation } after opening); file bytes are never passed to guardrail post-processing. A transfer that breaks mid-body is aborted below its Content-Length, never delivered short."
+      operationId: sandboxFsDownload
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Sandbox instance id.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - path
+              properties:
+                path:
+                  type: string
+                  description: Absolute path of a regular file inside the sandbox (no '..' segments).
+      responses:
+        "200":
+          description: The file's bytes.
+          headers:
+            Content-Length:
+              description: Exact file size in bytes.
+              schema:
+                type: integer
+            Content-Disposition:
+              description: "attachment; filename / filename* (RFC 6266)."
+              schema:
+                type: string
+            x-sandbox-file-size:
+              description: Exact file size in bytes (same as Content-Length; survives proxies that re-chunk).
+              schema:
+                type: integer
+            x-cognipeer-guardrail:
+              $ref: "#/components/headers/GuardrailDecision"
+            x-cognipeer-guardrail-trace-id:
+              $ref: "#/components/headers/GuardrailTraceId"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "202":
+          description: Guardrail approval required — the operation is held pending policy/human approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxToolAegisRejection"
+        "400":
+          description: "Missing/relative path, a directory, or not a regular file (`{ \"error\": \"is-a-directory\" }`)."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "Sandbox not found/not running (`not-found-or-not-ready`) or file not found (`not-found`)."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "413":
+          description: "File exceeds the transfer limit; `{ \"error\": \"too-large\", \"size\": <bytes> }`."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  size:
+                    type: integer
+        "500":
+          $ref: "#/components/responses/InternalError"
   /sandbox/sandboxes/{id}/fs/replace:
     post:
       tags:
