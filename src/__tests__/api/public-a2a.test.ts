@@ -9,9 +9,14 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
+vi.mock('@/lib/database', async () => {
+  const errors = await import('@/lib/database/provider/errors');
+  return {
+    getDatabase: vi.fn(),
+    AgentRunConflictError: errors.AgentRunConflictError,
+    AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
+  };
+});
 
 vi.mock('@/lib/services/agents/agentService', () => ({
   getAgentByKey: vi.fn(),
@@ -51,6 +56,13 @@ const runWithTenant = vi.fn(<T>(_db: string, fn: () => T | Promise<T>) => fn());
 const listAgents = vi.fn();
 const findTenantById = vi.fn();
 
+// Turns on an existing conversation hold its single active-run slot (a
+// `mode: 'sync'` AgentRun reservation) for their whole duration.
+const agentRunReservation = {
+  create: vi.fn(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record })),
+  remove: vi.fn(async () => true),
+};
+
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
   return fn as ReturnType<typeof vi.fn>;
 }
@@ -61,7 +73,7 @@ async function buildApp() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockFn(getDatabase).mockResolvedValue({ runWithTenant, listAgents, findTenantById });
+  mockFn(getDatabase).mockResolvedValue({ runWithTenant, listAgents, findTenantById , createAgentRun: agentRunReservation.create, deleteAgentRun: agentRunReservation.remove });
   findTenantById.mockResolvedValue({ _id: 'tenant-1', dbName: 'tenant_acme' });
   listAgents.mockResolvedValue([PUBLIC_AGENT]);
 });

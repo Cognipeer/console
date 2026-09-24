@@ -439,6 +439,15 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         .findOneAndDelete({ _id: objectId(id) });
       if (!existing) return false;
       await this.releaseConversationLock(existing.conversationId, id);
+      // A deleted row (cap overflow, publish failure) never ran, so its
+      // Idempotency-Key must be free for the caller's retry — a lock still
+      // bound to a vanished run would turn every retry into a 409 until
+      // retention expired it (SQLite's unique index frees it with the row).
+      if (existing.idempotencyKey) {
+        await db.collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks)
+          .deleteOne({ _id: idempotencyLockId(existing.tenantId, existing.projectId, existing.idempotencyKey), runId: id })
+          .catch((error) => logger.warn('Could not release agent run idempotency lock', { runId: id, error }));
+      }
       return true;
     }
 

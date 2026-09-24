@@ -5,8 +5,9 @@
  * timeout outcomes, and idempotency-key rejection to the right HTTP status
  * and envelope. Service-level behavior (claim/finalize CAS, the race
  * itself) is already covered by `agent-run-sync-ceiling.test.ts` and
- * `agent-run-background-execution.test.ts` — this file mocks
- * `agentRunService.ts` entirely and asserts only on the route wiring.
+ * `agent-run-background-execution.test.ts` — this file replaces every
+ * DB/queue-touching function of `agentRunService.ts` (keeping its pure
+ * serializer/envelope helpers real) and asserts only on the route wiring.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -21,6 +22,9 @@ const hoisted = vi.hoisted(() => ({
   requestAgentRunCancellation: vi.fn(),
   requireApiTokenFromHeader: vi.fn(),
   getDatabase: vi.fn(),
+  lookupIdempotentAgentRun: vi.fn(),
+  resolveAgentExecutionLimits: vi.fn(),
+  validateCallbackRequest: vi.fn(),
 }));
 
 vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
@@ -59,34 +63,23 @@ vi.mock('@/lib/services/agents/agentService', () => ({
   executePlaygroundChat: vi.fn(),
 }));
 
-vi.mock('@/lib/services/agents/agentRunService', () => ({
-  runSyncAgentTurn: hoisted.runSyncAgentTurn,
-  createBackgroundAgentRun: hoisted.createBackgroundAgentRun,
-  getAgentRunStatus: hoisted.getAgentRunStatus,
-  requestAgentRunCancellation: hoisted.requestAgentRunCancellation,
-  // Real logic — trivial and stable enough to inline rather than risk an
-  // importOriginal timing issue for a mocked module (repo vitest notes).
-  isBackgroundModeRequested: (headerValue: string | null | undefined, body: Record<string, unknown> | undefined) => {
-    if (typeof headerValue === 'string' && /^true$/i.test(headerValue.trim())) return true;
-    if (body?.background === true) return true;
-    return false;
-  },
-  agentRunConflictErrorBody: () => ({
-    error: { type: 'agent_run_conflict', message: 'conflict', code: 'active_run_conflict' },
-  }),
-  agentSyncTimeoutErrorBody: () => ({
-    error: { type: 'timeout', message: 'timed out', code: 'sync_timeout', side_effects_possible: true, retryable: false },
-  }),
-  idempotencyKeyRequiresBackgroundErrorBody: () => ({
-    error: { type: 'invalid_request_error', message: 'Idempotency-Key requires background: true', code: 'idempotency_key_sync_not_supported' },
-  }),
-  idempotencyKeyConflictErrorBody: () => ({
-    error: { type: 'idempotency_key_conflict', message: 'idempotency key conflict', code: 'idempotency_key_conflict' },
-  }),
-  agentRunConcurrencyLimitErrorBody: (limit: number) => ({
-    error: { type: 'rate_limit_error', message: `limit ${limit} reached`, code: 'agent_run_concurrency_limit' },
-  }),
-}));
+vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
+  // The real module for the pure helpers (serializeAgentRun, error bodies,
+  // background-signal detection, callback validation); only the functions
+  // that touch the DB/queue are replaced, so the route wiring is asserted
+  // against the SAME serializer and envelopes production uses.
+  const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
+  return {
+    ...actual,
+    runSyncAgentTurn: hoisted.runSyncAgentTurn,
+    createBackgroundAgentRun: hoisted.createBackgroundAgentRun,
+    getAgentRunStatus: hoisted.getAgentRunStatus,
+    requestAgentRunCancellation: hoisted.requestAgentRunCancellation,
+    lookupIdempotentAgentRun: hoisted.lookupIdempotentAgentRun,
+    resolveAgentExecutionLimits: hoisted.resolveAgentExecutionLimits,
+    validateCallbackRequest: hoisted.validateCallbackRequest,
+  };
+});
 
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 import { createMockDb } from '../helpers/db.mock';
@@ -119,6 +112,15 @@ function activeAgent() {
   };
 }
 
+const DEFAULT_LIMITS = {
+  syncTimeoutMs: 60_000,
+  backgroundEnabled: true,
+  backgroundMaxDurationMs: 1_800_000,
+  defaultMode: 'sync' as const,
+  maxConcurrentRunsPerTenant: 10,
+  maxConcurrentRunsPerProject: 0,
+};
+
 let client: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
 let runsApp: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
 
@@ -129,6 +131,11 @@ beforeEach(async () => {
   hoisted.requireApiTokenFromHeader.mockResolvedValue(AUTH_CTX);
   hoisted.getAgentByKey.mockResolvedValue(activeAgent());
   hoisted.createConversation.mockResolvedValue({ _id: 'conv-1' });
+  hoisted.resolveAgentExecutionLimits.mockResolvedValue(DEFAULT_LIMITS);
+  hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'none' });
+  hoisted.validateCallbackRequest.mockImplementation(async (url: unknown, secret: unknown) => (
+    url ? { ok: true, url, secret } : { ok: true }
+  ));
 
   client = await createFastifyApiTestApp(clientAgentsApiPlugin);
   runsApp = await createFastifyApiTestApp(clientAgentRunsApiPlugin);
@@ -192,7 +199,7 @@ describe('POST /responses — background signal (§4) and idempotency (§9/§12.
   });
 
   it('a background request past the tenant concurrency cap gets 429 (§12.8)', async () => {
-    hoisted.createBackgroundAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 10 });
+    hoisted.createBackgroundAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 10, scope: 'tenant' });
 
     const res = await client.inject({
       method: 'POST',
@@ -203,6 +210,122 @@ describe('POST /responses — background signal (§4) and idempotency (§9/§12.
 
     expect(res.statusCode).toBe(429);
     expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('rate_limit_error');
+  });
+
+  it('a background request past the PROJECT cap gets 429 naming the project scope', async () => {
+    hoisted.createBackgroundAgentRun.mockResolvedValue({ kind: 'concurrency_limit', limit: 2, scope: 'project' });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
+      payload: { model: 'support-agent', input: 'hello' },
+    });
+
+    expect(res.statusCode).toBe(429);
+    const body = parseJsonBody<{ error: { code: string; message: string } }>(res.body);
+    expect(body.error.code).toBe('agent_run_concurrency_limit');
+    expect(body.error.message).toContain('project');
+    expect(body.error.message).toContain('2');
+  });
+
+  it('passes the resolved limits, callback and idempotency scope to createBackgroundAgentRun', async () => {
+    hoisted.createBackgroundAgentRun.mockResolvedValue({
+      kind: 'created',
+      run: { _id: 'run-1', mode: 'background', status: 'queued', createdAt: new Date() },
+    });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-9' },
+      payload: {
+        model: 'support-agent',
+        input: 'hello',
+        callback_url: 'https://hooks.example.com/run',
+        callback_secret: 'a-very-long-secret-value',
+      },
+    });
+
+    expect(res.statusCode).toBe(202);
+    expect(hoisted.validateCallbackRequest).toHaveBeenCalledWith('https://hooks.example.com/run', 'a-very-long-secret-value');
+    const [input] = hoisted.createBackgroundAgentRun.mock.calls[0] as [Record<string, unknown>];
+    expect(input.limits).toEqual(DEFAULT_LIMITS);
+    expect(input.callbackUrl).toBe('https://hooks.example.com/run');
+    expect(input.callbackSecret).toBe('a-very-long-secret-value');
+    expect(input.idempotencyKey).toBe('idem-9');
+    // A new conversation: the hash must not depend on the fresh id.
+    expect(input.idempotencyConversationScope).toBeNull();
+    // 202 body is the single §8 shape — never the sealed secret.
+    expect(res.body).not.toContain('a-very-long-secret-value');
+  });
+
+  it('an invalid callback is rejected at submit time with 400 invalid_callback, before anything is created', async () => {
+    hoisted.validateCallbackRequest.mockResolvedValue({ ok: false, message: 'callback_url must resolve to a public address' });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
+      payload: { model: 'support-agent', input: 'hello', callback_url: 'http://169.254.169.254/latest' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('invalid_callback');
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.createBackgroundAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('background on an agent with background disabled gets 400 agent_background_disabled', async () => {
+    hoisted.resolveAgentExecutionLimits.mockResolvedValue({ ...DEFAULT_LIMITS, backgroundEnabled: false });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true' },
+      payload: { model: 'support-agent', input: 'hello' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('agent_background_disabled');
+    expect(hoisted.createBackgroundAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("an agent whose defaultMode is 'background' runs a call that says neither in the background", async () => {
+    hoisted.resolveAgentExecutionLimits.mockResolvedValue({ ...DEFAULT_LIMITS, defaultMode: 'background' });
+    hoisted.createBackgroundAgentRun.mockResolvedValue({
+      kind: 'created',
+      run: { _id: 'run-3', mode: 'background', status: 'queued', createdAt: new Date() },
+    });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: TOKEN_HEADERS,
+      payload: { model: 'support-agent', input: 'hello' },
+    });
+
+    expect(res.statusCode).toBe(202);
+    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it('the sync path gets the resolved (min) ceiling, not the env default', async () => {
+    hoisted.resolveAgentExecutionLimits.mockResolvedValue({ ...DEFAULT_LIMITS, syncTimeoutMs: 12_000 });
+    hoisted.runSyncAgentTurn.mockResolvedValue({
+      kind: 'ok',
+      response: { id: 'resp_conv-1', object: 'response', model: 'support-agent', output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null },
+    });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: TOKEN_HEADERS,
+      payload: { model: 'support-agent', input: 'hello' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const [arg] = hoisted.runSyncAgentTurn.mock.calls[0] as [{ syncTimeoutMs: number }];
+    expect(arg.syncTimeoutMs).toBe(12_000);
   });
 
   it('a background request reusing an Idempotency-Key with a different body gets 409 idempotency_key_conflict (§12.15)', async () => {
@@ -222,7 +345,7 @@ describe('POST /responses — background signal (§4) and idempotency (§9/§12.
   it('a background request replaying an Idempotency-Key with the SAME body gets 200 with the existing run (§12.15)', async () => {
     hoisted.createBackgroundAgentRun.mockResolvedValue({
       kind: 'idempotent_replay',
-      run: { _id: 'run-1', status: 'succeeded', createdAt: new Date('2024-01-01T00:00:00Z') },
+      run: { _id: 'run-1', mode: 'background', status: 'succeeded', createdAt: new Date('2024-01-01T00:00:00Z') },
     });
 
     const res = await client.inject({
@@ -237,6 +360,47 @@ describe('POST /responses — background signal (§4) and idempotency (§9/§12.
     expect(body.id).toBe('run_run-1');
     expect(body.status).toBe('succeeded');
   });
+  it('REGRESSION: a replayed Idempotency-Key is answered BEFORE a conversation is created (no orphan per retry)', async () => {
+    hoisted.lookupIdempotentAgentRun.mockResolvedValue({
+      kind: 'replay',
+      run: { _id: 'run-1', mode: 'background', status: 'running', conversationId: 'conv-original', createdAt: new Date() },
+    });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-1' },
+      payload: { model: 'support-agent', input: 'hello' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = parseJsonBody<{ id: string; conversation_id: string }>(res.body);
+    expect(body.id).toBe('run_run-1');
+    expect(body.conversation_id).toBe('conv-original');
+    expect(hoisted.lookupIdempotentAgentRun).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'idem-1',
+      idempotencyConversationScope: null,
+      userMessage: 'hello',
+    }));
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+    expect(hoisted.createBackgroundAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('REGRESSION: a pre-conversation idempotency conflict gets 409 without creating a conversation', async () => {
+    hoisted.lookupIdempotentAgentRun.mockResolvedValue({ kind: 'conflict' });
+
+    const res = await client.inject({
+      method: 'POST',
+      url: '/api/client/v1/responses',
+      headers: { ...TOKEN_HEADERS, 'x-cognipeer-background': 'true', 'idempotency-key': 'idem-1' },
+      payload: { model: 'support-agent', input: 'something else' },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(parseJsonBody<{ error: { type: string } }>(res.body).error.type).toBe('idempotency_key_conflict');
+    expect(hoisted.createConversation).not.toHaveBeenCalled();
+  });
+
 
   it('Idempotency-Key on a synchronous (non-background) request is rejected with 400', async () => {
     const res = await client.inject({
@@ -393,6 +557,7 @@ describe('GET/POST /client/v1/agents/runs/:runId — tenant+project scoping (§1
   it('GET returns the serialized run status', async () => {
     hoisted.getAgentRunStatus.mockResolvedValue({
       _id: 'run-1',
+      mode: 'background',
       agentKey: 'support-agent',
       conversationId: 'conv-1',
       status: 'running',

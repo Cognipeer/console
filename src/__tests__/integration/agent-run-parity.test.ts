@@ -7,7 +7,7 @@
  */
 
 import { it, expect, beforeEach } from 'vitest';
-import { AgentRunConflictError } from '@/lib/database/provider.interface';
+import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '@/lib/database/provider.interface';
 import type { IAgentRun } from '@/lib/database/provider.interface';
 import { describeForEachProvider } from './db-parity.helper';
 
@@ -206,5 +206,175 @@ describeForEachProvider('AgentRun — data model foundation (Group A)', (getDb) 
 
     expect(await db.getAgentRunById(String(expired._id), tenantId, projectId)).toBeNull();
     expect(await db.getAgentRunById(String(fresh._id), tenantId, projectId)).not.toBeNull();
+  });
+  // ── Hardening (PR #326 review) ─────────────────────────────────────────
+
+  const conv = () => `conv-${Math.random().toString(36).slice(2, 10)}`;
+
+  it('a second insert with the same Idempotency-Key in the same project throws AgentRunIdempotencyKeyTakenError, not a conversation conflict', async () => {
+    const db = getDb();
+    const key = `idem-${Math.random().toString(36).slice(2, 8)}`;
+    await db.createAgentRun(baseRecord(conv(), { idempotencyKey: key, idempotencyRequestHash: 'h1' }));
+
+    // A DIFFERENT conversation, so only the key can collide.
+    const second = db.createAgentRun(baseRecord(conv(), { idempotencyKey: key, idempotencyRequestHash: 'h1' }));
+    await expect(second).rejects.toBeInstanceOf(AgentRunIdempotencyKeyTakenError);
+    await expect(db.createAgentRun(baseRecord(conv(), { idempotencyKey: key }))).rejects.not.toBeInstanceOf(AgentRunConflictError);
+  });
+
+  it('the same Idempotency-Key is independent across projects', async () => {
+    const db = getDb();
+    const key = `idem-${Math.random().toString(36).slice(2, 8)}`;
+    await db.createAgentRun(baseRecord(conv(), { idempotencyKey: key }));
+    const other = await db.createAgentRun(baseRecord(conv(), { idempotencyKey: key, projectId: 'proj-other' }));
+    expect(other._id).toBeTruthy();
+  });
+
+  it('concurrent inserts with the same Idempotency-Key: exactly one wins, the other gets AgentRunIdempotencyKeyTakenError', async () => {
+    const db = getDb();
+    const key = `idem-${Math.random().toString(36).slice(2, 8)}`;
+    const results = await Promise.allSettled([
+      db.createAgentRun(baseRecord(conv(), { idempotencyKey: key })),
+      db.createAgentRun(baseRecord(conv(), { idempotencyKey: key })),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(AgentRunIdempotencyKeyTakenError);
+  });
+
+  it('REGRESSION: deleting a run (cap overflow / publish failure) frees its Idempotency-Key so the retry is not a permanent conflict', async () => {
+    const db = getDb();
+    const key = `idem-${Math.random().toString(36).slice(2, 8)}`;
+    const conversationId = conv();
+    const first = await db.createAgentRun(baseRecord(conversationId, { idempotencyKey: key }));
+    expect(await db.deleteAgentRun(String(first._id))).toBe(true);
+
+    const retry = await db.createAgentRun(baseRecord(conversationId, { idempotencyKey: key }));
+    expect(retry._id).toBeTruthy();
+    expect(String(retry._id)).not.toBe(String(first._id));
+  });
+
+  it('canceling a QUEUED run frees the conversation slot immediately', async () => {
+    const db = getDb();
+    const conversationId = conv();
+    const run = await db.createAgentRun(baseRecord(conversationId));
+    const canceled = await db.requestAgentRunCancel(String(run._id), tenantId, projectId);
+    expect(canceled?.status).toBe('canceled');
+
+    const next = await db.createAgentRun(baseRecord(conversationId));
+    expect(next._id).toBeTruthy();
+  });
+
+  it('a sync reservation holds the same conversation slot as a background run', async () => {
+    const db = getDb();
+    const conversationId = conv();
+    const reservation = await db.createAgentRun(baseRecord(conversationId, { mode: 'sync', status: 'running' }));
+    await expect(db.createAgentRun(baseRecord(conversationId))).rejects.toBeInstanceOf(AgentRunConflictError);
+    await db.deleteAgentRun(String(reservation._id));
+    expect((await db.createAgentRun(baseRecord(conversationId)))._id).toBeTruthy();
+  });
+
+  it('listAgentRuns filters by project, agentKey, conversationId, status and mode, newest first, bounded by limit', async () => {
+    const db = getDb();
+    const convA = conv();
+    const a1 = await db.createAgentRun(baseRecord(convA));
+    await db.claimAgentRun(String(a1._id), tenantId, 'w', new Date());
+    await db.finalizeAgentRun(String(a1._id), tenantId, { status: 'succeeded', completedAt: new Date() });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const a2 = await db.createAgentRun(baseRecord(convA));
+    await db.createAgentRun(baseRecord(conv(), { agentKey: 'other-agent' }));
+    await db.createAgentRun(baseRecord(conv(), { mode: 'sync', status: 'running' }));
+    await db.createAgentRun(baseRecord(conv(), { projectId: 'proj-elsewhere' }));
+
+    const byAgent = await db.listAgentRuns({ tenantId, projectId, agentKey });
+    expect(byAgent.map((r) => r.agentKey).every((k) => k === agentKey)).toBe(true);
+    expect(byAgent.every((r) => r.projectId === projectId)).toBe(true);
+
+    const byConversation = await db.listAgentRuns({ tenantId, projectId, conversationId: convA });
+    expect(byConversation.map((r) => String(r._id))).toEqual([String(a2._id), String(a1._id)]);
+
+    const succeeded = await db.listAgentRuns({ tenantId, projectId, conversationId: convA, status: ['succeeded'] });
+    expect(succeeded.map((r) => String(r._id))).toEqual([String(a1._id)]);
+
+    const backgroundOnly = await db.listAgentRuns({ tenantId, projectId, mode: 'background' });
+    expect(backgroundOnly.length).toBeGreaterThan(0);
+    expect(backgroundOnly.every((r) => r.mode === 'background')).toBe(true);
+    const syncOnly = await db.listAgentRuns({ tenantId, projectId, mode: 'sync' });
+    expect(syncOnly.every((r) => r.mode === 'sync')).toBe(true);
+    expect(syncOnly.length).toBeGreaterThan(0);
+
+    const limited = await db.listAgentRuns({ tenantId, projectId, limit: 1 });
+    expect(limited).toHaveLength(1);
+
+    const elsewhere = await db.listAgentRuns({ tenantId, projectId: 'proj-elsewhere' });
+    expect(elsewhere.every((r) => r.projectId === 'proj-elsewhere')).toBe(true);
+    expect(elsewhere.length).toBeGreaterThan(0);
+  });
+
+  it('countActiveAgentRuns can count background runs only (sync reservations do not use the background cap)', async () => {
+    const db = getDb();
+    const before = await db.countActiveAgentRuns(tenantId, projectId, 'background');
+    const beforeSync = await db.countActiveAgentRuns(tenantId, projectId, 'sync');
+    await db.createAgentRun(baseRecord(conv()));
+    await db.createAgentRun(baseRecord(conv(), { mode: 'sync', status: 'running' }));
+    expect(await db.countActiveAgentRuns(tenantId, projectId, 'background')).toBe(before + 1);
+    expect(await db.countActiveAgentRuns(tenantId, projectId, 'sync')).toBe(beforeSync + 1);
+  });
+
+  it('listQueuedAgentRuns returns only queued rows created before the cutoff, oldest first', async () => {
+    const db = getDb();
+    const q1 = await db.createAgentRun(baseRecord(conv()));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const q2 = await db.createAgentRun(baseRecord(conv()));
+    const running = await db.createAgentRun(baseRecord(conv()));
+    await db.claimAgentRun(String(running._id), tenantId, 'w', new Date());
+
+    const all = await db.listQueuedAgentRuns(tenantId, { createdBefore: new Date(Date.now() + 1000) });
+    const ids = all.map((r) => String(r._id));
+    expect(ids).toContain(String(q1._id));
+    expect(ids).toContain(String(q2._id));
+    expect(ids).not.toContain(String(running._id));
+    expect(ids.indexOf(String(q1._id))).toBeLessThan(ids.indexOf(String(q2._id)));
+
+    const none = await db.listQueuedAgentRuns(tenantId, { createdBefore: new Date(Date.now() - 60_000) });
+    expect(none.map((r) => String(r._id))).not.toContain(String(q1._id));
+  });
+
+  it('cleanupAgentRunRetention never deletes queued or running rows, whatever their expiresAt', async () => {
+    const db = getDb();
+    const past = new Date(Date.now() - 1000);
+    const queued = await db.createAgentRun(baseRecord(conv(), { expiresAt: past }));
+    const running = await db.createAgentRun(baseRecord(conv(), { expiresAt: past }));
+    await db.claimAgentRun(String(running._id), tenantId, 'w', new Date());
+    const done = await db.createAgentRun(baseRecord(conv(), { status: 'failed', expiresAt: past }));
+
+    await db.cleanupAgentRunRetention({ olderThan: new Date(), batchSize: 100 });
+
+    expect(await db.getAgentRunById(String(queued._id), tenantId, projectId)).not.toBeNull();
+    expect(await db.getAgentRunById(String(running._id), tenantId, projectId)).not.toBeNull();
+    expect(await db.getAgentRunById(String(done._id), tenantId, projectId)).toBeNull();
+  });
+
+  it('persists callbackSecret and maxDurationMs, and finalize can erase runtimeContext', async () => {
+    const db = getDb();
+    const run = await db.createAgentRun(baseRecord(conv(), {
+      callbackUrl: 'https://hooks.example.com/x',
+      callbackSecret: 'sealed-blob',
+      maxDurationMs: 123_000,
+      runtimeContext: { sealed: 'ciphertext' },
+    }));
+    const read = await db.getAgentRunById(String(run._id), tenantId, projectId);
+    expect(read?.callbackSecret).toBe('sealed-blob');
+    expect(read?.maxDurationMs).toBe(123_000);
+    expect(read?.runtimeContext).toEqual({ sealed: 'ciphertext' });
+
+    await db.claimAgentRun(String(run._id), tenantId, 'w', new Date());
+    const finalized = await db.finalizeAgentRun(String(run._id), tenantId, {
+      status: 'succeeded',
+      completedAt: new Date(),
+      runtimeContext: null,
+    });
+    expect(finalized?.runtimeContext ?? null).toBeNull();
   });
 });

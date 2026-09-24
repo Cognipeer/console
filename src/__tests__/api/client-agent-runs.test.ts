@@ -77,6 +77,7 @@ describe('client agent runs routes', () => {
   it('GET /api/client/v1/agents/runs/:runId returns serialized status', async () => {
     hoisted.getAgentRunStatus.mockResolvedValue({
       _id: 'run-1',
+      mode: 'background',
       agentKey: 'support-agent',
       conversationId: 'conv-1',
       status: 'running',
@@ -100,6 +101,25 @@ describe('client agent runs routes', () => {
     expect(body.id).toBe('run_run-1');
     expect(body.object).toBe('agent.run');
     expect(body.status).toBe('running');
+  });
+
+  it('GET returns a structured 404 for a sync reservation row (an internal lock, not a caller-owned run)', async () => {
+    hoisted.getAgentRunStatus.mockResolvedValue({
+      _id: 'run-1',
+      mode: 'sync',
+      agentKey: 'support-agent',
+      conversationId: 'conv-1',
+      status: 'running',
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/client/v1/agents/runs/run_run-1',
+      headers: { authorization: '******' },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe('agent_run_not_found');
   });
 
   it('POST /api/client/v1/agents/runs/:runId/cancel requests cancellation in tenant/project scope', async () => {

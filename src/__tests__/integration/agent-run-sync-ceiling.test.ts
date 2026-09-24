@@ -78,7 +78,9 @@ beforeEach(async () => {
   });
   tenantId = String(tenant._id);
   await db.switchToTenant(dbName);
-  process.env.AGENT_SYNC_TIMEOUT_MS = '60';
+  // The env ceiling is clamped to >= 5s; the per-call effective ceiling
+  // (resolveAgentExecutionLimits' min) is what these tests shorten.
+  process.env.AGENT_SYNC_TIMEOUT_MS = '5000';
   reloadConfig();
 });
 
@@ -97,7 +99,7 @@ describe('runSyncAgentTurn — hard wall-clock ceiling (§5)', () => {
     });
 
     const startedAt = Date.now();
-    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-timeout') });
+    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-timeout'), syncTimeoutMs: 60 });
     const elapsedMs = Date.now() - startedAt;
 
     expect(outcome.kind).toBe('timeout');
@@ -106,13 +108,67 @@ describe('runSyncAgentTurn — hard wall-clock ceiling (§5)', () => {
     expect(elapsedMs).toBeLessThan(300);
   });
 
-  it('deletes the sync reservation row on timeout, freeing the conversation for a new request', async () => {
-    hoisted.executeAgentChat.mockImplementation(async () => {
-      await delay(400);
+  it('REGRESSION: on timeout the reservation is held until the abandoned turn settles, then released', async () => {
+    // Freeing the slot at the 504 let the next request start a turn on the
+    // same conversation while the old one's tools were still running.
+    let finishAbandoned!: () => void;
+    let seenCell: { cancelled?: boolean; deadlineAt?: number } | undefined;
+    hoisted.executeAgentChat.mockImplementation(async (request: { cancellationCell?: { cancelled?: boolean; deadlineAt?: number } }) => {
+      seenCell = request.cancellationCell;
+      await new Promise<void>((resolve) => { finishAbandoned = resolve; });
       return { id: 'resp_x', object: 'response', model: AGENT_KEY, output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null };
     });
 
-    await runSyncAgentTurn({ request: baseRequest('conv-freed') });
+    const startedAt = Date.now();
+    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-held'), syncTimeoutMs: 60 });
+    expect(outcome.kind).toBe('timeout');
+
+    // The turn was told its deadline and, once abandoned, that it is cancelled
+    // (so a late result is never persisted and the SDK loop stops).
+    expect(seenCell?.deadlineAt).toBeGreaterThanOrEqual(startedAt + 60);
+    expect(seenCell?.deadlineAt).toBeLessThanOrEqual(Date.now());
+    expect(seenCell?.cancelled).toBe(true);
+
+    // Still reserved: another turn on this conversation is refused.
+    expect(await db.countActiveAgentRuns(tenantId, PROJECT_ID, 'sync')).toBe(1);
+    const callsBefore = hoisted.executeAgentChat.mock.calls.length;
+    const meanwhile = await runSyncAgentTurn({ request: baseRequest('conv-held'), syncTimeoutMs: 60 });
+    expect(meanwhile.kind).toBe('conflict');
+    expect(hoisted.executeAgentChat.mock.calls.length).toBe(callsBefore);
+
+    // The abandoned turn finally stops — only now is the slot released.
+    finishAbandoned();
+    await vi.waitFor(async () => {
+      expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
+    });
+  });
+
+  it('an abandoned turn that REJECTS after the timeout still releases the reservation', async () => {
+    let failAbandoned!: (error: Error) => void;
+    hoisted.executeAgentChat.mockImplementation(() => new Promise((_, reject) => { failAbandoned = reject; }));
+
+    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-held-reject'), syncTimeoutMs: 60 });
+    expect(outcome.kind).toBe('timeout');
+    expect(await db.countActiveAgentRuns(tenantId)).toBe(1);
+
+    failAbandoned(new Error('aborted at the deadline'));
+    await vi.waitFor(async () => {
+      expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
+    });
+  });
+
+  it('a turn that completes in time releases the reservation before returning', async () => {
+    hoisted.executeAgentChat.mockResolvedValue({ id: 'resp_ok', object: 'response', model: AGENT_KEY, output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null });
+
+    const outcome = await runSyncAgentTurn({ request: baseRequest('conv-quick'), syncTimeoutMs: 1_000 });
+    expect(outcome.kind).toBe('ok');
+    expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
+  });
+
+  it('a turn that throws before the deadline releases the reservation and rethrows', async () => {
+    hoisted.executeAgentChat.mockRejectedValue(new Error('provider exploded'));
+
+    await expect(runSyncAgentTurn({ request: baseRequest('conv-throw'), syncTimeoutMs: 1_000 })).rejects.toThrow('provider exploded');
     expect(await db.countActiveAgentRuns(tenantId)).toBe(0);
   });
 
@@ -121,9 +177,6 @@ describe('runSyncAgentTurn — hard wall-clock ceiling (§5)', () => {
       await delay(150);
       return { id: 'resp_x', object: 'response', model: AGENT_KEY, output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null };
     });
-    process.env.AGENT_SYNC_TIMEOUT_MS = '5000';
-    reloadConfig();
-
     const conversationId = 'conv-conflict';
     const firstPromise = runSyncAgentTurn({ request: baseRequest(conversationId) });
     await delay(20); // let the first call's reservation land before racing the second
@@ -140,9 +193,6 @@ describe('runSyncAgentTurn — hard wall-clock ceiling (§5)', () => {
       await delay(150);
       return { id: 'resp_x', object: 'response', model: AGENT_KEY, output: [], status: 'completed', usage: {}, created_at: 0, previous_response_id: null, version: null };
     });
-    process.env.AGENT_SYNC_TIMEOUT_MS = '5000';
-    reloadConfig();
-
     const conversationId = 'conv-cross-mode-conflict';
     const firstPromise = runSyncAgentTurn({ request: baseRequest(conversationId) });
     await delay(20);

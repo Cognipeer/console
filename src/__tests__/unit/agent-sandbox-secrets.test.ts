@@ -8,7 +8,10 @@ import {
     AGENT_SANDBOX_SECRET_MASK as MASK,
     maskAgentSandboxConfig,
     maskAgentSandboxSecrets,
+    openAgentCallbackSecret,
     openAgentSandboxSecrets,
+    sealAgentConfigSecrets,
+    sealAgentExecutionConfig,
     scrubSecretValues,
     sealAgentSandboxConfig,
 } from '@/lib/services/agents/agentSandboxSecrets';
@@ -59,5 +62,50 @@ describe('sandbox secrets', () => {
         const text = JSON.stringify(manifest);
         expect(text).not.toContain(stored.secretsSealed!);
         expect(manifest.spec.sandbox?.secrets).toEqual({ A: MASK, B: MASK });
+    });
+});
+
+describe('execution callback secret', () => {
+    const URL_ = 'https://hooks.example.com/agent';
+    const stored = sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: 'agent-callback-secret-1' }, undefined)!;
+
+    it('seals on save and never keeps the plaintext', () => {
+        expect(stored.callbackSecret).toBeUndefined();
+        expect(stored.callbackSecretSealed).toBeTruthy();
+        expect(JSON.stringify(stored)).not.toContain('agent-callback-secret-1');
+        expect(openAgentCallbackSecret(stored)).toBe('agent-callback-secret-1');
+    });
+
+    it('masks on read, with no ciphertext', () => {
+        const agent = maskAgentSandboxSecrets({ config: { modelKey: 'm', execution: stored } });
+        expect(agent.config.execution?.callbackSecret).toBe(MASK);
+        expect(agent.config.execution?.callbackSecretSealed).toBeUndefined();
+        expect(JSON.stringify(agent)).not.toContain(stored.callbackSecretSealed!);
+        // No secret stored → nothing to mask.
+        const plain = maskAgentSandboxSecrets({ config: { modelKey: 'm', execution: { callbackUrl: URL_ } } });
+        expect(plain.config.execution).toEqual({ callbackUrl: URL_ });
+    });
+
+    it('update: mask or omission keeps, a new value replaces, empty string removes', () => {
+        expect(openAgentCallbackSecret(sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: MASK }, stored))).toBe('agent-callback-secret-1');
+        expect(openAgentCallbackSecret(sealAgentExecutionConfig({ callbackUrl: URL_ }, stored))).toBe('agent-callback-secret-1');
+        expect(openAgentCallbackSecret(sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: 'rotated-secret-value-2' }, stored))).toBe('rotated-secret-value-2');
+        const removed = sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecret: '' }, stored)!;
+        expect(removed.callbackSecretSealed).toBeUndefined();
+        expect(openAgentCallbackSecret(removed)).toBeUndefined();
+    });
+
+    it('a client cannot inject its own ciphertext through callbackSecretSealed', () => {
+        const forged = sealAgentExecutionConfig({ callbackUrl: URL_, callbackSecretSealed: 'attacker-blob' }, undefined)!;
+        expect(forged.callbackSecretSealed).toBeUndefined();
+    });
+
+    it('sealAgentConfigSecrets seals execution alongside sandbox', () => {
+        const next = sealAgentConfigSecrets(
+            { modelKey: 'm', execution: { callbackUrl: URL_, callbackSecret: 'agent-callback-secret-1' } },
+            undefined,
+        );
+        expect(next.execution?.callbackSecret).toBeUndefined();
+        expect(openAgentCallbackSecret(next.execution)).toBe('agent-callback-secret-1');
     });
 });
