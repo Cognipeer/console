@@ -103,7 +103,6 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
-import { withStrictToolCalling } from './strictToolSchema';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { annotateAgentRunError, classifyAgentRunError } from './agentErrors';
@@ -1624,7 +1623,7 @@ async function buildSubagentModel(
             modelSettings: resolveModelInvocationConfig(model, {}),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        return withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
+        return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
             tenantDbName,
             model,
             route: 'agent.subagent',
@@ -3293,7 +3292,7 @@ export async function executeAgentChatLocal(
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
         tenantDbName,
         model,
         route: 'agent.chat',
@@ -3987,7 +3986,7 @@ export async function executePlaygroundChatLocal(
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
         tenantDbName,
         model,
         route: 'agent.playground',
