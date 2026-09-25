@@ -836,6 +836,13 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         // genuine reset token mailed to the victim pointing at a host they control.
         const resetUrl = `${getConfig().app.url}/reset-password?token=${resetToken}`;
 
+        // Local development only: print the link, so a password can be reset
+        // on a machine with no mail transport configured. Never in any other
+        // environment — the token is a live credential for this account.
+        if (getConfig().nodeEnv === 'development') {
+          console.info(`\n[dev] Password reset link for ${user.email} (${slug}):\n${resetUrl}\n`);
+        }
+
         const emailSent = await sendEmail(email, 'password-reset', {
           expiryTime: '1 hour',
           name: user.name,
