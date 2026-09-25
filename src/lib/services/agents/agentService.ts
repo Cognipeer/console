@@ -1406,12 +1406,6 @@ function createConsoleSdkAgent(
         ...(input.memory ? { memory: input.memory } : {}),
         ...(input.costEstimator ? { costEstimator: input.costEstimator } : {}),
         ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
-        // Strict tool calling on every call for providers that support it
-        // (not only with structured output): arguments are schema-valid by
-        // construction. The SDK makes every tool — ours and its own
-        // (manage_plan, open_skill, spawn_subagent, …) — strict-valid and maps
-        // the model's calls back to each tool's own shape; sub-agents inherit it.
-        strictTools: true,
         tracing: {
             enabled: true,
             mode: 'batched',
