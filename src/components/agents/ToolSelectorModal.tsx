@@ -228,13 +228,13 @@ export function ToolSelectorModal({
       }));
 
       const webSearchRes = await fetch('/api/websearch/providers', { cache: 'no-store' });
-      const providers: Array<{ key: string; name: string; status: string }> =
+      const providers: Array<{ key: string; label: string; status: string }> =
         webSearchRes.ok ? ((await webSearchRes.json()).providers ?? []) : [];
       setSystemOptions((prev) => ({
         ...prev,
         web_search: providers
           .filter((p) => p.status === 'active')
-          .map((p) => ({ value: p.key, label: `${p.name} (${p.key})` })),
+          .map((p) => ({ value: p.key, label: `${p.label} (${p.key})` })),
       }));
 
       allGroups.unshift(...SYSTEM_TOOLS.map((tool) => ({
