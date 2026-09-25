@@ -413,7 +413,10 @@
 .main {
   grid-column: 3;
   grid-row: 2;
-  padding: 16px 24px 32px;
+  /* Exposed so a sticky footer (e.g. the agent Build Save bar) can sit flush
+     with the bottom edge instead of floating above this padding. */
+  --shell-main-pb: 32px;
+  padding: 16px 24px var(--shell-main-pb);
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
@@ -1007,7 +1010,8 @@
 
   .main {
     grid-column: 1;
-    padding: 12px 14px 24px;
+    --shell-main-pb: 24px;
+    padding: 12px 14px var(--shell-main-pb);
   }
 
   .searchBox {

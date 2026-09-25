@@ -39,3 +39,21 @@
     width: 100%;
   }
 }
+
+/*
+ * Build's single Save stays in reach: pinned to the bottom of the viewport
+ * while the page scrolls, instead of waiting below the last section — the
+ * config is long now that every section is open.
+ */
+.configSaveBar {
+  position: sticky;
+  /* The scroll container's bottom padding would otherwise show page content
+     below the bar. */
+  bottom: calc(-1 * var(--shell-main-pb, 0px));
+  z-index: 5;
+  margin-top: var(--mantine-spacing-md);
+  padding: var(--mantine-spacing-sm) var(--mantine-spacing-md);
+  background: var(--mantine-color-body);
+  border-top: 1px solid var(--mantine-color-default-border);
+  box-shadow: 0 -6px 16px -12px rgba(0, 0, 0, 0.25);
+}
