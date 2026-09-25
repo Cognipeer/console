@@ -12,6 +12,9 @@ import { useRouter } from 'next/navigation';
 import {
   getPendingNavigationKey,
   isNavigationPendingFor,
+  resolveIntentPrefetchKind,
+  shouldUpgradeNavigationPrefetch,
+  type PrefetchIntentKind,
 } from '@/lib/navigation/navigationProgress';
 import {
   navigationProgress,
@@ -25,10 +28,23 @@ type RouterPrefetchOptions = NonNullable<Parameters<AppRouter['prefetch']>[1]>;
 // `PrefetchKind` is not part of Next's public exports; its runtime values are
 // these strings. `auto` mirrors a default <Link> (prefetch up to the nearest
 // loading.tsx); `full` prefetches the whole route and reuses it for 5 minutes.
-const PREFETCH_OPTIONS: Record<'auto' | 'full', RouterPrefetchOptions> = {
+const PREFETCH_OPTIONS: Record<PrefetchIntentKind, RouterPrefetchOptions> = {
   auto: { kind: 'auto' } as unknown as RouterPrefetchOptions,
   full: { kind: 'full' } as unknown as RouterPrefetchOptions,
 };
+
+/** Best-effort `router.prefetch` with an explicit prefetch kind. */
+export function requestRouterPrefetch(
+  router: Pick<AppRouter, 'prefetch'>,
+  href: string,
+  kind: PrefetchIntentKind,
+): void {
+  try {
+    router.prefetch(href, PREFETCH_OPTIONS[kind]);
+  } catch {
+    // Prefetching is best-effort.
+  }
+}
 
 export interface NavigationFeedback {
   /** `router.push` that also drives the shell navigation progress feedback. */
@@ -43,7 +59,9 @@ export interface NavigationFeedback {
 /**
  * Imperative navigation (launcher selection, command palette, row clicks,
  * post-save redirects) with the same instant feedback as link clicks. Falls
- * back to a plain router navigation when no progress UI is mounted.
+ * back to a plain router navigation when no progress UI is mounted. Moves to
+ * another dashboard page request a full prefetch first so the route commits in
+ * one step (see `shouldUpgradeNavigationPrefetch`).
  */
 export function useNavigationFeedback(): NavigationFeedback {
   const router = useRouter();
@@ -63,10 +81,19 @@ export function useNavigationFeedback(): NavigationFeedback {
   const navigate = useCallback(
     (method: 'push' | 'replace', href: string, options?: NavigateOptions) => {
       pendingIdRef.current = startNavigationProgress(href);
-      startTransition(() => {
-        if (method === 'replace') router.replace(href, options);
-        else router.push(href, options);
-      });
+      const run = () =>
+        startTransition(() => {
+          if (method === 'replace') router.replace(href, options);
+          else router.push(href, options);
+        });
+      if (shouldUpgradeNavigationPrefetch(href, window.location.href)) {
+        requestRouterPrefetch(router, href, 'full');
+        // Next swaps a cached partial prefetch for the full one a microtask
+        // later; navigating after that commits the route in one step.
+        queueMicrotask(run);
+        return;
+      }
+      run();
     },
     [router],
   );
@@ -80,13 +107,7 @@ export function useNavigationFeedback(): NavigationFeedback {
     [navigate],
   );
   const prefetch = useCallback(
-    (href: string) => {
-      try {
-        router.prefetch(href, PREFETCH_OPTIONS.auto);
-      } catch {
-        // Prefetching is best-effort.
-      }
-    },
+    (href: string) => requestRouterPrefetch(router, href, 'auto'),
     [router],
   );
 
@@ -121,10 +142,13 @@ export function useIsNavigationPending(href: string | null | undefined): boolean
 
 export interface IntentPrefetchOptions {
   /**
-   * `auto` (default) behaves like a default `<Link>` prefetch. Use `full` only
-   * for targets rendered on the client (their RSC payload holds no data).
+   * `auto` (default) behaves like a default `<Link>` prefetch (up to the
+   * nearest `loading.tsx`). `full` prefetches the complete route so the click
+   * commits it in one step instead of revealing it from the loading fallback;
+   * it only applies to dashboard routes, whose pages render on the client
+   * (see `resolveIntentPrefetchKind`). Other targets fall back to `auto`.
    */
-  kind?: 'auto' | 'full';
+  kind?: PrefetchIntentKind;
   /** Hover must last this long before prefetching (avoids sweep storms). */
   hoverDelayMs?: number;
 }
@@ -137,9 +161,11 @@ export interface IntentPrefetchHandlers {
 }
 
 /**
- * Intent-based prefetch for long lists (table rows, card grids) where a
- * viewport prefetch per item would be wasteful: prefetches on hover (after a
- * short delay), keyboard focus and pointer down.
+ * Intent-based prefetch for primary navigation and long lists (table rows,
+ * card grids) where a viewport prefetch per item would be wasteful or only
+ * cover the loading state: prefetches on hover (after a short delay), keyboard
+ * focus and pointer down. The current URL, other origins and `/api/*` are
+ * never prefetched.
  */
 export function useIntentPrefetch(options: IntentPrefetchOptions = {}) {
   const { kind = 'auto', hoverDelayMs = 80 } = options;
@@ -157,12 +183,9 @@ export function useIntentPrefetch(options: IntentPrefetchOptions = {}) {
 
   const prefetch = useCallback(
     (href: string | null | undefined) => {
-      if (!href) return;
-      try {
-        router.prefetch(href, PREFETCH_OPTIONS[kind]);
-      } catch {
-        // Prefetching is best-effort.
-      }
+      if (!href || typeof window === 'undefined') return;
+      const resolved = resolveIntentPrefetchKind(href, window.location.href, kind);
+      if (resolved) requestRouterPrefetch(router, href, resolved);
     },
     [router, kind],
   );

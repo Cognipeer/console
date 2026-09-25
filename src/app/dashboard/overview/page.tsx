@@ -649,7 +649,7 @@ function CardLink({
   children: ReactNode;
 }) {
   const pending = useIsNavigationPending(href);
-  const { getIntentProps } = useIntentPrefetch();
+  const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
   return (
     <UnstyledButton
       component={Link}

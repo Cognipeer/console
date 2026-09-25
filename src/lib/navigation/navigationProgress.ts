@@ -212,6 +212,53 @@ export function getTrackableNavigationKey(
   return key;
 }
 
+// ─── Prefetch policy ────────────────────────────────────────────────────────
+
+/** Mirrors Next's `PrefetchKind` values used by `router.prefetch`. */
+export type PrefetchIntentKind = 'auto' | 'full';
+
+function isDashboardPath(pathname: string): boolean {
+  return pathname === '/dashboard' || pathname.startsWith('/dashboard/');
+}
+
+/**
+ * Prefetch kind for a navigation intent (hover, focus, pointer down) on
+ * `href`, or `null` to skip it: other origins, non-http(s) schemes, `/api/*`
+ * and the current URL. `full` is only kept for dashboard routes — their pages
+ * render on the client, so the full RSC payload carries no data and Next may
+ * reuse it for its static stale time.
+ */
+export function resolveIntentPrefetchKind(
+  href: string | null | undefined,
+  currentHref: string,
+  requested: PrefetchIntentKind,
+): PrefetchIntentKind | null {
+  const rawHref = href?.trim();
+  if (!rawHref || rawHref.startsWith('#')) return null;
+  const key = toNavigationKey(rawHref, currentHref);
+  if (!key) return null;
+  const pathname = getKeyPathname(key);
+  if (isApiPath(pathname)) return null;
+  if (key === getLocationKey({ href: currentHref })) return null;
+  return requested === 'full' && isDashboardPath(pathname) ? 'full' : 'auto';
+}
+
+/**
+ * Whether a navigation to another dashboard page should request a full
+ * prefetch just before it starts. A cached partial (`auto`, i.e. default
+ * `<Link>`) prefetch makes Next commit the target's `loading.tsx` fallback
+ * first, and React may then hold the real content back until that fallback has
+ * been visible for 300 ms (its Suspense reveal throttle); with a full prefetch
+ * the route commits in one step.
+ * Same-page query changes keep the current page mounted, so they are skipped.
+ */
+export function shouldUpgradeNavigationPrefetch(href: string, currentHref: string): boolean {
+  if (resolveIntentPrefetchKind(href, currentHref, 'full') !== 'full') return false;
+  const key = toNavigationKey(href.trim(), currentHref);
+  const currentKey = getLocationKey({ href: currentHref });
+  return key !== null && currentKey !== null && getKeyPathname(key) !== getKeyPathname(currentKey);
+}
+
 // ─── Controller (state + timers) ────────────────────────────────────────────
 
 type TimerHandle = unknown;

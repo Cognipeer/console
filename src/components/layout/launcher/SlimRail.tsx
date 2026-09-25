@@ -11,7 +11,10 @@ import { Tooltip } from '@mantine/core';
 import classes from './LauncherShell.module.css';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
-import { usePendingNavigationKey } from '@/components/common/navigation/useNavigationFeedback';
+import {
+  useIntentPrefetch,
+  usePendingNavigationKey,
+} from '@/components/common/navigation/useNavigationFeedback';
 import { getKeyPathname, isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
 import { findServiceForPath } from './ServiceSubNav';
 
@@ -35,6 +38,7 @@ export default function SlimRail({
   const pathname = usePathname();
   const tNav = useTranslations('navigation');
   const pendingKey = usePendingNavigationKey();
+  const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
   // Instant acknowledgement: the rail item that owns the in-flight target is
   // marked pending; the committed active state stays pathname-derived.
   const pendingServiceId = pendingKey
@@ -67,6 +71,7 @@ export default function SlimRail({
           aria-label={tNav(service.navLabelKey)}
           aria-current={isActive ? 'page' : undefined}
           data-pending={pendingAttr(pendingServiceId === service.id, isActive)}
+          {...getIntentProps(service.href)}
         >
           <Icon size={opts.recent ? 16 : 18} stroke={1.7} />
         </Link>
@@ -106,6 +111,7 @@ export default function SlimRail({
           aria-label="Home"
           aria-current={overviewActive ? 'page' : undefined}
           data-pending={pendingAttr(isHrefPending('/dashboard/overview'), Boolean(overviewActive))}
+          {...getIntentProps('/dashboard/overview')}
         >
           <IconLayoutDashboard size={18} stroke={1.7} />
         </Link>
@@ -131,6 +137,7 @@ export default function SlimRail({
           aria-label="Settings"
           aria-current={settingsActive ? 'page' : undefined}
           data-pending={pendingAttr(isHrefPending(settingsHref), settingsActive)}
+          {...getIntentProps(settingsHref)}
         >
           <IconSettings size={17} stroke={1.7} />
         </Link>
@@ -141,6 +148,7 @@ export default function SlimRail({
           className={classes.railBtn}
           aria-label="Help"
           data-pending={pendingAttr(isHrefPending('/dashboard/docs'), false)}
+          {...getIntentProps('/dashboard/docs')}
         >
           <IconHelp size={17} stroke={1.7} />
         </Link>

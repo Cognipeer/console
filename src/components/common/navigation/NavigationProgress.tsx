@@ -7,8 +7,6 @@ import { useTranslations } from '@/lib/i18n';
 import {
   getLocationKey,
   getTrackableNavigationKey,
-  NAVIGATION_PROGRESS_OPT_OUT_ATTRIBUTE,
-  NAVIGATION_PROGRESS_OPT_OUT_VALUE,
   type NavigationProgressPhase,
 } from '@/lib/navigation/navigationProgress';
 import {
@@ -16,31 +14,17 @@ import {
   isRouterTransitionHookInstalled,
   navigationProgress,
 } from '@/lib/navigation/navigationProgressRuntime';
+import NavigationIntentPrefetch from './NavigationIntentPrefetch';
+import { readNavigationAnchor, readNavigationClick } from './navigationAnchor';
 import classes from './NavigationProgress.module.css';
 
-const OPT_OUT_SELECTOR = `[${NAVIGATION_PROGRESS_OPT_OUT_ATTRIBUTE}="${NAVIGATION_PROGRESS_OPT_OUT_VALUE}"]`;
-
 function handleDocumentClick(event: MouseEvent) {
-  const origin = event.target;
-  if (!(origin instanceof Element)) return;
-  const anchor = origin.closest('a[href]');
+  const anchor = readNavigationAnchor(event.target);
   if (!anchor) return;
 
   const key = getTrackableNavigationKey(
-    {
-      button: event.button,
-      metaKey: event.metaKey,
-      ctrlKey: event.ctrlKey,
-      shiftKey: event.shiftKey,
-      altKey: event.altKey,
-      defaultPrevented: event.defaultPrevented,
-    },
-    {
-      href: anchor.getAttribute('href'),
-      target: anchor.getAttribute('target'),
-      hasDownload: anchor.hasAttribute('download'),
-      optedOut: anchor.closest(OPT_OUT_SELECTOR) !== null,
-    },
+    readNavigationClick(event),
+    anchor,
     window.location.href,
   );
   if (!key) return;
@@ -109,8 +93,10 @@ function NavigationProgressBar() {
  * Tracks every same-origin link click in the document (including plain
  * `next/link` links rendered by pages that do not import this module),
  * imperative router navigations (via `instrumentation-client.ts` and
- * `useNavigationFeedback`) and back/forward. Mount once per layout.
- * Individual links can opt out with `data-nav-progress="off"`.
+ * `useNavigationFeedback`) and back/forward. Also mounts
+ * `NavigationIntentPrefetch`, so link clicks to dashboard pages commit without
+ * a throttled loading fallback. Mount once per layout. Individual links can
+ * opt out with `data-nav-progress="off"`.
  */
 export default function NavigationProgress() {
   useEffect(() => {
@@ -131,6 +117,7 @@ export default function NavigationProgress() {
       <Suspense fallback={null}>
         <NavigationCommitWatcher />
       </Suspense>
+      <NavigationIntentPrefetch />
       <NavigationProgressBar />
     </>
   );

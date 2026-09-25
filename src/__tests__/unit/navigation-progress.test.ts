@@ -16,6 +16,8 @@ import {
   NAVIGATION_PROGRESS_SAFETY_TIMEOUT_MS,
   NAVIGATION_PROGRESS_SHOW_DELAY_MS,
   reduceNavigationProgress,
+  resolveIntentPrefetchKind,
+  shouldUpgradeNavigationPrefetch,
   toNavigationKey,
   type NavigationAnchorInput,
   type NavigationClickInput,
@@ -134,6 +136,39 @@ describe('getTrackableNavigationKey', () => {
   it('ignores anchors without a usable href', () => {
     expect(getTrackableNavigationKey(click(), anchor(null), CURRENT)).toBeNull();
     expect(getTrackableNavigationKey(click(), anchor('   '), CURRENT)).toBeNull();
+  });
+});
+
+describe('prefetch policy', () => {
+  it('keeps full prefetches for other dashboard pages only', () => {
+    expect(resolveIntentPrefetchKind('/dashboard/models', CURRENT, 'full')).toBe('full');
+    expect(resolveIntentPrefetchKind('/dashboard/models/abc?tab=logs', CURRENT, 'full')).toBe('full');
+    expect(resolveIntentPrefetchKind('/dashboard', CURRENT, 'full')).toBe('full');
+    expect(resolveIntentPrefetchKind('/dashboardish', CURRENT, 'full')).toBe('auto');
+    expect(resolveIntentPrefetchKind('/login', CURRENT, 'full')).toBe('auto');
+    expect(resolveIntentPrefetchKind('/dashboard/models', CURRENT, 'auto')).toBe('auto');
+  });
+
+  it('skips the current URL, hashes, API routes and other origins', () => {
+    expect(resolveIntentPrefetchKind('/dashboard/overview', CURRENT, 'full')).toBeNull();
+    expect(resolveIntentPrefetchKind('/dashboard/overview#stats', CURRENT, 'full')).toBeNull();
+    expect(resolveIntentPrefetchKind('#stats', CURRENT, 'auto')).toBeNull();
+    expect(resolveIntentPrefetchKind('/api/models', CURRENT, 'full')).toBeNull();
+    expect(resolveIntentPrefetchKind('https://example.com/dashboard/models', CURRENT, 'full')).toBeNull();
+    expect(resolveIntentPrefetchKind('mailto:team@example.com', CURRENT, 'auto')).toBeNull();
+    expect(resolveIntentPrefetchKind(null, CURRENT, 'full')).toBeNull();
+    expect(resolveIntentPrefetchKind('  ', CURRENT, 'full')).toBeNull();
+    expect(resolveIntentPrefetchKind('/dashboard/overview?tab=x', CURRENT, 'full')).toBe('full');
+  });
+
+  it('upgrades imperative navigations that change the dashboard page', () => {
+    expect(shouldUpgradeNavigationPrefetch('/dashboard/models', CURRENT)).toBe(true);
+    expect(shouldUpgradeNavigationPrefetch('http://localhost:3000/dashboard/models/abc', CURRENT)).toBe(true);
+    expect(shouldUpgradeNavigationPrefetch('/dashboard/overview?range=7d', CURRENT)).toBe(false);
+    expect(shouldUpgradeNavigationPrefetch('/dashboard/overview', CURRENT)).toBe(false);
+    expect(shouldUpgradeNavigationPrefetch('/login', CURRENT)).toBe(false);
+    expect(shouldUpgradeNavigationPrefetch('/api/models', CURRENT)).toBe(false);
+    expect(shouldUpgradeNavigationPrefetch('https://example.com/dashboard/models', CURRENT)).toBe(false);
   });
 });
 

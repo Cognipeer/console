@@ -57,7 +57,10 @@ import {
 } from '@tabler/icons-react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { usePendingNavigationKey } from '@/components/common/navigation/useNavigationFeedback';
+import {
+  useIntentPrefetch,
+  usePendingNavigationKey,
+} from '@/components/common/navigation/useNavigationFeedback';
 import { isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
 import classes from './LauncherShell.module.css';
 
@@ -739,6 +742,7 @@ export default function ServiceSubNav({
 }: ServiceSubNavProps) {
   const rawSearchParams = useSearchParams();
   const pendingKey = usePendingNavigationKey();
+  const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
   const searchParams = new URLSearchParams(rawSearchParams?.toString() ?? '');
   const tNav = useTranslations('navigation');
   const ServiceIcon = service.icon;
@@ -792,7 +796,8 @@ export default function ServiceSubNav({
               href={item.href}
               className={`${classes.subnavItem} ${active ? classes.subnavItemActive : ''}`}
               aria-current={active ? 'page' : undefined}
-              data-pending={pending ? 'true' : undefined}>
+              data-pending={pending ? 'true' : undefined}
+              {...getIntentProps(item.href)}>
               <ItemIcon size={15} stroke={1.7} />
               <span className={classes.subnavItemLabel}>{item.label}</span>
               {item.badge ? (
