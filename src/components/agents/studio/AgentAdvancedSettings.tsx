@@ -11,12 +11,13 @@
 
 import { useMemo } from 'react';
 import {
-    Accordion,
     Alert,
+    Box,
     Badge,
     Group,
     MultiSelect,
     NumberInput,
+    Paper,
     Select,
     Stack,
     Switch,
@@ -125,17 +126,19 @@ export default function AgentAdvancedSettings({
                 allowDeselect={false}
             />
 
-            <Accordion variant="separated" multiple defaultValue={['limits']}>
-                <Accordion.Item value="planning">
-                    <Accordion.Control>
+            {/* Every group open — no accordion. Folded groups hid the settings that
+                decide how the agent loop behaves behind a click each. */}
+            <Stack gap="md">
+                <Paper withBorder radius="md" p="md">
+                    <Box mb="sm">
                         <Group gap="xs">
                             <Text size="sm" fw={600}>Planning</Text>
                             {planning.mode && planning.mode !== 'off' ? (
                                 <Badge size="xs" variant="light">{planning.mode}</Badge>
                             ) : null}
                         </Group>
-                    </Accordion.Control>
-                    <Accordion.Panel>
+                    </Box>
+                    <Box>
                         <Stack gap="sm">
                             <Select
                                 label="Mode"
@@ -174,14 +177,14 @@ export default function AgentAdvancedSettings({
                                 />
                             ) : null}
                         </Stack>
-                    </Accordion.Panel>
-                </Accordion.Item>
+                    </Box>
+                </Paper>
 
-                <Accordion.Item value="limits">
-                    <Accordion.Control>
+                <Paper withBorder radius="md" p="md">
+                    <Box mb="sm">
                         <Text size="sm" fw={600}>Limits &amp; budget</Text>
-                    </Accordion.Control>
-                    <Accordion.Panel>
+                    </Box>
+                    <Box>
                         <Stack gap="sm">
                             <Group grow>
                                 <NumberInput
@@ -252,14 +255,14 @@ export default function AgentAdvancedSettings({
                                 />
                             </Group>
                         </Stack>
-                    </Accordion.Panel>
-                </Accordion.Item>
+                    </Box>
+                </Paper>
 
-                <Accordion.Item value="context">
-                    <Accordion.Control>
+                <Paper withBorder radius="md" p="md">
+                    <Box mb="sm">
                         <Text size="sm" fw={600}>Context &amp; summarization</Text>
-                    </Accordion.Control>
-                    <Accordion.Panel>
+                    </Box>
+                    <Box>
                         <Stack gap="sm">
                             <Select
                                 label="Context policy"
@@ -372,17 +375,17 @@ export default function AgentAdvancedSettings({
                                 />
                             </Group>
                         </Stack>
-                    </Accordion.Panel>
-                </Accordion.Item>
+                    </Box>
+                </Paper>
 
-                <Accordion.Item value="contextPilot">
-                    <Accordion.Control>
+                <Paper withBorder radius="md" p="md">
+                    <Box mb="sm">
                         <Group gap="xs">
                             <Text size="sm" fw={600}>ContextPilot</Text>
                             {contextPilot.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
                         </Group>
-                    </Accordion.Control>
-                    <Accordion.Panel>
+                    </Box>
+                    <Box>
                         <Stack gap="sm">
                             <Switch
                                 label="Compress large tool outputs before they enter the transcript"
@@ -404,17 +407,17 @@ export default function AgentAdvancedSettings({
                                 clearable
                             />
                         </Stack>
-                    </Accordion.Panel>
-                </Accordion.Item>
+                    </Box>
+                </Paper>
 
-                <Accordion.Item value="reasoning">
-                    <Accordion.Control>
+                <Paper withBorder radius="md" p="md">
+                    <Box mb="sm">
                         <Group gap="xs">
                             <Text size="sm" fw={600}>Reasoning</Text>
                             {reasoning.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
                         </Group>
-                    </Accordion.Control>
-                    <Accordion.Panel>
+                    </Box>
+                    <Box>
                         <Stack gap="sm">
                             <Switch
                                 label="Enable reasoning"
@@ -474,14 +477,14 @@ export default function AgentAdvancedSettings({
                                 />
                             </Group>
                         </Stack>
-                    </Accordion.Panel>
-                </Accordion.Item>
+                    </Box>
+                </Paper>
 
                 {/* Memory moved to its own tab — see AgentMemoryPanel. It needs a
                     real backing store picked from the Memory module, which does
                     not fit this accordion's "knob with a default" shape. */}
 
-            </Accordion>
+            </Stack>
         </Stack>
     );
 }

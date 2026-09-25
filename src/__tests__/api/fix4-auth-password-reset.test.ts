@@ -22,7 +22,7 @@ vi.mock('@/lib/services/auth/rateLimiter', async (importOriginal) => {
   return { ...actual, checkRateLimit: vi.fn().mockReturnValue({ allowed: true }) };
 });
 
-import { getConfig } from '@/lib/core/config';
+import { getConfig, getConfigSource, setConfigSource } from '@/lib/core/config';
 import { getDatabase } from '@/lib/database';
 import { sendEmail } from '@/lib/email/mailer';
 import { authApiPlugin } from '@/server/api/plugins/auth';
@@ -94,6 +94,35 @@ describe('password reset and canLogin=false', () => {
       const res = await forgot();
       expect(res.statusCode).toBe(200);
       expect(sendEmail).toHaveBeenCalledWith(baseUser.email, 'password-reset', expect.objectContaining({ name: baseUser.name }));
+    });
+
+    // Local dev has no mail transport: the link goes to the terminal there,
+    // and nowhere else — it is a live credential for the account.
+    const withNodeEnv = async (nodeEnv: string, run: () => Promise<void>) => {
+      const original = getConfigSource();
+      setConfigSource({ name: `${original.name}+NODE_ENV=${nodeEnv}`, get: (key: string) => (key === 'NODE_ENV' ? nodeEnv : original.get(key)) });
+      const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+      try {
+        await run();
+        return info.mock.calls.map((call) => String(call[0]));
+      } finally {
+        info.mockRestore();
+        setConfigSource(original);
+      }
+    };
+
+    it('prints the reset link to the terminal in development', async () => {
+      db.findUserByEmail.mockResolvedValue({ ...baseUser, canLogin: true } as never);
+      const printed = await withNodeEnv('development', async () => { await forgot(); });
+      expect(printed.some((line) => line.includes('/reset-password?token=') && line.includes(baseUser.email))).toBe(true);
+    });
+
+    it('never prints it outside development', async () => {
+      db.findUserByEmail.mockResolvedValue({ ...baseUser, canLogin: true } as never);
+      for (const env of ['production', 'test']) {
+        const printed = await withNodeEnv(env, async () => { await forgot(); });
+        expect(printed.some((line) => line.includes('reset-password'))).toBe(false);
+      }
     });
   });
 

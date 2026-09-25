@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Paper,
@@ -59,7 +59,7 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import SectionCard from '@/components/common/SectionCard';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
-import AgentAdvancedSettings, { countAdvancedOverrides } from './studio/AgentAdvancedSettings';
+import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
 import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
 import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
 import AgentExportPanel from './studio/AgentExportPanel';
@@ -343,11 +343,8 @@ export default function AgentDetailPage() {
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
   const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
-  // Build page: the published snapshot (to flag changed sections) and which
-  // sections are folded to their one-line summary.
+  // Build page: the published snapshot, to flag changed sections.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
-  const [publishedLoaded, setPublishedLoaded] = useState(false);
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [onlyChanged, setOnlyChanged] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
@@ -417,7 +414,6 @@ export default function AgentDetailPage() {
   // Tracing state (with pagination & date filter)
 
   /** Badge on the Settings tab: how far this agent strays from the defaults. */
-  const advancedOverrideCount = useMemo(() => countAdvancedOverrides(runtimeConfig), [runtimeConfig]);
 
 
 
@@ -725,13 +721,6 @@ export default function AgentDetailPage() {
     // sub-target is a section anchor to scroll to.
     const section = activeTab === 'configure' ? configureTab : activeTab === 'deploy' ? deployTab : null;
     if (!section || !agent) return;
-    // A deep link to a folded section opens it before scrolling to it.
-    setCollapsedSections((prev) => {
-      if (!prev.has(section)) return prev;
-      const next = new Set(prev);
-      next.delete(section);
-      return next;
-    });
     const frame = requestAnimationFrame(() => {
       document.getElementById(`config-${section}`)
         ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -742,10 +731,8 @@ export default function AgentDetailPage() {
   const publishedVersionNumber = agent?.publishedVersion ?? null;
   useEffect(() => {
     let cancelled = false;
-    setPublishedLoaded(false);
     if (!publishedVersionNumber) {
       setPublishedConfig(null);
-      setPublishedLoaded(true);
       return;
     }
     fetch(`/api/agents/${agentId}/versions?version=${publishedVersionNumber}`, { cache: 'no-store' })
@@ -754,8 +741,7 @@ export default function AgentDetailPage() {
         if (cancelled) return;
         setPublishedConfig((data?.version?.snapshot?.config as Record<string, unknown> | undefined) ?? null);
       })
-      .catch(() => { if (!cancelled) setPublishedConfig(null); })
-      .finally(() => { if (!cancelled) setPublishedLoaded(true); });
+      .catch(() => { if (!cancelled) setPublishedConfig(null); });
     return () => { cancelled = true; };
   }, [agentId, publishedVersionNumber]);
 
@@ -767,81 +753,12 @@ export default function AgentDetailPage() {
   // Initial fold, once per agent: changed sections (what a reviewer came to
   // look at) stay open, settled ones fold to their summary. Never published →
   // everything is new, so only the essentials open.
-  const initialFoldFor = useRef<string | null>(null);
-  useEffect(() => {
-    if (!agent || !publishedLoaded || initialFoldFor.current === agent._id) return;
-    initialFoldFor.current = agent._id;
-    const all = Object.keys(CONFIG_SECTION_KEYS);
-    const open = new Set(publishedConfig ? changedSections : ['basic', 'prompt']);
-    if (configureTab) open.add(configureTab);
-    setCollapsedSections(new Set(all.filter((id) => !open.has(id))));
-  }, [agent, publishedLoaded, publishedConfig, changedSections, configureTab]);
-
-  const toggleSection = (id: string) => setCollapsedSections((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
-
-  /** What a folded section shows instead of its fields. */
-  const sectionSummary = (id: string): string => {
-    const values = configForm.values;
-    switch (id) {
-      case 'basic': {
-        const model = models.find((m) => m.key === values.modelKey)?.name ?? values.modelKey ?? 'No model';
-        const toolCount = toolBindings.reduce((sum, binding) => sum + (binding.toolNames?.length ?? 1), 0);
-        return [
-          model,
-          values.knowledgeEngineKey ? `Knowledge: ${values.knowledgeEngineKey}` : 'No knowledge base',
-          `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
-          `${guardrailBindings.length} guardrail${guardrailBindings.length === 1 ? '' : 's'}`,
-        ].join(' · ');
-      }
-      case 'prompt':
-        return values.promptMode === 'prompt' && values.promptKey
-          ? `Managed prompt: ${values.promptKey}`
-          : `${(values.systemPrompt ?? '').length.toLocaleString()} characters inline`;
-      case 'subagents':
-        return subagents.length > 0 ? subagents.map((sub) => sub.name).join(', ') : 'No sub-agents';
-      case 'skills':
-        return skills.length > 0 ? skills.join(', ') : 'No skills';
-      case 'memory':
-        return memoryConfig?.enabled ? 'On' : 'Off';
-      case 'sandbox':
-        return sandboxConfig?.enabled
-          ? [
-            sandboxConfig.mode === 'persist' ? 'Persistent' : 'Ephemeral',
-            sandboxConfig.templateKey ?? 'default template',
-            sandboxConfig.preview?.enabled ? 'preview links on' : null,
-          ].filter(Boolean).join(' · ')
-          : 'Off';
-      case 'execution': {
-        if (executionConfig?.backgroundEnabled === false) {
-          return executionConfig.syncTimeoutSeconds ? `Sync only · ${executionConfig.syncTimeoutSeconds}s timeout` : 'Sync only';
-        }
-        return [
-          executionConfig?.defaultMode === 'background' ? 'Background by default' : 'Sync by default',
-          executionConfig?.syncTimeoutSeconds ? `${executionConfig.syncTimeoutSeconds}s timeout` : 'default timeout',
-          executionConfig?.backgroundMaxDurationMinutes ? `runs up to ${executionConfig.backgroundMaxDurationMinutes} min` : null,
-          executionConfig?.callbackUrl ? 'callback set' : null,
-        ].filter(Boolean).join(' · ');
-      }
-      case 'advanced':
-        return advancedOverrideCount > 0
-          ? `${advancedOverrideCount} setting${advancedOverrideCount === 1 ? '' : 's'} changed from defaults`
-          : 'Defaults';
-      case 'output':
-        return structuredOutput?.enabled ? 'JSON schema' : 'Free text';
-      default:
-        return '';
-    }
-  };
-
-  /** Props every Build section shares: fold state, summary and changed flag. */
+  /**
+   * Props every Build section shares. Sections are always open: the config is
+   * edited as a whole and saved by one button, so folding it to summaries only
+   * hid what the agent is behind a click per section.
+   */
   const sectionProps = (id: string) => ({
-    collapsed: collapsedSections.has(id),
-    onToggle: () => toggleSection(id),
-    summary: sectionSummary(id),
     changed: changedSections.has(id),
     first: id === firstVisibleSection,
   });
@@ -1361,16 +1278,6 @@ export default function AgentDetailPage() {
                 : ' · never published'}
             </Text>
             <Group gap="xs">
-              <Button
-                size="compact-sm"
-                variant="subtle"
-                color="gray"
-                onClick={() => setCollapsedSections(
-                  collapsedSections.size > 0 ? new Set() : new Set(Object.keys(CONFIG_SECTION_KEYS)),
-                )}
-              >
-                {collapsedSections.size > 0 ? 'Expand all' : 'Collapse all'}
-              </Button>
               {agent.publishedVersion ? (
                 <Button
                   size="compact-sm"
