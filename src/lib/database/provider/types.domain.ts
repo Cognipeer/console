@@ -2638,6 +2638,8 @@ export interface IAgentConversationStep {
   summarized?: boolean;
   originalTokenCount?: number;
   timestamp?: string;
+  /** Text the model wrote in the message that made this call (first call of that message only). */
+  narration?: string;
 }
 
 export interface IAgentConversationMessage {

@@ -21,6 +21,8 @@ export interface PlaygroundStep {
     summarized?: boolean;
     originalTokenCount?: number;
     timestamp?: string;
+    /** What the model wrote before this call, in the same message (first call only). */
+    narration?: string;
 }
 
 /**

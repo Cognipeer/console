@@ -75,7 +75,7 @@ This check must live in one shared helper, not be reimplemented per plugin file,
 
 ## 5. Synchronous Mode Hard Timeout
 
-- A single configurable ceiling (`AGENT_SYNC_TIMEOUT_MS`, default on the order of 2–5 minutes) via `getConfig()` — never read from `process.env` directly (per repo convention). Must be set below the shortest infrastructure timeout in the deployment (Decision 6).
+- A single configurable ceiling (`AGENT_SYNC_TIMEOUT_MS`, default 10 minutes) via `getConfig()` — never read from `process.env` directly (per repo convention). Must be set below the shortest infrastructure timeout in the deployment (Decision 6).
 - This is a **server-operated ceiling on the HTTP call**, not the agent's own internal budget (`runtime.limits.maxWallClockMs`).
 - **Enforcement never waits for `invoke()` — it races it (Decision 8, §12.13):**
   1. At request entry, compute an absolute deadline (`now + AGENT_SYNC_TIMEOUT_MS`).

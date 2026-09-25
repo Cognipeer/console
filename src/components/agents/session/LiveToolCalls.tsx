@@ -49,6 +49,80 @@ export function summariseArgs(args: unknown): string | undefined {
     return undefined;
 }
 
+/**
+ * A live turn, in the order it happened: the model's text and its tool calls
+ * interleave ("Let me search…" → web_search → "Found it, now…" → fetch →
+ * answer). Keeping one text buffer and one call list rendered the calls on top
+ * and every piece of text glued together underneath — the narration read as
+ * part of the answer and the order was lost.
+ */
+export type LiveSegment =
+    | { kind: 'text'; text: string }
+    | { kind: 'tools'; calls: LiveToolCall[] };
+
+export interface LiveToolEvent {
+    phase: string;
+    name: string;
+    id?: string;
+    args?: unknown;
+    durationMs?: number;
+    error?: string;
+}
+
+export function appendLiveText(segments: LiveSegment[], text: string): LiveSegment[] {
+    if (!text) return segments;
+    const last = segments[segments.length - 1];
+    if (last?.kind === 'text') {
+        return [...segments.slice(0, -1), { kind: 'text', text: last.text + text }];
+    }
+    return [...segments, { kind: 'text', text }];
+}
+
+export function applyLiveToolEvent(segments: LiveSegment[], event: LiveToolEvent): LiveSegment[] {
+    if (event.phase === 'start') {
+        const count = segments.reduce((n, segment) => n + (segment.kind === 'tools' ? segment.calls.length : 0), 0);
+        const call: LiveToolCall = {
+            key: event.id ?? `${event.name}:${count}`,
+            name: event.name,
+            detail: summariseArgs(event.args),
+            running: true,
+        };
+        const last = segments[segments.length - 1];
+        if (last?.kind === 'tools') {
+            return [...segments.slice(0, -1), { kind: 'tools', calls: [...last.calls, call] }];
+        }
+        return [...segments, { kind: 'tools', calls: [call] }];
+    }
+    // Terminal phases carry the same id as their start, so the row updates in
+    // place; without an id (some providers omit it) the newest running row of
+    // that name is the one that just finished.
+    for (let s = segments.length - 1; s >= 0; s -= 1) {
+        const segment = segments[s];
+        if (segment.kind !== 'tools') continue;
+        const index = event.id
+            ? segment.calls.findIndex((call) => call.key === event.id)
+            : segment.calls.map((call) => call.name === event.name && call.running).lastIndexOf(true);
+        if (index < 0) continue;
+        const calls = [...segment.calls];
+        calls[index] = {
+            ...calls[index],
+            running: false,
+            durationMs: event.durationMs,
+            ...(event.error ? { error: event.error } : {}),
+        };
+        const next = [...segments];
+        next[s] = { kind: 'tools', calls };
+        return next;
+    }
+    return segments;
+}
+
+/** Every call of the latest group settled and no text yet: the model is writing. */
+export function isGenerating(segments: LiveSegment[]): boolean {
+    const last = segments[segments.length - 1];
+    return last?.kind === 'tools' && last.calls.every((call) => !call.running);
+}
+
 export interface LiveToolCallsProps {
     calls: LiveToolCall[];
     /** True once every call has finished and the model is writing the answer. */

@@ -353,7 +353,7 @@ export interface AppConfig {
    * timeout in the deployment (Decision 6).
    */
   agent: {
-    /** Hard wall-clock ceiling for a synchronous (non-background) agent turn. */
+    /** Hard wall-clock ceiling for a synchronous (non-background) agent turn. Default 10 min. */
     syncTimeoutMs: number;
     /** Server-operated upper bound on a background run, independent of the agent's own limit. */
     backgroundMaxDurationMs: number;
@@ -690,7 +690,7 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     agent: {
-      syncTimeoutMs: Math.max(int(source, 'AGENT_SYNC_TIMEOUT_MS', 180_000), 5_000),
+      syncTimeoutMs: Math.max(int(source, 'AGENT_SYNC_TIMEOUT_MS', 600_000), 5_000),
       backgroundMaxDurationMs: Math.max(int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000), 10_000),
       backgroundMaxConcurrentRunsPerTenant: int(
         source,

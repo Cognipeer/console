@@ -17,7 +17,7 @@ import { createSmartAgent, createTool } from '@cognipeer/agent-sdk';
 import { buildMemoryTools } from '@/lib/services/agents/agentMemoryTools';
 import { toolInputSchemaToZod } from '@/lib/services/agents/agentRuntimeConfig';
 
-type JsonSchema = { type?: unknown; properties?: Record<string, JsonSchema>; required?: string[]; additionalProperties?: unknown; items?: JsonSchema };
+type JsonSchema = { type?: unknown; properties?: Record<string, JsonSchema>; required?: string[]; additionalProperties?: unknown; items?: JsonSchema; anyOf?: JsonSchema[] };
 
 /** OpenAI strict mode's own rules, checked recursively. */
 function violations(schema: JsonSchema, path = 'root'): string[] {
@@ -31,6 +31,9 @@ function violations(schema: JsonSchema, path = 'root'): string[] {
         for (const key of props) out.push(...violations(schema.properties![key], `${path}.${key}`));
     }
     if (schema.items) out.push(...violations(schema.items, `${path}[]`));
+    // The provider checks every union branch too; not recursing here is how
+    // manage_plan's `todoList` union shipped broken with this suite green.
+    schema.anyOf?.forEach((branch, index) => out.push(...violations(branch, `${path}|${index}`)));
     return out;
 }
 
@@ -71,6 +74,21 @@ describe('strict-compatible tool schemas', () => {
         const t = toStrictCompatible(schema);
         expect(violations(strictParams(t.schema))).toEqual([]);
         expect(t.restore({ body: '{"query":"{app=\\"postgres\\"}"}' })).toEqual({ body: { query: '{app="postgres"}' } });
+    });
+
+    it('closes the branches of a union — manage_plan\'s todoList', () => {
+        const writeItem = z.object({ id: z.number().int(), step: z.string().optional(), status: z.enum(['a', 'b']) });
+        const updateItem = z.object({ id: z.number().int(), step: z.string().optional(), status: z.enum(['a', 'b']).optional() });
+        const schema = z.object({
+            operation: z.enum(['write', 'update']),
+            todoList: z.array(z.union([writeItem, updateItem])).optional(),
+        });
+        expect(violations(strictParams(schema))).not.toEqual([]);
+        const t = toStrictCompatible(schema);
+        expect(violations(strictParams(t.schema))).toEqual([]);
+        const restored = t.restore({ operation: 'update', todoList: [{ id: 1, step: null, status: null }] });
+        expect(restored).toEqual({ operation: 'update', todoList: [{ id: 1 }] });
+        expect(schema.safeParse(restored).success).toBe(true);
     });
 
     it('turns a whole OpenAPI action schema strict-compatible', () => {
