@@ -67,7 +67,7 @@ export const en = {
     clusterDescription: 'Manage cluster nodes and assign service instances to them',
     gpuFleet: 'GPU Fleet',
     gpuFleetDescription: 'Onboard GPU hosts, deploy models from the curated library, manage pools',
-    sandbox: 'Agent Sandbox',
+    sandbox: 'Sandbox',
     sandboxDescription: 'Remote, API-driven runtime sandboxes for code, files, terminals and previews',
     aiAppGateway: 'AI App Gateway',
     aiAppGatewayDescription: 'Control plane for AI coding agents: who uses Claude Code, Codex and Copilot, what they send, and what they may do',

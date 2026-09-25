@@ -1177,10 +1177,22 @@ function summariseConversation(conversation: IAgentConversation) {
   // A turn that reported usage but no price leaves the total a lower bound,
   // which the UI marks rather than presenting as exact.
   let costComplete = true;
+  // What the Sessions filters ask ("did anything go wrong?") — the same
+  // verdicts the session drawer badges: a failed tool call or an output that
+  // failed its schema is an error; a run cut short by a limit, a cancel or an
+  // unresumable pause is "stopped".
+  let failedCalls = 0;
+  let hasError = false;
+  let stopped = false;
 
   for (const message of conversation.messages ?? []) {
     if (message.role !== 'assistant') continue;
     turns += 1;
+    for (const step of message.steps ?? []) {
+      if (step.status === 'error' || step.error) failedCalls += 1;
+    }
+    if (message.outputError) hasError = true;
+    if (message.stopReason) stopped = true;
     inputTokens += message.usage?.inputTokens ?? 0;
     outputTokens += message.usage?.outputTokens ?? 0;
     totalTokens += message.usage?.totalTokens ?? 0;
@@ -1205,6 +1217,8 @@ function summariseConversation(conversation: IAgentConversation) {
     costUsd,
     costComplete,
     activeMs,
+    failedCalls,
+    status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
     hasContext: Boolean(
       conversation.metadata?.runtimeContext

@@ -1,18 +1,18 @@
-# Agent Sandbox
+# Sandbox
 
-The Agent Sandbox gives every project remote, API-driven runtime containers for running code, managing files, opening interactive terminals, and previewing apps. It boots a **full Linux container** (Python, Node, or a multi-runtime base image) that an agent — or a person — can drive over its whole lifecycle: create, exec, snapshot, fork, persist, and tear down.
+The Sandbox gives every project remote, API-driven runtime containers for running code, managing files, opening interactive terminals, and previewing apps. It boots a **full Linux container** (Python, Node, or a multi-runtime base image) that an agent — or a person — can drive over its whole lifecycle: create, exec, snapshot, fork, persist, and tear down.
 
 It is the execution substrate behind coding agents and any workflow that needs a real shell, a real filesystem, and real packages rather than a sandboxed function.
 
 ::: tip Enterprise module
-Agent Sandbox is part of the enterprise edition. The dashboard pages exist in the community build but show an upgrade prompt; the `/api/sandbox/*` routes and the runtime only activate for a tenant with an active enterprise license. See [Licensing](/guide/licensing).
+Sandbox is part of the enterprise edition. The dashboard pages exist in the community build but show an upgrade prompt; the `/api/sandbox/*` routes and the runtime only activate for a tenant with an active enterprise license. See [Licensing](/guide/licensing).
 :::
 
 ## Overview
 
-The landing page (**Operate → Agent Sandbox**) summarises everything provisioned in the active project: counts of sandboxes, templates, volumes, and snapshots, a "how to use" helper, and a live table of recent sandboxes with their state, snapshot/base image, region, resources, uptime, and last activity.
+The landing page (**Operate → Sandbox**) summarises everything provisioned in the active project: counts of sandboxes, templates, volumes, and snapshots, a "how to use" helper, and a live table of recent sandboxes with their state, snapshot/base image, region, resources, uptime, and last activity.
 
-![Agent Sandbox overview](/screenshots/sandbox/01-overview.png)
+![Sandbox overview](/screenshots/sandbox/01-overview.png)
 
 What to read on this screen:
 

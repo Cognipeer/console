@@ -202,14 +202,14 @@ export default function AgentOverviewPanel({
                         label="Runs"
                         value={formatNumber(runs)}
                         hint={`last ${windowDays} days`}
-                        onClick={() => onGoToTab('observe')}
+                        onClick={() => onGoToTab('sessions')}
                     />
                     <StatCard
                         icon={failed > 0 ? <IconAlertTriangle size={17} /> : <IconCheck size={17} />}
                         label="Success rate"
                         value={successRate === null ? '—' : `${(successRate * 100).toFixed(successRate === 1 ? 0 : 1)}%`}
                         hint={failed > 0 ? `${failed} failed` : runs > 0 ? 'no failures' : undefined}
-                        onClick={() => onGoToTab('observe')}
+                        onClick={() => onGoToTab('sessions')}
                     />
                     <StatCard
                         icon={<IconClock size={17} />}

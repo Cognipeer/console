@@ -134,7 +134,7 @@
 /* ── Inspector ──────────────────────────────────────────────────────── */
 
 .inspectorPanel {
-  width: 21rem;
+  width: 23rem;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -154,8 +154,87 @@
 }
 
 .metaRow {
-  padding-block: 4px;
-  border-bottom: 1px solid var(--mantine-color-gray-2);
+  padding-block: 5px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.metaRow:last-child {
+  border-bottom: 0;
+}
+
+/* ── Inspector summary + tabs ── */
+.sideSummary {
+  padding: 12px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.stat {
+  padding: 7px 9px;
+  border-radius: var(--ds-r-sm, 8px);
+  background: var(--ds-surface-2, var(--mantine-color-gray-0));
+  min-width: 0;
+  cursor: default;
+}
+
+.statValue {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.liveDot,
+.idleDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.liveDot {
+  background: var(--ds-accent);
+  box-shadow: 0 0 0 3px var(--ds-accent-ring);
+}
+
+.idleDot {
+  background: var(--ds-text-faint);
+}
+
+.sideTabs {
+  padding-inline: 6px;
+  flex-wrap: nowrap;
+}
+
+.sideTab {
+  padding: 9px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sideTab[data-active] {
+  font-weight: 600;
+}
+
+.tabCount {
+  margin-left: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ds-text-muted);
+  background: var(--ds-surface-2);
+  border-radius: 999px;
+  padding: 0 6px;
 }
 
 .metaValue {
@@ -200,7 +279,7 @@
 }
 
 .eventRow:hover {
-  background: var(--mantine-color-gray-0);
+  background: var(--ds-surface-2);
 }
 
 .eventBadge {

@@ -16,7 +16,7 @@ export type EnterpriseUpsellProps = {
 
 const MODULE_LABELS: Record<string, string> = {
   'gpu-fleet': 'GPU Fleet',
-  sandbox: 'Agent Sandbox',
+  sandbox: 'Sandbox',
   cluster: 'Cluster (multi-node)',
   'prompt-optimizer': 'Prompt Optimizer',
   realtime: 'Realtime',
