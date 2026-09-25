@@ -69,9 +69,73 @@ Because the same agent-invocation logic is reachable from more than one wire for
 | HTTP header | `X-Cognipeer-Background: true` | Every endpoint, regardless of body shape. This is the primary, universal signal. |
 | Body field | `"background": true` | Endpoints whose request schema naturally has room for it (mirrors OpenAI Responses API's own `background` field). |
 
-Resolution order: if either is present and truthy, the request runs in background mode. The header is canonical because it is invocation-shape-agnostic; the body field exists so an unmodified OpenAI SDK client can set `background: true` the way it already knows how to. Whether the *rest* of that SDK's background flow (polling, cancel) works unmodified is a separate question — see [§8](#8-response-id-scheme) and [§12.3](#123-openai-sdk-compatibility-response-id-scheme).
+**Resolution order: header > body > the agent's `defaultMode`.** The first signal that says something decides; the ones after it are not consulted:
 
-This check must live in one shared helper, not be reimplemented per plugin file, so that every current and future client-facing agent entry point picks it up automatically.
+1. **`X-Cognipeer-Background` header** — `true` or `false` (case-insensitive, surrounding whitespace ignored). Any other value (`1`, `yes`, empty) is ignored and resolution falls through to the body.
+2. **Body `background` field** — only a JSON boolean counts (`true` / `false`); a string such as `"true"` is ignored and resolution falls through.
+3. **The agent's `execution.defaultMode`** (Build → Execution, `sync` | `background`) — used only when neither of the above said anything. It is treated as `sync` whenever background execution is disabled for the agent.
+
+So an explicit `false` in either place wins over an agent whose `defaultMode` is `background`, and `X-Cognipeer-Background: false` wins over `"background": true` in the same request. The header is canonical because it is invocation-shape-agnostic; the body field exists so an unmodified OpenAI SDK client can set `background: true` the way it already knows how to. Whether the *rest* of that SDK's background flow (polling, cancel) works unmodified is a separate question — see [§8](#8-response-id-scheme) and [§12.3](#123-openai-sdk-compatibility-response-id-scheme).
+
+This check lives in one shared helper (`isBackgroundModeRequested` in `src/lib/services/agents/agentRunService.ts`), not reimplemented per plugin file, so that every current and future client-facing agent entry point picks it up automatically.
+
+### 4.1 Request fields and headers used in background mode
+
+Accepted by `POST /api/client/v1/responses` (draft) and `POST /api/client/v1/agents/responses` (published), alongside the normal `model` / `input` / `previous_response_id` / `version` / `runtime_context` fields:
+
+| Where | Name | Type | Notes |
+|---|---|---|---|
+| Header | `X-Cognipeer-Background` | `true` \| `false` | Background signal, highest precedence (above). |
+| Body | `background` | boolean | Background signal, second precedence (above). |
+| Body | `callback_url` | string | Background mode only — ignored on synchronous calls. `http`/`https`, at most 2048 characters, must resolve to a public address; otherwise `400 invalid_callback`. When omitted, the agent's own default callback (Build → Execution) is used. |
+| Body | `callback_secret` | string | Background mode only; requires `callback_url`. 16–256 characters. Signs each delivery with `X-Cognipeer-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`. A `callback_url` sent without a secret is delivered unsigned — the agent's default secret is only used together with the agent's default URL. |
+| Header | `Idempotency-Key` | string | Background mode only, at most 255 characters (§9, §12.15). On a synchronous call: `400 idempotency_key_sync_not_supported`. |
+
+Callback deliveries are `POST`s with `X-Cognipeer-Event: agent_run.succeeded | agent_run.failed | agent_run.canceled` and a stable `X-Cognipeer-Event-Id` (dedupe retries on it); the body is `{ id, event, createdAt, runId, conversationId, data }`.
+
+Background-specific rejections: `400 agent_background_disabled` (the agent has background execution turned off), `409 agent_run_conflict` (a run is already active on the conversation), `409 idempotency_key_conflict`, `429 agent_run_concurrency_limit`.
+
+### 4.2 Examples
+
+With the header:
+
+```bash
+curl -X POST https://your-instance.com/api/client/v1/responses \
+  -H "Authorization: Bearer $COGNIPEER_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Cognipeer-Background: true" \
+  -d '{
+    "model": "support-bot",
+    "input": "Research this topic in depth and summarize the findings"
+  }'
+```
+
+With the body field instead — same result, and what an OpenAI SDK client sends when it sets `background: true`:
+
+```bash
+curl -X POST https://your-instance.com/api/client/v1/responses \
+  -H "Authorization: Bearer $COGNIPEER_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 3f1c9a2e-7b1d-4c55-9a51-0d6c2f1e8b7a" \
+  -d '{
+    "model": "support-bot",
+    "input": "Research this topic in depth and summarize the findings",
+    "background": true,
+    "callback_url": "https://your-server.com/webhooks/agent-run",
+    "callback_secret": "a-shared-secret-of-16-plus-chars"
+  }'
+```
+
+Either call answers `202 Accepted` with the run (the full status shape from §8, `status: "queued"`); a replayed `Idempotency-Key` answers `200` with the existing run instead. Poll it with `GET /api/client/v1/agents/runs/run_<id>` or cancel it with `POST /api/client/v1/agents/runs/run_<id>/cancel`.
+
+Forcing a synchronous call on an agent whose `defaultMode` is `background`:
+
+```bash
+curl -X POST https://your-instance.com/api/client/v1/responses \
+  -H "Authorization: Bearer $COGNIPEER_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "model": "support-bot", "input": "Quick question", "background": false }'
+```
 
 ## 5. Synchronous Mode Hard Timeout
 
