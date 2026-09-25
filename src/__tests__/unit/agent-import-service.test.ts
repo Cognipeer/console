@@ -6,6 +6,9 @@ const db = {
     findAgentByKey: vi.fn(),
     deleteSkill: vi.fn(),
     updateAgent: vi.fn(),
+    findSkillByKey: vi.fn(),
+    findPromptByKey: vi.fn(),
+    findToolByKey: vi.fn(),
 };
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
 vi.mock('@/lib/services/mcp/mcpService', () => ({
@@ -14,6 +17,8 @@ vi.mock('@/lib/services/mcp/mcpService', () => ({
     listMcpServers: vi.fn(),
 }));
 vi.mock('@/lib/services/agents/skillService', () => ({ createSkill: vi.fn(), listSkills: vi.fn() }));
+vi.mock('@/lib/services/prompts/promptService', () => ({ createPrompt: vi.fn(), deletePrompt: vi.fn() }));
+vi.mock('@/lib/services/tools/toolService', () => ({ createTool: vi.fn(), deleteTool: vi.fn() }));
 vi.mock('@/lib/services/webSearch/webSearchService', () => ({ listWebSearchProviders: vi.fn() }));
 vi.mock('@/lib/services/agents/agentConfigValidation', () => ({ validateAgentConfig: vi.fn() }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({ resolveSandboxAvailability: vi.fn() }));
@@ -24,6 +29,8 @@ vi.mock('@/lib/services/agents/agentManifest', async (importOriginal) => {
 
 import { createMcpServer, deleteMcpServer, listMcpServers } from '@/lib/services/mcp/mcpService';
 import { createSkill, listSkills } from '@/lib/services/agents/skillService';
+import { createPrompt, deletePrompt } from '@/lib/services/prompts/promptService';
+import { createTool, deleteTool } from '@/lib/services/tools/toolService';
 import { listWebSearchProviders } from '@/lib/services/webSearch/webSearchService';
 import { validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
@@ -76,6 +83,9 @@ beforeEach(() => {
         { key: 'gpt', name: 'GPT', modelId: 'gpt-5.6-luna' },
     ]);
     fn(db.findAgentByKey).mockResolvedValue(null);
+    fn(db.findSkillByKey).mockResolvedValue(null);
+    fn(db.findPromptByKey).mockResolvedValue(null);
+    fn(db.findToolByKey).mockResolvedValue(null);
     fn(db.updateAgent).mockResolvedValue({});
     fn(listSkills).mockResolvedValue([{ key: 'refunds', title: 'Refunds', status: 'active' }]);
     fn(listMcpServers).mockResolvedValue([{ _id: 'm-jira', key: 'jira', name: 'Jira', remoteConfig: { url: 'https://jira.example.com/mcp' }, status: 'active', tools: [{ name: 'search' }, { name: 'create' }] }]);
@@ -180,5 +190,113 @@ describe('applyAgentDocumentImport', () => {
         fn(resolveSandboxAvailability).mockResolvedValue({ available: true });
         await applyAgentDocumentImport(CTX, { content: DOC, modelKey: 'opus', mcp: { github: { action: 'skip' }, jira: { action: 'skip' } } });
         expect(fn(applyAgentManifest).mock.calls[0][4].spec.sandbox).toEqual({ enabled: true, mode: 'ephemeral' });
+    });
+});
+
+const MANIFEST = {
+    apiVersion: 'cognipeer.console/v1',
+    kind: 'Agent',
+    metadata: { key: 'support', name: 'Support', exportedAt: '2026-09-25T00:00:00Z' },
+    spec: {
+        modelKey: 'gpt',
+        promptKey: 'support-prompt',
+        skills: ['refunds', 'tone'],
+        toolBindings: [
+            { source: 'mcp', sourceKey: 'github', toolNames: ['get_issue'] },
+            { source: 'mcp', sourceKey: 'jira', toolNames: ['search'] },
+            { source: 'tool', sourceKey: 'crm', toolNames: ['lookup'] },
+        ],
+    },
+    dependencies: [],
+    resources: {
+        skills: [{ key: 'refunds', title: 'Refunds', header: 'When refunding', body: 'Steps' }],
+        prompts: [{ key: 'support-prompt', name: 'Support', template: 'Be kind' }],
+        mcpServers: [
+            { key: 'github', name: 'GitHub', sourceType: 'remote', remoteConfig: { url: 'https://api.githubcopilot.com/mcp/', transport: 'streamable-http' }, auth: { type: 'token' } },
+            { key: 'jira-cloud', name: 'Jira', sourceType: 'remote', remoteConfig: { url: 'https://jira.example.com/mcp', transport: 'streamable-http' }, auth: { type: 'none' } },
+        ],
+        tools: [{ key: 'crm', name: 'CRM', type: 'openapi', openApiSpec: '{}', upstreamBaseUrl: 'https://crm.example.com', auth: { type: 'header', headerName: 'X-Key' } }],
+    },
+};
+const MANIFEST_TEXT = JSON.stringify(MANIFEST);
+
+describe('cognipeer manifest with embedded definitions', () => {
+    beforeEach(() => {
+        fn(previewAgentImport).mockResolvedValue({
+            exists: false,
+            dependencies: [],
+            missing: [
+                { type: 'skill', key: 'refunds', usedBy: 'spec.skills' },
+                { type: 'skill', key: 'tone', usedBy: 'spec.skills' },
+                { type: 'prompt', key: 'support-prompt', usedBy: 'spec.promptKey' },
+            ],
+        });
+        fn(db.findPromptByKey).mockResolvedValue({ key: 'support-prompt', name: 'Support (here)' });
+    });
+
+    it('preview lists the definitions with what already exists (key, or MCP URL) and hides embedded ones from "missing"', async () => {
+        const preview = await previewAgentDocumentImport(CTX, MANIFEST_TEXT);
+        expect(preview.format.id).toBe('cognipeer');
+        const byRef = Object.fromEntries(preview.resources.map((r) => [`${r.type}:${r.key}`, r]));
+        expect(byRef['prompts:support-prompt'].existing).toEqual({ key: 'support-prompt', name: 'Support (here)' });
+        expect(byRef['skills:refunds'].existing).toBeUndefined();
+        expect(byRef['mcpServers:jira-cloud'].existing).toEqual({ key: 'jira', name: 'Jira' });
+        expect(byRef['mcpServers:github'].auth).toEqual({ type: 'token' });
+        expect(byRef['tools:crm'].auth).toEqual({ type: 'header', headerName: 'X-Key' });
+        expect(preview.missing).toEqual([{ type: 'skill', key: 'tone', usedBy: 'spec.skills' }]);
+    });
+
+    it('creates the missing ones with the supplied credentials, reuses the rest and remaps changed keys', async () => {
+        fn(createSkill).mockResolvedValue({ _id: 's1', key: 'refunds', title: 'Refunds' });
+        fn(createTool).mockResolvedValue({ _id: 't1', key: 'crm-1', name: 'CRM' });
+        fn(createMcpServer).mockResolvedValue({ _id: 'm1', key: 'github', name: 'GitHub', tools: [] });
+        const result = await applyAgentDocumentImport(CTX, {
+            content: MANIFEST_TEXT,
+            resources: {
+                'mcpServers:github': { action: 'create', auth: { token: 'ghp_x' } },
+                'tools:crm': { action: 'create', auth: { headerValue: 'k' } },
+            },
+        });
+        expect(fn(createMcpServer).mock.calls[0][4]).toMatchObject({ key: 'github', sourceType: 'remote', upstreamAuth: { type: 'token', token: 'ghp_x' } });
+        expect(fn(createTool).mock.calls[0][4]).toMatchObject({ upstreamAuth: { type: 'header', headerName: 'X-Key', headerValue: 'k' } });
+        expect(createPrompt).not.toHaveBeenCalled();
+        const written = fn(applyAgentManifest).mock.calls[0][4];
+        expect(written.resources).toBeUndefined();
+        expect(written.spec.promptKey).toBe('support-prompt');
+        expect(written.spec.toolBindings.map((b: { sourceKey: string }) => b.sourceKey)).toEqual(['github', 'jira', 'crm-1']);
+        expect(result.created.tools).toEqual([{ key: 'crm-1', name: 'CRM' }]);
+        expect(result.warnings.some((w) => w.code === 'credentials_missing')).toBe(false);
+    });
+
+    it('warns when a non-remote definition is created without its credential', async () => {
+        fn(createSkill).mockResolvedValue({ _id: 's1', key: 'refunds', title: 'Refunds' });
+        fn(createTool).mockResolvedValue({ _id: 't1', key: 'crm', name: 'CRM' });
+        const result = await applyAgentDocumentImport(CTX, {
+            content: MANIFEST_TEXT,
+            resources: { 'mcpServers:github': { action: 'skip' } },
+        });
+        expect(result.warnings.find((w) => w.code === 'credentials_missing')?.message).toContain('CRM');
+    });
+
+    it('rolls back every created definition when a later one fails', async () => {
+        fn(createSkill).mockResolvedValue({ _id: 's1', key: 'refunds', title: 'Refunds' });
+        fn(createPrompt).mockResolvedValue({ id: 'p1', key: 'support-prompt-1', name: 'Support' });
+        fn(createTool).mockResolvedValue({ _id: 't1', key: 'crm', name: 'CRM' });
+        fn(createMcpServer).mockRejectedValue(new Error('401 Unauthorized'));
+        await expect(applyAgentDocumentImport(CTX, {
+            content: MANIFEST_TEXT,
+            resources: { 'prompts:support-prompt': { action: 'create' }, 'mcpServers:github': { action: 'create' } },
+        })).rejects.toMatchObject({ status: 422, message: expect.stringContaining('GitHub') });
+        expect(db.deleteSkill).toHaveBeenCalledWith('s1');
+        expect(deletePrompt).toHaveBeenCalledWith('t_db', 'p1', 'p1');
+        expect(deleteTool).toHaveBeenCalledWith('t_db', 't1');
+        expect(applyAgentManifest).not.toHaveBeenCalled();
+    });
+
+    it('refuses an existing agent key before creating anything', async () => {
+        fn(db.findAgentByKey).mockResolvedValue({ _id: 'x' });
+        await expect(applyAgentDocumentImport(CTX, { content: MANIFEST_TEXT })).rejects.toMatchObject({ status: 409 });
+        expect(createSkill).not.toHaveBeenCalled();
+        expect(createMcpServer).not.toHaveBeenCalled();
     });
 });

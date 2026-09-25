@@ -18,6 +18,7 @@ import {
     Badge,
     Button,
     Card,
+    Checkbox,
     Code,
     CopyButton,
     FileButton,
@@ -102,16 +103,26 @@ export default function AgentExportPanel({
     const [sourceVersion, setSourceVersion] = useState<string | null>(null);
     const [manifestText, setManifestText] = useState('');
     const [manifestLoading, setManifestLoading] = useState(false);
+    // Definitions to embed next to the references, so the manifest can be
+    // imported into a project that does not have them yet.
+    const [include, setInclude] = useState<string[]>([]);
+    const [skippedResources, setSkippedResources] = useState<Array<{ type: string; key: string; reason: string }>>([]);
+
+    const manifestParams = useCallback((extra: Record<string, string> = {}) => {
+        const params = new URLSearchParams({ format, ...extra });
+        if (sourceVersion) params.set('version', sourceVersion);
+        if (include.length > 0) params.set('include', include.join(','));
+        return params;
+    }, [format, sourceVersion, include]);
 
     const loadManifest = useCallback(async () => {
         setManifestLoading(true);
         try {
-            const params = new URLSearchParams({ format });
-            if (sourceVersion) params.set('version', sourceVersion);
-            const res = await fetch(`/api/agents/${agentId}/export?${params}`);
+            const res = await fetch(`/api/agents/${agentId}/export?${manifestParams()}`);
             if (!res.ok) throw new Error(`Export failed (${res.status})`);
             const data = await res.json();
             setManifestText(data.content ?? '');
+            setSkippedResources(Array.isArray(data.skippedResources) ? data.skippedResources : []);
         } catch (error) {
             notifications.show({
                 title: 'Export failed',
@@ -121,7 +132,7 @@ export default function AgentExportPanel({
         } finally {
             setManifestLoading(false);
         }
-    }, [agentId, format, sourceVersion]);
+    }, [agentId, manifestParams]);
 
     useEffect(() => {
         void loadManifest();
@@ -139,9 +150,7 @@ export default function AgentExportPanel({
     );
 
     const downloadManifest = () => {
-        const params = new URLSearchParams({ format, download: '1' });
-        if (sourceVersion) params.set('version', sourceVersion);
-        window.open(`/api/agents/${agentId}/export?${params}`, '_blank');
+        window.open(`/api/agents/${agentId}/export?${manifestParams({ download: '1' })}`, '_blank');
     };
 
     // ── Code export ───────────────────────────────────────────────────────
@@ -273,6 +282,30 @@ export default function AgentExportPanel({
                             Secrets are never included.
                         </Text>
                     </Alert>
+
+                    <Stack gap={6}>
+                        <Text size="sm" fw={600}>Include definitions</Text>
+                        <Text size="xs" c="dimmed">
+                            Embed what the agent uses, so importing into a project that lacks them creates them.
+                            Credentials stay out — the importer is asked for them.
+                        </Text>
+                        <Checkbox.Group value={include} onChange={setInclude}>
+                            <Group gap="lg" mt={4}>
+                                <Checkbox size="xs" value="skills" label="Skills" />
+                                <Checkbox size="xs" value="prompts" label="Prompt" />
+                                <Checkbox size="xs" value="mcp" label="MCP servers" />
+                                <Checkbox size="xs" value="tools" label="Tools" />
+                            </Group>
+                        </Checkbox.Group>
+                        {skippedResources.length > 0 ? (
+                            <Alert variant="light" color="yellow" p="xs" icon={<IconAlertTriangle size={14} />}>
+                                <Text size="xs">
+                                    Kept as references only:{' '}
+                                    {skippedResources.map((r) => `${r.key} (${r.reason})`).join('; ')}
+                                </Text>
+                            </Alert>
+                        ) : null}
+                    </Stack>
 
                     <Group>
                         <SegmentedControl

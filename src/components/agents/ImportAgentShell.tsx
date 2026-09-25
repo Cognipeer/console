@@ -41,6 +41,7 @@ interface Preview {
     mcpServers: Array<{ ref: string; url: string; referenced: boolean; existing?: { key: string; name: string } }>;
     skills: Array<{ ref: string; label: string; kind: 'anthropic' | 'custom' | 'cognipeer'; existing?: { key: string; title: string } }>;
     skillOptions: Array<{ key: string; title: string }>;
+    resources: ResourceRow[];
     capabilities: {
         sandbox: { requested: string[]; available: boolean; reason?: string };
         webSearch: { requested: boolean; available: boolean };
@@ -48,6 +49,28 @@ interface Preview {
     };
     warnings: Array<{ code: string; message: string }>;
 }
+
+type ResourceType = 'skills' | 'prompts' | 'mcpServers' | 'tools';
+interface ResourceRow {
+    type: ResourceType;
+    key: string;
+    name: string;
+    detail?: string;
+    existing?: { key: string; name: string };
+    auth?: { type: 'none' | 'token' | 'header' | 'basic'; headerName?: string; username?: string };
+    envKeys?: string[];
+}
+type ResourceChoice = {
+    action: 'reuse' | 'create' | 'skip';
+    token?: string;
+    headerName?: string;
+    headerValue?: string;
+    username?: string;
+    password?: string;
+    env?: Record<string, string>;
+};
+const RESOURCE_LABELS: Record<ResourceType, string> = { skills: 'Skill', prompts: 'Prompt', mcpServers: 'MCP server', tools: 'Tool' };
+const resourceRef = (row: ResourceRow) => `${row.type}:${row.key}`;
 
 type McpChoice = {
     action: 'reuse' | 'create' | 'skip';
@@ -85,6 +108,7 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
     const [modelKey, setModelKey] = useState<string | null>(null);
     const [mcp, setMcp] = useState<Record<string, McpChoice>>({});
     const [skills, setSkills] = useState<Record<string, SkillChoice>>({});
+    const [resources, setResources] = useState<Record<string, ResourceChoice>>({});
     const resetRef = useRef<() => void>(null);
 
     const reset = () => {
@@ -126,6 +150,11 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
             setSkills(Object.fromEntries(next.skills.map((skill) => [skill.ref, skill.existing
                 ? { action: 'map', key: skill.existing.key }
                 : { action: 'skip', title: skill.label, header: `Imported ${skill.kind} skill ${skill.label}`, body: '' }])));
+            setResources(Object.fromEntries((next.resources ?? []).map((row) => [resourceRef(row), {
+                action: row.existing ? 'reuse' : 'create',
+                ...(row.auth?.headerName ? { headerName: row.auth.headerName } : {}),
+                ...(row.auth?.username ? { username: row.auth.username } : {}),
+            } satisfies ResourceChoice])));
         } catch (err) {
             setPreview(null);
             setError(err instanceof Error ? err.message : String(err));
@@ -189,6 +218,19 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                         choice.action === 'map' ? { action: 'map', key: choice.key }
                             : choice.action === 'create' ? { action: 'create', title: choice.title, header: choice.header, body: choice.body ?? '' }
                                 : { action: 'skip' }])),
+                    resources: Object.fromEntries(Object.entries(resources).map(([ref, choice]) => [ref,
+                        choice.action !== 'create' ? { action: choice.action }
+                            : {
+                                action: 'create',
+                                auth: {
+                                    token: choice.token || undefined,
+                                    headerName: choice.headerName || undefined,
+                                    headerValue: choice.headerValue || undefined,
+                                    username: choice.username || undefined,
+                                    password: choice.password || undefined,
+                                },
+                                ...(choice.env ? { env: choice.env } : {}),
+                            }])),
                 }),
             });
             const data = await res.json();
@@ -214,6 +256,9 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                     <SummaryKV label="Agent" value={key || '—'} />
                     <SummaryKV label="MCP servers" value={String(Object.values(mcp).filter((c) => c.action === 'create').length)} />
                     <SummaryKV label="Skills" value={String(Object.values(skills).filter((c) => c.action === 'create').length)} />
+                    {preview.resources?.length ? (
+                        <SummaryKV label="Embedded definitions" value={`${Object.values(resources).filter((c) => c.action === 'create').length} new · ${Object.values(resources).filter((c) => c.action === 'reuse').length} reused`} />
+                    ) : null}
                 </SummaryGroup>
             ) : null}
         </Stack>
@@ -446,6 +491,83 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                                             </FormRow>
                                             <Textarea size="xs" autosize minRows={2} maxRows={6} placeholder="Instructions (can be filled in later under Skills)" value={choice.body ?? ''} onChange={(event) => set({ body: event.currentTarget.value })} />
                                         </Stack>
+                                    ) : null}
+                                </Stack>
+                            );
+                        })}
+                    </Stack>
+                </FormSection>
+            ) : null}
+
+            {preview?.format.id && preview.resources?.length > 0 ? (
+                <FormSection number={3} title="Included definitions" description="The manifest carries these definitions. Each is reused when this project already has it, or created now — credentials were not exported, so enter them here.">
+                    <Stack gap="md">
+                        {preview.resources.map((row) => {
+                            const ref = resourceRef(row);
+                            const choice = resources[ref];
+                            if (!choice) return null;
+                            const set = (patch: Partial<ResourceChoice>) => setResources((prev) => ({ ...prev, [ref]: { ...prev[ref], ...patch } }));
+                            return (
+                                <Stack key={ref} gap={6} p="sm" style={{ border: '1px solid var(--mantine-color-default-border)', borderRadius: 8 }}>
+                                    <Group justify="space-between" wrap="nowrap">
+                                        <div style={{ minWidth: 0 }}>
+                                            <Group gap="xs">
+                                                <Text size="sm" fw={600}>{row.name}</Text>
+                                                <Badge size="xs" variant="light" color="gray">{RESOURCE_LABELS[row.type]}</Badge>
+                                                <Text size="xs" c="dimmed" ff="monospace">{row.key}</Text>
+                                            </Group>
+                                            {row.detail ? <Text size="xs" c="dimmed" truncate>{row.detail}</Text> : null}
+                                        </div>
+                                        <SegmentedControl
+                                            size="xs"
+                                            value={choice.action}
+                                            onChange={(value) => set({ action: value as ResourceChoice['action'] })}
+                                            data={[
+                                                ...(row.existing ? [{ value: 'reuse', label: `Use existing ${row.existing.name}` }] : []),
+                                                { value: 'create', label: row.existing ? 'Create a copy' : 'Create' },
+                                                { value: 'skip', label: 'Skip' },
+                                            ]}
+                                        />
+                                    </Group>
+                                    {choice.action === 'create' && row.auth && row.auth.type !== 'none' ? (
+                                        <FormRow cols={2}>
+                                            {row.auth.type === 'token' ? (
+                                                <FormField label="Bearer token">
+                                                    <PasswordInput size="xs" value={choice.token ?? ''} onChange={(event) => set({ token: event.currentTarget.value })} />
+                                                </FormField>
+                                            ) : row.auth.type === 'header' ? (
+                                                <>
+                                                    <FormField label="Header">
+                                                        <TextInput size="xs" value={choice.headerName ?? ''} onChange={(event) => set({ headerName: event.currentTarget.value })} />
+                                                    </FormField>
+                                                    <FormField label="Value">
+                                                        <PasswordInput size="xs" value={choice.headerValue ?? ''} onChange={(event) => set({ headerValue: event.currentTarget.value })} />
+                                                    </FormField>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <FormField label="Username">
+                                                        <TextInput size="xs" value={choice.username ?? ''} onChange={(event) => set({ username: event.currentTarget.value })} />
+                                                    </FormField>
+                                                    <FormField label="Password">
+                                                        <PasswordInput size="xs" value={choice.password ?? ''} onChange={(event) => set({ password: event.currentTarget.value })} />
+                                                    </FormField>
+                                                </>
+                                            )}
+                                        </FormRow>
+                                    ) : null}
+                                    {choice.action === 'create' && row.envKeys?.length ? (
+                                        <FormRow cols={2}>
+                                            {row.envKeys.map((name) => (
+                                                <FormField key={name} label={name}>
+                                                    <PasswordInput
+                                                        size="xs"
+                                                        value={choice.env?.[name] ?? ''}
+                                                        onChange={(event) => set({ env: { ...(choice.env ?? {}), [name]: event.currentTarget.value } })}
+                                                    />
+                                                </FormField>
+                                            ))}
+                                        </FormRow>
                                     ) : null}
                                 </Stack>
                             );

@@ -20,6 +20,8 @@ import { createLogger } from '@/lib/core/logger';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentToolBinding, type IMcpServer, type IAgentSkill } from '@/lib/database';
 import { createMcpServer, deleteMcpServer, listMcpServers } from '@/lib/services/mcp/mcpService';
 import { createSkill, listSkills } from '@/lib/services/agents/skillService';
+import { createPrompt, deletePrompt } from '@/lib/services/prompts/promptService';
+import { createTool, deleteTool } from '@/lib/services/tools/toolService';
 import { listWebSearchProviders } from '@/lib/services/webSearch/webSearchService';
 import {
     AGENT_MANIFEST_API_VERSION,
@@ -30,6 +32,12 @@ import {
     type AgentManifest,
 } from '../agentManifest';
 import { validateAgentConfig } from '../agentConfigValidation';
+import {
+    remapSpecResourceKeys,
+    type ManifestAuthShape,
+    type ManifestResourceType,
+    type ManifestResources,
+} from '../manifestResources';
 import { resolveSandboxAvailability } from '../agentSandboxTools';
 import { parseAgentDocument, type ParsedAgentDocument } from './document';
 import {
@@ -105,9 +113,81 @@ export interface AgentImportPreview {
         webSearch: { requested: boolean; available: boolean };
         webFetch: { requested: boolean };
     };
-    /** Cognipeer manifests: dependencies the project does not have. */
+    /**
+     * Cognipeer manifests exported with `include=…`: the embedded definitions.
+     * Each is reused when the project has one with the same key (or, for a
+     * remote MCP server, the same URL), created otherwise — or skipped.
+     */
+    resources: EmbeddedResourceRow[];
+    /** Cognipeer manifests: dependencies the project does not have (and the manifest does not embed). */
     missing?: Array<{ type: string; key: string; usedBy: string }>;
     warnings: Array<{ code: string; message: string }>;
+}
+
+export interface EmbeddedResourceRow {
+    type: ManifestResourceType;
+    key: string;
+    name: string;
+    /** One line: URL, package, source type… */
+    detail?: string;
+    existing?: { key: string; name: string };
+    /** Credential the importer has to supply when creating (secrets are never exported). */
+    auth?: ManifestAuthShape;
+    /** stdio MCP: env var names whose values have to be supplied. */
+    envKeys?: string[];
+}
+
+/** `resources` choice id — `type:key`, e.g. `mcpServers:github`. */
+export const resourceRef = (type: ManifestResourceType, key: string) => `${type}:${key}`;
+
+const DEPENDENCY_RESOURCE_TYPE: Record<string, ManifestResourceType | undefined> = {
+    skill: 'skills',
+    prompt: 'prompts',
+    mcp: 'mcpServers',
+    tool: 'tools',
+};
+
+async function embeddedResourceRows(ctx: ImportContext, resources: ManifestResources | undefined): Promise<EmbeddedResourceRow[]> {
+    if (!resources) return [];
+    const db = await getDatabase();
+    await db.switchToTenant(ctx.tenantDbName);
+    const rows: EmbeddedResourceRow[] = [];
+    for (const skill of resources.skills ?? []) {
+        const found = await db.findSkillByKey(skill.key, ctx.projectId);
+        rows.push({ type: 'skills', key: skill.key, name: skill.title, detail: skill.header, ...(found ? { existing: { key: found.key, name: found.title } } : {}) });
+    }
+    for (const prompt of resources.prompts ?? []) {
+        const found = await db.findPromptByKey(prompt.key, ctx.projectId);
+        rows.push({ type: 'prompts', key: prompt.key, name: prompt.name, ...(prompt.description ? { detail: prompt.description } : {}), ...(found ? { existing: { key: found.key, name: found.name } } : {}) });
+    }
+    if (resources.mcpServers?.length) {
+        const servers = await listMcpServers(ctx.tenantDbName, { projectId: ctx.projectId });
+        for (const server of resources.mcpServers) {
+            const found = servers.find((s: IMcpServer) => s.key === server.key)
+                ?? (server.remoteConfig ? servers.find((s: IMcpServer) => s.remoteConfig?.url === server.remoteConfig!.url && s.status !== 'disabled') : undefined);
+            rows.push({
+                type: 'mcpServers',
+                key: server.key,
+                name: server.name,
+                detail: server.remoteConfig?.url ?? (server.stdioConfig ? `${server.stdioConfig.runtime} ${server.stdioConfig.packageName}` : server.upstreamBaseUrl ?? server.sourceType),
+                ...(found ? { existing: { key: found.key, name: found.name } } : {}),
+                ...(server.auth.type !== 'none' ? { auth: server.auth } : {}),
+                ...(server.stdioConfig?.envKeys?.length ? { envKeys: server.stdioConfig.envKeys } : {}),
+            });
+        }
+    }
+    for (const tool of resources.tools ?? []) {
+        const found = await db.findToolByKey(tool.key, ctx.projectId);
+        rows.push({
+            type: 'tools',
+            key: tool.key,
+            name: tool.name,
+            detail: tool.mcpEndpoint ?? tool.upstreamBaseUrl ?? tool.type,
+            ...(found ? { existing: { key: found.key, name: found.name } } : {}),
+            ...(tool.auth.type !== 'none' ? { auth: tool.auth } : {}),
+        });
+    }
+    return rows;
 }
 
 function slugify(value: string): string {
@@ -168,6 +248,7 @@ export async function previewAgentDocumentImport(
         mcpServers: [],
         skills: [],
         skillOptions: [],
+        resources: [],
         capabilities: {
             sandbox: { requested: [], available: false },
             webSearch: { requested: false, available: false },
@@ -188,7 +269,13 @@ export async function previewAgentDocumentImport(
         const issues = validateAgentManifest(manifest);
         if (issues.length > 0) throw new AgentImportError('Manifest failed validation', 400, { issues });
         const preview = await previewAgentImport(ctx.tenantDbName, ctx.projectId, manifest);
-        const skillKeys = new Set(skills.map((s) => s.key));
+        const resources = await embeddedResourceRows(ctx, manifest.resources);
+        const embedded = new Set(resources.map((r) => resourceRef(r.type, r.key)));
+        // A dependency the manifest embeds is not "missing": the import creates it.
+        const missing = preview.missing.filter((dep) => {
+            const type = DEPENDENCY_RESOURCE_TYPE[dep.type];
+            return !(type && embedded.has(resourceRef(type, dep.key)));
+        });
         return {
             ...base,
             agent: {
@@ -202,14 +289,9 @@ export async function previewAgentDocumentImport(
                 suggestedKey: models.some((m) => m.key === manifest.spec.modelKey) ? manifest.spec.modelKey : undefined,
                 options: models,
             },
-            skills: (manifest.spec.skills ?? []).map((key) => ({
-                ref: key,
-                label: key,
-                kind: 'cognipeer' as const,
-                ...(skillKeys.has(key) ? { existing: { key, title: skills.find((s) => s.key === key)!.title } } : {}),
-            })),
-            missing: preview.missing,
-            warnings: preview.missing.map((dep) => ({
+            resources,
+            missing,
+            warnings: missing.map((dep) => ({
                 code: 'missing_dependency',
                 message: `${dep.type} "${dep.key}" (used by ${dep.usedBy}) does not exist in this project.`,
             })),
@@ -312,6 +394,16 @@ export type SkillImportChoice =
     | { action: 'create'; title: string; header: string; body: string }
     | { action: 'skip' };
 
+export type ResourceImportChoice =
+    | { action: 'reuse'; key?: string }
+    | {
+        action: 'create';
+        auth?: { token?: string; headerName?: string; headerValue?: string; username?: string; password?: string };
+        /** stdio MCP env values, by the names the manifest lists. */
+        env?: Record<string, string>;
+    }
+    | { action: 'skip' };
+
 export interface ApplyAgentDocumentImportInput {
     content: string;
     format?: string;
@@ -320,6 +412,8 @@ export interface ApplyAgentDocumentImportInput {
     modelKey?: string;
     mcp?: Record<string, McpImportChoice>;
     skills?: Record<string, SkillImportChoice>;
+    /** Cognipeer manifests: what to do with each embedded definition, by `type:key`. */
+    resources?: Record<string, ResourceImportChoice>;
     /** Cognipeer manifests only: overwrite an existing agent with the same key. */
     overwrite?: boolean;
 }
@@ -327,7 +421,12 @@ export interface ApplyAgentDocumentImportInput {
 export interface AgentImportApplyResult {
     agent: IAgent;
     action: 'created' | 'updated';
-    created: { mcpServers: Array<{ key: string; name: string }>; skills: Array<{ key: string; title: string }> };
+    created: {
+        mcpServers: Array<{ key: string; name: string }>;
+        skills: Array<{ key: string; title: string }>;
+        prompts?: Array<{ key: string; name: string }>;
+        tools?: Array<{ key: string; name: string }>;
+    };
     warnings: Array<{ code: string; message: string }>;
 }
 
@@ -343,21 +442,7 @@ export async function applyAgentDocumentImport(
         });
     }
 
-    if (format.id === 'cognipeer') {
-        const manifest = doc.data as unknown as AgentManifest;
-        const spec = input.modelKey ? { ...manifest.spec, modelKey: input.modelKey } : manifest.spec;
-        const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, { ...manifest, spec }, {
-            mode: input.overwrite ? 'upsert' : 'create',
-            key: input.key,
-            name: input.name,
-        });
-        return {
-            agent: result.agent,
-            action: result.action,
-            created: { mcpServers: [], skills: [] },
-            warnings: result.missing.map((dep) => ({ code: 'missing_dependency', message: `${dep.type} "${dep.key}" does not exist in this project.` })),
-        };
-    }
+    if (format.id === 'cognipeer') return applyManifestDocument(ctx, doc.data as unknown as AgentManifest, input);
 
     let plan: ClaudeAgentPlan;
     try {
@@ -527,6 +612,208 @@ export async function applyAgentDocumentImport(
                 skills: createdSkills.map((s) => ({ key: s.key, title: s.title })),
             },
             warnings: [...warnings, ...validation.warnings.map((w) => ({ code: 'config_warning', message: `${w.field}: ${w.message}` }))],
+        };
+    } catch (error) {
+        await rollback();
+        if (error instanceof AgentManifestError) throw new AgentImportError(error.message, 400, { issues: error.issues });
+        throw error;
+    }
+}
+
+// ── Cognipeer manifest (with optional embedded definitions) ─────────────
+
+function mergeAuth(shape: ManifestAuthShape, secret: Extract<ResourceImportChoice, { action: 'create' }>['auth']) {
+    return {
+        type: shape.type,
+        ...(shape.type === 'token' && secret?.token ? { token: secret.token } : {}),
+        ...(shape.type === 'header' ? { headerName: secret?.headerName || shape.headerName, ...(secret?.headerValue ? { headerValue: secret.headerValue } : {}) } : {}),
+        ...(shape.type === 'basic' ? { username: secret?.username || shape.username, ...(secret?.password ? { password: secret.password } : {}) } : {}),
+    };
+}
+
+function authIsComplete(auth: ReturnType<typeof mergeAuth>): boolean {
+    if (auth.type === 'token') return Boolean(auth.token);
+    if (auth.type === 'header') return Boolean(auth.headerName && auth.headerValue);
+    if (auth.type === 'basic') return Boolean(auth.username && auth.password);
+    return true;
+}
+
+async function applyManifestDocument(
+    ctx: ImportContext,
+    manifest: AgentManifest,
+    input: ApplyAgentDocumentImportInput,
+): Promise<AgentImportApplyResult> {
+    const issues = validateAgentManifest(manifest);
+    if (issues.length > 0) throw new AgentImportError('Manifest failed validation', 400, { issues });
+    const key = input.key?.trim() || manifest.metadata.key;
+    // Refuse before creating anything: a key clash must not leave library records behind.
+    if (!input.overwrite && await agentKeyExists(ctx.tenantDbName, ctx.projectId, key)) {
+        throw new AgentImportError(`An agent with key "${key}" already exists in this project. Choose another key.`, 409);
+    }
+
+    const resources = manifest.resources ?? {};
+    const rows = await embeddedResourceRows(ctx, resources);
+    const choiceFor = (type: ManifestResourceType, resourceKey: string): ResourceImportChoice => {
+        const explicit = input.resources?.[resourceRef(type, resourceKey)];
+        if (explicit) return explicit;
+        const row = rows.find((r) => r.type === type && r.key === resourceKey);
+        return row?.existing ? { action: 'reuse', key: row.existing.key } : { action: 'create' };
+    };
+    const existingKey = (type: ManifestResourceType, resourceKey: string, requested?: string) => {
+        const target = requested || rows.find((r) => r.type === type && r.key === resourceKey)?.existing?.key;
+        if (!target) throw new AgentImportError(`Nothing to reuse for ${type} "${resourceKey}" — create it or skip it.`);
+        return target;
+    };
+
+    const remap: Partial<Record<ManifestResourceType, Record<string, string>>> = {};
+    const setKey = (type: ManifestResourceType, from: string, to: string) => { (remap[type] ??= {})[from] = to; };
+    const created = {
+        mcpServers: [] as Array<{ key: string; name: string; id: string }>,
+        skills: [] as Array<{ key: string; title: string; id: string }>,
+        prompts: [] as Array<{ key: string; name: string; id: string }>,
+        tools: [] as Array<{ key: string; name: string; id: string }>,
+    };
+    const warnings: Array<{ code: string; message: string }> = [];
+
+    const rollback = async () => {
+        const attempt = async (label: string, fn: () => Promise<unknown>) => {
+            try {
+                await fn();
+            } catch (error) {
+                logger.warn(`Import rollback could not delete ${label}`, { error: (error as Error).message });
+            }
+        };
+        for (const server of created.mcpServers) await attempt(`MCP server ${server.key}`, () => deleteMcpServer(ctx.tenantDbName, server.id));
+        for (const tool of created.tools) await attempt(`tool ${tool.key}`, () => deleteTool(ctx.tenantDbName, tool.id));
+        for (const prompt of created.prompts) await attempt(`prompt ${prompt.key}`, () => deletePrompt(ctx.tenantDbName, ctx.projectId, prompt.id));
+        if (created.skills.length > 0) {
+            await attempt('skills', async () => {
+                const db = await getDatabase();
+                await db.switchToTenant(ctx.tenantDbName);
+                for (const skill of created.skills) await attempt(`skill ${skill.key}`, () => db.deleteSkill(skill.id));
+            });
+        }
+    };
+
+    try {
+        for (const skill of resources.skills ?? []) {
+            const choice = choiceFor('skills', skill.key);
+            if (choice.action === 'skip') continue;
+            if (choice.action === 'reuse') { setKey('skills', skill.key, existingKey('skills', skill.key, choice.key)); continue; }
+            const record = await createSkill(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, {
+                key: skill.key, title: skill.title, header: skill.header, body: skill.body ?? '',
+                ...(skill.minModelTier ? { minModelTier: skill.minModelTier } : {}),
+            });
+            created.skills.push({ key: record.key, title: record.title, id: String(record._id) });
+            setKey('skills', skill.key, record.key);
+        }
+
+        for (const prompt of resources.prompts ?? []) {
+            const choice = choiceFor('prompts', prompt.key);
+            if (choice.action === 'skip') continue;
+            if (choice.action === 'reuse') { setKey('prompts', prompt.key, existingKey('prompts', prompt.key, choice.key)); continue; }
+            const record = await createPrompt(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, {
+                key: prompt.key, name: prompt.name, template: prompt.template,
+                ...(prompt.description ? { description: prompt.description } : {}),
+                ...(prompt.metadata ? { metadata: prompt.metadata } : {}),
+                versionComment: `Imported with agent "${manifest.metadata.name}"`,
+            });
+            created.prompts.push({ key: record.key, name: record.name, id: record.id });
+            setKey('prompts', prompt.key, record.key);
+        }
+
+        for (const tool of resources.tools ?? []) {
+            const choice = choiceFor('tools', tool.key);
+            if (choice.action === 'skip') continue;
+            if (choice.action === 'reuse') { setKey('tools', tool.key, existingKey('tools', tool.key, choice.key)); continue; }
+            const auth = mergeAuth(tool.auth, choice.auth);
+            if (!authIsComplete(auth)) {
+                warnings.push({ code: 'credentials_missing', message: `Tool "${tool.name}" was created without its ${auth.type} credential — add it under Tools before running the agent.` });
+            }
+            let record;
+            try {
+                record = await createTool(ctx.tenantDbName, ctx.tenantId, ctx.userId, ctx.projectId, {
+                    name: tool.name, type: tool.type,
+                    ...(tool.description ? { description: tool.description } : {}),
+                    ...(tool.openApiSpec ? { openApiSpec: tool.openApiSpec } : {}),
+                    ...(tool.upstreamBaseUrl ? { upstreamBaseUrl: tool.upstreamBaseUrl } : {}),
+                    ...(tool.mcpEndpoint ? { mcpEndpoint: tool.mcpEndpoint, mcpTransport: tool.mcpTransport ?? 'streamable-http' } : {}),
+                    upstreamAuth: auth,
+                });
+            } catch (error) {
+                throw new AgentImportError(`Tool "${tool.name}" could not be created: ${(error as Error).message}`, 422, { resource: resourceRef('tools', tool.key) });
+            }
+            created.tools.push({ key: record.key, name: record.name, id: String(record._id) });
+            setKey('tools', tool.key, record.key);
+        }
+
+        for (const server of resources.mcpServers ?? []) {
+            const choice = choiceFor('mcpServers', server.key);
+            if (choice.action === 'skip') continue;
+            if (choice.action === 'reuse') { setKey('mcpServers', server.key, existingKey('mcpServers', server.key, choice.key)); continue; }
+            const auth = mergeAuth(server.auth, choice.auth);
+            if (!authIsComplete(auth) && server.sourceType !== 'remote') {
+                warnings.push({ code: 'credentials_missing', message: `MCP server "${server.name}" was created without its ${auth.type} credential — add it under MCP before running the agent.` });
+            }
+            const stdioConfig = server.stdioConfig
+                ? {
+                    runtime: server.stdioConfig.runtime,
+                    packageName: server.stdioConfig.packageName,
+                    ...(server.stdioConfig.args ? { args: server.stdioConfig.args } : {}),
+                    ...(server.stdioConfig.envKeys?.length
+                        ? { env: Object.fromEntries(server.stdioConfig.envKeys.map((name) => [name, choice.env?.[name] ?? ''])) }
+                        : {}),
+                    executionMode: server.stdioConfig.executionMode,
+                    ...(server.stdioConfig.sandbox ? { sandbox: server.stdioConfig.sandbox } : {}),
+                }
+                : undefined;
+            let record: IMcpServer;
+            try {
+                record = await createMcpServer(ctx.tenantDbName, ctx.tenantId, ctx.userId, ctx.projectId, {
+                    name: server.name,
+                    key: server.key,
+                    ...(server.description ? { description: server.description } : {}),
+                    sourceType: server.sourceType,
+                    ...(server.openApiSpec ? { openApiSpec: server.openApiSpec } : {}),
+                    ...(server.upstreamBaseUrl ? { upstreamBaseUrl: server.upstreamBaseUrl } : {}),
+                    ...(server.remoteConfig ? { remoteConfig: server.remoteConfig } : {}),
+                    ...(stdioConfig ? { stdioConfig } : {}),
+                    upstreamAuth: auth,
+                });
+            } catch (error) {
+                throw new AgentImportError(
+                    `MCP server "${server.name}" could not be created: ${(error as Error).message}`,
+                    422,
+                    { resource: resourceRef('mcpServers', server.key) },
+                );
+            }
+            created.mcpServers.push({ key: record.key, name: record.name, id: String(record._id) });
+            setKey('mcpServers', server.key, record.key);
+        }
+
+        const remapped = remapSpecResourceKeys(manifest.spec, remap);
+        const spec = input.modelKey ? { ...remapped, modelKey: input.modelKey } : remapped;
+        const { resources: _embedded, ...bare } = manifest;
+        void _embedded;
+        const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, { ...bare, spec }, {
+            mode: input.overwrite ? 'upsert' : 'create',
+            key,
+            name: input.name,
+        });
+        const strip = <T extends { id: string }>(list: T[]) => list.map(({ id: _id, ...rest }) => { void _id; return rest; });
+        return {
+            agent: result.agent,
+            action: result.action,
+            created: {
+                mcpServers: strip(created.mcpServers),
+                skills: strip(created.skills),
+                prompts: strip(created.prompts),
+                tools: strip(created.tools),
+            },
+            warnings: [
+                ...warnings,
+                ...result.missing.map((dep) => ({ code: 'missing_dependency', message: `${dep.type} "${dep.key}" does not exist in this project.` })),
+            ],
         };
     } catch (error) {
         await rollback();

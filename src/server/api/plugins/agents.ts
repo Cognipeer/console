@@ -47,6 +47,7 @@ import {
   serializeAgentManifest,
   type AgentManifestFormat,
 } from '@/lib/services/agents/agentManifest';
+import { collectManifestResources, parseResourceInclude } from '@/lib/services/agents/manifestResources';
 import {
   generateAgentProject,
   type AgentCodegenTarget,
@@ -542,11 +543,19 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
-      const query = (request.query ?? {}) as { format?: string; version?: string; download?: string };
+      const query = (request.query ?? {}) as { format?: string; version?: string; download?: string; include?: string };
       const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
       if (!agent) return reply.code(404).send({ error: 'Agent not found' });
 
       const format: AgentManifestFormat = query.format === 'yaml' ? 'yaml' : 'json';
+      // `include=skills,prompts,mcp,tools` (or `all`) embeds those definitions
+      // so the manifest can be imported into a project that lacks them.
+      let include;
+      try {
+        include = parseResourceInclude(query.include);
+      } catch (error) {
+        return reply.code(400).send({ error: (error as Error).message });
+      }
 
       // No `version` exports the DRAFT config — what the playground runs. A
       // version number exports that immutable snapshot instead, which is what
@@ -564,7 +573,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         version = requested;
       }
 
-      const manifest = buildAgentManifest(agent, config, version);
+      const { resources, skipped } = await collectManifestResources(session.tenantDbName, projectId, config, include);
+      const manifest = buildAgentManifest(agent, config, version, resources);
       const body = serializeAgentManifest(manifest, format);
 
       if (query.download === '1') {
@@ -578,7 +588,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           .send(body);
       }
 
-      return reply.code(200).send({ format, manifest, content: body });
+      return reply.code(200).send({ format, manifest, content: body, skippedResources: skipped });
     } catch (error) {
       logger.error('Export agent error', { error });
       return sendProjectContextError(reply, error)

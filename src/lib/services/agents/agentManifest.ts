@@ -19,6 +19,7 @@ import { getDatabase } from '@/lib/database';
 import type { IAgent, IAgentConfig, IAgentToolBinding } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { maskAgentSandboxConfig, sealAgentConfigSecrets } from './agentSandboxSecrets';
+import type { ManifestResources } from './manifestResources';
 
 
 const logger = createLogger('agent-manifest');
@@ -29,7 +30,7 @@ export type AgentManifestFormat = 'json' | 'yaml';
 
 export interface AgentManifestDependency {
     /** What the key points at, so the importer can send the user to the right page. */
-    type: 'model' | 'prompt' | 'tool' | 'mcp' | 'knowledge' | 'guardrail' | 'agent';
+    type: 'model' | 'prompt' | 'tool' | 'mcp' | 'knowledge' | 'guardrail' | 'agent' | 'skill';
     key: string;
     /** Where in the spec it is referenced — shown next to a missing dependency. */
     usedBy: string;
@@ -50,6 +51,11 @@ export interface AgentManifest {
     spec: IAgentConfig;
     /** Flat list of every key the spec references. Informational — derived, not authoritative. */
     dependencies: AgentManifestDependency[];
+    /**
+     * Opt-in embedded definitions (see `manifestResources.ts`) so an importer
+     * can create what its project is missing. Absent = references only.
+     */
+    resources?: ManifestResources;
 }
 
 // ── Build ────────────────────────────────────────────────────────────────
@@ -87,6 +93,7 @@ export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDe
     const out: AgentManifestDependency[] = [];
     if (spec.modelKey) out.push({ type: 'model', key: spec.modelKey, usedBy: 'spec.modelKey' });
     if (spec.promptKey) out.push({ type: 'prompt', key: spec.promptKey, usedBy: 'spec.promptKey' });
+    for (const skill of spec.skills ?? []) out.push({ type: 'skill', key: skill, usedBy: 'spec.skills' });
     if (spec.knowledgeEngineKey) {
         out.push({ type: 'knowledge', key: spec.knowledgeEngineKey, usedBy: 'spec.knowledgeEngineKey' });
     }
@@ -129,8 +136,10 @@ export function buildAgentManifest(
     agent: Pick<IAgent, 'key' | 'name' | 'description' | 'status'>,
     config: IAgentConfig,
     version: number | null = null,
+    resources?: ManifestResources,
 ): AgentManifest {
     const spec = sanitizeConfig(config);
+    const hasResources = Boolean(resources && Object.values(resources).some((list) => list && list.length > 0));
     return {
         apiVersion: AGENT_MANIFEST_API_VERSION,
         kind: 'Agent',
@@ -144,6 +153,7 @@ export function buildAgentManifest(
         },
         spec,
         dependencies: collectManifestDependencies(spec),
+        ...(hasResources ? { resources } : {}),
     };
 }
 
@@ -276,6 +286,8 @@ async function dependencyExists(
                 return Boolean(await db.findGuardrailByKey(dep.key, projectId));
             case 'agent':
                 return Boolean(await db.findAgentByKey(dep.key, projectId));
+            case 'skill':
+                return Boolean(await db.findSkillByKey(dep.key, projectId));
             default:
                 return false;
         }
