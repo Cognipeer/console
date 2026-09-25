@@ -217,16 +217,46 @@ export function getTrackableNavigationKey(
 /** Mirrors Next's `PrefetchKind` values used by `router.prefetch`. */
 export type PrefetchIntentKind = 'auto' | 'full';
 
+/**
+ * Dashboard subtrees whose server layouts decide per user whether the page may
+ * render: `projects/[projectId]` checks project membership in the tenant
+ * database, and `members`, `providers` and `tenant-settings` check the session
+ * role. A full prefetch renders that decision into a payload that Next reuses
+ * for its static stale time (5 minutes by default), so a user who has lost
+ * access, or another user signing in on the same tab (logout and login are
+ * soft navigations), could still open the page from the cache. These subtrees
+ * have no `loading.tsx`, so their default (`auto`) prefetch carries only the
+ * route tree and the layout runs again on every navigation. Add any new server
+ * layout or page under `/dashboard` that reads the session or the database.
+ */
+const SERVER_GATED_DASHBOARD_ROUTES: readonly string[] = [
+  '/dashboard/projects',
+  '/dashboard/members',
+  '/dashboard/providers',
+  '/dashboard/tenant-settings',
+];
+
+function isWithinRoute(pathname: string, route: string): boolean {
+  return pathname === route || pathname.startsWith(`${route}/`);
+}
+
 function isDashboardPath(pathname: string): boolean {
-  return pathname === '/dashboard' || pathname.startsWith('/dashboard/');
+  return isWithinRoute(pathname, '/dashboard');
+}
+
+function isServerGatedDashboardPath(pathname: string): boolean {
+  return SERVER_GATED_DASHBOARD_ROUTES.some((route) => isWithinRoute(pathname, route));
 }
 
 /**
  * Prefetch kind for a navigation intent (hover, focus, pointer down) on
  * `href`, or `null` to skip it: other origins, non-http(s) schemes, `/api/*`
- * and the current URL. `full` is only kept for dashboard routes — their pages
- * render on the client, so the full RSC payload carries no data and Next may
- * reuse it for its static stale time.
+ * and the current URL. `full` is only kept from one dashboard page to another
+ * outside `SERVER_GATED_DASHBOARD_ROUTES`. Next renders a prefetch from the
+ * first segment that differs from the current page, so the dashboard layout,
+ * which loads the signed-in user, is never part of it; the other dashboard
+ * segments read neither the session nor the database, so the payload holds no
+ * user data and Next may reuse it for its static stale time.
  */
 export function resolveIntentPrefetchKind(
   href: string | null | undefined,
@@ -239,8 +269,13 @@ export function resolveIntentPrefetchKind(
   if (!key) return null;
   const pathname = getKeyPathname(key);
   if (isApiPath(pathname)) return null;
-  if (key === getLocationKey({ href: currentHref })) return null;
-  return requested === 'full' && isDashboardPath(pathname) ? 'full' : 'auto';
+  const currentKey = getLocationKey({ href: currentHref });
+  if (key === currentKey) return null;
+  if (requested !== 'full') return 'auto';
+  const fromDashboard = currentKey !== null && isDashboardPath(getKeyPathname(currentKey));
+  return fromDashboard && isDashboardPath(pathname) && !isServerGatedDashboardPath(pathname)
+    ? 'full'
+    : 'auto';
 }
 
 /**

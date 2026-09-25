@@ -18,7 +18,8 @@ import { requestRouterPrefetch } from './useNavigationFeedback';
  * could hold the real content back until the fallback had been visible for
  * 300 ms. With the full prefetch requested before the click, Next commits the
  * route in one step. Links opted out with `data-nav-progress="off"`, new-tab
- * clicks, downloads and other origins are left alone.
+ * clicks, downloads, other origins and the server-gated routes that
+ * `resolveIntentPrefetchKind` keeps on `auto` are left alone.
  */
 export default function NavigationIntentPrefetch() {
   const router = useRouter();

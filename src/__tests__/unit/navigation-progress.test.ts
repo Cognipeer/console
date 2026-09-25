@@ -170,6 +170,43 @@ describe('prefetch policy', () => {
     expect(shouldUpgradeNavigationPrefetch('/api/models', CURRENT)).toBe(false);
     expect(shouldUpgradeNavigationPrefetch('https://example.com/dashboard/models', CURRENT)).toBe(false);
   });
+
+  it('keeps routes behind per-user server layouts on auto', () => {
+    const gated = [
+      '/dashboard/projects/p1',
+      '/dashboard/projects/p1/settings?tab=members',
+      'http://localhost:3000/dashboard/projects/p1',
+      '/dashboard/projects',
+      '/dashboard/members',
+      '/dashboard/providers',
+      '/dashboard/providers/openai',
+      '/dashboard/tenant-settings',
+      '/dashboard/tenant-settings/projects/p1',
+    ];
+    for (const href of gated) {
+      expect(resolveIntentPrefetchKind(href, CURRENT, 'full')).toBe('auto');
+      expect(resolveIntentPrefetchKind(href, CURRENT, 'auto')).toBe('auto');
+      expect(shouldUpgradeNavigationPrefetch(href, CURRENT)).toBe(false);
+    }
+    expect(
+      resolveIntentPrefetchKind('/dashboard/projects/p2', 'http://localhost:3000/dashboard/projects/p1', 'full'),
+    ).toBe('auto');
+  });
+
+  it('matches gated routes by whole path segment', () => {
+    expect(resolveIntentPrefetchKind('/dashboard/projects-archive', CURRENT, 'full')).toBe('full');
+    expect(resolveIntentPrefetchKind('/dashboard/membership', CURRENT, 'full')).toBe('full');
+    expect(
+      resolveIntentPrefetchKind('/dashboard/models', 'http://localhost:3000/dashboard/projects/p1', 'full'),
+    ).toBe('full');
+  });
+
+  it('only upgrades to full from a dashboard page, where the dashboard layout is shared', () => {
+    const login = 'http://localhost:3000/login';
+    expect(resolveIntentPrefetchKind('/dashboard/models', login, 'full')).toBe('auto');
+    expect(resolveIntentPrefetchKind('/dashboard', 'http://localhost:3000/no-project', 'full')).toBe('auto');
+    expect(shouldUpgradeNavigationPrefetch('/dashboard/models', login)).toBe(false);
+  });
 });
 
 describe('reduceNavigationProgress', () => {

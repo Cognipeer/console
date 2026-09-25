@@ -145,8 +145,8 @@ export interface IntentPrefetchOptions {
    * `auto` (default) behaves like a default `<Link>` prefetch (up to the
    * nearest `loading.tsx`). `full` prefetches the complete route so the click
    * commits it in one step instead of revealing it from the loading fallback;
-   * it only applies to dashboard routes, whose pages render on the client
-   * (see `resolveIntentPrefetchKind`). Other targets fall back to `auto`.
+   * it only applies between dashboard pages whose server render reads no user
+   * data (see `resolveIntentPrefetchKind`). Other targets fall back to `auto`.
    */
   kind?: PrefetchIntentKind;
   /** Hover must last this long before prefetching (avoids sweep storms). */
