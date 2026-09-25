@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import { Alert, Anchor, Group, NumberInput, Select, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconInfoCircle, IconTags } from '@tabler/icons-react';
@@ -164,7 +165,7 @@ export default function LabelDatasetModal({
         {!definitionsLoading && definitions.length === 0 ? (
           <Alert color="orange" variant="light" icon={<IconInfoCircle size={16} />}>
             No analysis definitions yet. Create one under{' '}
-            <Anchor href="/dashboard/analysis" size="sm">Analysis</Anchor> — its fields become the labels applied here.
+            <Anchor component={Link} href="/dashboard/analysis" size="sm">Analysis</Anchor> — its fields become the labels applied here.
           </Alert>
         ) : null}
 

@@ -14,6 +14,7 @@
  */
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
     ActionIcon,
     Badge,
@@ -429,7 +430,7 @@ export default function SessionList({
                         </Text>
                         {tracesHref ? (
                             <Button
-                                component="a"
+                                component={Link}
                                 href={tracesHref}
                                 size="compact-xs"
                                 variant="subtle"

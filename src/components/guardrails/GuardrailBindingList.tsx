@@ -27,6 +27,7 @@
  */
 
 import { useMemo } from 'react';
+import Link from 'next/link';
 import {
   ActionIcon,
   Badge,
@@ -267,7 +268,7 @@ export default function GuardrailBindingList({
         <IconShieldOff size={20} />
         <Text size="sm" c="dimmed" ta="center">
           No guardrails defined yet.{' '}
-          <Text component="a" href="/dashboard/guardrails" size="sm" c="teal">
+          <Text component={Link} href="/dashboard/guardrails" size="sm" c="teal">
             Create one first.
           </Text>
         </Text>

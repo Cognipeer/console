@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import {
     ActionIcon,
     Alert,
@@ -127,7 +128,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                 <Alert variant="light" color="orange" icon={<IconInfoCircle size={16} />} p="xs">
                                     <Text size="sm">
                                         No sandbox templates yet. Create one, or add the built-in ones with “Seed defaults”, on the{' '}
-                                        <Anchor href="/dashboard/sandbox/templates" size="sm">Sandbox templates</Anchor> page.
+                                        <Anchor component={Link} href="/dashboard/sandbox/templates" size="sm">Sandbox templates</Anchor> page.
                                     </Text>
                                 </Alert>
                             ) : null}

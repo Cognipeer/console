@@ -46,6 +46,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
   Alert,
   Anchor,
@@ -775,12 +776,12 @@ export default function GuardrailUsagePanel({
               <List size="sm" spacing="xs">
                 <List.Item>
                   <b>On a model</b> —{' '}
-                  <Anchor href="/dashboard/models" size="sm">Model Hub</Anchor> → the model row menu →{' '}
+                  <Anchor component={Link} href="/dashboard/models" size="sm">Model Hub</Anchor> → the model row menu →{' '}
                   <b>Guardrail settings</b> → tick the hooks this guardrail should cover there.
                 </List.Item>
                 <List.Item>
                   <b>On an agent</b> —{' '}
-                  <Anchor href="/dashboard/agents" size="sm">Agents</Anchor> → the agent →{' '}
+                  <Anchor component={Link} href="/dashboard/agents" size="sm">Agents</Anchor> → the agent →{' '}
                   <b>Configuration → Guardrails</b> → attach it and tick its hooks.
                 </List.Item>
               </List>
@@ -1564,7 +1565,7 @@ export default function GuardrailUsagePanel({
             >
               <List size="sm" spacing="xs">
                 <List.Item>
-                  <Anchor href="/dashboard/mcp" size="sm">MCP Servers</Anchor> → the server →{' '}
+                  <Anchor component={Link} href="/dashboard/mcp" size="sm">MCP Servers</Anchor> → the server →{' '}
                   <b>Overview → Guardrail</b>.
                 </List.Item>
                 <List.Item>
