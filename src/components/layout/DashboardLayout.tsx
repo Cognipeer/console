@@ -31,6 +31,8 @@ import { openSupport } from '@/lib/support/openSupport';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import classes from './launcher/LauncherShell.module.css';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
+import NavigationProgress from '@/components/common/navigation/NavigationProgress';
+import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
 import {
   getDashboardServices,
@@ -65,6 +67,7 @@ interface DashboardLayoutProps {
 
 export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, user }: DashboardLayoutProps) {
   const router = useRouter();
+  const { push: navigate } = useNavigationFeedback();
   const pathname = usePathname() ?? '';
   const [docsOpened, docsControls] = useDisclosure(false);
   const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
@@ -211,9 +214,9 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
         openDocs(DEFAULT_SDK_DOC);
         return;
       }
-      router.push(href);
+      navigate(href);
     },
-    [openDocs, router],
+    [openDocs, navigate],
   );
 
   const docsAside = (
@@ -270,6 +273,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       recentServices,
       isTenantAdmin,
       openLauncher: () => setLauncherOpen(true),
+      hydrated,
     }),
     [
       pinned,
@@ -280,12 +284,14 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       pinnedServices,
       recentServices,
       isTenantAdmin,
+      hydrated,
     ],
   );
 
   return (
     <DocsDrawerProvider value={{ openDocs }}>
       <LauncherProvider value={launcherContextValue}>
+      <NavigationProgress />
       <CommandPalette isTenantAdmin={isTenantAdmin} />
       <AppShell
         header={{ height: 0 }}
@@ -360,7 +366,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               recents={recentServices}
               pinnedIds={pinned}
               onTogglePin={togglePin}
-              onSelect={(svc) => router.push(svc.href)}
+              onSelect={(svc) => navigate(svc.href)}
             />
           ) : null}
 

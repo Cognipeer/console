@@ -1,0 +1,69 @@
+/* Shell navigation progress bar. Never intercepts pointer events. */
+.root {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: var(--mantine-z-index-max, 9999);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+
+.bar {
+  width: 100%;
+  height: 100%;
+  background: var(--ds-accent);
+  box-shadow: 0 0 6px var(--ds-accent-ring);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.root[data-phase='visible'] {
+  opacity: 1;
+  transition-duration: 120ms;
+}
+
+.root[data-phase='visible'] .bar {
+  animation: navProgressTrickle 9s cubic-bezier(0.08, 0.7, 0.2, 1) forwards;
+}
+
+.root[data-phase='completing'] {
+  opacity: 0;
+  transition: opacity 160ms ease 100ms;
+}
+
+.root[data-phase='completing'] .bar {
+  transform: scaleX(1);
+  transition: transform 120ms ease-out;
+}
+
+@keyframes navProgressTrickle {
+  0% {
+    transform: scaleX(0.06);
+  }
+  12% {
+    transform: scaleX(0.38);
+  }
+  100% {
+    transform: scaleX(0.92);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root,
+  .root[data-phase='visible'],
+  .root[data-phase='completing'] {
+    transition: none;
+  }
+
+  /* Static indicator: no trickle / growth animation. */
+  .root[data-phase='visible'] .bar,
+  .root[data-phase='completing'] .bar {
+    animation: none;
+    transition: none;
+    transform: scaleX(1);
+    opacity: 0.7;
+  }
+}

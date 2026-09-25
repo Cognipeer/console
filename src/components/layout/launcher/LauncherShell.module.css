@@ -261,6 +261,25 @@
   background: var(--ds-accent);
 }
 
+/* Instant acknowledgement while a navigation to this item is in flight. */
+.railBtn[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: navPendingPulse 0.7s ease-in-out infinite alternate;
+}
+
+.railBtn[data-pending='true']::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--ds-accent);
+  opacity: 0.45;
+}
+
 .railBtnLauncher {
   background: var(--ds-accent-soft);
   color: var(--ds-accent);
@@ -371,6 +390,12 @@
   background: var(--ds-accent-soft);
   color: var(--ds-accent);
   font-weight: 500;
+}
+
+.subnavItem[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: navPendingPulse 0.7s ease-in-out infinite alternate;
 }
 
 .subnavItemLabel {
@@ -980,6 +1005,12 @@
   font-weight: 500;
 }
 
+.mobileNavItem[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: navPendingPulse 0.7s ease-in-out infinite alternate;
+}
+
 .mobileNavItemIcon {
   width: 22px;
   height: 22px;
@@ -1064,5 +1095,22 @@
     width: 1px;
     height: 24px;
     margin: 0 4px;
+  }
+}
+
+@keyframes navPendingPulse {
+  from {
+    background-color: var(--ds-surface-2);
+  }
+  to {
+    background-color: var(--ds-accent-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .railBtn[data-pending='true'],
+  .subnavItem[data-pending='true'],
+  .mobileNavItem[data-pending='true'] {
+    animation: none;
   }
 }
