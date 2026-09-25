@@ -414,6 +414,9 @@ export default function ModelsPage() {
   // Counts come from the usage summary or the model list, whichever lands first.
   const countsReady = modelsLoaded || dashboardData !== null;
   const countBone = <SkeletonText width={40} />;
+  // The subtitle keeps its full length while loading so the header never re-wraps.
+  const modelCount = modelsLoaded ? models.length : '–';
+  const filteredCount = modelsLoaded ? filtered.length : '–';
 
   const refreshAll = () => {
     void loadModels();
@@ -441,12 +444,8 @@ export default function ModelsPage() {
         title={activeType === 'all' ? tNav('models') : TYPE_LABELS[activeType]}
         subtitle={
           activeType === 'all'
-            ? `Manage inference endpoints across providers.${
-                modelsLoaded ? ` ${models.length} deployed in this project.` : ''
-              }`
-            : `${TYPE_LABELS[activeType]} endpoints${
-                modelsLoaded ? ` · ${filtered.length} of ${models.length} models.` : ''
-              }`
+            ? `Manage inference endpoints across providers. ${modelCount} deployed in this project.`
+            : `${TYPE_LABELS[activeType]} endpoints · ${filteredCount} of ${modelCount} models.`
         }
         actions={
           <>

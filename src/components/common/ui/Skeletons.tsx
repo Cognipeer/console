@@ -131,6 +131,11 @@ export interface PageHeaderSkeletonProps {
   /** Action placeholders (sm controls, 36px) on the right. */
   actions?: SkeletonWidths;
   titleWidth?: Length;
+  /**
+   * Subtitle bar width. Match the real subtitle when the header wraps its
+   * actions below the title, so the placeholder wraps at the same widths.
+   */
+  subtitleWidth?: Length;
   label?: string;
 }
 
@@ -140,6 +145,7 @@ export function PageHeaderSkeleton({
   subtitle = true,
   actions = 1,
   titleWidth = 220,
+  subtitleWidth = 'clamp(160px, 38vw, 380px)',
   label,
 }: PageHeaderSkeletonProps) {
   return (
@@ -156,7 +162,7 @@ export function PageHeaderSkeleton({
           </div>
           {subtitle ? (
             <div style={{ marginTop: 4, fontSize: 13.5 }}>
-              <SkeletonText width="clamp(160px, 38vw, 380px)" />
+              <SkeletonText width={subtitleWidth} />
             </div>
           ) : null}
         </div>
@@ -292,7 +298,7 @@ export function TableSkeleton({
               <Skeleton key={index} height={32} width={width} radius="sm" />
             ))}
             <div style={{ flex: 1 }} />
-            <Skeleton height={28} width={28} radius="md" />
+            <Skeleton height={22} width={22} radius="md" />
           </div>
         ) : null}
         <div className="ds-tbl-wrap">
@@ -326,9 +332,13 @@ export function TableSkeleton({
           >
             <SkeletonText width={140} />
             {footer === 'pagination' ? (
+              // Prev, page number and Next (xs buttons, 28px).
               <div className="ds-row ds-gap-sm">
-                <Skeleton width={68} height={30} radius="sm" />
-                <Skeleton width={68} height={30} radius="sm" />
+                <Skeleton width={68} height={28} radius="sm" />
+                <span className="ds-mono" style={{ fontSize: 12 }}>
+                  <SkeletonText width={8} />
+                </span>
+                <Skeleton width={70} height={28} radius="sm" />
               </div>
             ) : null}
           </div>

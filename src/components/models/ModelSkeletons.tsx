@@ -13,6 +13,15 @@ import {
 
 /** Date filter (period select + range picker) as rendered in page headers. */
 const DATE_FILTER_WIDTHS = [140, 220] as const;
+/** "Browse providers" and "Create" header buttons. */
+const LIST_ACTION_WIDTHS = [163, 137] as const;
+/**
+ * Width of the list subtitle ("Manage inference endpoints across providers.
+ * N deployed in this project."). The real header wraps its actions below the
+ * title once subtitle + actions exceed the content width; a matching bar makes
+ * the placeholder wrap at the same viewport widths.
+ */
+const LIST_SUBTITLE_WIDTH = 467;
 const MODEL_COLUMN_COUNT = 8;
 
 function UsageBlockBones({ rows }: { rows: number }) {
@@ -58,7 +67,11 @@ export function ModelUsageSkeleton() {
 export function ModelsListSkeleton() {
   return (
     <SkeletonRegion className="ds-page">
-      <PageHeaderSkeleton actions={[...DATE_FILTER_WIDTHS, 150, 112]} titleWidth={140} />
+      <PageHeaderSkeleton
+        actions={[...DATE_FILTER_WIDTHS, ...LIST_ACTION_WIDTHS]}
+        titleWidth={140}
+        subtitleWidth={LIST_SUBTITLE_WIDTH}
+      />
       <StatGridSkeleton count={4} style={{ marginBottom: 16 }} />
       <div style={{ marginBottom: 16 }}>
         <TableSkeleton
@@ -78,7 +91,7 @@ export function ModelsListSkeleton() {
               <SkeletonText width={260} />
             </div>
           </div>
-          <Skeleton width={84} height={30} radius="sm" />
+          <Skeleton width={87} height={28} radius="sm" />
         </div>
         <ModelUsageSkeleton />
       </div>
@@ -117,10 +130,11 @@ export function ModelDetailSkeleton() {
             </div>
           </div>
         </div>
+        {/* Pin, Endpoint, Test and the actions menu (34px controls). */}
         <div className="ds-row ds-gap-sm" style={{ flexShrink: 0 }}>
           <Skeleton width={34} height={34} radius="md" />
-          <Skeleton width={104} height={36} radius="sm" />
-          <Skeleton width={74} height={36} radius="sm" />
+          <Skeleton width={110} height={34} radius="sm" />
+          <Skeleton width={77} height={34} radius="sm" />
           <Skeleton width={34} height={34} radius="md" />
         </div>
       </div>

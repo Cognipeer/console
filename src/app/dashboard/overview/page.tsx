@@ -94,6 +94,25 @@ const STAT_ROW_MIN_HEIGHT = 134;
 
 const TILE_STYLE: CSSProperties = { background: 'var(--ds-surface-1)', textAlign: 'left' };
 
+/**
+ * Tile descriptions always take two lines (clamped, space reserved), so tile
+ * heights do not depend on copy length and match the skeleton tiles.
+ */
+function twoLineText(fontSize: number, lineHeight: number): CSSProperties {
+  return {
+    fontSize,
+    lineHeight,
+    minHeight: `${lineHeight * 2}em`,
+    display: '-webkit-box',
+    WebkitBoxOrient: 'vertical',
+    WebkitLineClamp: 2,
+    overflow: 'hidden',
+  };
+}
+
+const PINNED_DESCRIPTION_STYLE = twoLineText(11.5, 1.4);
+const QUICK_START_DESCRIPTION_STYLE = twoLineText(12.5, 1.45);
+
 const RESOURCE_ROW_STYLE: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -346,7 +365,7 @@ export default function DashboardOverviewPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="ds-muted" style={{ fontSize: 11.5, lineHeight: 1.4 }}>
+                  <div className="ds-muted" style={PINNED_DESCRIPTION_STYLE}>
                     {tNav(svc.navDescriptionKey)}
                   </div>
                 </CardLink>
@@ -424,7 +443,7 @@ export default function DashboardOverviewPage() {
                   <div className="ds-h4" style={{ marginBottom: 4 }}>
                     {s.title}
                   </div>
-                  <div className="ds-muted" style={{ fontSize: 12.5, lineHeight: 1.45 }}>
+                  <div className="ds-muted" style={QUICK_START_DESCRIPTION_STYLE}>
                     {s.desc}
                   </div>
                 </CardLink>

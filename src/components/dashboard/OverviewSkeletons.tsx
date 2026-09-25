@@ -31,11 +31,14 @@ function CardHeaderBones({
   titleWidth = 150,
   subtitle = false,
   action,
+  actionWidth = 90,
   marginBottom = 14,
 }: {
   titleWidth?: number;
   subtitle?: boolean;
   action?: 'button' | 'text';
+  /** Width of the `xs` header button (28px tall). */
+  actionWidth?: number;
   marginBottom?: number;
 }) {
   return (
@@ -50,7 +53,7 @@ function CardHeaderBones({
           </div>
         ) : null}
       </div>
-      {action === 'button' ? <Skeleton width={76} height={30} radius="md" /> : null}
+      {action === 'button' ? <Skeleton width={actionWidth} height={28} radius="md" /> : null}
       {action === 'text' ? (
         <Text size="xs" component="div">
           <SkeletonText width={150} />
@@ -93,10 +96,20 @@ export function PinnedServiceTilesSkeleton({ count = 6 }: { count?: number }) {
       {Array.from({ length: count }, (_, index) => (
         <ServiceTileBones key={index} />
       ))}
+      {/* "Add service": one line of `Text size="sm"`, centred. */}
       <div
         className="ds-card ds-card-pad-sm"
-        style={{ background: 'transparent', borderStyle: 'dashed' }}
-      />
+        style={{
+          background: 'transparent',
+          borderStyle: 'dashed',
+          display: 'grid',
+          placeItems: 'center',
+        }}
+      >
+        <Text size="sm" component="div">
+          <SkeletonText width={96} />
+        </Text>
+      </div>
     </>
   );
 }
@@ -105,7 +118,7 @@ export function PinnedServiceTilesSkeleton({ count = 6 }: { count?: number }) {
 export function PinnedServicesSkeleton({ count = 6 }: { count?: number }) {
   return (
     <SkeletonRegion className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
-      <CardHeaderBones subtitle action="button" />
+      <CardHeaderBones subtitle action="button" actionWidth={95} />
       <div
         style={{
           display: 'grid',
@@ -204,7 +217,7 @@ function ResourceRowBones() {
 export function OverviewSkeleton() {
   return (
     <SkeletonRegion className="ds-page">
-      <PageHeaderSkeleton actions={[140, 220, 132]} titleWidth={300} />
+      <PageHeaderSkeleton actions={[140, 220, 140]} titleWidth={300} />
       <StatGridSkeleton count={4} spark style={{ marginBottom: 16 }} />
       <PinnedServicesSkeleton />
 
@@ -224,14 +237,14 @@ export function OverviewSkeleton() {
           </div>
         </div>
         <div className="ds-card ds-card-pad-lg">
-          <CardHeaderBones titleWidth={80} action="button" marginBottom={12} />
+          <CardHeaderBones titleWidth={80} action="button" actionWidth={89} marginBottom={12} />
           <ActivityListSkeleton />
         </div>
       </div>
 
       <div className="ds-grid-two" style={TWO_COLUMN_GRID}>
         <div className="ds-card ds-card-pad-lg">
-          <CardHeaderBones titleWidth={130} subtitle action="button" />
+          <CardHeaderBones titleWidth={130} subtitle action="button" actionWidth={103} />
           <Stack gap="xs">
             {Array.from({ length: 3 }, (_, index) => (
               <ResourceRowBones key={index} />
