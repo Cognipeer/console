@@ -43,8 +43,6 @@ export interface AgentCodegenOptions {
     consoleBaseUrl?: string;
     /** Emit a Dockerfile + .dockerignore. Default: true for `server`/`worker`. */
     includeDockerfile?: boolean;
-    /** Emit a `Makefile`-free minimal project (no README). Default: false. */
-    omitReadme?: boolean;
 }
 
 export interface GeneratedFile {
@@ -123,11 +121,12 @@ function writePackageJson(
     const entry = { cli: 'src/index.ts', server: 'src/server.ts', worker: 'src/worker.ts', lambda: 'src/lambda.ts' }[
         options.target
     ];
+    const built = entry.replace('src/', 'dist/').replace('.ts', '.js');
 
     const scripts: Record<string, string> = {
         dev: `tsx watch ${entry}`,
         build: 'tsc -p tsconfig.json',
-        start: options.target === 'lambda' ? 'echo "deploy the built handler to Lambda"' : `node dist/${entry.replace('src/', '').replace('.ts', '.js')}`,
+        start: options.target === 'lambda' ? 'echo "deploy the built handler to Lambda"' : `node ${built}`,
         typecheck: 'tsc --noEmit -p tsconfig.json',
     };
 
@@ -139,7 +138,7 @@ function writePackageJson(
             version: '0.1.0',
             private: true,
             type: 'module',
-            main: `dist/${entry.replace('src/', '').replace('.ts', '.js')}`,
+            main: built,
             scripts,
             dependencies: Object.fromEntries(Object.entries(deps).sort(([a], [b]) => a.localeCompare(b))),
             devDependencies: {
@@ -176,7 +175,7 @@ function writeTsconfig(): GeneratedFile {
     };
 }
 
-function writeEnvExample(options: AgentCodegenOptions, target: AgentCodegenTarget): GeneratedFile {
+function writeEnvExample(options: AgentCodegenOptions): GeneratedFile {
     const lines = [
         '# Console gateway — the exported agent calls the model and its tools through',
         '# the console, so this is the only credential the project needs.',
@@ -186,8 +185,8 @@ function writeEnvExample(options: AgentCodegenOptions, target: AgentCodegenTarge
         '# Optional: project scope for the API key, when it is a tenant-wide key.',
         '# CONSOLE_PROJECT_ID=',
     ];
-    if (target === 'server') lines.push('', 'PORT=3000', 'HOST=0.0.0.0');
-    if (target === 'worker') lines.push('', '# Your queue connection string.', '# QUEUE_URL=');
+    if (options.target === 'server') lines.push('', 'PORT=3000', 'HOST=0.0.0.0');
+    if (options.target === 'worker') lines.push('', '# Your queue connection string.', '# QUEUE_URL=');
     return { path: '.env.example', description: 'Environment template', contents: `${lines.join('\n')}\n` };
 }
 
@@ -849,9 +848,9 @@ export function generateAgentProject(
     }
 
     const files: GeneratedFile[] = [
-        writePackageJson(slug(options.packageName || agent.key), options, needsConsoleSdk),
+        writePackageJson(rootDir, options, needsConsoleSdk),
         writeTsconfig(),
-        writeEnvExample(options, options.target),
+        writeEnvExample(options),
         writeGitignore(),
         writeEnv(),
         writeModel(config, agent.name),
@@ -874,7 +873,7 @@ export function generateAgentProject(
 
     const wantsDocker = options.includeDockerfile ?? (options.target === 'server' || options.target === 'worker');
     if (wantsDocker) files.push(...writeDockerfile(options.target));
-    if (!options.omitReadme) files.push(writeReadme(agent, options, warnings));
+    files.push(writeReadme(agent, options, warnings));
 
     return { rootDir, files, warnings };
 }

@@ -54,6 +54,32 @@ export interface PromptOption {
     template: string;
 }
 
+/** Writes a prompt and returns it in the shape this panel lists. */
+async function writePrompt(
+    url: string,
+    method: 'POST' | 'PATCH',
+    body: Record<string, unknown>,
+    failure: string,
+    fallbackId?: string,
+): Promise<PromptOption> {
+    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || failure);
+    }
+    const data = await res.json();
+    return {
+        _id: data.prompt.id ?? data.prompt._id ?? fallbackId,
+        key: data.prompt.key,
+        name: data.prompt.name,
+        description: data.prompt.description,
+        template: data.prompt.template,
+    };
+}
+
+const notifyFailure = (title: string, error: unknown) =>
+    notifications.show({ title, message: error instanceof Error ? error.message : String(error), color: 'red' });
+
 export interface AgentPromptPanelProps {
     mode: 'custom' | 'prompt';
     onModeChange: (mode: 'custom' | 'prompt') => void;
@@ -67,7 +93,6 @@ export interface AgentPromptPanelProps {
     onPromptsChanged: (prompts: PromptOption[]) => void;
     /** Saves the AGENT config (mode/key/inline text) — shared with every other tab. */
     onSaveAgentConfig: () => void | Promise<void>;
-    disabled?: boolean;
 }
 
 export default function AgentPromptPanel({
@@ -80,7 +105,6 @@ export default function AgentPromptPanel({
     prompts,
     onPromptsChanged,
     onSaveAgentConfig,
-    disabled,
 }: AgentPromptPanelProps) {
     const selectedPrompt = useMemo(
         () => prompts.find((p) => p.key === promptKey) ?? null,
@@ -119,36 +143,22 @@ export default function AgentPromptPanel({
         if (!selectedPrompt) return;
         setSavingPrompt(true);
         try {
-            const res = await fetch(`/api/prompts/${selectedPrompt._id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+            const updated = await writePrompt(
+                `/api/prompts/${selectedPrompt._id}`,
+                'PATCH',
+                {
                     name: draftName,
                     description: draftDescription || undefined,
                     template: draftTemplate,
                     versionComment: 'Edited from the agent Prompt tab',
-                }),
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.error || 'Failed to save prompt');
-            }
-            const data = await res.json();
-            const updated: PromptOption = {
-                _id: data.prompt.id ?? data.prompt._id ?? selectedPrompt._id,
-                key: data.prompt.key,
-                name: data.prompt.name,
-                description: data.prompt.description,
-                template: data.prompt.template,
-            };
+                },
+                'Failed to save prompt',
+                selectedPrompt._id,
+            );
             onPromptsChanged(prompts.map((p) => (p._id === updated._id ? updated : p)));
             notifications.show({ title: 'Prompt saved', message: `"${updated.name}" was updated`, color: 'teal' });
         } catch (error) {
-            notifications.show({
-                title: 'Save failed',
-                message: error instanceof Error ? error.message : String(error),
-                color: 'red',
-            });
+            notifyFailure('Save failed', error);
         } finally {
             setSavingPrompt(false);
         }
@@ -158,26 +168,12 @@ export default function AgentPromptPanel({
         if (!systemPrompt.trim()) return;
         setPromoting(true);
         try {
-            const res = await fetch('/api/prompts', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: 'Untitled prompt',
-                    template: systemPrompt,
-                }),
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.error || 'Failed to create prompt');
-            }
-            const data = await res.json();
-            const created: PromptOption = {
-                _id: data.prompt.id ?? data.prompt._id,
-                key: data.prompt.key,
-                name: data.prompt.name,
-                description: data.prompt.description,
-                template: data.prompt.template,
-            };
+            const created = await writePrompt(
+                '/api/prompts',
+                'POST',
+                { name: 'Untitled prompt', template: systemPrompt },
+                'Failed to create prompt',
+            );
             onPromptsChanged([created, ...prompts]);
             onModeChange('prompt');
             onPromptKeyChange(created.key);
@@ -188,11 +184,7 @@ export default function AgentPromptPanel({
                 color: 'teal',
             });
         } catch (error) {
-            notifications.show({
-                title: 'Promote failed',
-                message: error instanceof Error ? error.message : String(error),
-                color: 'red',
-            });
+            notifyFailure('Promote failed', error);
         } finally {
             setPromoting(false);
         }
@@ -206,8 +198,8 @@ export default function AgentPromptPanel({
                 onChange={(value) => onModeChange(value as 'custom' | 'prompt')}
             >
                 <Group mt="xs" gap="lg">
-                    <Radio value="custom" label="Inline prompt" disabled={disabled} />
-                    <Radio value="prompt" label="Managed prompt" disabled={disabled} />
+                    <Radio value="custom" label="Inline prompt" />
+                    <Radio value="prompt" label="Managed prompt" />
                 </Group>
             </Radio.Group>
 
@@ -219,13 +211,12 @@ export default function AgentPromptPanel({
                         minRows={10}
                         maxRows={24}
                         autosize
-                        disabled={disabled}
                         value={systemPrompt}
                         onChange={(event) => onSystemPromptChange(event.currentTarget.value)}
                         styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)', fontSize: 13 } }}
                     />
                     <Group justify="space-between">
-                        <Button onClick={() => void onSaveAgentConfig()} size="sm" disabled={disabled}>
+                        <Button onClick={() => void onSaveAgentConfig()} size="sm">
                             Save
                         </Button>
                         <Tooltip
@@ -238,7 +229,7 @@ export default function AgentPromptPanel({
                                 size="sm"
                                 rightSection={<IconArrowRight size={14} />}
                                 loading={promoting}
-                                disabled={disabled || !systemPrompt.trim()}
+                                disabled={!systemPrompt.trim()}
                                 onClick={() => void promoteToManagedPrompt()}
                             >
                                 Promote to managed prompt
@@ -255,7 +246,6 @@ export default function AgentPromptPanel({
                         value={promptKey || null}
                         onChange={(next) => onPromptKeyChange(next ?? '')}
                         searchable
-                        disabled={disabled}
                     />
 
                     {!promptKey ? (

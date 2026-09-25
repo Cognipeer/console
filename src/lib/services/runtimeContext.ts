@@ -30,7 +30,7 @@ export interface AgentRuntimeContext {
    * Target-scoped headers win over the global `headers` map.
    */
   connections?: Record<string, RuntimeConnectionOverride>;
-  /** Free-form caller metadata (surfaced to logs/traces, never to prompts yet). */
+  /** Free-form caller metadata: surfaced to logs/traces, and fills the `{{placeholders}}` a prompt declares — see promptVariables.ts. */
   metadata?: Record<string, unknown>;
   /** Stamped by the server from the authenticated caller — not client-writable. */
   userId?: string;
@@ -230,8 +230,7 @@ export function resolveRuntimeHeaders(
   targetKey: string,
   policy: RuntimeHeaderPolicy | undefined,
 ): Record<string, string> | undefined {
-  if (!ctx) return undefined;
-  if (!policy?.allow) return undefined;
+  if (!ctx || !policy?.allow) return undefined;
 
   const scoped = ctx.connections?.[`${targetKind}:${targetKey}`]?.headers
     ?? ctx.connections?.[targetKey]?.headers;

@@ -24,7 +24,11 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
 import { createConversation, getAgentByKey, getConversationById } from '@/lib/services/agents';
-import { executeAgentChat, type AgentChatResponse } from '@/lib/services/agents/agentService';
+import {
+    executeAgentChat,
+    type AgentChatResponse,
+    type AgentConversationSource,
+} from '@/lib/services/agents/agentService';
 
 const logger = createLogger('api:agent-openai-bridge');
 
@@ -131,6 +135,7 @@ export async function resolveConversation(
     conversationId: string | undefined,
     agent: IAgent,
     ctx: AgentCompletionContext,
+    source: AgentConversationSource,
 ): Promise<{ conversationId: string } | { error: string }> {
     if (conversationId) {
         const conversation = await getConversationById(ctx.tenantDbName, conversationId);
@@ -150,7 +155,7 @@ export async function resolveConversation(
         ctx.userId,
         agent.key,
         undefined,
-        { source: 'api' },
+        { source },
     );
     return { conversationId: String(created._id) };
 }
@@ -251,7 +256,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         return { error: 'messages must contain at least one user message', status: 400 };
     }
 
-    const conversation = await resolveConversation(input.conversationId, input.agent, input.ctx);
+    const conversation = await resolveConversation(input.conversationId, input.agent, input.ctx, 'api');
     if ('error' in conversation) return { error: conversation.error, status: 404 };
 
     const result = await executeAgentChatExclusive({

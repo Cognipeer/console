@@ -14,34 +14,28 @@ import { agentEntityId } from './agentEntityId';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     Message as AgentSdkMessage,
-    Skill as AgentSdkSkill,
-    SkillPolicy as AgentSdkSkillPolicy,
     SmartAgentEvent as AgentSdkEvent,
-    SmartAgentMemoryConfig as AgentSdkMemoryConfig,
     SubagentDef as AgentSdkSubagentDef,
     ToolInterface as AgentSdkToolInterface,
-    TraceSinkConfig as AgentSdkTraceSinkConfig,
     TraceSessionFile,
 } from '@cognipeer/agent-sdk';
-import type { ZodTypeAny } from 'zod';
 import {
     jsonSchemaToZod,
     toolInputSchemaToZod,
     resolveAgentRuntimeOptions,
     resolveAgentSkillPolicy,
     resolveStructuredOutputSchema,
-    type ResolvedAgentRuntimeOptions,
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption } from './agentMemoryAdapter';
-import type { IAgentSubagent } from '@/lib/database/provider/types.domain';
+import type { IAgentConversationMessage, IAgentConversationStep, IAgentSubagent } from '@/lib/database/provider/types.domain';
 import {
     buildPromptVariables,
     renderPromptTemplate,
     shouldRenderInlinePrompt,
     type RenderedPrompt,
 } from './promptVariables';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -117,15 +111,10 @@ import {
     loadConversationState,
     saveConversationState,
     type AgentStopReason,
-    type AgentTurnCompaction,
 } from './agentTurnState';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 
 const logger = createLogger('agents');
-
-// The console's runtime defaults moved to `./agentRuntimeConfig` when they
-// became per-agent settings; `CONSOLE_AGENT_DEFAULTS` there holds the same
-// values and is what an agent with no `runtime` block still resolves to.
 
 const CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION =
     'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty. Each match carries a documentId — pass it to knowledge_read_document or knowledge_read_document_lines when the question needs more of that file than the matched passage.';
@@ -135,6 +124,14 @@ const CONSOLE_AGENT_KNOWLEDGE_READ_DESCRIPTION =
 
 const CONSOLE_AGENT_KNOWLEDGE_READ_LINES_DESCRIPTION =
     'Returns one line range of a knowledge-base document, given the documentId from a knowledge_search result. Use this for long documents, to page through a file, or to jump to a specific part of it. Call again with a later offset to continue reading.';
+
+/** Prepended to the system prompt of an agent with a knowledge engine bound. */
+const KNOWLEDGE_FIRST_INSTRUCTION = [
+    'Knowledge-base-first policy:',
+    '- For user questions that are factual, documentation, API, setup, troubleshooting, or product-behavior related, call `knowledge_search` first.',
+    '- Do not provide a final answer before at least one `knowledge_search` attempt unless the request is purely conversational.',
+    '- After retrieval, answer using the retrieved content; if retrieval is empty, say you are not fully certain and provide the best concise answer.',
+].join('\n');
 
 /**
  * Description of the optional `filter` argument, listing the metadata keys the
@@ -517,12 +514,7 @@ function protectBuiltTool(
  * Evaluate every guardrail bound to a TEXT hook, in binding order, and return
  * the text to carry forward.
  *
- * ONE implementation for all four call sites (chat input/output, playground
- * input/output). They had drifted into four different behaviours — the
- * playground's output check ran under the `input.pre` hook, logged no `source`,
- * blocked on the record's legacy `action` column rather than on the findings,
- * and neither playground site applied a redaction — which meant an operator
- * testing a guardrail in the playground was not testing what production runs.
+ * Used by `runExternalAgentTurn`; a local agent runs these hooks as SDK plugins.
  *
  * Redactions CHAIN: guardrail N+1 sees what guardrail N rewrote, so a redaction
  * cannot be undone by a later evaluation and the text that reaches the model
@@ -622,12 +614,11 @@ export class AgentGuardrailBlockedError extends Error {
  *     Synchronous and void-returning: the SDK neither awaits a decision nor
  *     offers a return channel to withhold a chunk, so there is no point at
  *     which `createStreamGate` could hold bytes back.
- *   · Neither `executeAgentChatLocal` nor `executePlaygroundChatLocal` passes
- *     `stream` or `onStream` at all, and no caller of either streams: the agent
- *     endpoints (`plugins/agents.ts`, `plugins/client-agents.ts`,
- *     `plugins/client-a2a.ts`) all await one `invoke` and send one response.
+ *   · When a caller passes `onTextChunk`, `onStream` is forwarded only as a
+ *     fire-and-forget copy of the deltas (`textStreamOptions`), so there is
+ *     still no point at which a chunk can be withheld.
  *
- * So there is no socket on this path to gate, and pretending otherwise would be
+ * So nothing on this path can gate a chunk, and claiming otherwise would be
  * the one failure the hook plane exists to prevent: a verdict claiming
  * enforcement it did not deliver. Streaming IS enforced on the gateway, which
  * owns its socket (`inferenceService`, `output.stream.delta`).
@@ -649,27 +640,6 @@ function warnUnservableStreamBinding(config: GuardrailBindingSource, agentKey: s
 }
 
 /**
- * DELETED, and worth saying why rather than leaving a gap.
- *
- * This used to be `warnUnservablePromptBinding`, telling an operator that a
- * `prompt.pre` binding "will not run on this agent" and to bind `input.pre` as
- * well. That was true until agent-sdk 0.10.0: the console emitted no
- * `prompt.pre` anywhere, because only the thing running the loop knows which
- * model call is the first of a turn.
- *
- * The plugin layer's `userPromptSubmit` is exactly that thing, and it now
- * serves the hook on this surface — so the warning became advice toward the
- * WRONG fix: an operator who follows it moves a once-per-turn policy onto
- * `input.pre`, which fires on every model call, and pays for a moderation
- * judge on each one.
- *
- * The stream warning above is NOT deleted alongside it. 0.10.0 did not close
- * that one: `onStream` is still `(chunk) => void`, synchronous and unawaitable,
- * and `pluginCapabilities().features.streamGate.implemented` is still false.
- * Streaming enforcement stays on the gateway.
- */
-
-/**
  * THE TEXT HOOKS RUN AS AN SDK PLUGIN; THE TOOL HOOKS DO NOT. Both halves of
  * that sentence are load-bearing.
  *
@@ -678,7 +648,7 @@ function warnUnservableStreamBinding(config: GuardrailBindingSource, agentKey: s
  * the brackets this module used to put around `sdkAgent.invoke`. That is a
  * straight win: `userPromptSubmit` fires exactly once for a user turn, which is
  * what `prompt.pre` has always meant and what no console surface could emit
- * before — `warnUnservablePromptBinding` existed only to apologise for it.
+ * before.
  *
  * The TOOL hooks deliberately stay on `createAgentToolGuard`, and moving them
  * would be a silent data-loss bug rather than a refactor. The plugin sees the
@@ -944,17 +914,6 @@ function persistedUserTurn(input: {
 }
 
 /**
- * The two hooks NO agent surface serves, warned together because they are one
- * question for a caller ("what did this operator configure that I cannot run?")
- * and because every agent entry point has to ask it: local chat, playground,
- * and — through `warnUnservableExternalBindings` — both connected-agent
- * branches.
- */
-function warnUnservableAgentBindings(config: GuardrailBindingSource, agentKey: string): void {
-    warnUnservableStreamBinding(config, agentKey);
-}
-
-/**
  * The connected-agent counterpart, warning once per run about every binding
  * this surface cannot serve.
  *
@@ -980,7 +939,7 @@ function warnUnservableAgentBindings(config: GuardrailBindingSource, agentKey: s
  * `/api/client/v1/guardrails/hooks/evaluate`.
  */
 function warnUnservableExternalBindings(config: GuardrailBindingSource, agentKey: string): void {
-    warnUnservableAgentBindings(config, agentKey);
+    warnUnservableStreamBinding(config, agentKey);
 
     const promptOnly = resolveBindings(config, 'prompt.pre')
         .filter((key) => !resolveBindings(config, 'input.pre').includes(key));
@@ -1154,45 +1113,6 @@ type InternalTraceSession = Omit<TraceSessionFile, 'events'> & {
     metadata?: Record<string, string>;
 };
 
-type CreateConsoleSdkAgentInput = {
-    name: string;
-    version?: string;
-    model: unknown;
-    tools: AgentSdkToolInterface[];
-    systemPrompt?: string;
-    tracingSink: AgentSdkTraceSinkConfig;
-    threadId?: string;
-    /** Guardrail plugins for the TEXT hooks; see `buildAgentGuardrailPlugins`. */
-    plugins?: AgentSdkPlugin[];
-    /**
-     * Attribution tags forwarded to the trace session's own `metadata` field —
-     * separate from prompt variables. This is what lets a scheduled fire, a
-     * live API call, and a playground run show up distinguishably in the
-     * existing Traces/Observability views instead of needing a parallel "run"
-     * record: `?metadataKey=scheduleId&metadataValue=<id>` on the tracing list
-     * finds every fire of one schedule, and `schedule.lastConversationId`
-     * already equals the trace's `threadId` (see below), so a single fire is
-     * one click away without any new API surface.
-     */
-    tracingMetadata?: Record<string, string>;
-    /**
-     * Resolved agent-sdk knobs from `config.runtime`. Absent for callers that
-     * have no agent config to hand (they get the console defaults).
-     */
-    runtimeOptions?: ResolvedAgentRuntimeOptions;
-    /** zod contract for the final answer, from `config.structuredOutput`. */
-    outputSchema?: ZodTypeAny;
-    /** Sub-agent registry built from `config.subagents`. */
-    subagents?: AgentSdkSubagentDef[];
-    /** Discoverable skills built from `config.skills` — see `agentSkillService.ts`. */
-    skills?: AgentSdkSkill[];
-    skillPolicy?: AgentSdkSkillPolicy;
-    /** Console-memory-backed `MemoryStore` — see `agentMemoryAdapter.ts`. Absent when memory is off. */
-    memory?: AgentSdkMemoryConfig;
-    /** Prices model calls for `limits.maxCostUsd` — see `buildAgentCostEstimator`. */
-    costEstimator?: ReturnType<typeof buildCostEstimator>;
-};
-
 /**
  * A guardrail DENY on the plugin plane is not a thrown error — and the console
  * has to turn it back into one.
@@ -1239,7 +1159,7 @@ function guardrailDenial(result: DeniableInvokeResult): string | undefined {
     // `ctx.__guardrailBlocked` is set for a denial at `preModelCall` and
     // `postModelCall` (dist/index.mjs:4074, :4201) and — since agent-sdk 0.10.1
     // — for a `userPromptSubmit` denial on BOTH `createAgent` (:7619) and
-    // `createSmartAgent` (:10325), the one `createConsoleSdkAgent` builds. On
+    // `createSmartAgent` (:10325), the one `buildLocalAgentRun` creates. On
     // 0.10.0 the smart-agent prompt branch returned the blocked state WITHOUT
     // the ctx marker, measured end-to-end: a guardrail bound to `prompt.pre`
     // decided `block`, the evaluation log recorded `decision: "block"`, and the
@@ -1382,45 +1302,17 @@ function extractAgentReasoning(result: AgentSdkInvokeResult): string | undefined
     return undefined;
 }
 
-function createConsoleSdkAgent(
-    createSmartAgentFn: typeof import('@cognipeer/agent-sdk').createSmartAgent,
-    input: CreateConsoleSdkAgentInput,
-) {
-    return createSmartAgentFn({
-        name: input.name,
-        version: input.version,
-        model: input.model,
-        ...(input.tools.length > 0 ? { tools: input.tools } : {}),
-        // Omitted entirely when empty: an empty array and no key mean the same
-        // thing to the host, and the shorter option object is what every other
-        // conditional field here does.
-        ...(input.plugins && input.plugins.length > 0 ? { plugins: input.plugins } : {}),
-        // `runtimeOptions` already carries the module defaults for every knob an
-        // operator left untouched, so spreading it is equivalent to the literal
-        // block this replaced — see `agentRuntimeConfig.CONSOLE_AGENT_DEFAULTS`.
-        ...(input.runtimeOptions ?? resolveAgentRuntimeOptions({})),
-        ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
-        ...(input.subagents && input.subagents.length > 0 ? { subagents: input.subagents } : {}),
-        ...(input.skills && input.skills.length > 0 ? { skills: input.skills } : {}),
-        ...(input.skillPolicy ? { skillPolicy: input.skillPolicy } : {}),
-        ...(input.memory ? { memory: input.memory } : {}),
-        ...(input.costEstimator ? { costEstimator: input.costEstimator } : {}),
-        ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
-        tracing: {
-            enabled: true,
-            mode: 'batched',
-            sink: input.tracingSink,
-            ...(input.threadId ? { threadId: input.threadId } : {}),
-            ...(input.tracingMetadata && Object.keys(input.tracingMetadata).length > 0
-                ? { metadata: input.tracingMetadata }
-                : {}),
-        },
-    });
-}
-
 /**
  * Reduces `runtimeContext` into the flat string map the trace session's own
  * `metadata` field accepts.
+ *
+ * These attribution tags are separate from prompt variables. They are what
+ * lets a scheduled fire, a live API call, and a playground run show up
+ * distinguishably in the existing Traces/Observability views instead of
+ * needing a parallel "run" record: `?metadataKey=scheduleId&metadataValue=<id>`
+ * on the tracing list finds every fire of one schedule, and
+ * `schedule.lastConversationId` already equals the trace's `threadId`, so a
+ * single fire is one click away without any new API surface.
  *
  * Deliberately narrow: `source` and `trigger`/`scheduleId`/`scheduleName` (the
  * fields the scheduler stamps into `metadata` for prompt variables) are worth
@@ -1478,8 +1370,6 @@ type BuildSubagentsInput = {
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
     runtimeContext?: AgentRuntimeContext;
-    /** Depth guard: a `ref` sub-agent must not pull in its own `ref` children. */
-    depth?: number;
 };
 
 /**
@@ -1724,9 +1614,22 @@ export async function buildBoundTools(
                     continue;
                 }
 
+                const description = action.description || `Call ${action.name} on ${toolRecord.name}`;
+                const log = (
+                    status: 'success' | 'error',
+                    latencyMs: number,
+                    args: Record<string, unknown>,
+                    response?: Record<string, unknown>,
+                    error?: string,
+                ) => logToolRequest(
+                    tenantDbName, tenantId, toolRecord.projectId,
+                    toolRecord.key, action.key, action.name,
+                    status, latencyMs, args, response, error,
+                    'agent', runtimeContext?.tokenId, toolRuntimeAuth, toolSecretValues,
+                );
                 const tool = createToolFn({
                     name: action.name,
-                    description: action.description || `Call ${action.name} on ${toolRecord.name}`,
+                    description,
                     // The action's real input schema, not an empty passthrough —
                     // see toolInputSchemaToZod.
                     schema: toolInputSchemaToZod(action.inputSchema),
@@ -1751,44 +1654,21 @@ export async function buildBoundTools(
                                 const { result, latencyMs } = await executeToolAction(
                                     toolRecord, action.key, args, toolRuntimeHeaders,
                                 );
-                                logToolRequest(
-                                    tenantDbName, tenantId, toolRecord.projectId,
-                                    toolRecord.key, action.key, action.name,
-                                    'success', latencyMs,
-                                    args,
+                                log(
+                                    'success', latencyMs, args,
                                     typeof result === 'object' ? (result as Record<string, unknown>) : { value: result },
-                                    undefined,
-                                    'agent',
-                                    runtimeContext?.tokenId,
-                                    toolRuntimeAuth,
-                                    toolSecretValues,
                                 );
                                 return typeof result === 'string' ? result : JSON.stringify(result);
                             } catch (execError) {
                                 const errorMessage = execError instanceof Error ? execError.message : 'Failed to execute tool action';
-                                logToolRequest(
-                                    tenantDbName, tenantId, toolRecord.projectId,
-                                    toolRecord.key, action.key, action.name,
-                                    'error', 0,
-                                    args,
-                                    undefined,
-                                    errorMessage,
-                                    'agent',
-                                    runtimeContext?.tokenId,
-                                    toolRuntimeAuth,
-                                    toolSecretValues,
-                                );
+                                log('error', 0, args, undefined, errorMessage);
                                 throw execError;
                             }
                         },
                     ),
                 });
                 tools.push(tool);
-                definitions.push({
-                    name: action.name,
-                    description: action.description || `Call ${action.name} on ${toolRecord.name}`,
-                    parameters: action.inputSchema,
-                });
+                definitions.push({ name: action.name, description, parameters: action.inputSchema });
             }
         } else if (binding.source === 'mcp') {
             // ── Legacy MCP server bindings ───────────────────────
@@ -1842,9 +1722,10 @@ export async function buildBoundTools(
                     const { result } = await executeMcpTool(server, toolName, args, mcpRuntimeHeaders);
                     return typeof result === 'string' ? result : JSON.stringify(result);
                 };
+                const description = mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`;
                 const tool = createToolFn({
                     name: mcpToolDef.name,
-                    description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
+                    description,
                     schema: toolInputSchemaToZod(mcpToolDef.inputSchema),
                     // Wrapped in `guard` ONLY when the server has no binding of
                     // its own; otherwise `executeMcpTool` -> `executeMcpToolLocal`
@@ -1858,11 +1739,7 @@ export async function buildBoundTools(
                         : dispatch,
                 });
                 tools.push(tool);
-                definitions.push({
-                    name: mcpToolDef.name,
-                    description: mcpToolDef.description || `Call ${mcpToolDef.name} on ${server.name}`,
-                    parameters: mcpToolDef.inputSchema,
-                });
+                definitions.push({ name: mcpToolDef.name, description, parameters: mcpToolDef.inputSchema });
             }
         } else if (binding.source === 'system' && binding.sourceKey === 'browser_use') {
             // ── System tool: Browser Use ───────────────────────
@@ -1890,37 +1767,15 @@ export async function buildBoundTools(
                         metadata: { source: 'agent-system-tool', binding: 'browser_use' },
                     },
                 );
-                const browserTools = (buildBrowserAgentTools({
+                const browserTools = adoptBuiltTools(guard, 'browser', buildBrowserAgentTools({
                     tenantDbName,
                     tenantId,
                     projectId,
                     sessionKey: session.sessionKey,
                     createdBy: 'agent-runtime',
-                }) as unknown as AgentSdkToolInterface[]).map((browserTool) =>
-                    // Built elsewhere, so guarded after the fact. These are the
-                    // agent's only tools that navigate and type into a live
-                    // browser, i.e. the surface `tool_access.sideEffects` most
-                    // wants to name.
-                    protectBuiltTool(
-                        guard,
-                        {
-                            name: agentToolPolicyName('browser', browserTool.name),
-                            requestedName: browserTool.name,
-                        },
-                        browserTool,
-                    ),
-                );
-                tools.push(...browserTools);
-                for (const browserTool of browserTools) {
-                    // Browser tools carry zod schemas only — record name +
-                    // description, no parameters.
-                    definitions.push({
-                        name: browserTool.name,
-                        ...(typeof browserTool.description === 'string' && browserTool.description
-                            ? { description: browserTool.description }
-                            : {}),
-                    });
-                }
+                }));
+                tools.push(...browserTools.tools);
+                definitions.push(...browserTools.definitions);
                 cleanupTasks.push(async () => {
                     await closeBrowserSession(
                         { tenantDbName, tenantId, projectId },
@@ -1940,34 +1795,44 @@ export async function buildBoundTools(
             const providerKey = typeof binding.config?.providerKey === 'string'
                 ? (binding.config.providerKey as string)
                 : undefined;
-            const webSearchTools = (buildWebSearchAgentTools({
+            const webSearchTools = adoptBuiltTools(guard, 'websearch', buildWebSearchAgentTools({
                 tenantDbName,
                 tenantId,
                 projectId,
                 providerKey,
-            }) as unknown as AgentSdkToolInterface[]).map((webSearchTool) =>
-                protectBuiltTool(
-                    guard,
-                    {
-                        name: agentToolPolicyName('websearch', webSearchTool.name),
-                        requestedName: webSearchTool.name,
-                    },
-                    webSearchTool,
-                ),
-            );
-            tools.push(...webSearchTools);
-            for (const webSearchTool of webSearchTools) {
-                definitions.push({
-                    name: webSearchTool.name,
-                    ...(typeof webSearchTool.description === 'string' && webSearchTool.description
-                        ? { description: webSearchTool.description }
-                        : {}),
-                });
-            }
+            }));
+            tools.push(...webSearchTools.tools);
+            definitions.push(...webSearchTools.definitions);
         }
     }
 
     return { cleanupTasks, tools, definitions };
+}
+
+/**
+ * Guards system tools built elsewhere (browser, web search) after the fact,
+ * under `agent.<surface>.<toolName>`. The browser tools are the agent's only
+ * tools that navigate and type into a live browser, i.e. the surface
+ * `tool_access.sideEffects` most wants to name.
+ *
+ * These tools carry zod schemas only, so their trace entries record name +
+ * description and no parameters.
+ */
+function adoptBuiltTools(
+    guard: AgentToolGuard,
+    surface: 'browser' | 'websearch',
+    built: readonly unknown[],
+): { tools: AgentSdkToolInterface[]; definitions: TraceToolDefinition[] } {
+    const tools = (built as AgentSdkToolInterface[]).map((tool) => protectBuiltTool(
+        guard,
+        { name: agentToolPolicyName(surface, tool.name), requestedName: tool.name },
+        tool,
+    ));
+    const definitions = tools.map((tool) => ({
+        name: tool.name,
+        ...(typeof tool.description === 'string' && tool.description ? { description: tool.description } : {}),
+    }));
+    return { tools, definitions };
 }
 
 async function runBoundToolCleanup(
@@ -2358,15 +2223,6 @@ export async function listAgents(
     return db.listAgents(filters);
 }
 
-export async function countAgents(
-    tenantDbName: string,
-    projectId?: string,
-): Promise<number> {
-    const db = await getDatabase();
-    await db.switchToTenant(tenantDbName);
-    return db.countAgents(projectId);
-}
-
 // ── Agent Publish & Versioning ───────────────────────────────────────
 
 /**
@@ -2458,13 +2314,7 @@ export async function resolveAgentConfig(
     agentKey: string,
     projectId?: string,
     requestedVersion?: number,
-): Promise<{
-    agent: IAgent;
-    config: IAgent['config'];
-    resolvedVersion: number | null;
-    agentName: string;
-    agentDescription?: string;
-}> {
+): Promise<{ agent: IAgent; config: IAgent['config']; resolvedVersion: number | null }> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
@@ -2477,40 +2327,17 @@ export async function resolveAgentConfig(
         if (!version) {
             throw new Error(`Version ${requestedVersion} not found for agent "${agentKey}"`);
         }
-        return {
-            agent,
-            config: version.snapshot.config,
-            resolvedVersion: version.version,
-            agentName: version.snapshot.name,
-            agentDescription: version.snapshot.description,
-        };
+        return { agent, config: version.snapshot.config, resolvedVersion: version.version };
     }
 
     // Use published version if available
     if (agent.publishedVersion) {
-        const version = await db.findAgentVersion(
-            String(agent._id),
-            agent.publishedVersion,
-        );
-        if (version) {
-            return {
-                agent,
-                config: version.snapshot.config,
-                resolvedVersion: version.version,
-                agentName: version.snapshot.name,
-                agentDescription: version.snapshot.description,
-            };
-        }
+        const version = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
+        if (version) return { agent, config: version.snapshot.config, resolvedVersion: version.version };
     }
 
     // Fallback to current config (never published or version data missing)
-    return {
-        agent,
-        config: agent.config,
-        resolvedVersion: null,
-        agentName: agent.name,
-        agentDescription: agent.description,
-    };
+    return { agent, config: agent.config, resolvedVersion: null };
 }
 
 // ── Model connection check ───────────────────────────────────────────
@@ -2520,6 +2347,39 @@ export interface AgentModelCheckResult {
     latencyMs: number;
     /** Set when the check failed — see `classifyAgentRunError`. */
     error?: { message: string; type: string; code?: string | null };
+}
+
+/**
+ * The chat model an agent run (or the model check) talks to, built through the
+ * model's own provider runtime. `lcModel` is returned as the runtime produced
+ * it — not awaited.
+ */
+async function buildAgentChatModel(
+    tenantDbName: string,
+    tenantId: string,
+    projectId: string,
+    modelKey: string,
+    overrides: Record<string, unknown> = {},
+) {
+    const model = await getModelByKey(tenantDbName, modelKey, projectId);
+    if (!model) throw new Error(`Model "${modelKey}" not found`);
+    if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
+    const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
+    if (!runtime.createChatModel) throw new Error('Provider runtime does not support chat model creation');
+
+    // Resolved through the gateway's helper so an agent obeys the same model
+    // record everything else does. Previously this built its own settings object
+    // and never read `model.settings`, which meant: a hard-coded temperature of
+    // 0.7 reached models that reject the parameter outright, the operator could
+    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
+    // under snake_case keys the contract layer does not read — so an agent's
+    // Top P and Max Tokens settings had never taken effect at all.
+    const lcModel = runtime.createChatModel({
+        modelId: model.modelId,
+        category: model.category,
+        modelSettings: resolveModelInvocationConfig(model, overrides).modelSettings,
+    });
+    return { model, lcModel };
 }
 
 /**
@@ -2536,17 +2396,8 @@ export async function checkAgentModel(
 ): Promise<AgentModelCheckResult> {
     const startedAt = Date.now();
     try {
-        const model = await getModelByKey(tenantDbName, modelKey, projectId);
-        if (!model) throw new Error(`Model "${modelKey}" not found`);
-        if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
-        const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
-        if (!runtime.createChatModel) throw new Error('Provider runtime does not support chat model creation');
-        const lcModel = await runtime.createChatModel({
-            modelId: model.modelId,
-            category: model.category,
-            modelSettings: resolveModelInvocationConfig(model, {}).modelSettings,
-        });
-        await (lcModel as { invoke: (input: unknown) => Promise<unknown> })
+        const { model, lcModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, modelKey);
+        await ((await lcModel) as { invoke: (input: unknown) => Promise<unknown> })
             .invoke([{ role: 'user', content: 'Reply with the single word OK.' }])
             .catch((error: unknown) => {
                 throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
@@ -2786,7 +2637,7 @@ export interface AgentPlaygroundChatRequest {
      * Fires when the agent summarizes its context mid-run. Same queue caveat
      * as `onToolEvent`.
      */
-    onCompaction?: (compaction: AgentTurnCompaction) => void;
+    onCompaction?: (compaction: IAgentTurnCompaction) => void;
 }
 
 /**
@@ -2797,61 +2648,10 @@ export interface AgentPlaygroundChatRequest {
  * does NOT return these: a tool result can be large and can contain exactly the
  * data a guardrail redacted from the answer.
  */
-export interface AgentPlaygroundStep {
-    id?: string;
-    name: string;
-    args?: unknown;
-    /** What the MODEL saw — possibly a summary of the result. See `rawOutput`. */
-    output?: unknown;
-    /** The untouched tool result, set only when it differs from `output`. */
-    rawOutput?: unknown;
-    /** Present when the tool threw. */
-    error?: string;
-    /** Sub-agent that made the call, when delegation was involved. */
-    subagent?: string;
-    status?: 'success' | 'error' | 'rejected' | 'handoff';
-    fromCache?: boolean;
-    summarized?: boolean;
-    originalTokenCount?: number;
-    timestamp?: string;
-    /**
-     * What the model wrote in the same message that made this call ("Let me
-     * search for …"), set on the first call of that message only. Kept so the
-     * transcript shows it where it happened — before the call — instead of
-     * dropping it (it is not part of the final answer).
-     */
-    narration?: string;
-}
+export type AgentPlaygroundStep = IAgentConversationStep;
 
-export interface AgentPlaygroundChatResult {
-    content: string;
-    reasoning?: string;
-    /** Parsed structured output, when the agent declares an output schema. */
-    output?: unknown;
-    /** Why the structured contract failed, when it did. */
-    outputError?: string;
-    usage?: {
-        inputTokens?: number;
-        outputTokens?: number;
-        cachedInputTokens?: number;
-        totalTokens?: number;
-        /** Priced from the model's own `pricing`; absent when the model has none. */
-        costUsd?: number;
-    };
-    /** Wall-clock time of the run, measured server-side. */
-    latencyMs?: number;
-    steps?: AgentPlaygroundStep[];
-    /** Which config actually ran: a version number, or null for the draft. */
-    version?: number | null;
-    /** Set when the run ended without a final answer — see `describeTurnOutcome`. */
-    stopReason?: Exclude<AgentStopReason, 'completed'>;
-    stopDetail?: string;
-    /** Context summarizations during this turn. */
-    compactions?: AgentTurnCompaction[];
-    compactedTools?: Array<{ toolName: string; toolCallId: string }>;
-    /** Non-fatal problems during the turn (a failed memory lookup, …). */
-    warnings?: string[];
-}
+/** A session turn's result: the persisted assistant message minus role/timestamp, which `persistSessionTurn` adds. */
+export type AgentPlaygroundChatResult = Omit<IAgentConversationMessage, 'role' | 'timestamp'>;
 
 /** OpenAI Responses API–compatible output content item */
 export interface ResponseOutputText {
@@ -2949,6 +2749,369 @@ export async function executeAgentChat(
     );
 }
 
+/**
+ * One turn of a connected (external) agent: invoked over HTTP, no local runtime.
+ *
+ * THE TEXT HOOKS ARE THE WHOLE ENFORCEMENT SURFACE HERE, and that is a
+ * property of the wire, not an omission: a connected agent runs on the far
+ * side of one HTTP call — we send text and get text back. Its tools are
+ * chosen, executed and returned by the remote runtime, so no tool name,
+ * no argument object and no tool result ever crosses into this process and
+ * there is nothing for `tool.pre` / `tool.post` to evaluate. That is why
+ * `createAgentToolGuard` is deliberately NOT built on this branch, and why
+ * a tool binding on a connected agent is warned about rather than quietly
+ * dropped: silent non-enforcement is the failure this plane exists to end.
+ *
+ * Returns the guarded user message (what went upstream), the moment it was
+ * sent, and the guarded answer.
+ */
+async function runExternalAgentTurn(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    config: IAgentConfig;
+    connection: NonNullable<IAgentConfig['connection']>;
+    history: Array<{ role: string; content: string }>;
+    userMessage: string;
+    runtimeContext?: AgentRuntimeContext;
+    source: 'agent' | 'agent-playground';
+}): Promise<{ userMessage: string; sentAt: Date; content: string }> {
+    const { tenantDbName, tenantId, projectId, agentKey, config, connection, source } = input;
+    warnUnservableExternalBindings(config, agentKey);
+
+    const userMessage = await evaluateBoundGuardrails({
+        tenantDbName, tenantId, projectId, config, hook: 'input.pre', text: input.userMessage, source,
+    });
+    const sentAt = new Date();
+    const { content: raw } = await invokeExternalAgent(
+        connection,
+        [...input.history, { role: 'user', content: userMessage }],
+        { tenantDbName, tenantId, projectId },
+        resolveRuntimeHeaders(input.runtimeContext, 'agent', agentKey, connection.runtimeHeaders),
+    );
+    const content = await evaluateBoundGuardrails({
+        tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: raw, source,
+    });
+    return { userMessage, sentAt, content };
+}
+
+/**
+ * Everything a local agent turn needs before `invoke()`: the model, the
+ * rendered system prompt, the guardrail plugins, every tool, and the SDK agent
+ * itself. ONE builder for the live chat and the playground, on purpose: an
+ * operator testing an agent in the playground has to be testing what
+ * production will run. The two differ only in the inputs below.
+ */
+async function buildLocalAgentRun(input: {
+    db: Awaited<ReturnType<typeof getDatabase>>;
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    agent: IAgent;
+    config: IAgentConfig;
+    runtimeContext?: AgentRuntimeContext;
+    /** The authenticated principal, or the agent itself — see `createAgentToolGuard`. */
+    actorId: string;
+    /** Evaluation-log `source`, so a rehearsal stays separate from production traffic. */
+    source: 'agent' | 'agent-playground';
+    route: 'agent.chat' | 'agent.playground';
+    userId?: string;
+    version?: number | null;
+    /** The Session / API conversation — required for a persistent sandbox. */
+    conversation: IAgentConversation | null;
+    memoryConversationId?: string;
+    threadId?: string;
+    onMessageRewrite?: (rewrite: PluginMessageRewrite) => void;
+}) {
+    const { db, tenantDbName, tenantId, projectId, agentKey, agent, config, runtimeContext, actorId, source } = input;
+
+    if (!config.modelKey) throw new Error('Agent has no model configured');
+    const { model, lcModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
+        ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+        ...(config.topP !== undefined ? { top_p: config.topP } : {}),
+        ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
+    });
+
+    // System prompt
+    let systemPrompt = config.systemPrompt;
+    const promptVariables = buildPromptVariables({
+        config,
+        agentKey,
+        agentName: agent.name,
+        version: input.version,
+        runtimeContext,
+        userId: input.userId,
+    });
+    if (!systemPrompt && config.promptKey) {
+        const prompt = await db.findPromptByKey(config.promptKey, projectId);
+        if (prompt) {
+            const rendered = renderPromptTemplate(prompt.template, promptVariables);
+            systemPrompt = rendered.text;
+            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
+        }
+    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
+        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
+        systemPrompt = rendered.text;
+        reportPromptVariables(rendered, { agentKey });
+    }
+
+    // Guardrails. One guard for the whole run — resolving the bindings once
+    // keeps every tool this agent gets under the same policy, and a legacy
+    // config (no `guardrails` array) resolves to the no-op guard.
+    warnUnservableStreamBinding(config, agentKey);
+    const toolGuard = createAgentToolGuard({ tenantDbName, tenantId, projectId, agentKey, config, actorId, source });
+
+    // THE TEXT HOOKS NOW RUN INSIDE THE AGENT, not around it.
+    //
+    // `prompt.pre`, `input.pre` and `output.pre` are served by the SDK plugin
+    // built here and handed to `createSmartAgent` below. The brackets that
+    // used to sit on either side of `invoke()` are gone: they ran `input.pre`
+    // once per TURN, where `preModelCall` runs it on every model call — which is
+    // what `input.pre` has always meant on the gateway, and what an operator
+    // binding it expects. `prompt.pre` is the once-per-turn hook, and it now
+    // actually fires.
+    //
+    // Tool hooks stay on `toolGuard` above; see `AGENT_PLUGIN_HOOKS`.
+    const guardrailPlugins = await buildAgentGuardrailPlugins({
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        config,
+        actorId,
+        source,
+        onMessageRewrite: input.onMessageRewrite,
+    });
+
+    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
+    const { z } = await import('zod');
+
+    // RAG retrieval tools, and the instruction to use them first
+    const tools: AgentSdkToolInterface[] = [];
+    const toolDefinitions: TraceToolDefinition[] = [];
+    if (config.knowledgeEngineKey) {
+        const knowledgeTools = await buildKnowledgeTools(
+            tenantDbName, tenantId, config.knowledgeEngineKey, toolGuard,
+        );
+        tools.push(...knowledgeTools.tools);
+        toolDefinitions.push(...knowledgeTools.toolDefinitions);
+        systemPrompt = systemPrompt
+            ? `${KNOWLEDGE_FIRST_INSTRUCTION}\n\n${systemPrompt}`
+            : KNOWLEDGE_FIRST_INSTRUCTION;
+    }
+
+    // Bound tools from toolBindings (MCP, future sources)
+    const { cleanupTasks, tools: boundTools, definitions: boundToolDefinitions } = await buildBoundTools(
+        tenantDbName,
+        tenantId,
+        projectId,
+        config.toolBindings,
+        createTool,
+        z,
+        toolGuard,
+        runtimeContext,
+    );
+    tools.push(...boundTools);
+    toolDefinitions.push(...boundToolDefinitions);
+
+    // Memory as tools the model can actually call. The SDK gives it
+    // neither: recall is pre-injected as a system message and writes only
+    // happen at compaction, so an agent can neither look a fact up nor record
+    // what it was just told. Built from the SAME store the SDK path reads, so
+    // a tool write is visible to next turn's injection.
+    // Non-fatal failures during the run (memory today), reported with the answer.
+    const warnings = new Set<string>();
+    const memory = buildAgentMemoryOption(config.memory, {
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId: input.memoryConversationId,
+        userId: input.userId,
+        onWarning: (message) => warnings.add(message),
+    });
+    const memoryToolMode = config.memory?.tools ?? 'readwrite';
+    if (memory?.store && memoryToolMode !== 'off') {
+        const allowWrites = memoryToolMode === 'readwrite';
+        tools.push(...buildMemoryTools({
+            store: memory.store,
+            // 'workspace' is the SDK's OWN default when a config names no
+            // scope (every runtime profile sets `memory: { scope: 'workspace' }`).
+            // Defaulting to 'session' here would have the tools write where the
+            // SDK's injection never reads — a fact stored and then invisible.
+            scope: memory.scope ?? 'workspace',
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            allowWrites,
+        }));
+        toolDefinitions.push(...memoryToolDefinitions(allowWrites));
+    }
+
+    // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
+    // the other bound tools once the run is over. A conversation keeps a
+    // persistent sandbox across its turns, a stateless call gets a throwaway one.
+    const sandboxTools = await buildAgentSandboxTools({
+        sandbox: config.sandbox,
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversation: input.conversation,
+        createToolFn: createTool,
+        zod: z,
+        protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
+        onWarning: (message) => warnings.add(message),
+    });
+    tools.push(...sandboxTools.tools);
+    toolDefinitions.push(...sandboxTools.definitions);
+    cleanupTasks.push(sandboxTools.cleanup);
+
+    // Wrapped so a streamed turn keeps its tool calls and usage — see
+    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
+    // Usage-tapped: agent calls bypass the gateway, so without this they
+    // never reached Model Hub or the bill — see modelUsageTap.ts.
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        tenantDbName,
+        model,
+        route: input.route,
+        agentKey,
+    });
+    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
+
+    const { subagents, cleanupTasks: subagentCleanupTasks } = await buildAgentSubagents({
+        tenantDbName,
+        tenantId,
+        projectId,
+        subagents: config.subagents,
+        createToolFn: createTool,
+        zod: z,
+        guard: toolGuard,
+        runtimeContext,
+    });
+    cleanupTasks.push(...subagentCleanupTasks);
+
+    const skills = await buildAgentSkills(tenantDbName, projectId, config.skills);
+    const outputSchema = resolveStructuredOutputSchema(config.structuredOutput);
+    const skillPolicy = resolveAgentSkillPolicy(config);
+    const tracingMetadata = buildTracingMetadata(runtimeContext);
+    const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model);
+
+    const sdkAgent = createSmartAgent({
+        name: agent.name,
+        version: input.version != null ? String(input.version) : undefined,
+        model: sdkModel,
+        ...(tools.length > 0 ? { tools } : {}),
+        // Omitted entirely when empty: an empty array and no key mean the same
+        // thing to the host, and the shorter option object is what every other
+        // conditional field here does.
+        ...(guardrailPlugins.length > 0 ? { plugins: guardrailPlugins } : {}),
+        // Carries the module defaults for every knob an operator left untouched
+        // — see `agentRuntimeConfig.CONSOLE_AGENT_DEFAULTS`.
+        ...resolveAgentRuntimeOptions(config),
+        ...(outputSchema ? { outputSchema } : {}),
+        ...(subagents.length > 0 ? { subagents } : {}),
+        ...(skills.length > 0 ? { skills } : {}),
+        ...(skillPolicy ? { skillPolicy } : {}),
+        ...(memory ? { memory } : {}),
+        ...(costEstimator ? { costEstimator } : {}),
+        ...(systemPrompt ? { systemPrompt } : {}),
+        tracing: {
+            enabled: true,
+            mode: 'batched',
+            sink: tracingSink,
+            ...(input.threadId ? { threadId: input.threadId } : {}),
+            ...(tracingMetadata ? { metadata: tracingMetadata } : {}),
+        },
+    });
+
+    return { sdkAgent, model, systemPrompt, cleanupTasks, warnings };
+}
+
+/**
+ * Invoke options that forward the answer's deltas to `onTextChunk`.
+ *
+ * `stream: true` is what actually turns provider deltas on — with only
+ * `onStream` the SDK fires it exactly once, at the end, with the whole answer.
+ * That terminal `isFinal` call repeats the FULL content, so forwarding it
+ * would print the answer twice: once streamed, once again in one burst.
+ */
+function textStreamOptions(onTextChunk: ((text: string) => void) | undefined, agentKey: string) {
+    if (!onTextChunk) return {};
+    return {
+        stream: true,
+        onStream: (chunk: { text?: string; isFinal?: boolean }) => {
+            if (chunk.isFinal || !chunk.text) return;
+            try {
+                onTextChunk(chunk.text);
+            } catch (callbackError) {
+                logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+            }
+        },
+    };
+}
+
+/** The first exchange of a "New conversation" names it after what was asked. */
+function firstTurnTitle(conversation: IAgentConversation, messageCount: number, userText: string): string | undefined {
+    return conversation.title === 'New conversation' && messageCount <= 2
+        ? userText.substring(0, 80)
+        : conversation.title;
+}
+
+/**
+ * The OpenAI Responses–shaped reply to one exchange. `outcome` is absent for a
+ * connected agent, which reports no stop reason at all.
+ */
+function toAgentChatResponse(input: {
+    conversationId: string;
+    priorMessageCount: number;
+    agentName: string;
+    version: number | null;
+    content: string;
+    messages: IAgentConversation['messages'];
+    reasoning?: string;
+    outcome?: { stopReason: AgentStopReason; stopDetail?: string };
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+}): AgentChatResponse {
+    const { reasoning, outcome, usage } = input;
+    const responseId = `resp_${input.conversationId}`;
+    const msgId = `msg_${Date.now().toString(36)}`;
+    const reasoningId = `rs_${Date.now().toString(36)}`;
+    const stopped = outcome && outcome.stopReason !== 'completed' ? outcome : undefined;
+
+    return {
+        id: responseId,
+        object: 'response',
+        model: input.agentName,
+        output: [
+            // OpenAI Responses convention: reasoning item precedes the message.
+            ...(reasoning
+                ? [{ id: reasoningId, type: 'reasoning' as const, summary: [{ type: 'summary_text' as const, text: reasoning }] }]
+                : []),
+            { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content }] },
+        ],
+        status: stopped ? 'incomplete' : 'completed',
+        ...(stopped
+            ? {
+                incomplete_details: { reason: incompleteReason(stopped.stopReason, stopped.stopDetail) },
+                stop_reason: stopped.stopReason,
+                ...(stopped.stopDetail ? { stop_detail: stopped.stopDetail } : {}),
+            }
+            : outcome ? { stop_reason: 'completed' as const } : {}),
+        usage: {
+            input_tokens: usage?.inputTokens ?? 0,
+            output_tokens: usage?.outputTokens ?? 0,
+            total_tokens: usage?.totalTokens ?? ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)),
+        },
+        created_at: Math.floor(Date.now() / 1000),
+        previous_response_id: input.priorMessageCount > 0 ? responseId : null,
+        version: input.version,
+        _conversation_messages: input.messages,
+    };
+}
+
 /** Local (non-routed) implementation. Exported so the queue consumer can call it. */
 export async function executeAgentChatLocal(
     request: AgentChatRequest,
@@ -2959,8 +3122,8 @@ export async function executeAgentChatLocal(
         projectId,
         agentKey,
         conversationId,
+        userMessage,
     } = request;
-    let { userMessage } = request;
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -3003,59 +3166,31 @@ export async function executeAgentChatLocal(
         throw new Error(`Conversation "${conversationId}" not found`);
     }
 
-    // 2b. Connected (external) agent — invoke over HTTP, skip local runtime.
-    //
-    // THE TEXT HOOKS ARE THE WHOLE ENFORCEMENT SURFACE HERE, and that is a
-    // property of the wire, not an omission: a connected agent runs on the far
-    // side of one HTTP call — we send text and get text back. Its tools are
-    // chosen, executed and returned by the remote runtime, so no tool name,
-    // no argument object and no tool result ever crosses into this process and
-    // there is nothing for `tool.pre` / `tool.post` to evaluate. That is why
-    // `createAgentToolGuard` is deliberately NOT built on this branch, and why
-    // a tool binding on a connected agent is warned about rather than quietly
-    // dropped: silent non-enforcement is the failure this plane exists to end.
+    // 2b. Connected (external) agent — see `runExternalAgentTurn`.
     if (config.kind === 'external' && config.connection) {
-        warnUnservableExternalBindings(config, agentKey);
-
-        // Reassigned exactly as the local path does at 5a: the guarded text is
-        // what goes upstream, what is persisted, and what the title is cut from.
-        userMessage = await evaluateBoundGuardrails({
+        // Both texts are the GUARDED ones: the user turn is what went upstream,
+        // what is persisted and what the title is cut from; the answer is
+        // guarded BEFORE `updatedMessages` is built, because that one array is
+        // both the persisted history and the returned payload. Redacting only
+        // the response would leave the raw answer in the conversation — where
+        // the next turn reads it back and sends it upstream as history.
+        const turn = await runExternalAgentTurn({
             tenantDbName,
             tenantId,
             projectId,
+            agentKey,
             config,
-            hook: 'input.pre',
-            text: userMessage,
-            source: 'agent',
-        });
-
-        const now = new Date();
-        const history = (conversation.messages || []).map((m) => ({ role: m.role, content: m.content }));
-        const { content: externalContent } = await invokeExternalAgent(
-            config.connection,
-            [...history, { role: 'user', content: userMessage }],
-            { tenantDbName, tenantId, projectId },
-            resolveRuntimeHeaders(request.runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
-        );
-
-        // BEFORE `updatedMessages` is built, because that one array is both the
-        // persisted history and the returned payload. Redacting only the
-        // response would leave the raw answer in the conversation — where the
-        // next turn reads it back and sends it upstream as history.
-        const assistantContent = await evaluateBoundGuardrails({
-            tenantDbName,
-            tenantId,
-            projectId,
-            config,
-            hook: 'output.pre',
-            text: externalContent,
+            connection: config.connection,
+            history: (conversation.messages || []).map((m) => ({ role: m.role, content: m.content })),
+            userMessage,
+            runtimeContext: request.runtimeContext,
             source: 'agent',
         });
 
         const updatedMessages = [
             ...(conversation.messages || []),
-            { role: 'user', content: userMessage, timestamp: now },
-            { role: 'assistant', content: assistantContent, timestamp: new Date() },
+            { role: 'user', content: turn.userMessage, timestamp: turn.sentAt },
+            { role: 'assistant', content: turn.content, timestamp: new Date() },
         ];
         // §12.12: a deadline/cancel decision made about this turn while the
         // external HTTP call was in flight must not be overwritten by a late
@@ -3063,276 +3198,49 @@ export async function executeAgentChatLocal(
         if (!isCancellationCellTripped(request.cancellationCell)) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
-                title: conversation.title === 'New conversation' && updatedMessages.length <= 2
-                    ? userMessage.substring(0, 80)
-                    : conversation.title,
+                title: firstTurnTitle(conversation, updatedMessages.length, turn.userMessage),
             });
         }
 
-        const responseId = `resp_${conversationId}`;
-        const msgId = `msg_${Date.now().toString(36)}`;
-        return {
-            id: responseId,
-            object: 'response' as const,
-            model: agent.name,
-            output: [
-                {
-                    id: msgId,
-                    type: 'message' as const,
-                    role: 'assistant' as const,
-                    content: [{ type: 'output_text' as const, text: assistantContent }],
-                },
-            ],
-            status: 'completed' as const,
-            usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-            created_at: Math.floor(Date.now() / 1000),
-            previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
+        return toAgentChatResponse({
+            conversationId,
+            priorMessageCount: conversation.messages?.length ?? 0,
+            agentName: agent.name,
             version: resolvedVersion,
-            _conversation_messages: updatedMessages,
-        };
+            content: turn.content,
+            messages: updatedMessages,
+        });
     }
 
-    // 3. Resolve model
-    if (!config.modelKey) throw new Error('Agent has no model configured');
-    const model = await getModelByKey(tenantDbName, config.modelKey, projectId);
-    if (!model) throw new Error(`Model "${config.modelKey}" not found`);
-    if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
-
-    // 4. Build LangChain model runtime
-    const { runtime } = await buildModelRuntime(
-        tenantDbName,
-        tenantId,
-        model.providerKey,
-        projectId,
-    );
-
-    if (!runtime.createChatModel) {
-        throw new Error('Provider runtime does not support chat model creation');
-    }
-
-    // Resolved through the gateway's helper so an agent obeys the same model
-    // record everything else does. Previously this built its own settings object
-    // and never read `model.settings`, which meant: a hard-coded temperature of
-    // 0.7 reached models that reject the parameter outright, the operator could
-    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
-    // under snake_case keys the contract layer does not read — so an agent's
-    // Top P and Max Tokens settings had never taken effect at all.
-    const lcModel = runtime.createChatModel({
-        modelId: model.modelId,
-        category: model.category,
-        modelSettings: resolveModelInvocationConfig(model, {
-            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-            ...(config.topP !== undefined ? { top_p: config.topP } : {}),
-            ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
-        }).modelSettings,
-    });
-
-    // 5. Resolve system prompt
-    let systemPrompt = config.systemPrompt;
-    const promptVariables = buildPromptVariables({
-        config,
-        agentKey,
-        agentName: agent.name,
-        version: resolvedVersion,
-        runtimeContext: request.runtimeContext,
-        userId: request.userId,
-    });
-    if (!systemPrompt && config.promptKey) {
-        const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        if (prompt) {
-            const rendered = renderPromptTemplate(prompt.template, promptVariables);
-            systemPrompt = rendered.text;
-            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
-        }
-    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
-        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
-        systemPrompt = rendered.text;
-        reportPromptVariables(rendered, { agentKey });
-    }
-
-    // 5a. Guardrails. One guard for the whole run — resolving the bindings once
-    // keeps every tool this agent gets under the same policy, and a legacy
-    // config (no `guardrails` array) resolves to the no-op guard.
-    warnUnservableAgentBindings(config, agentKey);
-    const toolGuard = createAgentToolGuard({
-        tenantDbName,
-        tenantId,
-        projectId,
-        agentKey,
-        config,
-        actorId: request.userId,
-        source: 'agent',
-    });
-
-    // THE TEXT HOOKS NOW RUN INSIDE THE AGENT, not around it.
-    //
-    // `prompt.pre`, `input.pre` and `output.pre` are served by the SDK plugin
-    // built here and handed to `createConsoleSdkAgent` below. The brackets that
-    // used to sit on either side of `invoke()` are gone: they ran `input.pre`
-    // once per TURN, where `preModelCall` runs it on every model call — which is
-    // what `input.pre` has always meant on the gateway, and what an operator
-    // binding it expects. `prompt.pre` is the once-per-turn hook, and it now
-    // actually fires.
-    //
-    // Tool hooks stay on `toolGuard` above; see `AGENT_PLUGIN_HOOKS`.
-    //
-    // The ledger collects what `input.pre` rewrote on the wire, so step 8 can
+    // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`. The
+    // ledger collects what `input.pre` rewrote on the wire, so step 6 can
     // persist the redacted user turn rather than the raw one.
     const rewriteLedger = new MessageRewriteLedger();
-    const guardrailPlugins = await buildAgentGuardrailPlugins({
+    const { sdkAgent, model, cleanupTasks, warnings } = await buildLocalAgentRun({
+        db,
         tenantDbName,
         tenantId,
         projectId,
         agentKey,
+        agent,
         config,
+        runtimeContext: request.runtimeContext,
         actorId: request.userId,
+        source: 'agent',
+        route: 'agent.chat',
+        userId: request.userId,
+        version: resolvedVersion,
+        conversation,
+        memoryConversationId: conversationId,
+        threadId: conversationId,
         onMessageRewrite: (rewrite) => rewriteLedger.record(rewrite),
     });
 
-    // 5b. Build RAG retrieval tool if knowledge engine is configured
-    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
-    const { z } = await import('zod');
-
-    const tools: AgentSdkToolInterface[] = [];
-    const toolDefinitions: TraceToolDefinition[] = [];
-    if (config.knowledgeEngineKey) {
-        const knowledgeTools = await buildKnowledgeTools(
-            tenantDbName, tenantId, config.knowledgeEngineKey, toolGuard,
-        );
-        tools.push(...knowledgeTools.tools);
-        toolDefinitions.push(...knowledgeTools.toolDefinitions);
-    }
-
-    if (config.knowledgeEngineKey) {
-        const knowledgeSearchInstruction = [
-            'Knowledge-base-first policy:',
-            '- For user questions that are factual, documentation, API, setup, troubleshooting, or product-behavior related, call `knowledge_search` first.',
-            '- Do not provide a final answer before at least one `knowledge_search` attempt unless the request is purely conversational.',
-            '- After retrieval, answer using the retrieved content; if retrieval is empty, say you are not fully certain and provide the best concise answer.',
-        ].join('\n');
-        systemPrompt = systemPrompt
-            ? `${knowledgeSearchInstruction}\n\n${systemPrompt}`
-            : knowledgeSearchInstruction;
-    }
-
-    // 5c. Build bound tools from toolBindings (MCP, future sources)
-    const { cleanupTasks, tools: boundTools, definitions: boundToolDefinitions } = await buildBoundTools(
-        tenantDbName,
-        tenantId,
-        projectId,
-        config.toolBindings,
-        createTool,
-        z,
-        toolGuard,
-        request.runtimeContext,
-    );
-    tools.push(...boundTools);
-    toolDefinitions.push(...boundToolDefinitions);
-
-    // 5d. Memory as tools the model can actually call. The SDK gives it
-    // neither: recall is pre-injected as a system message and writes only
-    // happen at compaction, so an agent can neither look a fact up nor record
-    // what it was just told. Built from the SAME store the SDK path reads, so
-    // a tool write is visible to next turn's injection.
-    // Non-fatal failures during the run (memory today), reported with the answer.
-    const warnings = new Set<string>();
-    const memoryOption = buildAgentMemoryOption(config.memory, {
-        tenantDbName,
-        tenantId,
-        projectId,
-        agentKey,
-        conversationId,
-        userId: request.userId,
-        onWarning: (message) => warnings.add(message),
-    });
-    const memoryToolMode = config.memory?.tools ?? 'readwrite';
-    if (memoryOption?.store && memoryToolMode !== 'off') {
-        const allowWrites = memoryToolMode === 'readwrite';
-        tools.push(...buildMemoryTools({
-            store: memoryOption.store,
-            // 'workspace' is the SDK's OWN default when a config names no
-            // scope (every runtime profile sets `memory: { scope: 'workspace' }`).
-            // Defaulting to 'session' here would have the tools write where the
-            // SDK's injection never reads — a fact stored and then invisible.
-            scope: memoryOption.scope ?? 'workspace',
-            createToolFn: createTool,
-            zod: z,
-            guard: toolGuard,
-            allowWrites,
-        }));
-        toolDefinitions.push(...memoryToolDefinitions(allowWrites));
-    }
-
-    // 5e. Sandbox access (Enterprise). Provisioned on first use; cleaned up
-    // with the other bound tools once the run is over.
-    const sandboxTools = await buildAgentSandboxTools({
-        sandbox: config.sandbox,
-        tenantDbName,
-        tenantId,
-        projectId,
-        agentKey,
-        conversation,
-        createToolFn: createTool,
-        zod: z,
-        protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
-        onWarning: (message) => warnings.add(message),
-    });
-    tools.push(...sandboxTools.tools);
-    toolDefinitions.push(...sandboxTools.definitions);
-    cleanupTasks.push(sandboxTools.cleanup);
-
-    // 6. What the agent resumes from: the state the conversation's last turn
+    // 4. What the agent resumes from: the state the conversation's last turn
     // ended in (its tool calls and results, summaries, plan), or the text
     // transcript when there is none — see agentTurnState.ts.
     const now = new Date();
     const carried = await loadConversationState(db, conversation);
-
-    // 7. Create agent-sdk instance and invoke
-    // Wrapped so a streamed turn keeps its tool calls and usage — see
-    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
-    // Usage-tapped: agent calls bypass the gateway, so without this they
-    // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
-        tenantDbName,
-        model,
-        route: 'agent.chat',
-        agentKey,
-    });
-    const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
-
-    const chatSubagents = await buildAgentSubagents({
-        tenantDbName,
-        tenantId,
-        projectId,
-        subagents: config.subagents,
-        createToolFn: createTool,
-        zod: z,
-        guard: toolGuard,
-        runtimeContext: request.runtimeContext,
-    });
-    cleanupTasks.push(...chatSubagents.cleanupTasks);
-
-    const chatSkills = await buildAgentSkills(tenantDbName, projectId, config.skills);
-
-    const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
-        name: agent.name,
-        model: sdkModel,
-        tools,
-        systemPrompt,
-        tracingSink,
-        plugins: guardrailPlugins,
-        threadId: conversationId,
-        version: resolvedVersion !== null ? String(resolvedVersion) : undefined,
-        runtimeOptions: resolveAgentRuntimeOptions(config),
-        outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
-        subagents: chatSubagents.subagents,
-        skills: chatSkills,
-        skillPolicy: resolveAgentSkillPolicy(config),
-        memory: memoryOption,
-        tracingMetadata: buildTracingMetadata(request.runtimeContext),
-        costEstimator: await buildAgentCostEstimator(tenantDbName, projectId, config, model),
-    });
-
     const inputState = buildTurnInputState({
         carried,
         transcript: conversation.messages || [],
@@ -3341,30 +3249,14 @@ export async function executeAgentChatLocal(
     const userTurnIndex = inputState.messages.length - 1;
 
     try {
-        // Streaming is opt-in per call: `stream: true` is what actually turns
-        // provider deltas on, and the SDK's terminal `isFinal` callback
-        // repeats the WHOLE answer, so forwarding it would emit the response
-        // twice. Both handled, same as the playground path.
-        const { onTextChunk: onLiveTextChunk } = request;
-        const compactions: AgentTurnCompaction[] = [];
+        // 5. Invoke
+        const compactions: IAgentTurnCompaction[] = [];
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell);
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 if (event.type === 'summarization') compactions.push(compactionFromEvent(event));
             },
-            ...(onLiveTextChunk
-                ? {
-                    stream: true,
-                    onStream: (chunk: { text?: string; isFinal?: boolean }) => {
-                        if (chunk.isFinal || !chunk.text) return;
-                        try {
-                            onLiveTextChunk(chunk.text);
-                        } catch (callbackError) {
-                            logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
-                        }
-                    },
-                }
-                : {}),
+            ...textStreamOptions(request.onTextChunk, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
             ...(request.cancellationCell?.deadlineAt !== undefined
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
@@ -3394,37 +3286,27 @@ export async function executeAgentChatLocal(
 
         const assistantReasoning = extractAgentReasoning(result);
 
-        // 7b. Output guardrail check. Behaviour change over the single-slot
-        // version, deliberate: a REDACTION is now applied instead of computed
-        // and dropped. The redacted text is what gets stored on the
-        // conversation and what gets returned, because a guardrail that
-        // rewrites the answer only in the log is not enforcing anything.
-        // (`reasoning` is still unchecked — it is not part of the answer the
-        // gateway checks either, and gating it belongs with the SDK work that
-        // would let a chain-of-thought be withheld separately.)
-        // `output.pre` ran inside the agent, on `postModelCall`. A redaction it
-        // landed is already in `result.content`, because the plugin rewrites the
-        // host's own payload rather than handing a copy back — which is what
-        // makes the redaction reach the user instead of only the log. A BLOCK
-        // surfaces as a thrown invoke, handled by the catch below.
+        // 5b. Output guardrail: `output.pre` ran inside the agent on
+        // `postModelCall`, so a redaction is already in `result.content` and a
+        // block was turned into a throw by `guardrailBlockedError` above.
+        // Reasoning is not gated.
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
         const outcome = describeTurnOutcome(result, inputState.messages.length);
-        const assistantContent = outcome.content;
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const compactedTools = compactions.length > 0
             ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
 
-        // 8. Update conversation with new messages — the REWRITTEN user turn,
+        // 6. Update conversation with new messages — the REWRITTEN user turn,
         // and the title cut from the same string.
         const updatedMessages: IAgentConversation['messages'] = [
             ...(conversation.messages || []),
             { role: 'user', content: persistedUserMessage, timestamp: now },
             {
                 role: 'assistant',
-                content: assistantContent,
+                content: outcome.content,
                 ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
                 ...(outcome.stopReason !== 'completed'
                     ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
@@ -3445,9 +3327,7 @@ export async function executeAgentChatLocal(
         if (!supersededByDeadlineOrCancel) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
-                title: conversation.title === 'New conversation' && updatedMessages.length <= 2
-                    ? persistedUserMessage.substring(0, 80)
-                    : conversation.title,
+                title: firstTurnTitle(conversation, updatedMessages.length, persistedUserMessage),
             });
             await saveConversationState(db, {
                 conversationId,
@@ -3467,60 +3347,17 @@ export async function executeAgentChatLocal(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
-        const responseId = `resp_${conversationId}`;
-        const msgId = `msg_${Date.now().toString(36)}`;
-        const reasoningId = `rs_${Date.now().toString(36)}`;
-
-        return {
-            id: responseId,
-            object: 'response' as const,
-            model: agent.name,
-            output: [
-                // OpenAI Responses convention: reasoning item precedes the message.
-                ...(assistantReasoning
-                    ? [
-                          {
-                              id: reasoningId,
-                              type: 'reasoning' as const,
-                              summary: [
-                                  {
-                                      type: 'summary_text' as const,
-                                      text: assistantReasoning,
-                                  },
-                              ],
-                          },
-                      ]
-                    : []),
-                {
-                    id: msgId,
-                    type: 'message' as const,
-                    role: 'assistant' as const,
-                    content: [
-                        {
-                            type: 'output_text' as const,
-                            text: assistantContent,
-                        },
-                    ],
-                },
-            ],
-            status: outcome.stopReason === 'completed' ? 'completed' as const : 'incomplete' as const,
-            ...(outcome.stopReason !== 'completed'
-                ? {
-                    incomplete_details: { reason: incompleteReason(outcome.stopReason, outcome.stopDetail) },
-                    stop_reason: outcome.stopReason,
-                    ...(outcome.stopDetail ? { stop_detail: outcome.stopDetail } : {}),
-                }
-                : { stop_reason: 'completed' as const }),
-            usage: {
-                input_tokens: usage?.inputTokens ?? 0,
-                output_tokens: usage?.outputTokens ?? 0,
-                total_tokens: usage?.totalTokens ?? ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)),
-            },
-            created_at: Math.floor(Date.now() / 1000),
-            previous_response_id: (conversation.messages?.length ?? 0) > 0 ? responseId : null,
+        return toAgentChatResponse({
+            conversationId,
+            priorMessageCount: conversation.messages?.length ?? 0,
+            agentName: agent.name,
             version: resolvedVersion,
-            _conversation_messages: updatedMessages,
-        };
+            content: outcome.content,
+            messages: updatedMessages,
+            reasoning: assistantReasoning,
+            outcome,
+            usage,
+        });
     } finally {
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
     }
@@ -3660,17 +3497,13 @@ export function extractPlaygroundSteps(
  * from "nobody told the console what this model costs".
  */
 async function priceTurn(
-    tenantDbName: string,
-    projectId: string,
-    modelKey: string | undefined,
+    pricing: IModelPricing | null | undefined,
     usage: AgentPlaygroundChatResult['usage'],
 ): Promise<number | undefined> {
-    if (!modelKey || !usage) return undefined;
+    if (!pricing || !usage) return undefined;
     try {
-        const model = await getModelByKey(tenantDbName, modelKey, projectId);
-        if (!model?.pricing) return undefined;
         const { calculateCost } = await import('@/lib/services/models/usageLogger');
-        return calculateCost(model.pricing, {
+        return calculateCost(pricing, {
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             cachedInputTokens: usage.cachedInputTokens,
@@ -3744,49 +3577,24 @@ export async function executePlaygroundChatLocal(
         ranVersion = request.version;
     }
 
-    // Connected (external) agent — invoke over HTTP, skip local runtime.
-    //
-    // Same enforcement surface as the live path, and for the same reason: the
-    // remote runtime owns its tools, so `tool.pre` / `tool.post` are NOT
-    // enforceable here and no tool guard is built. Only `input.pre` and
-    // `output.pre` run — and they run with the same helper the live path uses,
-    // so an operator testing a connected agent's policy in the playground is
-    // testing what production will actually apply.
+    // Connected (external) agent — see `runExternalAgentTurn`. `content` is
+    // the guarded answer: the only copy for a stateless call, and what a
+    // Session persists — never the raw upstream reply.
     if (config.kind === 'external' && config.connection) {
-        warnUnservableExternalBindings(config, agentKey);
-
-        const guardedMessage = await evaluateBoundGuardrails({
+        const { content } = await runExternalAgentTurn({
             tenantDbName,
             tenantId,
             projectId,
+            agentKey,
             config,
-            hook: 'input.pre',
-            text: userMessage,
+            connection: config.connection,
+            history: history || [],
+            userMessage,
+            runtimeContext,
             source: 'agent-playground',
         });
 
-        const { content } = await invokeExternalAgent(
-            config.connection,
-            [...(history || []), { role: 'user', content: guardedMessage }],
-            { tenantDbName, tenantId, projectId },
-            resolveRuntimeHeaders(runtimeContext, 'agent', agentKey, config.connection.runtimeHeaders),
-        );
-
-        // Redacting here is still the only enforcement point for a STATELESS
-        // call (no session) — the returned string is the only copy. For a
-        // Session, persistence below writes this same guarded text, never
-        // the raw upstream `content`.
-        const guardedContent = await evaluateBoundGuardrails({
-            tenantDbName,
-            tenantId,
-            projectId,
-            config,
-            hook: 'output.pre',
-            text: content,
-            source: 'agent-playground',
-        });
-
-        const externalResult: AgentPlaygroundChatResult = { content: guardedContent, version: ranVersion };
+        const externalResult: AgentPlaygroundChatResult = { content, version: ranVersion };
         if (sessionConversation) {
             await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
         }
@@ -3795,184 +3603,34 @@ export async function executePlaygroundChatLocal(
         return externalResult;
     }
 
-    // Resolve model
-    if (!config.modelKey) throw new Error('Agent has no model configured');
-    const model = await getModelByKey(tenantDbName, config.modelKey, projectId);
-    if (!model) throw new Error(`Model "${config.modelKey}" not found`);
-    if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
-
-    const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
-    if (!runtime.createChatModel) {
-        throw new Error('Provider runtime does not support chat model creation');
-    }
-
-    // Resolved through the gateway's helper so an agent obeys the same model
-    // record everything else does. Previously this built its own settings object
-    // and never read `model.settings`, which meant: a hard-coded temperature of
-    // 0.7 reached models that reject the parameter outright, the operator could
-    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
-    // under snake_case keys the contract layer does not read — so an agent's
-    // Top P and Max Tokens settings had never taken effect at all.
-    const lcModel = runtime.createChatModel({
-        modelId: model.modelId,
-        category: model.category,
-        modelSettings: resolveModelInvocationConfig(model, {
-            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-            ...(config.topP !== undefined ? { top_p: config.topP } : {}),
-            ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
-        }).modelSettings,
-    });
-
-    // Resolve system prompt. Same helper as the live path: a prompt that renders
-    // differently in the playground is a prompt nobody can test.
-    let systemPrompt = config.systemPrompt;
-    const promptVariables = buildPromptVariables({
-        config,
-        agentKey,
-        agentName: agent.name,
-        runtimeContext: runtimeContext,
-    });
-    if (!systemPrompt && config.promptKey) {
-        const prompt = await db.findPromptByKey(config.promptKey, projectId);
-        if (prompt) {
-            const rendered = renderPromptTemplate(prompt.template, promptVariables);
-            systemPrompt = rendered.text;
-            reportPromptVariables(rendered, { agentKey, promptKey: config.promptKey });
-        }
-    } else if (systemPrompt && shouldRenderInlinePrompt(config, systemPrompt)) {
-        const rendered = renderPromptTemplate(systemPrompt, promptVariables);
-        systemPrompt = rendered.text;
-        reportPromptVariables(rendered, { agentKey });
-    }
-
-    // Guardrails. Same guard and same helper as the live chat path, on purpose:
-    // an operator testing a policy in the playground has to be testing what
-    // production will run.
-    warnUnservableAgentBindings(config, agentKey);
-    const toolGuard = createAgentToolGuard({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings } = await buildLocalAgentRun({
+        db,
         tenantDbName,
         tenantId,
         projectId,
         agentKey,
+        agent,
         config,
+        runtimeContext,
         // The playground carries no authenticated principal down to here, so
         // the agent stands in for itself. `roles` is `['agent']` either way,
         // which is what `tool_access.allowedRoles` matches on — so a policy
         // verified here behaves the same in production.
         actorId: `agent:${agentKey}`,
         source: 'agent-playground',
-    });
-
-    // Same move as the live path: the text hooks run inside the agent now.
-    // `source` stays 'agent-playground' so the evaluation log still separates a
-    // rehearsal from production traffic.
-    const guardrailPlugins = await buildAgentGuardrailPlugins({
-        tenantDbName,
-        tenantId,
-        projectId,
-        agentKey,
-        config,
-        actorId: `agent:${agentKey}`,
-        source: 'agent-playground',
-    });
-    const guardedUserMessage = userMessage;
-
-    // Build RAG retrieval tool if knowledge engine is configured
-    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
-    const { z } = await import('zod');
-
-    const playgroundTools: AgentSdkToolInterface[] = [];
-    const playgroundToolDefinitions: TraceToolDefinition[] = [];
-    if (config.knowledgeEngineKey) {
-        const knowledgeTools = await buildKnowledgeTools(
-            tenantDbName, tenantId, config.knowledgeEngineKey, toolGuard,
-        );
-        playgroundTools.push(...knowledgeTools.tools);
-        playgroundToolDefinitions.push(...knowledgeTools.toolDefinitions);
-    }
-
-    if (config.knowledgeEngineKey) {
-        const knowledgeSearchInstruction = [
-            'Knowledge-base-first policy:',
-            '- For user questions that are factual, documentation, API, setup, troubleshooting, or product-behavior related, call `knowledge_search` first.',
-            '- Do not provide a final answer before at least one `knowledge_search` attempt unless the request is purely conversational.',
-            '- After retrieval, answer using the retrieved content; if retrieval is empty, say you are not fully certain and provide the best concise answer.',
-        ].join('\n');
-        systemPrompt = systemPrompt
-            ? `${knowledgeSearchInstruction}\n\n${systemPrompt}`
-            : knowledgeSearchInstruction;
-    }
-
-    // Build bound tools from toolBindings (MCP, future sources)
-    const {
-        cleanupTasks,
-        tools: boundPlaygroundTools,
-        definitions: boundPlaygroundToolDefinitions,
-    } = await buildBoundTools(
-        tenantDbName,
-        tenantId,
-        projectId,
-        config.toolBindings,
-        createTool,
-        z,
-        toolGuard,
-        runtimeContext,
-    );
-    playgroundTools.push(...boundPlaygroundTools);
-    playgroundToolDefinitions.push(...boundPlaygroundToolDefinitions);
-
-    // Same memory toolset the live path binds — a playground that hands the
-    // agent a different set of tools is not testing the agent.
-    // Non-fatal failures during the run (memory today), reported with the answer.
-    const warnings = new Set<string>();
-    const playgroundMemoryOption = buildAgentMemoryOption(config.memory, {
-        tenantDbName,
-        tenantId,
-        projectId,
-        agentKey,
-        conversationId: sessionConversation ? String(sessionConversation._id) : undefined,
+        route: 'agent.playground',
         userId: runtimeContext?.userId,
-        onWarning: (message) => warnings.add(message),
-    });
-    const playgroundMemoryToolMode = config.memory?.tools ?? 'readwrite';
-    if (playgroundMemoryOption?.store && playgroundMemoryToolMode !== 'off') {
-        const allowWrites = playgroundMemoryToolMode === 'readwrite';
-        playgroundTools.push(...buildMemoryTools({
-            store: playgroundMemoryOption.store,
-            scope: playgroundMemoryOption.scope ?? 'workspace',
-            createToolFn: createTool,
-            zod: z,
-            guard: toolGuard,
-            allowWrites,
-        }));
-        playgroundToolDefinitions.push(...memoryToolDefinitions(allowWrites));
-    }
-
-    // Same sandbox access the live path gives the agent — a Session keeps
-    // a persistent sandbox across its turns, a stateless call gets a
-    // throwaway one.
-    const playgroundSandboxTools = await buildAgentSandboxTools({
-        sandbox: config.sandbox,
-        tenantDbName,
-        tenantId,
-        projectId,
-        agentKey,
         conversation: sessionConversation,
-        createToolFn: createTool,
-        zod: z,
-        protect: (name, tool) => protectBuiltTool(toolGuard, { name, requestedName: tool.name }, tool),
-        onWarning: (message) => warnings.add(message),
+        memoryConversationId: sessionConversation ? String(sessionConversation._id) : undefined,
+        // A session's turns group under one Observability thread, the same way
+        // API turns do — the agent Sessions drawer renders that thread.
+        threadId: request.conversationId,
     });
-    playgroundTools.push(...playgroundSandboxTools.tools);
-    playgroundToolDefinitions.push(...playgroundSandboxTools.definitions);
-    cleanupTasks.push(playgroundSandboxTools.cleanup);
 
-    // The GUARDED message is what the model sees — the single-slot version
-    // computed a redaction here and then sent the raw text anyway.
     const inputState = buildTurnInputState({
         carried,
         transcript: history || [],
-        userMessage: guardedUserMessage,
+        userMessage,
         systemPrompt,
     });
     const priorExecutionIds = new Set(
@@ -3981,61 +3639,9 @@ export async function executePlaygroundChatLocal(
             .filter((id): id is string => typeof id === 'string'),
     );
 
-    // Create agent-sdk instance and invoke (tracing enabled)
-    // Wrapped so a streamed turn keeps its tool calls and usage — see
-    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
-    // Usage-tapped: agent calls bypass the gateway, so without this they
-    // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
-        tenantDbName,
-        model,
-        route: 'agent.playground',
-        agentKey,
-    });
-    const tracingSink = await createInternalTracingSink(
-        tenantDbName,
-        tenantId,
-        projectId,
-        playgroundToolDefinitions,
-    );
-
-    const playgroundSubagents = await buildAgentSubagents({
-        tenantDbName,
-        tenantId,
-        projectId,
-        subagents: config.subagents,
-        createToolFn: createTool,
-        zod: z,
-        guard: toolGuard,
-        runtimeContext: runtimeContext,
-    });
-    cleanupTasks.push(...playgroundSubagents.cleanupTasks);
-
-    const playgroundSkills = await buildAgentSkills(tenantDbName, projectId, config.skills);
-
-    const sdkAgent = createConsoleSdkAgent(createSmartAgent, {
-        name: agent.name,
-        model: sdkModel,
-        tools: playgroundTools,
-        systemPrompt,
-        tracingSink,
-        plugins: guardrailPlugins,
-        // A session's turns group under one Observability thread, the same way
-        // API turns do — the agent Sessions drawer renders that thread.
-        ...(request.conversationId ? { threadId: request.conversationId } : {}),
-        tracingMetadata: buildTracingMetadata(runtimeContext),
-        runtimeOptions: resolveAgentRuntimeOptions(config),
-        outputSchema: resolveStructuredOutputSchema(config.structuredOutput),
-        subagents: playgroundSubagents.subagents,
-        skills: playgroundSkills,
-        skillPolicy: resolveAgentSkillPolicy(config),
-        memory: playgroundMemoryOption,
-        costEstimator: await buildAgentCostEstimator(tenantDbName, projectId, config, model),
-    });
-
     // Surface progress to the caller (best-effort; never fails the run).
-    const { onToolEvent, onTextChunk, onCompaction } = request;
-    const compactions: AgentTurnCompaction[] = [];
+    const { onToolEvent, onCompaction } = request;
+    const compactions: IAgentTurnCompaction[] = [];
     const invokeConfig = {
         onEvent: (event: AgentSdkEvent) => {
             if (event.type === 'summarization') {
@@ -4065,23 +3671,7 @@ export async function executePlaygroundChatLocal(
                 logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
             }
         },
-        ...(onTextChunk ? {
-            // `stream: true` is what actually turns provider deltas on —
-            // with only `onStream` the SDK fires it exactly once, at the
-            // end, with the whole answer.
-            stream: true,
-            onStream: (chunk: { text?: string; isFinal?: boolean }) => {
-                // That same terminal call repeats the FULL content, so
-                // forwarding it would print the answer twice: once
-                // streamed, once again in one burst.
-                if (chunk.isFinal || !chunk.text) return;
-                try {
-                    onTextChunk(chunk.text);
-                } catch (callbackError) {
-                    logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
-                }
-            },
-        } : {}),
+        ...textStreamOptions(request.onTextChunk, agentKey),
     };
 
     const invokeStartedAt = Date.now();
@@ -4096,12 +3686,6 @@ export async function executePlaygroundChatLocal(
 
         const assistantReasoning = extractAgentReasoning(result);
 
-        // Output guardrail check. Three defects fixed by going through the
-        // shared helper: this site ran under the `input.pre` hook (no `phase`
-        // was passed, and 'input' is the default), it blocked on the record's
-        // legacy `action` column rather than on whether a finding actually
-        // fired, and it dropped any redaction. All three meant a policy
-        // verified in the playground was not the policy production ran.
         // Already adjudicated by the plugin's `postModelCall`; see the live path.
         //
         // A run a limit or a cancellation cut short has no final answer; the
@@ -4135,7 +3719,7 @@ export async function executePlaygroundChatLocal(
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
         };
 
-        const costUsd = await priceTurn(tenantDbName, projectId, config.modelKey, playgroundResult.usage);
+        const costUsd = await priceTurn(model.pricing, playgroundResult.usage);
         if (costUsd !== undefined && playgroundResult.usage) {
             playgroundResult.usage.costUsd = costUsd;
         }

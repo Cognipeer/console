@@ -10,7 +10,7 @@
  * so this component's whole job is the gap in between.
  */
 
-import { Box, Group, Loader, Paper, Stack, Text } from '@mantine/core';
+import { Group, Loader, Paper, Stack, Text } from '@mantine/core';
 import { IconWorld } from '@tabler/icons-react';
 import { formatDuration } from '@/lib/utils/tracingUtils';
 import classes from './AgentSessionView.module.css';
@@ -167,10 +167,6 @@ export default function LiveToolCalls({ calls, generating }: LiveToolCallsProps)
                     </Group>
                 </Paper>
             ) : null}
-
-            {/* Nothing to show yet: the first model call has not decided on a
-                tool, so neither a tool row nor "Generating" would be true. */}
-            {calls.length === 0 && !generating ? <Box /> : null}
         </Stack>
     );
 }

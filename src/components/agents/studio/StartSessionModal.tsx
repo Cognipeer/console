@@ -45,6 +45,17 @@ const CONTEXT_PLACEHOLDER = `{
   }
 }`;
 
+/** "Draft (current config)" plus one option per version, the published one marked. */
+export function versionSelectData(versions: Array<{ version: number }>, publishedVersion?: number | null) {
+    return [
+        { value: '', label: 'Draft (current config)' },
+        ...versions.map((v) => ({
+            value: String(v.version),
+            label: `v${v.version}${v.version === publishedVersion ? ' · published' : ''}`,
+        })),
+    ];
+}
+
 export default function StartSessionModal({
     opened,
     onClose,
@@ -67,20 +78,20 @@ export default function StartSessionModal({
         setVersion('');
     }, [opened]);
 
-    const parsedContext = useMemo(() => {
-        if (!contextJson.trim()) return { ok: true as const, value: undefined };
+    const parsedContext = useMemo<{ value?: Record<string, unknown>; error?: string }>(() => {
+        if (!contextJson.trim()) return {};
         try {
             const parsed = JSON.parse(contextJson);
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-                return { ok: false as const, error: 'Context must be a JSON object' };
+                return { error: 'Context must be a JSON object' };
             }
-            return { ok: true as const, value: parsed as Record<string, unknown> };
+            return { value: parsed as Record<string, unknown> };
         } catch (error) {
-            return { ok: false as const, error: error instanceof Error ? error.message : String(error) };
+            return { error: error instanceof Error ? error.message : String(error) };
         }
     }, [contextJson]);
 
-    const contextValid = parsedContext.ok;
+    const contextValid = parsedContext.error === undefined;
 
     const checklist = [
         { id: 1, label: 'Name (optional — the first message names it otherwise)', done: true },
@@ -96,7 +107,7 @@ export default function StartSessionModal({
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     title: name.trim() || undefined,
-                    ...(parsedContext.ok && parsedContext.value ? { context: parsedContext.value } : {}),
+                    ...(parsedContext.value ? { context: parsedContext.value } : {}),
                 }),
             });
             if (!res.ok) {
@@ -129,7 +140,7 @@ export default function StartSessionModal({
                     value={
                         contextJson.trim()
                             ? contextValid
-                                ? <span className="ds-faint">{Object.keys((parsedContext.ok && parsedContext.value) || {}).length} key(s)</span>
+                                ? <span className="ds-faint">{Object.keys(parsedContext.value ?? {}).length} key(s)</span>
                                 : <span style={{ color: 'var(--mantine-color-red-6)' }}>invalid</span>
                             : <span className="ds-faint">none</span>
                     }
@@ -179,13 +190,7 @@ export default function StartSessionModal({
                             hint="Pin a published version to test a frozen snapshot instead of the current draft."
                         >
                             <Select
-                                data={[
-                                    { value: '', label: 'Draft (current config)' },
-                                    ...versions.map((v) => ({
-                                        value: String(v.version),
-                                        label: `v${v.version}${v.version === publishedVersion ? ' · published' : ''}`,
-                                    })),
-                                ]}
+                                data={versionSelectData(versions, publishedVersion)}
                                 value={version}
                                 onChange={(next) => setVersion(next ?? '')}
                                 allowDeselect={false}
@@ -212,7 +217,7 @@ export default function StartSessionModal({
                             minRows={10}
                             maxRows={20}
                             autosize
-                            error={!contextValid && 'error' in parsedContext ? parsedContext.error : undefined}
+                            error={parsedContext.error}
                             value={contextJson}
                             onChange={(event) => setContextJson(event.currentTarget.value)}
                             styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)', fontSize: 12 } }}

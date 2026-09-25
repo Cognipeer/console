@@ -13,7 +13,7 @@
  *
  * Adding a newly-split module = add ONE entry to ENTERPRISE_API_RULES.
  */
-import { LicenseManager, isEnterpriseLicenseType, type LicenseType } from './license-manager';
+import { LicenseManager, type LicenseType } from './license-manager';
 
 export interface EnterpriseApiRule {
   /** Enterprise module id (matches platform-services.json `enterpriseModule`). */
@@ -151,10 +151,10 @@ export interface EnterpriseDenial {
 
 function getEnterpriseRuleForPath(pathname: string): EnterpriseApiRule | null {
   for (const rule of ENTERPRISE_API_RULES) {
-    if (rule.exemptPrefixes?.some((p) => pathname === p || pathname.startsWith(p))) {
+    if (rule.exemptPrefixes?.some((p) => pathname.startsWith(p))) {
       continue;
     }
-    if (rule.prefixes.some((p) => pathname === p || pathname.startsWith(p))) {
+    if (rule.prefixes.some((p) => pathname.startsWith(p))) {
       return rule;
     }
   }
@@ -197,13 +197,8 @@ export function checkEnterpriseApiAccess(
       },
     };
   }
-  // buildSessionHeaders already collapses an expired license to FREE, so the
-  // type check usually suffices; isEnterpriseActive re-checks expiry+grace when
-  // a caller passes the raw type+expiry.
-  const allowed = expiresAt === undefined
-    ? isEnterpriseLicenseType(effectiveLicenseType)
-    : LicenseManager.isEnterpriseActive(effectiveLicenseType, expiresAt);
-  if (allowed) {
+  // Expiry + grace are re-checked when the caller passes an expiry; without one this is a type check.
+  if (LicenseManager.isEnterpriseActive(effectiveLicenseType, expiresAt)) {
     return null;
   }
   return {

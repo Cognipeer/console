@@ -376,21 +376,11 @@ export interface GuardrailRegexPolicyConfig extends GuardrailPolicyBase<'regex'>
   rules: GuardrailRegexRule[];
 }
 
-export interface GuardrailModerationPolicyConfig extends GuardrailPolicyBase<'moderation'> {
-  /** See `IGuardrailModerationPolicy.detector`. */
-  detector?: 'llm' | 'model' | 'lexicon';
-  modelKey?: string;
-  categories: Record<string, boolean>;
-  /** See `IGuardrailModerationPolicy.lexiconCustomLists`. */
-  lexiconCustomLists?: Record<string, string[]>;
-}
+export interface GuardrailModerationPolicyConfig
+  extends GuardrailPolicyBase<'moderation'>, IGuardrailModerationPolicy {}
 
-export interface GuardrailPromptShieldPolicyConfig extends GuardrailPolicyBase<'prompt_shield'> {
-  modelKey?: string;
-  sensitivity: 'low' | 'balanced' | 'high';
-  /** See `IGuardrailPromptShieldPolicy.detector`. */
-  detector?: 'llm' | 'pattern';
-}
+export interface GuardrailPromptShieldPolicyConfig
+  extends GuardrailPolicyBase<'prompt_shield'>, IGuardrailPromptShieldPolicy {}
 
 export interface GuardrailCustomPolicyConfig extends GuardrailPolicyBase<'custom'> {
   modelKey?: string;
@@ -2139,7 +2129,6 @@ export type AgentContextPolicy = 'raw' | 'summary_only' | 'hybrid';
 export type AgentToolResponsePolicy = 'keep_full' | 'keep_structured' | 'summarize_archive' | 'drop';
 export type AgentChildContextPolicy = 'minimal' | 'scoped' | 'full';
 export type AgentSubagentMode = 'off' | 'registry_only' | 'registry_and_adhoc';
-export type AgentMemoryProvider = 'inMemory' | 'redis' | 'postgres' | 'mongo' | 's3';
 export type AgentMemoryScope = 'session' | 'user' | 'workspace' | 'tenant';
 export type AgentMemoryWritePolicy = 'manual' | 'auto_important' | 'always';
 export type AgentMemoryReadPolicy = 'recent_only' | 'semantic' | 'hybrid';
@@ -2197,10 +2186,8 @@ export interface IAgentReasoningConfig {
 /**
  * Memory backing for an agent — routed through console's OWN memory module
  * (vector-backed stores manageable at `/dashboard/memory`), not a bare
- * SDK-provider string. `AgentMemoryProvider`/`AgentMemoryScope` (the raw SDK
- * provider kinds) are still exported above for anyone constructing the SDK
- * option object directly, but nothing here asks an operator to pick a
- * driver — they pick a STORE, the same one the Memory module itself lists.
+ * SDK-provider string: an operator picks a STORE, the same one the Memory
+ * module itself lists.
  *
  * At run time this resolves to a `MemoryStore` implementation
  * (`agentMemoryAdapter.ts`) backed by `recallForChat`/`addMemory` on that
@@ -2532,24 +2519,14 @@ export interface IAgentToolBinding {
  * stamped with the schedule id in its metadata — so history came for free
  * rather than needing a second write path.
  *
- * The timing fields are deliberately identical to `ICrawlerSchedule` so both
- * features share `schedulePlanner`; cron semantics that diverge between two
- * schedulers in the same product is a support ticket waiting to happen.
+ * It extends `ICrawlerSchedule` so both features share `schedulePlanner`;
+ * cron semantics that diverge between two schedulers in the same product is
+ * a support ticket waiting to happen.
  */
-export interface IAgentSchedule {
+export interface IAgentSchedule extends ICrawlerSchedule {
   /** Stable id, generated on create. Stamped onto every run's conversation. */
   id: string;
   name: string;
-  enabled: boolean;
-  mode: CrawlerScheduleMode;
-  /** interval mode: seconds between runs. Minimum 60. */
-  intervalSeconds?: number;
-  /** cron mode: 5- or 6-field cron expression (UTC). */
-  cron?: string;
-  startAt?: Date;
-  endAt?: Date;
-  lastRunAt?: Date;
-  nextRunAt?: Date;
   /** The message sent to the agent on each fire. Supports prompt variables. */
   message: string;
   /**
@@ -2608,10 +2585,7 @@ export interface IAgentVersion {
   createdAt?: Date;
 }
 
-/**
- * One tool call as a debug session shows it — see `IAgentConversationMessage`.
- * Kept minimal on purpose: full tool payloads live in tracing, not here.
- */
+/** One tool call as a debug session shows it — see `IAgentConversationMessage`. */
 export interface IAgentConversationStep {
   id?: string;
   name: string;
@@ -2624,7 +2598,9 @@ export interface IAgentConversationStep {
   output?: unknown;
   /** The untouched tool result, stored only when it differs from `output`. */
   rawOutput?: unknown;
+  /** Present when the tool threw. */
   error?: string;
+  /** Sub-agent that made the call, when delegation was involved. */
   subagent?: string;
   /**
    * The SDK's own verdict. Authoritative: the old code sniffed the output for
@@ -2638,7 +2614,12 @@ export interface IAgentConversationStep {
   summarized?: boolean;
   originalTokenCount?: number;
   timestamp?: string;
-  /** Text the model wrote in the message that made this call (first call of that message only). */
+  /**
+   * What the model wrote in the same message that made this call ("Let me
+   * search for …"), set on the first call of that message only. Kept so the
+   * transcript shows it where it happened — before the call — instead of
+   * dropping it (it is not part of the final answer).
+   */
   narration?: string;
 }
 
@@ -2655,11 +2636,14 @@ export interface IAgentConversationMessage {
    * session shows what happened, not just what was said.
    */
   steps?: IAgentConversationStep[];
+  /** Parsed structured output, when the agent declares an output schema. */
   output?: unknown;
+  /** Why the structured contract failed, when it did. */
   outputError?: string;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
+    /** A discounted slice of `inputTokens`, not an addition to it. */
     cachedInputTokens?: number;
     totalTokens?: number;
     /** Priced from the model's own `pricing` at the time of the run — see `calculateCost`. */
@@ -2692,10 +2676,12 @@ export interface IAgentConversationMessage {
 /** One context summarization during a turn, as the session view shows it. */
 export interface IAgentTurnCompaction {
   at: string;
+  /** Tool results the pass compacted. */
   messagesCompressed?: number;
   tokensBefore?: number;
   tokensAfter?: number;
   durationMs?: number;
+  /** The summarizer's own model call. */
   inputTokens?: number;
   outputTokens?: number;
   summary?: {
@@ -2706,6 +2692,7 @@ export interface IAgentTurnCompaction {
     discarded?: string[];
   };
   integrityNotes?: string[];
+  /** The summarizer call failed and a local fallback summary was used. */
   failed?: boolean;
 }
 
@@ -3659,7 +3646,7 @@ export interface IPrescriptionReport {
 
 /**
  * Which path created this row. A `'sync'` row exists only to hold the
- * single-active-run reservation (see the partial unique index on
+ * single-active-run reservation (see `createAgentRun` in contract.ts for
  * `conversationId`, §6/§12.14) for the duration of an inline call — it is
  * always deleted when the call ends (success, timeout, or error), never left
  * in a terminal state and never intended to be polled.
@@ -3667,8 +3654,8 @@ export interface IPrescriptionReport {
 export type AgentRunMode = 'sync' | 'background';
 
 /**
- * No `'timeout'` state — timeouts only happen in synchronous mode, which
- * never creates a run record (§6).
+ * No `timeout` state: a timeout only happens in synchronous mode, whose
+ * reservation row is deleted when the call ends, never finalized (§6).
  */
 export type AgentRunStatus =
   | 'queued'
@@ -3703,19 +3690,15 @@ export interface IAgentRun extends IUsageAttributionFields {
   projectId: string;
   agentKey: string;
   /**
-   * Conversation this turn is appended to. Guarded by a partial unique index
-   * so at most one active (`queued`/`running`) run can exist per conversation
-   * regardless of mode (§6, §12.14).
+   * Conversation this turn is appended to. Guarded (SQLite partial unique
+   * index / Mongo agent_run_locks) so at most one active (`queued`/`running`)
+   * run can exist per conversation regardless of mode (§6, §12.14).
    */
   conversationId: string;
   userMessage: string;
   /**
-   * Reconstructs the exact `AgentChatRequest` the worker needs to actually
-   * execute the turn (§7 step 2: "the worker loads everything else from the
-   * AgentRun record itself"). Opaque JSON, owned by `agentRunService.ts` —
-   * the DB layer never reads inside it. Not part of the §6 field table
-   * verbatim but required for the execution path to function at all: the
-   * queue payload is only `{ runId }`.
+   * Which agent config the worker re-runs the turn with. The queue message
+   * carries only ids; the worker loads the rest from this row (§7 step 2).
    */
   version?: number | null;
   usePublished?: boolean;

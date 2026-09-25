@@ -38,6 +38,7 @@ import type { ProviderConfigView } from '@/lib/services/providers/providerServic
 import type {
   WebSearchAiAnswerSettings,
   WebSearchResult,
+  WebSearchResultItem,
 } from '@/lib/services/webSearch/types';
 import type { IWebSearchRunLog } from '@/lib/database';
 
@@ -46,13 +47,50 @@ const LOGS_FETCH_LIMIT = 200;
 type TabId = 'playground' | 'usage' | 'logs' | 'config';
 
 function aiAnswerOf(p: ProviderConfigView | null): WebSearchAiAnswerSettings {
-  const raw = (p?.settings as Record<string, unknown> | undefined)?.aiAnswer;
+  const raw = p?.settings?.aiAnswer;
   return raw && typeof raw === 'object' ? (raw as WebSearchAiAnswerSettings) : {};
 }
 
 function settingString(p: ProviderConfigView, name: string): string | undefined {
-  const value = (p.settings as Record<string, unknown>)?.[name];
+  const value = p.settings?.[name];
   return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/** Optional settings rows on the Configuration card, shown only when set. */
+const SETTING_ROWS: Array<[name: string, label: string]> = [
+  ['baseUrl', 'Base URL'],
+  ['language', 'Language'],
+  ['country', 'Country / market'],
+  ['safeSearch', 'Safe search'],
+];
+
+/** One search's result rows — the playground and the log detail show the same list. */
+function ResultLinks({
+  results,
+}: {
+  results: Array<Pick<WebSearchResultItem, 'position' | 'url' | 'title' | 'snippet'>>;
+}) {
+  return (
+    <>
+      {results.map((r) => (
+        <div key={`${r.position}-${r.url}`} className="ds-col" style={{ gap: 2 }}>
+          <a
+            href={r.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            style={{ fontSize: 13, fontWeight: 500 }}
+          >
+            {r.position}. {r.title || r.url}
+            <IconExternalLink size={12} style={{ marginLeft: 4, verticalAlign: -1 }} />
+          </a>
+          <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{r.url}</span>
+          {r.snippet && (
+            <span className="ds-muted" style={{ fontSize: 12 }}>{r.snippet}</span>
+          )}
+        </div>
+      ))}
+    </>
+  );
 }
 
 export default function WebSearchInstancePage() {
@@ -214,7 +252,7 @@ export default function WebSearchInstancePage() {
       acc[s] = (acc[s] ?? 0) + 1;
       return acc;
     }, {});
-    const aiAnswered = logs.filter((l) => l.metadata && (l.metadata as Record<string, unknown>).answerModel).length;
+    const aiAnswered = logs.filter((l) => l.metadata?.answerModel).length;
     const totalResults = success.reduce((acc, l) => acc + (l.resultCount ?? 0), 0);
     return {
       total: logs.length,
@@ -519,26 +557,7 @@ export default function WebSearchInstancePage() {
                 </div>
               )}
               <Stack gap={10}>
-                {searchResult.results.map((r) => (
-                  <div key={`${r.position}-${r.url}`} className="ds-col" style={{ gap: 2 }}>
-                    <a
-                      href={r.url}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      style={{ fontSize: 13, fontWeight: 500 }}
-                    >
-                      {r.position}. {r.title || r.url}
-                      <IconExternalLink
-                        size={12}
-                        style={{ marginLeft: 4, verticalAlign: -1 }}
-                      />
-                    </a>
-                    <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{r.url}</span>
-                    {r.snippet && (
-                      <span className="ds-muted" style={{ fontSize: 12 }}>{r.snippet}</span>
-                    )}
-                  </div>
-                ))}
+                <ResultLinks results={searchResult.results} />
               </Stack>
             </div>
           )}
@@ -751,30 +770,15 @@ export default function WebSearchInstancePage() {
                     <span className="ds-faint">none</span>
                   )}
                 </div>
-                {settingString(instance, 'baseUrl') && (
-                  <div className="ds-row-between">
-                    <span className="ds-muted">Base URL</span>
-                    <span className="ds-mono">{settingString(instance, 'baseUrl')}</span>
-                  </div>
-                )}
-                {settingString(instance, 'language') && (
-                  <div className="ds-row-between">
-                    <span className="ds-muted">Language</span>
-                    <span className="ds-mono">{settingString(instance, 'language')}</span>
-                  </div>
-                )}
-                {settingString(instance, 'country') && (
-                  <div className="ds-row-between">
-                    <span className="ds-muted">Country / market</span>
-                    <span className="ds-mono">{settingString(instance, 'country')}</span>
-                  </div>
-                )}
-                {settingString(instance, 'safeSearch') && (
-                  <div className="ds-row-between">
-                    <span className="ds-muted">Safe search</span>
-                    <span className="ds-mono">{settingString(instance, 'safeSearch')}</span>
-                  </div>
-                )}
+                {SETTING_ROWS.map(([name, label]) => {
+                  const value = settingString(instance, name);
+                  return value ? (
+                    <div key={name} className="ds-row-between">
+                      <span className="ds-muted">{label}</span>
+                      <span className="ds-mono">{value}</span>
+                    </div>
+                  ) : null;
+                })}
                 {instance.description && (
                   <div className="ds-row-between">
                     <span className="ds-muted">Description</span>
@@ -864,10 +868,10 @@ export default function WebSearchInstancePage() {
                 <span className="ds-badge">{logDetail.latencyMs} ms</span>
               )}
               {logDetail.source && <span className="ds-badge">{logDetail.source}</span>}
-              {(logDetail.metadata as Record<string, unknown> | undefined)?.answerModel ? (
+              {logDetail.metadata?.answerModel ? (
                 <span className="ds-badge ds-badge-ok">
                   <IconSparkles size={11} style={{ verticalAlign: -1, marginRight: 3 }} />
-                  {String((logDetail.metadata as Record<string, unknown>).answerModel)}
+                  {String(logDetail.metadata.answerModel)}
                 </span>
               ) : null}
             </Group>
@@ -885,23 +889,7 @@ export default function WebSearchInstancePage() {
             {(logDetail.results ?? []).length > 0 && (
               <Stack gap={8}>
                 <span className="ds-muted" style={{ fontSize: 12 }}>Returned results</span>
-                {(logDetail.results ?? []).map((r) => (
-                  <div key={`${r.position}-${r.url}`} className="ds-col" style={{ gap: 2 }}>
-                    <a
-                      href={r.url}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      style={{ fontSize: 13, fontWeight: 500 }}
-                    >
-                      {r.position}. {r.title || r.url}
-                      <IconExternalLink size={12} style={{ marginLeft: 4, verticalAlign: -1 }} />
-                    </a>
-                    <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>{r.url}</span>
-                    {r.snippet && (
-                      <span className="ds-muted" style={{ fontSize: 12 }}>{r.snippet}</span>
-                    )}
-                  </div>
-                ))}
+                <ResultLinks results={logDetail.results ?? []} />
               </Stack>
             )}
           </Stack>

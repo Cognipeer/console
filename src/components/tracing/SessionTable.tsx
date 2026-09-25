@@ -1,5 +1,6 @@
 'use client';
 
+import type { CSSProperties } from 'react';
 import { Tooltip } from '@mantine/core';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
@@ -28,6 +29,8 @@ interface SessionTableProps {
   loading?: boolean;
 }
 
+const NUM_CELL: CSSProperties = { textAlign: 'right', fontSize: 12.5, fontVariantNumeric: 'tabular-nums' };
+
 function statusVariant(status?: string) {
   switch ((status ?? '').toLowerCase()) {
     case 'success':
@@ -37,9 +40,6 @@ function statusVariant(status?: string) {
     case 'error':
     case 'failed':
       return 'err' as const;
-    case 'running':
-    case 'in_progress':
-      return 'info' as const;
     case 'paused':
     case 'cancelled':
       return 'paused' as const;
@@ -151,34 +151,13 @@ export default function SessionTable({
               <td className="ds-faint" style={{ fontSize: 12.5 }}>
                 {formatRelativeTime(session.startedAt)}
               </td>
-              <td
-                className="ds-mono"
-                style={{
-                  textAlign: 'right',
-                  fontSize: 12.5,
-                  fontVariantNumeric: 'tabular-nums',
-                }}
-              >
+              <td className="ds-mono" style={NUM_CELL}>
                 {formatDuration(session.durationMs)}
               </td>
-              <td
-                className="ds-mono"
-                style={{
-                  textAlign: 'right',
-                  fontSize: 12.5,
-                  fontVariantNumeric: 'tabular-nums',
-                }}
-              >
+              <td className="ds-mono" style={NUM_CELL}>
                 {formatNumber(session.totalEvents)}
               </td>
-              <td
-                className="ds-mono"
-                style={{
-                  textAlign: 'right',
-                  fontSize: 12.5,
-                  fontVariantNumeric: 'tabular-nums',
-                }}
-              >
+              <td className="ds-mono" style={NUM_CELL}>
                 {formatNumber(session.totalTokens)}
               </td>
             </tr>

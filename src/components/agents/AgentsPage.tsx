@@ -38,10 +38,6 @@ interface Agent {
     modelKey?: string;
     kind?: 'native' | 'external';
     connection?: { protocol?: string };
-    systemPrompt?: string;
-    promptKey?: string;
-    temperature?: number;
-    topP?: number;
     toolBindings?: Array<{ toolNames?: string[] }>;
     knowledgeEngineKey?: string;
     memory?: { enabled?: boolean };
@@ -60,6 +56,18 @@ type PublishFilter = 'all' | 'published' | 'unpublished';
 /** Tools the agent can call by name — the bound ones; knowledge/memory are shown as capability chips. */
 function boundToolCount(agent: Agent): number {
   return (agent.config.toolBindings ?? []).reduce((sum, b) => sum + (b.toolNames?.length ?? 0), 0);
+}
+
+/** A create-menu entry: title over a one-line description. */
+function MenuOption({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="ds-col" style={{ gap: 1 }}>
+      <span style={{ fontSize: 13, fontWeight: 500 }}>{title}</span>
+      <span className="ds-muted" style={{ fontSize: 11 }}>
+        {description}
+      </span>
+    </div>
+  );
 }
 
 interface Model {
@@ -142,6 +150,7 @@ export default function AgentsPage() {
   const handleCreated = (agentId: string) => {
     setCreateModalOpen(false);
     setConnectModalOpen(false);
+    setImportOpen(false);
     router.push(`/dashboard/agents/${agentId}`);
   };
 
@@ -327,35 +336,23 @@ export default function AgentsPage() {
                 leftSection={<IconRobot size={15} />}
                 onClick={() => setCreateModalOpen(true)}
               >
-                <div className="ds-col" style={{ gap: 1 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500 }}>{t('createAgent')}</span>
-                  <span className="ds-muted" style={{ fontSize: 11 }}>
-                    {t('createAgentDesc')}
-                  </span>
-                </div>
+                <MenuOption title={t('createAgent')} description={t('createAgentDesc')} />
               </Menu.Item>
               <Menu.Item
                 leftSection={<IconPlugConnected size={15} />}
                 onClick={() => setConnectModalOpen(true)}
               >
-                <div className="ds-col" style={{ gap: 1 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500 }}>{t('connectAgent')}</span>
-                  <span className="ds-muted" style={{ fontSize: 11 }}>
-                    {t('connectAgentDesc')}
-                  </span>
-                </div>
+                <MenuOption title={t('connectAgent')} description={t('connectAgentDesc')} />
               </Menu.Item>
               <Menu.Divider />
               <Menu.Item
                 leftSection={<IconFileImport size={15} />}
                 onClick={() => setImportOpen(true)}
               >
-                <div className="ds-col" style={{ gap: 1 }}>
-                  <span style={{ fontSize: 13, fontWeight: 500 }}>Import</span>
-                  <span className="ds-muted" style={{ fontSize: 11 }}>
-                    From a Claude Managed Agent or an agent manifest (YAML / JSON)
-                  </span>
-                </div>
+                <MenuOption
+                  title="Import"
+                  description="From a Claude Managed Agent or an agent manifest (YAML / JSON)"
+                />
               </Menu.Item>
             </Menu.Dropdown>
           </Menu>
@@ -475,10 +472,7 @@ export default function AgentsPage() {
       <ImportAgentShell
         opened={importOpen}
         onClose={() => setImportOpen(false)}
-        onImported={(agentId) => {
-          setImportOpen(false);
-          handleCreated(agentId);
-        }}
+        onImported={handleCreated}
       />
       <ConnectAgentModal
         opened={connectModalOpen}

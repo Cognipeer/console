@@ -20,16 +20,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.detailCell {
-  background: var(--mantine-color-gray-0);
-}
-
-@media (prefers-color-scheme: dark) {
-  .detailCell {
-    background: var(--mantine-color-dark-6);
-  }
-}
-
 .sortHeader {
   width: 100%;
 }

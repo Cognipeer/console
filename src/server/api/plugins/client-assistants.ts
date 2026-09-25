@@ -50,6 +50,8 @@ import type {
 import {
   createAgentRecord,
   createConversation,
+  deleteAgentRecord,
+  deleteConversation,
   getAgentByKey,
   getConversationById,
   listAgents,
@@ -366,13 +368,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: '`model` is required and must name a registered model key' });
       }
 
-      let toolFields: { toolBindings?: IAgentToolBinding[]; knowledgeEngineKey?: string };
-      try {
-        toolFields = await toolBindingsFromAssistantBody(ctx.tenantDbName, ctx.projectId, body);
-      } catch (error) {
-        if (error instanceof AssistantRequestError) return reply.code(400).send({ error: error.message });
-        throw error;
-      }
+      const toolFields = await toolBindingsFromAssistantBody(ctx.tenantDbName, ctx.projectId, body);
 
       const config: IAgentConfig = {
         modelKey: body.model,
@@ -404,6 +400,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send(agentToAssistant(agent));
     } catch (error) {
+      if (error instanceof AssistantRequestError) return reply.code(400).send({ error: error.message });
       logger.error('Create assistant error', { error });
       return reply.code(500).send({ error: error instanceof Error ? error.message : 'Internal server error' });
     }
@@ -445,22 +442,16 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!agent) return reply.code(404).send({ error: 'Assistant not found' });
 
       const body = readJsonBody<Record<string, unknown>>(request);
-      let toolFields: { toolBindings?: IAgentToolBinding[]; knowledgeEngineKey?: string } = {};
-      if (body.tools !== undefined) {
-        try {
-          toolFields = await toolBindingsFromAssistantBody(ctx.tenantDbName, ctx.projectId, body);
-        } catch (error) {
-          if (error instanceof AssistantRequestError) return reply.code(400).send({ error: error.message });
-          throw error;
-        }
-      }
+      const toolFields = body.tools !== undefined
+        ? await toolBindingsFromAssistantBody(ctx.tenantDbName, ctx.projectId, body)
+        : {};
 
       const config: Partial<IAgentConfig> = {
         ...(typeof body.model === 'string' ? { modelKey: body.model } : {}),
         ...(typeof body.instructions === 'string' ? { systemPrompt: body.instructions } : {}),
         ...(typeof body.temperature === 'number' ? { temperature: body.temperature } : {}),
         ...(typeof body.top_p === 'number' ? { topP: body.top_p } : {}),
-        ...(body.tools !== undefined ? toolFields : {}),
+        ...toolFields,
       };
 
       const updates: Partial<IAgent> = {
@@ -474,6 +465,7 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!updated) return reply.code(404).send({ error: 'Assistant not found' });
       return reply.code(200).send(agentToAssistant(updated));
     } catch (error) {
+      if (error instanceof AssistantRequestError) return reply.code(400).send({ error: error.message });
       logger.error('Modify assistant error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
@@ -485,7 +477,6 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       const { assistantId: rawId } = request.params as { assistantId: string };
       const agent = await getAgentByKey(ctx.tenantDbName, agentKeyFromAssistantId(rawId), ctx.projectId);
       if (!agent) return reply.code(404).send({ error: 'Assistant not found' });
-      const { deleteAgentRecord } = await import('@/lib/services/agents');
       const deleted = await deleteAgentRecord(ctx.tenantDbName, String(agent._id));
       return reply.code(200).send({ id: rawId, object: 'assistant.deleted', deleted });
     } catch (error) {
@@ -620,7 +611,6 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       const { threadId: rawId } = request.params as { threadId: string };
       const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
       if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
-      const { deleteConversation } = await import('@/lib/services/agents');
       const deleted = await deleteConversation(ctx.tenantDbName, conversationIdFromThreadId(rawId));
       return reply.code(200).send({ id: rawId, object: 'thread.deleted', deleted });
     } catch (error) {
@@ -782,10 +772,9 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
         total_tokens: result.usage.total_tokens,
       };
       const remaining = pending.filter((m) => m.id !== toRun.id);
-      const existingRuns = readAssistantsMetadata(conversation).runs ?? [];
       await writeAssistantsMetadata(conversationId, conversation, {
         pendingMessages: remaining,
-        runs: [...existingRuns, record].slice(-50),
+        runs: [...(readAssistantsMetadata(conversation).runs ?? []), record].slice(-50),
       });
 
       return { status: 200, body: toRunObject(threadId(conversationId), record) };
@@ -794,18 +783,17 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       // OpenAI's own semantics (a failed run never consumes the thread state it
       // was given), so the caller can fix whatever was wrong and run again
       // without re-sending the message.
+      record.status = 'failed';
+      record.failed_at = Math.floor(Date.now() / 1000);
       if (error instanceof AgentGuardrailBlockedError) {
-        record.status = 'failed';
-        record.failed_at = Math.floor(Date.now() / 1000);
         record.last_error = { code: 'guardrail_block', message: error.message };
       } else {
-        record.status = 'failed';
-        record.failed_at = Math.floor(Date.now() / 1000);
         const classified = classifyAgentRunError(error);
         record.last_error = { code: classified.error.code ?? classified.error.type, message: classified.error.message };
       }
-      const existingRuns = readAssistantsMetadata(conversation).runs ?? [];
-      await writeAssistantsMetadata(conversationId, conversation, { runs: [...existingRuns, record].slice(-50) });
+      await writeAssistantsMetadata(conversationId, conversation, {
+        runs: [...(readAssistantsMetadata(conversation).runs ?? []), record].slice(-50),
+      });
       return { status: 200, body: toRunObject(threadId(conversationId), record) };
     }
   }

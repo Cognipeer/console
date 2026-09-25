@@ -98,5 +98,3 @@ export function noisyOr(scores: number[]): number {
   }
   return 1 - survival;
 }
-
-export { CONTEXT_WINDOW };

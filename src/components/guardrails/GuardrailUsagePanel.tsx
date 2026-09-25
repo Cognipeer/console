@@ -141,10 +141,10 @@ export type UsageSurface = 'model' | 'agent' | 'mcp';
  * HOOK_IDS). It therefore renders as inert on every consumer, which is true.
  *
  * The runtime says the same thing once per run through
- * `agentService.warnUnservableAgentBindings` (the stream and prompt hooks) and
- * `warnUnservableExternalBindings` (those plus the tool hooks, on a connected
- * agent), so a binding that cannot fire is reported on both the screen where it
- * is made and the log of the run that ignored it.
+ * `agentService.warnUnservableStreamBinding` (the stream hook) and
+ * `warnUnservableExternalBindings` (that, plus prompt.pre and the tool hooks,
+ * on a connected agent), so a binding that cannot fire is reported on both the
+ * screen where it is made and the log of the run that ignored it.
  */
 export const SURFACE_HOOKS: Readonly<Record<UsageSurface, readonly HookId[]>> = {
   model: ['input.pre', 'output.pre', 'output.stream.delta'],

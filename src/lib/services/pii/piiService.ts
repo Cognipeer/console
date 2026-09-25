@@ -5,9 +5,6 @@
  *  - Built-in PII catalog (multi-language) + custom regex patterns
  *  - Detect, redact, mask, scan-with-policy
  *  - CRUD for tenant-scoped reusable PII policies
- *
- * NOTE: This service is intentionally not wired into other modules
- * (guardrails / tracing / RAG / audit) yet — integration is a later phase.
  */
 
 import slugify from 'slugify';
@@ -25,11 +22,13 @@ import {
   categoryLabel,
   categoryDescription,
   filterCategoriesByLanguages,
+  matchesLanguages,
   type PiiCategoryDefinition,
 } from './categories';
-import { detect, detectAsync, applyReplacements, tokenize, detokenize, explainCustomPatternError } from './detector';
+import { detectAsync, applyReplacements, tokenize, detokenize, explainCustomPatternError } from './detector';
+import type { DetectorConfig } from './detector';
 import { scanWithCognipeer } from './cognipeerEngine';
-import { COGNIPEER_PII_CATEGORIES, buildCognipeerDefaultCategories } from './cognipeerCategories';
+import { COGNIPEER_PII_CATEGORIES } from './cognipeerCategories';
 import type {
   PiiFinding,
   PiiScanResult,
@@ -87,12 +86,8 @@ async function generateUniqueKey(
 // ── Default policy builder ────────────────────────────────────────────────
 
 export function buildDefaultPolicyCategories(engine: PiiEngine = 'regex'): Record<string, boolean> {
-  if (engine === 'cognipeer') return buildCognipeerDefaultCategories();
-  const out: Record<string, boolean> = {};
-  for (const cat of PII_CATEGORIES) {
-    out[cat.id] = cat.defaultEnabled;
-  }
-  return out;
+  const catalog = engine === 'cognipeer' ? COGNIPEER_PII_CATEGORIES : PII_CATEGORIES;
+  return Object.fromEntries(catalog.map((c) => [c.id, c.defaultEnabled]));
 }
 
 // ── CRUD operations ───────────────────────────────────────────────────────
@@ -233,13 +228,7 @@ export function getCategoryCatalog(
   languages?: PiiLanguage[],
   engine: PiiEngine = 'regex',
 ): CategoryCatalogEntry[] {
-  if (engine === 'cognipeer') {
-    if (!languages || languages.length === 0) return COGNIPEER_PII_CATEGORIES;
-    const set = new Set<PiiLanguage>(languages);
-    return COGNIPEER_PII_CATEGORIES.filter(
-      (c) => c.languages.includes('global') || c.languages.some((l) => set.has(l)),
-    );
-  }
+  if (engine === 'cognipeer') return COGNIPEER_PII_CATEGORIES.filter(matchesLanguages(languages));
   const list = filterCategoriesByLanguages(languages);
   return list.map((c) => ({
     id: c.id,
@@ -253,14 +242,19 @@ export function getCategoryCatalog(
 
 // ── Detect / Redact / Mask (stateless) ────────────────────────────────────
 
-/** Shared by every stateless entry point below and by `scanWithPolicy`'s
- *  cognipeer branch: run whichever engine is requested and normalise the
- *  result to `{findings, degraded}`, so the rest of each function (output-text
- *  stitching, tokenize, block-remapping) stays identical for either engine. */
+/**
+ * The detection step behind every entry point below — the stateless
+ * detect/redact/mask/tokenize calls and `scanWithPolicy`, for either engine:
+ * run whichever engine is requested and normalise the result to
+ * `{findings, degraded}`, so `applyPiiAction` stays identical for both.
+ * `detection` is absent on stateless input and on every pre-v2 policy, so
+ * `detectAsync` takes its `mode: 'pattern'` fast path, which is exactly
+ * `detect()`'s output (see `detectAsync`'s doc).
+ */
 async function runDetection(
   text: string,
   engine: PiiEngine,
-  options: { categories?: Record<string, boolean>; customPatterns?: IPiiCustomPattern[]; languages?: PiiLanguage[]; locale?: PiiLanguage },
+  options: DetectorConfig,
   action: PiiAction,
 ): Promise<{ findings: PiiFinding[]; degraded: string[] }> {
   if (engine === 'cognipeer') {
@@ -270,47 +264,56 @@ async function runDetection(
       action,
     );
   }
+  return detectAsync(
+    text,
+    {
+      categories: options.categories,
+      customPatterns: options.customPatterns,
+      languages: options.languages,
+      locale: options.locale ?? 'en',
+      detection: options.detection,
+    },
+    action,
+  );
+}
+
+/** Apply `action` to detected findings: stitch the output text (or tokenize
+ *  it, returning the vault) and, for 'block', stamp every finding blocking. */
+function applyPiiAction(
+  text: string,
+  findings: PiiFinding[],
+  action: PiiAction,
+): { findings: PiiFinding[]; outputText: string; hasBlocking: boolean; vault?: PiiVault } {
+  if (action === 'tokenize') return { ...tokenize(text, findings), hasBlocking: false };
+  const out = action === 'block' ? findings.map((f) => ({ ...f, block: true })) : findings;
   return {
-    findings: detect(
-      text,
-      {
-        categories: options.categories,
-        customPatterns: options.customPatterns,
-        languages: options.languages,
-        locale: options.locale ?? 'en',
-      },
-      action,
-    ),
-    degraded: [],
+    findings: out,
+    outputText: action === 'detect' || action === 'block' ? text : applyReplacements(text, findings),
+    hasBlocking: out.some((f) => f.block),
   };
 }
 
-export async function detectPii(input: DetectInput): Promise<PiiScanResult> {
-  const { findings, degraded } = await runDetection(input.text, input.engine ?? 'regex', input, 'detect');
-  return {
-    inputLength: input.text.length,
-    findings,
-    outputText: input.text,
-    hasBlocking: false,
-    action: 'detect',
-    languages: input.languages ?? ['global'],
-    ...(degraded.length > 0 ? { degraded } : {}),
-  };
-}
-
-export async function redactPii(input: RedactInput): Promise<PiiScanResult> {
-  const action: PiiAction = input.action === 'mask' ? 'mask' : 'redact';
-  const { findings, degraded } = await runDetection(input.text, input.engine ?? 'regex', input, action);
-  const outputText = applyReplacements(input.text, findings);
+async function scanStateless(input: DetectInput, action: PiiAction): Promise<PiiScanResult> {
+  const detected = await runDetection(input.text, input.engine ?? 'regex', input, action);
+  const { findings, outputText, hasBlocking, vault } = applyPiiAction(input.text, detected.findings, action);
   return {
     inputLength: input.text.length,
     findings,
     outputText,
-    hasBlocking: false,
+    hasBlocking,
     action,
     languages: input.languages ?? ['global'],
-    ...(degraded.length > 0 ? { degraded } : {}),
+    ...(vault ? { vault } : {}),
+    ...(detected.degraded.length > 0 ? { degraded: detected.degraded } : {}),
   };
+}
+
+export async function detectPii(input: DetectInput): Promise<PiiScanResult> {
+  return scanStateless(input, 'detect');
+}
+
+export async function redactPii(input: RedactInput): Promise<PiiScanResult> {
+  return scanStateless(input, input.action === 'mask' ? 'mask' : 'redact');
 }
 
 export async function maskPii(input: DetectInput): Promise<PiiScanResult> {
@@ -327,18 +330,8 @@ export async function maskPii(input: DetectInput): Promise<PiiScanResult> {
  * model's response with the same vault.
  */
 export async function tokenizePii(input: TokenizeInput): Promise<PiiScanResult & { vault: PiiVault }> {
-  const { findings, degraded } = await runDetection(input.text, input.engine ?? 'regex', input, 'tokenize');
-  const { outputText, vault, findings: tokenized } = tokenize(input.text, findings);
-  return {
-    inputLength: input.text.length,
-    findings: tokenized,
-    outputText,
-    hasBlocking: false,
-    action: 'tokenize',
-    languages: input.languages ?? ['global'],
-    vault,
-    ...(degraded.length > 0 ? { degraded } : {}),
-  };
+  const result = await scanStateless(input, 'tokenize');
+  return { ...result, vault: result.vault ?? {} };
 }
 
 /**
@@ -381,71 +374,30 @@ export async function scanWithPolicy(params: {
   }
 
   const action: PiiAction = params.actionOverride ?? policy.defaultAction;
-  const engine: PiiEngine = policy.engine ?? 'regex';
-
-  let findings: PiiFinding[];
-  let degraded: string[];
-  if (engine === 'cognipeer') {
-    ({ findings, degraded } = await scanWithCognipeer(
-      params.text,
-      { categories: policy.categories, customPatterns: policy.customPatterns, languages: policy.languages },
-      action,
-    ));
-  } else {
-    const detectorConfig = {
+  const detected = await runDetection(
+    params.text,
+    policy.engine ?? 'regex',
+    {
       categories: policy.categories,
       customPatterns: policy.customPatterns,
       languages: policy.languages,
-      locale: params.locale ?? 'en',
-      // PII v2: absent on every policy created before this field existed, so
-      // `detectAsync`'s fast path (`mode` defaulting to 'pattern') makes this
-      // branch call `detect()` with identical output to the line this
-      // replaced — see `detectAsync`'s own doc comment.
+      locale: params.locale,
       detection: policy.detection,
-    };
-    // `detect()` stays the entry point whenever no NLP layer is requested —
-    // not just an optimization: it keeps a plain policy's call stack (and
-    // therefore its latency) completely unchanged, which is what makes the
-    // load test's 'pattern' arm a true baseline rather than `detectAsync`
-    // doing slightly more work to reach the same answer.
-    const usesNlpLayers = policy.detection?.mode && policy.detection.mode !== 'pattern';
-    ({ findings, degraded } = usesNlpLayers
-      ? await detectAsync(params.text, detectorConfig, action)
-      : { findings: detect(params.text, detectorConfig, action), degraded: [] as string[] });
-  }
-
-  if (action === 'tokenize') {
-    const { outputText, vault, findings: tokenized } = tokenize(params.text, findings);
-    return {
-      inputLength: params.text.length,
-      findings: tokenized,
-      outputText,
-      hasBlocking: false,
-      action,
-      languages: policy.languages ?? [],
-      vault,
-      policyKey: policy.key,
-      policyName: policy.name,
-      ...(degraded.length > 0 ? { degraded } : {}),
-    };
-  }
-
-  const outputText = action === 'detect' || action === 'block'
-    ? params.text
-    : applyReplacements(params.text, findings);
-  const blockedFindings: PiiFinding[] = action === 'block'
-    ? findings.map((f) => ({ ...f, block: true }))
-    : findings;
+    },
+    action,
+  );
+  const { findings, outputText, hasBlocking, vault } = applyPiiAction(params.text, detected.findings, action);
   return {
     inputLength: params.text.length,
-    findings: blockedFindings,
+    findings,
     outputText,
-    hasBlocking: blockedFindings.some((f) => f.block),
+    hasBlocking,
     action,
     languages: policy.languages ?? [],
+    ...(vault ? { vault } : {}),
     policyKey: policy.key,
     policyName: policy.name,
-    ...(degraded.length > 0 ? { degraded } : {}),
+    ...(detected.degraded.length > 0 ? { degraded: detected.degraded } : {}),
   };
 }
 

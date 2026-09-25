@@ -36,15 +36,6 @@ import { openAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecret
 
 const logger = createLogger('agent-sandbox');
 
-export const SANDBOX_TOOL_NAMES = [
-    'sandbox_exec',
-    'sandbox_run_code',
-    'sandbox_read_file',
-    'sandbox_write_file',
-    'sandbox_list_files',
-    'sandbox_preview_link',
-] as const;
-
 const DEFAULT_LINK_TTL_HOURS = 24;
 const MAX_LINK_TTL_HOURS = 168;
 const DEFAULT_KEEP_ALIVE_MINUTES = 30;
@@ -80,7 +71,7 @@ export async function resolveSandboxAvailability(tenantId: string): Promise<Sand
     return { available: true, runner };
 }
 
-export function sandboxUnavailableMessage(reason: 'edition' | 'license'): string {
+function sandboxUnavailableMessage(reason: 'edition' | 'license'): string {
     return reason === 'license'
         ? 'Sandbox access requires an Enterprise license; the agent ran without its sandbox tools.'
         : 'Sandbox access is configured, but this edition has no sandbox module; the agent ran without its sandbox tools.';
@@ -141,7 +132,8 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     const { runner } = availability;
 
     const conversationId = input.conversation?._id ? String(input.conversation._id) : undefined;
-    const persist = config.mode === 'persist' && Boolean(conversationId);
+    const persistConversationId = config.mode === 'persist' ? conversationId : undefined;
+    const persist = Boolean(persistConversationId);
     if (config.mode === 'persist' && !conversationId) {
         logger.debug('Persistent sandbox requested without a conversation; running ephemeral', { agentKey: input.agentKey });
     }
@@ -150,7 +142,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         tenantId: input.tenantId,
         projectId: input.projectId,
         agentKey: input.agentKey,
-        ...(persist && conversationId ? { conversationId } : {}),
+        ...(persistConversationId ? { conversationId: persistConversationId } : {}),
     };
     const timeoutSec = clampTimeout(config.commandTimeoutSec);
     const retentionHours = config.retentionHours && config.retentionHours > 0 ? config.retentionHours : DEFAULT_RETENTION_HOURS;
@@ -168,16 +160,15 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
 
     // ── The instance, provisioned on first use ───────────────────────────
     let instance: Promise<string> | null = null;
-    let used = false;
     let createdAt: string | undefined;
 
     const provision = async (): Promise<string> => {
         let previous: ConversationSandboxRecord | undefined;
-        if (persist && conversationId) {
+        if (persistConversationId) {
             const db = await getDatabase();
             await db.switchToTenant(input.tenantDbName);
-            const fresh = await db.findAgentConversationById(conversationId);
-            previous = (fresh?.metadata?.sandbox as ConversationSandboxRecord | undefined) ?? undefined;
+            const fresh = await db.findAgentConversationById(persistConversationId);
+            previous = fresh?.metadata?.sandbox as ConversationSandboxRecord | undefined;
             if (previous && (isStale(previous, retentionHours)
                 || (config.templateKey && previous.templateKey && previous.templateKey !== config.templateKey))) {
                 // Too old, or the agent now wants a different template: start over.
@@ -205,7 +196,6 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     };
 
     const getInstance = (): Promise<string> => {
-        used = true;
         if (!instance) {
             instance = provision().catch((error: unknown) => {
                 instance = null; // let the next call retry
@@ -339,7 +329,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     }
 
     const cleanup = async () => {
-        if (!used || !instance) return;
+        if (!instance) return;
         let instanceId: string;
         try {
             instanceId = await instance;
@@ -353,26 +343,27 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 // preview has been idle for `keepAliveMinutes`
                 // (idleStopSeconds on the instance).
                 logger.info('Agent sandbox left running for its preview', { agentKey: input.agentKey, instanceId });
+            } else if (persistConversationId) {
+                await runner.stop(ref, instanceId);
+            } else {
+                await runner.destroy(ref, instanceId);
             }
-            if (persist && conversationId) {
-                if (!previewIssued) await runner.stop(ref, instanceId);
+            if (persistConversationId) {
                 const db = await getDatabase();
                 await db.switchToTenant(input.tenantDbName);
                 // Re-read: the transcript write for this turn happened after
                 // the conversation was loaded, and `metadata` is replaced
                 // wholesale — merging into a stale copy would drop it.
-                const latest = await db.findAgentConversationById(conversationId);
+                const latest = await db.findAgentConversationById(persistConversationId);
                 const record: ConversationSandboxRecord = {
                     instanceId,
                     ...(config.templateKey ? { templateKey: config.templateKey } : {}),
                     createdAt: createdAt ?? new Date().toISOString(),
                     lastUsedAt: new Date().toISOString(),
                 };
-                await db.updateAgentConversation(conversationId, {
+                await db.updateAgentConversation(persistConversationId, {
                     metadata: { ...(latest?.metadata ?? {}), sandbox: record },
                 });
-            } else if (!previewIssued) {
-                await runner.destroy(ref, instanceId);
             }
         } catch (error) {
             logger.warn('Agent sandbox cleanup failed', {

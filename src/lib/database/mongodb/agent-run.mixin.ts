@@ -8,7 +8,7 @@
  * agent turns can carry irreversible tool side effects that crawl jobs do not.
  */
 
-import { ObjectId, MongoServerError } from 'mongodb';
+import { ObjectId, MongoServerError, type Filter } from 'mongodb';
 import type { IAgentRun } from '../provider.interface';
 import { AgentRunConflictError, AgentRunIdempotencyKeyTakenError } from '../provider/errors';
 import type { Constructor } from './types';
@@ -22,6 +22,8 @@ function toId(value: ObjectId | string | undefined): string {
 function objectId(id: string): ObjectId {
   return new ObjectId(id);
 }
+
+const toRun = (doc: IAgentRun): IAgentRun => ({ ...doc, _id: toId(doc._id) });
 
 /** Mongo's duplicate-key error code, shared across every unique index violation. */
 const DUPLICATE_KEY_ERROR_CODE = 11000;
@@ -202,30 +204,26 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       }
     }
 
+    private agentRunsCollection() {
+      return this.getTenantDb().collection<IAgentRun>(COLLECTIONS.agentRuns);
+    }
+
+    /** findOneAndUpdate($set) → the updated run, or null when the filter (a CAS guard) matched nothing. */
+    private async setAgentRun(filter: Filter<IAgentRun>, set: Partial<IAgentRun>): Promise<IAgentRun | null> {
+      const doc = await this.agentRunsCollection().findOneAndUpdate(filter, { $set: set }, { returnDocument: 'after' });
+      return doc ? toRun(doc) : null;
+    }
+
     async claimAgentRun(
       id: string,
       tenantId: string,
       workerId: string,
       startedAt: Date,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const result = await db
-        .collection<IAgentRun>(COLLECTIONS.agentRuns)
-        .findOneAndUpdate(
-          { _id: objectId(id), tenantId, status: 'queued' },
-          {
-            $set: {
-              status: 'running',
-              workerId,
-              startedAt,
-              heartbeatAt: startedAt,
-              updatedAt: new Date(),
-            },
-          },
-          { returnDocument: 'after' },
-        );
-      if (!result) return null;
-      return { ...result, _id: toId(result._id) } as IAgentRun;
+      return this.setAgentRun(
+        { _id: objectId(id), tenantId, status: 'queued' },
+        { status: 'running', workerId, startedAt, heartbeatAt: startedAt, updatedAt: new Date() },
+      );
     }
 
     async updateAgentRunHeartbeat(
@@ -233,16 +231,10 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       workerId: string,
       heartbeatAt: Date,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const result = await db
-        .collection<IAgentRun>(COLLECTIONS.agentRuns)
-        .findOneAndUpdate(
-          { _id: objectId(id), workerId, status: 'running' },
-          { $set: { heartbeatAt, updatedAt: new Date() } },
-          { returnDocument: 'after' },
-        );
-      if (!result) return null;
-      return { ...result, _id: toId(result._id) } as IAgentRun;
+      return this.setAgentRun(
+        { _id: objectId(id), workerId, status: 'running' },
+        { heartbeatAt, updatedAt: new Date() },
+      );
     }
 
     async requestAgentRunCancel(
@@ -250,48 +242,20 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       tenantId: string,
       projectId: string,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
       const now = new Date();
+      const scope = { _id: objectId(id), tenantId, projectId };
       // Fast path: run hasn't started yet, cancel it outright.
-      const queuedResult = await db
-        .collection<IAgentRun>(COLLECTIONS.agentRuns)
-        .findOneAndUpdate(
-          {
-            _id: objectId(id),
-            tenantId,
-            projectId,
-            status: 'queued',
-          },
-          {
-            $set: {
-              status: 'canceled',
-              errorReason: 'canceled_by_caller',
-              completedAt: now,
-              updatedAt: now,
-            },
-          },
-          { returnDocument: 'after' },
-        );
-      if (queuedResult) {
-        await this.releaseConversationLock(queuedResult.conversationId, id);
-        return { ...queuedResult, _id: toId(queuedResult._id) } as IAgentRun;
+      const canceled = await this.setAgentRun(
+        { ...scope, status: 'queued' },
+        { status: 'canceled', errorReason: 'canceled_by_caller', completedAt: now, updatedAt: now },
+      );
+      if (canceled) {
+        await this.releaseConversationLock(canceled.conversationId, id);
+        return canceled;
       }
       // Already running (possibly on another node) — stamp the request so
       // the owning worker observes it on its next heartbeat-cadence poll.
-      const runningResult = await db
-        .collection<IAgentRun>(COLLECTIONS.agentRuns)
-        .findOneAndUpdate(
-          {
-            _id: objectId(id),
-            tenantId,
-            projectId,
-            status: 'running',
-          },
-          { $set: { cancelRequestedAt: now, updatedAt: now } },
-          { returnDocument: 'after' },
-        );
-      if (!runningResult) return null;
-      return { ...runningResult, _id: toId(runningResult._id) } as IAgentRun;
+      return this.setAgentRun({ ...scope, status: 'running' }, { cancelRequestedAt: now, updatedAt: now });
     }
 
     async finalizeAgentRun(
@@ -299,21 +263,9 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       tenantId: string,
       data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const payload: Partial<IAgentRun> = { ...data, updatedAt: new Date() };
-      delete payload._id;
-      delete payload.tenantId;
-      delete payload.createdAt;
-      const result = await db
-        .collection<IAgentRun>(COLLECTIONS.agentRuns)
-        .findOneAndUpdate(
-          { _id: objectId(id), tenantId, status: 'running' },
-          { $set: payload },
-          { returnDocument: 'after' },
-        );
-      if (!result) return null;
-      if (!ACTIVE_STATUSES.has(result.status)) await this.releaseConversationLock(result.conversationId, id);
-      return { ...result, _id: toId(result._id) } as IAgentRun;
+      const run = await this.setAgentRun({ _id: objectId(id), tenantId, status: 'running' }, { ...data, updatedAt: new Date() });
+      if (run && !ACTIVE_STATUSES.has(run.status)) await this.releaseConversationLock(run.conversationId, id);
+      return run;
     }
 
     async updateAgentRunCallback(
@@ -321,22 +273,10 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       tenantId: string,
       data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number },
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const result = await db
-        .collection<IAgentRun>(COLLECTIONS.agentRuns)
-        .findOneAndUpdate(
-          { _id: objectId(id), tenantId },
-          {
-            $set: {
-              callbackStatus: data.callbackStatus,
-              callbackAttempts: data.callbackAttempts,
-              updatedAt: new Date(),
-            },
-          },
-          { returnDocument: 'after' },
-        );
-      if (!result) return null;
-      return { ...result, _id: toId(result._id) } as IAgentRun;
+      return this.setAgentRun(
+        { _id: objectId(id), tenantId },
+        { callbackStatus: data.callbackStatus, callbackAttempts: data.callbackAttempts, updatedAt: new Date() },
+      );
     }
 
     async getAgentRunById(
@@ -349,8 +289,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         const record = await db
           .collection<IAgentRun>(COLLECTIONS.agentRuns)
           .findOne({ _id: objectId(id), tenantId, projectId });
-        if (!record) return null;
-        return { ...record, _id: toId(record._id) } as IAgentRun;
+        return record ? toRun(record) : null;
       } catch {
         return null;
       }
@@ -365,17 +304,15 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       const record = await db
         .collection<IAgentRun>(COLLECTIONS.agentRuns)
         .findOne({ tenantId, projectId, idempotencyKey }, { sort: { createdAt: -1 } });
-      if (!record) return null;
-      return { ...record, _id: toId(record._id) } as IAgentRun;
+      return record ? toRun(record) : null;
     }
 
     async listStaleAgentRuns(
       tenantId: string,
       heartbeatBefore: Date,
-      limit?: number,
     ): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
-      const cursor = db
+      const docs = await db
         .collection<IAgentRun>(COLLECTIONS.agentRuns)
         .find({
           tenantId,
@@ -386,10 +323,9 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
             { heartbeatAt: { $exists: false } },
           ],
         })
-        .sort({ heartbeatAt: 1 });
-      if (limit && limit > 0) cursor.limit(limit);
-      const docs = await cursor.toArray();
-      return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IAgentRun);
+        .sort({ heartbeatAt: 1 })
+        .toArray();
+      return docs.map(toRun);
     }
 
     async listQueuedAgentRuns(
@@ -405,7 +341,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         .sort({ createdAt: 1 });
       if (options?.limit && options.limit > 0) cursor.limit(options.limit);
       const docs = await cursor.toArray();
-      return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IAgentRun);
+      return docs.map(toRun);
     }
 
     async listAgentRuns(filter: {
@@ -429,7 +365,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         .sort({ createdAt: -1 })
         .limit(Math.min(Math.max(filter.limit ?? 50, 1), 500))
         .toArray();
-      return docs.map((d) => ({ ...d, _id: toId(d._id) }) as IAgentRun);
+      return docs.map(toRun);
     }
 
     async deleteAgentRun(id: string): Promise<boolean> {
@@ -463,7 +399,6 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
     }
 
     async cleanupAgentRunRetention(options: {
-      projectId?: string;
       olderThan: Date;
       batchSize?: number;
     }): Promise<{ deletedCount: number }> {
@@ -475,7 +410,6 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         // run right after it is created).
         status: { $nin: ['queued', 'running'] },
       };
-      if (options.projectId) query.projectId = options.projectId;
       await db.collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks)
         .deleteMany({ kind: 'idempotency', expiresAt: { $lt: options.olderThan } })
         .catch(() => undefined);

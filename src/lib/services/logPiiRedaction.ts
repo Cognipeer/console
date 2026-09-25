@@ -7,8 +7,7 @@
  * body) has no distinctive key name or known value to match against — it can
  * only be found by scanning the text itself. This module does that scan,
  * using the same detector the PII guardrail enforces requests with
- * (`@/lib/services/pii/piiService`), which already existed but — per its own
- * file header — was "intentionally not wired into other modules... yet".
+ * (`@/lib/services/pii/piiService`).
  *
  * A guardrail binding is a per-request, per-tenant DECISION about whether to
  * block/warn on PII in a LIVE call. This is unconditional and always runs
@@ -26,16 +25,7 @@ const MAX_DEPTH = 8;
 
 async function scrubPiiValue(value: unknown, depth: number, seen: WeakSet<object>): Promise<unknown> {
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') {
-    if (!value) return value;
-    try {
-      return (await redactPii({ text: value })).outputText;
-    } catch {
-      // A detector failure must never block or corrupt the write path --
-      // fall back to the untouched string rather than throw.
-      return value;
-    }
-  }
+  if (typeof value === 'string') return redactPiiFromLogString(value);
   if (typeof value !== 'object') return value;
   // Preserve native instances, matching logRedaction.ts's scrubValue: walking
   // a Date/Buffer/Error as a plain object would erase it (Object.entries is
@@ -74,6 +64,8 @@ export async function redactPiiFromLogString(str: string | undefined): Promise<s
   try {
     return (await redactPii({ text: str })).outputText;
   } catch {
+    // A detector failure must never block or corrupt the write path --
+    // fall back to the untouched string rather than throw.
     return str;
   }
 }

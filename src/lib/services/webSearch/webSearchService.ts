@@ -229,6 +229,14 @@ export async function runWebSearch(
   }
 
   const startedAt = Date.now();
+  const logEntry: Pick<IWebSearchRunLog, 'tenantId' | 'projectId' | 'searchKey' | 'driver' | 'query' | 'source'> = {
+    tenantId,
+    projectId,
+    searchKey: providerKey,
+    driver: record.driver,
+    query,
+    source: options.source ?? 'api',
+  };
   try {
     const { results, answer: providerAnswer } = await callWebSearchProvider(
       record,
@@ -262,15 +270,10 @@ export async function runWebSearch(
     const latencyMs = Date.now() - startedAt;
 
     logRun(tenantDbName, {
-      tenantId,
-      projectId,
-      searchKey: providerKey,
-      driver: record.driver,
-      query,
+      ...logEntry,
       resultCount: results.length,
       latencyMs,
       status: 'success',
-      source: options.source ?? 'api',
       results: loggableResults(results),
       answer,
       metadata: answerModel || warnings.length > 0
@@ -290,16 +293,11 @@ export async function runWebSearch(
     };
   } catch (error) {
     logRun(tenantDbName, {
-      tenantId,
-      projectId,
-      searchKey: providerKey,
-      driver: record.driver,
-      query,
+      ...logEntry,
       resultCount: 0,
       latencyMs: Date.now() - startedAt,
       status: 'error',
       errorMessage: error instanceof Error ? error.message : String(error),
-      source: options.source ?? 'api',
     });
     logger.warn('Web search failed', {
       tenantId,

@@ -30,36 +30,8 @@ import {
 } from '@mantine/core';
 import { IconAlertTriangle, IconFileImport, IconUpload } from '@tabler/icons-react';
 import FormShell, { FormField, FormRow, FormSection, SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
+import type { AgentImportPreview as Preview, EmbeddedResourceRow as ResourceRow } from '@/lib/services/agents/import/importService';
 
-type FormatId = 'cognipeer' | 'claude-managed-agent';
-
-interface Preview {
-    format: { id: FormatId | null; label?: string; detected: boolean; candidates: Array<{ id: FormatId; label: string; confidence: number }> };
-    envelope: 'json' | 'yaml' | 'markdown';
-    agent?: { name: string; key: string; description?: string; exists: boolean };
-    model?: { requested?: string; suggestedKey?: string; options: Array<{ key: string; name: string; modelId: string }> };
-    mcpServers: Array<{ ref: string; url: string; referenced: boolean; existing?: { key: string; name: string } }>;
-    skills: Array<{ ref: string; label: string; kind: 'anthropic' | 'custom' | 'cognipeer'; existing?: { key: string; title: string } }>;
-    skillOptions: Array<{ key: string; title: string }>;
-    resources: ResourceRow[];
-    capabilities: {
-        sandbox: { requested: string[]; available: boolean; reason?: string };
-        webSearch: { requested: boolean; available: boolean };
-        webFetch: { requested: boolean };
-    };
-    warnings: Array<{ code: string; message: string }>;
-}
-
-type ResourceType = 'skills' | 'prompts' | 'mcpServers' | 'tools';
-interface ResourceRow {
-    type: ResourceType;
-    key: string;
-    name: string;
-    detail?: string;
-    existing?: { key: string; name: string };
-    auth?: { type: 'none' | 'token' | 'header' | 'basic'; headerName?: string; username?: string };
-    envKeys?: string[];
-}
 type ResourceChoice = {
     action: 'reuse' | 'create' | 'skip';
     token?: string;
@@ -69,7 +41,7 @@ type ResourceChoice = {
     password?: string;
     env?: Record<string, string>;
 };
-const RESOURCE_LABELS: Record<ResourceType, string> = { skills: 'Skill', prompts: 'Prompt', mcpServers: 'MCP server', tools: 'Tool' };
+const RESOURCE_LABELS: Record<ResourceRow['type'], string> = { skills: 'Skill', prompts: 'Prompt', mcpServers: 'MCP server', tools: 'Tool' };
 const resourceRef = (row: ResourceRow) => `${row.type}:${row.key}`;
 
 type McpChoice = {
@@ -150,7 +122,7 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
             setSkills(Object.fromEntries(next.skills.map((skill) => [skill.ref, skill.existing
                 ? { action: 'map', key: skill.existing.key }
                 : { action: 'skip', title: skill.label, header: `Imported ${skill.kind} skill ${skill.label}`, body: '' }])));
-            setResources(Object.fromEntries((next.resources ?? []).map((row) => [resourceRef(row), {
+            setResources(Object.fromEntries(next.resources.map((row) => [resourceRef(row), {
                 action: row.existing ? 'reuse' : 'create',
                 ...(row.auth?.headerName ? { headerName: row.auth.headerName } : {}),
                 ...(row.auth?.username ? { username: row.auth.username } : {}),
@@ -249,14 +221,14 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
             <SummaryGroup title="Document">
                 <SummaryKV label="File" value={fileName ?? (content ? 'Pasted' : '—')} />
                 <SummaryKV label="Format" value={preview?.format.label ?? (preview ? 'Not recognised' : '—')} />
-                <SummaryKV label="Envelope" value={preview?.envelope?.toUpperCase() ?? '—'} />
+                <SummaryKV label="Envelope" value={preview?.envelope.toUpperCase() ?? '—'} />
             </SummaryGroup>
             {preview?.format.id ? (
                 <SummaryGroup title="Will create">
                     <SummaryKV label="Agent" value={key || '—'} />
                     <SummaryKV label="MCP servers" value={String(Object.values(mcp).filter((c) => c.action === 'create').length)} />
                     <SummaryKV label="Skills" value={String(Object.values(skills).filter((c) => c.action === 'create').length)} />
-                    {preview.resources?.length ? (
+                    {preview.resources.length ? (
                         <SummaryKV label="Embedded definitions" value={`${Object.values(resources).filter((c) => c.action === 'create').length} new · ${Object.values(resources).filter((c) => c.action === 'reuse').length} reused`} />
                     ) : null}
                 </SummaryGroup>
@@ -499,7 +471,7 @@ export default function ImportAgentShell({ opened, onClose, onImported }: Import
                 </FormSection>
             ) : null}
 
-            {preview?.format.id && preview.resources?.length > 0 ? (
+            {preview?.format.id && preview.resources.length > 0 ? (
                 <FormSection number={3} title="Included definitions" description="The manifest carries these definitions. Each is reused when this project already has it, or created now — credentials were not exported, so enter them here.">
                     <Stack gap="md">
                         {preview.resources.map((row) => {

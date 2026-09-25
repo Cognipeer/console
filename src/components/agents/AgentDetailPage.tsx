@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Paper,
@@ -17,7 +17,6 @@ import {
   Code,
   CopyButton,
   Tooltip,
-  Box,
   Modal,
   Table,
   VisuallyHidden,
@@ -49,11 +48,11 @@ import {
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
 import GuardrailBindingList, {
+  bindingRowsFromLegacySlots,
   bindingRowsFromStored,
   type GuardrailBindingOption,
   type GuardrailBindingRow,
 } from '@/components/guardrails/GuardrailBindingList';
-import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import SectionCard from '@/components/common/SectionCard';
@@ -63,9 +62,9 @@ import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
 import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
 import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
 import AgentExportPanel from './studio/AgentExportPanel';
-import AgentPromptPanel from './studio/AgentPromptPanel';
+import AgentPromptPanel, { type PromptOption } from './studio/AgentPromptPanel';
 import AgentOverviewPanel from './studio/AgentOverviewPanel';
-import SessionList from './studio/SessionList';
+import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentExecutionPanel from './studio/AgentExecutionPanel';
@@ -79,6 +78,7 @@ import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import type { SkillView } from '@/components/skills/types';
 import type {
+  IAgentConfig,
   IAgentMemoryConfig,
   IAgentSandboxConfig,
   IAgentExecutionConfig,
@@ -87,6 +87,7 @@ import type {
   IAgentStructuredOutput,
   IAgentSubagent,
   IAgentSubagentPolicy,
+  IExternalAgentConnection,
 } from '@/lib/database/provider/types.domain';
 import classes from './AgentDetailPage.module.css';
 
@@ -103,37 +104,9 @@ interface Agent {
   key: string;
   name: string;
   description?: string;
-  config: {
-    modelKey?: string;
-    systemPrompt?: string;
-    promptKey?: string;
-    temperature?: number;
-    topP?: number;
-    maxTokens?: number;
-    knowledgeEngineKey?: string;
-    /** Multi-guardrail binding. Authoritative when present — the two slots
-     *  below are then derived from it, not read. */
-    guardrails?: Array<{ key: string; hooks?: HookId[] }>;
-    /** @deprecated Read only as the fallback when `guardrails` is absent. */
-    inputGuardrailKey?: string;
-    /** @deprecated See `inputGuardrailKey`. */
-    outputGuardrailKey?: string;
-    toolBindings?: ToolBinding[];
-    promptVariables?: Record<string, string>;
-    runtime?: IAgentRuntimeConfig;
-    structuredOutput?: IAgentStructuredOutput;
-    subagents?: IAgentSubagent[];
-    subagentPolicy?: IAgentSubagentPolicy;
-    kind?: 'native' | 'external';
-    connection?: {
-      protocol?: string;
-      url?: string;
-      model?: string;
-      responsePath?: string;
-      credentialProviderKey?: string;
-      hasApiKey?: boolean;
-      headers?: Record<string, string>;
-    };
+  // The API never returns the encrypted key — only whether one is stored.
+  config: Omit<IAgentConfig, 'connection'> & {
+    connection?: Partial<Omit<IExternalAgentConnection, 'apiKeyEnc'>> & { hasApiKey?: boolean };
   };
   status: string;
   publishedVersion?: number | null;
@@ -157,40 +130,12 @@ interface AgentVersion {
   createdAt: string;
 }
 
-/** A row in the Sessions list / Overview's "recent sessions" — see AgentSessionView for the full record. */
-/** Mirrors `summariseConversation` on the sessions list route. */
-interface SessionSummary {
-  _id: string;
-  title?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  messageCount?: number;
-  turns?: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-  costUsd?: number;
-  costComplete?: boolean;
-  activeMs?: number;
-  /** `metadata.source` — only `console` (or unset, legacy) sessions can be continued. */
-  source?: string;
-  hasContext?: boolean;
-}
-
 interface Model {
   _id: string;
   key: string;
   name: string;
   modelId: string;
   category: string;
-}
-
-interface Prompt {
-  _id: string;
-  key: string;
-  name: string;
-  description?: string;
-  template: string;
 }
 
 interface RagModule {
@@ -200,54 +145,25 @@ interface RagModule {
   status: string;
 }
 
-/**
- * `GuardrailBindingOption` is the shape the binding list needs — including the
- * `hooks` config, which is what decides whether a hook checkbox is available.
- * Extended rather than redeclared so the two cannot drift.
- */
-interface Guardrail extends GuardrailBindingOption {
-  _id: string;
-  target?: string;
-}
-
-
-
-/**
- * The legacy single slots, rendered as the equivalent binding list.
- *
- * The output slot seeds `output.pre` ONLY. `resolveBindings` also projects the
- * legacy key onto `output.stream.delta`, but a guardrail written before the
- * hook plane declares no streaming binding, so the stream gate evaluates
- * nothing for it today — seeding that hook would show a ticked box that does
- * nothing and the API would reject it. The checkbox unlocks itself the moment
- * the guardrail enables streaming.
- */
-function seedGuardrailsFromLegacySlots(
-  inputKey: string | undefined,
-  outputKey: string | undefined,
-): GuardrailBindingRow[] {
-  // Materialised rows: a legacy slot names ONE direction, so "wherever the
-  // guardrail declares" (an absent `hooks`) is not what it meant — the
-  // conversion has to be the exact equivalent of the two slots.
-  const rows: Array<Required<GuardrailBindingRow>> = [];
-  const bind = (key: string | undefined, hook: HookId) => {
-    if (!key) return;
-    const existing = rows.find((row) => row.key === key);
-    if (existing) {
-      if (!existing.hooks.includes(hook)) existing.hooks.push(hook);
-      return;
-    }
-    rows.push({ key, hooks: [hook] });
-  };
-  bind(inputKey || undefined, 'input.pre');
-  bind(outputKey || undefined, 'output.pre');
-  return rows;
+/** Loads one list endpoint into state; a failed load is logged and leaves the list as it was. */
+async function loadList<T>(
+  url: string,
+  pick: (data: Record<string, unknown>) => unknown,
+  set: (rows: T[]) => void,
+  what: string,
+) {
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (res.ok) set((pick(await res.json()) ?? []) as T[]);
+  } catch (err) {
+    console.error(`Failed to load ${what}`, err);
+  }
 }
 
 /**
  * Deep-link compatibility for `?tab=`.
  *
- * The page used to have thirteen flat tabs; they are now six, and Configure
+ * The page used to have thirteen flat tabs; they are now five, and Configure
  * and Deploy are single pages whose `sub` is a section to scroll to rather
  * than a pane to show. Every old value still resolves —
  * a bookmark or the Sessions page's own back link must not land on a tab that
@@ -302,9 +218,9 @@ export default function AgentDetailPage() {
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
-  const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [prompts, setPrompts] = useState<PromptOption[]>([]);
   const [ragModules, setRagModules] = useState<RagModule[]>([]);
-  const [guardrails, setGuardrails] = useState<Guardrail[]>([]);
+  const [guardrails, setGuardrails] = useState<GuardrailBindingOption[]>([]);
   const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string }>>([]);
   const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -382,7 +298,7 @@ export default function AgentDetailPage() {
 
   // Sessions list (for the Sessions tab — the actual chat now lives at its
   // own route, see AgentSessionView).
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
@@ -406,16 +322,8 @@ export default function AgentDetailPage() {
       systemPrompt: '',
       promptKey: '',
       knowledgeEngineKey: '',
-      inputGuardrailKey: '',
-      outputGuardrailKey: '',
     },
   });
-
-  // Tracing state (with pagination & date filter)
-
-  /** Badge on the Settings tab: how far this agent strays from the defaults. */
-
-
 
   // ── Data Loading ──────────────────────────────────────────────
 
@@ -434,8 +342,6 @@ export default function AgentDetailPage() {
           systemPrompt: cfg.systemPrompt || '',
           promptKey: cfg.promptKey || '',
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
-          inputGuardrailKey: cfg.inputGuardrailKey || '',
-          outputGuardrailKey: cfg.outputGuardrailKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
         setRuntimeConfig(cfg.runtime ?? {});
@@ -451,143 +357,20 @@ export default function AgentDetailPage() {
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
         // fall back to the legacy slots.
-        if (Array.isArray(cfg.guardrails)) {
-          // Shared mapping: an absent `hooks` means "wherever the guardrail
-          // declares it runs" and must stay absent, or the binding is silently
-          // parked the next time this config is saved for any reason, while the
-          // row still renders as attached.
-          setGuardrailBindings(
-            bindingRowsFromStored(cfg.guardrails as Array<{ key: string; hooks?: HookId[] }>),
-          );
-        } else {
-          const seeded = seedGuardrailsFromLegacySlots(
-            cfg.inputGuardrailKey,
-            cfg.outputGuardrailKey,
-          );
-          setGuardrailBindings(seeded);
-        }
+        //
+        // Shared mapping: an absent `hooks` means "wherever the guardrail
+        // declares it runs" and must stay absent, or the binding is silently
+        // parked the next time this config is saved for any reason, while the
+        // row still renders as attached.
+        setGuardrailBindings(Array.isArray(cfg.guardrails)
+          ? bindingRowsFromStored(cfg.guardrails)
+          : bindingRowsFromLegacySlots(cfg.inputGuardrailKey, cfg.outputGuardrailKey));
       }
     } catch (err) {
       console.error('Failed to load agent', err);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
-
-  const loadModels = async () => {
-    try {
-      const res = await fetch('/api/models?category=llm', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setModels(data.models ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load models', err);
-    }
-  };
-
-  const loadPrompts = async () => {
-    try {
-      const res = await fetch('/api/prompts', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setPrompts(data.prompts ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load prompts', err);
-    }
-  };
-
-  const loadRagModules = async () => {
-    try {
-      const res = await fetch('/api/rag/modules?status=active', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setRagModules(data.modules ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load RAG modules', err);
-    }
-  };
-
-  const loadProjectAgents = async () => {
-    try {
-      // Native agents only: a connected agent is an HTTP endpoint, and the
-      // runtime refuses to flatten one into a sub-agent, so offering it here
-      // would only produce a binding that silently drops at run time.
-      const res = await fetch('/api/agents', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setProjectAgents(
-          (data.agents ?? [])
-            .filter((entry: Agent) => entry.config?.kind !== 'external')
-            .map((entry: Agent) => ({
-              key: entry.key,
-              name: entry.name,
-              publishedVersion: entry.publishedVersion ?? null,
-            })),
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load project agents', err);
-    }
-  };
-
-  const loadSkillLibrary = async () => {
-    try {
-      const res = await fetch('/api/skills', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setSkillLibrary(data.skills ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load skill library', err);
-    }
-  };
-
-  const loadMemoryStores = async () => {
-    try {
-      const res = await fetch('/api/memory/stores', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setMemoryStores(
-          (data.stores ?? []).map((s: { key: string; name: string; status: string }) => ({
-            key: s.key,
-            name: s.name,
-            status: s.status,
-          })),
-        );
-      }
-    } catch (err) {
-      console.error('Failed to load memory stores', err);
-    }
-  };
-
-  const loadGuardrails = async () => {
-    try {
-      // Unfiltered on purpose: a guardrail disabled AFTER it was bound must
-      // still render as a (badged) row in the binding list, which keeps
-      // disabled ones out of its picker instead.
-      const res = await fetch('/api/guardrails', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setGuardrails(data.guardrails ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load guardrails', err);
-    }
-  };
-
-  const loadProviders = async () => {
-    try {
-      const res = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setProviders(data.providers ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load providers', err);
-    }
-  };
 
   const loadVersions = useCallback(async () => {
     if (!agent) return;
@@ -682,14 +465,27 @@ export default function AgentDetailPage() {
       setLoading(true);
       await Promise.all([
         loadAgent(),
-        loadModels(),
-        loadPrompts(),
-        loadRagModules(),
-        loadGuardrails(),
-        loadProviders(),
-        loadProjectAgents(),
-        loadSkillLibrary(),
-        loadMemoryStores(),
+        loadList('/api/models?category=llm', (d) => d.models, setModels, 'models'),
+        loadList('/api/prompts', (d) => d.prompts, setPrompts, 'prompts'),
+        loadList('/api/rag/modules?status=active', (d) => d.modules, setRagModules, 'RAG modules'),
+        // Unfiltered on purpose: a guardrail disabled AFTER it was bound must
+        // still render as a (badged) row in the binding list, which keeps
+        // disabled ones out of its picker instead.
+        loadList('/api/guardrails', (d) => d.guardrails, setGuardrails, 'guardrails'),
+        loadList('/api/providers?scope=tenant', (d) => d.providers, setProviders, 'providers'),
+        // Native agents only: a connected agent is an HTTP endpoint, and the
+        // runtime refuses to flatten one into a sub-agent, so offering it here
+        // would only produce a binding that silently drops at run time.
+        loadList(
+          '/api/agents',
+          (d) => ((d.agents ?? []) as Agent[])
+            .filter((entry) => entry.config?.kind !== 'external')
+            .map((entry) => ({ key: entry.key, name: entry.name, publishedVersion: entry.publishedVersion ?? null })),
+          setProjectAgents,
+          'project agents',
+        ),
+        loadList('/api/skills', (d) => d.skills, setSkillLibrary, 'skill library'),
+        loadList('/api/memory/stores', (d) => d.stores, setMemoryStores, 'memory stores'),
       ]);
       setLoading(false);
     })();
@@ -750,18 +546,6 @@ export default function AgentDetailPage() {
     [agent?.config, publishedConfig],
   );
 
-  // Initial fold, once per agent: changed sections (what a reviewer came to
-  // look at) stay open, settled ones fold to their summary. Never published →
-  // everything is new, so only the essentials open.
-  /**
-   * Props every Build section shares. Sections are always open: the config is
-   * edited as a whole and saved by one button, so folding it to summaries only
-   * hid what the agent is behind a click per section.
-   */
-  const sectionProps = (id: string) => ({
-    changed: changedSections.has(id),
-    first: id === firstVisibleSection,
-  });
   const sectionVisible = (id: string) => !onlyChanged || changedSections.has(id);
   // The divider above a section is skipped for the first one SHOWN — with
   // "only changed" on, that is not always General.
@@ -958,13 +742,7 @@ export default function AgentDetailPage() {
     ? `${origin}/api/public/a2a/${agent.tenantId}/${a2aConfig?.endpointSlug}`
     : `${origin}/api/client/v1/a2a/${agent.key}`;
   const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
-  const apiOrigin = origin;
 
-  /**
-   * The Basic settings pane. Extracted from the playground so settings and
-   * the conversation no longer share a cramped two-column row: the playground
-   * is now full width, and this renders under Settings → Basic.
-   */
   /**
    * The General section's fields, all open.
    *
@@ -1111,6 +889,25 @@ export default function AgentDetailPage() {
     )
   );
 
+  /**
+   * One Build section, or nothing when "only changed" hides it. A connected
+   * agent has only General. Sections are always open: the config is edited as
+   * a whole and saved by one button, so folding them only hid what the agent is.
+   */
+  const buildSection = (id: string, description: string, body: ReactNode, meta?: ReactNode) =>
+    (id === 'basic' || !isConnected) && sectionVisible(id) ? (
+      <ConfigSection
+        id={id}
+        title={CONFIG_SECTION_TITLES[id]}
+        description={description}
+        meta={meta}
+        changed={changedSections.has(id)}
+        first={id === firstVisibleSection}
+      >
+        {body}
+      </ConfigSection>
+    ) : null;
+
   return (
     <PageContainer>
       <PageHeader
@@ -1235,7 +1032,6 @@ export default function AgentDetailPage() {
                 onOpen={(id) => setViewedSessionId(id)}
                 onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
                 onStart={() => setStartSessionOpen(true)}
-                searchable
                 onRefresh={() => void loadSessions()}
                 refreshing={sessionsLoading}
                 tracesHref={`/dashboard/tracing/sessions?agent=${encodeURIComponent(agent.name)}`}
@@ -1277,169 +1073,114 @@ export default function AgentDetailPage() {
                 ? ` · ${changedSections.size} changed since v${agent.publishedVersion}`
                 : ' · never published'}
             </Text>
-            <Group gap="xs">
-              {agent.publishedVersion ? (
-                <Button
-                  size="compact-sm"
-                  variant={onlyChanged ? 'light' : 'subtle'}
-                  color={onlyChanged ? 'orange' : 'gray'}
-                  disabled={changedSections.size === 0 && !onlyChanged}
-                  onClick={() => setOnlyChanged((value) => !value)}
-                >
-                  {onlyChanged ? 'Show all sections' : 'Show only changed'}
-                </Button>
-              ) : null}
-            </Group>
+            {agent.publishedVersion ? (
+              <Button
+                size="compact-sm"
+                variant={onlyChanged ? 'light' : 'subtle'}
+                color={onlyChanged ? 'orange' : 'gray'}
+                disabled={changedSections.size === 0 && !onlyChanged}
+                onClick={() => setOnlyChanged((value) => !value)}
+              >
+                {onlyChanged ? 'Show all sections' : 'Show only changed'}
+              </Button>
+            ) : null}
           </Group>
           <Paper withBorder radius="md" p="xl">
-            {sectionVisible('basic') ? (
-            <ConfigSection
-              id="basic"
-              {...sectionProps('basic')}
-              title="General"
-              description="What this agent is, which model answers, and the tools it can call."
-            >
-              {renderBasicSettings()}
-            </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('prompt') ? (
-              <ConfigSection
-                id="prompt"
-                {...sectionProps('prompt')}
-                title="Prompt"
-                description="Inline text, or a prompt from the Prompts module — editable right here."
-              >
-                <AgentPromptPanel
-                  mode={configForm.values.promptMode}
-                  onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
-                  systemPrompt={configForm.values.systemPrompt}
-                  onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
-                  promptKey={configForm.values.promptKey}
-                  onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
-                  prompts={prompts}
-                  onPromptsChanged={(next) => setPrompts(next)}
-                  onSaveAgentConfig={handleSaveConfig}
-                />
-              </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('subagents') ? (
-              <ConfigSection
-                id="subagents"
-                {...sectionProps('subagents')}
-                title="Delegation"
-                description="Roles this agent can hand work to, and the guards around that."
-                meta={subagents.length > 0 ? (
-                  <Badge size="xs" variant="light" w="fit-content">{subagents.length} sub-agents</Badge>
-                ) : null}
-              >
-                <AgentSubagentsPanel
-                  subagents={subagents}
-                  policy={subagentPolicy}
-                  agents={projectAgents}
-                  models={models.map((model) => ({ key: model.key, name: model.name }))}
-                  currentAgentKey={agent.key}
-                  onChange={(nextSubagents, nextPolicy) => {
-                    setSubagents(nextSubagents);
-                    setSubagentPolicy(nextPolicy);
-                  }}
-                />
-              </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('skills') ? (
-              <ConfigSection
-                id="skills"
-                {...sectionProps('skills')}
-                title="Skills"
-                description="Capabilities this agent can discover and open on demand, from the project's skill library."
-                meta={skills.length > 0 ? (
-                  <Badge size="xs" variant="light" w="fit-content">{skills.length} attached</Badge>
-                ) : null}
-              >
-                <AgentSkillsPanel
-                  skills={skills}
-                  policy={skillPolicy}
-                  library={skillLibrary}
-                  onLibraryAdd={(skill) => setSkillLibrary((prev) => [...prev.filter((s) => s.key !== skill.key), skill])}
-                  onChange={(nextSkills, nextPolicy) => {
-                    setSkills(nextSkills);
-                    setSkillPolicy(nextPolicy);
-                  }}
-                />
-              </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('memory') ? (
-              <ConfigSection
-                id="memory"
-                {...sectionProps('memory')}
-                title="Memory"
-                description="What this agent remembers across runs, backed by a store from the Memory module."
-                meta={memoryConfig?.enabled ? (
-                  <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
-                ) : null}
-              >
-                <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />
-              </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('sandbox') ? (
-              <ConfigSection
-                id="sandbox"
-                {...sectionProps('sandbox')}
-                title="Sandbox"
-                description="An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets."
-                meta={sandboxConfig?.enabled ? (
-                  <Badge size="xs" color="grape" variant="light" w="fit-content">
-                    {sandboxConfig.mode === 'persist' ? 'persistent' : 'ephemeral'}
-                  </Badge>
-                ) : null}
-              >
-                <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} />
-              </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('execution') ? (
-              <ConfigSection
-                id="execution"
-                {...sectionProps('execution')}
-                title="Execution"
-                description="How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling."
-                meta={executionConfig?.defaultMode === 'background' ? (
-                  <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
-                ) : null}
-              >
-                <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />
-              </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('advanced') ? (
-              <ConfigSection
-                id="advanced"
-                {...sectionProps('advanced')}
-                title="Runtime"
-                description="How the agent loop behaves: planning, budgets, context handling and reasoning."
-              >
-                <AgentAdvancedSettings
-                  value={runtimeConfig}
-                  onChange={setRuntimeConfig}
-                  toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
-                />
-              </ConfigSection>
-            ) : null}
-
-            {!isConnected && sectionVisible('output') ? (
-              <ConfigSection
-                id="output"
-                {...sectionProps('output')}
-                title="Structured output"
-                description="Make the agent answer with JSON that matches a schema instead of free text."
-              >
-                <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />
-              </ConfigSection>
-            ) : null}
+            {buildSection(
+              'basic',
+              'What this agent is, which model answers, and the tools it can call.',
+              renderBasicSettings(),
+            )}
+            {buildSection(
+              'prompt',
+              'Inline text, or a prompt from the Prompts module — editable right here.',
+              <AgentPromptPanel
+                mode={configForm.values.promptMode}
+                onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
+                systemPrompt={configForm.values.systemPrompt}
+                onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
+                promptKey={configForm.values.promptKey}
+                onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
+                prompts={prompts}
+                onPromptsChanged={setPrompts}
+                onSaveAgentConfig={handleSaveConfig}
+              />,
+            )}
+            {buildSection(
+              'subagents',
+              'Roles this agent can hand work to, and the guards around that.',
+              <AgentSubagentsPanel
+                subagents={subagents}
+                policy={subagentPolicy}
+                agents={projectAgents}
+                models={models.map((model) => ({ key: model.key, name: model.name }))}
+                currentAgentKey={agent.key}
+                onChange={(nextSubagents, nextPolicy) => {
+                  setSubagents(nextSubagents);
+                  setSubagentPolicy(nextPolicy);
+                }}
+              />,
+              subagents.length > 0 ? (
+                <Badge size="xs" variant="light" w="fit-content">{subagents.length} sub-agents</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'skills',
+              "Capabilities this agent can discover and open on demand, from the project's skill library.",
+              <AgentSkillsPanel
+                skills={skills}
+                policy={skillPolicy}
+                library={skillLibrary}
+                onLibraryAdd={(skill) => setSkillLibrary((prev) => [...prev.filter((s) => s.key !== skill.key), skill])}
+                onChange={(nextSkills, nextPolicy) => {
+                  setSkills(nextSkills);
+                  setSkillPolicy(nextPolicy);
+                }}
+              />,
+              skills.length > 0 ? (
+                <Badge size="xs" variant="light" w="fit-content">{skills.length} attached</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'memory',
+              'What this agent remembers across runs, backed by a store from the Memory module.',
+              <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />,
+              memoryConfig?.enabled ? (
+                <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'sandbox',
+              'An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets.',
+              <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} />,
+              sandboxConfig?.enabled ? (
+                <Badge size="xs" color="grape" variant="light" w="fit-content">
+                  {sandboxConfig.mode === 'persist' ? 'persistent' : 'ephemeral'}
+                </Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'execution',
+              'How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling.',
+              <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />,
+              executionConfig?.defaultMode === 'background' ? (
+                <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'advanced',
+              'How the agent loop behaves: planning, budgets, context handling and reasoning.',
+              <AgentAdvancedSettings
+                value={runtimeConfig}
+                onChange={setRuntimeConfig}
+                toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
+              />,
+            )}
+            {buildSection(
+              'output',
+              'Make the agent answer with JSON that matches a schema instead of free text.',
+              <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />,
+            )}
           </Paper>
 
           {/*
@@ -1710,56 +1451,36 @@ export default function AgentDetailPage() {
           and it had been buried as the second item of Observe's rail.
         */}
         <Tabs.Panel value="usage">
-          <Stack gap="md">
-            <SectionCard p="md">
-              <Stack gap="md">
-                <Text size="lg" fw={600}>
-                  {t('usage.title')}
-                </Text>
-                <Text size="sm" c="dimmed">
-                  {t('usage.description', { name: agent.name })}
-                </Text>
+          <SectionCard p="md">
+            <Stack gap="md">
+              <Text size="lg" fw={600}>
+                {t('usage.title')}
+              </Text>
+              <Text size="sm" c="dimmed">
+                {t('usage.description', { name: agent.name })}
+              </Text>
 
-                <Divider />
+              <Divider />
 
-                {/* ── SDK Usage ─────────────────────────────── */}
-                <Text size="sm" fw={600}>
-                  {t('usage.sdkTitle')}
-                </Text>
+              {/* ── SDK Usage ─────────────────────────────── */}
+              <Text size="sm" fw={600}>
+                {t('usage.sdkTitle')}
+              </Text>
 
-                <Text size="sm" c="dimmed" mb="xs">
-                  {t('usage.installLabel')}
-                </Text>
-                <Box>
-                  <Group gap="xs" align="center">
-                    <Code block className={classes.codeGrow}>
-                      npm install @cognipeer/console-sdk
-                    </Code>
-                    <CopyButton value="npm install @cognipeer/console-sdk">
-                      {({ copied, copy }) => (
-                        <Tooltip label={copied ? 'Copied' : 'Copy'}>
-                          <ActionIcon
-                            variant="subtle"
-                            onClick={copy}
-                            color={copied ? 'teal' : 'gray'}
-                          >
-                            {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                          </ActionIcon>
-                        </Tooltip>
-                      )}
-                    </CopyButton>
-                  </Group>
-                </Box>
+              <Text size="sm" c="dimmed" mb="xs">
+                {t('usage.installLabel')}
+              </Text>
+              <CopyableCode value="npm install @cognipeer/console-sdk" />
 
-                <Text size="sm" c="dimmed" mb="xs">
-                  {t('usage.chatLabel')}
-                </Text>
-                <Code block>
-                  {`import { ConsoleClient } from '@cognipeer/console-sdk';
+              <Text size="sm" c="dimmed" mb="xs">
+                {t('usage.chatLabel')}
+              </Text>
+              <Code block>
+                {`import { ConsoleClient } from '@cognipeer/console-sdk';
 
 const client = new ConsoleClient({
   apiKey: 'YOUR_API_KEY',
-  baseURL: '${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}',
+  baseURL: '${origin}',
 });
 
 // ── Single turn ──────────────────────────────────
@@ -1784,21 +1505,21 @@ const res = await client.agents.responses.create({
   input: 'Summarize the key points',
   version: ${agent.publishedVersion || 1},
 });`}
-                </Code>
+              </Code>
 
-                <Divider />
+              <Divider />
 
-                {/* ── REST Usage ────────────────────────────── */}
-                <Text size="sm" fw={600}>
-                  {t('usage.restTitle')}
-                </Text>
+              {/* ── REST Usage ────────────────────────────── */}
+              <Text size="sm" fw={600}>
+                {t('usage.restTitle')}
+              </Text>
 
-                <Text size="sm" c="dimmed" mb="xs">
-                  {t('usage.restLabel')}
-                </Text>
-                <Code block>
-                  {`# First message
-curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/client/v1/responses \\
+              <Text size="sm" c="dimmed" mb="xs">
+                {t('usage.restLabel')}
+              </Text>
+              <Code block>
+                {`# First message
+curl -X POST ${origin}/api/client/v1/responses \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -1807,7 +1528,7 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
   }'
 
 # Continue conversation (use the id from the previous response)
-curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/client/v1/responses \\
+curl -X POST ${origin}/api/client/v1/responses \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -1817,7 +1538,7 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
   }'
 
 # Use a specific published version
-curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/client/v1/responses \\
+curl -X POST ${origin}/api/client/v1/responses \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -1825,16 +1546,16 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
     "input": "Hello!",
     "version": ${agent.publishedVersion || 1}
   }'`}
-                </Code>
+              </Code>
 
-                <Divider />
+              <Divider />
 
-                {/* ── Response Format ──────────────────────── */}
-                <Text size="sm" fw={600}>
-                  {t('usage.responseTitle')}
-                </Text>
-                <Code block>
-                  {`{
+              {/* ── Response Format ──────────────────────── */}
+              <Text size="sm" fw={600}>
+                {t('usage.responseTitle')}
+              </Text>
+              <Code block>
+                {`{
   "id": "resp_<conversation_id>",
   "object": "response",
   "model": "${agent.name}",
@@ -1861,23 +1582,23 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
   "previous_response_id": null,
   "version": ${agent.publishedVersion || 'null'}
 }`}
-                </Code>
+              </Code>
 
-                <Divider />
+              <Divider />
 
-                {/* ── Background execution ─────────────────── */}
-                <Text size="sm" fw={600}>Background execution (long-running turns)</Text>
-                <Text size="xs" c="dimmed">
-                  For turns that may run past a normal HTTP timeout (deep research, long tool chains), add{' '}
-                  <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call. Instead of
-                  the completed answer, you immediately get back a run id to poll — the turn keeps executing
-                  server-side even if you disconnect. Optionally set <code>Idempotency-Key</code> so a retried
-                  request replays the same run instead of starting a second one, or <code>callback_url</code> to
-                  get an HMAC-signed webhook when it finishes instead of polling.
-                </Text>
-                <Code block>
+              {/* ── Background execution ─────────────────── */}
+              <Text size="sm" fw={600}>Background execution (long-running turns)</Text>
+              <Text size="xs" c="dimmed">
+                For turns that may run past a normal HTTP timeout (deep research, long tool chains), add{' '}
+                <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call. Instead of
+                the completed answer, you immediately get back a run id to poll — the turn keeps executing
+                server-side even if you disconnect. Optionally set <code>Idempotency-Key</code> so a retried
+                request replays the same run instead of starting a second one, or <code>callback_url</code> to
+                get an HMAC-signed webhook when it finishes instead of polling.
+              </Text>
+              <Code block>
 {`# 1. Start it in the background — returns immediately with 202
-curl -X POST ${apiOrigin}/api/client/v1/responses \\
+curl -X POST ${origin}/api/client/v1/responses \\
   -H "Authorization: ******" \\
   -H "Content-Type: application/json" \\
   -H "x-cognipeer-background: true" \\
@@ -1891,7 +1612,7 @@ curl -X POST ${apiOrigin}/api/client/v1/responses \\
 # → 202 { "id": "run_<run_id>", "object": "agent.run", "status": "queued", "created_at": 1719500000 }
 
 # 2. Poll status until it leaves "queued"/"running"
-curl ${apiOrigin}/api/client/v1/agents/runs/run_<run_id> \\
+curl ${origin}/api/client/v1/agents/runs/run_<run_id> \\
   -H "Authorization: ******"
 
 # → 200 { "id": "run_<run_id>", "object": "agent.run", "status": "succeeded",
@@ -1900,12 +1621,12 @@ curl ${apiOrigin}/api/client/v1/agents/runs/run_<run_id> \\
 # status is one of: queued | running | succeeded | failed | canceled
 
 # 3. (optional) Cancel it before it finishes
-curl -X POST ${apiOrigin}/api/client/v1/agents/runs/run_<run_id>/cancel \\
+curl -X POST ${origin}/api/client/v1/agents/runs/run_<run_id>/cancel \\
   -H "Authorization: ******"
 
 # Once succeeded, continue the conversation with a normal (synchronous) call —
 # the run's own "resp_" id inside "result.id" works as previous_response_id too:
-curl -X POST ${apiOrigin}/api/client/v1/responses \\
+curl -X POST ${origin}/api/client/v1/responses \\
   -H "Authorization: ******" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -1913,30 +1634,30 @@ curl -X POST ${apiOrigin}/api/client/v1/responses \\
     "input": "Now write it up as a one-pager",
     "previous_response_id": "run_<run_id>"
   }'`}
-                </Code>
-                <Text size="xs" c="dimmed">
-                  Only one background (or synchronous) run may be in flight per conversation at a time — a
-                  second request against the same conversation is rejected with <code>409 agent_run_conflict</code>{' '}
-                  until the first one finishes.
-                </Text>
+              </Code>
+              <Text size="xs" c="dimmed">
+                Only one background (or synchronous) run may be in flight per conversation at a time — a
+                second request against the same conversation is rejected with <code>409 agent_run_conflict</code>{' '}
+                until the first one finishes.
+              </Text>
 
-                {/*
-                  Every other surface the agent is reachable on. They were
-                  built one at a time and only the Responses API was ever
-                  documented here, so an integrator reading this tab would
-                  not know an OpenAI client could call the agent at all.
-                */}
-                <Divider />
-                <Text size="sm" fw={600}>OpenAI-compatible (chat/completions)</Text>
-                <Text size="xs" c="dimmed">
-                  Any OpenAI SDK can call this agent — put its key in <code>model</code> (or <code>agent:{agent.key}</code> if a
-                  model shares the name). Runs the published version. Pass back <code>conversation_id</code> to continue a thread;
-                  set <code>stream: true</code> for token deltas.
-                </Text>
-                <Code block>
+              {/*
+                Every other surface the agent is reachable on. They were
+                built one at a time and only the Responses API was ever
+                documented here, so an integrator reading this tab would
+                not know an OpenAI client could call the agent at all.
+              */}
+              <Divider />
+              <Text size="sm" fw={600}>OpenAI-compatible (chat/completions)</Text>
+              <Text size="xs" c="dimmed">
+                Any OpenAI SDK can call this agent — put its key in <code>model</code> (or <code>agent:{agent.key}</code> if a
+                model shares the name). Runs the published version. Pass back <code>conversation_id</code> to continue a thread;
+                set <code>stream: true</code> for token deltas.
+              </Text>
+              <Code block>
 {`from openai import OpenAI
 
-client = OpenAI(base_url="${apiOrigin}/api/client/v1", api_key="YOUR_API_TOKEN")
+client = OpenAI(base_url="${origin}/api/client/v1", api_key="YOUR_API_TOKEN")
 
 stream = client.chat.completions.create(
     model="${agent.key}",
@@ -1945,40 +1666,39 @@ stream = client.chat.completions.create(
 )
 for chunk in stream:
     print(chunk.choices[0].delta.content or "", end="")`}
-                </Code>
-                <Code block>
-{`curl -N -X POST ${apiOrigin}/api/client/v1/chat/completions \\
+              </Code>
+              <Code block>
+{`curl -N -X POST ${origin}/api/client/v1/chat/completions \\
   -H "Authorization: Bearer YOUR_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'`}
-                </Code>
+              </Code>
 
-                <Divider />
-                <Text size="sm" fw={600}>A2A (agent-to-agent)</Text>
-                <Text size="xs" c="dimmed">
-                  {a2aEnabled
-                    ? 'Exposed. Other agents discover it from the card and talk JSON-RPC — settings under Deploy → Publish.'
-                    : 'Not exposed yet — turn it on under Deploy → Publish, then other agents can discover it from the card below.'}
-                </Text>
-                <Code block>{`GET ${a2aCardUrl}`}</Code>
+              <Divider />
+              <Text size="sm" fw={600}>A2A (agent-to-agent)</Text>
+              <Text size="xs" c="dimmed">
+                {a2aEnabled
+                  ? 'Exposed. Other agents discover it from the card and talk JSON-RPC — settings under Deploy → Publish.'
+                  : 'Not exposed yet — turn it on under Deploy → Publish, then other agents can discover it from the card below.'}
+              </Text>
+              <Code block>{`GET ${a2aCardUrl}`}</Code>
 
-                <Divider />
-                <Text size="sm" fw={600}>Assistants API</Text>
-                <Text size="xs" c="dimmed">
-                  For clients built on OpenAI Assistants. This agent already IS an assistant — its id is
-                  {' '}<code>asst_{agent.key}</code> — so there is nothing to create; <code>POST /assistants</code> would make
-                  a new, separate agent. Start a thread and run it in one call:
-                </Text>
-                <Code block>
-{`POST ${apiOrigin}/api/client/v1/threads/runs
+              <Divider />
+              <Text size="sm" fw={600}>Assistants API</Text>
+              <Text size="xs" c="dimmed">
+                For clients built on OpenAI Assistants. This agent already IS an assistant — its id is
+                {' '}<code>asst_{agent.key}</code> — so there is nothing to create; <code>POST /assistants</code> would make
+                a new, separate agent. Start a thread and run it in one call:
+              </Text>
+              <Code block>
+{`POST ${origin}/api/client/v1/threads/runs
 {
   "assistant_id": "asst_${agent.key}",
   "thread": { "messages": [{ "role": "user", "content": "Hello" }] }
 }`}
-                </Code>
-              </Stack>
-            </SectionCard>
-          </Stack>
+              </Code>
+            </Stack>
+          </SectionCard>
         </Tabs.Panel>
       </Tabs>
 
@@ -2067,7 +1787,7 @@ for chunk in stream:
   );
 }
 
-/** One-line code block with a copy button (endpoint URLs on the Publish tab). */
+/** One-line code block with a copy button. */
 function CopyableCode({ value }: { value: string }) {
   return (
     <Group gap="xs" align="center">
@@ -2227,7 +1947,3 @@ function computeJsonDiff(
 
   return diffs;
 }
-
-// ReasoningDisclosure / StepTimeline / StepPayload / StructuredOutputBlock /
-// TurnFooter moved to `session/AgentSessionView.tsx` along with the rest of
-// the chat UI they belonged to — see that file.

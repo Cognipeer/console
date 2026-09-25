@@ -183,16 +183,15 @@ export default function CompareVersionsDrawer({
                                 <Paper key={index} withBorder={turn.role === 'assistant'} radius="md" p="sm" bg={turn.role === 'user' ? 'var(--ds-surface-sunken, var(--mantine-color-gray-0))' : undefined}>
                                     <Stack gap={6}>
                                         <MessageBlock messageRole={turn.role} content={turn.content} />
-                                        {(turn.steps ?? []).length > 0 ? (
+                                        {turn.steps?.length ? (
                                             <Group gap={4}>
-                                                {(turn.steps ?? []).map((step, stepIndex) => (
-                                                    <Group key={stepIndex} gap={4} wrap="nowrap">
-                                                        <StatusBadge
-                                                            status={step.status === 'error' || step.error ? 'error' : 'ok'}
-                                                            label={step.name}
-                                                            withDot
-                                                        />
-                                                    </Group>
+                                                {turn.steps.map((step, stepIndex) => (
+                                                    <StatusBadge
+                                                        key={stepIndex}
+                                                        status={step.status === 'error' || step.error ? 'error' : 'ok'}
+                                                        label={step.name}
+                                                        withDot
+                                                    />
                                                 ))}
                                             </Group>
                                         ) : null}

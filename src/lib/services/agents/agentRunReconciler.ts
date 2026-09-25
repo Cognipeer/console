@@ -24,20 +24,16 @@
  *
  * A `queued` run whose message was lost (memory-queue restart, matching the
  * crawler's documented failure mode) IS safe to republish as-is, since it
- * never started executing — that recovery is boot-specific (an in-memory
- * queue's contents are only ever lost by a process restart), so it runs
- * once at `reconcileOrphanedAgentRuns()` (called from bootstrap), not on
- * every periodic tick — redundantly republishing an already-durably-queued
- * BullMQ job on every tick would be wasteful (though harmless: `claimAgentRun`'s
- * CAS makes a duplicate delivery safe either way).
+ * never started executing: every queued run at boot, and on each tick those
+ * older than `runRequeueAfterMs`. `claimAgentRun` is a CAS, so a duplicate
+ * delivery no-ops.
  */
 
 import { getDatabase } from '@/lib/database';
-import type { DatabaseProvider } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
-import { fireAgentRunCallback, isAbandonedSyncReservation, republishAgentRun } from './agentRunService';
+import { fireAgentRunCallback, isAbandonedSyncReservation, publishAgentRunJob, runWithTenantDb } from './agentRunService';
 
 const logger = createLogger('agent-run:reconcile');
 
@@ -50,17 +46,6 @@ const ORPHANED_RUNNING_MESSAGE =
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let running = false;
-let paused = false;
-let lastStartedAt: Date | null = null;
-let lastCompletedAt: Date | null = null;
-let lastDurationMs: number | null = null;
-let lastError: string | null = null;
-let lastLockProvider = 'unknown';
-let lastProcessedTenants = 0;
-let lastFailedRunningRuns = 0;
-let lastDeletedSyncRuns = 0;
-let lastRequeuedRuns = 0;
-let lastRetentionDeleted = 0;
 let lastRetentionAt = 0;
 /** Retention is a housekeeping sweep, not a per-tick one — hourly is plenty. */
 const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
@@ -77,34 +62,6 @@ interface SweepResult {
 
 const EMPTY_SWEEP: SweepResult = { tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, retentionDeleted: 0 };
 
-/**
- * Binds `fn` to `tenantDbName` for its whole execution via the ALREADY-
- * RESOLVED `mainDb` handle's own `runWithTenant` (a real AsyncLocalStorage
- * scope), rather than the separate `runWithTenantScope` export — which
- * would call `getDatabase()` again through `@/lib/database`'s OWN internal
- * reference, invisible to a test that only overrides this file's top-level
- * `getDatabase` import. Reusing the handle already in scope sidesteps that
- * entirely while keeping the identical AsyncLocalStorage guarantee
- * `runWithTenantScope` exists for (§12.11-adjacent — never the
- * process-global `switchToTenant` fallback for a background task
- * iterating every tenant).
- */
-async function runWithTenantDb<T>(
-  mainDb: DatabaseProvider,
-  tenantDbName: string,
-  fn: (db: DatabaseProvider) => T | Promise<T>,
-): Promise<T> {
-  if (typeof mainDb.runWithTenant === 'function') {
-    return mainDb.runWithTenant(tenantDbName, () => fn(mainDb));
-  }
-  await mainDb.switchToTenant(tenantDbName);
-  return fn(mainDb);
-}
-
-/**
- * The heartbeat-staleness sweep itself — shared by both the one-shot boot
- * call and the periodic scheduler.
- */
 /**
  * One pass over every tenant:
  *  - `running` background runs whose heartbeat went stale → `worker_lost`;
@@ -140,7 +97,7 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
     const tenantId = String(tenant._id);
 
     try {
-      await runWithTenantDb(mainDb, tenant.dbName, async (tenantDb) => {
+      await runWithTenantDb(tenant.dbName, async (tenantDb) => {
         const staleRuns = await tenantDb.listStaleAgentRuns(tenantId, staleBefore);
         for (const run of staleRuns) {
           const runId = String(run._id);
@@ -173,10 +130,10 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           }
         }
 
-        const queued = await tenantDb.listQueuedAgentRuns(tenantId, { ...(requeueBefore ? { createdBefore: requeueBefore } : {}), limit: REQUEUE_BATCH });
+        const queued = await tenantDb.listQueuedAgentRuns(tenantId, { createdBefore: requeueBefore, limit: REQUEUE_BATCH });
         for (const run of queued) {
           try {
-            await republishAgentRun(run);
+            await publishAgentRunJob(run);
             requeuedRuns += 1;
           } catch (error) {
             logger.warn('Failed to republish a queued agent run', {
@@ -220,17 +177,13 @@ export async function reconcileOrphanedAgentRuns(): Promise<SweepResult> {
   return sweep;
 }
 
-async function runOnce(manual = false): Promise<SweepResult> {
-  if (paused && !manual) return EMPTY_SWEEP;
+async function runOnce(): Promise<SweepResult> {
   if (running) return EMPTY_SWEEP;
   running = true;
   let lockToken: string | undefined;
-  const startedAt = new Date();
-  lastStartedAt = startedAt;
 
   try {
     const cache = await getCache();
-    lastLockProvider = cache.name;
     lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
     // Single coordinated task, not per-entity work (unlike agentScheduler's
     // per-agent instance assignment) — only the node holding the global
@@ -241,19 +194,13 @@ async function runOnce(manual = false): Promise<SweepResult> {
     }
 
     const result = await sweepStaleRunningAgentRuns();
-    lastError = null;
-    lastProcessedTenants = result.tenantsScanned;
-    lastFailedRunningRuns = result.failedRunningRuns;
-    lastDeletedSyncRuns = result.deletedSyncRuns;
-    lastRequeuedRuns = result.requeuedRuns;
-    if (result.retentionDeleted > 0) lastRetentionDeleted = result.retentionDeleted;
     if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0 || result.requeuedRuns > 0) {
       logger.info('Reconciled orphaned agent runs', result);
     }
     return result;
   } catch (error) {
-    lastError = error instanceof Error ? error.message : String(error);
-    logger.error('Fatal agent-run reconciler error', { error: lastError });
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('Fatal agent-run reconciler error', { error: message });
     throw error;
   } finally {
     if (lockToken) {
@@ -266,8 +213,6 @@ async function runOnce(manual = false): Promise<SweepResult> {
         });
       }
     }
-    lastCompletedAt = new Date();
-    lastDurationMs = lastCompletedAt.getTime() - startedAt.getTime();
     running = false;
   }
 }
@@ -281,41 +226,6 @@ export function startAgentRunReconciler(): void {
   if (schedulerTimer.unref) schedulerTimer.unref();
 }
 
-export function stopAgentRunReconciler(): void {
-  if (schedulerTimer !== null) {
-    clearInterval(schedulerTimer);
-    schedulerTimer = null;
-    logger.info('Stopped');
-  }
-}
-
-export function pauseAgentRunReconciler(): void {
-  paused = true;
-}
-
-export function resumeAgentRunReconciler(): void {
-  paused = false;
-}
-
 export async function triggerAgentRunReconcilerRun(): Promise<SweepResult> {
-  return runOnce(true);
-}
-
-export function getAgentRunReconcilerStatus() {
-  return {
-    checkIntervalMs: CHECK_INTERVAL_MS,
-    running,
-    paused,
-    started: schedulerTimer !== null,
-    lastStartedAt,
-    lastCompletedAt,
-    lastDurationMs,
-    lastError,
-    lastLockProvider,
-    lastProcessedTenants,
-    lastFailedRunningRuns,
-    lastDeletedSyncRuns,
-    lastRequeuedRuns,
-    lastRetentionDeleted,
-  };
+  return runOnce();
 }

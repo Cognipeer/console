@@ -41,6 +41,7 @@
 import type { PiiLanguage } from '@/lib/database';
 import { type Candidate, foldGeneral } from './confidence';
 import { AhoCorasick, isWordBoundaryMatch, resolveAcOverlaps } from './ahoCorasick';
+import { PII_CATEGORIES_BY_ID } from './categories';
 import {
   TR_PROVINCES,
   TR_DISTRICTS_SEED,
@@ -127,7 +128,18 @@ function adjacent(text: string, a: WordSeg, b: WordSeg): boolean {
   return /^\s*$/.test(text.slice(a.end, b.start));
 }
 
-const EV = (s: string): string[] => [s];
+/** One gazetteer hit on `[start, end)`; severity and label come from the catalog entry. */
+function hit(
+  text: string,
+  category: 'person' | 'organization' | 'location',
+  start: number,
+  end: number,
+  baseScore: number,
+  evidence: string,
+): Candidate {
+  const { severity, label } = PII_CATEGORIES_BY_ID[category];
+  return { category, start, end, value: text.slice(start, end), baseScore, detector: 'dictionary', severity, label, evidence: [evidence] };
+}
 
 /**
  * Sweep the word stream left-to-right, greedily matching the longest known
@@ -151,18 +163,10 @@ function scanPersonsAndOrgs(text: string, words: WordSeg[]): Candidate[] {
       if (n1 && adjacent(text, w, n1) && FIRST_NAMES.has(n1.key)) {
         const n2 = words[i + 2];
         if (n2 && adjacent(text, n1, n2) && SURNAMES.has(n2.key)) {
-          out.push({
-            category: 'person', start: w.start, end: n2.end, value: text.slice(w.start, n2.end),
-            baseScore: 0.92, detector: 'dictionary', severity: 'high', label: 'Person name',
-            evidence: EV(`title "${w.text}" + first name + surname`),
-          });
+          out.push(hit(text, 'person', w.start, n2.end, 0.92, `title "${w.text}" + first name + surname`));
           i += 3; continue;
         }
-        out.push({
-          category: 'person', start: w.start, end: n1.end, value: text.slice(w.start, n1.end),
-          baseScore: 0.85, detector: 'dictionary', severity: 'high', label: 'Person name',
-          evidence: EV(`title "${w.text}" + first name`),
-        });
+        out.push(hit(text, 'person', w.start, n1.end, 0.85, `title "${w.text}" + first name`));
         i += 2; continue;
       }
     }
@@ -173,26 +177,14 @@ function scanPersonsAndOrgs(text: string, words: WordSeg[]): Candidate[] {
       if (n1 && adjacent(text, w, n1) && SURNAMES.has(n1.key)) {
         const n2 = words[i + 2];
         if (n2 && adjacent(text, n1, n2) && SUFFIX_TITLES.has(n2.key)) {
-          out.push({
-            category: 'person', start: w.start, end: n2.end, value: text.slice(w.start, n2.end),
-            baseScore: 0.9, detector: 'dictionary', severity: 'high', label: 'Person name',
-            evidence: EV(`first name + surname + "${n2.text}"`),
-          });
+          out.push(hit(text, 'person', w.start, n2.end, 0.9, `first name + surname + "${n2.text}"`));
           i += 3; continue;
         }
-        out.push({
-          category: 'person', start: w.start, end: n1.end, value: text.slice(w.start, n1.end),
-          baseScore: 0.78, detector: 'dictionary', severity: 'high', label: 'Person name',
-          evidence: EV('first name + surname'),
-        });
+        out.push(hit(text, 'person', w.start, n1.end, 0.78, 'first name + surname'));
         i += 2; continue;
       }
       if (n1 && adjacent(text, w, n1) && SUFFIX_TITLES.has(n1.key)) {
-        out.push({
-          category: 'person', start: w.start, end: n1.end, value: text.slice(w.start, n1.end),
-          baseScore: 0.8, detector: 'dictionary', severity: 'high', label: 'Person name',
-          evidence: EV(`first name + "${n1.text}"`),
-        });
+        out.push(hit(text, 'person', w.start, n1.end, 0.8, `first name + "${n1.text}"`));
         i += 2; continue;
       }
     }
@@ -230,20 +222,12 @@ function scanPersonsAndOrgs(text: string, words: WordSeg[]): Candidate[] {
         };
         if (twoTokenSuffix && ORG_SUFFIXES.has(twoTokenSuffix)) {
           const end = extendPastGluedDots(afterSuffix.end);
-          out.push({
-            category: 'organization', start: w.start, end, value: text.slice(w.start, end),
-            baseScore: 0.85, detector: 'dictionary', severity: 'medium', label: 'Organization name',
-            evidence: EV(`capitalized run + "${twoTokenSuffix}"`),
-          });
+          out.push(hit(text, 'organization', w.start, end, 0.85, `capitalized run + "${twoTokenSuffix}"`));
           i = j + 3; continue;
         }
         if (ORG_SUFFIXES.has(asSuffix)) {
           const end = extendPastGluedDots(suffixCandidate.end);
-          out.push({
-            category: 'organization', start: w.start, end, value: text.slice(w.start, end),
-            baseScore: 0.85, detector: 'dictionary', severity: 'medium', label: 'Organization name',
-            evidence: EV(`capitalized run + "${asSuffix}"`),
-          });
+          out.push(hit(text, 'organization', w.start, end, 0.85, `capitalized run + "${asSuffix}"`));
           i = j + 2; continue;
         }
       }
@@ -251,17 +235,9 @@ function scanPersonsAndOrgs(text: string, words: WordSeg[]): Candidate[] {
 
     // lone first/surname — low base score, needs context or NER agreement to clear a real threshold
     if (isFirst) {
-      out.push({
-        category: 'person', start: w.start, end: w.end, value: w.text,
-        baseScore: w.capitalized ? 0.35 : 0, detector: 'dictionary', severity: 'high', label: 'Person name',
-        evidence: EV('bare first-name dictionary hit'),
-      });
+      out.push(hit(text, 'person', w.start, w.end, w.capitalized ? 0.35 : 0, 'bare first-name dictionary hit'));
     } else if (isSurname) {
-      out.push({
-        category: 'person', start: w.start, end: w.end, value: w.text,
-        baseScore: w.capitalized ? 0.3 : 0, detector: 'dictionary', severity: 'high', label: 'Person name',
-        evidence: EV('bare surname dictionary hit'),
-      });
+      out.push(hit(text, 'person', w.start, w.end, w.capitalized ? 0.3 : 0, 'bare surname dictionary hit'));
     }
     i += 1;
   }
@@ -281,19 +257,11 @@ function scanLocations(text: string, words: WordSeg[]): Candidate[] {
     const sep = n1 ? text.slice(w.end, n1.start) : '';
     const pairedSep = /^\s*[/,]\s*$/.test(sep);
     if (n1 && pairedSep && (PROVINCES.has(fold(n1.text)) || DISTRICTS.has(fold(n1.text))) && n1.capitalized) {
-      out.push({
-        category: 'location', start: w.start, end: n1.end, value: text.slice(w.start, n1.end),
-        baseScore: 0.75, detector: 'dictionary', severity: 'low', label: 'Location',
-        evidence: EV('district/province pair'),
-      });
+      out.push(hit(text, 'location', w.start, n1.end, 0.75, 'district/province pair'));
       i += 1;
       continue;
     }
-    out.push({
-      category: 'location', start: w.start, end: w.end, value: w.text,
-      baseScore: isProvince ? 0.55 : 0.5, detector: 'dictionary', severity: 'low', label: 'Location',
-      evidence: EV(isProvince ? 'province gazetteer hit' : 'district gazetteer hit'),
-    });
+    out.push(hit(text, 'location', w.start, w.end, isProvince ? 0.55 : 0.5, isProvince ? 'province gazetteer hit' : 'district gazetteer hit'));
   }
   return out;
 }

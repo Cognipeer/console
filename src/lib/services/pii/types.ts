@@ -122,17 +122,7 @@ export interface CreatePiiPolicyInput {
   metadata?: Record<string, unknown>;
 }
 
-export interface UpdatePiiPolicyInput {
-  name?: string;
-  description?: string;
-  defaultAction?: PiiAction;
-  engine?: PiiEngine;
-  categories?: Record<string, boolean>;
-  customPatterns?: IPiiCustomPattern[];
-  languages?: PiiLanguage[];
-  enabled?: boolean;
-  metadata?: Record<string, unknown>;
-}
+export type UpdatePiiPolicyInput = Partial<Omit<CreatePiiPolicyInput, 'projectId'>>;
 
 export interface DetectInput {
   text: string;

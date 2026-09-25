@@ -49,12 +49,3 @@ export const COGNIPEER_PII_CATEGORIES: CategoryCatalogEntry[] = [
   { id: 'organization', label: 'Organization name', description: 'Organization name — needs "pattern+dictionary" mode or above', languages: ['global'], severity: 'medium', defaultEnabled: false },
   { id: 'location', label: 'Location', description: 'Location — needs "pattern+dictionary" mode or above', languages: ['global'], severity: 'low', defaultEnabled: false },
 ];
-
-export const COGNIPEER_PII_CATEGORIES_BY_ID: Readonly<Record<string, CategoryCatalogEntry>> =
-  Object.fromEntries(COGNIPEER_PII_CATEGORIES.map((c) => [c.id, c]));
-
-export function buildCognipeerDefaultCategories(): Record<string, boolean> {
-  const out: Record<string, boolean> = {};
-  for (const c of COGNIPEER_PII_CATEGORIES) out[c.id] = c.defaultEnabled;
-  return out;
-}

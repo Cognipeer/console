@@ -27,7 +27,7 @@
  * than silently passing flagged content through unredacted.
  */
 
-import type { GuardrailScanResult } from '@cognipeer/guardrail';
+import type { Guardrail, GuardrailScanResult } from '@cognipeer/guardrail';
 import { createLogger } from '@/lib/core/logger';
 import { LEGACY_FINDING_TYPE, toLegacyAction } from '../hooks/contract';
 import type {
@@ -109,24 +109,14 @@ type Profile = CognipeerGuardrailModerationPolicyConfig['profile'];
  * cleared — same lifetime as the process, same reasoning as
  * `services/pii/ner.ts`'s own model cache.
  */
-const instances = new Map<string, ReturnType<typeof loadInstance>>();
+const instances = new Map<Profile, Promise<Guardrail>>();
 
-function loadInstance(profile: Profile) {
-  return import('@cognipeer/guardrail').then(({ Guardrail }) =>
-    Guardrail.load({ profile, maxScanChars: MAX_SCAN_CHARS }),
-  );
-}
-
-/** Exported for the families' own unit tests only, so a test can force a
- *  fresh load rather than reusing whatever a prior test cached. */
-export function _resetCognipeerGuardrailCache(): void {
-  instances.clear();
-}
-
-function getInstance(profile: Profile) {
+function getInstance(profile: Profile): Promise<Guardrail> {
   let cached = instances.get(profile);
   if (!cached) {
-    cached = loadInstance(profile);
+    cached = import('@cognipeer/guardrail').then(({ Guardrail }) =>
+      Guardrail.load({ profile, maxScanChars: MAX_SCAN_CHARS }),
+    );
     instances.set(profile, cached);
   }
   return cached;
@@ -200,7 +190,7 @@ async function runGate(
     };
   };
 
-  let guardrail: Awaited<ReturnType<typeof getInstance>>;
+  let guardrail: Guardrail;
   try {
     guardrail = await getInstance(profile);
   } catch (error) {
@@ -233,8 +223,7 @@ async function runGate(
     const risk = scan.risk[categoryId];
     if (risk === undefined || risk < 0.5) continue; // not triggered
 
-    const category = categoryById.get(categoryId);
-    if (!category) continue; // unreachable: filtered against categoryById above
+    const category = categoryById.get(categoryId)!; // filtered against categoryById above
 
     // The G1 fix `families/llm.ts` applies for the same reason: a whole-text
     // verdict has nothing for a rewrite to remove, so `redact` is escalated to

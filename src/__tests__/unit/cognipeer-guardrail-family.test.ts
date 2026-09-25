@@ -179,7 +179,7 @@ describe('runCognipeerGuardrailModerationPolicy', () => {
 describe('the two families share one model instance per profile', () => {
   it('a "strict" load triggered by one family is reused by the other (no second load error)', async () => {
     // Both already ran above at profile "strict" — this just re-confirms both
-    // succeed back-to-back without needing `_resetCognipeerGuardrailCache`,
+    // succeed back-to-back with no cache reset in between,
     // i.e. neither call evicts the other's cached instance.
     const shield = await runShield(INJECTION_TEXT, shieldPolicy({ prompt_injection: true }));
     const moderation = await runModeration(BENIGN_TEXT, moderationPolicy({ insult: true }));

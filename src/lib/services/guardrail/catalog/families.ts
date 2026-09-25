@@ -218,20 +218,27 @@ export type PolicyFamilyDefinition<F extends PolicyFamily> = Omit<
 
 // ── shared option sets ──────────────────────────────────────────────────────
 
+function categoryOptions(defs: readonly { id: string; label: string }[]): PolicyFieldOption[] {
+  return defs.map((d) => ({ value: d.id, label: d.label }));
+}
+
+/** `{ [id]: defaultEnabled }` over a definition list. */
+function defaultFlags(defs: readonly { id: string; defaultEnabled: boolean }[]): Record<string, boolean> {
+  return Object.fromEntries(defs.map((d) => [d.id, d.defaultEnabled]));
+}
+
 /** Derived from the definitions the moderation family already ships, so the
  *  picker cannot fall behind the classifier's category set. */
-const MODERATION_CATEGORY_OPTIONS: readonly PolicyFieldOption[] = MODERATION_CATEGORIES.map(
-  (category) => ({ value: category.id, label: category.label }),
-);
+const MODERATION_CATEGORY_OPTIONS: readonly PolicyFieldOption[] = categoryOptions(MODERATION_CATEGORIES);
 
 /** Derived from the model's own manifest, split into the two families' own
  *  gates — `cognipeer_guardrail_moderation` never offers a shield category to
  *  switch on, and vice versa. */
 const COGNIPEER_GUARDRAIL_MODERATION_CATEGORY_OPTIONS: readonly PolicyFieldOption[] =
-  COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES.map((category) => ({ value: category.id, label: category.label }));
+  categoryOptions(COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES);
 
 const COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORY_OPTIONS: readonly PolicyFieldOption[] =
-  COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES.map((category) => ({ value: category.id, label: category.label }));
+  categoryOptions(COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES);
 
 const BUILTIN_WORD_LIST_OPTIONS: readonly PolicyFieldOption[] = WORD_FILTER_BUILTIN_LISTS.map(
   (list) => ({ value: list.id, label: list.label, description: list.description }),
@@ -321,6 +328,11 @@ const summary = (parts: Array<string | false | undefined>, fallback: string): st
   const kept = parts.filter((part): part is string => typeof part === 'string' && part.length > 0);
   return kept.length > 0 ? kept.join(' · ') : fallback;
 };
+
+function categoryCount(map: unknown, total: number): string {
+  const on = enabledKeys(map).length;
+  return on > 0 ? `${on} of ${total} categories` : 'No categories switched on';
+}
 
 /** First line of a prose field, clipped. Never the whole prompt: the card is
  *  one line and a 4KB rule would push every other card off the screen. */
@@ -718,9 +730,7 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
       ...base('word_filter'),
       // Derived from the definitions, so a new built-in list arrives switched
       // on or off exactly as its author declared rather than as this file guessed.
-      builtinLists: Object.fromEntries(
-        WORD_FILTER_BUILTIN_LISTS.map((list) => [list.id, list.defaultEnabled]),
-      ),
+      builtinLists: defaultFlags(WORD_FILTER_BUILTIN_LISTS),
     }),
     summarise: (policy) =>
       summary(
@@ -798,16 +808,13 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
       // serve, so a policy created before anyone registers a moderation model
       // still runs.
       detector: 'llm' as const,
-      categories: Object.fromEntries(
-        MODERATION_CATEGORIES.map((category) => [category.id, category.defaultEnabled]),
-      ),
+      categories: defaultFlags(MODERATION_CATEGORIES),
     }),
     summarise: (policy) => {
-      const on = enabledKeys(policy.categories).length;
       const detectorLabel = policy.detector === 'model' ? 'classifier' : policy.detector === 'lexicon' ? 'lexicon (no model)' : 'LLM judge';
       return summary(
         [
-          on > 0 ? `${on} of ${MODERATION_CATEGORIES.length} categories` : 'No categories switched on',
+          categoryCount(policy.categories, MODERATION_CATEGORIES.length),
           detectorLabel,
           ...(policy.detector === 'lexicon' ? [] : [policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen']),
         ],
@@ -913,21 +920,14 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
     ]),
     defaults: () => ({
       ...base('cognipeer_guardrail_moderation'),
-      categories: Object.fromEntries(
-        COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES.map((category) => [category.id, category.defaultEnabled]),
-      ),
+      categories: defaultFlags(COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES),
       profile: 'strict' as const,
     }),
-    summarise: (policy) => {
-      const on = enabledKeys(policy.categories).length;
-      return summary(
-        [
-          on > 0 ? `${on} of ${COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES.length} categories` : 'No categories switched on',
-          `${policy.profile ?? 'strict'} profile`,
-        ],
+    summarise: (policy) =>
+      summary(
+        [categoryCount(policy.categories, COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES.length), `${policy.profile ?? 'strict'} profile`],
         'Not configured yet.',
-      );
-    },
+      ),
   },
 
   cognipeer_guardrail_prompt_shield: {
@@ -966,21 +966,14 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
     ]),
     defaults: () => ({
       ...base('cognipeer_guardrail_prompt_shield'),
-      categories: Object.fromEntries(
-        COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES.map((category) => [category.id, category.defaultEnabled]),
-      ),
+      categories: defaultFlags(COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES),
       profile: 'strict' as const,
     }),
-    summarise: (policy) => {
-      const on = enabledKeys(policy.categories).length;
-      return summary(
-        [
-          on > 0 ? `${on} of ${COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES.length} categories` : 'No categories switched on',
-          `${policy.profile ?? 'strict'} profile`,
-        ],
+    summarise: (policy) =>
+      summary(
+        [categoryCount(policy.categories, COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES.length), `${policy.profile ?? 'strict'} profile`],
         'Not configured yet.',
-      );
-    },
+      ),
   },
 
   // ══ access ═══════════════════════════════════════════════════════════════

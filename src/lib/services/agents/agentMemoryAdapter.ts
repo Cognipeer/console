@@ -59,8 +59,10 @@ export interface AgentMemoryContext {
     onWarning?: (message: string) => void;
 }
 
-function describeFailure(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+function reportFailure(ctx: AgentMemoryContext, logEvent: string, operation: string, scope: ConsoleMemoryScope, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn(logEvent, { storeKey: ctx.storeKey, scope, error: message });
+    ctx.onWarning?.(`Memory ${operation} failed (store "${ctx.storeKey}"): ${message}`);
 }
 
 /** Exported for direct testing — a silent scope mismatch would leak facts across sessions/users. */
@@ -78,20 +80,6 @@ export function toConsoleScope(scope: SdkMemoryScope): ConsoleMemoryScope {
     }
 }
 
-function scopeIdFor(scope: SdkMemoryScope, ctx: AgentMemoryContext): string | undefined {
-    switch (scope) {
-        case 'session':
-            return ctx.scopeIds.session;
-        case 'user':
-            return ctx.scopeIds.user;
-        case 'workspace':
-            return ctx.scopeIds.workspace;
-        case 'tenant':
-        default:
-            return undefined;
-    }
-}
-
 function toFact(item: { _id?: unknown; content: string; summary?: string; importance: number; tags: string[]; status: string; updatedAt?: Date; metadata: Record<string, unknown> }): MemoryFact {
     const key = typeof item.metadata?.factKey === 'string' ? item.metadata.factKey : String(item._id ?? '');
     return {
@@ -106,10 +94,14 @@ function toFact(item: { _id?: unknown; content: string; summary?: string; import
 }
 
 export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
+    const where = (sdkScope: SdkMemoryScope) => ({
+        scope: toConsoleScope(sdkScope),
+        // 'tenant' has no scopeId: the store itself is tenant-scoped.
+        scopeId: sdkScope === 'session' || sdkScope === 'user' || sdkScope === 'workspace' ? ctx.scopeIds[sdkScope] : undefined,
+    });
     return {
         async get(sdkScope, options) {
-            const scope = toConsoleScope(sdkScope);
-            const scopeId = scopeIdFor(sdkScope, ctx);
+            const { scope, scopeId } = where(sdkScope);
             try {
                 const { items } = await listMemoryItems(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {
                     scope,
@@ -121,15 +113,13 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
             } catch (error) {
                 // A memory read failing must not fail the run — the agent still
                 // answers, it just does so without recalled context this turn.
-                logger.warn('Memory read failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
-                ctx.onWarning?.(`Memory read failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
+                reportFailure(ctx, 'Memory read failed', 'read', scope, error);
                 return [];
             }
         },
 
         async upsert(sdkScope, facts) {
-            const scope = toConsoleScope(sdkScope);
-            const scopeId = scopeIdFor(sdkScope, ctx);
+            const { scope, scopeId } = where(sdkScope);
             try {
                 const { items: existing } = await listMemoryItems(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {
                     scope,
@@ -161,14 +151,12 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                     }
                 }
             } catch (error) {
-                logger.warn('Memory write failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
-                ctx.onWarning?.(`Memory write failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
+                reportFailure(ctx, 'Memory write failed', 'write', scope, error);
             }
         },
 
         async markObsolete(sdkScope, keys) {
-            const scope = toConsoleScope(sdkScope);
-            const scopeId = scopeIdFor(sdkScope, ctx);
+            const { scope, scopeId } = where(sdkScope);
             try {
                 const keySet = new Set(keys);
                 const { items } = await listMemoryItems(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {
@@ -185,14 +173,12 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                     }
                 }
             } catch (error) {
-                logger.warn('Memory markObsolete failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
-                ctx.onWarning?.(`Memory update failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
+                reportFailure(ctx, 'Memory markObsolete failed', 'update', scope, error);
             }
         },
 
         async semanticSearch(sdkScope, query, options) {
-            const scope = toConsoleScope(sdkScope);
-            const scopeId = scopeIdFor(sdkScope, ctx);
+            const { scope, scopeId } = where(sdkScope);
             try {
                 const result = await searchMemories(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.storeKey, {
                     query,
@@ -211,8 +197,7 @@ export function createConsoleMemoryStore(ctx: AgentMemoryContext): MemoryStore {
                     }),
                 );
             } catch (error) {
-                logger.warn('Memory semantic search failed', { storeKey: ctx.storeKey, scope, error: error instanceof Error ? error.message : String(error) });
-                ctx.onWarning?.(`Memory search failed (store "${ctx.storeKey}"): ${describeFailure(error)}`);
+                reportFailure(ctx, 'Memory semantic search failed', 'search', scope, error);
                 return [];
             }
         },
@@ -249,7 +234,7 @@ export function buildAgentMemoryOption(
             user: ctx.userId,
             workspace: ctx.agentKey,
         },
-        ...(ctx.onWarning ? { onWarning: ctx.onWarning } : {}),
+        onWarning: ctx.onWarning,
     });
 
     return {

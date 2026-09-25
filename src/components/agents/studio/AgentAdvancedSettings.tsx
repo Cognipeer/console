@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * The Advanced half of the settings split.
+ * Runtime settings.
  *
  * Every control here is tri-state in spirit: leaving a field empty means "use
  * the console default", which is why the number inputs have no `defaultValue`
@@ -9,10 +9,9 @@
  * `maxToolCalls: 0` would be an agent that cannot call a tool.
  */
 
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import {
     Alert,
-    Box,
     Badge,
     Group,
     MultiSelect,
@@ -41,7 +40,6 @@ export interface AgentAdvancedSettingsProps {
     onChange: (next: IAgentRuntimeConfig) => void;
     /** Tool names available to this agent, offered as ContextPilot exclusions. */
     toolNames?: string[];
-    disabled?: boolean;
 }
 
 const PROFILE_OPTIONS: Array<{ value: AgentRuntimeProfile; label: string }> = [
@@ -58,12 +56,7 @@ const PLANNING_OPTIONS: Array<{ value: AgentPlanningMode; label: string }> = [
     { value: 'reasoning_then_tools', label: 'reasoning_then_tools — think first' },
 ];
 
-const REPLAN_OPTIONS: Array<{ value: AgentReplanPolicy; label: string }> = [
-    { value: 'never', label: 'never' },
-    { value: 'on_failure', label: 'on_failure' },
-    { value: 'on_conflict', label: 'on_conflict' },
-    { value: 'every_n_steps', label: 'every_n_steps' },
-];
+const REPLAN_OPTIONS: AgentReplanPolicy[] = ['never', 'on_failure', 'on_conflict', 'every_n_steps'];
 
 const CONTEXT_POLICY_OPTIONS: Array<{ value: AgentContextPolicy; label: string }> = [
     { value: 'raw', label: 'raw — keep the whole transcript' },
@@ -71,25 +64,32 @@ const CONTEXT_POLICY_OPTIONS: Array<{ value: AgentContextPolicy; label: string }
     { value: 'hybrid', label: 'hybrid — recent turns plus summaries' },
 ];
 
-const RETENTION_OPTIONS: Array<{ value: AgentToolResponsePolicy; label: string }> = [
-    { value: 'keep_full', label: 'keep_full' },
-    { value: 'keep_structured', label: 'keep_structured' },
-    { value: 'summarize_archive', label: 'summarize_archive' },
-    { value: 'drop', label: 'drop' },
-];
+const RETENTION_OPTIONS: AgentToolResponsePolicy[] = ['keep_full', 'keep_structured', 'summarize_archive', 'drop'];
 
-/** `''` and `null` both mean "unset"; anything else is a number. */
+/** `''` means "unset"; anything else is a number. */
 function numberValue(input: string | number): number | undefined {
-    if (input === '' || input === null || input === undefined) return undefined;
+    if (input === '') return undefined;
     const parsed = typeof input === 'number' ? input : Number(input);
     return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** One always-open group of runtime knobs. */
+function SettingsGroup({ title, badge, children }: { title: string; badge?: ReactNode; children: ReactNode }) {
+    return (
+        <Paper withBorder radius="md" p="md">
+            <Group gap="xs" mb="sm">
+                <Text size="sm" fw={600}>{title}</Text>
+                {badge}
+            </Group>
+            <Stack gap="sm">{children}</Stack>
+        </Paper>
+    );
 }
 
 export default function AgentAdvancedSettings({
     value,
     onChange,
     toolNames = [],
-    disabled,
 }: AgentAdvancedSettingsProps) {
     const patch = (next: Partial<IAgentRuntimeConfig>) => onChange({ ...value, ...next });
 
@@ -122,383 +122,308 @@ export default function AgentAdvancedSettings({
                 data={PROFILE_OPTIONS}
                 value={value.profile ?? 'balanced'}
                 onChange={(next) => patch({ profile: (next as AgentRuntimeProfile) ?? undefined })}
-                disabled={disabled}
                 allowDeselect={false}
             />
 
-            {/* Every group open — no accordion. Folded groups hid the settings that
-                decide how the agent loop behaves behind a click each. */}
-            <Stack gap="md">
-                <Paper withBorder radius="md" p="md">
-                    <Box mb="sm">
-                        <Group gap="xs">
-                            <Text size="sm" fw={600}>Planning</Text>
-                            {planning.mode && planning.mode !== 'off' ? (
-                                <Badge size="xs" variant="light">{planning.mode}</Badge>
-                            ) : null}
-                        </Group>
-                    </Box>
-                    <Box>
-                        <Stack gap="sm">
-                            <Select
-                                label="Mode"
-                                data={PLANNING_OPTIONS}
-                                value={planning.mode ?? 'off'}
-                                onChange={(next) =>
-                                    patch({ planning: { ...planning, mode: (next as AgentPlanningMode) ?? 'off' } })
-                                }
-                                disabled={disabled}
-                                allowDeselect={false}
-                            />
-                            <Select
-                                label="Replan policy"
-                                data={REPLAN_OPTIONS}
-                                value={planning.replanPolicy ?? 'on_failure'}
-                                onChange={(next) =>
-                                    patch({
-                                        planning: {
-                                            ...planning,
-                                            replanPolicy: (next as AgentReplanPolicy) ?? 'on_failure',
-                                        },
-                                    })
-                                }
-                                disabled={disabled || (planning.mode ?? 'off') === 'off'}
-                                allowDeselect={false}
-                            />
-                            {planning.replanPolicy === 'every_n_steps' ? (
-                                <NumberInput
-                                    label="Replan every N steps"
-                                    min={1}
-                                    value={planning.everyNSteps ?? ''}
-                                    onChange={(next) =>
-                                        patch({ planning: { ...planning, everyNSteps: numberValue(next) } })
-                                    }
-                                    disabled={disabled}
-                                />
-                            ) : null}
-                        </Stack>
-                    </Box>
-                </Paper>
+            <SettingsGroup
+                title="Planning"
+                badge={planning.mode && planning.mode !== 'off' ? (
+                    <Badge size="xs" variant="light">{planning.mode}</Badge>
+                ) : null}
+            >
+                <Select
+                    label="Mode"
+                    data={PLANNING_OPTIONS}
+                    value={planning.mode ?? 'off'}
+                    onChange={(next) =>
+                        patch({ planning: { ...planning, mode: (next as AgentPlanningMode) ?? 'off' } })
+                    }
+                    allowDeselect={false}
+                />
+                <Select
+                    label="Replan policy"
+                    data={REPLAN_OPTIONS}
+                    value={planning.replanPolicy ?? 'on_failure'}
+                    onChange={(next) =>
+                        patch({
+                            planning: {
+                                ...planning,
+                                replanPolicy: (next as AgentReplanPolicy) ?? 'on_failure',
+                            },
+                        })
+                    }
+                    disabled={(planning.mode ?? 'off') === 'off'}
+                    allowDeselect={false}
+                />
+                {planning.replanPolicy === 'every_n_steps' ? (
+                    <NumberInput
+                        label="Replan every N steps"
+                        min={1}
+                        value={planning.everyNSteps ?? ''}
+                        onChange={(next) =>
+                            patch({ planning: { ...planning, everyNSteps: numberValue(next) } })
+                        }
+                    />
+                ) : null}
+            </SettingsGroup>
 
-                <Paper withBorder radius="md" p="md">
-                    <Box mb="sm">
-                        <Text size="sm" fw={600}>Limits &amp; budget</Text>
-                    </Box>
-                    <Box>
-                        <Stack gap="sm">
-                            <Group grow>
-                                <NumberInput
-                                    label="Max tool calls"
-                                    placeholder="12"
-                                    min={1}
-                                    value={limits.maxToolCalls ?? ''}
-                                    onChange={(next) => patch({ limits: { ...limits, maxToolCalls: numberValue(next) } })}
-                                    disabled={disabled}
-                                />
-                                <NumberInput
-                                    label="Max parallel tools"
-                                    placeholder="SDK default"
-                                    min={1}
-                                    value={limits.maxParallelTools ?? ''}
-                                    onChange={(next) =>
-                                        patch({ limits: { ...limits, maxParallelTools: numberValue(next) } })
-                                    }
-                                    disabled={disabled}
-                                />
-                            </Group>
-                            <Group grow>
-                                <NumberInput
-                                    label="Max context tokens"
-                                    placeholder="48000"
-                                    min={1000}
-                                    step={1000}
-                                    value={limits.maxContextTokens ?? ''}
-                                    onChange={(next) =>
-                                        patch({ limits: { ...limits, maxContextTokens: numberValue(next) } })
-                                    }
-                                    disabled={disabled}
-                                />
-                                <NumberInput
-                                    label="Max total output tokens"
-                                    placeholder="unlimited"
-                                    min={100}
-                                    step={500}
-                                    value={limits.maxTotalOutputTokens ?? ''}
-                                    onChange={(next) =>
-                                        patch({ limits: { ...limits, maxTotalOutputTokens: numberValue(next) } })
-                                    }
-                                    disabled={disabled}
-                                />
-                            </Group>
-                            <Group grow>
-                                <NumberInput
-                                    label="Max wall clock (ms)"
-                                    placeholder="unlimited"
-                                    min={1000}
-                                    step={1000}
-                                    value={limits.maxWallClockMs ?? ''}
-                                    onChange={(next) =>
-                                        patch({ limits: { ...limits, maxWallClockMs: numberValue(next) } })
-                                    }
-                                    disabled={disabled}
-                                />
-                                <NumberInput
-                                    label="Max cost (USD)"
-                                    description="Needs a cost estimator on the run; ignored otherwise."
-                                    placeholder="unlimited"
-                                    min={0}
-                                    step={0.5}
-                                    decimalScale={2}
-                                    value={limits.maxCostUsd ?? ''}
-                                    onChange={(next) => patch({ limits: { ...limits, maxCostUsd: numberValue(next) } })}
-                                    disabled={disabled}
-                                />
-                            </Group>
-                        </Stack>
-                    </Box>
-                </Paper>
+            <SettingsGroup title="Limits & budget">
+                <Group grow>
+                    <NumberInput
+                        label="Max tool calls"
+                        placeholder="12"
+                        min={1}
+                        value={limits.maxToolCalls ?? ''}
+                        onChange={(next) => patch({ limits: { ...limits, maxToolCalls: numberValue(next) } })}
+                    />
+                    <NumberInput
+                        label="Max parallel tools"
+                        placeholder="SDK default"
+                        min={1}
+                        value={limits.maxParallelTools ?? ''}
+                        onChange={(next) =>
+                            patch({ limits: { ...limits, maxParallelTools: numberValue(next) } })
+                        }
+                    />
+                </Group>
+                <Group grow>
+                    <NumberInput
+                        label="Max context tokens"
+                        placeholder="48000"
+                        min={1000}
+                        step={1000}
+                        value={limits.maxContextTokens ?? ''}
+                        onChange={(next) =>
+                            patch({ limits: { ...limits, maxContextTokens: numberValue(next) } })
+                        }
+                    />
+                    <NumberInput
+                        label="Max total output tokens"
+                        placeholder="unlimited"
+                        min={100}
+                        step={500}
+                        value={limits.maxTotalOutputTokens ?? ''}
+                        onChange={(next) =>
+                            patch({ limits: { ...limits, maxTotalOutputTokens: numberValue(next) } })
+                        }
+                    />
+                </Group>
+                <Group grow>
+                    <NumberInput
+                        label="Max wall clock (ms)"
+                        placeholder="unlimited"
+                        min={1000}
+                        step={1000}
+                        value={limits.maxWallClockMs ?? ''}
+                        onChange={(next) =>
+                            patch({ limits: { ...limits, maxWallClockMs: numberValue(next) } })
+                        }
+                    />
+                    <NumberInput
+                        label="Max cost (USD)"
+                        description="Needs a cost estimator on the run; ignored otherwise."
+                        placeholder="unlimited"
+                        min={0}
+                        step={0.5}
+                        decimalScale={2}
+                        value={limits.maxCostUsd ?? ''}
+                        onChange={(next) => patch({ limits: { ...limits, maxCostUsd: numberValue(next) } })}
+                    />
+                </Group>
+            </SettingsGroup>
 
-                <Paper withBorder radius="md" p="md">
-                    <Box mb="sm">
-                        <Text size="sm" fw={600}>Context &amp; summarization</Text>
-                    </Box>
-                    <Box>
-                        <Stack gap="sm">
-                            <Select
-                                label="Context policy"
-                                data={CONTEXT_POLICY_OPTIONS}
-                                value={context.policy ?? 'hybrid'}
-                                onChange={(next) =>
-                                    patch({ context: { ...context, policy: (next as AgentContextPolicy) ?? 'hybrid' } })
-                                }
-                                disabled={disabled}
-                                allowDeselect={false}
-                            />
-                            <Group grow>
-                                <NumberInput
-                                    label="Last turns to keep"
-                                    placeholder="10"
-                                    min={1}
-                                    value={context.lastTurnsToKeep ?? ''}
-                                    onChange={(next) =>
-                                        patch({ context: { ...context, lastTurnsToKeep: numberValue(next) } })
-                                    }
-                                    disabled={disabled}
-                                />
-                                <Select
-                                    label="Tool response retention"
-                                    data={RETENTION_OPTIONS}
-                                    value={context.toolResponsePolicy ?? 'summarize_archive'}
-                                    onChange={(next) =>
-                                        patch({
-                                            context: {
-                                                ...context,
-                                                toolResponsePolicy: (next as AgentToolResponsePolicy) ?? undefined,
-                                            },
-                                        })
-                                    }
-                                    disabled={disabled}
-                                    allowDeselect={false}
-                                />
-                            </Group>
-                            <Switch
-                                label="Summarize when the context fills up"
-                                checked={summarization.enable ?? true}
-                                onChange={(event) =>
-                                    patch({
-                                        summarization: { ...summarization, enable: event.currentTarget.checked },
-                                    })
-                                }
-                                disabled={disabled}
-                            />
-                            <Group grow>
-                                <NumberInput
-                                    label="Summary trigger (tokens)"
-                                    placeholder="32000"
-                                    min={1000}
-                                    step={1000}
-                                    value={summarization.summaryTriggerTokens ?? ''}
-                                    onChange={(next) =>
-                                        patch({
-                                            summarization: {
-                                                ...summarization,
-                                                summaryTriggerTokens: numberValue(next),
-                                            },
-                                        })
-                                    }
-                                    disabled={disabled || summarization.enable === false}
-                                />
-                                <NumberInput
-                                    label="Summary budget (tokens)"
-                                    placeholder="48000"
-                                    min={1000}
-                                    step={1000}
-                                    value={summarization.maxTokens ?? ''}
-                                    onChange={(next) =>
-                                        patch({ summarization: { ...summarization, maxTokens: numberValue(next) } })
-                                    }
-                                    disabled={disabled || summarization.enable === false}
-                                />
-                            </Group>
-                            <Group grow>
-                                <NumberInput
-                                    label="Max tool response chars"
-                                    placeholder="80000"
-                                    min={1000}
-                                    step={1000}
-                                    value={toolResponses.maxToolResponseChars ?? ''}
-                                    onChange={(next) =>
-                                        patch({
-                                            toolResponses: {
-                                                ...toolResponses,
-                                                maxToolResponseChars: numberValue(next),
-                                            },
-                                        })
-                                    }
-                                    disabled={disabled}
-                                />
-                                <NumberInput
-                                    label="Max tool response tokens"
-                                    placeholder="20000"
-                                    min={500}
-                                    step={500}
-                                    value={toolResponses.maxToolResponseTokens ?? ''}
-                                    onChange={(next) =>
-                                        patch({
-                                            toolResponses: {
-                                                ...toolResponses,
-                                                maxToolResponseTokens: numberValue(next),
-                                            },
-                                        })
-                                    }
-                                    disabled={disabled}
-                                />
-                            </Group>
-                        </Stack>
-                    </Box>
-                </Paper>
+            <SettingsGroup title="Context & summarization">
+                <Select
+                    label="Context policy"
+                    data={CONTEXT_POLICY_OPTIONS}
+                    value={context.policy ?? 'hybrid'}
+                    onChange={(next) =>
+                        patch({ context: { ...context, policy: (next as AgentContextPolicy) ?? 'hybrid' } })
+                    }
+                    allowDeselect={false}
+                />
+                <Group grow>
+                    <NumberInput
+                        label="Last turns to keep"
+                        placeholder="10"
+                        min={1}
+                        value={context.lastTurnsToKeep ?? ''}
+                        onChange={(next) =>
+                            patch({ context: { ...context, lastTurnsToKeep: numberValue(next) } })
+                        }
+                    />
+                    <Select
+                        label="Tool response retention"
+                        data={RETENTION_OPTIONS}
+                        value={context.toolResponsePolicy ?? 'summarize_archive'}
+                        onChange={(next) =>
+                            patch({
+                                context: {
+                                    ...context,
+                                    toolResponsePolicy: (next as AgentToolResponsePolicy) ?? undefined,
+                                },
+                            })
+                        }
+                        allowDeselect={false}
+                    />
+                </Group>
+                <Switch
+                    label="Summarize when the context fills up"
+                    checked={summarization.enable ?? true}
+                    onChange={(event) =>
+                        patch({
+                            summarization: { ...summarization, enable: event.currentTarget.checked },
+                        })
+                    }
+                />
+                <Group grow>
+                    <NumberInput
+                        label="Summary trigger (tokens)"
+                        placeholder="32000"
+                        min={1000}
+                        step={1000}
+                        value={summarization.summaryTriggerTokens ?? ''}
+                        onChange={(next) =>
+                            patch({
+                                summarization: {
+                                    ...summarization,
+                                    summaryTriggerTokens: numberValue(next),
+                                },
+                            })
+                        }
+                        disabled={summarization.enable === false}
+                    />
+                    <NumberInput
+                        label="Summary budget (tokens)"
+                        placeholder="48000"
+                        min={1000}
+                        step={1000}
+                        value={summarization.maxTokens ?? ''}
+                        onChange={(next) =>
+                            patch({ summarization: { ...summarization, maxTokens: numberValue(next) } })
+                        }
+                        disabled={summarization.enable === false}
+                    />
+                </Group>
+                <Group grow>
+                    <NumberInput
+                        label="Max tool response chars"
+                        placeholder="80000"
+                        min={1000}
+                        step={1000}
+                        value={toolResponses.maxToolResponseChars ?? ''}
+                        onChange={(next) =>
+                            patch({
+                                toolResponses: {
+                                    ...toolResponses,
+                                    maxToolResponseChars: numberValue(next),
+                                },
+                            })
+                        }
+                    />
+                    <NumberInput
+                        label="Max tool response tokens"
+                        placeholder="20000"
+                        min={500}
+                        step={500}
+                        value={toolResponses.maxToolResponseTokens ?? ''}
+                        onChange={(next) =>
+                            patch({
+                                toolResponses: {
+                                    ...toolResponses,
+                                    maxToolResponseTokens: numberValue(next),
+                                },
+                            })
+                        }
+                    />
+                </Group>
+            </SettingsGroup>
 
-                <Paper withBorder radius="md" p="md">
-                    <Box mb="sm">
-                        <Group gap="xs">
-                            <Text size="sm" fw={600}>ContextPilot</Text>
-                            {contextPilot.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
-                        </Group>
-                    </Box>
-                    <Box>
-                        <Stack gap="sm">
-                            <Switch
-                                label="Compress large tool outputs before they enter the transcript"
-                                description="Deterministic — no extra model calls. Originals stay retrievable."
-                                checked={contextPilot.enabled ?? false}
-                                onChange={(event) =>
-                                    patch({ contextPilot: { ...contextPilot, enabled: event.currentTarget.checked } })
-                                }
-                                disabled={disabled}
-                            />
-                            <MultiSelect
-                                label="Never compress these tools"
-                                placeholder="Pick tools whose raw output matters"
-                                data={toolOptions}
-                                value={contextPilot.excludeTools ?? []}
-                                onChange={(next) => patch({ contextPilot: { ...contextPilot, excludeTools: next } })}
-                                disabled={disabled || !contextPilot.enabled}
-                                searchable
-                                clearable
-                            />
-                        </Stack>
-                    </Box>
-                </Paper>
+            <SettingsGroup
+                title="ContextPilot"
+                badge={contextPilot.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
+            >
+                <Switch
+                    label="Compress large tool outputs before they enter the transcript"
+                    description="Deterministic — no extra model calls. Originals stay retrievable."
+                    checked={contextPilot.enabled ?? false}
+                    onChange={(event) =>
+                        patch({ contextPilot: { ...contextPilot, enabled: event.currentTarget.checked } })
+                    }
+                />
+                <MultiSelect
+                    label="Never compress these tools"
+                    placeholder="Pick tools whose raw output matters"
+                    data={toolOptions}
+                    value={contextPilot.excludeTools ?? []}
+                    onChange={(next) => patch({ contextPilot: { ...contextPilot, excludeTools: next } })}
+                    disabled={!contextPilot.enabled}
+                    searchable
+                    clearable
+                />
+            </SettingsGroup>
 
-                <Paper withBorder radius="md" p="md">
-                    <Box mb="sm">
-                        <Group gap="xs">
-                            <Text size="sm" fw={600}>Reasoning</Text>
-                            {reasoning.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
-                        </Group>
-                    </Box>
-                    <Box>
-                        <Stack gap="sm">
-                            <Switch
-                                label="Enable reasoning"
-                                checked={reasoning.enabled ?? false}
-                                onChange={(event) =>
-                                    patch({ reasoning: { ...reasoning, enabled: event.currentTarget.checked } })
-                                }
-                                disabled={disabled}
-                            />
-                            <Group grow>
-                                <Select
-                                    label="Level"
-                                    data={['minimal', 'low', 'medium', 'high']}
-                                    value={reasoning.level ?? null}
-                                    onChange={(next) =>
-                                        patch({ reasoning: { ...reasoning, level: (next as AgentReasoningLevel) ?? undefined } })
-                                    }
-                                    disabled={disabled || !reasoning.enabled}
-                                    clearable
-                                />
-                                <Select
-                                    label="Provider effort"
-                                    description="`none` is a value that gets sent, not off."
-                                    data={['none', 'minimal', 'low', 'medium', 'high']}
-                                    value={reasoning.effort ?? null}
-                                    onChange={(next) =>
-                                        patch({
-                                            reasoning: { ...reasoning, effort: (next as AgentReasoningEffort) ?? undefined },
-                                        })
-                                    }
-                                    disabled={disabled || !reasoning.enabled}
-                                    clearable
-                                />
-                            </Group>
-                            <Group grow>
-                                <NumberInput
-                                    label="Thinking budget (tokens)"
-                                    placeholder="provider default"
-                                    min={128}
-                                    step={128}
-                                    value={reasoning.budgetTokens ?? ''}
-                                    onChange={(next) =>
-                                        patch({ reasoning: { ...reasoning, budgetTokens: numberValue(next) } })
-                                    }
-                                    disabled={disabled || !reasoning.enabled}
-                                />
-                                <Switch
-                                    mt="lg"
-                                    label="Include thoughts in the trace"
-                                    checked={reasoning.includeThoughts ?? false}
-                                    onChange={(event) =>
-                                        patch({
-                                            reasoning: { ...reasoning, includeThoughts: event.currentTarget.checked },
-                                        })
-                                    }
-                                    disabled={disabled || !reasoning.enabled}
-                                />
-                            </Group>
-                        </Stack>
-                    </Box>
-                </Paper>
-
-                {/* Memory moved to its own tab — see AgentMemoryPanel. It needs a
-                    real backing store picked from the Memory module, which does
-                    not fit this accordion's "knob with a default" shape. */}
-
-            </Stack>
+            <SettingsGroup
+                title="Reasoning"
+                badge={reasoning.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
+            >
+                <Switch
+                    label="Enable reasoning"
+                    checked={reasoning.enabled ?? false}
+                    onChange={(event) =>
+                        patch({ reasoning: { ...reasoning, enabled: event.currentTarget.checked } })
+                    }
+                />
+                <Group grow>
+                    <Select
+                        label="Level"
+                        data={['minimal', 'low', 'medium', 'high']}
+                        value={reasoning.level ?? null}
+                        onChange={(next) =>
+                            patch({ reasoning: { ...reasoning, level: (next as AgentReasoningLevel) ?? undefined } })
+                        }
+                        disabled={!reasoning.enabled}
+                        clearable
+                    />
+                    <Select
+                        label="Provider effort"
+                        description="`none` is a value that gets sent, not off."
+                        data={['none', 'minimal', 'low', 'medium', 'high']}
+                        value={reasoning.effort ?? null}
+                        onChange={(next) =>
+                            patch({
+                                reasoning: { ...reasoning, effort: (next as AgentReasoningEffort) ?? undefined },
+                            })
+                        }
+                        disabled={!reasoning.enabled}
+                        clearable
+                    />
+                </Group>
+                <Group grow>
+                    <NumberInput
+                        label="Thinking budget (tokens)"
+                        placeholder="provider default"
+                        min={128}
+                        step={128}
+                        value={reasoning.budgetTokens ?? ''}
+                        onChange={(next) =>
+                            patch({ reasoning: { ...reasoning, budgetTokens: numberValue(next) } })
+                        }
+                        disabled={!reasoning.enabled}
+                    />
+                    <Switch
+                        mt="lg"
+                        label="Include thoughts in the trace"
+                        checked={reasoning.includeThoughts ?? false}
+                        onChange={(event) =>
+                            patch({
+                                reasoning: { ...reasoning, includeThoughts: event.currentTarget.checked },
+                            })
+                        }
+                        disabled={!reasoning.enabled}
+                    />
+                </Group>
+            </SettingsGroup>
         </Stack>
     );
-}
-
-/** Kept exported so the settings header can show how far an agent strays from defaults. */
-export function countAdvancedOverrides(runtime: IAgentRuntimeConfig | undefined): number {
-    if (!runtime) return 0;
-    let count = 0;
-    if (runtime.profile && runtime.profile !== 'balanced') count += 1;
-    if (runtime.planning?.mode && runtime.planning.mode !== 'off') count += 1;
-    for (const key of Object.keys(runtime.limits ?? {})) {
-        if ((runtime.limits as Record<string, unknown>)[key] !== undefined) count += 1;
-    }
-    if (runtime.contextPilot?.enabled) count += 1;
-    if (runtime.reasoning?.enabled) count += 1;
-    return count;
 }

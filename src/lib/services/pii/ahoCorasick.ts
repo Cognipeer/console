@@ -37,12 +37,12 @@ export interface AcMatch {
 
 export class AhoCorasick {
   private readonly root: AcNode = { children: new Map(), fail: null, output: [] };
-  private built = false;
 
   constructor(private readonly patterns: string[]) {
     for (let i = 0; i < patterns.length; i++) {
       this.insert(patterns[i], i);
     }
+    this.build();
   }
 
   private insert(pattern: string, index: number): void {
@@ -60,7 +60,6 @@ export class AhoCorasick {
 
   /** BFS-build failure links and propagate output sets along them (classic Aho-Corasick construction). */
   private build(): void {
-    if (this.built) return;
     const queue: AcNode[] = [];
     for (const child of this.root.children.values()) {
       child.fail = this.root;
@@ -78,7 +77,6 @@ export class AhoCorasick {
         }
       }
     }
-    this.built = true;
   }
 
   /**
@@ -88,7 +86,6 @@ export class AhoCorasick {
    * them (e.g. longest-match-wins, per `resolveDictionaryOverlaps`).
    */
   search(text: string): AcMatch[] {
-    this.build();
     const results: AcMatch[] = [];
     let node = this.root;
     for (let i = 0; i < text.length; i++) {
@@ -97,11 +94,9 @@ export class AhoCorasick {
         node = node.fail ?? this.root;
       }
       node = node.children.get(ch) ?? this.root;
-      if (node.output.length > 0) {
-        for (const patternIndex of node.output) {
-          const len = this.patterns[patternIndex].length;
-          results.push({ start: i - len + 1, end: i + 1, patternIndex });
-        }
+      for (const patternIndex of node.output) {
+        const len = this.patterns[patternIndex].length;
+        results.push({ start: i - len + 1, end: i + 1, patternIndex });
       }
     }
     return results;
@@ -123,15 +118,17 @@ export function isWordBoundaryMatch(text: string, start: number, end: number): b
   return !isLetter(text[start - 1]) && !isLetter(text[end]);
 }
 
+/** Span comparator: lower start first, longer match wins ties. */
+export const byStartThenLongest = (a: { start: number; end: number }, b: { start: number; end: number }): number =>
+  a.start - b.start || (b.end - b.start) - (a.end - a.start);
+
 /**
  * Longest-match-wins de-overlap for same-source matches: sort by start then
  * by descending length, keep a match only if it doesn't overlap one already
  * kept. Mirrors `detector.ts`'s `resolveOverlaps` but pattern-index based.
  */
 export function resolveAcOverlaps(matches: AcMatch[]): AcMatch[] {
-  const sorted = matches
-    .slice()
-    .sort((a, b) => (a.start !== b.start ? a.start - b.start : (b.end - b.start) - (a.end - a.start)));
+  const sorted = matches.slice().sort(byStartThenLongest);
   const out: AcMatch[] = [];
   for (const m of sorted) {
     const last = out[out.length - 1];

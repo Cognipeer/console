@@ -80,16 +80,15 @@ function sanitizeMinScore(raw: unknown): number | undefined {
 /**
  * `null` is meaningful here and `undefined` is not: a PATCH that clears the pin
  * sends `null`, and the update must write "follow the published version" rather
- * than leave the old pin in place. A nonsense value is dropped to `undefined`
- * so the target falls back to published instead of running a version that
- * cannot exist.
+ * than leave the old pin in place. A non-number is dropped to `undefined` (the
+ * field is left out / untouched); a number below 1 becomes `null` ("follow
+ * published", a state the runner can execute) rather than a pin that cannot
+ * resolve.
  */
 function sanitizeAgentVersion(raw: unknown): number | null | undefined {
   if (raw === null) return null;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
   const version = Math.trunc(raw);
-  // A nonsense version becomes `null` rather than a pin that cannot resolve:
-  // "follow published" is a state the runner can actually execute.
   return version >= 1 ? version : null;
 }
 

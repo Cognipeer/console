@@ -50,6 +50,7 @@ function loadTransformers(): Promise<Transformers> {
   return transformers;
 }
 import type { Candidate } from './confidence';
+import { PII_CATEGORIES_BY_ID } from './categories';
 import { createLogger } from '@/lib/core/logger';
 
 const logger = createLogger('pii-ner');
@@ -59,7 +60,6 @@ export type NerCategory = 'person' | 'organization' | 'location';
 interface NerModelSpec {
   /** Directory name under `nerModelPath` — also the id policies reference in `detection.ner.models`. */
   id: string;
-  languages: string[];
   /** Model's raw BIO type (PER/ORG/LOC) → PII category. */
   labelMap: Record<string, NerCategory>;
 }
@@ -73,15 +73,8 @@ interface NerModelSpec {
 export const NER_MODELS: Record<string, NerModelSpec> = {
   'tr-ner': {
     id: 'tr-ner',
-    languages: ['tr'],
     labelMap: { PER: 'person', ORG: 'organization', LOC: 'location' },
   },
-};
-
-const SEVERITY_BY_CATEGORY: Record<NerCategory, 'low' | 'medium' | 'high'> = {
-  person: 'high',
-  organization: 'medium',
-  location: 'low',
 };
 
 // ── Environment + lazy pipeline loading ────────────────────────────────────
@@ -122,11 +115,6 @@ function getPipeline(modelId: string, nerModelPath: string): Promise<Pipeline> {
     pipelineCache.set(cacheKey, loading);
   }
   return loading;
-}
-
-/** True once a model's pipeline is loaded (or loading) — lets a caller report "cold" vs "warm" without forcing a load. */
-export function isModelWarm(modelId: string, nerModelPath: string): boolean {
-  return pipelineCache.has(`${nerModelPath}::${modelId}`);
 }
 
 // ── In-process concurrency gate (explicitly NOT a worker pool) ─────────────
@@ -242,7 +230,7 @@ function decodeEntities(windowText: string, windowOffset: number, tokens: RawTok
       value: windowText.slice(buffer[0].start, buffer[buffer.length - 1].end),
       baseScore: meanScore,
       detector: 'ner',
-      severity: SEVERITY_BY_CATEGORY[bufferType],
+      severity: PII_CATEGORIES_BY_ID[bufferType].severity,
       label: bufferType,
       evidence: [`ner:${bufferType} score=${meanScore.toFixed(2)}`],
     });

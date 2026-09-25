@@ -107,7 +107,7 @@ export function runLexiconModerationPolicy(
 // ── child_safety — structural, no lexicon needed ──────────────────────────
 
 /** Ages a "minor" reference can plausibly name — deliberately excludes 18+. */
-const MINOR_AGE_RE = /\b(?:[6-9]|1[0-7])\s*(?:yaşında|yaşındayım|yaş(?:ında)?|years?[\s-]?old|y\/?o)\b/gi;
+const MINOR_AGE_RE = /\b(?:[6-9]|1[0-7])\s*(?:yaşında|yaşındayım|yaş(?:ında)?|years?[\s-]?old|y\/?o)\b/i;
 
 /**
  * Grooming-pattern phrases: secrecy requests, meet-alone requests, media
@@ -133,9 +133,7 @@ const GROOMING_PHRASES = [
  */
 export function detectChildSafetySignal(text: string, globalAction: GuardrailAction): GuardrailFinding[] {
   const folded = text.toLowerCase();
-  const hasAgeSignal = MINOR_AGE_RE.test(text);
-  MINOR_AGE_RE.lastIndex = 0; // stateful /g regex — reset for the next call
-  if (!hasAgeSignal) return [];
+  if (!MINOR_AGE_RE.test(text)) return [];
 
   const matchedPhrase = GROOMING_PHRASES.find((p) => folded.includes(p));
   if (!matchedPhrase) return [];

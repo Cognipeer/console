@@ -202,20 +202,6 @@ function unauthorized(
   return reply.code(status).send(body);
 }
 
-/**
- * Resolve a tenant's CURRENT effective license for the enterprise API guard,
- * instead of trusting the licenseType/licenseExpiresAt embedded in the
- * caller's session JWT. A JWT can be up to JWT_EXPIRES_IN old (default 7
- * days), so trusting it here would let every other already-logged-in user
- * of a tenant keep enterprise access for the life of their cookie after an
- * owner/admin downgrades or removes the tenant's license.
- *
- * Backed by a short TTL cache (`enterprise-license-cache.ts`) so this
- * doesn't add a DB round-trip to every gated request; the license admin
- * endpoints invalidate that cache entry immediately on change, so both
- * upgrades and downgrades are visible on the very next request.
- */
-
 function getAuditOutcome(
   statusCode: number,
   upstreamForwarded = false,

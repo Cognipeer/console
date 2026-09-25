@@ -18,7 +18,6 @@ import type { IAgentStructuredOutput } from '@/lib/database/provider/types.domai
 export interface AgentStructuredOutputEditorProps {
     value: IAgentStructuredOutput | undefined;
     onChange: (next: IAgentStructuredOutput | undefined) => void;
-    disabled?: boolean;
 }
 
 const STARTER_SCHEMA = {
@@ -34,7 +33,6 @@ const STARTER_SCHEMA = {
 export default function AgentStructuredOutputEditor({
     value,
     onChange,
-    disabled,
 }: AgentStructuredOutputEditorProps) {
     const enabled = value?.enabled ?? false;
     const [text, setText] = useState(() => (value?.schema ? JSON.stringify(value.schema, null, 2) : ''));
@@ -77,7 +75,6 @@ export default function AgentStructuredOutputEditor({
                 description="The agent's final answer is parsed against this schema. Free-text answers stop being possible."
                 checked={enabled}
                 onChange={(event) => commit({ enabled: event.currentTarget.checked })}
-                disabled={disabled}
             />
 
             <TextInput
@@ -86,7 +83,7 @@ export default function AgentStructuredOutputEditor({
                 placeholder="incident_triage_result"
                 value={value?.name ?? ''}
                 onChange={(event) => commit({ name: event.currentTarget.value || undefined })}
-                disabled={disabled || !enabled}
+                disabled={!enabled}
             />
 
             <Switch
@@ -94,7 +91,7 @@ export default function AgentStructuredOutputEditor({
                 description="Every declared property becomes required and unknown keys are rejected. Match this to what your provider's strict JSON mode expects."
                 checked={value?.strict ?? false}
                 onChange={(event) => commit({ strict: event.currentTarget.checked })}
-                disabled={disabled || !enabled}
+                disabled={!enabled}
             />
 
             <Stack gap="xs">
@@ -115,7 +112,7 @@ export default function AgentStructuredOutputEditor({
                         size="compact-xs"
                         variant="subtle"
                         leftSection={<IconWand size={12} />}
-                        disabled={disabled || !enabled}
+                        disabled={!enabled}
                         onClick={() => {
                             const seeded = JSON.stringify(STARTER_SCHEMA, null, 2);
                             setText(seeded);
@@ -144,7 +141,7 @@ export default function AgentStructuredOutputEditor({
                     maxRows={24}
                     formatOnBlur
                     validationError={null}
-                    disabled={disabled || !enabled}
+                    disabled={!enabled}
                     styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)', fontSize: 12 } }}
                 />
 

@@ -10,10 +10,6 @@
   align-items: stretch;
 }
 
-.titleBlock {
-  min-width: 0;
-}
-
 .transcriptPanel {
   display: flex;
   flex-direction: column;

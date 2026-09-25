@@ -264,6 +264,25 @@ export function LlmRequestItemsView({ items, labels: labelsOverride }: LlmReques
   );
 }
 
+function RawJsonSection({ title, value, emptyLabel }: { title: string; value: unknown; emptyLabel: string }) {
+  return (
+    <Stack gap={4}>
+      <Text size="sm" fw={600}>
+        {title}
+      </Text>
+      <ScrollArea.Autosize mah={360} type="auto">
+        {value !== undefined ? (
+          <JsonTreeViewer data={value} initialExpandLevel={2} />
+        ) : (
+          <Text size="sm" c="dimmed">
+            {emptyLabel}
+          </Text>
+        )}
+      </ScrollArea.Autosize>
+    </Stack>
+  );
+}
+
 /**
  * The single full-screen viewer for "one LLM request/response" used
  * throughout the app — Model Hub logs, Agent Observability events, and AI
@@ -317,34 +336,8 @@ export default function LlmRequestDetailModal({
             {hasRaw ? (
               <Tabs.Panel value="raw" pt="md">
                 <Stack gap="md">
-                  <Stack gap={4}>
-                    <Text size="sm" fw={600}>
-                      {labels.request}
-                    </Text>
-                    <ScrollArea.Autosize mah={360} type="auto">
-                      {data.raw?.request !== undefined ? (
-                        <JsonTreeViewer data={data.raw.request} initialExpandLevel={2} />
-                      ) : (
-                        <Text size="sm" c="dimmed">
-                          {labels.noRequest}
-                        </Text>
-                      )}
-                    </ScrollArea.Autosize>
-                  </Stack>
-                  <Stack gap={4}>
-                    <Text size="sm" fw={600}>
-                      {labels.response}
-                    </Text>
-                    <ScrollArea.Autosize mah={360} type="auto">
-                      {data.raw?.response !== undefined ? (
-                        <JsonTreeViewer data={data.raw.response} initialExpandLevel={2} />
-                      ) : (
-                        <Text size="sm" c="dimmed">
-                          {labels.noResponse}
-                        </Text>
-                      )}
-                    </ScrollArea.Autosize>
-                  </Stack>
+                  <RawJsonSection title={labels.request} value={data.raw?.request} emptyLabel={labels.noRequest} />
+                  <RawJsonSection title={labels.response} value={data.raw?.response} emptyLabel={labels.noResponse} />
                 </Stack>
               </Tabs.Panel>
             ) : null}

@@ -28,27 +28,10 @@ import { IconPlayerStop, IconRefresh } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
+import type { serializeAgentRun } from '@/lib/services/agents/agentRunService';
 
-export interface AgentRunRow {
-    id: string;
-    status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
-    conversation_id: string;
-    created_at: number | null;
-    started_at: number | null;
-    completed_at: number | null;
-    cancel_requested_at: number | null;
-    max_duration_ms: number | null;
-    error: { type: string; message: string | null } | null;
-    callback: { url: string; status: 'pending' | 'delivered' | 'failed' | null; attempts: number; signed: boolean } | null;
-}
-
-const STATUS_BADGE: Record<AgentRunRow['status'], string> = {
-    queued: 'queued',
-    running: 'running',
-    succeeded: 'succeeded',
-    failed: 'failed',
-    canceled: 'canceled',
-};
+/** A run as `GET /api/agents/:id/runs` sends it. */
+type AgentRunRow = ReturnType<typeof serializeAgentRun>;
 
 const ERROR_LABELS: Record<string, string> = {
     agent_error: 'Agent error',
@@ -184,7 +167,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                 <Table.Tr key={run.id}>
                                     <Table.Td>
                                         <Group gap={4} wrap="nowrap">
-                                            <StatusBadge status={STATUS_BADGE[run.status]} />
+                                            <StatusBadge status={run.status} />
                                             {run.cancel_requested_at && ACTIVE.has(run.status)
                                                 ? <Badge size="xs" color="orange" variant="light">canceling</Badge>
                                                 : null}
@@ -198,7 +181,7 @@ export default function AgentRunsTable({ agentId, onOpenConversation, onActiveCo
                                     </Table.Td>
                                     <Table.Td>
                                         <Text size="xs" c="dimmed">
-                                            {run.created_at ? formatRelativeTime(new Date(run.created_at * 1000).toISOString()) : '—'}
+                                            {run.created_at ? formatRelativeTime(new Date(run.created_at * 1000)) : '—'}
                                         </Text>
                                     </Table.Td>
                                     <Table.Td ta="right">

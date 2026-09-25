@@ -16,6 +16,8 @@
 
 import { getConfig } from '@/lib/core/config';
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
+import { getDisabledToolNames } from '@/lib/services/mcp/mcpService';
+import { AGENT_SANDBOX_SECRET_MASK } from './agentSandboxSecrets';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 
 export interface AgentConfigIssue {
@@ -74,8 +76,8 @@ function checkEnum(issues: Issues, field: string, value: unknown, allowed: Set<s
 }
 
 /**
- * The checks that need nothing but the config itself. Exported so the
- * dashboard can run the same rules as the user types.
+ * The checks that need nothing but the config itself — no database lookups.
+ * validateAgentConfig runs these first.
  */
 export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValidation {
     const issues: Issues = { errors: [], warnings: [] };
@@ -177,19 +179,14 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
             issues.errors.push({ field: 'execution.defaultMode', message: 'cannot be background while background execution is disabled' });
         }
         if (execution.callbackUrl !== undefined && execution.callbackUrl !== '') {
-            let parsed: URL | null = null;
-            try {
-                parsed = new URL(execution.callbackUrl);
-            } catch {
-                parsed = null;
-            }
+            const parsed = URL.canParse(execution.callbackUrl) ? new URL(execution.callbackUrl) : null;
             if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || execution.callbackUrl.length > 2048) {
                 issues.errors.push({ field: 'execution.callbackUrl', message: 'must be an http(s) URL of at most 2048 characters' });
             } else if (parsed.protocol === 'http:') {
                 issues.warnings.push({ field: 'execution.callbackUrl', message: 'Callbacks over plain http can be read in transit; prefer https.' });
             }
         }
-        if (typeof execution.callbackSecret === 'string' && execution.callbackSecret !== '' && execution.callbackSecret !== '••••••'
+        if (typeof execution.callbackSecret === 'string' && execution.callbackSecret !== '' && execution.callbackSecret !== AGENT_SANDBOX_SECRET_MASK
             && (execution.callbackSecret.length < 16 || execution.callbackSecret.length > 256)) {
             issues.errors.push({ field: 'execution.callbackSecret', message: 'must be 16–256 characters' });
         }
@@ -297,7 +294,7 @@ function checkBindingShape(issues: Issues, field: string, binding: IAgentToolBin
 }
 
 function hasPrice(pricing: { inputTokenPer1M?: number; outputTokenPer1M?: number } | undefined | null): boolean {
-    return Boolean(pricing) && ((pricing!.inputTokenPer1M ?? 0) > 0 || (pricing!.outputTokenPer1M ?? 0) > 0);
+    return (pricing?.inputTokenPer1M ?? 0) > 0 || (pricing?.outputTokenPer1M ?? 0) > 0;
 }
 
 /**
@@ -336,6 +333,11 @@ export async function validateAgentConfig(input: {
             });
         }
     };
+    const checkKnowledge = async (field: string, key: string) => {
+        if (!(await db.findRagModuleByKey(key).catch(() => null))) {
+            issues.errors.push({ field, message: `Knowledge engine "${key}" does not exist` });
+        }
+    };
 
     if (config.sandbox?.enabled && input.tenantId) {
         const availability = await resolveSandboxAvailability(input.tenantId);
@@ -366,12 +368,7 @@ export async function validateAgentConfig(input: {
         const prompt = await db.findPromptByKey(config.promptKey, projectId).catch(() => null);
         if (!prompt) issues.errors.push({ field: 'promptKey', message: `Prompt "${config.promptKey}" does not exist` });
     }
-    if (config.knowledgeEngineKey) {
-        const knowledgeModule = await db.findRagModuleByKey(config.knowledgeEngineKey).catch(() => null);
-        if (!knowledgeModule) {
-            issues.errors.push({ field: 'knowledgeEngineKey', message: `Knowledge engine "${config.knowledgeEngineKey}" does not exist` });
-        }
-    }
+    if (config.knowledgeEngineKey) await checkKnowledge('knowledgeEngineKey', config.knowledgeEngineKey);
     if (config.memory?.enabled && config.memory.memoryStoreKey) {
         const store = await db.findMemoryStoreByKey(config.memory.memoryStoreKey, projectId).catch(() => null);
         if (!store) {
@@ -405,10 +402,7 @@ export async function validateAgentConfig(input: {
                 issues.errors.push({ field: `${field}.agentKey`, message: `"${entry.agentKey}" already delegates back to this agent (a cycle)` });
             }
         }
-        if (entry.knowledgeEngineKey) {
-            const knowledgeModule = await db.findRagModuleByKey(entry.knowledgeEngineKey).catch(() => null);
-            if (!knowledgeModule) issues.errors.push({ field: `${field}.knowledgeEngineKey`, message: `Knowledge engine "${entry.knowledgeEngineKey}" does not exist` });
-        }
+        if (entry.knowledgeEngineKey) await checkKnowledge(`${field}.knowledgeEngineKey`, entry.knowledgeEngineKey);
         await checkBindingReferences(issues, db, `${field}.toolBindings`, entry.toolBindings);
     }
 
@@ -447,11 +441,7 @@ async function checkBindingReferences(
                 continue;
             }
             if (server.status !== 'active') issues.errors.push({ field, message: `MCP server "${binding.sourceKey}" is not active` });
-            const disabled = new Set(
-                Array.isArray((server.metadata as { disabledTools?: unknown } | undefined)?.disabledTools)
-                    ? (server.metadata as { disabledTools: string[] }).disabledTools
-                    : [],
-            );
+            const disabled = new Set(getDisabledToolNames(server));
             for (const name of binding.toolNames ?? []) {
                 if (!server.tools.some((tool) => tool.name === name)) {
                     issues.errors.push({ field: `${field}.toolNames`, message: `MCP server "${binding.sourceKey}" has no tool "${name}"` });
@@ -463,17 +453,9 @@ async function checkBindingReferences(
     }
 }
 
-/** One line for a 400 body: the first error, and how many more there are. */
-export function summarizeValidation(result: AgentConfigValidation): string {
-    const [first, ...rest] = result.errors;
-    if (!first) return '';
-    return `${first.field}: ${first.message}${rest.length > 0 ? ` (and ${rest.length} more)` : ''}`;
-}
-
-/** The 400 body for a config that failed validation. */
+/** The 400 body for a config that failed validation: the first error, and how many more there are. */
 export function invalidConfigBody(result: AgentConfigValidation) {
-    return {
-        error: `Invalid agent config — ${summarizeValidation(result)}`,
-        validation: result,
-    };
+    const [first, ...rest] = result.errors;
+    const summary = first ? `${first.field}: ${first.message}${rest.length > 0 ? ` (and ${rest.length} more)` : ''}` : '';
+    return { error: `Invalid agent config — ${summary}`, validation: result };
 }

@@ -28,19 +28,10 @@ import type { PiiFinding } from './types';
 /** Cached module reference — the package's functions are stateless calls (no
  *  `.load()` step to repeat, unlike `@cognipeer/guardrail`'s classifier
  *  instance), so this exists only to pay the `import()` cost once. */
-let piiModule: ReturnType<typeof loadPii> | undefined;
-
-function loadPii() {
-  return import('@cognipeer/pii');
-}
-
-/** Exported for this module's own unit test only. */
-export function _resetCognipeerPiiCache(): void {
-  piiModule = undefined;
-}
+let piiModule: Promise<typeof import('@cognipeer/pii')> | undefined;
 
 function getPii() {
-  if (!piiModule) piiModule = loadPii();
+  piiModule ??= import('@cognipeer/pii');
   return piiModule;
 }
 

@@ -107,11 +107,7 @@ export function withAssembledStream<T extends object>(input: T): T {
                 // LangChain's concat is what merges partial tool-call argument
                 // JSON across chunks; without it, a call's args arrive in
                 // fragments and never parse.
-                merged = merged === undefined
-                    ? piece
-                    : typeof merged.concat === 'function'
-                        ? merged.concat(piece)
-                        : piece;
+                merged = typeof merged?.concat === 'function' ? merged.concat(piece) : piece;
                 yield chunk;
             }
             if (merged) yield assembleStreamedMessage(merged, text);

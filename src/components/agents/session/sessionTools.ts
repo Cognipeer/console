@@ -53,11 +53,7 @@ export function collectConfiguredTools(config: AgentToolConfig | undefined): Con
     const tools: ConfiguredTool[] = [];
 
     for (const binding of config.toolBindings ?? []) {
-        const origin: ToolOrigin = binding.source === 'mcp'
-            ? 'mcp'
-            : binding.source === 'system'
-                ? 'system'
-                : 'tool';
+        const origin: ToolOrigin = binding.source === 'mcp' || binding.source === 'system' ? binding.source : 'tool';
         // An empty `toolNames` binds nothing: both resolution loops in
         // `agentService.ts` iterate the list literally, so an empty one
         // contributes no tool at all rather than "everything".

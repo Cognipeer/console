@@ -56,9 +56,12 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
         if (opened) setValues(initialValues);
     }, [opened, initialValues]);
 
+    const set = <K extends keyof FormValues>(field: K, value: FormValues[K]) => setValues((v) => ({ ...v, [field]: value }));
+
     const validTitle = values.title.trim().length > 0;
     const validHeader = values.header.trim().length > 0;
     const validBody = values.body.trim().length > 0;
+    const ready = validTitle && validHeader && validBody;
 
     const checklist = [
         { id: 1, label: 'Title', done: validTitle },
@@ -67,7 +70,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
     ];
 
     const handleSubmit = async () => {
-        if (!validTitle || !validHeader || !validBody) return;
+        if (!ready) return;
         setSaving(true);
         try {
             const payload = {
@@ -105,8 +108,6 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
         }
     };
 
-    const bodyChars = values.body.length;
-
     const summary = (
         <>
             <SummaryGroup title={isEdit ? 'Edit skill' : 'New skill'}>
@@ -119,10 +120,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                     />
                 ) : null}
                 <SummaryKV label="Header" value={values.header || <span className="ds-faint">—</span>} />
-                <SummaryKV
-                    label="Instructions"
-                    value={validBody ? <span className="ds-faint">{bodyChars} chars</span> : <span className="ds-faint">—</span>}
-                />
+                <SummaryKV label="Instructions" value={<span className="ds-faint">{validBody ? `${values.body.length} chars` : '—'}</span>} />
                 <SummaryKV label="Model tier" value={values.minModelTier === 'any' ? 'Any' : values.minModelTier} />
             </SummaryGroup>
             <SummaryGroup title="Pre-flight">
@@ -143,7 +141,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
             primaryAction={{
                 label: isEdit ? 'Save' : 'Create',
                 loading: saving,
-                disabled: !validTitle || !validHeader || !validBody,
+                disabled: !ready,
                 onClick: () => void handleSubmit(),
             }}
             secondaryAction={{ label: 'Cancel', onClick: onClose }}
@@ -159,7 +157,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                         <TextInput
                             placeholder="Atlassian triage"
                             value={values.title}
-                            onChange={(event) => setValues((v) => ({ ...v, title: event.currentTarget.value }))}
+                            onChange={(event) => set('title', event.currentTarget.value)}
                         />
                     </FormField>
                     {!isEdit ? (
@@ -167,7 +165,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                             <TextInput
                                 placeholder="atlassian-triage"
                                 value={values.key}
-                                onChange={(event) => setValues((v) => ({ ...v, key: event.currentTarget.value }))}
+                                onChange={(event) => set('key', event.currentTarget.value)}
                             />
                         </FormField>
                     ) : null}
@@ -183,7 +181,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                             minRows={2}
                             autosize
                             value={values.header}
-                            onChange={(event) => setValues((v) => ({ ...v, header: event.currentTarget.value }))}
+                            onChange={(event) => set('header', event.currentTarget.value)}
                         />
                     </FormField>
                 </FormRow>
@@ -196,7 +194,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                                 { value: 'small', label: 'Small models only' },
                             ]}
                             value={values.minModelTier}
-                            onChange={(next) => setValues((v) => ({ ...v, minModelTier: (next as FormValues['minModelTier']) ?? 'any' }))}
+                            onChange={(next) => set('minModelTier', (next as FormValues['minModelTier']) ?? 'any')}
                             allowDeselect={false}
                         />
                     </FormField>
@@ -208,7 +206,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                                     { value: 'inactive', label: 'Inactive — hidden from every agent' },
                                 ]}
                                 value={values.status}
-                                onChange={(next) => setValues((v) => ({ ...v, status: (next as FormValues['status']) ?? 'active' }))}
+                                onChange={(next) => set('status', (next as FormValues['status']) ?? 'active')}
                                 allowDeselect={false}
                             />
                         </FormField>
@@ -231,7 +229,7 @@ export default function SkillEditorModal({ opened, onClose, skill, onSaved }: Sk
                             autosize
                             styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)', fontSize: 13 } }}
                             value={values.body}
-                            onChange={(event) => setValues((v) => ({ ...v, body: event.currentTarget.value }))}
+                            onChange={(event) => set('body', event.currentTarget.value)}
                         />
                     </FormField>
                 </FormRow>

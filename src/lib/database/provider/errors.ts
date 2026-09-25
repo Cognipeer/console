@@ -5,15 +5,6 @@
  */
 
 /**
- * Thrown when an `AgentRun` insert violates the partial unique index on
- * `conversationId` for active (`queued`/`running`) statuses (§6/§12.14 of
- * docs/guide/agent-background-execution.md). Both database providers must
- * catch their driver-specific unique-constraint violation and re-throw this
- * instead of letting the raw driver error propagate, so `createAgentRun`
- * callers can map it directly to `409 Conflict` without inspecting
- * driver-specific error shapes.
- */
-/**
  * Thrown when an `AgentRun` insert reuses an `Idempotency-Key` another run in
  * the same tenant+project already holds. The service resolves it to a replay
  * (same request) or a 409 (different request); it exists so two CONCURRENT
@@ -29,6 +20,16 @@ export class AgentRunIdempotencyKeyTakenError extends Error {
   }
 }
 
+/**
+ * Thrown when an `AgentRun` insert violates the one-active-run guard on
+ * `conversationId` (SQLite: a partial unique index; Mongo: agent_run_locks
+ * documents) for active (`queued`/`running`) statuses (§6/§12.14 of
+ * docs/guide/agent-background-execution.md). Both database providers must
+ * catch their driver-specific unique-constraint violation and re-throw this
+ * instead of letting the raw driver error propagate, so `createAgentRun`
+ * callers can map it directly to `409 Conflict` without inspecting
+ * driver-specific error shapes.
+ */
 export class AgentRunConflictError extends Error {
   readonly conversationId: string;
 
