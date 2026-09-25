@@ -279,8 +279,23 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (published version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. This endpoint returns a single completed response object; it does not stream.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponsePublished
+      parameters:
+        - name: X-Cognipeer-Background
+          in: header
+          required: false
+          description: "Run the turn in background mode. `true` / `false` (case-insensitive, surrounding whitespace ignored); any other value is ignored. Takes precedence over the body `background` field, which in turn takes precedence over the agent's `execution.defaultMode` setting."
+          schema:
+            type: string
+            example: "true"
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: "Background mode only (at most 255 characters). Repeating a key with the same request (agent key, `input`, `version` and, when continuing, the `previous_response_id` conversation) returns the existing run with `200` instead of queuing a new one; the same key with a different request is rejected with `409` (`idempotency_key_conflict`). Sending it on a synchronous request is rejected with `400` (`idempotency_key_sync_not_supported`)."
+          schema:
+            type: string
+            maxLength: 255
       requestBody:
         required: true
         content:
@@ -289,17 +304,104 @@ paths:
               $ref: "#/components/schemas/AgentResponsesRequest"
       responses:
         "200":
-          description: The completed agent response in OpenAI Responses format.
+          description: "Synchronous mode: the completed agent response in OpenAI Responses format. Background mode with a replayed `Idempotency-Key`: the existing `AgentRun` (no new run is queued)."
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AgentResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/AgentResponse"
+                  - $ref: "#/components/schemas/AgentRun"
+        "202":
+          description: "Background mode: the run was queued. Poll `GET /agents/runs/{runId}` with the returned `id`, or wait for the `callback_url` webhook."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Another run (synchronous or background) is already active for this conversation (`agent_run_conflict`), or the `Idempotency-Key` was already used with a different request (`idempotency_key_conflict`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: agent_run_conflict
+                  message: An active run (queued or running) already exists for this conversation.
+                  code: agent_run_conflict
+        "429":
+          description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          description: "Synchronous mode: the turn exceeded the synchronous timeout and was terminated (`timeout`). Tool side effects already in flight may have happened (`side_effects_possible: true`); the request is not retried automatically. Use background mode for long-running turns."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /agents/runs/{runId}:
+    get:
+      tags:
+        - Agents
+      summary: Get a background agent run
+      description: "Poll the status and result of a background agent run started with `POST /responses` or `POST /agents/responses` in background mode. Accepts the run id as returned (`run_{id}`); the run's `resp_{id}` form is accepted too. Runs are resolved within the token's project only. `result` is populated once `status` is `succeeded`; `error` once it is `failed` or `canceled`."
+      operationId: getAgentRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          description: The run id (`run_{id}`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The agent run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/runs/{runId}/cancel:
+    post:
+      tags:
+        - Agents
+      summary: Cancel a background agent run
+      description: "Cooperative cancel. A `queued` run is canceled immediately (`status: canceled`, `error.type: canceled_by_caller`). A `running` run gets `cancel_requested_at` stamped and stops before its next step; tool or model calls already in flight are not interrupted. Poll `GET /agents/runs/{runId}` for the final status. Runs already `succeeded`, `failed` or `canceled` return `409` (`agent_run_already_terminal`)."
+      operationId: cancelAgentRun
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          description: The run id (`run_{id}`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The agent run after the cancel request was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/{agentKey}:
@@ -7348,8 +7450,23 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (draft version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) for multi-turn conversations and `version` to pin a published version. This endpoint returns a single completed response object; it does not stream.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponseDraft
+      parameters:
+        - name: X-Cognipeer-Background
+          in: header
+          required: false
+          description: "Run the turn in background mode. `true` / `false` (case-insensitive, surrounding whitespace ignored); any other value is ignored. Takes precedence over the body `background` field, which in turn takes precedence over the agent's `execution.defaultMode` setting."
+          schema:
+            type: string
+            example: "true"
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: "Background mode only (at most 255 characters). Repeating a key with the same request (agent key, `input`, `version` and, when continuing, the `previous_response_id` conversation) returns the existing run with `200` instead of queuing a new one; the same key with a different request is rejected with `409` (`idempotency_key_conflict`). Sending it on a synchronous request is rejected with `400` (`idempotency_key_sync_not_supported`)."
+          schema:
+            type: string
+            maxLength: 255
       requestBody:
         required: true
         content:
@@ -7358,19 +7475,50 @@ paths:
               $ref: "#/components/schemas/AgentResponsesRequest"
       responses:
         "200":
-          description: The completed agent response in OpenAI Responses format.
+          description: "Synchronous mode: the completed agent response in OpenAI Responses format. Background mode with a replayed `Idempotency-Key`: the existing `AgentRun` (no new run is queued)."
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AgentResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/AgentResponse"
+                  - $ref: "#/components/schemas/AgentRun"
+        "202":
+          description: "Background mode: the run was queued. Poll `GET /agents/runs/{runId}` with the returned `id`, or wait for the `callback_url` webhook."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: "Another run (synchronous or background) is already active for this conversation (`agent_run_conflict`), or the `Idempotency-Key` was already used with a different request (`idempotency_key_conflict`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: agent_run_conflict
+                  message: An active run (queued or running) already exists for this conversation.
+                  code: agent_run_conflict
+        "429":
+          description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
+        "504":
+          description: "Synchronous mode: the turn exceeded the synchronous timeout and was terminated (`timeout`). Tool side effects already in flight may have happened (`side_effects_possible: true`); the request is not retried automatically. Use background mode for long-running turns."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /sandbox/sandboxes:
     post:
       tags:
@@ -12330,9 +12478,108 @@ components:
           description: Specific published version to run (positive integer).
         runtime_context:
           $ref: "#/components/schemas/AgentRuntimeContext"
+        background:
+          type: boolean
+          description: "Run the turn in background mode (mirrors the OpenAI Responses API field). Only a JSON boolean is honoured. The `X-Cognipeer-Background` header takes precedence over this field, and this field takes precedence over the agent's `execution.defaultMode`, so `false` forces a synchronous call on an agent that runs in the background by default. Background mode returns `202` with an `AgentRun`; it is rejected with `400` (`agent_background_disabled`) when the agent has background execution disabled."
+        callback_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: "Background mode only (ignored for synchronous calls). `http`/`https` URL that must resolve to a public address; it receives a `POST` when the run finishes with `succeeded`, `failed` or `canceled` (headers `X-Cognipeer-Event: agent_run.<status>` and `X-Cognipeer-Event-Id`; retried with backoff). When omitted, the agent's default callback from its Execution settings is used. An invalid value is rejected with `400` (`invalid_callback`)."
+        callback_secret:
+          type: string
+          minLength: 16
+          maxLength: 256
+          description: "Background mode only; requires `callback_url`. When set, each callback carries `X-Cognipeer-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, \"<t>.<body>\")>`. A `callback_url` supplied without a secret is delivered unsigned (the agent's default callback secret is not applied to it)."
       required:
         - model
         - input
+    AgentRun:
+      type: object
+      description: A background agent run, as returned when it is created, polled or canceled.
+      properties:
+        id:
+          type: string
+          description: Run ID in the form `run_{id}`.
+        object:
+          type: string
+          enum:
+            - agent.run
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+        agent:
+          type: string
+          description: Agent key the run invokes.
+        conversation_id:
+          type: string
+          description: Conversation the turn is appended to.
+        result:
+          type: object
+          nullable: true
+          description: "The same response a synchronous call returns, with `id` set to `resp_{runId}`. Populated only when `status` is `succeeded`. Either `run_{id}` or `resp_{id}` can be passed back as `previous_response_id` to continue the conversation."
+          allOf:
+            - $ref: "#/components/schemas/AgentResponse"
+        error:
+          type: object
+          nullable: true
+          description: Populated only when `status` is `failed` or `canceled`.
+          properties:
+            type:
+              type: string
+              enum:
+                - agent_error
+                - worker_lost
+                - max_duration_exceeded
+                - canceled_by_caller
+                - precondition_failed
+            message:
+              type: string
+              nullable: true
+        created_at:
+          type: integer
+          nullable: true
+          description: Unix timestamp (seconds) when the run was created.
+        started_at:
+          type: integer
+          nullable: true
+          description: Unix timestamp (seconds) when a worker started the run.
+        completed_at:
+          type: integer
+          nullable: true
+          description: Unix timestamp (seconds) when the run reached a terminal status.
+        cancel_requested_at:
+          type: integer
+          nullable: true
+          description: Unix timestamp (seconds) when a cancel was requested.
+        max_duration_ms:
+          type: integer
+          nullable: true
+          description: Server-side wall-clock ceiling for this run; exceeding it fails the run with `max_duration_exceeded`.
+        callback:
+          type: object
+          nullable: true
+          description: Callback delivery state, or null when the run has no callback URL.
+          properties:
+            url:
+              type: string
+            status:
+              type: string
+              nullable: true
+              enum:
+                - pending
+                - delivered
+                - failed
+            attempts:
+              type: integer
+            signed:
+              type: boolean
+              description: Whether deliveries are signed with a callback secret.
     AgentRuntimeContext:
       type: object
       description: Caller-supplied runtime context. Headers offered to downstream tools/MCP/connected agents (subject to per-target passthrough policy), plus optional per-target overrides and free-form metadata. Server-stamped fields (userId, tokenId, source) are not client-writable.

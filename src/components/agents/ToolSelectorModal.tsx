@@ -61,7 +61,7 @@ interface ToolSourceGroup {
 
 interface BrowserOption { id: string; name: string; key: string; status: string }
 
-interface WebSearchProviderOption { key: string; name: string; status: string }
+interface WebSearchProviderOption { key: string; label: string; status: string }
 
 /** sourceKey → icon, for the built-in system tools rendered as their own group. */
 const SYSTEM_TOOL_ICONS: Record<string, typeof IconBrowser> = {
@@ -220,8 +220,8 @@ export function ToolSelectorModal({
         const webSearchData = await webSearchRes.json();
         webSearchList = (webSearchData.providers ?? [])
           .filter((p: { status: string }) => p.status === 'active')
-          .map((p: { key: string; name: string; status: string }) => ({
-            key: p.key, name: p.name, status: p.status,
+          .map((p: { key: string; label: string; status: string }) => ({
+            key: p.key, label: p.label, status: p.status,
           }));
       }
       setWebSearchProviders(webSearchList);
@@ -555,7 +555,7 @@ export function ToolSelectorModal({
                           label="Web Search instance"
                           placeholder={webSearchProviders.length === 0 ? 'No web search instances available' : 'Select an instance to add Web Search'}
                           description="Selecting an instance adds the Web Search system tool to this agent."
-                          data={webSearchProviders.map((p) => ({ value: p.key, label: `${p.name} (${p.key})` }))}
+                          data={webSearchProviders.map((p) => ({ value: p.key, label: `${p.label} (${p.key})` }))}
                           value={(systemConfigs[sourceId]?.providerKey as string) ?? null}
                           onChange={(value) => {
                             setSystemConfigs((prev) => ({

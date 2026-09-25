@@ -14,7 +14,42 @@
 
 import type { ReactNode } from 'react';
 import { Badge, Box, Divider, Group, Stack, Text } from '@mantine/core';
+import type { ComboboxItem, ComboboxLikeRenderOptionInput } from '@mantine/core';
+import { IconCheck } from '@tabler/icons-react';
 import classes from './ConfigSection.module.css';
+
+export interface DescribedSelectOption {
+    value: string;
+    label: string;
+    /** One line under the option, shown in the dropdown — for a choice whose name alone does not explain what it does. */
+    description?: string;
+}
+
+/**
+ * Mantine `renderOption` for a Select/MultiSelect whose choices are not
+ * self-explanatory: the option's own one-line description renders under its
+ * label in the dropdown. Same visual pattern as the guardrail policy editor's
+ * `describedOption` (`components/guardrails/PolicyFieldRenderer.tsx`),
+ * kept local here so this domain does not import from that one.
+ */
+export function describedSelectOption(
+    options: readonly DescribedSelectOption[],
+): (input: ComboboxLikeRenderOptionInput<ComboboxItem>) => ReactNode {
+    return function renderOption({ option, checked }) {
+        const description = options.find((o) => o.value === option.value)?.description;
+        return (
+            <Group gap={6} wrap="nowrap" align="flex-start" style={{ flex: 1 }}>
+                <IconCheck size={14} style={{ marginTop: 3, flexShrink: 0, opacity: checked ? 1 : 0 }} />
+                <div>
+                    <Text size="sm">{option.label}</Text>
+                    {description ? (
+                        <Text size="xs" c="dimmed">{description}</Text>
+                    ) : null}
+                </div>
+            </Group>
+        );
+    };
+}
 
 export interface ConfigBlockProps {
     icon?: ReactNode;

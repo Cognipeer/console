@@ -1869,7 +1869,9 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
                 <Text size="sm" fw={600}>Background execution (long-running turns)</Text>
                 <Text size="xs" c="dimmed">
                   For turns that may run past a normal HTTP timeout (deep research, long tool chains), add{' '}
-                  <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call. Instead of
+                  <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call — or send{' '}
+                  <code>&quot;background&quot;: true</code> in the body, as an OpenAI SDK does. The header wins over the
+                  body field, and either wins over the agent&apos;s default mode. Instead of
                   the completed answer, you immediately get back a run id to poll — the turn keeps executing
                   server-side even if you disconnect. Optionally set <code>Idempotency-Key</code> so a retried
                   request replays the same run instead of starting a second one, or <code>callback_url</code> to
@@ -1889,6 +1891,18 @@ curl -X POST ${apiOrigin}/api/client/v1/responses \\
   }'
 
 # → 202 { "id": "run_<run_id>", "object": "agent.run", "status": "queued", "created_at": 1719500000 }
+
+# Same thing with the body field instead of the header (what an OpenAI SDK sends).
+# Precedence: x-cognipeer-background header > "background" body field > the agent's default mode.
+curl -X POST ${apiOrigin}/api/client/v1/responses \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Research this topic in depth and summarize the findings",
+    "background": true,
+    "callback_url": "https://your-server.com/webhooks/agent-run"
+  }'
 
 # 2. Poll status until it leaves "queued"/"running"
 curl ${apiOrigin}/api/client/v1/agents/runs/run_<run_id> \\
