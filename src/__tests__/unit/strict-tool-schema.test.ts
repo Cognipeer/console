@@ -12,8 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
-import { restoreToolCalls, toStrictCompatible, withStrictToolCalling } from '@/lib/services/agents/strictToolSchema';
-import { createSmartAgent, createTool } from '@cognipeer/agent-sdk';
+import { createSmartAgent, createTool, restoreToolCalls, toStrictCompatible } from '@cognipeer/agent-sdk';
 import { buildMemoryTools } from '@/lib/services/agents/agentMemoryTools';
 import { toolInputSchemaToZod } from '@/lib/services/agents/agentRuntimeConfig';
 
@@ -123,7 +122,7 @@ describe('restoreToolCalls', () => {
  * strict mode, and a strict-shaped tool call still runs the tool with its
  * original arguments.
  */
-describe('withStrictToolCalling — every tool the provider sees', () => {
+describe('strictTools (agent-sdk) — every console tool the provider sees', () => {
     function fakeStrictModel(script: Array<Record<string, unknown>>) {
         const bound: Array<{ tools: Array<{ name: string; description?: string; schema: z.ZodTypeAny }>; options?: Record<string, unknown> }> = [];
         let turn = 0;
@@ -167,7 +166,8 @@ describe('withStrictToolCalling — every tool the provider sees', () => {
         });
         const agent = createSmartAgent({
             name: 'strict-probe',
-            model: withStrictToolCalling(model) as never,
+            model: model as never,
+            strictTools: true,
             tools: [knowledgeLike, openApiLike, ...memory],
             planning: { mode: 'todo' },
             skills: [{ key: 'triage', title: 'Triage', header: 'How to triage', prompt: 'Look at logs.' }] as never,
@@ -205,7 +205,7 @@ describe('withStrictToolCalling — every tool the provider sees', () => {
             { role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 'knowledge_read_document_lines', args: { documentId: 'd1', offset: null } }] },
             { role: 'assistant', content: 'done' },
         ]);
-        const agent = createSmartAgent({ name: 'p', model: withStrictToolCalling(model) as never, tools: [tool] } as never);
+        const agent = createSmartAgent({ name: 'p', model: model as never, strictTools: true, tools: [tool] } as never);
         await agent.invoke({ messages: [{ role: 'user', content: 'go' }] } as never);
         // Without the restore the SDK's own validation rejected `offset: null`.
         expect(seen).toEqual([{ documentId: 'd1' }]);
@@ -236,7 +236,7 @@ describe('withStrictToolCalling — every tool the provider sees', () => {
             func: async (args: unknown) => { seen.legacy_mcp = args; return 'ok'; },
         });
         const agent = createSmartAgent({
-            name: 'p', model: withStrictToolCalling(model) as never, tools: [noParams, unknownSchema],
+            name: 'p', model: model as never, strictTools: true, tools: [noParams, unknownSchema],
         } as never);
         await agent.invoke({ messages: [{ role: 'user', content: 'go' }] } as never);
 
@@ -247,10 +247,5 @@ describe('withStrictToolCalling — every tool the provider sees', () => {
         expect(seen.list_errors).toEqual({});
         // The unknown-schema tool gets its arguments decoded back into an object.
         expect(seen.legacy_mcp).toEqual({ q: '502' });
-    });
-
-    it('leaves a provider without strict tool calling untouched', () => {
-        const model = { capabilities: { strictToolCalling: false }, bindTools: () => model };
-        expect(withStrictToolCalling(model)).toBe(model);
     });
 });

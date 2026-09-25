@@ -103,7 +103,6 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
-import { withStrictToolCalling } from './strictToolSchema';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { annotateAgentRunError, classifyAgentRunError } from './agentErrors';
@@ -1407,6 +1406,12 @@ function createConsoleSdkAgent(
         ...(input.memory ? { memory: input.memory } : {}),
         ...(input.costEstimator ? { costEstimator: input.costEstimator } : {}),
         ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+        // Strict tool calling on every call for providers that support it
+        // (not only with structured output): arguments are schema-valid by
+        // construction. The SDK makes every tool — ours and its own
+        // (manage_plan, open_skill, spawn_subagent, …) — strict-valid and maps
+        // the model's calls back to each tool's own shape; sub-agents inherit it.
+        strictTools: true,
         tracing: {
             enabled: true,
             mode: 'batched',
@@ -1624,7 +1629,7 @@ async function buildSubagentModel(
             modelSettings: resolveModelInvocationConfig(model, {}),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        return withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
+        return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
             tenantDbName,
             model,
             route: 'agent.subagent',
@@ -3293,7 +3298,7 @@ export async function executeAgentChatLocal(
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
         tenantDbName,
         model,
         route: 'agent.chat',
@@ -3987,7 +3992,7 @@ export async function executePlaygroundChatLocal(
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withStrictToolCalling(withAssembledStream(fromLangchainModel(lcModel))), {
+    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
         tenantDbName,
         model,
         route: 'agent.playground',
