@@ -7290,7 +7290,7 @@ paths:
       tags:
         - Sandbox
       summary: Create a sandbox
-      description: Enterprise (license-gated) Agent Sandbox endpoint. Spins up an isolated runtime container from a template. The sandbox starts automatically; poll `GET /sandbox/sandboxes/{id}` until its status is `running`. If no template is resolvable the built-in template library is auto-seeded for the tenant on first use.
+      description: Enterprise (license-gated) Sandbox endpoint. Spins up an isolated runtime container from a template. The sandbox starts automatically; poll `GET /sandbox/sandboxes/{id}` until its status is `running`. If no template is resolvable the built-in template library is auto-seeded for the tenant on first use.
       operationId: createSandbox
       requestBody:
         required: false
