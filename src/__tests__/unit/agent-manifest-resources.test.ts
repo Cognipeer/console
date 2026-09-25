@@ -27,7 +27,7 @@ const SPEC = {
         { source: 'tool' as const, sourceKey: 'crm', toolNames: ['lookup'] },
         { source: 'system' as const, sourceKey: 'web_search', toolNames: ['web_search'] },
     ],
-    subagents: [{ kind: 'inline' as const, name: 'helper', toolBindings: [{ source: 'mcp' as const, sourceKey: 'files', toolNames: ['read'] }] }],
+    subagents: [{ kind: 'inline' as const, name: 'helper', header: 'Helps', toolBindings: [{ source: 'mcp' as const, sourceKey: 'files', toolNames: ['read'] }] }],
 };
 
 beforeEach(() => {
@@ -101,7 +101,7 @@ describe('collectManifestResources', () => {
     });
 
     it('buildAgentManifest omits an empty resources block', async () => {
-        const agent = { key: 'a', name: 'A' };
+        const agent = { key: 'a', name: 'A', status: 'draft' as const };
         expect(buildAgentManifest(agent, SPEC, null, {}).resources).toBeUndefined();
         expect(buildAgentManifest(agent, SPEC, null, { skills: [] }).resources).toBeUndefined();
         expect(buildAgentManifest(agent, SPEC).dependencies).toContainEqual({ type: 'skill', key: 'refunds', usedBy: 'spec.skills' });
