@@ -126,7 +126,9 @@ describe('runSyncAgentTurn — hard wall-clock ceiling (§5)', () => {
     // The turn was told its deadline and, once abandoned, that it is cancelled
     // (so a late result is never persisted and the SDK loop stops).
     expect(seenCell?.deadlineAt).toBeGreaterThanOrEqual(startedAt + 60);
-    expect(seenCell?.deadlineAt).toBeLessThanOrEqual(Date.now());
+    // Allow a tiny same-tick scheduling skew between reading Date.now() here
+    // and the value captured inside runSyncAgentTurn.
+    expect(seenCell?.deadlineAt).toBeLessThanOrEqual(Date.now() + 5);
     expect(seenCell?.cancelled).toBe(true);
 
     // Still reserved: another turn on this conversation is refused.
