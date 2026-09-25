@@ -62,6 +62,7 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                     ) : (
                         <Select
                             label="Memory store"
+                            description="Which existing Memory module store this agent reads and writes facts to."
                             placeholder="Select a store…"
                             data={activeStores.map((s) => ({ value: s.key, label: s.name }))}
                             value={value?.memoryStoreKey ?? null}
@@ -107,10 +108,11 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                         />
                         <Select
                             label="Read policy"
+                            description="How facts are chosen for the pre-injected recall each turn."
                             data={[
-                                { value: 'recent_only', label: 'recent_only' },
-                                { value: 'semantic', label: 'semantic — vector search' },
-                                { value: 'hybrid', label: 'hybrid' },
+                                { value: 'recent_only', label: 'recent_only — most recently written facts' },
+                                { value: 'semantic', label: 'semantic — vector similarity search' },
+                                { value: 'hybrid', label: 'hybrid — half recent, half semantic, deduped' },
                             ]}
                             value={value?.readPolicy ?? 'hybrid'}
                             onChange={(next) => patch({ readPolicy: (next as AgentMemoryReadPolicy) ?? undefined })}
