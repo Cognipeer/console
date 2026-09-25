@@ -36,7 +36,7 @@ import {
 import type { ChatMessage } from '@/components/agents/session/sessionTypes';
 import { normalizePlaygroundUsage } from '@/lib/services/agents/playgroundUsage';
 import { consumeSse } from '@/components/agents/session/consumeSse';
-import { summariseArgs } from '@/components/agents/session/LiveToolCalls';
+import { appendLiveText, applyLiveToolEvent, isGenerating, summariseArgs, type LiveSegment } from '@/components/agents/session/LiveToolCalls';
 import {
     collectConfiguredTools,
     countUnnamedToolSurfaces,
@@ -814,6 +814,29 @@ describe('live tool call labels', () => {
     it('has nothing to show for an argument-less call', () => {
         expect(summariseArgs(undefined)).toBeUndefined();
         expect(summariseArgs({})).toBeUndefined();
+    });
+});
+
+describe('live turn order', () => {
+    it('interleaves text and tool calls in the order they streamed', () => {
+        let segments: LiveSegment[] = [];
+        segments = appendLiveText(segments, 'Let me ');
+        segments = appendLiveText(segments, 'search.');
+        segments = applyLiveToolEvent(segments, { phase: 'start', name: 'web_search', id: 'c1', args: { query: 'digiturk' } });
+        segments = applyLiveToolEvent(segments, { phase: 'start', name: 'web_search', id: 'c2' });
+        expect(isGenerating(segments)).toBe(false);
+        segments = applyLiveToolEvent(segments, { phase: 'success', name: 'web_search', id: 'c1', durationMs: 10 });
+        segments = applyLiveToolEvent(segments, { phase: 'success', name: 'web_search', id: 'c2', durationMs: 12 });
+        expect(isGenerating(segments)).toBe(true);
+        segments = appendLiveText(segments, 'Found it.');
+        expect(isGenerating(segments)).toBe(false);
+        segments = applyLiveToolEvent(segments, { phase: 'start', name: 'fetch' });
+        segments = applyLiveToolEvent(segments, { phase: 'error', name: 'fetch', error: 'boom' });
+        segments = appendLiveText(segments, 'Answer');
+
+        expect(segments.map((segment) => (segment.kind === 'text' ? segment.text : segment.calls.map((call) => `${call.name}${call.running ? '…' : call.error ? '!' : ''}`).join(',')))).toEqual([
+            'Let me search.', 'web_search,web_search', 'Found it.', 'fetch!', 'Answer',
+        ]);
     });
 });
 

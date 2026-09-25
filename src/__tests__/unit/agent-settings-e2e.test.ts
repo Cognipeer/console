@@ -292,6 +292,29 @@ describe('agent settings — what a run reports back', () => {
         expect(steps[0].error).toBeUndefined();
     });
 
+    it('keeps what the model wrote before a batch of calls, on its first call', () => {
+        const steps = extractPlaygroundSteps({
+            content: 'answer', metadata: {}, messages: [],
+            state: {
+                messages: [
+                    { role: 'user', content: 'news?' },
+                    { role: 'assistant', content: 'Let me search.', tool_calls: [{ id: 'c1' }, { id: 'c2' }] },
+                    { role: 'tool', content: 'r', tool_call_id: 'c1' },
+                    { role: 'tool', content: 'r', tool_call_id: 'c2' },
+                    { role: 'assistant', content: '', tool_calls: [{ id: 'c3' }] },
+                    { role: 'tool', content: 'r', tool_call_id: 'c3' },
+                    { role: 'assistant', content: 'answer' },
+                ],
+                toolHistory: [
+                    { executionId: 'e1', toolName: 'web_search', tool_call_id: 'c1' },
+                    { executionId: 'e2', toolName: 'web_search', tool_call_id: 'c2' },
+                    { executionId: 'e3', toolName: 'fetch', tool_call_id: 'c3' },
+                ],
+            },
+        } as never);
+        expect(steps.map((step) => step.narration)).toEqual(['Let me search.', undefined, undefined]);
+    });
+
     it('reports a guardrail-rejected call as failed, not as an answer', () => {
         const steps = extractPlaygroundSteps({
             content: '', metadata: {}, messages: [],

@@ -129,6 +129,30 @@ export function toStrictCompatible(schema: ZodTypeAny): StrictTransform {
                 restore: (value) => (Array.isArray(value) ? value.map(child.restore) : value),
             };
         }
+        case 'ZodUnion':
+        case 'ZodDiscriminatedUnion': {
+            // Each branch must satisfy strict mode on its own: manage_plan's
+            // `todoList: array(union(writeItem, updateItem))` left the
+            // branches' optional fields out of `required`, and the provider
+            // rejected every run with planning on (`… anyOf 0 … Missing 'step'`).
+            const rawOptions = def.options instanceof Map ? [...def.options.values()] : def.options;
+            const options = (rawOptions as ZodTypeAny[]).map(toStrictCompatible);
+            if (options.length === 1) return options[0];
+            if (options.every((option, index) => option.schema === rawOptions[index])) {
+                return { schema, restore: identity };
+            }
+            return {
+                schema: describeLike(z.union(options.map((option) => option.schema) as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]), schema),
+                restore: (value) => {
+                    // The model's value names no branch: the first branch
+                    // whose restored value its ORIGINAL schema accepts wins
+                    // (a "not given" null is only droppable where optional).
+                    const candidates = options.map((option) => option.restore(value));
+                    const index = candidates.findIndex((candidate, i) => (rawOptions as ZodTypeAny[])[i].safeParse(candidate).success);
+                    return candidates[index >= 0 ? index : 0];
+                },
+            };
+        }
         case 'ZodEffects':
             return toStrictCompatible(def.schema);
         case 'ZodRecord':

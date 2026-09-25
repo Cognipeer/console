@@ -80,7 +80,9 @@ import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList';
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import SessionSidePanel from './SessionSidePanel';
-import LiveToolCalls, { summariseArgs, type LiveToolCall } from './LiveToolCalls';
+import LiveToolCalls, {
+    appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
+} from './LiveToolCalls';
 import { consumeSse } from './consumeSse';
 import ContextCompactionCard from './ContextCompactionCard';
 import type { ChatMessage, PlaygroundStep, TurnCompaction } from './sessionTypes';
@@ -186,9 +188,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [runtimeContextJson, setRuntimeContextJson] = useState('');
     const [pinnedVersion, setPinnedVersion] = useState(searchParams.get('version') ?? '');
     const [deleting, setDeleting] = useState(false);
-    const [liveCalls, setLiveCalls] = useState<LiveToolCall[]>([]);
-    const [generating, setGenerating] = useState(false);
-    const [streamText, setStreamText] = useState('');
+    const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([]);
+    const generating = isGenerating(liveSegments);
     const [liveCompactions, setLiveCompactions] = useState<TurnCompaction[]>([]);
 
     const viewportRef = useRef<HTMLDivElement>(null);
@@ -302,9 +303,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         const startedAt = Date.now();
         setSending(true);
         setInput('');
-        setLiveCalls([]);
-        setGenerating(false);
-        setStreamText('');
+        setLiveSegments([]);
         setLiveCompactions([]);
 
         const optimistic: ChatMessage[] = [...messages, { role: 'user', content: message }];
@@ -394,47 +393,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
             await consumeSse(res.body, (event, data) => {
                 if (event === 'tool') {
-                    const payload = data as {
-                        phase: string; name: string; id?: string; args?: unknown;
-                        durationMs?: number; error?: string;
-                    };
-                    setLiveCalls((current) => {
-                        // Terminal phases carry the same id as their start, so
-                        // the row updates in place; without an id (some
-                        // providers omit it) the newest running row of that
-                        // name is the one that just finished.
-                        const key = payload.id ?? `${payload.name}:${current.length}`;
-                        if (payload.phase === 'start') {
-                            setGenerating(false);
-                            return [...current, {
-                                key,
-                                name: payload.name,
-                                detail: summariseArgs(payload.args),
-                                running: true,
-                            }];
-                        }
-                        const index = payload.id
-                            ? current.findIndex((call) => call.key === payload.id)
-                            : current.map((call) => call.name === payload.name && call.running)
-                                .lastIndexOf(true);
-                        if (index < 0) return current;
-                        const next = [...current];
-                        next[index] = {
-                            ...next[index],
-                            running: false,
-                            durationMs: payload.durationMs,
-                            ...(payload.error ? { error: payload.error } : {}),
-                        };
-                        // Every call settled: whatever happens next is the model
-                        // writing, which is what the operator is now waiting on.
-                        if (next.every((call) => !call.running)) setGenerating(true);
-                        return next;
-                    });
+                    setLiveSegments((current) => applyLiveToolEvent(current, data as LiveToolEvent));
                 } else if (event === 'text') {
-                    // First delta means the model is writing: the tool rows
-                    // stop being the thing to watch.
-                    setGenerating(false);
-                    setStreamText((current) => current + String((data as { text?: string }).text ?? ''));
+                    setLiveSegments((current) => appendLiveText(current, String((data as { text?: string }).text ?? '')));
                 } else if (event === 'summary') {
                     setLiveCompactions((current) => [...current, data as TurnCompaction]);
                 } else if (event === 'result') {
@@ -448,12 +409,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             fail(err);
         } finally {
             setSending(false);
-            setLiveCalls([]);
             setLiveCompactions([]);
-            setGenerating(false);
             // Cleared only now: dropping it the moment `result` lands would
             // blank the answer for the frame between the two state updates.
-            setStreamText('');
+            setLiveSegments([]);
         }
     };
 
@@ -721,7 +680,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                         {msg.reasoning ? (
                                                             <ReasoningDisclosure reasoning={msg.reasoning} latencyMs={msg.latencyMs} />
                                                         ) : null}
-                                                        {msg.steps?.length ? <StepTimeline steps={msg.steps} /> : null}
+                                                        {msg.steps?.length ? <NarratedSteps steps={msg.steps} /> : null}
                                                         {msg.compactions?.map((compaction, index) => (
                                                             <ContextCompactionCard
                                                                 key={`${compaction.at}-${index}`}
@@ -787,23 +746,30 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                             {liveCompactions.map((compaction, index) => (
                                                 <ContextCompactionCard key={`live-${index}`} compaction={compaction} live />
                                             ))}
-                                            {liveCalls.length === 0 && !generating && !streamText ? (
+                                            {liveSegments.length === 0 ? (
                                                 <Group gap="xs">
                                                     <Loader size="xs" />
                                                     <Text size="xs" c="dimmed">The agent is working…</Text>
                                                 </Group>
                                             ) : (
-                                                <LiveToolCalls calls={liveCalls} generating={generating} />
+                                                <Stack gap="xs">
+                                                    {liveSegments.map((segment, index) => (segment.kind === 'tools' ? (
+                                                        <LiveToolCalls
+                                                            key={`tools-${index}`}
+                                                            calls={segment.calls}
+                                                            generating={generating && index === liveSegments.length - 1}
+                                                        />
+                                                    ) : (
+                                                        <Box key={`text-${index}`} className={classes.chatMarkdown}>
+                                                            <TypographyStylesProvider className={classes.markdownBody}>
+                                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                                    {segment.text}
+                                                                </ReactMarkdown>
+                                                            </TypographyStylesProvider>
+                                                        </Box>
+                                                    )))}
+                                                </Stack>
                                             )}
-                                            {streamText ? (
-                                                <Box className={classes.chatMarkdown} mt="xs">
-                                                    <TypographyStylesProvider className={classes.markdownBody}>
-                                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                                            {streamText}
-                                                        </ReactMarkdown>
-                                                    </TypographyStylesProvider>
-                                                </Box>
-                                            ) : null}
                                         </Box>
                                     ) : null}
                                 </Stack>
@@ -993,6 +959,35 @@ function ReasoningDisclosure({ reasoning, latencyMs }: { reasoning: string; late
 }
 
 /**
+ * A turn's tool calls with what the model wrote before each batch ("Let me
+ * search…"), in the order it happened — the same order the live view showed.
+ * A turn with no such text keeps the single collapsed timeline.
+ */
+function NarratedSteps({ steps }: { steps: PlaygroundStep[] }) {
+    if (!steps.some((step) => step.narration)) return <StepTimeline steps={steps} />;
+    const groups: Array<{ narration?: string; offset: number; steps: PlaygroundStep[] }> = [];
+    steps.forEach((step, index) => {
+        const current = groups[groups.length - 1];
+        if (!current || step.narration) groups.push({ narration: step.narration, offset: index, steps: [step] });
+        else current.steps.push(step);
+    });
+    return (
+        <>
+            {groups.map((group) => (
+                <Box key={group.offset}>
+                    {group.narration ? (
+                        <TypographyStylesProvider className={classes.markdownBody}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{group.narration}</ReactMarkdown>
+                        </TypographyStylesProvider>
+                    ) : null}
+                    <StepTimeline steps={group.steps} offset={group.offset} />
+                </Box>
+            ))}
+        </>
+    );
+}
+
+/**
  * The tool calls a turn made, in order.
  *
  * Collapsed, because by the time a turn is in the transcript the calls have
@@ -1000,7 +995,7 @@ function ReasoningDisclosure({ reasoning, latencyMs }: { reasoning: string; late
  * came back for. The summary line keeps them one click away, and a failure
  * colours it red so a turn that went wrong still announces itself.
  */
-function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
+function StepTimeline({ steps, offset = 0 }: { steps: PlaygroundStep[]; offset?: number }) {
     const [open, setOpen] = useState(false);
     const failed = steps.filter((step) => step.error).length;
 
@@ -1020,7 +1015,7 @@ function StepTimeline({ steps }: { steps: PlaygroundStep[] }) {
             <Collapse in={open}>
                 <Stack gap={6} mt="xs">
                     {steps.map((step, index) => (
-                        <StepCard key={step.id ?? index} step={step} index={index} />
+                        <StepCard key={step.id ?? index} step={step} index={offset + index} />
                     ))}
                 </Stack>
             </Collapse>

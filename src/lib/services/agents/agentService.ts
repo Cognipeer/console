@@ -2815,6 +2815,13 @@ export interface AgentPlaygroundStep {
     summarized?: boolean;
     originalTokenCount?: number;
     timestamp?: string;
+    /**
+     * What the model wrote in the same message that made this call ("Let me
+     * search for …"), set on the first call of that message only. Kept so the
+     * transcript shows it where it happened — before the call — instead of
+     * dropping it (it is not part of the final answer).
+     */
+    narration?: string;
 }
 
 export interface AgentPlaygroundChatResult {
@@ -3578,6 +3585,18 @@ export function extractPlaygroundSteps(
     const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
     if (!Array.isArray(history)) return [];
 
+    // tool_call_id → the text of the assistant message that issued it.
+    const narrations = new Map<string, string>();
+    const messages = (result.state as { messages?: unknown[] } | undefined)?.messages;
+    for (const message of Array.isArray(messages) ? messages : []) {
+        const m = message as { role?: unknown; _getType?: () => string; content?: unknown; tool_calls?: Array<{ id?: unknown }> };
+        const role = typeof m?.role === 'string' ? m.role : m?._getType?.();
+        if ((role !== 'assistant' && role !== 'ai') || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) continue;
+        const text = agentMessageText(m.content).trim();
+        const firstId = m.tool_calls[0]?.id;
+        if (text && typeof firstId === 'string') narrations.set(firstId, text);
+    }
+
     return history
         .filter((entry) => !(priorExecutionIds && typeof entry.executionId === 'string' && priorExecutionIds.has(entry.executionId)))
         .map((entry) => {
@@ -3627,6 +3646,9 @@ export function extractPlaygroundSteps(
                 ? { originalTokenCount: entry.originalTokenCount }
                 : {}),
             ...(typeof entry.timestamp === 'string' ? { timestamp: entry.timestamp } : {}),
+            ...(typeof entry.tool_call_id === 'string' && narrations.has(entry.tool_call_id)
+                ? { narration: narrations.get(entry.tool_call_id) }
+                : {}),
         };
     });
 }
