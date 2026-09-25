@@ -122,7 +122,9 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
   const cfg = getConfig();
   const now = Date.now();
   const staleBefore = new Date(now - cfg.agent.runHeartbeatStaleMs);
-  const requeueBefore = options.requeueAllQueued ? new Date(now) : new Date(now - cfg.agent.runRequeueAfterMs);
+  // Boot requeues every queued run — no age cut-off at all (`< now` missed a
+  // run created in the same millisecond as the sweep).
+  const requeueBefore = options.requeueAllQueued ? undefined : new Date(now - cfg.agent.runRequeueAfterMs);
   const doRetention = now - lastRetentionAt > RETENTION_INTERVAL_MS;
   if (doRetention) lastRetentionAt = now;
 
@@ -171,7 +173,7 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           }
         }
 
-        const queued = await tenantDb.listQueuedAgentRuns(tenantId, { createdBefore: requeueBefore, limit: REQUEUE_BATCH });
+        const queued = await tenantDb.listQueuedAgentRuns(tenantId, { ...(requeueBefore ? { createdBefore: requeueBefore } : {}), limit: REQUEUE_BATCH });
         for (const run of queued) {
           try {
             await republishAgentRun(run);

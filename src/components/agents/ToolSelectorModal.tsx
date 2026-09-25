@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import CreateMcpModal from '@/components/mcp/CreateMcpModal';
 import {
   Modal,
   Stack,
@@ -22,6 +23,7 @@ import {
 import {
   IconChevronDown,
   IconChevronRight,
+  IconPlus,
   IconServer,
   IconSearch,
   IconTool,
@@ -105,6 +107,10 @@ export function ToolSelectorModal({
 
   // Selection state – keyed by "source::sourceKey::toolName"
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // An MCP server created from here: once the list reloads, all its tools
+  // are selected — the reason it was created from inside the agent.
+  const [createMcpOpen, setCreateMcpOpen] = useState(false);
+  const [pendingServerKey, setPendingServerKey] = useState<string | null>(null);
 
   // Per-binding config state for system tools (e.g. browser_use needs a browserId)
   const [systemConfigs, setSystemConfigs] = useState<Record<string, Record<string, unknown>>>({});
@@ -270,6 +276,19 @@ export function ToolSelectorModal({
     if (opened) loadSources();
   }, [opened, loadSources]);
 
+  useEffect(() => {
+    if (!pendingServerKey) return;
+    const group = sources.find((g) => g.source === 'mcp' && g.sourceKey === pendingServerKey);
+    if (!group) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const tool of group.tools) next.add(`mcp::${group.sourceKey}::${tool.name}`);
+      return next;
+    });
+    setExpandedSources((prev) => new Set(prev).add(`mcp::${group.sourceKey}`));
+    setPendingServerKey(null);
+  }, [pendingServerKey, sources]);
+
   // ── Toggle helpers ──────────────────────────────────────────────
 
   const toggleSource = (source: string, sourceKey: string) => {
@@ -418,11 +437,26 @@ export function ToolSelectorModal({
           {t('config.toolSelectorDescription')}
         </Text>
 
-        <TextInput
-          placeholder="Search tools..."
-          leftSection={<IconSearch size={14} />}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+        <Group gap="xs" wrap="nowrap">
+          <TextInput
+            style={{ flex: 1 }}
+            placeholder="Search tools..."
+            leftSection={<IconSearch size={14} />}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <Button variant="light" leftSection={<IconPlus size={14} />} onClick={() => setCreateMcpOpen(true)}>
+            New MCP server
+          </Button>
+        </Group>
+        <CreateMcpModal
+          opened={createMcpOpen}
+          onClose={() => setCreateMcpOpen(false)}
+          onCreated={(server) => {
+            setCreateMcpOpen(false);
+            setPendingServerKey(server.key);
+            void loadSources();
+          }}
         />
 
         {loading ? (

@@ -1521,6 +1521,7 @@ export default function AgentDetailPage() {
                   skills={skills}
                   policy={skillPolicy}
                   library={skillLibrary}
+                  onLibraryAdd={(skill) => setSkillLibrary((prev) => [...prev.filter((s) => s.key !== skill.key), skill])}
                   onChange={(nextSkills, nextPolicy) => {
                     setSkills(nextSkills);
                     setSkillPolicy(nextPolicy);

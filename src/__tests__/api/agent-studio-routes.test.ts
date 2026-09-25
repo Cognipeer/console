@@ -76,6 +76,21 @@ vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
     };
 });
 
+vi.mock('@/lib/services/agents/manifestResources', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/manifestResources')>();
+    return {
+        ...actual,
+        collectManifestResources: vi.fn(async () => ({
+            resources: { skills: [{ key: 'refunds', title: 'Refunds', header: 'h', body: 'b' }] },
+            skipped: [{ type: 'mcpServers', key: 'kb', reason: 'internal' }],
+        })),
+    };
+});
+vi.mock('@/lib/services/agents/import/importService', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/import/importService')>();
+    return { ...actual, previewAgentDocumentImport: vi.fn(), applyAgentDocumentImport: vi.fn() };
+});
+
 vi.mock('@/lib/services/agents/skillService', () => ({
     createSkill: vi.fn(),
     deleteSkill: vi.fn(),
@@ -106,6 +121,11 @@ import {
     requestAgentRunCancellation,
     resolveAgentExecutionLimits,
 } from '@/lib/services/agents/agentRunService';
+import {
+    AgentImportError,
+    applyAgentDocumentImport,
+    previewAgentDocumentImport,
+} from '@/lib/services/agents/import/importService';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { skillsApiPlugin } from '@/server/api/plugins/skills';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -152,6 +172,17 @@ describe('export / import', () => {
         const body = parseJsonBody<{ manifest: { metadata: { key: string }; spec: { modelKey: string } } }>(res.body);
         expect(body.manifest.metadata.key).toBe('field-ops');
         expect(body.manifest.spec.modelKey).toBe('gpt-5-terra');
+    });
+
+    it('GET /agents/:agentId/export?include= embeds definitions and reports what stayed a reference', async () => {
+        const app = await agentsApp();
+        const res = await app.inject({ method: 'GET', url: '/api/agents/agent-1/export?format=json&include=skills,mcp' });
+        expect(res.statusCode).toBe(200);
+        const body = parseJsonBody<{ manifest: { resources?: { skills?: unknown[] } }; skippedResources: unknown[] }>(res.body);
+        expect(body.manifest.resources?.skills).toHaveLength(1);
+        expect(body.skippedResources).toEqual([{ type: 'mcpServers', key: 'kb', reason: 'internal' }]);
+        const bad = await app.inject({ method: 'GET', url: '/api/agents/agent-1/export?include=secrets' });
+        expect(bad.statusCode).toBe(400);
     });
 
     it('GET /agents/:agentId/export 404s for another project\'s agent', async () => {
@@ -501,5 +532,46 @@ describe('execution limits and background runs', () => {
         mockFn(requestAgentRunCancellation).mockResolvedValueOnce({ kind: 'already_terminal', run: { ...RUN, status: 'succeeded' } });
         const done = await app.inject({ method: 'POST', url: '/api/agents/agent-1/runs/run_run-1/cancel' });
         expect(done.statusCode).toBe(409);
+    });
+});
+
+describe('import from a definition document', () => {
+    it('POST /agents/import/document/preview requires content and passes the format hint', async () => {
+        const app = await agentsApp();
+        const empty = await app.inject({ method: 'POST', url: '/api/agents/import/document/preview', payload: {} });
+        expect(empty.statusCode).toBe(400);
+
+        mockFn(previewAgentDocumentImport).mockResolvedValue({ format: { id: 'claude-managed-agent' }, warnings: [] });
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/import/document/preview',
+            payload: { content: 'name: x\nmodel: claude-opus-5-5', format: 'claude-managed-agent' },
+        });
+        expect(res.statusCode).toBe(200);
+        expect(mockFn(previewAgentDocumentImport)).toHaveBeenCalledWith(
+            expect.objectContaining({ tenantDbName: 'tenant_acme', projectId: 'proj-1', userId: 'user-1' }),
+            'name: x\nmodel: claude-opus-5-5',
+            'claude-managed-agent',
+        );
+    });
+
+    it('POST /agents/import/document answers 201 with what it created, and maps import errors to their status', async () => {
+        mockFn(applyAgentDocumentImport).mockResolvedValueOnce({
+            agent: { ...AGENT, _id: 'agent-new', key: 'support-bot' },
+            action: 'created',
+            created: { mcpServers: [{ key: 'github', name: 'github' }], skills: [] },
+            warnings: [{ code: 'web_fetch', message: 'mapped' }],
+        });
+        const app = await agentsApp();
+        const ok = await app.inject({ method: 'POST', url: '/api/agents/import/document', payload: { content: 'x', modelKey: 'opus' } });
+        expect(ok.statusCode).toBe(201);
+        const body = parseJsonBody<{ agent: { _id: string }; created: unknown; warnings: unknown[] }>(ok.body);
+        expect(body.agent._id).toBe('agent-new');
+        expect(body.warnings).toHaveLength(1);
+
+        mockFn(applyAgentDocumentImport).mockRejectedValueOnce(new AgentImportError('MCP server "jira" could not be connected', 422, { mcpServer: 'jira' }));
+        const failed = await app.inject({ method: 'POST', url: '/api/agents/import/document', payload: { content: 'x', modelKey: 'opus' } });
+        expect(failed.statusCode).toBe(422);
+        expect(parseJsonBody<{ details: unknown }>(failed.body).details).toEqual({ mcpServer: 'jira' });
     });
 });

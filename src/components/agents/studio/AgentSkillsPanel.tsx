@@ -7,10 +7,11 @@
  * agent has to a Prompt or a Tool.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
     Alert,
     Badge,
+    Button,
     Card,
     Group,
     MultiSelect,
@@ -19,7 +20,8 @@ import {
     Stack,
     Text,
 } from '@mantine/core';
-import { IconBulb, IconInfoCircle } from '@tabler/icons-react';
+import { IconBulb, IconInfoCircle, IconPlus } from '@tabler/icons-react';
+import SkillEditorModal from '@/components/skills/SkillEditorModal';
 import type { IAgentSkillPolicy } from '@/lib/database/provider/types.domain';
 import type { SkillView } from '@/components/skills/types';
 
@@ -28,10 +30,13 @@ export interface AgentSkillsPanelProps {
     policy: IAgentSkillPolicy | undefined;
     library: SkillView[];
     onChange: (skills: string[], policy: IAgentSkillPolicy | undefined) => void;
+    /** A skill created from this panel — the page adds it to its library copy. */
+    onLibraryAdd?: (skill: SkillView) => void;
     disabled?: boolean;
 }
 
-export default function AgentSkillsPanel({ skills, policy, library, onChange, disabled }: AgentSkillsPanelProps) {
+export default function AgentSkillsPanel({ skills, policy, library, onChange, onLibraryAdd, disabled }: AgentSkillsPanelProps) {
+    const [creating, setCreating] = useState(false);
     const options = useMemo(
         () => library
             .filter((s) => s.status === 'active' || skills.includes(s.key))
@@ -56,7 +61,29 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, di
                         disclosed only once it opens the skill — the model decides what it needs.
                     </Text>
                 </Stack>
+                <Button
+                    size="xs"
+                    variant="light"
+                    leftSection={<IconPlus size={14} />}
+                    onClick={() => setCreating(true)}
+                    disabled={disabled}
+                >
+                    New skill
+                </Button>
             </Group>
+
+            {/* Created here, saved to the project's skill library (so other agents
+                can use it too) and attached to this agent in one step. */}
+            <SkillEditorModal
+                opened={creating}
+                onClose={() => setCreating(false)}
+                skill={null}
+                onSaved={(created) => {
+                    setCreating(false);
+                    onLibraryAdd?.(created);
+                    if (!skills.includes(created.key)) onChange([...skills, created.key], policy);
+                }}
+            />
 
             <MultiSelect
                 placeholder={library.length ? 'Select skills…' : 'No skills in the library yet'}
@@ -71,8 +98,8 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, di
             {library.length === 0 ? (
                 <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />}>
                     <Text size="sm">
-                        No skills exist yet. Create one from <strong>Build → Agents → Skills</strong>, then attach
-                        it here.
+                        No skills exist yet. Create one with <strong>New skill</strong> — it is saved to the
+                        project&apos;s skill library and attached to this agent.
                     </Text>
                 </Alert>
             ) : null}
