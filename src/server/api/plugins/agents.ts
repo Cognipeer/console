@@ -1,4 +1,11 @@
-import type { FastifyPluginAsync } from 'fastify';
+import { AgentDocumentParseError } from '@/lib/services/agents/import/document';
+import {
+  AgentImportError,
+  applyAgentDocumentImport,
+  previewAgentDocumentImport,
+  type ApplyAgentDocumentImportInput,
+} from '@/lib/services/agents/import/importService';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IUser } from '@/lib/database';
@@ -631,6 +638,67 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: error.message, issues: error.issues });
       }
       logger.error('Import agent error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to import agent' });
+    }
+  }));
+
+  // ── Import from a definition document (New → Import) ────────────────
+  // Any supported format — the console manifest or a Claude Managed Agent
+  // (JSON / YAML / Markdown front-matter) — auto-detected unless `format`
+  // says otherwise. `/preview` writes nothing.
+  const sendImportError = (reply: FastifyReply, error: unknown) => {
+    if (error instanceof AgentDocumentParseError) return reply.code(400).send({ error: error.message });
+    if (error instanceof AgentImportError) {
+      return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
+    }
+    if (error instanceof AgentManifestError) return reply.code(400).send({ error: error.message, issues: error.issues });
+    return null;
+  };
+
+  app.post('/agents/import/document/preview', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const body = await readJsonBody<{ content?: string; format?: string }>(request);
+      if (typeof body?.content !== 'string' || !body.content.trim()) {
+        return reply.code(400).send({ error: 'content is required' });
+      }
+      const preview = await previewAgentDocumentImport(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
+        body.content,
+        body.format,
+      );
+      return reply.code(200).send(preview);
+    } catch (error) {
+      const handled = sendImportError(reply, error);
+      if (handled) return handled;
+      logger.error('Preview agent document import error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Failed to read the document' });
+    }
+  }));
+
+  app.post('/agents/import/document', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const body = await readJsonBody<ApplyAgentDocumentImportInput>(request);
+      if (typeof body?.content !== 'string' || !body.content.trim()) {
+        return reply.code(400).send({ error: 'content is required' });
+      }
+      const result = await applyAgentDocumentImport(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
+        body,
+      );
+      return reply.code(result.action === 'created' ? 201 : 200).send({
+        agent: redactAgent(result.agent),
+        action: result.action,
+        created: result.created,
+        warnings: result.warnings,
+      });
+    } catch (error) {
+      const handled = sendImportError(reply, error);
+      if (handled) return handled;
+      logger.error('Agent document import error', { error });
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({ error: 'Failed to import agent' });
     }

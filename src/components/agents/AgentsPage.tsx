@@ -16,6 +16,7 @@ import {
   IconChevronDown,
   IconEye,
   IconPlugConnected,
+  IconFileImport,
   IconPlus,
   IconRobot,
   IconTrash,
@@ -26,6 +27,7 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateAgentModal from './CreateAgentModal';
 import ConnectAgentModal from './ConnectAgentModal';
+import ImportAgentShell from './ImportAgentShell';
 
 interface Agent {
   _id: string;
@@ -84,6 +86,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -342,6 +345,18 @@ export default function AgentsPage() {
                   </span>
                 </div>
               </Menu.Item>
+              <Menu.Divider />
+              <Menu.Item
+                leftSection={<IconFileImport size={15} />}
+                onClick={() => setImportOpen(true)}
+              >
+                <div className="ds-col" style={{ gap: 1 }}>
+                  <span style={{ fontSize: 13, fontWeight: 500 }}>Import</span>
+                  <span className="ds-muted" style={{ fontSize: 11 }}>
+                    From a Claude Managed Agent or an agent manifest (YAML / JSON)
+                  </span>
+                </div>
+              </Menu.Item>
             </Menu.Dropdown>
           </Menu>
         }
@@ -457,6 +472,14 @@ export default function AgentsPage() {
         onCreated={handleCreated}
       />
 
+      <ImportAgentShell
+        opened={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={(agentId) => {
+          setImportOpen(false);
+          handleCreated(agentId);
+        }}
+      />
       <ConnectAgentModal
         opened={connectModalOpen}
         onClose={() => setConnectModalOpen(false)}
