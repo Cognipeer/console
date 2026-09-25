@@ -564,6 +564,9 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
   border-color: var(--ds-accent);
   box-shadow: 0 0 0 3px var(--ds-accent-soft);
 }
+.ds-link-row[data-pending='true'] {
+  box-shadow: 0 0 0 1px var(--ds-accent), 0 0 0 4px var(--ds-accent-soft);
+}
 
 /* Badges */
 .ds-badge {

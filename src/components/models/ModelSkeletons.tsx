@@ -120,7 +120,7 @@ export function ModelDetailSkeleton() {
         <div className="ds-row ds-gap-sm" style={{ flexShrink: 0 }}>
           <Skeleton width={34} height={34} radius="md" />
           <Skeleton width={104} height={36} radius="sm" />
-          <Skeleton width={150} height={36} radius="sm" />
+          <Skeleton width={74} height={36} radius="sm" />
           <Skeleton width={34} height={34} radius="md" />
         </div>
       </div>

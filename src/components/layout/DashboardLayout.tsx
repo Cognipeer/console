@@ -27,6 +27,7 @@ import ServiceSubNav, {
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
 import { LauncherProvider } from './launcher/LauncherContext';
+import { DashboardUserProvider, type DashboardUser } from './DashboardUserContext';
 import { openSupport } from '@/lib/support/openSupport';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import classes from './launcher/LauncherShell.module.css';
@@ -126,6 +127,25 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   };
 
   const isTenantAdmin = defaultUser.role === 'owner' || defaultUser.role === 'admin';
+
+  // Only the real signed-in user (not the placeholder above) is shared with pages.
+  const hasShellUser = Boolean(user);
+  const shellUserName = user?.name ?? '';
+  const shellUserEmail = user?.email ?? '';
+  const shellUserLicense = user?.licenseType ?? '';
+  const shellUserRole = user?.role;
+  const dashboardUser = useMemo<DashboardUser | null>(
+    () =>
+      hasShellUser
+        ? {
+            name: shellUserName,
+            email: shellUserEmail,
+            licenseType: shellUserLicense,
+            role: shellUserRole,
+          }
+        : null,
+    [hasShellUser, shellUserName, shellUserEmail, shellUserLicense, shellUserRole],
+  );
 
   const allowedServices = useMemo(
     () =>
@@ -290,6 +310,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
 
   return (
     <DocsDrawerProvider value={{ openDocs }}>
+      <DashboardUserProvider value={dashboardUser}>
       <LauncherProvider value={launcherContextValue}>
       <NavigationProgress />
       <CommandPalette isTenantAdmin={isTenantAdmin} />
@@ -394,6 +415,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
         {docsAside}
       </AppShell>
       </LauncherProvider>
+      </DashboardUserProvider>
     </DocsDrawerProvider>
   );
 }

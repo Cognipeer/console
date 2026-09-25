@@ -4,14 +4,13 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Button,
-  Center,
-  Loader,
   Progress,
   Stack,
   Text,
@@ -42,6 +41,9 @@ import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/l
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { SkeletonText } from '@/components/common/ui/Skeletons';
+import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
+import { ModelUsageSkeleton } from '@/components/models/ModelSkeletons';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
@@ -177,6 +179,7 @@ const TYPE_LABELS: Record<CategoryFilter, string> = {
 
 export default function ModelsPage() {
   const [models, setModels] = useState<ModelDto[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [providers, setProviders] = useState<ModelProviderView[]>([]);
   const [loading, setLoading] = useState(true);
   const [dashboardData, setDashboardData] = useState<ModelsDashboardData | null>(null);
@@ -197,7 +200,11 @@ export default function ModelsPage() {
   const t = useTranslations('models');
   const tNav = useTranslations('navigation');
   const router = useRouter();
+  const { push: navigate } = useNavigationFeedback();
   const searchParams = useSearchParams();
+  // Latest request wins for both loaders.
+  const modelsRequestRef = useRef(0);
+  const dashboardRequestRef = useRef<AbortController | null>(null);
 
   // The model type is driven by the left sub-nav via the `?type=` query param.
   const typeParam = searchParams.get('type');
@@ -214,6 +221,7 @@ export default function ModelsPage() {
   }, [dynamicCreateRequested]);
 
   const loadModels = useCallback(async () => {
+    const requestId = ++modelsRequestRef.current;
     setLoading(true);
     try {
       const response = await fetch('/api/models?includeProviders=true', {
@@ -221,30 +229,43 @@ export default function ModelsPage() {
       });
       if (!response.ok) throw new Error('Failed to load models');
       const data = await response.json();
+      if (requestId !== modelsRequestRef.current) return;
       setModels((data.models ?? []) as ModelDto[]);
       setProviders((data.providers ?? []) as ModelProviderView[]);
     } catch (error) {
+      if (requestId !== modelsRequestRef.current) return;
       console.error('Failed to load models', error);
     } finally {
-      setLoading(false);
+      if (requestId === modelsRequestRef.current) {
+        setLoading(false);
+        setModelsLoaded(true);
+      }
     }
   }, []);
 
   const loadDashboard = useCallback(async () => {
+    dashboardRequestRef.current?.abort();
+    const controller = new AbortController();
+    dashboardRequestRef.current = controller;
     setDashboardLoading(true);
     try {
       const params = buildDashboardDateSearchParams(dateFilter);
       const res = await fetch(`/api/models/dashboard?${params.toString()}`, {
         cache: 'no-store',
+        signal: controller.signal,
       });
       if (res.ok) {
         const data = (await res.json()) as ModelsDashboardData;
-        setDashboardData(data);
+        if (!controller.signal.aborted) setDashboardData(data);
       }
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error('Failed to load models dashboard', err);
     } finally {
-      setDashboardLoading(false);
+      if (dashboardRequestRef.current === controller) {
+        dashboardRequestRef.current = null;
+        setDashboardLoading(false);
+      }
     }
   }, [dateFilter]);
 
@@ -252,6 +273,14 @@ export default function ModelsPage() {
     void loadModels();
     void loadDashboard();
   }, [loadModels, loadDashboard]);
+
+  useEffect(
+    () => () => {
+      modelsRequestRef.current += 1;
+      dashboardRequestRef.current?.abort();
+    },
+    [],
+  );
 
   const handleModelCreated = ({
     model,
@@ -382,6 +411,10 @@ export default function ModelsPage() {
     }
   };
 
+  // Counts come from the usage summary or the model list, whichever lands first.
+  const countsReady = modelsLoaded || dashboardData !== null;
+  const countBone = <SkeletonText width={40} />;
+
   const refreshAll = () => {
     void loadModels();
     void loadDashboard();
@@ -408,8 +441,12 @@ export default function ModelsPage() {
         title={activeType === 'all' ? tNav('models') : TYPE_LABELS[activeType]}
         subtitle={
           activeType === 'all'
-            ? `Manage inference endpoints across providers. ${models.length} deployed in this project.`
-            : `${TYPE_LABELS[activeType]} endpoints · ${filtered.length} of ${models.length} models.`
+            ? `Manage inference endpoints across providers.${
+                modelsLoaded ? ` ${models.length} deployed in this project.` : ''
+              }`
+            : `${TYPE_LABELS[activeType]} endpoints${
+                modelsLoaded ? ` · ${filtered.length} of ${models.length} models.` : ''
+              }`
         }
         actions={
           <>
@@ -440,22 +477,32 @@ export default function ModelsPage() {
         <StatTile
           label={t('metrics.totalModels')}
           icon={<IconSparkles size={14} stroke={1.7} />}
-          value={dashboardData?.overview.totalModels ?? models.length}
+          value={
+            countsReady ? (dashboardData?.overview.totalModels ?? models.length) : countBone
+          }
         />
         <StatTile
           label={t('metrics.llmModels')}
           icon={<IconBrain size={14} stroke={1.7} />}
-          value={dashboardData?.overview.llmCount ?? counts.llm}
+          value={countsReady ? (dashboardData?.overview.llmCount ?? counts.llm) : countBone}
         />
         <StatTile
           label={t('metrics.embeddingModels')}
           icon={<IconCpu size={14} stroke={1.7} />}
-          value={dashboardData?.overview.embeddingCount ?? counts.embedding}
+          value={
+            countsReady
+              ? (dashboardData?.overview.embeddingCount ?? counts.embedding)
+              : countBone
+          }
         />
         <StatTile
           label={t('metrics.providers')}
           icon={<IconPlug size={14} stroke={1.7} />}
-          value={dashboardData?.overview.providerCount ?? providers.length}
+          value={
+            countsReady
+              ? (dashboardData?.overview.providerCount ?? providers.length)
+              : countBone
+          }
         />
       </div>
 
@@ -465,7 +512,8 @@ export default function ModelsPage() {
           loading={loading}
           rowKey={(m) => m._id}
           pagination={modelsCtl.pagination}
-          onRowClick={(m) => router.push(`/dashboard/models/${m._id}`)}
+          rowHref={(m) => modelDetailHref(m)}
+          rowPrefetch="full"
           search={{
             value: query,
             onChange: setQuery,
@@ -529,7 +577,7 @@ export default function ModelsPage() {
               id: 'view',
               label: t('actions.viewDetails'),
               icon: <IconEye size={14} />,
-              onClick: () => router.push(`/dashboard/models/${m._id}`),
+              onClick: () => navigate(modelDetailHref(m)),
             },
             {
               id: 'edit',
@@ -538,7 +586,7 @@ export default function ModelsPage() {
               onClick: () =>
                 dynamicConfigOf(m)
                   ? openDynamicEdit(m)
-                  : router.push(`/dashboard/models/${m._id}/edit`),
+                  : navigate(`${modelDetailHref(m)}/edit`),
             },
             { divider: true },
             {
@@ -580,9 +628,7 @@ export default function ModelsPage() {
         </div>
 
         {dashboardLoading && !dashboardData ? (
-          <Center py="xl">
-            <Loader size="sm" color="teal" />
-          </Center>
+          <ModelUsageSkeleton />
         ) : (
           <Stack gap="md">
             <div className="ds-stat-grid">
@@ -882,6 +928,10 @@ function fmtNumPricing(value: number): string {
   return value.toFixed(2);
 }
 
+function modelDetailHref(m: ModelDto): string {
+  return `/dashboard/models/${m._id}`;
+}
+
 function modelColumns(
   t: ReturnType<typeof useTranslations>,
   providerLookup: Map<string, ModelProviderView>,
@@ -897,11 +947,14 @@ function modelColumns(
           className="ds-col"
           style={{ gap: 2, whiteSpace: 'nowrap' }}
         >
-          <span
+          {/* Real link: Cmd/Ctrl-click and middle-click open a new tab. */}
+          <Link
+            href={modelDetailHref(m)}
+            prefetch={false}
             style={{ fontSize: 13, fontWeight: 500, color: 'var(--ds-text)' }}
           >
             {m.name}
-          </span>
+          </Link>
           <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
             {m.key}
           </span>
