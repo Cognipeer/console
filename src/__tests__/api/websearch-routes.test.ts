@@ -366,6 +366,26 @@ describe('POST /api/client/v1/websearch/search', () => {
     );
   });
 
+  it('returns 200 with warnings when the instance cannot serve include_answer', async () => {
+    (runWebSearch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...MOCK_RESULT,
+      answer: undefined,
+      warnings: ['AI answers are not enabled on instance "brave-main"; returning search results only.'],
+    });
+    const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/websearch/search',
+      headers: { authorization: 'Bearer tok_abc', 'content-type': 'application/json' },
+      payload: JSON.stringify({ query: 'hello', include_answer: true }),
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.answer).toBeUndefined();
+    expect(body.warnings).toEqual([expect.stringMatching(/not enabled/)]);
+    expect(body.results.length).toBeGreaterThan(0);
+  });
+
   it('POST /:key/search targets the named instance, ignoring body.provider', async () => {
     const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
     const res = await app.inject({

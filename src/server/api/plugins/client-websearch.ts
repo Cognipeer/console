@@ -8,11 +8,12 @@
  *
  * Request shape:
  *   { query, provider?, count?, offset?, language?, country?, safe_search?,
- *     include_answer? } — include_answer requires the instance to have AI
- *   answers enabled (settings.aiAnswer); otherwise the request fails.
+ *     include_answer? } — include_answer is best-effort: without AI answers
+ *   enabled on the instance (settings.aiAnswer) the results come back with no
+ *   `answer` and a `warnings` entry saying why.
  * Response shape (normalized across drivers):
  *   { id, provider, driver, query, answer?, results: [{ title, url, snippet,
- *     position, published_at?, source?, score? }], latency_ms }
+ *     position, published_at?, source?, score? }], warnings?, latency_ms }
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -104,6 +105,7 @@ export const clientWebSearchApiPlugin: FastifyPluginAsync = async (app) => {
           source: r.source,
           score: r.score,
         })),
+        ...(result.warnings?.length ? { warnings: result.warnings } : {}),
         latency_ms: result.latencyMs,
       });
     } catch (error) {
