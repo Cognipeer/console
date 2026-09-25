@@ -217,6 +217,19 @@ describe('validateAgentConfig', () => {
         expect(fields(result.errors)).toContain('sandbox.templateKey');
         sandboxAvailability.value = { available: true };
     });
+
+    it('sandbox: enabled without a template is an error (no implicit default)', async () => {
+        sandboxAvailability.value = {
+            available: true,
+            runner: { listTemplates: async () => [{ key: 'multi-base', name: 'Multi base' }] },
+        };
+        const result = await validateAgentConfig({
+            tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p', agentKey: 'me',
+            config: { modelKey: 'gpt-main', sandbox: { enabled: true } },
+        });
+        expect(result.errors).toContainEqual({ field: 'sandbox.templateKey', message: 'Pick a sandbox template for this agent' });
+        sandboxAvailability.value = { available: true };
+    });
 });
 
 describe('validateAgentConfigShape — execution settings', () => {

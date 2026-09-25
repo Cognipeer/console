@@ -346,7 +346,12 @@ export async function validateAgentConfig(input: {
                     ? 'Sandbox access requires an Enterprise license'
                     : 'This edition has no sandbox module',
             });
-        } else if (config.sandbox.templateKey) {
+        } else if (!config.sandbox.templateKey?.trim()) {
+            // No implicit default: built-in templates are only created by the
+            // explicit "Seed defaults" action, so an unset key could resolve
+            // to nothing (or to whatever template happens to be first).
+            issues.errors.push({ field: 'sandbox.templateKey', message: 'Pick a sandbox template for this agent' });
+        } else {
             const templates = await availability.runner.listTemplates(input.tenantDbName, input.tenantId).catch(() => null);
             if (templates && !templates.some((template) => template.key === config.sandbox!.templateKey)) {
                 issues.errors.push({ field: 'sandbox.templateKey', message: `Sandbox template "${config.sandbox.templateKey}" does not exist` });

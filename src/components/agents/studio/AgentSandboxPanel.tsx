@@ -123,17 +123,26 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                 <>
                     <ConfigBlock title="Machine">
                         <Stack gap="sm">
+                            {capabilities?.available && capabilities.templates.length === 0 ? (
+                                <Alert variant="light" color="orange" icon={<IconInfoCircle size={16} />} p="xs">
+                                    <Text size="sm">
+                                        No sandbox templates yet. Create one, or add the built-in ones with “Seed defaults”, on the{' '}
+                                        <Anchor href="/dashboard/sandbox/templates" size="sm">Sandbox templates</Anchor> page.
+                                    </Text>
+                                </Alert>
+                            ) : null}
                             <Select
                                 label="Template"
-                                description="The image the sandbox starts from. Default: the tenant's default template."
-                                placeholder="Default (multi-base)"
+                                description="The image the sandbox starts from."
+                                placeholder="Pick a template"
+                                withAsterisk
+                                error={capabilities?.available && !value?.templateKey ? 'Pick a template — the agent cannot be saved without one.' : undefined}
                                 data={(capabilities?.templates ?? []).map((template) => ({
                                     value: template.key,
                                     label: template.description ? `${template.name} — ${template.description}` : template.name,
                                 }))}
                                 value={value?.templateKey ?? null}
                                 onChange={(next) => patch({ templateKey: next ?? undefined })}
-                                clearable
                                 searchable
                                 disabled={disabled}
                             />

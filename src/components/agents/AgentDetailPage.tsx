@@ -18,7 +18,6 @@ import {
   CopyButton,
   Tooltip,
   Box,
-  Pagination,
   Modal,
   Table,
   VisuallyHidden,
@@ -27,16 +26,12 @@ import {
   Alert,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
-import { DatePickerInput } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
 import {
   IconMessageCircle,
-  IconTimeline,
   IconCode,
   IconCopy,
   IconCheck,
-  IconCalendar,
-  IconRefresh,
   IconSettings,
   IconDatabase,
   IconShield,
@@ -62,7 +57,6 @@ import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import SectionCard from '@/components/common/SectionCard';
-import SessionTable from '@/components/tracing/SessionTable';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import AgentAdvancedSettings, { countAdvancedOverrides } from './studio/AgentAdvancedSettings';
@@ -216,19 +210,7 @@ interface Guardrail extends GuardrailBindingOption {
   target?: string;
 }
 
-interface TracingSessionRecord {
-  sessionId: string;
-  threadId?: string;
-  agentName?: string;
-  status?: string;
-  startedAt?: string;
-  endedAt?: string;
-  durationMs?: number;
-  totalEvents?: number;
-  totalTokens?: number;
-}
 
-const DEFAULT_PAGE_SIZE = 25;
 
 /**
  * The legacy single slots, rendered as the equivalent binding list.
@@ -278,7 +260,8 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   configure: { top: 'configure' },
   build: { top: 'configure' },
   ship: { top: 'deploy' },
-  operate: { top: 'observe' },
+  // Operate was folded into Sessions (same list, its filters moved there).
+  operate: { top: 'sessions' },
   settings: { top: 'configure', sub: 'basic' },
   basic: { top: 'configure', sub: 'basic' },
   prompt: { top: 'configure', sub: 'prompt' },
@@ -294,8 +277,8 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   publish: { top: 'deploy', sub: 'publish' },
   schedules: { top: 'deploy', sub: 'schedules' },
   export: { top: 'deploy', sub: 'export' },
-  observe: { top: 'observe' },
-  traces: { top: 'observe' },
+  observe: { top: 'sessions' },
+  traces: { top: 'sessions' },
   usage: { top: 'usage' },
   api: { top: 'usage' },
 };
@@ -432,23 +415,11 @@ export default function AgentDetailPage() {
   });
 
   // Tracing state (with pagination & date filter)
-  const [tracingSessions, setTracingSessions] = useState<TracingSessionRecord[]>([]);
-  const [tracingTotal, setTracingTotal] = useState(0);
-  const [tracingLoading, setTracingLoading] = useState(false);
-  const [tracingRefreshing, setTracingRefreshing] = useState(false);
-  const [tracingPage, setTracingPage] = useState(1);
-  const [tracingPageSize, setTracingPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [tracingStatusFilter, setTracingStatusFilter] = useState<string | null>(null);
-  const [tracingDateRange, setTracingDateRange] = useState<[Date | null, Date | null]>([null, null]);
 
   /** Badge on the Settings tab: how far this agent strays from the defaults. */
   const advancedOverrideCount = useMemo(() => countAdvancedOverrides(runtimeConfig), [runtimeConfig]);
 
 
-  const tracingPagination = useMemo(() => {
-    const totalPages = Math.max(1, Math.ceil(tracingTotal / tracingPageSize));
-    return { totalPages };
-  }, [tracingTotal, tracingPageSize]);
 
   // ── Data Loading ──────────────────────────────────────────────
 
@@ -622,37 +593,6 @@ export default function AgentDetailPage() {
     }
   };
 
-  const loadTracingSessions = useCallback(async (isRefresh = false) => {
-    if (!agent) return;
-    if (isRefresh) setTracingRefreshing(true);
-    else setTracingLoading(true);
-
-    try {
-      const params = new URLSearchParams();
-      params.set('agent', agent.name);
-      params.set('limit', tracingPageSize.toString());
-      params.set('skip', ((tracingPage - 1) * tracingPageSize).toString());
-      if (tracingStatusFilter) params.set('status', tracingStatusFilter);
-      const [from, to] = tracingDateRange;
-      if (from) params.set('from', from.toISOString());
-      if (to) params.set('to', to.toISOString());
-
-      const res = await fetch(`/api/tracing/sessions?${params.toString()}`, {
-        cache: 'no-store',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setTracingSessions(data.sessions ?? []);
-        setTracingTotal(data.total ?? 0);
-      }
-    } catch (err) {
-      console.error('Failed to load tracing sessions', err);
-    } finally {
-      setTracingLoading(false);
-      setTracingRefreshing(false);
-    }
-  }, [agent, tracingPage, tracingPageSize, tracingStatusFilter, tracingDateRange]);
-
   const loadVersions = useCallback(async () => {
     if (!agent) return;
     setVersionsLoading(true);
@@ -758,12 +698,6 @@ export default function AgentDetailPage() {
       setLoading(false);
     })();
   }, [loadAgent]);
-
-  useEffect(() => {
-    if (activeTab === 'observe' && agent) {
-      loadTracingSessions();
-    }
-  }, [activeTab, agent, loadTracingSessions]);
 
   useEffect(() => {
     // Export needs the version list too: it offers "export v3" as a source, and
@@ -1334,9 +1268,6 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
             Ship
           </Tabs.Tab>
-          <Tabs.Tab value="observe" leftSection={<IconTimeline size={14} />}>
-            Operate
-          </Tabs.Tab>
           <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
             {t('tabs.usage')}
           </Tabs.Tab>
@@ -1388,6 +1319,9 @@ export default function AgentDetailPage() {
                 onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
                 onStart={() => setStartSessionOpen(true)}
                 searchable
+                onRefresh={() => void loadSessions()}
+                refreshing={sessionsLoading}
+                tracesHref={`/dashboard/tracing/sessions?agent=${encodeURIComponent(agent.name)}`}
               />
             ) : null}
             {/* Mounted even while hidden so the active-run count stays live for the toggle label. */}
@@ -1861,103 +1795,6 @@ export default function AgentDetailPage() {
               />
             </ConfigSection>
           </Paper>
-        </Tabs.Panel>
-
-        {/* ── Observe — what the agent actually did, and what it cost ── */}
-        <Tabs.Panel value="observe">
-          <Stack gap="md">
-            {/* Filters */}
-            <SectionCard p="md">
-              <Group gap="md" wrap="wrap">
-                <Select
-                  label={t('traces.statusFilter')}
-                  placeholder={t('traces.allStatuses')}
-                  data={[
-                    { value: 'success', label: 'Success' },
-                    { value: 'error', label: 'Error' },
-                    { value: 'running', label: 'Running' },
-                  ]}
-                  value={tracingStatusFilter}
-                  onChange={(value) => {
-                    setTracingStatusFilter(value);
-                    setTracingPage(1);
-                  }}
-                  clearable
-                  className={classes.filterControlSm}
-                />
-                <DatePickerInput
-                  type="range"
-                  label={t('traces.dateRange')}
-                  placeholder={t('traces.selectRange')}
-                  value={tracingDateRange}
-                  onChange={(value) => {
-                    setTracingDateRange(value as [Date | null, Date | null]);
-                    setTracingPage(1);
-                  }}
-                  leftSection={<IconCalendar size={16} />}
-                  clearable
-                  className={classes.filterControlMd}
-                />
-                <Select
-                  label={t('traces.pageSize')}
-                  data={['25', '50', '100'].map((v) => ({ value: v, label: `${v} rows` }))}
-                  value={tracingPageSize.toString()}
-                  onChange={(v) => {
-                    setTracingPageSize(v ? parseInt(v, 10) : DEFAULT_PAGE_SIZE);
-                    setTracingPage(1);
-                  }}
-                  className={classes.filterControlXs}
-                />
-                <Box className={classes.filterActions}>
-                  <Button
-                    leftSection={<IconRefresh size={14} />}
-                    variant="light"
-                    size="sm"
-                    onClick={() => loadTracingSessions(true)}
-                    loading={tracingRefreshing}
-                  >
-                    {t('traces.refresh')}
-                  </Button>
-                </Box>
-              </Group>
-            </SectionCard>
-
-            {/* Sessions table */}
-            <SectionCard p="md">
-              <Stack gap="md">
-                <Group justify="space-between" align="center">
-                  <Text fw={600}>{t('traces.sessions')}</Text>
-                  <Badge size="sm" variant="light">
-                    {tracingTotal} total
-                  </Badge>
-                </Group>
-
-                <SessionTable
-                  sessions={tracingSessions}
-                  loading={tracingLoading}
-                  onRowClick={(sessionId) =>
-                    router.push(`/dashboard/tracing/sessions/${sessionId}`)
-                  }
-                  onThreadClick={(threadId) =>
-                    router.push(`/dashboard/tracing/threads/${threadId}`)
-                  }
-                />
-
-                {tracingPagination.totalPages > 1 && (
-                  <Group justify="space-between" align="center">
-                    <Text size="sm" c="dimmed">
-                      Page {tracingPage} of {tracingPagination.totalPages}
-                    </Text>
-                    <Pagination
-                      total={tracingPagination.totalPages}
-                      value={tracingPage}
-                      onChange={setTracingPage}
-                    />
-                  </Group>
-                )}
-              </Stack>
-            </SectionCard>
-          </Stack>
         </Tabs.Panel>
 
         {/*

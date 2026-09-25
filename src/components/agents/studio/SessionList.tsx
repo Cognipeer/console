@@ -29,16 +29,22 @@ import {
     Tooltip,
     UnstyledButton,
 } from '@mantine/core';
+import { DatePickerInput } from '@mantine/dates';
 import {
+    IconAlertTriangle,
     IconArrowDown,
     IconArrowUp,
     IconCheck,
+    IconCalendar,
     IconCopy,
     IconExternalLink,
+    IconHandStop,
     IconMessageCircle,
     IconPlayerPlay,
     IconPlus,
+    IconRefresh,
     IconSearch,
+    IconTimeline,
     IconX,
 } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
@@ -47,26 +53,45 @@ import { formatCost } from '../session/sessionUsage';
 import classes from './SessionList.module.css';
 
 
-type WindowFilter = 'all' | '24h' | '7d' | '30d';
+type WindowFilter = 'all' | '24h' | '7d' | '30d' | 'custom';
 type ActivityFilter = 'all' | 'used' | 'empty' | 'unpriced';
+type StatusFilter = 'all' | 'success' | 'error' | 'stopped';
+type DateRange = [Date | null, Date | null];
 type SortColumn = 'title' | 'turns' | 'totalTokens' | 'costUsd' | 'activeMs' | 'updatedAt';
 interface SortState {
     column: SortColumn;
     direction: 'asc' | 'desc';
 }
 
-const WINDOW_MS: Record<Exclude<WindowFilter, 'all'>, number> = {
+const WINDOW_MS: Record<Exclude<WindowFilter, 'all' | 'custom'>, number> = {
     '24h': 24 * 60 * 60 * 1000,
     '7d': 7 * 24 * 60 * 60 * 1000,
     '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
-function windowCutoff(filter: WindowFilter): number | undefined {
-    return filter === 'all' ? undefined : Date.now() - WINDOW_MS[filter];
+/** The [from, to] bounds (ms) a time filter allows; `undefined` = open. */
+function windowBounds(filter: WindowFilter, range: DateRange): [number | undefined, number | undefined] {
+    if (filter === 'all') return [undefined, undefined];
+    if (filter === 'custom') {
+        const [from, to] = range;
+        // The picker's `to` is a calendar day — include all of it.
+        const end = to ? new Date(to.getFullYear(), to.getMonth(), to.getDate(), 23, 59, 59, 999).getTime() : undefined;
+        return [from ? from.getTime() : undefined, end];
+    }
+    return [Date.now() - WINDOW_MS[filter], undefined];
 }
 
-function filtersApplied(query: string, filter: WindowFilter, activity: ActivityFilter): boolean {
-    return Boolean(query.trim()) || filter !== 'all' || activity !== 'all';
+interface Filters {
+    query: string;
+    timeWindow: WindowFilter;
+    activity: ActivityFilter;
+    status: StatusFilter;
+    source: string;
+}
+
+function filtersApplied(f: Filters): boolean {
+    return Boolean(f.query.trim()) || f.timeWindow !== 'all' || f.activity !== 'all'
+        || f.status !== 'all' || f.source !== 'all';
 }
 
 function sortSessions(sessions: SessionListItem[], sort: SortState): SessionListItem[] {
@@ -127,6 +152,13 @@ export interface SessionListItem {
     /** False when a turn reported usage but no price — the total is a lower bound. */
     costComplete?: boolean;
     activeMs?: number;
+    /** Tool calls that failed across all turns. */
+    failedCalls?: number;
+    /**
+     * Server verdict (see `summariseConversation`): `error` — a failed tool
+     * call or output; `stopped` — cut short by a limit, cancel or pause.
+     */
+    status?: 'success' | 'error' | 'stopped' | 'empty';
     /** Where the session came from (`metadata.source`) — see AgentConversationSource. */
     source?: string;
     hasContext?: boolean;
@@ -179,6 +211,11 @@ export interface SessionListProps {
     limit?: number;
     /** Overview wants the bare table; the Sessions tab wants to search it. */
     searchable?: boolean;
+    /** Reload the list (Sessions tab). */
+    onRefresh?: () => void;
+    refreshing?: boolean;
+    /** The same runs as traces — span-level detail lives in Tracing. */
+    tracesHref?: string;
 }
 
 export function messageCountOf(session: SessionListItem): number {
@@ -194,17 +231,23 @@ export default function SessionList({
     starting,
     limit,
     searchable,
+    onRefresh,
+    refreshing,
+    tracesHref,
 }: SessionListProps) {
     const [query, setQuery] = useState('');
     // Not named `window`: that shadows the global inside this component,
     // which is a trap waiting for the first line that needs the real one.
     const [timeWindow, setTimeWindow] = useState<WindowFilter>('all');
     const [activity, setActivity] = useState<ActivityFilter>('all');
+    const [status, setStatus] = useState<StatusFilter>('all');
+    const [source, setSource] = useState<string>('all');
+    const [range, setRange] = useState<DateRange>([null, null]);
     const [sort, setSort] = useState<SortState>({ column: 'updatedAt', direction: 'desc' });
 
     const filtered = useMemo(() => {
         const needle = query.trim().toLowerCase();
-        const cutoff = windowCutoff(timeWindow);
+        const [from, to] = windowBounds(timeWindow, range);
 
         const matching = sessions.filter((session) => {
             if (needle) {
@@ -214,13 +257,17 @@ export default function SessionList({
                     || session._id.toLowerCase().includes(needle);
                 if (!hit) return false;
             }
-            if (cutoff !== undefined) {
+            if (from !== undefined || to !== undefined) {
                 const when = Date.parse(session.updatedAt ?? session.createdAt ?? '');
                 // A row with no timestamp cannot be shown to be inside a
                 // window, so a time filter excludes it rather than quietly
                 // treating "unknown" as "recent".
-                if (!Number.isFinite(when) || when < cutoff) return false;
+                if (!Number.isFinite(when)) return false;
+                if (from !== undefined && when < from) return false;
+                if (to !== undefined && when > to) return false;
             }
+            if (status !== 'all' && session.status !== status) return false;
+            if (source !== 'all' && (session.source ?? 'unknown') !== source) return false;
             if (activity === 'used' && (session.turns ?? 0) === 0) return false;
             if (activity === 'empty' && (session.turns ?? 0) > 0) return false;
             if (activity === 'unpriced' && session.costComplete !== false) return false;
@@ -228,7 +275,22 @@ export default function SessionList({
         });
 
         return sortSessions(matching, sort);
-    }, [sessions, query, timeWindow, activity, sort]);
+    }, [sessions, query, timeWindow, range, activity, status, source, sort]);
+
+    // Only the sources that actually occur — a filter offering "Red team" on
+    // an agent nobody red-teamed is a filter that always returns nothing.
+    const sourceOptions = useMemo(() => {
+        const seen = [...new Set(sessions.map((session) => session.source ?? 'unknown'))];
+        return [
+            { value: 'all', label: 'All sources' },
+            ...seen.map((value) => ({ value, label: value === 'unknown' ? 'Unknown' : sessionSourceLabel(value) })),
+        ];
+    }, [sessions]);
+
+    const current: Filters = { query, timeWindow, activity, status, source };
+    const clearFilters = () => {
+        setQuery(''); setTimeWindow('all'); setRange([null, null]); setActivity('all'); setStatus('all'); setSource('all');
+    };
 
     const toggleSort = (column: SortColumn) => {
         setSort((current) => current.column === column
@@ -285,12 +347,51 @@ export default function SessionList({
                                 { value: '24h', label: 'Last 24 hours' },
                                 { value: '7d', label: 'Last 7 days' },
                                 { value: '30d', label: 'Last 30 days' },
+                                { value: 'custom', label: 'Custom range…' },
                             ]}
                             value={timeWindow}
                             onChange={(next) => setTimeWindow((next as WindowFilter) ?? 'all')}
                             allowDeselect={false}
                             aria-label="Filter by last activity"
                         />
+                        {timeWindow === 'custom' ? (
+                            <DatePickerInput
+                                type="range"
+                                size="xs"
+                                w={220}
+                                placeholder="Pick dates"
+                                value={range}
+                                onChange={(value) => setRange(value as DateRange)}
+                                leftSection={<IconCalendar size={13} />}
+                                clearable
+                                aria-label="Last activity between"
+                            />
+                        ) : null}
+                        <Select
+                            size="xs"
+                            w={150}
+                            data={[
+                                { value: 'all', label: 'Any status' },
+                                { value: 'success', label: 'Completed' },
+                                { value: 'error', label: 'Has errors' },
+                                { value: 'stopped', label: 'Stopped early' },
+                            ]}
+                            value={status}
+                            onChange={(next) => setStatus((next as StatusFilter) ?? 'all')}
+                            allowDeselect={false}
+                            aria-label="Filter by status"
+                        />
+                        {sourceOptions.length > 2 ? (
+                            <Select
+                                size="xs"
+                                w={140}
+                                data={sourceOptions}
+                                value={source}
+                                onChange={(next) => setSource(next ?? 'all')}
+                                allowDeselect={false}
+                                aria-label="Filter by source"
+                            />
+                        ) : null}
                         <Select
                             size="xs"
                             w={170}
@@ -308,23 +409,44 @@ export default function SessionList({
                             allowDeselect={false}
                             aria-label="Filter by activity"
                         />
-                        {filtersApplied(query, timeWindow, activity) ? (
+                        {filtersApplied(current) ? (
                             <Button
                                 size="compact-xs"
                                 variant="subtle"
                                 color="gray"
                                 leftSection={<IconX size={12} />}
-                                onClick={() => { setQuery(''); setTimeWindow('all'); setActivity('all'); }}
+                                onClick={clearFilters}
                             >
                                 Clear
                             </Button>
                         ) : null}
                     </Group>
-                    <Text size="xs" c="dimmed">
-                        {filtered.length === sessions.length
-                            ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}`
-                            : `${filtered.length} of ${sessions.length}`}
-                    </Text>
+                    <Group gap="xs" wrap="nowrap">
+                        <Text size="xs" c="dimmed">
+                            {filtered.length === sessions.length
+                                ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}`
+                                : `${filtered.length} of ${sessions.length}`}
+                        </Text>
+                        {tracesHref ? (
+                            <Button
+                                component="a"
+                                href={tracesHref}
+                                size="compact-xs"
+                                variant="subtle"
+                                color="gray"
+                                leftSection={<IconTimeline size={12} />}
+                            >
+                                Traces
+                            </Button>
+                        ) : null}
+                        {onRefresh ? (
+                            <Tooltip label="Refresh" withArrow>
+                                <ActionIcon size="sm" variant="subtle" color="gray" loading={refreshing} onClick={onRefresh} aria-label="Refresh sessions">
+                                    <IconRefresh size={14} />
+                                </ActionIcon>
+                            </Tooltip>
+                        ) : null}
+                    </Group>
                 </Group>
             ) : null}
 
@@ -367,11 +489,27 @@ export default function SessionList({
                     {rows.map((session) => (
                                 <Table.Tr key={session._id} className={classes.row}>
                                     <Table.Td>
-                                        <UnstyledButton onClick={() => onOpen(session._id)} className={classes.nameButton}>
-                                            <Text size="sm" fw={500} lineClamp={1}>
-                                                {session.title || 'New session'}
-                                            </Text>
-                                        </UnstyledButton>
+                                        <Group gap={6} wrap="nowrap">
+                                            <UnstyledButton onClick={() => onOpen(session._id)} className={classes.nameButton}>
+                                                <Text size="sm" fw={500} lineClamp={1}>
+                                                    {session.title || 'New session'}
+                                                </Text>
+                                            </UnstyledButton>
+                                            {session.status === 'error' ? (
+                                                <Tooltip
+                                                    label={session.failedCalls
+                                                        ? `${session.failedCalls} failed tool call${session.failedCalls === 1 ? '' : 's'}`
+                                                        : 'An output failed validation'}
+                                                    withArrow
+                                                >
+                                                    <IconAlertTriangle size={14} color="var(--ds-err)" aria-label="Has errors" />
+                                                </Tooltip>
+                                            ) : session.status === 'stopped' ? (
+                                                <Tooltip label="A turn stopped early (limit, cancel or pause)" withArrow>
+                                                    <IconHandStop size={14} color="var(--ds-warn)" aria-label="Stopped early" />
+                                                </Tooltip>
+                                            ) : null}
+                                        </Group>
                                     </Table.Td>
                                     <Table.Td>
                                         <SessionSourceBadge source={session.source} />

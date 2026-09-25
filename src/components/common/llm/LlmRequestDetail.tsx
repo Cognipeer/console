@@ -281,7 +281,16 @@ export default function LlmRequestDetailModal({
   const hasRaw = Boolean(data?.raw && (data.raw.request !== undefined || data.raw.response !== undefined));
 
   return (
-    <Modal opened={opened} onClose={onClose} title={title} fullScreen padding="lg">
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={title}
+      fullScreen
+      padding="lg"
+      // Mantine drops the body's top padding when a header is present; the
+      // theme gives the header a bottom border, so the badge row sat on it.
+      styles={{ body: { paddingTop: 'var(--mantine-spacing-md)' } }}
+    >
       {data ? (
         <Stack gap="md">
           {data.badges ? <Box>{data.badges}</Box> : null}

@@ -24,7 +24,7 @@ import {
     Tooltip,
     UnstyledButton,
 } from '@mantine/core';
-import { IconArrowsMinimize, IconCheck, IconCopy, IconList, IconSettings, IconTool } from '@tabler/icons-react';
+import { IconCheck, IconCopy } from '@tabler/icons-react';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import type { ChatMessage, PlaygroundStep, TurnCompaction } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
@@ -159,20 +159,49 @@ export default function SessionSidePanel({
     }, [messages]);
 
     return (
-        <Tabs value={tab} onChange={(value) => setTab(value ?? 'session')} className={classes.sidePanel}>
-            <Tabs.List>
-                <Tabs.Tab value="session" leftSection={<IconSettings size={13} />}>Session</Tabs.Tab>
-                <Tabs.Tab value="events" leftSection={<IconList size={13} />}>
-                    Events
-                    {events.length > 0 ? <Badge size="xs" variant="light" ml={6}>{events.length}</Badge> : null}
+        <Tabs
+            value={tab}
+            onChange={(value) => setTab(value ?? 'session')}
+            className={classes.sidePanel}
+            classNames={{ list: classes.sideTabs, tab: classes.sideTab }}
+        >
+            {/*
+              The numbers people glance at while chatting stay visible whatever
+              tab is open — the tabs are for the detail behind them.
+            */}
+            <Box className={classes.sideSummary}>
+                <Group justify="space-between" wrap="nowrap" gap="xs">
+                    <Group gap={6} wrap="nowrap">
+                        <span className={running ? classes.liveDot : classes.idleDot} />
+                        <Text size="xs" fw={600}>{running ? 'Running' : 'Idle'}</Text>
+                    </Group>
+                    <Badge size="xs" variant="light" color={pinnedVersion ? 'teal' : 'gray'}>
+                        {pinnedVersion
+                            ? `v${pinnedVersion}${Number(pinnedVersion) === publishedVersion ? ' · published' : ''}`
+                            : 'draft'}
+                    </Badge>
+                </Group>
+                <div className={classes.statGrid}>
+                    <SummaryStat
+                        label="Cost"
+                        value={`${formatCost(totals.costUsd)}${totals.costComplete ? '' : ' +'}`}
+                        hint={totals.costComplete ? undefined : 'Some turns are unpriced — their model has no pricing configured.'}
+                    />
+                    <SummaryStat label="Tokens" value={formatCompactTokens(totals.totalTokens)} hint={`${formatNumber(totals.totalTokens)} total`} />
+                    <SummaryStat label="Turns" value={String(totals.turns)} hint={totals.activeMs ? `${formatDuration(totals.activeMs)} active` : undefined} />
+                </div>
+            </Box>
+
+            <Tabs.List grow>
+                <Tabs.Tab value="session">Session</Tabs.Tab>
+                <Tabs.Tab value="events">
+                    Events{events.length > 0 ? <span className={classes.tabCount}>{events.length}</span> : null}
                 </Tabs.Tab>
-                <Tabs.Tab value="tools" leftSection={<IconTool size={13} />}>
-                    Tools
-                    {tools.length > 0 ? <Badge size="xs" variant="light" ml={6}>{tools.length}</Badge> : null}
+                <Tabs.Tab value="tools">
+                    Tools{tools.length > 0 ? <span className={classes.tabCount}>{tools.length}</span> : null}
                 </Tabs.Tab>
-                <Tabs.Tab value="context" leftSection={<IconArrowsMinimize size={13} />}>
-                    Context
-                    {compactions.length > 0 ? <Badge size="xs" variant="light" color="indigo" ml={6}>{compactions.length}</Badge> : null}
+                <Tabs.Tab value="context">
+                    Context{compactions.length > 0 ? <span className={classes.tabCount}>{compactions.length}</span> : null}
                 </Tabs.Tab>
             </Tabs.List>
 
@@ -181,37 +210,14 @@ export default function SessionSidePanel({
                     <Stack gap="lg">
                         <Stack gap={0}>
                             <MetaRow label="ID" value={<SessionIdValue id={sessionId} />} />
-                            <MetaRow
-                                label="Status"
-                                value={
-                                    <Badge size="xs" variant="light" color={running ? 'blue' : 'gray'}>
-                                        {running ? 'Running' : 'Idle'}
-                                    </Badge>
-                                }
-                            />
                             <MetaRow label="Created" value={<TimeValue value={createdAt} />} />
                             <MetaRow label="Updated" value={<TimeValue value={updatedAt} />} />
                             <MetaRow label="Agent" value={<Text size="xs" ff="monospace">{agentKey}</Text>} title={agentName} />
-                            <MetaRow
-                                label="Config"
-                                value={
-                                    <Badge size="xs" variant="light" color={pinnedVersion ? 'teal' : 'gray'}>
-                                        {pinnedVersion
-                                            ? `v${pinnedVersion}${Number(pinnedVersion) === publishedVersion ? ' · published' : ''}`
-                                            : 'draft'}
-                                    </Badge>
-                                }
-                            />
-                            <MetaRow label="Turns" value={<Text size="xs">{totals.turns}</Text>} />
                         </Stack>
 
                         <Box>
                             <Group justify="space-between" align="baseline" mb={6}>
-                                <Text size="xs" fw={700} tt="uppercase" c="dimmed">Cost</Text>
-                                <Text size="sm" fw={600}>
-                                    {formatCost(totals.costUsd)}
-                                    {!totals.costComplete ? <Text component="span" size="xs" c="dimmed"> +</Text> : null}
-                                </Text>
+                                <Text size="xs" fw={700} tt="uppercase" c="dimmed">Cost per turn</Text>
                             </Group>
                             {costSeries.points.length > 0 ? (
                                 <Group gap={2} align="flex-end" className={classes.costChart}>
@@ -465,6 +471,16 @@ export default function SessionSidePanel({
             </ScrollArea>
         </Tabs>
     );
+}
+
+function SummaryStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+    const body = (
+        <Box className={classes.stat}>
+            <Text size="10px" c="dimmed" tt="uppercase" fw={600} lts="0.05em">{label}</Text>
+            <Text size="sm" fw={600} className={classes.statValue}>{value}</Text>
+        </Box>
+    );
+    return hint ? <Tooltip label={hint} withArrow multiline w={220}>{body}</Tooltip> : body;
 }
 
 function MetaRow({ label, value, title }: { label: string; value: React.ReactNode; title?: string }) {
