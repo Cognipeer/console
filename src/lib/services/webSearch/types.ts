@@ -14,8 +14,9 @@ export interface WebSearchInput {
   safeSearch?: 'off' | 'moderate' | 'strict';
   /**
    * Interpret the results with the instance's configured AI model and return
-   * a synthesized `answer`. Errors if AI answers are not enabled on the
-   * instance settings.
+   * a synthesized `answer`. Best-effort: when AI answers are not enabled on the
+   * instance (or the model call fails) the search still returns its results
+   * and `warnings` explains why there is no AI answer.
    */
   includeAnswer?: boolean;
 }
@@ -52,5 +53,7 @@ export interface WebSearchResult {
   answer?: string;
   /** Model key when the answer was produced by the instance's AI model. */
   answerModel?: string;
+  /** Non-fatal notes, e.g. an `includeAnswer` request the instance could not serve. */
+  warnings?: string[];
   latencyMs: number;
 }

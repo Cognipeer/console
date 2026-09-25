@@ -488,8 +488,8 @@ export default function WebSearchInstancePage() {
           </Group>
           {withAnswer && !aiConfigured && (
             <div className="ds-faint" style={{ fontSize: 12, marginTop: 6 }}>
-              AI answers are not enabled on this instance — the search will fail.
-              Enable them under Configuration → AI Answer.
+              AI answers are not enabled on this instance — results will come back without
+              an AI answer. Enable them under Configuration → AI Answer.
             </div>
           )}
 
@@ -504,6 +504,11 @@ export default function WebSearchInstancePage() {
               <div className="ds-faint" style={{ fontSize: 12, marginBottom: 8 }}>
                 {searchResult.results.length} results · {searchResult.latencyMs} ms
               </div>
+              {searchResult.warnings?.map((warning) => (
+                <div key={warning} className="ds-badge ds-badge-warn" style={{ marginBottom: 8, whiteSpace: 'normal' }}>
+                  {warning}
+                </div>
+              ))}
               {searchResult.answer && (
                 <div className="ds-card" style={{ padding: 12, marginBottom: 10, fontSize: 13 }}>
                   <span className="ds-badge ds-badge-ok" style={{ marginRight: 8 }}>

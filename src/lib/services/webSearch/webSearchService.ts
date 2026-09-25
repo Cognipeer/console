@@ -207,19 +207,24 @@ export async function runWebSearch(
     throw new Error(`Provider "${providerKey}" is not active.`);
   }
 
-  // Validate the AI answer request up-front so a misconfigured instance fails
-  // before spending provider quota.
+  // An answer is a best-effort extra on top of the search, never a reason to
+  // fail it: agents set `includeAnswer` on their own and API callers cannot see
+  // the instance settings. When AI answers are off (or have no model) the
+  // search still runs and the response says why there is no AI answer.
   const aiSettings = aiAnswerSettingsOf(record.settings as Record<string, unknown>);
+  const warnings: string[] = [];
+  let answerModelKey: string | undefined;
   if (options.includeAnswer) {
     if (aiSettings.enabled !== true) {
-      throw new Error(
-        `AI answers are not enabled on instance "${providerKey}". Enable them under Configuration → AI Answer.`,
+      warnings.push(
+        `AI answers are not enabled on instance "${providerKey}"; returning search results only. Enable them under Configuration → AI Answer.`,
       );
-    }
-    if (!aiSettings.modelKey) {
-      throw new Error(
-        `Instance "${providerKey}" has AI answers enabled but no model selected. Pick a model under Configuration → AI Answer.`,
+    } else if (!aiSettings.modelKey) {
+      warnings.push(
+        `Instance "${providerKey}" has AI answers enabled but no model selected; returning search results only. Pick a model under Configuration → AI Answer.`,
       );
+    } else {
+      answerModelKey = aiSettings.modelKey;
     }
   }
 
@@ -233,17 +238,25 @@ export async function runWebSearch(
 
     let answer = providerAnswer;
     let answerModel: string | undefined;
-    if (options.includeAnswer && aiSettings.modelKey) {
-      answer = await interpretResults({
-        tenantDbName,
-        tenantId,
-        projectId,
-        modelKey: aiSettings.modelKey,
-        instructions: aiSettings.instructions,
-        query,
-        results,
-      });
-      answerModel = aiSettings.modelKey;
+    if (answerModelKey) {
+      try {
+        answer = await interpretResults({
+          tenantDbName,
+          tenantId,
+          projectId,
+          modelKey: answerModelKey,
+          instructions: aiSettings.instructions,
+          query,
+          results,
+        });
+        answerModel = answerModelKey;
+      } catch (error) {
+        // The provider call already succeeded (and was billed) — keep its
+        // results rather than throwing them away over the answer.
+        const message = error instanceof Error ? error.message : String(error);
+        warnings.push(`AI answer failed: ${message}`);
+        logger.warn('Web search AI answer failed', { tenantId, projectId, providerKey, error: message });
+      }
     }
 
     const latencyMs = Date.now() - startedAt;
@@ -260,7 +273,9 @@ export async function runWebSearch(
       source: options.source ?? 'api',
       results: loggableResults(results),
       answer,
-      metadata: answerModel ? { answerModel } : undefined,
+      metadata: answerModel || warnings.length > 0
+        ? { ...(answerModel ? { answerModel } : {}), ...(warnings.length > 0 ? { warnings } : {}) }
+        : undefined,
     });
 
     return {
@@ -270,6 +285,7 @@ export async function runWebSearch(
       results,
       answer,
       answerModel,
+      ...(warnings.length > 0 ? { warnings } : {}),
       latencyMs,
     };
   } catch (error) {

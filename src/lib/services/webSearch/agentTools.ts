@@ -31,7 +31,7 @@ export function buildWebSearchAgentTools(ctx: WebSearchToolBindCtx) {
   const searchTool = createTool({
     name: 'web_search',
     description:
-      'Search the web and return ranked results (title, url, snippet). Set includeAnswer to also get a synthesized answer — errors if the instance has no AI answer model configured.',
+      'Search the web and return ranked results (title, url, snippet). Set includeAnswer to also get a synthesized answer when the instance has AI answers configured; otherwise results are returned without one.',
     schema: z.object({
       query: z.string().min(1),
       count: z.number().int().min(1).max(50).optional()

@@ -171,30 +171,71 @@ describe('instance resolution without an explicit key', () => {
 });
 
 describe('AI answer (includeAnswer)', () => {
-  it('errors when AI answers are not enabled on the instance', async () => {
-    await expect(
-      runWebSearch('tenant_acme', 'tenant-1', 'proj-1', {
-        query: 'q',
-        providerKey: 'brave-main',
-        includeAnswer: true,
-      }),
-    ).rejects.toThrow(/AI answers are not enabled/i);
-    expect(callWebSearchProvider).not.toHaveBeenCalled();
-    expect(createWebSearchRunLog).not.toHaveBeenCalled();
+  it('still searches when AI answers are not enabled — no answer, a warning instead', async () => {
+    (callWebSearchProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      results: [{ title: 'A', url: 'https://a', snippet: 's', position: 1 }],
+    });
+    const result = await runWebSearch('tenant_acme', 'tenant-1', 'proj-1', {
+      query: 'q',
+      providerKey: 'brave-main',
+      includeAnswer: true,
+    });
+    expect(result.results).toHaveLength(1);
+    expect(result.answer).toBeUndefined();
+    expect(result.answerModel).toBeUndefined();
+    expect(result.warnings).toEqual([expect.stringMatching(/AI answers are not enabled/i)]);
+    expect(handleChatCompletion).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(createWebSearchRunLog).toHaveBeenCalledTimes(1));
+    expect(createWebSearchRunLog).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'success', metadata: { warnings: result.warnings } }),
+    );
   });
 
-  it('errors when enabled but no model is selected', async () => {
+  it('keeps a provider-native answer when AI answers are off', async () => {
+    (callWebSearchProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      results: [], answer: 'native answer',
+    });
+    const result = await runWebSearch('tenant_acme', 'tenant-1', 'proj-1', {
+      query: 'q',
+      providerKey: 'brave-main',
+      includeAnswer: true,
+    });
+    expect(result.answer).toBe('native answer');
+    expect(result.answerModel).toBeUndefined();
+  });
+
+  it('still searches when enabled but no model is selected', async () => {
     (loadProviderRuntimeData as ReturnType<typeof vi.fn>).mockResolvedValue({
       record: { ...RECORD, settings: { aiAnswer: { enabled: true } } },
       credentials: { apiKey: 'k' },
     });
-    await expect(
-      runWebSearch('tenant_acme', 'tenant-1', 'proj-1', {
-        query: 'q',
-        providerKey: 'brave-main',
-        includeAnswer: true,
-      }),
-    ).rejects.toThrow(/no model selected/i);
+    (callWebSearchProvider as ReturnType<typeof vi.fn>).mockResolvedValue({ results: [] });
+    const result = await runWebSearch('tenant_acme', 'tenant-1', 'proj-1', {
+      query: 'q',
+      providerKey: 'brave-main',
+      includeAnswer: true,
+    });
+    expect(result.warnings).toEqual([expect.stringMatching(/no model selected/i)]);
+    expect(handleChatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('returns the results with a warning when the answer model fails', async () => {
+    (loadProviderRuntimeData as ReturnType<typeof vi.fn>).mockResolvedValue({
+      record: { ...RECORD, settings: { aiAnswer: { enabled: true, modelKey: 'gpt-4' } } },
+      credentials: { apiKey: 'k' },
+    });
+    (callWebSearchProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      results: [{ title: 'A', url: 'https://a', snippet: 's', position: 1 }],
+    });
+    (handleChatCompletion as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('model down'));
+    const result = await runWebSearch('tenant_acme', 'tenant-1', 'proj-1', {
+      query: 'q',
+      providerKey: 'brave-main',
+      includeAnswer: true,
+    });
+    expect(result.results).toHaveLength(1);
+    expect(result.answer).toBeUndefined();
+    expect(result.warnings).toEqual(['AI answer failed: model down']);
   });
 
   it('interprets results with the configured model and logs the answer', async () => {
