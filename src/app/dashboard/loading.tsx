@@ -1,5 +1,5 @@
-import LoadingState from '@/components/common/LoadingState';
+import { PageSkeleton } from '@/components/common/ui/Skeletons';
 
 export default function DashboardLoading() {
-  return <LoadingState label="Loading dashboard..." minHeight={360} size="lg" />;
+  return <PageSkeleton />;
 }

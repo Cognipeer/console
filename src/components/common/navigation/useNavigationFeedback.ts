@@ -98,12 +98,16 @@ export function useNavigationFeedback(): NavigationFeedback {
 
 const getPendingKeySnapshot = () => getPendingNavigationKey(navigationProgress.getState());
 const getServerPendingKey = () => null;
+const subscribeNoop = () => () => {};
 
-/** `pathname + search` of the in-flight navigation target, if any. */
-export function usePendingNavigationKey(): string | null {
+/**
+ * `pathname + search` of the in-flight navigation target, if any. Pass
+ * `enabled: false` to skip the subscription (always returns `null`).
+ */
+export function usePendingNavigationKey(enabled = true): string | null {
   return useSyncExternalStore(
-    navigationProgress.subscribe,
-    getPendingKeySnapshot,
+    enabled ? navigationProgress.subscribe : subscribeNoop,
+    enabled ? getPendingKeySnapshot : getServerPendingKey,
     getServerPendingKey,
   );
 }

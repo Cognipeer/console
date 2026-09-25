@@ -559,6 +559,11 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
   box-shadow: var(--ds-shadow-sm);
   transform: translateY(-1px);
 }
+/* Card link whose navigation is in flight (instant click acknowledgement). */
+.ds-card.interactive[data-pending='true'] {
+  border-color: var(--ds-accent);
+  box-shadow: 0 0 0 3px var(--ds-accent-soft);
+}
 
 /* Badges */
 .ds-badge {
@@ -743,6 +748,62 @@ html[data-mantine-color-scheme='dark'] .mantine-Table-tr:hover {
 .ds-tbl tbody tr.selected { background: var(--ds-accent-soft); }
 .ds-tbl th:first-child, .ds-tbl td:first-child { padding-left: 18px; }
 .ds-tbl th:last-child, .ds-tbl td:last-child { padding-right: 18px; }
+.ds-tbl tbody tr.ds-skeleton-row:hover { background: transparent; cursor: default; }
+/* Row whose link navigation is in flight (instant click acknowledgement). */
+.ds-tbl tbody tr[data-pending='true'] { background: var(--ds-accent-soft); }
+.ds-tbl tbody tr[data-pending='true'] > td:first-child { box-shadow: inset 2px 0 0 var(--ds-accent); }
+
+/* Skeleton placeholders (components/common/ui/Skeletons.tsx) */
+.ds-skeleton .ds-eyebrow::before,
+.ds-skeleton .ds-stat-label::before {
+  background: var(--ds-border-strong);
+  box-shadow: none;
+}
+.ds-skeleton .ds-stat:hover {
+  border-color: var(--ds-border-soft);
+  transform: none;
+}
+.ds-skeleton .ds-tab { cursor: default; }
+
+/* Refresh indicator: shown while content is refetched in place. It fades in
+   after a short delay so fast refreshes never flash. */
+.ds-refresh-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  animation: ds-refresh-in var(--ds-m-base) ease-out 150ms forwards;
+}
+.ds-refresh-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--ds-accent), transparent);
+  animation: ds-refresh-slide 1.1s ease-in-out infinite;
+}
+@keyframes ds-refresh-in {
+  to { opacity: 1; }
+}
+@keyframes ds-refresh-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ds-refresh-bar::after {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+    background: var(--ds-accent);
+  }
+}
 
 /* Empty state inside card */
 .ds-empty {
