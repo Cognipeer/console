@@ -359,9 +359,9 @@ export default function GuardrailEvaluationHistory({
                       <Badge
                         size="sm"
                         variant="light"
-                        color={log.passed ? 'teal' : 'red'}
+                        color={!log.passed ? 'red' : log.findings?.length ? 'yellow' : 'teal'}
                       >
-                        {log.passed ? 'Passed' : 'Failed'}
+                        {!log.passed ? 'Failed' : log.decision === 'redact' ? 'Redacted' : log.findings?.length ? 'Flagged' : 'Passed'}
                       </Badge>
                     </Table.Td>
                     <Table.Td style={{ maxWidth: 260 }}>
@@ -382,7 +382,7 @@ export default function GuardrailEvaluationHistory({
                       )}
                     </Table.Td>
                     <Table.Td>
-                      {maxSev && !log.passed ? <SeverityBadge severity={maxSev} /> : <Text size="xs" c="dimmed">—</Text>}
+                      {maxSev && log.findings?.length ? <SeverityBadge severity={maxSev} /> : <Text size="xs" c="dimmed">—</Text>}
                     </Table.Td>
                     <Table.Td>
                       <Text size="xs" c="dimmed">{log.source ?? '—'}</Text>

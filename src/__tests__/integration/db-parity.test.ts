@@ -408,6 +408,48 @@ describeForEachProvider('Guardrail CRUD + evaluation logs', (getDb) => {
     expect(aggregate.failedCount).toBe(1);
     expect(aggregate.passRate).toBe(50);
   });
+
+  it('aggregate counts findings from passed (redact) logs, not only failed ones', async () => {
+    const db = getDb();
+    const created = await db.createGuardrail({
+      tenantId,
+      key: `pii-redact-${Math.random().toString(36).slice(2, 8)}`,
+      name: 'Customer PII Redaction',
+      type: 'preset',
+      target: 'input',
+      action: 'redact',
+      enabled: true,
+      createdBy: 'user-1',
+    });
+    const guardrailId = String(created._id);
+
+    // What the hook engine writes for a redact verdict: `passed` means "no
+    // BLOCKING finding", so a redaction is passed=true WITH findings.
+    await db.createGuardrailEvaluationLog({
+      tenantId,
+      guardrailId,
+      guardrailKey: created.key,
+      guardrailName: created.name,
+      guardrailType: created.type,
+      target: 'input.pre',
+      action: 'redact',
+      passed: true,
+      findings: [
+        { type: 'pii', category: 'email', severity: 'high', message: 'Email address detected', action: 'redact', block: false },
+        { type: 'pii', category: 'phone', severity: 'medium', message: 'Phone number detected', action: 'redact', block: false },
+      ],
+      inputText: 'My email is [REDACTED:email] and phone [REDACTED:phone].',
+      latencyMs: 1,
+      source: 'parity-test',
+      message: null,
+    });
+
+    const aggregate = await db.aggregateGuardrailEvaluations(guardrailId);
+    expect(aggregate.passedCount).toBe(1);
+    expect(aggregate.failedCount).toBe(0);
+    expect(aggregate.findingsByType).toEqual({ pii: 2 });
+    expect(aggregate.findingsBySeverity).toEqual({ high: 1, medium: 1 });
+  });
 });
 
 /**

@@ -340,14 +340,17 @@ export function GuardrailMixin<TBase extends Constructor<SQLiteProviderBase>>(Ba
       const failedCount = (totalsRow.failedCount as number) || 0;
       const avgLatencyMs = totalsRow.avgLatencyMs as number | null;
 
-      // Findings aggregation – parse JSON findings from failed logs
-      const failedRows = db.prepare(
-        `SELECT findings FROM ${TABLES.guardrailEvalLogs} ${where} AND passed = 0`,
+      // Findings aggregation – parse JSON findings from EVERY log, not only
+      // failed ones. `passed` means "no blocking finding", so redact/warn
+      // verdicts are logged passed=true WITH findings; filtering on
+      // passed = 0 made every redaction invisible in the stats.
+      const findingRows = db.prepare(
+        `SELECT findings FROM ${TABLES.guardrailEvalLogs} ${where}`,
       ).all(params) as SqliteRow[];
 
       const findingsByType: Record<string, number> = {};
       const findingsBySeverity: Record<string, number> = {};
-      for (const row of failedRows) {
+      for (const row of findingRows) {
         const findings = this.parseJson<Array<{ type?: string; severity?: string }>>(row.findings, []);
         for (const f of findings) {
           if (f.type) findingsByType[f.type] = (findingsByType[f.type] || 0) + 1;
