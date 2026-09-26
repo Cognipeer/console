@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { ActionIcon, Text } from '@mantine/core';
 import {
   IconBook,
@@ -15,6 +16,8 @@ import classes from './LauncherShell.module.css';
 import { SUBNAV_CONFIG, type SubNavItem } from './ServiceSubNav';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
+import { usePendingNavigationKey } from '@/components/common/navigation/useNavigationFeedback';
+import { isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
 
 interface MobileNavDrawerProps {
   open: boolean;
@@ -44,8 +47,8 @@ export default function MobileNavDrawer({
   settingsHref,
   settingsActive,
 }: MobileNavDrawerProps) {
-  const router = useRouter();
   const rawSearchParams = useSearchParams();
+  const pendingKey = usePendingNavigationKey();
   const searchParams = new URLSearchParams(rawSearchParams?.toString() ?? '');
   const tNav = useTranslations('navigation');
 
@@ -65,10 +68,10 @@ export default function MobileNavDrawer({
 
   if (!open) return null;
 
-  const goTo = (href: string) => {
-    router.push(href);
-    onClose();
-  };
+  const pendingAttr = (href: string, active: boolean) =>
+    !active && isNavigationPendingFor(pendingKey, href, window.location.href)
+      ? 'true'
+      : undefined;
 
   const overviewActive =
     pathname === '/dashboard' || pathname?.startsWith('/dashboard/overview');
@@ -83,18 +86,19 @@ export default function MobileNavDrawer({
     const Icon = service.icon;
     const isActive = activeService?.id === service.id;
     return (
-      <button
+      <Link
         key={service.id}
-        type="button"
+        href={service.href}
         className={`${classes.mobileNavItem} ${isActive ? classes.mobileNavItemActive : ''}`}
-        onClick={() => goTo(service.href)}
+        onNavigate={onClose}
         aria-current={isActive ? 'page' : undefined}
+        data-pending={pendingAttr(service.href, isActive)}
       >
         <span className={classes.mobileNavItemIcon}>
           <Icon size={17} stroke={1.7} />
         </span>
         <span>{tNav(service.navLabelKey)}</span>
-      </button>
+      </Link>
     );
   };
 
@@ -141,17 +145,18 @@ export default function MobileNavDrawer({
         </button>
 
         <div className={classes.mobileNavSection}>
-          <button
-            type="button"
+          <Link
+            href="/dashboard/overview"
             className={`${classes.mobileNavItem} ${overviewActive ? classes.mobileNavItemActive : ''}`}
-            onClick={() => goTo('/dashboard/overview')}
+            onNavigate={onClose}
             aria-current={overviewActive ? 'page' : undefined}
+            data-pending={pendingAttr('/dashboard/overview', Boolean(overviewActive))}
           >
             <span className={classes.mobileNavItemIcon}>
               <IconLayoutDashboard size={17} stroke={1.7} />
             </span>
             <span>Home</span>
-          </button>
+          </Link>
         </div>
 
         {pinned.length > 0 ? (
@@ -179,12 +184,13 @@ export default function MobileNavDrawer({
                   ? item.matcher(pathname, searchParams)
                   : pathname === item.href;
                 return (
-                  <button
+                  <Link
                     key={item.id}
-                    type="button"
+                    href={item.href}
                     className={`${classes.mobileNavItem} ${active ? classes.mobileNavItemActive : ''}`}
-                    onClick={() => goTo(item.href)}
+                    onNavigate={onClose}
                     aria-current={active ? 'page' : undefined}
+                    data-pending={pendingAttr(item.href, active)}
                   >
                     <span className={classes.mobileNavItemIcon}>
                       <ItemIcon size={16} stroke={1.7} />
@@ -193,7 +199,7 @@ export default function MobileNavDrawer({
                     {item.badge ? (
                       <span className={classes.subnavBadge}>{item.badge}</span>
                     ) : null}
-                  </button>
+                  </Link>
                 );
               })}
             </div>
@@ -202,17 +208,18 @@ export default function MobileNavDrawer({
 
         <div className={classes.mobileNavDivider} />
         <div className={classes.mobileNavSection}>
-          <button
-            type="button"
+          <Link
+            href={settingsHref}
             className={`${classes.mobileNavItem} ${settingsActive ? classes.mobileNavItemActive : ''}`}
-            onClick={() => goTo(settingsHref)}
+            onNavigate={onClose}
             aria-current={settingsActive ? 'page' : undefined}
+            data-pending={pendingAttr(settingsHref, settingsActive)}
           >
             <span className={classes.mobileNavItemIcon}>
               <IconSettings size={16} stroke={1.7} />
             </span>
             <span>Settings</span>
-          </button>
+          </Link>
           <button
             type="button"
             className={classes.mobileNavItem}

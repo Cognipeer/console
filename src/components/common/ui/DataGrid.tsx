@@ -1,14 +1,13 @@
 'use client';
 
-import { ReactNode, useMemo } from 'react';
+import { ReactNode, useMemo, type MouseEvent } from 'react';
 import {
   ActionIcon,
   Button,
-  Center,
-  Loader,
   Menu,
   Text,
   Tooltip,
+  VisuallyHidden,
 } from '@mantine/core';
 import {
   IconChevronLeft,
@@ -17,6 +16,15 @@ import {
   IconRefresh,
   IconSearch,
 } from '@tabler/icons-react';
+import {
+  useIntentPrefetch,
+  useNavigationFeedback,
+  usePendingNavigationKey,
+} from '@/components/common/navigation/useNavigationFeedback';
+import { useTranslations } from '@/lib/i18n';
+import { isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
+import RefreshIndicator from './RefreshIndicator';
+import { DataGridSkeletonRows, DEFAULT_SKELETON_ROWS, SkeletonText } from './Skeletons';
 import TabsBar, { type TabsBarItem } from './TabsBar';
 
 export interface DataGridColumn<T> {
@@ -71,10 +79,28 @@ export interface DataGridProps<T> {
   rowKey: (row: T) => string;
   /** Column definitions */
   columns: DataGridColumn<T>[];
-  /** Loading state */
+  /**
+   * Loading state. With no records yet the grid draws skeleton rows under the
+   * real toolbar and header; with records it keeps them and shows a subtle
+   * refreshing indicator.
+   */
   loading?: boolean;
+  /** Skeleton rows drawn while loading without records (default 6). */
+  skeletonRows?: number;
   /** Row click handler — when set, rows become "clickable" */
   onRowClick?: (row: T) => void;
+  /**
+   * Navigation target of a row. Enables intent prefetch (hover, focus,
+   * pointer down) and a pending highlight while the navigation is in flight.
+   * Without `onRowClick`, clicking the row navigates there. Render a real
+   * `<Link>` in the primary cell so Cmd/Ctrl-click opens a new tab.
+   */
+  rowHref?: (row: T) => string | null | undefined;
+  /**
+   * Prefetch for `rowHref` targets: `auto` (default) mirrors a default Link,
+   * `full` suits client-rendered detail pages, `false` disables it.
+   */
+  rowPrefetch?: 'auto' | 'full' | false;
   /** Kebab menu actions per row (right-aligned) */
   rowActions?: (row: T) => DataGridRowAction<T>[];
 
@@ -90,7 +116,7 @@ export interface DataGridProps<T> {
   toolbarRight?: ReactNode;
   /** Refresh button handler */
   onRefresh?: () => void;
-  /** Whether refresh is in progress */
+  /** Whether refresh is in progress (also shows the refreshing indicator) */
   refreshing?: boolean;
 
   /** Tabs above the toolbar */
@@ -130,7 +156,10 @@ export default function DataGrid<T>({
   rowKey,
   columns,
   loading,
+  skeletonRows,
   onRowClick,
+  rowHref,
+  rowPrefetch = 'auto',
   rowActions,
   search,
   filters,
@@ -151,6 +180,39 @@ export default function DataGrid<T>({
 }: DataGridProps<T>) {
   const totalColumns =
     columns.length + (selectable ? 1 : 0) + (rowActions ? 1 : 0);
+
+  const hasRecords = records.length > 0;
+  const showSkeleton = Boolean(loading) && !hasRecords;
+  const isRefreshing = !showSkeleton && Boolean(loading || refreshing);
+
+  const tFeedback = useTranslations('navigationFeedback');
+  const { push: navigate } = useNavigationFeedback();
+  const pendingKey = usePendingNavigationKey(Boolean(rowHref));
+  const { getIntentProps } = useIntentPrefetch({
+    kind: rowPrefetch === 'full' ? 'full' : 'auto',
+  });
+
+  const activateRow = useMemo(() => {
+    if (onRowClick) return onRowClick;
+    if (!rowHref) return undefined;
+    return (row: T) => {
+      const href = rowHref(row);
+      if (href) navigate(href);
+    };
+  }, [onRowClick, rowHref, navigate]);
+
+  const handleRowClick = (event: MouseEvent<HTMLTableRowElement>, row: T) => {
+    if (!activateRow) return;
+    // A real link inside the row handles its own click (incl. Cmd/Ctrl-click).
+    const anchor = (event.target as Element | null)?.closest?.('a[href]');
+    if (anchor && event.currentTarget.contains(anchor)) return;
+    const href = rowHref?.(row);
+    if (href && (event.metaKey || event.ctrlKey || event.shiftKey)) {
+      window.open(href, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    activateRow(row);
+  };
 
   const allSelected = useMemo(() => {
     if (!selectable || !selected || records.length === 0) return false;
@@ -198,7 +260,13 @@ export default function DataGrid<T>({
         <TabsBar items={tabs} activeId={activeTab} onChange={onTabChange} />
       ) : null}
 
-      <div className="ds-card" style={{ overflow: 'hidden' }}>
+      <div
+        className="ds-card"
+        style={{ overflow: 'hidden', position: 'relative' }}
+        aria-busy={loading || refreshing ? true : undefined}
+        data-refreshing={isRefreshing || undefined}
+      >
+        <RefreshIndicator active={isRefreshing} />
         {showToolbar ? (
           <div className="ds-toolbar">
             {search ? (
@@ -280,11 +348,7 @@ export default function DataGrid<T>({
           </div>
         ) : null}
 
-        {loading ? (
-          <Center py="xl">
-            <Loader size="sm" color="teal" />
-          </Center>
-        ) : records.length === 0 ? (
+        {!loading && !hasRecords ? (
           <EmptyView empty={empty} />
         ) : (
           <div className="ds-tbl-wrap">
@@ -297,6 +361,7 @@ export default function DataGrid<T>({
                         type="checkbox"
                         className="ds-checkbox"
                         checked={allSelected}
+                        disabled={!hasRecords}
                         ref={(el) => {
                           if (el)
                             el.indeterminate = someSelected && !allSelected;
@@ -326,15 +391,31 @@ export default function DataGrid<T>({
                 </tr>
               </thead>
               <tbody>
+                {showSkeleton ? (
+                  <DataGridSkeletonRows
+                    columns={columns.length}
+                    rows={skeletonRows ?? DEFAULT_SKELETON_ROWS}
+                    selectable={selectable}
+                    withActions={Boolean(rowActions)}
+                    align={columns.map((c) => c.align)}
+                  />
+                ) : null}
                 {records.map((row) => {
                   const id = rowKey(row);
                   const isSel = selected?.has(id) ?? false;
                   const actions = rowActions ? rowActions(row) : [];
+                  const href = rowHref ? rowHref(row) : null;
+                  const isRowPending =
+                    Boolean(href && pendingKey) &&
+                    typeof window !== 'undefined' &&
+                    isNavigationPendingFor(pendingKey, href, window.location.href);
                   return (
                     <tr
                       key={id}
-                      className={`${onRowClick ? 'clickable' : ''} ${isSel ? 'selected' : ''}`}
-                      onClick={onRowClick ? () => onRowClick(row) : undefined}
+                      className={`${activateRow ? 'clickable' : ''} ${isSel ? 'selected' : ''}`}
+                      onClick={activateRow ? (event) => handleRowClick(event, row) : undefined}
+                      data-pending={isRowPending || undefined}
+                      {...(href && rowPrefetch !== false ? getIntentProps(href) : null)}
                     >
                       {selectable ? (
                         <td
@@ -375,8 +456,9 @@ export default function DataGrid<T>({
             </table>
           </div>
         )}
+        {showSkeleton ? <VisuallyHidden>{tFeedback('loadingContent')}</VisuallyHidden> : null}
 
-        {(footerLeft || footerRight || pagination) && !loading && records.length > 0 ? (
+        {(footerLeft || footerRight || pagination) && (hasRecords || showSkeleton) ? (
           <div
             className="ds-row-between"
             style={{
@@ -386,7 +468,7 @@ export default function DataGrid<T>({
               color: 'var(--ds-text-muted)',
             }}
           >
-            <span>{footerLeft}</span>
+            <span>{showSkeleton && footerLeft ? <SkeletonText width={140} /> : footerLeft}</span>
             <div className="ds-row ds-gap-sm">
               {footerRight}
               {pagination ? (
@@ -407,7 +489,7 @@ export default function DataGrid<T>({
                   <Button
                     variant="default"
                     size="xs"
-                    disabled={pagination.page <= 1}
+                    disabled={Boolean(loading) || pagination.page <= 1}
                     leftSection={<IconChevronLeft size={12} />}
                     onClick={() =>
                       pagination.onPageChange(Math.max(1, pagination.page - 1))
@@ -421,7 +503,7 @@ export default function DataGrid<T>({
                   <Button
                     variant="default"
                     size="xs"
-                    disabled={pagination.hasMore === false}
+                    disabled={Boolean(loading) || pagination.hasMore === false}
                     rightSection={<IconChevronRight size={12} />}
                     onClick={() => pagination.onPageChange(pagination.page + 1)}
                   >

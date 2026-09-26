@@ -137,6 +137,18 @@ export const tr: typeof en = {
     cost: 'Maliyet ve Optimizasyon',
     costDescription: 'Model ve agent bazında harcama, fiyatlandırma, model geçiş önerileri ve parite testleri',
   },
+  navigationFeedback: {
+    loadingPage: 'Sayfa yükleniyor…',
+    loadingContent: 'İçerik yükleniyor…',
+    refreshing: 'Yenileniyor…',
+    retry: 'Tekrar dene',
+    loadFailed: 'Bu bölüm yüklenemedi.',
+  },
+  dashboardOverview: {
+    ...en.dashboardOverview,
+    statsError: 'Çalışma alanı istatistikleri yüklenemedi.',
+    activityError: 'Son etkinlikler yüklenemedi.',
+  },
   breadcrumbs: {
     ...en.breadcrumbs,
     pii: 'PII Servisi',

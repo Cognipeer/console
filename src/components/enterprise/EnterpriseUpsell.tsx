@@ -10,6 +10,8 @@
  * module code is entirely absent.
  */
 
+import Link from 'next/link';
+
 export type EnterpriseUpsellProps = {
   module: string;
 };
@@ -49,7 +51,7 @@ export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {
         This module is available in the Cognipeer Console Enterprise edition. Activate an
         Enterprise license to enable {label}.
       </p>
-      <a
+      <Link
         href="/dashboard/license"
         style={{
           background: '#111',
@@ -62,7 +64,7 @@ export function EnterpriseUpsell({ module }: EnterpriseUpsellProps) {
         }}
       >
         View license &amp; upgrade
-      </a>
+      </Link>
     </div>
   );
 }

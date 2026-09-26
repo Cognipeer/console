@@ -1,6 +1,7 @@
 'use client';
 
-import { useRouter, usePathname } from 'next/navigation';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import {
   IconHelp,
   IconLayoutDashboard,
@@ -10,6 +11,12 @@ import { Tooltip } from '@mantine/core';
 import classes from './LauncherShell.module.css';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
+import {
+  useIntentPrefetch,
+  usePendingNavigationKey,
+} from '@/components/common/navigation/useNavigationFeedback';
+import { getKeyPathname, isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
+import { findServiceForPath } from './ServiceSubNav';
 
 interface SlimRailProps {
   pinned: DashboardServiceDefinition[];
@@ -28,11 +35,19 @@ export default function SlimRail({
   settingsHref,
   settingsActive,
 }: SlimRailProps) {
-  const router = useRouter();
   const pathname = usePathname();
   const tNav = useTranslations('navigation');
-
-  const goTo = (href: string) => router.push(href);
+  const pendingKey = usePendingNavigationKey();
+  const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
+  // Instant acknowledgement: the rail item that owns the in-flight target is
+  // marked pending; the committed active state stays pathname-derived.
+  const pendingServiceId = pendingKey
+    ? findServiceForPath([...pinned, ...recents], getKeyPathname(pendingKey))?.id ?? null
+    : null;
+  const isHrefPending = (href: string) =>
+    typeof window !== 'undefined' && isNavigationPendingFor(pendingKey, href, window.location.href);
+  const pendingAttr = (pending: boolean, active: boolean) =>
+    pending && !active ? 'true' : undefined;
 
   const renderService = (
     service: DashboardServiceDefinition,
@@ -49,16 +64,17 @@ export default function SlimRail({
         offset={8}
         openDelay={120}
       >
-        <button
-          type="button"
-          onClick={() => goTo(service.href)}
+        <Link
+          href={service.href}
           className={`${classes.railBtn} ${isActive ? classes.railBtnActive : ''}`}
           style={opts.recent ? { opacity: 0.75 } : undefined}
           aria-label={tNav(service.navLabelKey)}
           aria-current={isActive ? 'page' : undefined}
+          data-pending={pendingAttr(pendingServiceId === service.id, isActive)}
+          {...getIntentProps(service.href)}
         >
           <Icon size={opts.recent ? 16 : 18} stroke={1.7} />
-        </button>
+        </Link>
       </Tooltip>
     );
   };
@@ -89,15 +105,16 @@ export default function SlimRail({
       </Tooltip>
 
       <Tooltip label="Home" position="right" withArrow offset={8} openDelay={120}>
-        <button
-          type="button"
+        <Link
+          href="/dashboard/overview"
           className={`${classes.railBtn} ${overviewActive ? classes.railBtnActive : ''}`}
-          onClick={() => goTo('/dashboard/overview')}
           aria-label="Home"
           aria-current={overviewActive ? 'page' : undefined}
+          data-pending={pendingAttr(isHrefPending('/dashboard/overview'), Boolean(overviewActive))}
+          {...getIntentProps('/dashboard/overview')}
         >
           <IconLayoutDashboard size={18} stroke={1.7} />
-        </button>
+        </Link>
       </Tooltip>
 
       <div className={classes.railDivider} />
@@ -114,25 +131,27 @@ export default function SlimRail({
 
       <div className={classes.railDivider} />
       <Tooltip label="Settings" position="right" withArrow offset={8} openDelay={120}>
-        <button
-          type="button"
+        <Link
+          href={settingsHref}
           className={`${classes.railBtn} ${settingsActive ? classes.railBtnActive : ''}`}
           aria-label="Settings"
           aria-current={settingsActive ? 'page' : undefined}
-          onClick={() => goTo(settingsHref)}
+          data-pending={pendingAttr(isHrefPending(settingsHref), settingsActive)}
+          {...getIntentProps(settingsHref)}
         >
           <IconSettings size={17} stroke={1.7} />
-        </button>
+        </Link>
       </Tooltip>
       <Tooltip label="Help" position="right" withArrow offset={8} openDelay={120}>
-        <button
-          type="button"
+        <Link
+          href="/dashboard/docs"
           className={classes.railBtn}
           aria-label="Help"
-          onClick={() => goTo('/dashboard/docs')}
+          data-pending={pendingAttr(isHrefPending('/dashboard/docs'), false)}
+          {...getIntentProps('/dashboard/docs')}
         >
           <IconHelp size={17} stroke={1.7} />
-        </button>
+        </Link>
       </Tooltip>
     </aside>
   );

@@ -112,6 +112,13 @@ export const en = {
     ocr: 'OCR Jobs',
     ocrDescription: 'Batch OCR + extraction over files and images with summary and structured output',
   },
+  navigationFeedback: {
+    loadingPage: 'Loading page…',
+    loadingContent: 'Loading content…',
+    refreshing: 'Refreshing…',
+    retry: 'Retry',
+    loadFailed: 'Couldn’t load this section.',
+  },
   notifications: {
     logoutSuccessTitle: 'Logged Out',
     logoutSuccessMessage: 'You have been logged out successfully',
@@ -1116,6 +1123,8 @@ export const en = {
       sdk: 'Agent SDK',
       sdkDesc: 'Instrument agents with the SDK',
     },
+    statsError: 'Couldn’t load workspace stats.',
+    activityError: 'Couldn’t load recent activity.',
   },
   models: {
     list: {

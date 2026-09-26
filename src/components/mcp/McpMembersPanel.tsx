@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
   Alert,
   Anchor,
@@ -182,7 +183,7 @@ export default function McpMembersPanel({ serverId, members, onServerUpdated }: 
                 <Table.Tr key={m.serverId}>
                   <Table.Td>
                     <Group gap={6}>
-                      <Anchor href={`/dashboard/mcp/${m.serverId}`} size="sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <Anchor component={Link} href={`/dashboard/mcp/${m.serverId}`} size="sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                         {m.name} <IconExternalLink size={12} />
                       </Anchor>
                       <Text size="xs" c="dimmed" ff="monospace">{m.serverKey}</Text>
