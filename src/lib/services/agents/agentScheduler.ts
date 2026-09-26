@@ -15,14 +15,10 @@ import type { IAgent, IAgentSchedule } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { findInstanceAssignment, getThisNodeName, resolveDefaultNodeName } from '@/lib/core/cluster';
+import { isDue } from '@/lib/services/crawler/schedulePlanner';
 
 import { agentEntityId } from './agentEntityId';
-import {
-    computeScheduleNextRun,
-    readSchedules,
-    recordScheduleRun,
-    runAgentSchedule,
-} from './agentScheduleService';
+import { readSchedules, recordScheduleRun, runAgentSchedule } from './agentScheduleService';
 
 const logger = createLogger('agent-scheduler');
 
@@ -33,7 +29,6 @@ const SCHEDULE_ACTOR = 'system:agent-scheduler';
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let running = false;
-let paused = false;
 
 /**
  * Fires currently in flight, keyed `${agentId}:${scheduleId}`.
@@ -45,34 +40,14 @@ let paused = false;
  */
 const inFlight = new Set<string>();
 
-let lastStartedAt: Date | null = null;
-let lastCompletedAt: Date | null = null;
-let lastDurationMs: number | null = null;
-let lastError: string | null = null;
-let lastLockProvider = 'unknown';
-let lastProcessedTenants = 0;
-let lastDueSchedules = 0;
-
-function isDue(schedule: IAgentSchedule, now: Date): boolean {
-    if (!schedule.enabled) return false;
-    const next = computeScheduleNextRun(schedule, now);
-    return next !== null && next.getTime() <= now.getTime();
-}
-
-async function runOnce(manual = false): Promise<{ dueSchedules: number; processedTenants: number }> {
-    if (paused && !manual) return { dueSchedules: 0, processedTenants: 0 };
-    if (running) return { dueSchedules: 0, processedTenants: 0 };
+async function runOnce(): Promise<void> {
+    if (running) return;
     running = true;
 
     let lockToken: string | undefined;
-    const startedAt = new Date();
-    lastStartedAt = startedAt;
-    let processedTenants = 0;
-    let dueCount = 0;
 
     try {
         const cache = await getCache();
-        lastLockProvider = cache.name;
         lockToken = await cache.acquireLock(SCHEDULER_LOCK_KEY, SCHEDULER_LOCK_TTL_SECONDS);
         const holdsGlobalLock = Boolean(lockToken);
         const thisNode = getThisNodeName();
@@ -83,7 +58,6 @@ async function runOnce(manual = false): Promise<{ dueSchedules: number; processe
 
         for (const tenant of tenants) {
             if (!tenant.dbName) continue;
-            processedTenants += 1;
 
             try {
                 await runWithTenantScope(tenant.dbName, async (tenantDb) => {
@@ -120,7 +94,6 @@ async function runOnce(manual = false): Promise<{ dueSchedules: number; processe
                                 });
                                 continue;
                             }
-                            dueCount += 1;
                             void dispatch(tenant.dbName!, tenantId, agent, schedule, fireKey);
                         }
                     }
@@ -131,14 +104,9 @@ async function runOnce(manual = false): Promise<{ dueSchedules: number; processe
                 });
             }
         }
-
-        lastError = null;
-        lastProcessedTenants = processedTenants;
-        lastDueSchedules = dueCount;
-        return { dueSchedules: dueCount, processedTenants };
     } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
-        logger.error('Fatal scheduler error', { error: lastError });
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error('Fatal scheduler error', { error: message });
         throw err;
     } finally {
         if (lockToken) {
@@ -151,8 +119,6 @@ async function runOnce(manual = false): Promise<{ dueSchedules: number; processe
                 });
             }
         }
-        lastCompletedAt = new Date();
-        lastDurationMs = lastCompletedAt.getTime() - startedAt.getTime();
         running = false;
     }
 }
@@ -229,41 +195,4 @@ export function startAgentScheduler(): void {
         void runOnce();
     }, CHECK_INTERVAL_MS);
     if (schedulerTimer.unref) schedulerTimer.unref();
-}
-
-export function stopAgentScheduler(): void {
-    if (schedulerTimer !== null) {
-        clearInterval(schedulerTimer);
-        schedulerTimer = null;
-        logger.info('Stopped');
-    }
-}
-
-export function pauseAgentScheduler(): void {
-    paused = true;
-}
-
-export function resumeAgentScheduler(): void {
-    paused = false;
-}
-
-export async function runAgentSchedulerOnce(): Promise<{ dueSchedules: number; processedTenants: number }> {
-    return runOnce(true);
-}
-
-export function getAgentSchedulerStatus() {
-    return {
-        running,
-        paused,
-        started: schedulerTimer !== null,
-        checkIntervalMs: CHECK_INTERVAL_MS,
-        inFlight: inFlight.size,
-        lastStartedAt,
-        lastCompletedAt,
-        lastDurationMs,
-        lastError,
-        lastLockProvider,
-        lastProcessedTenants,
-        lastDueSchedules,
-    };
 }

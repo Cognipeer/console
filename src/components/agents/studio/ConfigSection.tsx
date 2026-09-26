@@ -65,16 +65,6 @@ export default function ConfigSection({
     first,
     changed,
 }: ConfigSectionProps) {
-    // Always open — no fold mode. A folded section showed a one-line summary
-    // in place of its fields, which hid the config behind a click per section.
-    const heading = (
-        <Group gap={6} wrap="nowrap">
-            <Text fw={600}>{title}</Text>
-            {changed ? (
-                <Badge size="xs" variant="light" color="orange">Changed</Badge>
-            ) : null}
-        </Group>
-    );
     return (
         <>
             {!first ? <Divider my="xl" /> : null}
@@ -86,11 +76,16 @@ export default function ConfigSection({
                 className={classes.section}
             >
                 <Stack gap={4} className={classes.label}>
-                    {heading}
+                    <Group gap={6} wrap="nowrap">
+                        <Text fw={600}>{title}</Text>
+                        {changed ? (
+                            <Badge size="xs" variant="light" color="orange">Changed</Badge>
+                        ) : null}
+                    </Group>
                     {description ? <Text size="sm" c="dimmed">{description}</Text> : null}
                     {meta}
                 </Stack>
-                <Box id={`config-${id}-body`} className={classes.content}>
+                <Box className={classes.content}>
                     {children}
                 </Box>
             </Group>

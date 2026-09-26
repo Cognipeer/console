@@ -18,6 +18,7 @@ import {
 } from '@mantine/core';
 import { IconPlus, IconTrash } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import type { CategoryCatalogEntry, PiiAction, PiiEngine } from '@/lib/services/pii/types';
 
 const SUPPORTED_LANGUAGES = ['global', 'en', 'tr', 'de'] as const;
 
@@ -32,15 +33,6 @@ export interface PiiCustomPatternForm {
   enabled: boolean;
 }
 
-export interface PiiCatalogEntry {
-  id: string;
-  label: string;
-  description: string;
-  languages: string[];
-  severity: 'low' | 'medium' | 'high';
-  defaultEnabled: boolean;
-}
-
 interface Props {
   /** Categories on/off map. */
   categories: Record<string, boolean>;
@@ -49,16 +41,16 @@ interface Props {
   onCustomPatternsChange: (next: PiiCustomPatternForm[]) => void;
   languages: string[];
   onLanguagesChange: (next: string[]) => void;
-  defaultAction: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
-  onDefaultActionChange: (next: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize') => void;
+  defaultAction: PiiAction;
+  onDefaultActionChange: (next: PiiAction) => void;
   /** Which detector runs this policy's scan. Changing it is the caller's cue
    *  to reset `categories` to the new engine's own defaults and reload
    *  `catalog` — see `PiiEngine`'s own doc comment for why the two engines
    *  don't share a category vocabulary. */
-  engine: 'regex' | 'cognipeer';
-  onEngineChange: (next: 'regex' | 'cognipeer') => void;
+  engine: PiiEngine;
+  onEngineChange: (next: PiiEngine) => void;
   /** Loaded category catalog from /api/pii/categories — already scoped to `engine`. */
-  catalog: PiiCatalogEntry[];
+  catalog: CategoryCatalogEntry[];
 }
 
 function makePatternId(): string {

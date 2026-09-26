@@ -41,14 +41,6 @@ export async function startAgentQueueConsumer(): Promise<void> {
     if (ctx.name === 'playground') {
       return executePlaygroundChatLocal(ctx.data as unknown as AgentPlaygroundChatRequest);
     }
-    // Background runs moved to their own queue; still drained here for jobs
-    // published by a previous release during a rolling deploy.
-    if (ctx.name === 'run') {
-      return runAgentJobLocal(ctx.data as unknown as { runId: string; tenantId: string; tenantDbName: string });
-    }
-    if (ctx.name === 'callback') {
-      return deliverAgentRunCallbackJob(ctx.data as unknown as Parameters<typeof deliverAgentRunCallbackJob>[0]);
-    }
     throw new Error(`Unknown agent job: ${ctx.name}`);
   }, { concurrency: CONCURRENCY });
 

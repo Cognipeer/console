@@ -65,6 +65,23 @@ function referenceValue(v: FormValues): string {
   return (v.kind === 'agent' ? v.agentKey : v.kind === 'rag' ? v.ragModuleKey : v.modelKey) || '—';
 }
 
+const isJson = (text: string) => {
+  try { JSON.parse(text); return true; } catch { return false; }
+};
+
+type Named = { key: string; name: string };
+const toOption = (r: Named) => ({ value: r.key, label: r.name });
+
+/** GET a list endpoint; `apply` runs only on success, so a failed fetch leaves the dropdown as it was. */
+async function loadList<T>(url: string, field: string, apply: (rows: T[]) => void): Promise<void> {
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (res.ok) apply(((await res.json())[field] ?? []) as T[]);
+  } catch {
+    /* non-fatal — the dropdown stays empty */
+  }
+}
+
 /** Assemble the OpenAI-shaped response_format the target will send. */
 function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined {
   if (v.responseMode === 'none') return undefined;
@@ -78,7 +95,7 @@ function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined
 
 export default function CreateTargetModal({ opened, onClose, onCreated, models = [], editing = null }: CreateTargetModalProps) {
   const [loading, setLoading] = useState(false);
-  const [agents, setAgents] = useState<{ value: string; label: string; _id?: string; publishedVersion?: number | null }[]>([]);
+  const [agents, setAgents] = useState<{ value: string; label: string; _id: string }[]>([]);
   const [agentVersionOptions, setAgentVersionOptions] = useState<{ value: string; label: string }[]>([]);
   const [agentVersionsLoading, setAgentVersionsLoading] = useState(false);
   const [prompts, setPrompts] = useState<{ value: string; label: string }[]>([]);
@@ -101,7 +118,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       jsonSchema: (v, values) => {
         if (values.responseMode !== 'json_schema') return null;
         if (!v.trim()) return 'Paste the JSON schema';
-        try { JSON.parse(v); return null; } catch { return 'Not valid JSON'; }
+        return isJson(v) ? null : 'Not valid JSON';
       },
     },
   });
@@ -133,42 +150,17 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       });
     }
     void (async () => {
-      try {
-        const res = await fetch('/api/agents', { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          setAgents(
-            ((data.agents ?? []) as Array<{ _id: string; key: string; name: string; publishedVersion?: number | null }>)
-              .map((a) => ({ value: a.key, label: a.name, _id: a._id, publishedVersion: a.publishedVersion ?? null })),
-          );
-        }
-      } catch {
-        /* non-fatal — agent dropdown stays empty */
-      }
-      try {
-        const res = await fetch('/api/prompts', { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          setPrompts(((data.prompts ?? []) as Array<{ key: string; name: string }>).map((p) => ({ value: p.key, label: p.name })));
-        }
-      } catch {
-        /* non-fatal — prompt dropdown stays empty */
-      }
-      try {
-        const res = await fetch('/api/rag/modules', { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          setRagModules(((data.modules ?? []) as Array<{ key: string; name: string }>).map((m) => ({ value: m.key, label: m.name })));
-        }
-      } catch {
-        /* non-fatal — Knowledge Engine dropdown stays empty */
-      }
+      await loadList<Named & { _id: string }>('/api/agents', 'agents', (rows) =>
+        setAgents(rows.map((a) => ({ ...toOption(a), _id: a._id }))),
+      );
+      await loadList<Named>('/api/prompts', 'prompts', (rows) => setPrompts(rows.map(toOption)));
+      await loadList<Named>('/api/rag/modules', 'modules', (rows) => setRagModules(rows.map(toOption)));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
-  const selectedAgentKey = form.getValues().agentKey;
-  const selectedKind = form.getValues().kind;
+  const v = form.getValues();
+  const kind = v.kind;
 
   /**
    * Versions are fetched per agent rather than bundled into the agent list:
@@ -176,11 +168,11 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
    * also what the Agents page pages through.
    */
   useEffect(() => {
-    if (!opened || selectedKind !== 'agent' || !selectedAgentKey) {
+    if (!opened || kind !== 'agent' || !v.agentKey) {
       setAgentVersionOptions([]);
       return;
     }
-    const agentId = agents.find((entry) => entry.value === selectedAgentKey)?._id;
+    const agentId = agents.find((entry) => entry.value === v.agentKey)?._id;
     if (!agentId) {
       setAgentVersionOptions([]);
       return;
@@ -211,7 +203,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, selectedKind, selectedAgentKey, agents.length]);
+  }, [opened, kind, v.agentKey, agents.length]);
 
   const handleSubmit = async () => {
     if (form.validate().hasErrors) return;
@@ -261,8 +253,6 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     }
   };
 
-  const v = form.getValues();
-  const kind = v.kind;
   const validName = v.name.trim().length > 0;
   const validRef = kind === 'model' ? Boolean(v.modelKey)
     : kind === 'agent' ? v.agentKey.trim().length > 0
@@ -272,9 +262,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     v.promptMode === 'promptKey' ? Boolean(v.promptKey)
       : v.promptMode === 'inline' ? v.systemPrompt.trim().length > 0
         : true;
-  const validSchema = v.responseMode !== 'json_schema' || (() => {
-    try { JSON.parse(v.jsonSchema); return true; } catch { return false; }
-  })();
+  const validSchema = v.responseMode !== 'json_schema' || isJson(v.jsonSchema);
   const canSubmit = validName && validRef && (kind !== 'model' || (validPrompt && validSchema));
 
   const checklist = [
@@ -369,14 +357,14 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
             >
               <Select
                 placeholder={
-                  !form.getValues().agentKey
+                  !v.agentKey
                     ? 'Select an agent first'
                     : agentVersionsLoading
                       ? 'Loading versions…'
                       : 'Published (follows the live version)'
                 }
                 data={agentVersionOptions}
-                disabled={!form.getValues().agentKey || agentVersionsLoading}
+                disabled={!v.agentKey || agentVersionsLoading}
                 clearable
                 {...form.getInputProps('agentVersion')}
               />

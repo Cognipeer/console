@@ -16,15 +16,13 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
+import type { PiiAction, PiiEngine } from '@/lib/services/pii/types';
 
 interface PiiPolicyView {
   id: string;
   name: string;
   key: string;
 }
-
-type DefaultAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
-type Engine = 'regex' | 'cognipeer';
 
 interface Props {
   opened: boolean;
@@ -39,8 +37,8 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [defaultAction, setDefaultAction] = useState<DefaultAction>('detect');
-  const [engine, setEngine] = useState<Engine>('regex');
+  const [defaultAction, setDefaultAction] = useState<PiiAction>('detect');
+  const [engine, setEngine] = useState<PiiEngine>('regex');
   const [enabled, setEnabled] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
@@ -193,13 +191,13 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
         description={t('detail.basics.engineHelper')}
         done
       >
-        <ChipPicker<Engine>
+        <ChipPicker<PiiEngine>
           options={[
             { value: 'regex', label: tEngine('regex') },
             { value: 'cognipeer', label: tEngine('cognipeer') },
           ]}
           value={engine}
-          onChange={(v) => setEngine(v as Engine)}
+          onChange={(v) => setEngine(v as PiiEngine)}
         />
       </FormSection>
 
@@ -209,7 +207,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
         description="What should happen when the policy detects PII."
         done
       >
-        <ChipPicker<DefaultAction>
+        <ChipPicker<PiiAction>
           options={[
             { value: 'detect', label: tAct('detect') },
             { value: 'redact', label: tAct('redact') },
@@ -218,7 +216,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
             { value: 'block', label: tAct('block') },
           ]}
           value={defaultAction}
-          onChange={(v) => setDefaultAction(v as DefaultAction)}
+          onChange={(v) => setDefaultAction(v as PiiAction)}
         />
       </FormSection>
 

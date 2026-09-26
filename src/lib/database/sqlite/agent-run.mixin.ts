@@ -99,25 +99,24 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       return (await this.findAgentRunByIdRaw(id))!;
     }
 
+    /** A guarded UPDATE; the row read back, or null when the guard (a CAS) matched nothing. */
+    private async updateAgentRunIf(id: string, sql: string, params: Record<string, unknown>): Promise<IAgentRun | null> {
+      if (this.getTenantDb().prepare(sql).run(params).changes !== 1) return null;
+      return this.findAgentRunByIdRaw(id);
+    }
+
     async claimAgentRun(
       id: string,
       tenantId: string,
       workerId: string,
       startedAt: Date,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const now = this.now();
-      const startedAtIso = startedAt.toISOString();
-      const result = db.prepare(`
+      return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET status = 'running', workerId = @workerId, startedAt = @startedAt,
             heartbeatAt = @startedAt, updatedAt = @updatedAt
         WHERE id = @id AND tenantId = @tenantId AND status = 'queued'
-      `).run({
-        id, tenantId, workerId, startedAt: startedAtIso, updatedAt: now,
-      });
-      if (result.changes !== 1) return null;
-      return this.findAgentRunByIdRaw(id);
+      `, { id, tenantId, workerId, startedAt: startedAt.toISOString(), updatedAt: this.now() });
     }
 
     async updateAgentRunHeartbeat(
@@ -125,15 +124,11 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       workerId: string,
       heartbeatAt: Date,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const now = this.now();
-      const result = db.prepare(`
+      return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET heartbeatAt = @heartbeatAt, updatedAt = @updatedAt
         WHERE id = @id AND workerId = @workerId AND status = 'running'
-      `).run({ id, workerId, heartbeatAt: heartbeatAt.toISOString(), updatedAt: now });
-      if (result.changes !== 1) return null;
-      return this.findAgentRunByIdRaw(id);
+      `, { id, workerId, heartbeatAt: heartbeatAt.toISOString(), updatedAt: this.now() });
     }
 
     async requestAgentRunCancel(
@@ -141,25 +136,22 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       tenantId: string,
       projectId: string,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const now = this.now();
+      const params = { id, tenantId, projectId, now: this.now() };
       // Fast path: run hasn't started yet, cancel it outright.
-      const queuedResult = db.prepare(`
+      const canceled = await this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET status = 'canceled', errorReason = 'canceled_by_caller', completedAt = @now, updatedAt = @now
         WHERE id = @id AND tenantId = @tenantId AND projectId = @projectId AND status = 'queued'
-      `).run({ id, tenantId, projectId, now });
-      if (queuedResult.changes === 1) return this.findAgentRunByIdRaw(id);
+      `, params);
+      if (canceled) return canceled;
 
       // Already running (possibly on another node) — stamp the request so
       // the owning worker observes it on its next heartbeat-cadence poll.
-      const runningResult = db.prepare(`
+      return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET cancelRequestedAt = @now, updatedAt = @now
         WHERE id = @id AND tenantId = @tenantId AND projectId = @projectId AND status = 'running'
-      `).run({ id, tenantId, projectId, now });
-      if (runningResult.changes !== 1) return null;
-      return this.findAgentRunByIdRaw(id);
+      `, params);
     }
 
     async finalizeAgentRun(
@@ -167,15 +159,13 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       tenantId: string,
       data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const now = this.now();
-      const { sets, params } = this.buildAgentRunSetClause(data, id, now);
+      const { sets, params } = this.buildAgentRunSetClause(data, id, this.now());
       params.tenantId = tenantId;
-      const result = db.prepare(
+      return this.updateAgentRunIf(
+        id,
         `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status = 'running'`,
-      ).run(params);
-      if (result.changes !== 1) return null;
-      return this.findAgentRunByIdRaw(id);
+        params,
+      );
     }
 
     async updateAgentRunCallback(
@@ -183,21 +173,17 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       tenantId: string,
       data: { callbackStatus: NonNullable<IAgentRun['callbackStatus']>; callbackAttempts: number },
     ): Promise<IAgentRun | null> {
-      const db = this.getTenantDb();
-      const now = this.now();
-      const result = db.prepare(`
+      return this.updateAgentRunIf(id, `
         UPDATE ${TABLES.agentRuns}
         SET callbackStatus = @callbackStatus, callbackAttempts = @callbackAttempts, updatedAt = @updatedAt
         WHERE id = @id AND tenantId = @tenantId
-      `).run({
+      `, {
         id,
         tenantId,
         callbackStatus: data.callbackStatus,
         callbackAttempts: data.callbackAttempts,
-        updatedAt: now,
+        updatedAt: this.now(),
       });
-      if (result.changes !== 1) return null;
-      return this.findAgentRunByIdRaw(id);
     }
 
     private buildAgentRunSetClause(
@@ -277,24 +263,14 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
     async listStaleAgentRuns(
       tenantId: string,
       heartbeatBefore: Date,
-      limit?: number,
     ): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
-      let sql = `
+      const rows = db.prepare(`
         SELECT * FROM ${TABLES.agentRuns}
         WHERE tenantId = @tenantId AND status = 'running'
           AND (heartbeatAt IS NULL OR heartbeatAt < @heartbeatBefore)
         ORDER BY heartbeatAt ASC
-      `;
-      const params: Record<string, unknown> = {
-        tenantId,
-        heartbeatBefore: heartbeatBefore.toISOString(),
-      };
-      if (limit && limit > 0) {
-        sql += ' LIMIT @limit';
-        params.limit = limit;
-      }
-      const rows = db.prepare(sql).all(params) as SqliteRow[];
+      `).all({ tenantId, heartbeatBefore: heartbeatBefore.toISOString() }) as SqliteRow[];
       return rows.map((r) => this.mapAgentRun(r));
     }
 
@@ -366,34 +342,19 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
     }
 
     async cleanupAgentRunRetention(options: {
-      projectId?: string;
       olderThan: Date;
       batchSize?: number;
     }): Promise<{ deletedCount: number }> {
       const db = this.getTenantDb();
       // Active rows are never retention's to delete, whatever expiresAt says.
-      const conds: string[] = ['expiresAt IS NOT NULL', 'expiresAt < @olderThan', "status NOT IN ('queued', 'running')"];
+      const conds = ['expiresAt IS NOT NULL', 'expiresAt < @olderThan', "status NOT IN ('queued', 'running')"];
       const params: Record<string, unknown> = { olderThan: options.olderThan.toISOString() };
-      if (options.projectId) {
-        conds.push('projectId = @projectId');
-        params.projectId = options.projectId;
-      }
       const whereClause = conds.join(' AND ');
-      if (options.batchSize && options.batchSize > 0) {
-        const ids = db.prepare(
-          `SELECT id FROM ${TABLES.agentRuns} WHERE ${whereClause} LIMIT @batchSize`,
-        ).all({ ...params, batchSize: options.batchSize }) as SqliteRow[];
-        if (ids.length === 0) return { deletedCount: 0 };
-        const placeholders = ids.map((_, i) => `@id${i}`).join(', ');
-        const idParams: Record<string, unknown> = {};
-        ids.forEach((r, i) => { idParams[`id${i}`] = r.id; });
-        const result = db.prepare(
-          `DELETE FROM ${TABLES.agentRuns} WHERE id IN (${placeholders})`,
-        ).run(idParams);
-        return { deletedCount: result.changes };
-      }
-      const result = db.prepare(`DELETE FROM ${TABLES.agentRuns} WHERE ${whereClause}`).run(params);
-      return { deletedCount: result.changes };
+      const batched = Boolean(options.batchSize && options.batchSize > 0);
+      const sql = batched
+        ? `DELETE FROM ${TABLES.agentRuns} WHERE id IN (SELECT id FROM ${TABLES.agentRuns} WHERE ${whereClause} LIMIT @batchSize)`
+        : `DELETE FROM ${TABLES.agentRuns} WHERE ${whereClause}`;
+      return { deletedCount: db.prepare(sql).run(batched ? { ...params, batchSize: options.batchSize } : params).changes };
     }
 
     private async findAgentRunByIdRaw(id: string): Promise<IAgentRun | null> {

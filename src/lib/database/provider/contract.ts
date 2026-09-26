@@ -1607,9 +1607,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   // ── Agent Runs (background execution, tenant-specific) ──
   // See docs/guide/agent-background-execution.md §6, §7, §12.
   /**
-   * Insert a new AgentRun row. The `conversationId` + active-status partial
-   * unique index (§6/§12.14) enforces "at most one queued/running run per
-   * conversation" at the DB layer, for both `mode: 'sync'` and
+   * Insert a new AgentRun row. Each provider enforces "at most one
+   * queued/running run per conversation" race-free (§6/§12.14): SQLite with a
+   * partial unique index, Mongo with agent_run_locks documents, since Cosmos
+   * rejects partial indexes — for both `mode: 'sync'` and
    * `mode: 'background'` rows alike. A violation MUST be caught by the
    * implementation and re-thrown as `AgentRunConflictError` (see
    * `./errors.ts`), never left as a raw driver error, so callers can map it
@@ -1699,7 +1700,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   listStaleAgentRuns(
     tenantId: string,
     heartbeatBefore: Date,
-    limit?: number,
   ): Promise<IAgentRun[]>;
   /**
    * Boot-time recovery input (§7.1): `queued` rows in this tenant — a
@@ -1734,7 +1734,6 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   countActiveAgentRuns(tenantId: string, projectId?: string, mode?: IAgentRun['mode']): Promise<number>;
   /** §12.10 retention, following the `cleanupAgentTracingRetention` precedent. */
   cleanupAgentRunRetention(options: {
-    projectId?: string;
     olderThan: Date;
     batchSize?: number;
   }): Promise<{ deletedCount: number }>;

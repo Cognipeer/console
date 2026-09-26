@@ -13,7 +13,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 
-import type { PiiLanguage, IPiiCustomPattern, PiiDetectionConfig } from '@/lib/database';
+import type { PiiAction, PiiLanguage, IPiiCustomPattern, PiiDetectionConfig } from '@/lib/database';
 // The regex family's interruptible sweep — a V8 context with a timeout, the
 // only thing that can stop a backtracking regex. Custom patterns are
 // tenant-authored and run on caller-controlled text, so they get exactly the
@@ -27,7 +27,6 @@ import {
 } from '@/lib/services/guardrail/families/regex';
 import type { PiiFinding, PiiVault } from './types';
 import {
-  PII_CATEGORIES,
   PII_CATEGORIES_BY_ID,
   filterCategoriesByLanguages,
   categoryLabel,
@@ -45,7 +44,8 @@ import { findContextWord, applyContextBoost, noisyOr, type Candidate } from './c
 // implemented and unit-tested in `dictionary.ts` but not yet wired into
 // `DetectorConfig` — see the plan's Faz 1 note on tenant dictionaries.
 import { scanDictionary } from './dictionary';
-import { runNer, type NerDegradedNote } from './ner';
+import { runNer } from './ner';
+import { byStartThenLongest } from './ahoCorasick';
 import { getConfig } from '@/lib/core/config';
 
 const SEVERITY_WEIGHT: Record<PiiSeverity, number> = { low: 1, medium: 2, high: 3 };
@@ -101,8 +101,19 @@ export async function withCustomPatternBudget<T>(
   return { result, skipped: report.skipped };
 }
 
-function customFlags(p: Pick<IPiiCustomPattern, 'flags'>): string {
-  return (p.flags ?? '').includes('g') ? (p.flags ?? 'g') : `${p.flags ?? ''}g`;
+const withGlobalFlag = (flags: string): string => (flags.includes('g') ? flags : `${flags}g`);
+
+/** Compile a custom pattern, or return why it will be refused at runtime. */
+function compileCustomRegex(p: Pick<IPiiCustomPattern, 'pattern' | 'flags'>): RegExp | string {
+  if (!p.pattern || typeof p.pattern !== 'string') return 'pattern is empty, so it can never fire';
+  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) {
+    return `pattern source is ${p.pattern.length} characters, over the ${MAX_CUSTOM_PATTERN_SOURCE_CHARS} character limit`;
+  }
+  try {
+    return new RegExp(p.pattern, withGlobalFlag(p.flags ?? ''));
+  } catch (error) {
+    return `pattern does not compile: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 /**
@@ -113,16 +124,8 @@ function customFlags(p: Pick<IPiiCustomPattern, 'flags'>): string {
 export function explainCustomPatternError(
   p: Pick<IPiiCustomPattern, 'pattern' | 'flags'>,
 ): string | null {
-  if (!p.pattern || typeof p.pattern !== 'string') return 'pattern is empty, so it can never fire';
-  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) {
-    return `pattern source is ${p.pattern.length} characters, over the ${MAX_CUSTOM_PATTERN_SOURCE_CHARS} character limit`;
-  }
-  try {
-    new RegExp(p.pattern, customFlags(p));
-    return null;
-  } catch (error) {
-    return `pattern does not compile: ${error instanceof Error ? error.message : String(error)}`;
-  }
+  const r = compileCustomRegex(p);
+  return typeof r === 'string' ? r : null;
 }
 
 /** Configuration consumed by `detect()`. */
@@ -168,12 +171,11 @@ function compileBuiltin(
   cat: PiiCategoryDefinition & { pattern: RegExp },
   locale: PiiLanguage,
 ): CompiledPattern {
-  const flags = cat.pattern.flags.includes('g') ? cat.pattern.flags : `${cat.pattern.flags}g`;
   return {
     source: 'builtin',
     categoryId: cat.id,
     severity: cat.severity,
-    regex: new RegExp(cat.pattern.source, flags),
+    regex: new RegExp(cat.pattern.source, withGlobalFlag(cat.pattern.flags)),
     validate: cat.validate,
     label: categoryLabel(cat, locale),
     mask: cat.mask,
@@ -184,19 +186,8 @@ function compileBuiltin(
 function compileCustom(
   p: IPiiCustomPattern,
   locale: PiiLanguage,
-): CompiledPattern | null {
-  if (!p.enabled) return null;
-  if (!p.pattern || typeof p.pattern !== 'string') return null;
-  // The source cap is enforced HERE, at compile, so that the save path can
-  // reject the same pattern by calling `explainCustomPatternError` and the
-  // scan refuses it even when a row was written past the validator.
-  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) return null;
-  let regex: RegExp;
-  try {
-    regex = new RegExp(p.pattern, customFlags(p));
-  } catch {
-    return null;
-  }
+  regex: RegExp,
+): CompiledPattern {
   const severity = p.severity ?? 'medium';
   return {
     source: 'custom',
@@ -204,7 +195,7 @@ function compileCustom(
     severity,
     regex,
     label: p.labels?.[locale] ?? p.label,
-    mask: { kind: 'fixed', replacement: `[REDACTED_${p.categoryId.toUpperCase()}]` },
+    mask: { kind: 'fixed', replacement: redactReplacement(p.categoryId) },
     baseScore: defaultBaseScoreForSeverity(severity),
     custom: p,
   };
@@ -250,7 +241,7 @@ function buildReplacement(value: string, mask: PiiMaskStrategy, categoryId: stri
     }
     case 'keep-domain': {
       const at = value.indexOf('@');
-      if (at <= 0) return `[REDACTED_${categoryId.toUpperCase()}]`;
+      if (at <= 0) return redactReplacement(categoryId);
       const local = value.slice(0, at);
       const domain = value.slice(at);
       const masked = local.length <= 1 ? '*' : `${local[0]}${'*'.repeat(Math.max(1, local.length - 1))}`;
@@ -265,10 +256,7 @@ function redactReplacement(categoryId: string): string {
 
 /** Stable-sort findings: lower start first, longer-match wins ties. */
 function sortFindings(findings: PiiFinding[]): PiiFinding[] {
-  return findings.slice().sort((a, b) => {
-    if (a.start !== b.start) return a.start - b.start;
-    return (b.end - b.start) - (a.end - a.start);
-  });
+  return findings.slice().sort(byStartThenLongest);
 }
 
 /**
@@ -294,6 +282,33 @@ function resolveOverlaps(findings: PiiFinding[]): PiiFinding[] {
   return out;
 }
 
+/** Build a finding from a detected span — the one place `message`, `action`,
+ *  `block` and `replacement` are derived, for the pattern sweep and the
+ *  fusion path alike. */
+function toFinding(
+  f: Omit<PiiFinding, 'message' | 'action' | 'block' | 'replacement'>,
+  mask: PiiMaskStrategy,
+  locale: PiiLanguage,
+  actionMode: PiiAction,
+): PiiFinding {
+  return {
+    category: f.category,
+    source: f.source,
+    severity: f.severity,
+    value: f.value,
+    start: f.start,
+    end: f.end,
+    label: f.label,
+    message: formatMessage(f.label, locale),
+    action: actionMode,
+    block: actionMode === 'block',
+    replacement: actionMode === 'redact' ? redactReplacement(f.category) : buildReplacement(f.value, mask, f.category),
+    confidence: f.confidence,
+    detector: f.detector,
+    evidence: f.evidence,
+  };
+}
+
 /**
  * Detect PII findings in `text` given the supplied config.
  *
@@ -307,7 +322,7 @@ function resolveOverlaps(findings: PiiFinding[]): PiiFinding[] {
 export function detect(
   text: string,
   config: DetectorConfig = {},
-  actionMode: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize' = 'detect',
+  actionMode: PiiAction = 'detect',
 ): PiiFinding[] {
   if (!text) return [];
 
@@ -331,12 +346,12 @@ export function detect(
   for (const p of config.customPatterns ?? []) {
     if (!p.enabled) continue;
     if (!customAppliesToLanguages(p, config.languages)) continue;
-    const c = compileCustom(p, locale);
-    if (c) {
-      customs.push(c);
-    } else {
-      skip(p, explainCustomPatternError(p) ?? 'pattern does not compile');
+    const regex = compileCustomRegex(p);
+    if (typeof regex === 'string') {
+      skip(p, regex);
+      continue;
     }
+    customs.push(compileCustom(p, locale, regex));
   }
 
   // PII v2: context boost is on by default, off only if a policy explicitly
@@ -348,30 +363,17 @@ export function detect(
   const push = (c: CompiledPattern, value: string, start: number): void => {
     if (c.validate && !c.validate(value)) return;
     const end = start + value.length;
-    const replacement = actionMode === 'redact'
-      ? redactReplacement(c.categoryId)
-      : buildReplacement(value, c.mask, c.categoryId);
     const contextWord = contextBoostEnabled ? findContextWord(text, start, end, CONTEXT_WORDS[c.categoryId]) : null;
     const confidence = applyContextBoost(c.baseScore, !!contextWord);
     const evidence: string[] = [];
     if (c.validate) evidence.push('checksum/format validated');
     if (contextWord) evidence.push(`context word "${contextWord}"`);
-    raw.push({
-      category: c.categoryId,
-      source: c.source,
-      severity: c.severity,
-      value,
-      start,
-      end,
-      label: c.label,
-      message: formatMessage(c.label, locale),
-      action: actionMode,
-      block: actionMode === 'block',
-      replacement,
-      confidence,
-      detector: 'pattern',
-      evidence,
-    });
+    raw.push(toFinding(
+      { category: c.categoryId, source: c.source, severity: c.severity, value, start, end, label: c.label, confidence, detector: 'pattern', evidence },
+      c.mask,
+      locale,
+      actionMode,
+    ));
   };
 
   // Built-in patterns are vetted, fixed and anchored; they sweep on the main
@@ -458,29 +460,21 @@ function findingToCandidate(f: PiiFinding): Candidate {
   };
 }
 
-function candidateToFinding(c: Candidate, locale: PiiLanguage, actionMode: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize'): PiiFinding {
-  const catDef = PII_CATEGORIES_BY_ID[c.category];
-  const mask: PiiMaskStrategy = catDef?.mask ?? { kind: 'fixed', replacement: `[REDACTED_${c.category.toUpperCase()}]` };
-  const replacement = actionMode === 'redact' ? redactReplacement(c.category) : buildReplacement(c.value, mask, c.category);
-  return {
-    category: c.category,
-    // Dictionary/NER findings are catalog detections, not tenant customPatterns —
-    // 'builtin' is the correct `source` for them the same way it is for a
-    // built-in regex category.
-    source: 'builtin',
-    severity: c.severity,
-    value: c.value,
-    start: c.start,
-    end: c.end,
-    label: c.label,
-    message: formatMessage(c.label, locale),
-    action: actionMode,
-    block: actionMode === 'block',
-    replacement,
-    confidence: Math.round(c.baseScore * 1000) / 1000,
-    detector: c.detector,
-    evidence: c.evidence,
-  };
+function candidateToFinding(c: Candidate, locale: PiiLanguage, actionMode: PiiAction): PiiFinding {
+  const mask: PiiMaskStrategy = PII_CATEGORIES_BY_ID[c.category]?.mask ?? { kind: 'fixed', replacement: redactReplacement(c.category) };
+  return toFinding(
+    {
+      ...c,
+      // Dictionary/NER findings are catalog detections, not tenant customPatterns —
+      // 'builtin' is the correct `source` for them the same way it is for a
+      // built-in regex category.
+      source: 'builtin',
+      confidence: Math.round(c.baseScore * 1000) / 1000,
+    },
+    mask,
+    locale,
+    actionMode,
+  );
 }
 
 /**
@@ -506,7 +500,7 @@ export function fuseCandidates(text: string, candidates: Candidate[], minConfide
 
   const merged: Candidate[] = [];
   for (const list of byCategory.values()) {
-    const sorted = list.slice().sort((a, b) => (a.start !== b.start ? a.start - b.start : (b.end - b.start) - (a.end - a.start)));
+    const sorted = list.slice().sort(byStartThenLongest);
     for (const c of sorted) {
       const last = merged[merged.length - 1];
       if (last && last.category === c.category && c.start < last.end) {
@@ -572,7 +566,7 @@ export function fuseCandidates(text: string, candidates: Candidate[], minConfide
 export async function detectAsync(
   text: string,
   config: DetectorConfig = {},
-  actionMode: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize' = 'detect',
+  actionMode: PiiAction = 'detect',
 ): Promise<DetectAsyncResult> {
   const mode = config.detection?.mode ?? 'pattern';
   if (mode === 'pattern' || !text) {
@@ -618,7 +612,7 @@ export async function detectAsync(
         failMode: nerOpts.failMode,
       });
       for (const c of nerResult.candidates) candidates.push(boost(c));
-      for (const note of nerResult.degraded as NerDegradedNote[]) {
+      for (const note of nerResult.degraded) {
         degraded.push(`ner[${note.modelId}] @${note.windowOffset}: ${note.reason}`);
       }
       if (!nerResult.modelsAvailable) degraded.push('no requested NER model could be loaded from PII_NER_MODEL_PATH');
@@ -725,10 +719,3 @@ export function detokenize(text: string, vault: PiiVault | undefined | null): st
   }
   return out;
 }
-
-/** Convenience: enumerate built-in catalog ids (used by API). */
-export function builtinCategoryIds(): string[] {
-  return PII_CATEGORIES.map((c) => c.id);
-}
-
-export { PII_CATEGORIES, PII_CATEGORIES_BY_ID };

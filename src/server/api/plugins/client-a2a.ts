@@ -24,11 +24,7 @@ import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
-import {
-  createConversation,
-  getAgentByKey,
-  getConversationById,
-} from '@/lib/services/agents/agentService';
+import { getAgentByKey, getConversationById } from '@/lib/services/agents/agentService';
 import { isA2aEnabled } from '@/lib/services/agents/a2aExposure';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -37,6 +33,7 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { resolveConversation } from './agent-openai-bridge';
 
 const logger = createLogger('api:client-a2a');
 
@@ -46,8 +43,6 @@ const JSONRPC_VERSION = '2.0';
 // A2A-specific JSON-RPC error codes (spec §8).
 const ERR_TASK_NOT_FOUND = -32001;
 const ERR_UNSUPPORTED_OPERATION = -32004;
-
-export { isA2aEnabled };
 
 interface A2aPart {
   kind?: string;
@@ -225,30 +220,18 @@ export async function handleA2aRpc(
         );
       }
 
-      // contextId ↔ conversationId: reuse the Responses API conversation store.
-      let conversationId: string | undefined;
-      if (typeof message.contextId === 'string' && message.contextId) {
-        const conversation = await getConversationById(ctx.tenantDbName, message.contextId);
-        // agentKey alone is not unique across projects — see the identical
-        // check in client-agents.ts's previous_response_id handling.
-        if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
-          return reply.code(200).send(
-            jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'),
-          );
-        }
-        conversationId = message.contextId;
-      } else {
-        const conversation = await createConversation(
-          ctx.tenantDbName,
-          ctx.tenantId,
-          ctx.projectId,
-          ctx.userId,
-          agent.key,
-          undefined,
-          { source: 'a2a' },
-        );
-        conversationId = String(conversation._id);
+      // contextId ↔ conversationId: reuse the Responses API conversation
+      // store, scoped on agent AND project like every other agent surface.
+      const resolved = await resolveConversation(
+        typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined,
+        agent,
+        ctx,
+        'a2a',
+      );
+      if ('error' in resolved) {
+        return reply.code(200).send(jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'));
       }
+      const { conversationId } = resolved;
 
       const runtimeContext = buildRuntimeContextFromRequest(
         message.metadata?.runtime_context,

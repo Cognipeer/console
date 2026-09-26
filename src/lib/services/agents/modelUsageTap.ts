@@ -98,6 +98,7 @@ function record(
 ) {
     const usage = extractTokenUsage(outcome.message) ?? {};
     const toolCalls = countToolCalls(outcome.message);
+    const finishReason = finishReasonOf(outcome.message);
     void logModelUsage(ctx.tenantDbName, ctx.model, {
         requestId: `agent-${ctx.agentKey ?? 'run'}-${outcome.startedAt}-${Math.random().toString(36).slice(2, 8)}`,
         route: ctx.route,
@@ -113,7 +114,7 @@ function record(
             : {}),
         latencyMs: Date.now() - outcome.startedAt,
         usage: { ...usage, ...(toolCalls ? { toolCalls } : {}) },
-        ...(finishReasonOf(outcome.message) ? { finishReason: finishReasonOf(outcome.message) } : {}),
+        ...(finishReason ? { finishReason } : {}),
     }).catch((error: unknown) => {
         logger.warn('Agent model usage could not be recorded', {
             model: ctx.model.key,
@@ -156,22 +157,22 @@ export function withModelUsageLogging<T extends object>(input: T, ctx: ModelUsag
             // The usage rides on the LAST usage-bearing chunk (for a wrapped
             // stream, the assembled message withAssembledStream yields).
             let lastWithUsage: unknown;
-            let finished = false;
+            // Stays 'cancelled' when the consumer stops early: still billed for
+            // what the provider generated, but neither a success nor a fault.
+            let status: 'success' | 'error' | 'cancelled' = 'cancelled';
+            let failure: unknown;
             try {
                 for await (const chunk of stream(...args) as AsyncIterable<unknown>) {
                     if (extractTokenUsage(chunk)) lastWithUsage = chunk;
                     yield chunk;
                 }
-                finished = true;
-                record(ctx, { status: 'success', message: lastWithUsage, startedAt, streamed: true });
+                status = 'success';
             } catch (error) {
-                finished = true;
-                record(ctx, { status: 'error', error, message: lastWithUsage, startedAt, streamed: true });
+                status = 'error';
+                failure = error;
                 throw error;
             } finally {
-                // The consumer stopped early (cancellation): still billed for
-                // what the provider generated, but neither a success nor a fault.
-                if (!finished) record(ctx, { status: 'cancelled', message: lastWithUsage, startedAt, streamed: true });
+                record(ctx, { status, error: failure, message: lastWithUsage, startedAt, streamed: true });
             }
         };
     }

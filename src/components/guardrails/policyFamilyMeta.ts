@@ -10,17 +10,18 @@
  * family an operator cannot reach at all (which is exactly the missing
  * regex/webhook/secrets/tool_access gap this wave closes).
  *
- * So: the colours, icons and compact `short` forms are declared here; everything
- * that is ALREADY a fact somewhere else — `POLICY_VALID_HOOKS`,
- * `STREAM_ELIGIBLE_FAMILIES`, `policyMaxMatchChars` from the contract, and the
- * family `label` from the CATALOG — is READ rather than restated, so a change
+ * So: only the icons, compact `short` forms and picker `description`s are
+ * declared here; everything that is ALREADY a fact somewhere else —
+ * `POLICY_VALID_HOOKS`, `STREAM_ELIGIBLE_FAMILIES`, `policyMaxMatchChars` from
+ * the contract, and the family `label`, `color`, `needsModel` and
+ * `needsFailMode` from the CATALOG — is READ rather than restated, so a change
  * there reaches these screens without anyone remembering to mirror it.
  *
  * `label` joined that list after the two copies were found to have already
- * drifted; see the note on `PolicyFamilyMeta.label`. The rest of this table
- * still duplicates the catalog's display half and should eventually be deleted
- * in favour of it — `short`, `icon` (a React component, which the catalog
- * deliberately does not hold) and the hook helpers are what would remain.
+ * drifted; see the note on `PolicyFamilyMeta.label`. `color`, `needsModel` and
+ * `needsFailMode` followed for the same reason. What remains authored in `META`
+ * is `short`, `description` and `icon` (a React component, which the catalog
+ * deliberately does not hold).
  *
  * ── WHAT THIS FILE MAY NOT IMPORT ────────────────────────────────────────────
  * `hooks/contract` only, exactly like `GuardrailHooksMatrix`. `hooks/legacy`
@@ -53,7 +54,7 @@ import {
   policyMaxMatchChars,
 } from '@/lib/services/guardrail/hooks/contract';
 import type { PolicyFamily, GuardrailPolicy, HookId } from '@/lib/services/guardrail/hooks/contract';
-import { catalogFor } from '@/lib/services/guardrail/catalog';
+import { catalogFor, familyNeedsFailMode, familyNeedsModel } from '@/lib/services/guardrail/catalog';
 
 export { POLICY_FAMILIES, HOOK_IDS };
 
@@ -142,7 +143,7 @@ export interface PolicyFamilyMeta {
    *  and what it costs. */
   description: string;
   icon: Icon;
-  /** Mantine colour token. */
+  /** Mantine colour token. READ from the catalog (`PolicyFamilySpec.color`). */
   color: string;
   /** From `POLICY_VALID_HOOKS` — never restated. */
   validHooks: readonly HookId[];
@@ -150,125 +151,74 @@ export interface PolicyFamilyMeta {
    *  family still needs a bounded match length from its own config, which is
    *  what `canBindToHook` policies. */
   streamSafe: boolean;
-  /** An enabled policy of this family with no `modelKey` reads as active while
-   *  nothing runs — the server rejects it. */
+  /** READ from the catalog (`familyNeedsModel`). */
   needsModel: boolean;
-  /**
-   * Whether `failMode` is a real question for this family.
-   *
-   * It answers "the policy could not RUN" — a model outage, a webhook timeout, a
-   * PII policy read that failed — which only the families that reach out of the
-   * process can experience. A regex, a word list and the secret patterns run in
-   * memory on a string: offering them a failure mode is a control for a state
-   * that does not occur, which is noise at best and false comfort at worst.
-   *
-   * `tool_access` is the one debatable row, and it is deliberately FALSE:
-   * `families/toolAccess.ts` can emit a degraded entry (an argument nested past
-   * `maxArgDepth`, a DNS lookup that fails while `denyPrivateNetworks` is on),
-   * so a per-policy failure mode would not be meaningless there. It is left off
-   * because the two cases are rare and narrow, and the guardrail-level
-   * `failMode` still covers them — the editor says so in place of the control.
-   * Flipping this one boolean is all it takes to surface it.
-   */
+  /** READ from the catalog (`PolicyFamilySpec.needsFailMode`, via
+   *  `familyNeedsFailMode`) — see the rationale there. */
   needsFailMode: boolean;
 }
 
-const META: Readonly<Record<PolicyFamily, Omit<PolicyFamilyMeta, 'family' | 'label' | 'validHooks' | 'streamSafe'>>> = {
+const META: Readonly<Record<PolicyFamily, Pick<PolicyFamilyMeta, 'short' | 'description' | 'icon'>>> = {
   pii: {
     short: 'PII',
     description:
       'Personal data, scanned through a PII policy. Categories, languages, checksums and mask strategies live on the policy, not here.',
     icon: IconFingerprint,
-    color: 'blue',
-    needsModel: false,
-    // The policy read is a database round trip, and it can fail.
-    needsFailMode: true,
   },
   secrets: {
     short: 'Secrets',
     description:
       'API keys, tokens and private keys — vendor patterns plus an optional high-entropy heuristic. No database, no model.',
     icon: IconKey,
-    color: 'yellow',
-    needsModel: false,
-    needsFailMode: false,
   },
   word_filter: {
     short: 'Words',
     description:
       'Word lists and phrases, matched after normalisation so leetspeak and s p a c e d out evasion still hit.',
     icon: IconFilterX,
-    color: 'grape',
-    needsModel: false,
-    needsFailMode: false,
   },
   regex: {
     short: 'Regex',
     description:
       'Your own patterns. They produce spans, so they can redact in place — and with a declared match bound they can run on a stream.',
     icon: IconRegex,
-    color: 'indigo',
-    needsModel: false,
-    needsFailMode: false,
   },
   moderation: {
     short: 'Moder.',
     description: 'LLM classifier for harmful and policy-violating content, across the OpenAI category set.',
     icon: IconAlertOctagon,
-    color: 'red',
-    needsModel: true,
-    needsFailMode: true,
   },
   prompt_shield: {
     short: 'Shield',
     description: 'LLM detection of prompt injection and jailbreak attempts.',
     icon: IconShieldLock,
-    color: 'orange',
-    needsModel: true,
-    needsFailMode: true,
   },
   cognipeer_guardrail_moderation: {
     short: 'CG Mod.',
     description: 'A bundled, offline classifier — six content categories from one on-device inference. No model to pick.',
     icon: IconCpu,
-    color: 'green',
-    needsModel: false,
-    // The model load or one inference call can fail.
-    needsFailMode: true,
   },
   cognipeer_guardrail_prompt_shield: {
     short: 'CG Shield',
     description: 'A bundled, offline classifier — three jailbreak/injection categories from one on-device inference. No model to pick.',
     icon: IconCpu,
-    color: 'lime',
-    needsModel: false,
-    needsFailMode: true,
   },
   custom: {
     short: 'Custom',
     description: 'A rule you write in prose, judged by an LLM.',
     icon: IconRobot,
-    color: 'teal',
-    needsModel: true,
-    needsFailMode: true,
   },
   tool_access: {
     short: 'Tool',
     description:
       'Tool allow/deny lists, roles, side-effect classes, domains, filesystem paths and argument schemas. Only meaningful on the two tool hooks.',
     icon: IconTool,
-    color: 'cyan',
-    needsModel: false,
-    needsFailMode: false,
   },
   webhook: {
     short: 'Hook',
     description:
       'Your own classifier over https. It receives the hook call and answers with a verdict — the same contract the built-in policies use.',
     icon: IconWebhook,
-    color: 'violet',
-    needsModel: false,
-    needsFailMode: true,
   },
 };
 
@@ -281,16 +231,19 @@ const META: Readonly<Record<PolicyFamily, Omit<PolicyFamilyMeta, 'family' | 'lab
 export const POLICY_FAMILY_META: Readonly<Record<PolicyFamily, PolicyFamilyMeta>> = Object.freeze(
   Object.fromEntries(
     POLICY_FAMILIES.map((family) => {
-      const meta = META[family];
+      const spec = catalogFor(family);
       return [
         family,
         {
-          ...meta,
+          ...META[family],
           family,
           // Falls back to the raw family id for a family the catalog cannot
           // resolve — the same degradation `familyLabel` documents, and the
           // only string that still lets an operator recognise the policy.
-          label: catalogFor(family)?.label ?? family,
+          label: spec?.label ?? family,
+          color: spec?.color ?? 'gray',
+          needsModel: familyNeedsModel(family),
+          needsFailMode: familyNeedsFailMode(family),
           validHooks: POLICY_VALID_HOOKS[family],
           streamSafe: STREAM_ELIGIBLE_FAMILIES.has(family),
         } satisfies PolicyFamilyMeta,

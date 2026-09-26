@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
-import type { AgentStatus, IAgent, IAgentConfig } from '@/lib/database';
+import type { AgentStatus, IAgentConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -9,9 +8,6 @@ import {
   getAgentByKey,
   getConversationById,
   listAgents,
-  normalizeA2aMetadataUpdate,
-  prepareConnectionForStorage,
-  publishAgent,
   updateAgentRecord,
   runSyncAgentTurn,
   createBackgroundAgentRun,
@@ -34,7 +30,6 @@ import {
   validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { invalidConfigBody, validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
@@ -45,83 +40,18 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
-import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
+import {
+  connectedConfigForUpdate,
+  normalizeA2aUpdate,
+  prepareNewAgentConfig,
+  publishValidatedAgent,
+  redactAgent,
+  sendAgentGuardrailBlock,
+  validateNativeConfigUpdate,
+} from './agent-config-write';
+import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 
 const logger = createLogger('api:client-agents');
-
-/**
- * A guardrail refusal answered as the inference routes answer
- * `GuardrailBlockError`: same status, same `{ error: { type: 'guardrail_block' } }`
- * envelope, so an SDK client branches on `error.type` and reads `guardrail_key`
- * and `reason` whether it called `/chat/completions` or `/responses`. Before
- * this the client API returned `500 Internal server error` for a policy
- * decision — no reason, no key, indistinguishable from an outage.
- */
-function sendAgentGuardrailBlock(
-  reply: { code: (status: number) => { send: (body: unknown) => unknown } },
-  error: unknown,
-) {
-  if (!(error instanceof AgentGuardrailBlockedError)) return null;
-  return reply.code(error.status).send({
-    error: {
-      type: 'guardrail_block',
-      action: 'block',
-      message: error.message,
-      reason: error.reason,
-      guardrail_key: error.guardrailKey ?? null,
-      hook: error.hook ?? null,
-    },
-  });
-}
-
-/**
- * Strip secret material (encrypted inline API keys) from an agent before it
- * leaves the API. Mirrors the dashboard `agents.ts` helper — the presence of a
- * key is surfaced as `connection.hasApiKey`.
- */
-function redactAgent<T extends IAgent>(input: T): T {
-  // Sandbox secrets: keys with a masked value, never the sealed payload.
-  const agent = maskAgentSandboxSecrets(input);
-  const connection = agent.config?.connection;
-  if (!connection) return agent;
-  const { apiKeyEnc, ...rest } = connection;
-  return {
-    ...agent,
-    config: {
-      ...agent.config,
-      connection: { ...rest, hasApiKey: Boolean(apiKeyEnc) },
-    },
-  } as unknown as T;
-}
-
-/**
- * Normalize an incoming agent config. For connected (external) agents the
- * connection is validated and its inline API key encrypted; native agents must
- * carry a modelKey. Throws (Error) on invalid input — callers map to 400.
- */
-function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
-  if (!rawConfig || typeof rawConfig !== 'object') {
-    throw new Error('Agent config is required');
-  }
-  const cfg = rawConfig as Record<string, unknown>;
-
-  if (cfg.kind === 'external') {
-    // Guardrail bindings are carried through and validated by the caller with
-    // `resolveConfigGuardrailBindings`; dropping them here is what left a
-    // connected agent's saved bindings unenforced (the enforcement branch reads
-    // them off the stored config). Mirrors the dashboard `agents.ts` helper.
-    return {
-      kind: 'external',
-      connection: prepareConnectionForStorage(cfg.connection),
-      ...carriedGuardrailFields(cfg),
-    };
-  }
-
-  if (typeof cfg.modelKey !== 'string' || !cfg.modelKey) {
-    throw new Error('Model configuration is required');
-  }
-  return cfg as IAgentConfig;
-}
 
 function extractUserMessage(input: unknown): string | null {
   if (typeof input === 'string') {
@@ -222,12 +152,6 @@ function createResponsesHandler(usePublished: boolean) {
       // EXISTING conversation via previous_response_id.
       let idempotencyConversationScope: string | null = null;
       if (typeof body.previous_response_id === 'string') {
-        const parsed = conversationIdFromResponseId(body.previous_response_id);
-        if (!parsed) {
-          return reply.code(404).send({
-            error: 'previous_response_id does not match a valid conversation',
-          });
-        }
         // Dual-mode (§8, §12.3): a background/run response is polled by its
         // OWN `run_<runId>` id, and its embedded `result.id` is
         // `resp_<runId>` — a caller may reasonably pass either back as
@@ -236,20 +160,22 @@ function createResponsesHandler(usePublished: boolean) {
         // for run ids). A `resp_` id keeps the existing dual-mode: try the
         // AgentRun lookup first, fall back to the raw-conversationId scheme
         // (the synchronous, conversation-scoped id) only if no run matches.
-        const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, parsed.strippedId);
-        if (!run && parsed.kind === 'run') {
-          return reply.code(404).send({
-            error: 'previous_response_id does not match a valid conversation',
-          });
-        }
-        const resolvedConversationId = run ? run.conversationId : parsed.strippedId;
-        const conversation = await getConversationById(ctx.tenantDbName, resolvedConversationId);
+        //
         // agentKey alone is not unique across projects (findAgentByKey takes
         // an optional projectId precisely because the same key can exist in
         // more than one) — without the projectId check, a token in project B
         // could reuse a previous_response_id from project A's conversation
         // with the same-keyed agent and read/append to project A's history.
-        if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
+        const parsed = conversationIdFromResponseId(body.previous_response_id);
+        const run = parsed
+          ? await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, parsed.strippedId)
+          : null;
+        const resolvedConversationId = run ? run.conversationId : parsed?.kind === 'resp' ? parsed.strippedId : undefined;
+        const conversation = resolvedConversationId !== undefined
+          ? await getConversationById(ctx.tenantDbName, resolvedConversationId)
+          : null;
+        if (resolvedConversationId === undefined || !conversation
+          || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
           return reply.code(404).send({
             error: 'previous_response_id does not match a valid conversation',
           });
@@ -329,13 +255,12 @@ function createResponsesHandler(usePublished: boolean) {
         conversationId = String(conversation._id);
       }
 
+      const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
       const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
         userId: ctx.tokenRecord.userId,
-        tokenId: ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined,
+        tokenId: apiTokenId,
         source: 'api',
       });
-
-      const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
 
       if (background) {
         const outcome = await createBackgroundAgentRun({
@@ -498,33 +423,16 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Agent name is required' });
       }
 
-      let config: IAgentConfig;
-      try {
-        config = normalizeAgentConfig(body.config);
-      } catch (validationError) {
-        return reply.code(400).send({
-          error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
-        });
-      }
-
       // Guardrail bindings, validated exactly as the dashboard route validates
       // them. No `user`: a token is scoped to its project, so a guardrail owned
       // by another project is out of reach and only a tenant-wide one (no
       // projectId) falls back.
-      const bindings = await resolveConfigGuardrailBindings(
-        ctx.tenantDbName,
-        ctx.projectId,
-        config.guardrails,
-      );
-      if (bindings.error) {
-        return reply.code(400).send({ error: bindings.error });
-      }
-      if (bindings.patch) Object.assign(config, bindings.patch);
-
-      const validation = await validateAgentConfig({ tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId, config });
-      if (validation.errors.length > 0) {
-        return reply.code(400).send(invalidConfigBody(validation));
-      }
+      const prepared = await prepareNewAgentConfig(body.config, {
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+      });
+      if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
 
       const agent = await createAgentRecord(
         ctx.tenantDbName,
@@ -532,7 +440,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.projectId,
         ctx.tokenRecord.userId,
         {
-          config,
+          config: prepared.config,
           description: typeof body.description === 'string' ? body.description : undefined,
           name: body.name,
           status: body.status as AgentStatus | undefined,
@@ -563,21 +471,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.config && typeof body.config === 'object') {
         const cfg = body.config as Record<string, unknown>;
         if (cfg.kind === 'external') {
-          // Connected-agent config: validate connection & preserve the stored
-          // API key when the client edits without resending it.
-          const conn = { ...((cfg.connection as Record<string, unknown>) ?? {}) };
-          if (!conn.apiKey && !conn.apiKeyEnc) {
-            const existingEnc = existing.config?.connection?.apiKeyEnc;
-            if (existingEnc) conn.apiKeyEnc = existingEnc;
-          }
           let externalConfig: IAgentConfig;
           try {
-            externalConfig = {
-              kind: 'external',
-              connection: prepareConnectionForStorage(conn),
-              // Carried, then validated below — see `normalizeAgentConfig`.
-              ...carriedGuardrailFields(cfg),
-            };
+            externalConfig = connectedConfigForUpdate(cfg, existing);
           } catch (validationError) {
             return reply.code(400).send({
               error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
@@ -598,38 +494,16 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           // connected agent's connection.
           delete body.config;
         } else {
-          const bindings = await resolveConfigGuardrailBindings(
-            ctx.tenantDbName,
-            ctx.projectId,
-            cfg.guardrails,
-          );
-          if (bindings.error) {
-            return reply.code(400).send({ error: bindings.error });
-          }
-          // The config replaces the stored one wholesale, so the projected
-          // legacy slots must ride along on the SAME object.
-          if (bindings.patch) Object.assign(cfg, bindings.patch);
-
-          const validation = await validateAgentConfig({
+          const checked = await validateNativeConfigUpdate(cfg, existing.key, {
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
-            config: cfg as IAgentConfig,
-            agentKey: existing.key,
           });
-          if (validation.errors.length > 0) {
-            return reply.code(400).send(invalidConfigBody(validation));
-          }
+          if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
         }
       }
 
-      // A2A exposure updates: whitelist fields and keep the endpoint slug
-      // server-owned (existing slug is preserved, never client-chosen).
-      if (body.metadata && typeof body.metadata === 'object'
-        && (body.metadata as Record<string, unknown>).a2a !== undefined) {
-        const metadata = body.metadata as Record<string, unknown>;
-        metadata.a2a = normalizeA2aMetadataUpdate(metadata.a2a, existing);
-      }
+      normalizeA2aUpdate(body, existing);
 
       const agent = await updateAgentRecord(
         ctx.tenantDbName,
@@ -684,26 +558,15 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
-      const validation = await validateAgentConfig({
-        tenantDbName: ctx.tenantDbName,
-        tenantId: ctx.tenantId,
-        projectId: ctx.projectId,
-        config: existing.config,
-        agentKey: existing.key,
-      });
-      if (validation.errors.length > 0) {
-        return reply.code(400).send(invalidConfigBody(validation));
-      }
-
-      const body = readJsonBody<Record<string, unknown>>(request);
-      const version = await publishAgent(
-        ctx.tenantDbName,
+      const published = await publishValidatedAgent(
+        request,
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        existing,
         String(existing._id),
         ctx.tokenRecord.userId,
-        typeof body.changelog === 'string' ? body.changelog : undefined,
       );
-
-      return reply.code(201).send({ version });
+      if ('badRequest' in published) return reply.code(400).send(published.badRequest);
+      return reply.code(201).send({ version: published.version });
     } catch (error) {
       logger.error('Publish client agent error', { error });
       return reply.code(500).send({

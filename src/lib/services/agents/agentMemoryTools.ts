@@ -26,10 +26,19 @@
 
 import type { MemoryStore, ToolInterface as AgentSdkToolInterface } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
+import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 
 const logger = createLogger('agent-memory-tools');
 
-export const MEMORY_TOOL_NAMES = ['memory_search', 'memory_write', 'memory_forget'] as const;
+/** A memory store failure is answered with `fallback` (and logged), never thrown into the run. */
+async function orFallback(event: string, fallback: string, run: () => Promise<string>): Promise<string> {
+    try {
+        return await run();
+    } catch (error) {
+        logger.warn(event, { error: error instanceof Error ? error.message : String(error) });
+        return fallback;
+    }
+}
 
 /** How many facts one `memory_search` may return, whatever the model asks for. */
 const MAX_SEARCH_LIMIT = 20;
@@ -81,7 +90,7 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
             async (args: { query?: string; limit?: number }) => {
                 const limit = Math.min(args.limit ?? DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
                 const query = typeof args.query === 'string' ? args.query.trim() : '';
-                try {
+                return orFallback('memory_search failed', 'Memory search is unavailable right now.', async () => {
                     // `semanticSearch` needs a query to embed; with none, the
                     // honest fallback is "the most recent facts", not an empty
                     // result the model would read as "nothing is remembered".
@@ -97,12 +106,7 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
                             updatedAt: fact.lastUpdatedAt,
                         })),
                     );
-                } catch (error) {
-                    logger.warn('memory_search failed', {
-                        error: error instanceof Error ? error.message : String(error),
-                    });
-                    return 'Memory search is unavailable right now.';
-                }
+                });
             },
         ),
     }) as AgentSdkToolInterface);
@@ -131,7 +135,7 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
                 const key = typeof args.key === 'string' ? args.key.trim() : '';
                 const value = typeof args.value === 'string' ? args.value.trim() : '';
                 if (!key || !value) return 'Both key and value are required.';
-                try {
+                return orFallback('memory_write failed', 'Could not save that to memory.', async () => {
                     await store.upsert(scope, [{
                         key,
                         value,
@@ -141,12 +145,7 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
                         tags: ['agent_tool'],
                     }]);
                     return `Remembered "${key}".`;
-                } catch (error) {
-                    logger.warn('memory_write failed', {
-                        error: error instanceof Error ? error.message : String(error),
-                    });
-                    return 'Could not save that to memory.';
-                }
+                });
             },
         ),
     }) as AgentSdkToolInterface);
@@ -165,15 +164,10 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
             async (args: { key?: string }) => {
                 const key = typeof args.key === 'string' ? args.key.trim() : '';
                 if (!key) return 'A key is required.';
-                try {
+                return orFallback('memory_forget failed', 'Could not update memory.', async () => {
                     await store.markObsolete(scope, [key]);
                     return `Forgot "${key}".`;
-                } catch (error) {
-                    logger.warn('memory_forget failed', {
-                        error: error instanceof Error ? error.message : String(error),
-                    });
-                    return 'Could not update memory.';
-                }
+                });
             },
         ),
     }) as AgentSdkToolInterface);
@@ -186,14 +180,8 @@ export function buildMemoryTools(deps: MemoryToolDeps): AgentSdkToolInterface[] 
  * memory tools alongside every other tool the run could call rather than
  * leaving three unexplained names in the timeline.
  */
-export interface MemoryToolDefinition {
-    name: string;
-    description: string;
-    parameters: Record<string, unknown>;
-}
-
-export function memoryToolDefinitions(allowWrites: boolean): MemoryToolDefinition[] {
-    const definitions: MemoryToolDefinition[] = [{
+export function memoryToolDefinitions(allowWrites: boolean): TraceToolDefinition[] {
+    const definitions: TraceToolDefinition[] = [{
         name: 'memory_search',
         description: 'Search stored memory for facts about this user/conversation.',
         parameters: {

@@ -47,7 +47,6 @@ interface SandboxCapabilities {
 export interface AgentSandboxPanelProps {
     value: IAgentSandboxConfig | undefined;
     onChange: (next: IAgentSandboxConfig | undefined) => void;
-    disabled?: boolean;
 }
 
 type Row = { id: number; key: string; value: string };
@@ -58,13 +57,25 @@ const toMap = (rows: Row[]): Record<string, string> | undefined => {
     const entries = rows.filter((row) => row.key.trim()).map((row) => [row.key.trim(), row.value] as const);
     return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 };
+/** A cleared NumberInput reports `''` — that means "unset", not 0. */
+const optionalNumber = (next: string | number) => (typeof next === 'number' ? next : undefined);
 
-export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSandboxPanelProps) {
+const SANDBOX_TOOLS = [
+    ['exec', 'Run commands (sandbox_exec)'],
+    ['code', 'Run code (sandbox_run_code)'],
+    ['files', 'Files (read / write / list)'],
+] as const;
+
+export default function AgentSandboxPanel({ value, onChange }: AgentSandboxPanelProps) {
     const [capabilities, setCapabilities] = useState<SandboxCapabilities | null>(null);
     const enabled = value?.enabled ?? false;
     const mode: AgentSandboxMode = value?.mode ?? 'ephemeral';
     const tools = { exec: true, code: true, files: true, ...(value?.tools ?? {}) };
     const patch = (next: Partial<IAgentSandboxConfig>) => onChange({ ...(value ?? {}), ...next });
+    const patchPreview = (next: Partial<NonNullable<IAgentSandboxConfig['preview']>>) =>
+        patch({ preview: { ...(value?.preview ?? {}), ...next } });
+    const patchResources = (next: Partial<NonNullable<IAgentSandboxConfig['resources']>>) =>
+        patch({ resources: { ...(value?.resources ?? {}), ...next } });
 
     useEffect(() => {
         let cancelled = false;
@@ -117,7 +128,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                 description="An isolated Linux machine the agent can run commands and code in, and read and write files on. Provisioned only when the agent first uses it."
                 checked={enabled}
                 onChange={(event) => patch({ enabled: event.currentTarget.checked })}
-                disabled={disabled || (Boolean(unavailable) && capabilities?.reason !== 'unreachable' && !enabled)}
+                disabled={Boolean(unavailable) && capabilities?.reason !== 'unreachable' && !enabled}
             />
 
             {enabled ? (
@@ -145,7 +156,6 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                 value={value?.templateKey ?? null}
                                 onChange={(next) => patch({ templateKey: next ?? undefined })}
                                 searchable
-                                disabled={disabled}
                             />
                             <Group grow align="flex-start">
                                 <NumberInput
@@ -156,10 +166,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                     step={0.5}
                                     decimalScale={2}
                                     value={value?.resources?.cpuCores ?? ''}
-                                    onChange={(next) => patch({
-                                        resources: { ...(value?.resources ?? {}), cpuCores: typeof next === 'number' ? next : undefined },
-                                    })}
-                                    disabled={disabled}
+                                    onChange={(next) => patchResources({ cpuCores: optionalNumber(next) })}
                                 />
                                 <NumberInput
                                     label="Memory (MB)"
@@ -167,10 +174,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                     min={128}
                                     step={256}
                                     value={value?.resources?.memoryMb ?? ''}
-                                    onChange={(next) => patch({
-                                        resources: { ...(value?.resources ?? {}), memoryMb: typeof next === 'number' ? next : undefined },
-                                    })}
-                                    disabled={disabled}
+                                    onChange={(next) => patchResources({ memoryMb: optionalNumber(next) })}
                                 />
                             </Group>
                             <Switch
@@ -178,7 +182,6 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                 description="No internet from inside the sandbox — package installs will fail."
                                 checked={value?.blockNetwork ?? false}
                                 onChange={(event) => patch({ blockNetwork: event.currentTarget.checked })}
-                                disabled={disabled}
                             />
                         </Stack>
                     </ConfigBlock>
@@ -192,7 +195,6 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                     { value: 'ephemeral', label: 'Ephemeral' },
                                     { value: 'persist', label: 'Persistent' },
                                 ]}
-                                disabled={disabled}
                             />
                             <Text size="xs" c="dimmed">
                                 {mode === 'ephemeral'
@@ -207,8 +209,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                     min={1}
                                     max={600}
                                     value={value?.commandTimeoutSec ?? ''}
-                                    onChange={(next) => patch({ commandTimeoutSec: typeof next === 'number' ? next : undefined })}
-                                    disabled={disabled}
+                                    onChange={(next) => patch({ commandTimeoutSec: optionalNumber(next) })}
                                 />
                                 {mode === 'persist' ? (
                                     <NumberInput
@@ -218,8 +219,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                         min={1}
                                         max={720}
                                         value={value?.retentionHours ?? ''}
-                                        onChange={(next) => patch({ retentionHours: typeof next === 'number' ? next : undefined })}
-                                        disabled={disabled}
+                                        onChange={(next) => patch({ retentionHours: optionalNumber(next) })}
                                     />
                                 ) : null}
                             </Group>
@@ -232,8 +232,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                 label="Allow preview links"
                                 description="The agent can serve something from the sandbox — a web app, a report, a dashboard on a port — and give the user a link to it (sandbox_preview_link)."
                                 checked={value?.preview?.enabled ?? false}
-                                onChange={(event) => patch({ preview: { ...(value?.preview ?? {}), enabled: event.currentTarget.checked } })}
-                                disabled={disabled}
+                                onChange={(event) => patchPreview({ enabled: event.currentTarget.checked })}
                             />
                             {value?.preview?.enabled ? (
                                 <>
@@ -241,8 +240,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                         label="Public links"
                                         description="Anyone who has the link can open it, without signing in, until it expires. Off: links open only for signed-in console users with sandbox access. Public links need SANDBOX_PREVIEW_SECRET on the server; without it the agent gets a private link and is told why."
                                         checked={value.preview.public ?? false}
-                                        onChange={(event) => patch({ preview: { ...value.preview, public: event.currentTarget.checked } })}
-                                        disabled={disabled}
+                                        onChange={(event) => patchPreview({ public: event.currentTarget.checked })}
                                     />
                                     <Group grow align="flex-start">
                                         {value.preview.public ? (
@@ -253,8 +251,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                                 min={1}
                                                 max={168}
                                                 value={value.preview.linkTtlHours ?? ''}
-                                                onChange={(next) => patch({ preview: { ...value.preview, linkTtlHours: typeof next === 'number' ? next : undefined } })}
-                                                disabled={disabled}
+                                                onChange={(next) => patchPreview({ linkTtlHours: optionalNumber(next) })}
                                             />
                                         ) : null}
                                         <NumberInput
@@ -264,8 +261,7 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                                             min={5}
                                             max={1440}
                                             value={value.preview.keepAliveMinutes ?? ''}
-                                            onChange={(next) => patch({ preview: { ...value.preview, keepAliveMinutes: typeof next === 'number' ? next : undefined } })}
-                                            disabled={disabled}
+                                            onChange={(next) => patchPreview({ keepAliveMinutes: optionalNumber(next) })}
                                         />
                                     </Group>
                                     {value.blockNetwork ? (
@@ -278,24 +274,14 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
 
                     <ConfigBlock title="Tools">
                         <Group gap="lg">
-                            <Checkbox
-                                label="Run commands (sandbox_exec)"
-                                checked={tools.exec}
-                                onChange={(event) => patch({ tools: { ...tools, exec: event.currentTarget.checked } })}
-                                disabled={disabled}
-                            />
-                            <Checkbox
-                                label="Run code (sandbox_run_code)"
-                                checked={tools.code}
-                                onChange={(event) => patch({ tools: { ...tools, code: event.currentTarget.checked } })}
-                                disabled={disabled}
-                            />
-                            <Checkbox
-                                label="Files (read / write / list)"
-                                checked={tools.files}
-                                onChange={(event) => patch({ tools: { ...tools, files: event.currentTarget.checked } })}
-                                disabled={disabled}
-                            />
+                            {SANDBOX_TOOLS.map(([tool, label]) => (
+                                <Checkbox
+                                    key={tool}
+                                    label={label}
+                                    checked={tools[tool]}
+                                    onChange={(event) => patch({ tools: { ...tools, [tool]: event.currentTarget.checked } })}
+                                />
+                            ))}
                         </Group>
                     </ConfigBlock>
 
@@ -310,7 +296,6 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                             <KeyValueEditor
                                 value={value?.env}
                                 onChange={(env) => patch({ env })}
-                                disabled={disabled}
                                 addLabel="Add variable"
                             />
                         </Stack>
@@ -339,7 +324,6 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
                             <KeyValueEditor
                                 value={value?.secrets}
                                 onChange={(secrets) => patch({ secrets: secrets ?? {} })}
-                                disabled={disabled}
                                 addLabel="Add secret"
                                 secret
                             />
@@ -361,13 +345,11 @@ export default function AgentSandboxPanel({ value, onChange, disabled }: AgentSa
 function KeyValueEditor({
     value,
     onChange,
-    disabled,
     addLabel,
     secret = false,
 }: {
     value: Record<string, string> | undefined;
     onChange: (next: Record<string, string> | undefined) => void;
-    disabled?: boolean;
     addLabel: string;
     secret?: boolean;
 }) {
@@ -384,6 +366,7 @@ function KeyValueEditor({
         setRows(next);
         onChange(toMap(next));
     };
+    const setRow = (id: number, next: Partial<Row>) => update(rows.map((r) => (r.id === id ? { ...r, ...next } : r)));
 
     return (
         <Stack gap={6}>
@@ -392,28 +375,23 @@ function KeyValueEditor({
                     <TextInput
                         placeholder="NAME"
                         value={row.key}
-                        onChange={(event) => update(rows.map((r) => (r.id === row.id ? { ...r, key: event.currentTarget.value } : r)))}
+                        onChange={(event) => setRow(row.id, { key: event.currentTarget.value })}
                         style={{ flex: 1 }}
                         ff="monospace"
-                        disabled={disabled}
                     />
                     {secret ? (
                         <PasswordInput
                             placeholder={row.value === SANDBOX_SECRET_MASK ? 'Stored — type to replace' : 'value'}
                             value={row.value === SANDBOX_SECRET_MASK ? '' : row.value}
-                            onChange={(event) => update(rows.map((r) => (r.id === row.id
-                                ? { ...r, value: event.currentTarget.value || SANDBOX_SECRET_MASK }
-                                : r)))}
+                            onChange={(event) => setRow(row.id, { value: event.currentTarget.value || SANDBOX_SECRET_MASK })}
                             style={{ flex: 2 }}
-                            disabled={disabled}
                         />
                     ) : (
                         <TextInput
                             placeholder="value"
                             value={row.value}
-                            onChange={(event) => update(rows.map((r) => (r.id === row.id ? { ...r, value: event.currentTarget.value } : r)))}
+                            onChange={(event) => setRow(row.id, { value: event.currentTarget.value })}
                             style={{ flex: 2 }}
-                            disabled={disabled}
                         />
                     )}
                     <Tooltip label="Remove" withArrow>
@@ -422,7 +400,6 @@ function KeyValueEditor({
                             color="red"
                             mt={4}
                             onClick={() => update(rows.filter((r) => r.id !== row.id))}
-                            disabled={disabled}
                             aria-label="Remove"
                         >
                             <IconTrash size={14} />
@@ -435,8 +412,7 @@ function KeyValueEditor({
                     size="compact-xs"
                     variant="light"
                     leftSection={<IconPlus size={12} />}
-                    onClick={() => update([...rows, { id: ++rowSeq, key: '', value: secret ? '' : '' }])}
-                    disabled={disabled}
+                    onClick={() => update([...rows, { id: ++rowSeq, key: '', value: '' }])}
                 >
                     {addLabel}
                 </Button>

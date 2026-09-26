@@ -198,6 +198,39 @@ export function bindingRowsFromStored(
 }
 
 /**
+ * The legacy single slots, rendered as the equivalent binding list. Shared for
+ * the same reason as `bindingRowsFromStored`.
+ *
+ * The output slot seeds `output.pre` ONLY. `resolveBindings` also projects the
+ * legacy key onto `output.stream.delta`, but a guardrail written before the
+ * hook plane declares no streaming binding, so the stream gate evaluates
+ * nothing for it today — seeding that hook would show a ticked box that does
+ * nothing and the API would reject it. The checkbox unlocks itself the moment
+ * the guardrail enables streaming.
+ */
+export function bindingRowsFromLegacySlots(
+  inputKey?: string,
+  outputKey?: string,
+): GuardrailBindingRow[] {
+  // Materialised rows: a legacy slot names ONE direction, so "wherever the
+  // guardrail declares" (an absent `hooks`) is not what it meant — the
+  // conversion has to be the exact equivalent of the two slots.
+  const rows: Array<Required<GuardrailBindingRow>> = [];
+  const bind = (key: string | undefined, hook: HookId) => {
+    if (!key) return;
+    const existing = rows.find((row) => row.key === key);
+    if (existing) {
+      if (!existing.hooks.includes(hook)) existing.hooks.push(hook);
+      return;
+    }
+    rows.push({ key, hooks: [hook] });
+  };
+  bind(inputKey, 'input.pre');
+  bind(outputKey, 'output.pre');
+  return rows;
+}
+
+/**
  * The hooks a row runs on right now — the same question `resolveBindings` and
  * `bindingCoversHook` answer on the server, asked of one guardrail.
  *

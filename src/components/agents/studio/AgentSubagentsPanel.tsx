@@ -44,6 +44,7 @@ import {
 import type {
     AgentChildContextPolicy,
     AgentSubagentMode,
+    IAgentLimits,
     IAgentSubagent,
     IAgentSubagentPolicy,
 } from '@/lib/database/provider/types.domain';
@@ -68,7 +69,6 @@ export interface AgentSubagentsPanelProps {
     models: ModelOption[];
     /** Excluded from the `ref` picker — an agent cannot delegate to itself. */
     currentAgentKey?: string;
-    disabled?: boolean;
 }
 
 const EMPTY_INLINE: IAgentSubagent = { kind: 'inline', name: '', header: '' };
@@ -88,7 +88,6 @@ export default function AgentSubagentsPanel({
     agents,
     models,
     currentAgentKey,
-    disabled,
 }: AgentSubagentsPanelProps) {
     const [editing, setEditing] = useState<{ index: number; draft: IAgentSubagent } | null>(null);
 
@@ -127,6 +126,10 @@ export default function AgentSubagentsPanel({
     };
 
     const patchPolicy = (patch: Partial<IAgentSubagentPolicy>) => onChange(subagents, { ...(policy ?? {}), ...patch });
+    const patchDraft = (patch: Partial<IAgentSubagent>) =>
+        editing && setEditing({ index: editing.index, draft: { ...editing.draft, ...patch } });
+    const patchDraftLimits = (patch: Partial<IAgentLimits>) =>
+        patchDraft({ limits: { ...(editing?.draft.limits ?? {}), ...patch } });
 
     const draft = editing?.draft;
     const draftInvalid =
@@ -146,9 +149,9 @@ export default function AgentSubagentsPanel({
                         header you write, so write the header as &quot;what it does + when to use it&quot;.
                     </Text>
                 </Stack>
-                <Menu position="bottom-end" disabled={disabled}>
+                <Menu position="bottom-end">
                     <Menu.Target>
-                        <Button size="xs" leftSection={<IconPlus size={14} />} rightSection={<IconChevronDown size={12} />} disabled={disabled}>
+                        <Button size="xs" leftSection={<IconPlus size={14} />} rightSection={<IconChevronDown size={12} />}>
                             Add sub-agent
                         </Button>
                     </Menu.Target>
@@ -213,14 +216,13 @@ export default function AgentSubagentsPanel({
                                     <ActionIcon
                                         variant="subtle"
                                         size="sm"
-                                        disabled={disabled}
                                         onClick={() => setEditing({ index, draft: { ...entry } })}
                                     >
                                         <IconPencil size={14} />
                                     </ActionIcon>
-                                    <Menu position="bottom-end" disabled={disabled}>
+                                    <Menu position="bottom-end">
                                         <Menu.Target>
-                                            <ActionIcon variant="subtle" size="sm" disabled={disabled}>
+                                            <ActionIcon variant="subtle" size="sm">
                                                 <IconDots size={14} />
                                             </ActionIcon>
                                         </Menu.Target>
@@ -260,7 +262,6 @@ export default function AgentSubagentsPanel({
                                 ]}
                                 value={policy?.mode ?? 'registry_only'}
                                 onChange={(next) => patchPolicy({ mode: (next as AgentSubagentMode) ?? 'registry_only' })}
-                                disabled={disabled}
                                 allowDeselect={false}
                             />
                             <Select
@@ -275,7 +276,6 @@ export default function AgentSubagentsPanel({
                                 onChange={(next) =>
                                     patchPolicy({ childContextPolicy: (next as AgentChildContextPolicy) ?? 'scoped' })
                                 }
-                                disabled={disabled}
                                 allowDeselect={false}
                             />
                         </Group>
@@ -287,7 +287,6 @@ export default function AgentSubagentsPanel({
                                 max={5}
                                 value={policy?.maxDepth ?? ''}
                                 onChange={(next) => patchPolicy({ maxDepth: next === '' ? undefined : Number(next) })}
-                                disabled={disabled}
                             />
                             <NumberInput
                                 label="Max child calls per run"
@@ -295,7 +294,6 @@ export default function AgentSubagentsPanel({
                                 min={1}
                                 value={policy?.maxChildCalls ?? ''}
                                 onChange={(next) => patchPolicy({ maxChildCalls: next === '' ? undefined : Number(next) })}
-                                disabled={disabled}
                             />
                             <NumberInput
                                 label="Max parallel"
@@ -303,14 +301,13 @@ export default function AgentSubagentsPanel({
                                 min={1}
                                 value={policy?.maxParallel ?? ''}
                                 onChange={(next) => patchPolicy({ maxParallel: next === '' ? undefined : Number(next) })}
-                                disabled={disabled}
                             />
                         </Group>
                         <Switch
                             label="Ad-hoc children may use the parent's tools"
                             checked={policy?.allowAdhocTools ?? false}
                             onChange={(event) => patchPolicy({ allowAdhocTools: event.currentTarget.checked })}
-                            disabled={disabled || (policy?.mode ?? 'registry_only') !== 'registry_and_adhoc'}
+                            disabled={(policy?.mode ?? 'registry_only') !== 'registry_and_adhoc'}
                         />
                     </Stack>
                 </Card>
@@ -332,14 +329,10 @@ export default function AgentSubagentsPanel({
                                 value={draft.agentKey ?? null}
                                 onChange={(next) => {
                                     const picked = agents.find((a) => a.key === next);
-                                    setEditing({
-                                        index: editing!.index,
-                                        draft: {
-                                            ...draft,
-                                            agentKey: next ?? undefined,
-                                            name: draft.name || slugName(picked?.name ?? next ?? ''),
-                                            header: draft.header || `Delegates to the ${picked?.name ?? next} agent.`,
-                                        },
+                                    patchDraft({
+                                        agentKey: next ?? undefined,
+                                        name: draft.name || slugName(picked?.name ?? next ?? ''),
+                                        header: draft.header || `Delegates to the ${picked?.name ?? next} agent.`,
                                     });
                                 }}
                                 searchable
@@ -352,9 +345,7 @@ export default function AgentSubagentsPanel({
                             description="What the orchestrator calls. Lowercase, underscores."
                             placeholder="log_reader"
                             value={draft.name}
-                            onChange={(event) =>
-                                setEditing({ index: editing!.index, draft: { ...draft, name: event.currentTarget.value } })
-                            }
+                            onChange={(event) => patchDraft({ name: event.currentTarget.value })}
                             error={
                                 draft.name && nameTaken(slugName(draft.name), editing!.index)
                                     ? 'Another sub-agent already uses this name'
@@ -368,9 +359,7 @@ export default function AgentSubagentsPanel({
                             description="One line: what it does and when to use it. This is the only thing the orchestrator reads when choosing."
                             placeholder="Searches application logs for a time window and returns the matching lines with timestamps."
                             value={draft.header}
-                            onChange={(event) =>
-                                setEditing({ index: editing!.index, draft: { ...draft, header: event.currentTarget.value } })
-                            }
+                            onChange={(event) => patchDraft({ header: event.currentTarget.value })}
                             autosize
                             minRows={2}
                             required
@@ -382,12 +371,7 @@ export default function AgentSubagentsPanel({
                                     label="System prompt"
                                     description="The child's role. Leave empty to inherit nothing — the header alone is often enough."
                                     value={draft.systemPrompt ?? ''}
-                                    onChange={(event) =>
-                                        setEditing({
-                                            index: editing!.index,
-                                            draft: { ...draft, systemPrompt: event.currentTarget.value || undefined },
-                                        })
-                                    }
+                                    onChange={(event) => patchDraft({ systemPrompt: event.currentTarget.value || undefined })}
                                     autosize
                                     minRows={4}
                                     maxRows={12}
@@ -397,12 +381,7 @@ export default function AgentSubagentsPanel({
                                     description="Falls back to the parent's model. A cheap model here is the usual reason to have a sub-agent at all."
                                     data={modelOptions}
                                     value={draft.modelKey ?? null}
-                                    onChange={(next) =>
-                                        setEditing({
-                                            index: editing!.index,
-                                            draft: { ...draft, modelKey: next ?? undefined },
-                                        })
-                                    }
+                                    onChange={(next) => patchDraft({ modelKey: next ?? undefined })}
                                     searchable
                                     clearable
                                 />
@@ -421,12 +400,7 @@ export default function AgentSubagentsPanel({
                             description="Overrides the roster-wide setting for this one sub-agent."
                             data={['minimal', 'scoped', 'full']}
                             value={draft.childContextPolicy ?? null}
-                            onChange={(next) =>
-                                setEditing({
-                                    index: editing!.index,
-                                    draft: { ...draft, childContextPolicy: (next as AgentChildContextPolicy) ?? undefined },
-                                })
-                            }
+                            onChange={(next) => patchDraft({ childContextPolicy: (next as AgentChildContextPolicy) ?? undefined })}
                             clearable
                         />
 
@@ -436,18 +410,7 @@ export default function AgentSubagentsPanel({
                                 placeholder="inherit"
                                 min={1}
                                 value={draft.limits?.maxToolCalls ?? ''}
-                                onChange={(next) =>
-                                    setEditing({
-                                        index: editing!.index,
-                                        draft: {
-                                            ...draft,
-                                            limits: {
-                                                ...(draft.limits ?? {}),
-                                                maxToolCalls: next === '' ? undefined : Number(next),
-                                            },
-                                        },
-                                    })
-                                }
+                                onChange={(next) => patchDraftLimits({ maxToolCalls: next === '' ? undefined : Number(next) })}
                             />
                             <NumberInput
                                 label="Max context tokens"
@@ -455,18 +418,7 @@ export default function AgentSubagentsPanel({
                                 min={1000}
                                 step={1000}
                                 value={draft.limits?.maxContextTokens ?? ''}
-                                onChange={(next) =>
-                                    setEditing({
-                                        index: editing!.index,
-                                        draft: {
-                                            ...draft,
-                                            limits: {
-                                                ...(draft.limits ?? {}),
-                                                maxContextTokens: next === '' ? undefined : Number(next),
-                                            },
-                                        },
-                                    })
-                                }
+                                onChange={(next) => patchDraftLimits({ maxContextTokens: next === '' ? undefined : Number(next) })}
                             />
                         </Group>
 

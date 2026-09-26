@@ -18,32 +18,18 @@ import { createConversation, executeAgentChat } from './agentService';
 
 const logger = createLogger('agent-schedule');
 
-/** Timing fields shared with `ICrawlerSchedule`, as the planner expects them. */
-function timingOf(schedule: IAgentSchedule) {
-    return {
-        mode: schedule.mode,
-        enabled: schedule.enabled,
-        intervalSeconds: schedule.intervalSeconds,
-        cron: schedule.cron,
-        startAt: schedule.startAt,
-        endAt: schedule.endAt,
-        lastRunAt: schedule.lastRunAt,
-        nextRunAt: schedule.nextRunAt,
-    };
-}
-
 export function computeScheduleNextRun(schedule: IAgentSchedule, from: Date = new Date()): Date | null {
-    return computeNextRun(timingOf(schedule), from);
+    return computeNextRun(schedule, from);
 }
 
 export function validateAgentSchedule(schedule: IAgentSchedule): string | null {
     if (!schedule.name?.trim()) return 'name is required';
     if (!schedule.message?.trim()) return 'message is required';
-    return validateSchedule(timingOf(schedule));
+    return validateSchedule(schedule);
 }
 
 export function readSchedules(agent: Pick<IAgent, 'metadata'>): IAgentSchedule[] {
-    const raw = (agent.metadata as { schedules?: unknown } | undefined)?.schedules;
+    const raw = agent.metadata?.schedules;
     return Array.isArray(raw) ? (raw as IAgentSchedule[]) : [];
 }
 
@@ -52,7 +38,7 @@ async function writeSchedules(
     agent: IAgent,
     schedules: IAgentSchedule[],
     userId: string,
-): Promise<IAgentSchedule[]> {
+): Promise<void> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
     // Merge into the existing metadata rather than replacing it: `metadata.a2a`
@@ -61,7 +47,6 @@ async function writeSchedules(
         metadata: { ...(agent.metadata ?? {}), schedules },
         updatedBy: userId,
     });
-    return schedules;
 }
 
 export type AgentScheduleInput = Omit<

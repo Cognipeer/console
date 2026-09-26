@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { AgentGuardrailBlockedError, type AgentChatResponse } from '@/lib/services/agents/agentService';
 import { createLogger } from '@/lib/core/logger';
@@ -15,6 +15,7 @@ import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
+import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   resolveAgentModel,
@@ -173,14 +174,9 @@ function invalidJson(reply: FastifyReply) {
  */
 async function handleAgentChatCompletion(input: {
   agent: IAgent;
-  auth: {
-    tenantDbName: string;
-    tenantId: string;
-    projectId: string;
-    tokenRecord: { _id?: unknown; userId: string };
-  };
+  auth: ApiTokenContext;
   body: Record<string, unknown>;
-  headers: Record<string, unknown>;
+  headers: FastifyRequest['headers'];
   model: string;
   reply: FastifyReply;
 }) {
@@ -188,15 +184,11 @@ async function handleAgentChatCompletion(input: {
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const streaming = body.stream === true;
 
-  const runtimeContext = buildRuntimeContextFromRequest(
-    body.runtime_context,
-    input.headers as never,
-    {
-      userId: auth.tokenRecord.userId,
-      tokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
-      source: 'api',
-    },
-  );
+  const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, input.headers, {
+    userId: auth.tokenRecord.userId,
+    tokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+    source: 'api',
+  });
 
   const common = {
     agent,
@@ -239,21 +231,10 @@ async function handleAgentChatCompletion(input: {
         error: { message: result.error, type: 'invalid_request_error' },
       });
     }
-    return reply.code(200).send(toChatCompletion({
-      id,
-      model,
-      content: result.content,
-      conversationId: result.conversationId,
-      ...(result.usage ? { usage: result.usage } : {}),
-      ...(result.stopReason ? { stopReason: result.stopReason } : {}),
-      ...(result.stopDetail ? { stopDetail: result.stopDetail } : {}),
-    }));
+    return reply.code(200).send(toChatCompletion({ id, model, ...result }));
   }
 
-  reply.raw.setHeader('Content-Type', 'text/event-stream');
-  reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-  reply.raw.setHeader('Connection', 'keep-alive');
-  reply.raw.setHeader('X-Accel-Buffering', 'no');
+  applyStreamHeaders(reply);
   reply.raw.flushHeaders?.();
 
   let closed = false;
@@ -280,13 +261,13 @@ async function handleAgentChatCompletion(input: {
 
     if ('error' in result) {
       send({ error: { message: result.error, type: 'invalid_request_error' } });
-    } else if (!streamed && result.content) {
+    } else {
       // A routed run streams nothing (the callback cannot cross the job
       // queue), and a caller that asked for a stream must still receive the
       // answer rather than an empty one followed by [DONE].
-      send(toChatChunk({ id, model, delta: result.content }));
+      if (!streamed && result.content) send(toChatChunk({ id, model, delta: result.content }));
+      stopReason = result.stopReason;
     }
-    if (!('error' in result)) stopReason = result.stopReason;
     send(toChatChunk({ id, model, finish: true, stopReason }));
   } catch (error) {
     logger.error('Agent chat completion stream failed', { error });

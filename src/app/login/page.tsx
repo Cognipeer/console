@@ -51,7 +51,6 @@ function LoginPageContent() {
   const [sso, setSso] = useState<SsoDiscovery>({ available: false });
   const [ssoStep, setSsoStep] = useState(false);
   const [ssoEmail, setSsoEmail] = useState('');
-  const [ssoLoading, setSsoLoading] = useState(false);
   const t = useTranslations('login');
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
@@ -81,7 +80,7 @@ function LoginPageContent() {
           return;
         }
       } catch {
-        setCheckingAuth(false);
+        /* not signed in — the finally shows the form */
       } finally {
         setCheckingAuth(false);
       }
@@ -126,7 +125,7 @@ function LoginPageContent() {
     setSsoStep(true);
   };
 
-  const handleSsoEmailSubmit = async () => {
+  const handleSsoEmailSubmit = () => {
     const email = ssoEmail.trim().toLowerCase();
     if (!/^\S+@\S+\.\S+$/.test(email)) {
       notifications.show({
@@ -136,13 +135,7 @@ function LoginPageContent() {
       });
       return;
     }
-    setSsoLoading(true);
-    try {
-      const next = '/dashboard';
-      window.location.href = `/api/auth/sso/start?email=${encodeURIComponent(email)}&next=${encodeURIComponent(next)}`;
-    } finally {
-      setSsoLoading(false);
-    }
+    window.location.href = `/api/auth/sso/start?email=${encodeURIComponent(email)}&next=${encodeURIComponent('/dashboard')}`;
   };
 
   const handleSubmit = async (values: typeof form.values) => {
@@ -235,7 +228,7 @@ function LoginPageContent() {
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
-                void handleSsoEmailSubmit();
+                handleSsoEmailSubmit();
               }
             }}
           />
@@ -244,9 +237,8 @@ function LoginPageContent() {
             color="teal"
             size="md"
             fullWidth
-            loading={ssoLoading}
             leftSection={<IconShieldLock size={16} stroke={1.7} />}
-            onClick={() => void handleSsoEmailSubmit()}
+            onClick={handleSsoEmailSubmit}
           >
             {t('sso.emailStep.continue')}
           </Button>

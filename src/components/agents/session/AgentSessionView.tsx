@@ -79,13 +79,17 @@ import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/comm
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList';
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
+import { versionSelectData } from '../studio/StartSessionModal';
 import SessionSidePanel from './SessionSidePanel';
 import LiveToolCalls, {
     appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
 } from './LiveToolCalls';
 import { consumeSse } from './consumeSse';
 import ContextCompactionCard from './ContextCompactionCard';
-import type { ChatMessage, PlaygroundStep, TurnCompaction } from './sessionTypes';
+import type { AgentToolConfig } from './sessionTools';
+import {
+    stepFailed, type ChatMessage, type PlaygroundStep, type SessionRecord, type TurnCompaction,
+} from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
 import classes from './AgentSessionView.module.css';
 
@@ -94,23 +98,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: {
-        kind?: 'native' | 'external';
-        // What the agent can call, for the inspector's Tools tab — a tool that
-        // was never bound reads very differently from one that was bound and
-        // never chosen.
-        toolBindings?: Array<{ source?: string; sourceKey?: string; toolNames?: string[] }>;
-        knowledgeEngineKey?: string;
-        subagents?: unknown[];
-        skills?: unknown[];
-        memory?: { enabled?: boolean; memoryStoreKey?: string; tools?: 'off' | 'read' | 'readwrite' };
-        sandbox?: {
-            enabled?: boolean;
-            templateKey?: string;
-            tools?: { exec?: boolean; code?: boolean; files?: boolean };
-            preview?: { enabled?: boolean };
-        };
-    };
+    config?: AgentToolConfig & { kind?: 'native' | 'external' };
 }
 
 interface VersionOption {
@@ -137,22 +125,13 @@ class TurnFailure extends Error {
 }
 
 /** What an operator can do about each kind of failure. */
-function failureHint(type: string | undefined): string | undefined {
-    switch (type) {
-        case 'provider_authentication_error':
-            return 'Fix the API key on the model’s provider (Model Hub → Providers), then retry.';
-        case 'provider_permission_error':
-            return 'The provider account cannot use this model or deployment. Check its access, then retry.';
-        case 'agent_config_error':
-            return 'The agent’s configuration is broken — open Configure and fix the highlighted field.';
-        case 'rate_limit_error':
-            return 'The provider is rate limiting. Wait a moment and retry.';
-        case 'guardrail_block':
-            return 'A guardrail blocked this message.';
-        default:
-            return undefined;
-    }
-}
+const FAILURE_HINTS: Record<string, string> = {
+    provider_authentication_error: 'Fix the API key on the model’s provider (Model Hub → Providers), then retry.',
+    provider_permission_error: 'The provider account cannot use this model or deployment. Check its access, then retry.',
+    agent_config_error: 'The agent’s configuration is broken — open Configure and fix the highlighted field.',
+    rate_limit_error: 'The provider is rate limiting. Wait a moment and retry.',
+    guardrail_block: 'A guardrail blocked this message.',
+};
 
 const STOP_LABELS: Record<NonNullable<ChatMessage['stopReason']>, string> = {
     limit: 'Stopped by a run limit',
@@ -165,10 +144,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const searchParams = useSearchParams();
 
     const [agent, setAgent] = useState<AgentSummary | null>(null);
-    const [sessionTitle, setSessionTitle] = useState<string>('');
-    const [sessionCreatedAt, setSessionCreatedAt] = useState<string | undefined>();
-    const [sessionUpdatedAt, setSessionUpdatedAt] = useState<string | undefined>();
-    const [sessionContext, setSessionContext] = useState<Record<string, unknown> | undefined>();
+    const [session, setSession] = useState<SessionRecord | null>(null);
     const [versions, setVersions] = useState<VersionOption[]>([]);
     const [loading, setLoading] = useState(true);
     const [notFound, setNotFound] = useState(false);
@@ -180,8 +156,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // API / A2A / scheduled sessions are real traffic: shown, never extended
     // from here. Only console sessions (or legacy ones without a source) take
     // new messages — the same rule the Sessions panel applies to Continue.
-    const [sessionSource, setSessionSource] = useState<string | undefined>(undefined);
+    const source = session?.metadata?.source;
+    const sessionSource = typeof source === 'string' ? source : undefined;
     const readOnly = !isContinuableSession(sessionSource);
+    const sessionContext = session?.metadata?.runtimeContext as Record<string, unknown> | undefined;
     const [search, setSearch] = useState('');
     const [zoom, setZoom] = useState(DEFAULT_ZOOM);
     const [overrideOpen, setOverrideOpen] = useState(false);
@@ -223,15 +201,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             const agentData = await agentRes.json();
             const sessionData = await sessionRes.json();
             setAgent(agentData.agent);
-            setSessionTitle(sessionData.session.title ?? '');
-            setSessionSource(
-                typeof sessionData.session.metadata?.source === 'string' ? sessionData.session.metadata.source : undefined,
-            );
-            setSessionCreatedAt(sessionData.session.createdAt ?? undefined);
-            setSessionUpdatedAt(sessionData.session.updatedAt ?? undefined);
-            setSessionContext(
-                (sessionData.session.metadata?.runtimeContext as Record<string, unknown> | undefined) ?? undefined,
-            );
+            setSession(sessionData.session);
             // A resumed turn's version badge, tokens and cost should read "what
             // this turn actually did", which the stored record already carries
             // — nothing to recompute here.
@@ -346,7 +316,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : Date.now() - startedAt,
                 },
             ]);
-            setSessionUpdatedAt(new Date().toISOString());
+            setSession((current) => current && { ...current, updatedAt: new Date().toISOString() });
         };
 
         // The failure stays in the transcript, under the message that caused
@@ -450,7 +420,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             icon={<IconMessageCircle size={16} />}
             title={
                 <>
-                    <span className="detail-title">{sessionTitle || 'Session'}</span>
+                    <span className="detail-title">{session?.title || 'Session'}</span>
                     <Badge size="sm" variant="light" color={sending ? 'blue' : 'gray'}>
                         {sending ? 'Running' : 'Idle'}
                     </Badge>
@@ -486,8 +456,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             <Text size="xs" c="dimmed">{formatCost(totals.costUsd)}</Text>
                         </Group>
                     ) : null}
-                    {sessionUpdatedAt ? (
-                        <Text size="xs" c="dimmed">{formatRelativeTime(sessionUpdatedAt)}</Text>
+                    {session?.updatedAt ? (
+                        <Text size="xs" c="dimmed">{formatRelativeTime(session.updatedAt)}</Text>
                     ) : null}
                 </Group>
             }
@@ -497,25 +467,13 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         <Select
                             size="xs"
                             w={180}
-                            data={[
-                                { value: '', label: 'Draft (current config)' },
-                                ...versions.map((v) => ({
-                                    value: String(v.version),
-                                    label: `v${v.version}${v.version === agent.publishedVersion ? ' · published' : ''}`,
-                                })),
-                            ]}
+                            data={versionSelectData(versions, agent.publishedVersion)}
                             value={pinnedVersion}
                             onChange={(next) => setPinnedVersion(next ?? '')}
                             allowDeselect={false}
                             disabled={sending}
                         />
                     ) : null}
-                    {/*
-                      A reopened session lands wherever you left the scroll, and
-                      the composer is a page-height away at the bottom. This is
-                      the "pick this back up" affordance the sessions table
-                      links straight to.
-                    */}
                     {!isConnected && versions.length > 0 ? (
                         <Button
                             size="xs"
@@ -526,6 +484,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             Compare
                         </Button>
                     ) : null}
+                    {/*
+                      A reopened session lands wherever you left the scroll, and
+                      the composer is a page-height away at the bottom. This is
+                      the "pick this back up" affordance the sessions table
+                      links straight to.
+                    */}
                     <Button
                         size="xs"
                         variant="light"
@@ -598,7 +562,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                     const seconds = (message.latencyMs ?? 0) / 1000;
                                     const failed = message.role === 'error'
                                         || Boolean(message.stopReason)
-                                        || message.steps?.some((step) => step.error);
+                                        || message.steps?.some(stepFailed);
                                     return (
                                         <Tooltip
                                             key={index}
@@ -635,14 +599,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 <Stack gap="lg">
                                     {messages.map((msg, i) => {
                                         if (matchedIndexes && !matchedIndexes.has(i)) return null;
-                                        if (msg.role === 'error') {
-                                            const previous = messages[i - 1];
-                                            return (
-                                                <Box
-                                                    key={i}
-                                                    ref={(node: HTMLDivElement | null) => { turnRefs.current[i] = node; }}
-                                                    className={`${classes.turn} ${classes.errorTurn}`}
-                                                >
+                                        const previous = messages[i - 1];
+                                        return (
+                                            <Box
+                                                key={i}
+                                                ref={(node: HTMLDivElement | null) => { turnRefs.current[i] = node; }}
+                                                className={msg.role === 'error' ? `${classes.turn} ${classes.errorTurn}` : classes.turn}
+                                            >
+                                                {msg.role === 'error' ? (
                                                     <FailedTurn
                                                         message={msg}
                                                         onRetry={previous?.role === 'user'
@@ -653,75 +617,18 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                             }
                                                             : undefined}
                                                     />
-                                                </Box>
-                                            );
-                                        }
-                                        return (
-                                            <Box
-                                                key={i}
-                                                ref={(node: HTMLDivElement | null) => { turnRefs.current[i] = node; }}
-                                                className={classes.turn}
-                                            >
-                                                <Group gap={6} mb={4} align="center">
-                                                    <Badge
-                                                        size="xs"
-                                                        variant="light"
-                                                        color={msg.role === 'user' ? 'blue' : 'grape'}
-                                                        leftSection={msg.role === 'user'
-                                                            ? <IconUser size={10} />
-                                                            : <IconRobot size={10} />}
-                                                    >
-                                                        {msg.role === 'user' ? 'You' : agent.name}
-                                                    </Badge>
-                                                    {msg.role === 'assistant' ? <TurnPills message={msg} /> : null}
-                                                </Group>
-                                                {msg.role === 'assistant' ? (
-                                                    <Box className={classes.chatMarkdown}>
-                                                        {msg.reasoning ? (
-                                                            <ReasoningDisclosure reasoning={msg.reasoning} latencyMs={msg.latencyMs} />
-                                                        ) : null}
-                                                        {msg.steps?.length ? <NarratedSteps steps={msg.steps} /> : null}
-                                                        {msg.compactions?.map((compaction, index) => (
-                                                            <ContextCompactionCard
-                                                                key={`${compaction.at}-${index}`}
-                                                                compaction={compaction}
-                                                                // The tool list is per turn; shown on the
-                                                                // last pass so it is not repeated.
-                                                                compactedTools={index === msg.compactions!.length - 1 ? msg.compactedTools : undefined}
-                                                            />
-                                                        ))}
-                                                        {msg.stopReason ? <StopNotice message={msg} /> : null}
-                                                        {/*
-                                                      Wrapped so headings, lists and tables
-                                                      in an answer actually look like
-                                                      headings, lists and tables — a bare
-                                                      ReactMarkdown emits real h2/ul/table
-                                                      elements that nothing was styling, so
-                                                      a structured report rendered as one
-                                                      undifferentiated block of text.
-                                                    */}
-                                                    <TypographyStylesProvider className={classes.markdownBody}>
-                                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-                                                    </TypographyStylesProvider>
-                                                        {msg.output !== undefined ? <StructuredOutputBlock output={msg.output} /> : null}
-                                                        {msg.outputError ? (
-                                                            <Alert variant="light" color="red" icon={<IconAlertTriangle size={14} />} mt="xs" p="xs">
-                                                                <Text size="xs">The answer did not match the output schema: {msg.outputError}</Text>
-                                                            </Alert>
-                                                        ) : null}
-                                                        {msg.warnings?.length ? (
-                                                            <Alert variant="light" color="yellow" icon={<IconInfoCircle size={14} />} mt="xs" p="xs">
-                                                                <Stack gap={2}>
-                                                                    <Text size="xs" fw={600}>This answer was produced without everything it should have had:</Text>
-                                                                    {msg.warnings.map((warning) => (
-                                                                        <Text key={warning} size="xs">{warning}</Text>
-                                                                    ))}
-                                                                </Stack>
-                                                            </Alert>
-                                                        ) : null}
-                                                    </Box>
                                                 ) : (
-                                                    <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
+                                                    <>
+                                                        <Group gap={6} mb={4} align="center">
+                                                            <RoleBadge user={msg.role === 'user'} agentName={agent.name} />
+                                                            {msg.role === 'assistant' ? <TurnPills message={msg} /> : null}
+                                                        </Group>
+                                                        {msg.role === 'assistant' ? (
+                                                            <AssistantTurn message={msg} />
+                                                        ) : (
+                                                            <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
+                                                        )}
+                                                    </>
                                                 )}
                                             </Box>
                                         );
@@ -734,14 +641,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                     {sending ? (
                                         <Box>
                                             <Group gap={6} mb={4}>
-                                                <Badge
-                                                    size="xs"
-                                                    variant="light"
-                                                    color="grape"
-                                                    leftSection={<IconRobot size={10} />}
-                                                >
-                                                    {agent.name}
-                                                </Badge>
+                                                <RoleBadge agentName={agent.name} />
                                             </Group>
                                             {liveCompactions.map((compaction, index) => (
                                                 <ContextCompactionCard key={`live-${index}`} compaction={compaction} live />
@@ -761,11 +661,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                         />
                                                     ) : (
                                                         <Box key={`text-${index}`} className={classes.chatMarkdown}>
-                                                            <TypographyStylesProvider className={classes.markdownBody}>
-                                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                                                    {segment.text}
-                                                                </ReactMarkdown>
-                                                            </TypographyStylesProvider>
+                                                            <Markdown text={segment.text} />
                                                         </Box>
                                                     )))}
                                                 </Stack>
@@ -830,8 +726,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 <Paper withBorder radius="md" className={classes.inspectorPanel}>
                     <SessionSidePanel
                         sessionId={sessionId}
-                        createdAt={sessionCreatedAt}
-                        updatedAt={sessionUpdatedAt}
+                        createdAt={session?.createdAt}
+                        updatedAt={session?.updatedAt}
                         agentName={agent.name}
                         agentKey={agent.key}
                         pinnedVersion={pinnedVersion}
@@ -848,11 +744,38 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 opened={compareOpen}
                 onClose={() => setCompareOpen(false)}
                 agentId={agentId}
-                publishedVersion={agent?.publishedVersion ?? null}
+                publishedVersion={agent.publishedVersion ?? null}
                 versions={versions.map((v) => v.version)}
                 initialMessage={[...messages].reverse().find((m) => m.role === 'user')?.content}
             />
         </DetailShell>
+    );
+}
+
+function RoleBadge({ user, agentName }: { user?: boolean; agentName: string }) {
+    return (
+        <Badge
+            size="xs"
+            variant="light"
+            color={user ? 'blue' : 'grape'}
+            leftSection={user ? <IconUser size={10} /> : <IconRobot size={10} />}
+        >
+            {user ? 'You' : agentName}
+        </Badge>
+    );
+}
+
+/**
+ * Wrapped so headings, lists and tables in an answer actually look like
+ * headings, lists and tables — a bare ReactMarkdown emits real h2/ul/table
+ * elements that nothing was styling, so a structured report rendered as one
+ * undifferentiated block of text.
+ */
+function Markdown({ text }: { text: string }) {
+    return (
+        <TypographyStylesProvider className={classes.markdownBody}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+        </TypographyStylesProvider>
     );
 }
 
@@ -912,7 +835,7 @@ function StopNotice({ message }: { message: ChatMessage }) {
 }
 
 function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () => void }) {
-    const hint = failureHint(message.errorType);
+    const hint = message.errorType ? FAILURE_HINTS[message.errorType] : undefined;
     return (
         <Stack gap={6}>
             <Group gap={6}>
@@ -933,6 +856,44 @@ function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () =
                 </Group>
             ) : null}
         </Stack>
+    );
+}
+
+function AssistantTurn({ message }: { message: ChatMessage }) {
+    return (
+        <Box className={classes.chatMarkdown}>
+            {message.reasoning ? (
+                <ReasoningDisclosure reasoning={message.reasoning} latencyMs={message.latencyMs} />
+            ) : null}
+            {message.steps?.length ? <NarratedSteps steps={message.steps} /> : null}
+            {message.compactions?.map((compaction, index) => (
+                <ContextCompactionCard
+                    key={`${compaction.at}-${index}`}
+                    compaction={compaction}
+                    // The tool list is per turn; shown on the last pass so it
+                    // is not repeated.
+                    compactedTools={index === message.compactions!.length - 1 ? message.compactedTools : undefined}
+                />
+            ))}
+            {message.stopReason ? <StopNotice message={message} /> : null}
+            <Markdown text={message.content} />
+            {message.output !== undefined ? <StructuredOutputBlock output={message.output} /> : null}
+            {message.outputError ? (
+                <Alert variant="light" color="red" icon={<IconAlertTriangle size={14} />} mt="xs" p="xs">
+                    <Text size="xs">The answer did not match the output schema: {message.outputError}</Text>
+                </Alert>
+            ) : null}
+            {message.warnings?.length ? (
+                <Alert variant="light" color="yellow" icon={<IconInfoCircle size={14} />} mt="xs" p="xs">
+                    <Stack gap={2}>
+                        <Text size="xs" fw={600}>This answer was produced without everything it should have had:</Text>
+                        {message.warnings.map((warning) => (
+                            <Text key={warning} size="xs">{warning}</Text>
+                        ))}
+                    </Stack>
+                </Alert>
+            ) : null}
+        </Box>
     );
 }
 
@@ -975,11 +936,7 @@ function NarratedSteps({ steps }: { steps: PlaygroundStep[] }) {
         <>
             {groups.map((group) => (
                 <Box key={group.offset}>
-                    {group.narration ? (
-                        <TypographyStylesProvider className={classes.markdownBody}>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{group.narration}</ReactMarkdown>
-                        </TypographyStylesProvider>
-                    ) : null}
+                    {group.narration ? <Markdown text={group.narration} /> : null}
                     <StepTimeline steps={group.steps} offset={group.offset} />
                 </Box>
             ))}
@@ -997,7 +954,7 @@ function NarratedSteps({ steps }: { steps: PlaygroundStep[] }) {
  */
 function StepTimeline({ steps, offset = 0 }: { steps: PlaygroundStep[]; offset?: number }) {
     const [open, setOpen] = useState(false);
-    const failed = steps.filter((step) => step.error).length;
+    const failed = steps.filter(stepFailed).length;
 
     return (
         <Box mb="sm">
@@ -1025,7 +982,7 @@ function StepTimeline({ steps, offset = 0 }: { steps: PlaygroundStep[]; offset?:
 
 /** One tool call: what was asked, what came back, and how the run treated it. */
 function StepCard({ step, index }: { step: PlaygroundStep; index: number }) {
-    const failed = Boolean(step.error) || step.status === 'error' || step.status === 'rejected';
+    const failed = stepFailed(step);
 
     return (
         <Paper withBorder p="xs" radius="sm">

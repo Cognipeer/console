@@ -38,11 +38,16 @@ export interface ContextCompactionCardProps {
     defaultOpen?: boolean;
 }
 
-/** How much smaller the context got, as a whole percentage. */
-export function compactionSavings(compaction: TurnCompaction): number | undefined {
-    const { tokensBefore, tokensAfter } = compaction;
-    if (!tokensBefore || tokensAfter === undefined || tokensBefore <= 0) return undefined;
-    return Math.max(0, Math.round((1 - tokensAfter / tokensBefore) * 100));
+/**
+ * "12.3k → 4.1k (−67%)": how far the context shrank, with the saving as a
+ * whole percentage. Undefined when the pass did not report both sizes.
+ */
+export function compactionShrinkLabel({ tokensBefore, tokensAfter }: TurnCompaction): string | undefined {
+    if (tokensBefore === undefined || tokensAfter === undefined) return undefined;
+    const shrink = `${formatCompactTokens(tokensBefore)} → ${formatCompactTokens(tokensAfter)}`;
+    return tokensBefore > 0
+        ? `${shrink} (−${Math.max(0, Math.round((1 - tokensAfter / tokensBefore) * 100))}%)`
+        : shrink;
 }
 
 export default function ContextCompactionCard({
@@ -52,7 +57,6 @@ export default function ContextCompactionCard({
     defaultOpen = false,
 }: ContextCompactionCardProps) {
     const [open, setOpen] = useState(defaultOpen);
-    const savings = compactionSavings(compaction);
     const summary = compaction.summary ?? {};
     const hasDetail = Boolean(
         summary.userDirectives?.length || summary.facts?.length || summary.goals?.length
@@ -107,8 +111,7 @@ export default function ContextCompactionCard({
                                     </Box>
                                 </Tooltip>
                                 <Text size="10px" c="dimmed" className={classes.noWrap}>
-                                    {formatCompactTokens(compaction.tokensBefore)} → {formatCompactTokens(compaction.tokensAfter)}
-                                    {savings !== undefined ? ` (−${savings}%)` : ''}
+                                    {compactionShrinkLabel(compaction)}
                                 </Text>
                             </Group>
                         ) : null}

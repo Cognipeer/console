@@ -11,7 +11,7 @@
  *   import    the other direction, always via a dry run first
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
     Accordion,
     Alert,
@@ -47,6 +47,7 @@ import {
     IconFileImport,
     IconRefresh,
 } from '@tabler/icons-react';
+import { versionSelectData } from './StartSessionModal';
 
 type CodegenTarget = 'cli' | 'server' | 'worker' | 'lambda';
 
@@ -138,16 +139,13 @@ export default function AgentExportPanel({
         void loadManifest();
     }, [loadManifest]);
 
-    const versionOptions = useMemo(
-        () => [
-            { value: '', label: 'Draft (current config)' },
-            ...versions.map((v) => ({
-                value: String(v.version),
-                label: `v${v.version}${v.version === publishedVersion ? ' · published' : ''}`,
-            })),
-        ],
-        [versions, publishedVersion],
-    );
+    // The manifest and code tabs share one source-version picker.
+    const versionSelect = {
+        data: versionSelectData(versions, publishedVersion),
+        value: sourceVersion ?? '',
+        onChange: (next: string | null) => setSourceVersion(next || null),
+        allowDeselect: false,
+    };
 
     const downloadManifest = () => {
         window.open(`/api/agents/${agentId}/export?${manifestParams({ download: '1' })}`, '_blank');
@@ -161,32 +159,27 @@ export default function AgentExportPanel({
     const [codegenLoading, setCodegenLoading] = useState(false);
     const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
-    const codegenBody = useMemo(
-        () => ({
-            target,
-            packageName: packageName.trim() || undefined,
-            includeDockerfile,
-            consoleBaseUrl: typeof window !== 'undefined' ? window.location.origin : undefined,
-            ...(sourceVersion ? { version: Number(sourceVersion) } : {}),
-        }),
-        [target, packageName, includeDockerfile, sourceVersion],
-    );
-
-    const preview = async () => {
+    // Preview and .zip are the same request — only the output format and what is read back differ.
+    const runCodegen = async (output: 'json' | 'zip', failTitle: string, onResponse: (res: Response) => Promise<void>) => {
         setCodegenLoading(true);
         try {
             const res = await fetch(`/api/agents/${agentId}/codegen`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ...codegenBody, format: 'json' }),
+                body: JSON.stringify({
+                    target,
+                    packageName: packageName.trim() || undefined,
+                    includeDockerfile,
+                    consoleBaseUrl: window.location.origin,
+                    ...(sourceVersion ? { version: Number(sourceVersion) } : {}),
+                    format: output,
+                }),
             });
             if (!res.ok) throw new Error(`Code export failed (${res.status})`);
-            const data: CodegenResult = await res.json();
-            setCodegen(data);
-            setSelectedFile(data.files.find((f) => f.path === 'src/agent.ts')?.path ?? data.files[0]?.path ?? null);
+            await onResponse(res);
         } catch (error) {
             notifications.show({
-                title: 'Code export failed',
+                title: failTitle,
                 message: error instanceof Error ? error.message : String(error),
                 color: 'red',
             });
@@ -195,32 +188,20 @@ export default function AgentExportPanel({
         }
     };
 
-    const downloadZip = async () => {
-        setCodegenLoading(true);
-        try {
-            const res = await fetch(`/api/agents/${agentId}/codegen`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ...codegenBody, format: 'zip' }),
-            });
-            if (!res.ok) throw new Error(`Code export failed (${res.status})`);
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `${packageName.trim() || agentKey}.zip`;
-            link.click();
-            URL.revokeObjectURL(url);
-        } catch (error) {
-            notifications.show({
-                title: 'Download failed',
-                message: error instanceof Error ? error.message : String(error),
-                color: 'red',
-            });
-        } finally {
-            setCodegenLoading(false);
-        }
-    };
+    const preview = () => runCodegen('json', 'Code export failed', async (res) => {
+        const data: CodegenResult = await res.json();
+        setCodegen(data);
+        setSelectedFile(data.files.find((f) => f.path === 'src/agent.ts')?.path ?? data.files[0]?.path ?? null);
+    });
+
+    const downloadZip = () => runCodegen('zip', 'Download failed', async (res) => {
+        const url = URL.createObjectURL(await res.blob());
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${packageName.trim() || agentKey}.zip`;
+        link.click();
+        URL.revokeObjectURL(url);
+    });
 
     const activeFile = codegen?.files.find((f) => f.path === selectedFile) ?? null;
 
@@ -314,14 +295,7 @@ export default function AgentExportPanel({
                             onChange={(next) => setFormat(next as 'yaml' | 'json')}
                             data={[{ value: 'yaml', label: 'YAML' }, { value: 'json', label: 'JSON' }]}
                         />
-                        <Select
-                            size="xs"
-                            w={240}
-                            data={versionOptions}
-                            value={sourceVersion ?? ''}
-                            onChange={(next) => setSourceVersion(next || null)}
-                            allowDeselect={false}
-                        />
+                        <Select size="xs" w={240} {...versionSelect} />
                         <Button size="xs" variant="default" leftSection={<IconRefresh size={14} />} onClick={() => void loadManifest()}>
                             Reload
                         </Button>
@@ -385,14 +359,7 @@ export default function AgentExportPanel({
                             onChange={(event) => setPackageName(event.currentTarget.value)}
                             w={220}
                         />
-                        <Select
-                            label="Source"
-                            w={200}
-                            data={versionOptions}
-                            value={sourceVersion ?? ''}
-                            onChange={(next) => setSourceVersion(next || null)}
-                            allowDeselect={false}
-                        />
+                        <Select label="Source" w={200} {...versionSelect} />
                         <Switch
                             mb={8}
                             label="Dockerfile"

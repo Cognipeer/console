@@ -26,13 +26,16 @@
 
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
+    CostEstimator,
     Message as AgentSdkMessage,
     SmartState as AgentSdkSmartState,
     SummarizationEvent as AgentSdkSummarizationEvent,
 } from '@cognipeer/agent-sdk';
 
 import { createLogger } from '@/lib/core/logger';
-import type { IAgentConversation, IAgentConversationState, IAgentTurnCompaction, IModelPricing } from '@/lib/database';
+import type { DatabaseProvider, IAgentConversation, IAgentTurnCompaction, IModelPricing } from '@/lib/database';
+
+import { chunkText } from './assembledStream';
 
 const logger = createLogger('agent-turn-state');
 
@@ -187,14 +190,9 @@ function pickCarried(state: AgentSdkSmartState | undefined): CarriedState {
 }
 
 function truncateText(value: unknown, limit: number): unknown {
-    if (typeof value === 'string') {
-        return value.length > limit ? `${value.slice(0, limit)}… [truncated for storage]` : value;
-    }
-    if (value !== null && typeof value === 'object') {
-        const text = JSON.stringify(value);
-        return text.length > limit ? `${text.slice(0, limit)}… [truncated for storage]` : value;
-    }
-    return value;
+    if (typeof value !== 'string' && (value === null || typeof value !== 'object')) return value;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return text.length > limit ? `${text.slice(0, limit)}… [truncated for storage]` : value;
 }
 
 /**
@@ -209,29 +207,25 @@ export function serializeForStorage(carried: CarriedState): string | null {
     let text = JSON.stringify(carried);
     if (text.length <= MAX_STATE_BYTES) return text;
 
-    const strip = (entries: unknown) => Array.isArray(entries)
-        ? entries.map((entry) => {
-            if (!entry || typeof entry !== 'object') return entry;
-            const copy = { ...(entry as Record<string, unknown>) };
-            delete copy.rawOutput;
-            return copy;
-        })
-        : entries;
-    const shrunk: CarriedState = {
-        ...carried,
-        toolHistory: strip(carried.toolHistory) as CarriedState['toolHistory'],
-        toolHistoryArchived: strip(carried.toolHistoryArchived) as CarriedState['toolHistoryArchived'],
+    const shrunk: CarriedState = { ...carried };
+    const eachToolEntry = (fn: (entry: Record<string, unknown>) => Record<string, unknown>) => {
+        for (const key of ['toolHistory', 'toolHistoryArchived'] as const) {
+            const entries: unknown = shrunk[key];
+            if (!Array.isArray(entries)) continue;
+            (shrunk as Record<string, unknown>)[key] = entries.map((entry) => entry && typeof entry === 'object'
+                ? fn({ ...(entry as Record<string, unknown>) })
+                : entry);
+        }
     };
+
+    eachToolEntry((entry) => {
+        delete entry.rawOutput;
+        return entry;
+    });
     text = JSON.stringify(shrunk);
     if (text.length <= MAX_STATE_BYTES) return text;
 
-    const cut = (entries: unknown) => Array.isArray(entries)
-        ? entries.map((entry) => entry && typeof entry === 'object'
-            ? { ...(entry as Record<string, unknown>), output: truncateText((entry as Record<string, unknown>).output, TRIMMED_TOOL_TEXT_CHARS) }
-            : entry)
-        : entries;
-    shrunk.toolHistory = cut(shrunk.toolHistory) as CarriedState['toolHistory'];
-    shrunk.toolHistoryArchived = cut(shrunk.toolHistoryArchived) as CarriedState['toolHistoryArchived'];
+    eachToolEntry((entry) => ({ ...entry, output: truncateText(entry.output, TRIMMED_TOOL_TEXT_CHARS) }));
     text = JSON.stringify(shrunk);
     if (text.length <= MAX_STATE_BYTES) return text;
 
@@ -242,11 +236,7 @@ export function serializeForStorage(carried: CarriedState): string | null {
     return text.length <= MAX_STATE_BYTES ? text : null;
 }
 
-type StateStore = {
-    findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
-    saveAgentConversationState(state: Omit<IAgentConversationState, '_id' | 'createdAt' | 'updatedAt'>): Promise<void>;
-    deleteAgentConversationState(conversationId: string): Promise<boolean>;
-};
+type StateStore = Pick<DatabaseProvider, 'findAgentConversationState' | 'saveAgentConversationState' | 'deleteAgentConversationState'>;
 
 /**
  * The state the conversation's last turn ended in, ready to take the next
@@ -379,27 +369,12 @@ export interface AgentTurnOutcome {
     partial: boolean;
 }
 
-function messageText(message: LooseMessage | undefined): string {
-    if (!message) return '';
-    const { content } = message;
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-        return content
-            .map((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string'
-                ? (part as { text: string }).text
-                : ''))
-            .join('');
-    }
-    return '';
-}
-
 /** Messages the SDK injects itself; their text is not the agent's answer. */
 function isSyntheticText(message: LooseMessage): boolean {
-    if (Array.isArray(message.tool_calls) && message.tool_calls.some((call) => {
+    return Array.isArray(message.tool_calls) && message.tool_calls.some((call) => {
         const fn = call.function as { name?: string } | undefined;
         return (call.name ?? fn?.name) === 'summarize_context';
-    })) return true;
-    return false;
+    });
 }
 
 export function describeTurnOutcome(
@@ -440,7 +415,7 @@ export function describeTurnOutcome(
     for (let i = messages.length - 1; i >= Math.max(0, inputMessageCount); i -= 1) {
         const message = messages[i];
         if (roleOf(message) !== 'assistant' || isSyntheticText(message)) continue;
-        const text = messageText(message).trim();
+        const text = chunkText(message.content).trim();
         if (text) {
             lastText = text;
             break;
@@ -455,9 +430,7 @@ export function describeTurnOutcome(
  * One context summarization that happened during a turn — the stored shape,
  * built from the SDK's `summarization` event.
  */
-export type AgentTurnCompaction = IAgentTurnCompaction;
-
-export function compactionFromEvent(event: AgentSdkSummarizationEvent): AgentTurnCompaction {
+export function compactionFromEvent(event: AgentSdkSummarizationEvent): IAgentTurnCompaction {
     const structured = event.structuredSummary as (AgentSdkSummarizationEvent['structuredSummary'] & {
         user_directives?: string[];
     }) | undefined;
@@ -500,32 +473,17 @@ export function compactedToolResults(
     after: AgentSdkMessage[] | undefined,
 ): Array<{ toolName: string; toolCallId: string }> {
     const placeholder = /^(SUMMARIZED|ARCHIVED_TOOL_RESPONSE|SUMMARIZED_TOOL_RESPONSE|STRUCTURED_TOOL_RESPONSE|DROPPED_TOOL_RESPONSE)/;
-    const wasPlaceholder = new Set<string>();
-    for (const message of before as LooseMessage[]) {
-        if (message.role === 'tool' && typeof message.tool_call_id === 'string'
-            && typeof message.content === 'string' && placeholder.test(message.content)) {
-            wasPlaceholder.add(message.tool_call_id);
-        }
-    }
-    const out: Array<{ toolName: string; toolCallId: string }> = [];
-    for (const message of (after ?? []) as LooseMessage[]) {
-        if (message.role !== 'tool' || typeof message.tool_call_id !== 'string') continue;
-        if (message.name === 'summarize_context') continue;
-        if (typeof message.content !== 'string' || !placeholder.test(message.content)) continue;
-        if (wasPlaceholder.has(message.tool_call_id)) continue;
-        out.push({ toolName: typeof message.name === 'string' ? message.name : 'tool', toolCallId: message.tool_call_id });
-    }
-    return out;
+    const placeholders = (messages: AgentSdkMessage[]) => (messages as LooseMessage[]).filter(
+        (m): m is LooseMessage & { tool_call_id: string } => m.role === 'tool' && typeof m.tool_call_id === 'string'
+            && typeof m.content === 'string' && placeholder.test(m.content),
+    );
+    const wasPlaceholder = new Set(placeholders(before).map((m) => m.tool_call_id));
+    return placeholders(after ?? [])
+        .filter((m) => m.name !== 'summarize_context' && !wasPlaceholder.has(m.tool_call_id))
+        .map((m) => ({ toolName: typeof m.name === 'string' ? m.name : 'tool', toolCallId: m.tool_call_id }));
 }
 
 // ── Cost ────────────────────────────────────────────────────────────────────
-
-type CostEstimatorArgs = {
-    modelName?: string;
-    inputTokens: number;
-    outputTokens: number;
-    cachedInputTokens?: number;
-};
 
 /**
  * The SDK enforces `limits.maxCostUsd` only through a `costEstimator` — with
@@ -540,20 +498,20 @@ export function buildCostEstimator(
     models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }>,
     fallback: IModelPricing | null | undefined,
     calculate: (pricing: IModelPricing, usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }) => { totalCost: number },
-): ((args: CostEstimatorArgs) => number) | undefined {
+): CostEstimator | undefined {
     // A pricing record of zeros is "nobody entered prices", not "free": it
     // would price every call at $0 and the cap would never fire.
     const priced = (pricing: IModelPricing | null | undefined): pricing is IModelPricing =>
-        Boolean(pricing) && ((pricing!.inputTokenPer1M ?? 0) > 0 || (pricing!.outputTokenPer1M ?? 0) > 0);
-    if (!priced(fallback)) fallback = undefined;
+        !!pricing && ((pricing.inputTokenPer1M ?? 0) > 0 || (pricing.outputTokenPer1M ?? 0) > 0);
+    const fallbackPricing = priced(fallback) ? fallback : undefined;
     const byName = new Map<string, IModelPricing>();
     for (const entry of models) {
         if (!priced(entry.pricing)) continue;
         for (const name of entry.names) if (name) byName.set(name.toLowerCase(), entry.pricing);
     }
-    if (byName.size === 0 && !fallback) return undefined;
+    if (byName.size === 0 && !fallbackPricing) return undefined;
     return (args) => {
-        const pricing = (args.modelName ? byName.get(args.modelName.toLowerCase()) : undefined) ?? fallback ?? undefined;
+        const pricing = (args.modelName ? byName.get(args.modelName.toLowerCase()) : undefined) ?? fallbackPricing;
         if (!pricing) return 0;
         return calculate(pricing, {
             inputTokens: args.inputTokens,

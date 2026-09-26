@@ -1,6 +1,6 @@
 /**
  * Per-category context keyword lists used by the confidence pass
- * (`confidence.ts`'s `hasContextWord`) to boost a candidate's score when a
+ * (`confidence.ts`'s `findContextWord`) to boost a candidate's score when a
  * relevant word appears within ±60 characters.
  *
  * Deliberately flat (not split per language): the risk of a context word

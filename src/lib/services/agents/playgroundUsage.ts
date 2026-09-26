@@ -8,14 +8,10 @@
  * answers correctly and simply saves nothing.
  */
 
-export interface PlaygroundUsage {
-    inputTokens?: number;
-    outputTokens?: number;
-    /** A discounted slice of `inputTokens`, not an addition to it. */
-    cachedInputTokens?: number;
-    totalTokens?: number;
-    costUsd?: number;
-}
+import type { IAgentConversationMessage } from '@/lib/database/provider/types.domain';
+
+/** The usage a session turn stores. `cachedInputTokens` is a discounted slice of `inputTokens`, not an addition to it. */
+export type PlaygroundUsage = NonNullable<IAgentConversationMessage['usage']>;
 
 /**
  * Two shapes arrive here. `AgentInvokeResult.metadata.usage` is the SDK's own

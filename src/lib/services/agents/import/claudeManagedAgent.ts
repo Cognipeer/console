@@ -13,7 +13,7 @@
  * and writing it is `importService.ts`'s job.
  */
 
-import type { ParsedAgentDocument } from './document';
+import { AgentDocumentParseError, type ParsedAgentDocument } from './document';
 
 /** The built-in toolset's tools that need a machine to run on → the console Sandbox. */
 export const CLAUDE_SANDBOX_TOOLS = ['bash', 'read', 'write', 'edit', 'glob', 'grep'] as const;
@@ -86,18 +86,13 @@ export function detectClaudeManagedAgent(doc: ParsedAgentDocument): number {
 }
 
 /** `default_config.enabled` + per-tool `configs[]` → which names are on. */
-function toolFilterFrom(toolset: Record<string, unknown>): { mode: 'all-except' | 'only'; names: string[] } {
+function toolFilterFrom(toolset: Record<string, unknown>): ClaudeMcpPlan['toolFilter'] {
     const defaultEnabled = asRecord(toolset.default_config)?.enabled !== false;
     const configs = asArray(toolset.configs).map(asRecord).filter(Boolean) as Array<Record<string, unknown>>;
-    if (defaultEnabled) {
-        return {
-            mode: 'all-except',
-            names: configs.filter((c) => c.enabled === false).map((c) => str(c.name)).filter((n): n is string => Boolean(n)),
-        };
-    }
     return {
-        mode: 'only',
-        names: configs.filter((c) => c.enabled === true).map((c) => str(c.name)).filter((n): n is string => Boolean(n)),
+        mode: defaultEnabled ? 'all-except' : 'only',
+        // names = the per-tool exceptions to the default
+        names: configs.filter((c) => c.enabled === !defaultEnabled).map((c) => str(c.name)).filter((n): n is string => Boolean(n)),
     };
 }
 
@@ -105,7 +100,7 @@ export function planClaudeManagedAgent(doc: ParsedAgentDocument): ClaudeAgentPla
     const data = doc.data;
     const unsupported: ClaudeAgentPlan['unsupported'] = [];
     const name = str(data.name);
-    if (!name) throw new Error('A Claude agent definition needs a name.');
+    if (!name) throw new AgentDocumentParseError('A Claude agent definition needs a name.');
 
     const model = typeof data.model === 'string' ? str(data.model) : str(asRecord(data.model)?.id);
     const systemPrompt = str(data.system) ?? doc.body;
@@ -117,9 +112,7 @@ export function planClaudeManagedAgent(doc: ParsedAgentDocument): ClaudeAgentPla
         if (!tool) continue;
         const type = str(tool.type) ?? '';
         if (/^agent_toolset_/.test(type)) {
-            const filter = toolFilterFrom(tool);
-            const enabled = CLAUDE_BUILTIN_TOOLS.filter((t) =>
-                (filter.mode === 'all-except' ? !filter.names.includes(t) : filter.names.includes(t)));
+            const enabled = applyToolFilter(CLAUDE_BUILTIN_TOOLS, toolFilterFrom(tool));
             builtins.sandbox = enabled.filter((t) => (CLAUDE_SANDBOX_TOOLS as readonly string[]).includes(t));
             builtins.webSearch = enabled.includes('web_search');
             builtins.webFetch = enabled.includes('web_fetch');
@@ -202,7 +195,7 @@ export function planClaudeManagedAgent(doc: ParsedAgentDocument): ClaudeAgentPla
 }
 
 /** Keeps discovered tool names that pass a toolset filter. */
-export function applyToolFilter(discovered: string[], filter: ClaudeMcpPlan['toolFilter']): string[] {
+export function applyToolFilter(discovered: readonly string[], filter: ClaudeMcpPlan['toolFilter']): string[] {
     return filter.mode === 'all-except'
         ? discovered.filter((name) => !filter.names.includes(name))
         : discovered.filter((name) => filter.names.includes(name));

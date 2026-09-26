@@ -299,12 +299,7 @@ export async function previewAgentDocumentImport(
     }
 
     // claude-managed-agent
-    let plan: ClaudeAgentPlan;
-    try {
-        plan = planClaudeManagedAgent(doc);
-    } catch (error) {
-        throw new AgentImportError((error as Error).message);
-    }
+    const plan = planClaudeManagedAgent(doc);
     const key = slugify(plan.name);
     const [servers, sandbox, webSearch] = await Promise.all([
         listMcpServers(ctx.tenantDbName, { projectId: ctx.projectId }),
@@ -430,6 +425,66 @@ export interface AgentImportApplyResult {
     warnings: Array<{ code: string; message: string }>;
 }
 
+/** Library records an import created, so a failure can remove them again. */
+interface CreatedRecords {
+    mcpServers: Array<{ key: string; name: string; id: string }>;
+    skills: Array<{ key: string; title: string; id: string }>;
+    prompts: Array<{ key: string; name: string; id: string }>;
+    tools: Array<{ key: string; name: string; id: string }>;
+}
+
+const withoutIds = <T extends { id: string }>(list: T[]) => list.map(({ id: _id, ...rest }) => { void _id; return rest; });
+
+type RollbackKind = 'MCP server' | 'tool' | 'prompt' | 'skill' | 'skills';
+/** Logs a rollback delete that failed; `key` is absent when the skills DB switch itself failed. */
+type RollbackReporter = (kind: RollbackKind, key: string | undefined, error: string) => void;
+
+const reportManifestRollbackFailure: RollbackReporter = (kind, key, error) =>
+    logger.warn(`Import rollback could not delete ${key === undefined ? kind : `${kind} ${key}`}`, { error });
+
+// The Claude path keeps its own log events, and stays silent when the skills DB switch fails.
+const reportClaudeRollbackFailure: RollbackReporter = (kind, key, error) => {
+    if (kind === 'skills') return;
+    logger.warn(kind === 'MCP server' ? 'Import rollback could not delete an MCP server' : 'Import rollback could not delete a skill', { key, error });
+};
+
+/**
+ * Runs the writing part of an import; if it throws, deletes whatever
+ * `created` has collected so far and rethrows (manifest errors as a 400).
+ * Best effort, one by one: a failure here must never mask the error that
+ * triggered the rollback.
+ */
+async function withImportRollback<T>(
+    ctx: ImportContext,
+    created: CreatedRecords,
+    report: RollbackReporter,
+    run: () => Promise<T>,
+): Promise<T> {
+    try {
+        return await run();
+    } catch (error) {
+        const attempt = async (kind: RollbackKind, key: string | undefined, fn: () => Promise<unknown>) => {
+            try {
+                await fn();
+            } catch (rollbackError) {
+                report(kind, key, (rollbackError as Error).message);
+            }
+        };
+        for (const server of created.mcpServers) await attempt('MCP server', server.key, () => deleteMcpServer(ctx.tenantDbName, server.id));
+        for (const tool of created.tools) await attempt('tool', tool.key, () => deleteTool(ctx.tenantDbName, tool.id));
+        for (const prompt of created.prompts) await attempt('prompt', prompt.key, () => deletePrompt(ctx.tenantDbName, ctx.projectId, prompt.id));
+        if (created.skills.length > 0) {
+            await attempt('skills', undefined, async () => {
+                const db = await getDatabase();
+                await db.switchToTenant(ctx.tenantDbName);
+                for (const skill of created.skills) await attempt('skill', skill.key, () => db.deleteSkill(skill.id));
+            });
+        }
+        if (error instanceof AgentManifestError) throw new AgentImportError(error.message, 400, { issues: error.issues });
+        throw error;
+    }
+}
+
 export async function applyAgentDocumentImport(
     ctx: ImportContext,
     input: ApplyAgentDocumentImportInput,
@@ -444,49 +499,17 @@ export async function applyAgentDocumentImport(
 
     if (format.id === 'cognipeer') return applyManifestDocument(ctx, doc.data as unknown as AgentManifest, input);
 
-    let plan: ClaudeAgentPlan;
-    try {
-        plan = planClaudeManagedAgent(doc);
-    } catch (error) {
-        throw new AgentImportError((error as Error).message);
-    }
-    if (!input.modelKey) throw new AgentImportError('Choose a model for the agent.');
+    const plan = planClaudeManagedAgent(doc);
+    const modelKey = input.modelKey;
+    if (!modelKey) throw new AgentImportError('Choose a model for the agent.');
 
     const key = input.key?.trim() || slugify(plan.name);
     if (await agentKeyExists(ctx.tenantDbName, ctx.projectId, key)) {
         throw new AgentImportError(`An agent with key "${key}" already exists in this project. Choose another key.`, 409);
     }
 
-    const createdServers: IMcpServer[] = [];
-    const createdSkills: IAgentSkill[] = [];
-    const rollback = async () => {
-        // Best effort, one by one: a failure here must never mask the error
-        // that triggered the rollback.
-        for (const server of createdServers) {
-            try {
-                await deleteMcpServer(ctx.tenantDbName, String(server._id));
-            } catch (error) {
-                logger.warn('Import rollback could not delete an MCP server', { key: server.key, error: (error as Error).message });
-            }
-        }
-        if (createdSkills.length > 0) {
-            try {
-                const db = await getDatabase();
-                await db.switchToTenant(ctx.tenantDbName);
-                for (const skill of createdSkills) {
-                    try {
-                        await db.deleteSkill(String(skill._id));
-                    } catch (error) {
-                        logger.warn('Import rollback could not delete a skill', { key: skill.key, error: (error as Error).message });
-                    }
-                }
-            } catch {
-                /* the original error is what matters */
-            }
-        }
-    };
-
-    try {
+    const created: CreatedRecords = { mcpServers: [], skills: [], prompts: [], tools: [] };
+    return withImportRollback(ctx, created, reportClaudeRollbackFailure, async () => {
         const toolBindings: IAgentToolBinding[] = [];
         const existingServers = await listMcpServers(ctx.tenantDbName, { projectId: ctx.projectId });
 
@@ -518,7 +541,7 @@ export async function applyAgentDocumentImport(
                         { mcpServer: server.ref },
                     );
                 }
-                createdServers.push(resolved);
+                created.mcpServers.push({ key: resolved.key, name: resolved.name, id: String(resolved._id) });
             }
             if (!server.referenced) continue;
             const toolNames = applyToolFilter((resolved.tools ?? []).map((t) => t.name), server.toolFilter);
@@ -536,13 +559,13 @@ export async function applyAgentDocumentImport(
             if (!choice.title?.trim() || !choice.header?.trim()) {
                 throw new AgentImportError(`Skill "${skill.skillId}" needs a title and a one-line description.`);
             }
-            const created = await createSkill(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, {
+            const record = await createSkill(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, {
                 title: choice.title.trim(),
                 header: choice.header.trim(),
                 body: choice.body ?? '',
             });
-            createdSkills.push(created);
-            skillKeys.push(created.key);
+            created.skills.push({ key: record.key, title: record.title, id: String(record._id) });
+            skillKeys.push(record.key);
         }
 
         const sandboxAvailability = plan.builtins.sandbox.length > 0 ? await resolveSandboxAvailability(ctx.tenantId) : null;
@@ -551,7 +574,7 @@ export async function applyAgentDocumentImport(
         if (plan.builtins.webFetch) toolBindings.push({ source: 'system', sourceKey: 'browser_use', toolNames: ['browser_use'] });
 
         const config: IAgentConfig = {
-            modelKey: input.modelKey,
+            modelKey,
             ...(plan.systemPrompt ? { systemPrompt: plan.systemPrompt } : {}),
             ...(toolBindings.length > 0 ? { toolBindings } : {}),
             ...(skillKeys.length > 0 ? { skills: [...new Set(skillKeys)] } : {}),
@@ -607,17 +630,10 @@ export async function applyAgentDocumentImport(
         return {
             agent: result.agent,
             action: 'created',
-            created: {
-                mcpServers: createdServers.map((s) => ({ key: s.key, name: s.name })),
-                skills: createdSkills.map((s) => ({ key: s.key, title: s.title })),
-            },
+            created: { mcpServers: withoutIds(created.mcpServers), skills: withoutIds(created.skills) },
             warnings: [...warnings, ...validation.warnings.map((w) => ({ code: 'config_warning', message: `${w.field}: ${w.message}` }))],
         };
-    } catch (error) {
-        await rollback();
-        if (error instanceof AgentManifestError) throw new AgentImportError(error.message, 400, { issues: error.issues });
-        throw error;
-    }
+    });
 }
 
 // ── Cognipeer manifest (with optional embedded definitions) ─────────────
@@ -653,53 +669,26 @@ async function applyManifestDocument(
 
     const resources = manifest.resources ?? {};
     const rows = await embeddedResourceRows(ctx, resources);
-    const choiceFor = (type: ManifestResourceType, resourceKey: string): ResourceImportChoice => {
-        const explicit = input.resources?.[resourceRef(type, resourceKey)];
-        if (explicit) return explicit;
-        const row = rows.find((r) => r.type === type && r.key === resourceKey);
-        return row?.existing ? { action: 'reuse', key: row.existing.key } : { action: 'create' };
-    };
-    const existingKey = (type: ManifestResourceType, resourceKey: string, requested?: string) => {
-        const target = requested || rows.find((r) => r.type === type && r.key === resourceKey)?.existing?.key;
+    /** What to do with an embedded definition — by default reuse what the project has, create otherwise. A reuse comes back with the key it resolves to. */
+    const choiceFor = (type: ManifestResourceType, resourceKey: string) => {
+        const existing = rows.find((r) => r.type === type && r.key === resourceKey)?.existing?.key;
+        const choice: ResourceImportChoice = input.resources?.[resourceRef(type, resourceKey)] ?? (existing ? { action: 'reuse' } : { action: 'create' });
+        if (choice.action !== 'reuse') return choice;
+        const target = choice.key || existing;
         if (!target) throw new AgentImportError(`Nothing to reuse for ${type} "${resourceKey}" — create it or skip it.`);
-        return target;
+        return { action: 'reuse' as const, key: target };
     };
 
     const remap: Partial<Record<ManifestResourceType, Record<string, string>>> = {};
     const setKey = (type: ManifestResourceType, from: string, to: string) => { (remap[type] ??= {})[from] = to; };
-    const created = {
-        mcpServers: [] as Array<{ key: string; name: string; id: string }>,
-        skills: [] as Array<{ key: string; title: string; id: string }>,
-        prompts: [] as Array<{ key: string; name: string; id: string }>,
-        tools: [] as Array<{ key: string; name: string; id: string }>,
-    };
+    const created: CreatedRecords = { mcpServers: [], skills: [], prompts: [], tools: [] };
     const warnings: Array<{ code: string; message: string }> = [];
 
-    const rollback = async () => {
-        const attempt = async (label: string, fn: () => Promise<unknown>) => {
-            try {
-                await fn();
-            } catch (error) {
-                logger.warn(`Import rollback could not delete ${label}`, { error: (error as Error).message });
-            }
-        };
-        for (const server of created.mcpServers) await attempt(`MCP server ${server.key}`, () => deleteMcpServer(ctx.tenantDbName, server.id));
-        for (const tool of created.tools) await attempt(`tool ${tool.key}`, () => deleteTool(ctx.tenantDbName, tool.id));
-        for (const prompt of created.prompts) await attempt(`prompt ${prompt.key}`, () => deletePrompt(ctx.tenantDbName, ctx.projectId, prompt.id));
-        if (created.skills.length > 0) {
-            await attempt('skills', async () => {
-                const db = await getDatabase();
-                await db.switchToTenant(ctx.tenantDbName);
-                for (const skill of created.skills) await attempt(`skill ${skill.key}`, () => db.deleteSkill(skill.id));
-            });
-        }
-    };
-
-    try {
+    return withImportRollback(ctx, created, reportManifestRollbackFailure, async () => {
         for (const skill of resources.skills ?? []) {
             const choice = choiceFor('skills', skill.key);
             if (choice.action === 'skip') continue;
-            if (choice.action === 'reuse') { setKey('skills', skill.key, existingKey('skills', skill.key, choice.key)); continue; }
+            if (choice.action === 'reuse') { setKey('skills', skill.key, choice.key); continue; }
             const record = await createSkill(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, {
                 key: skill.key, title: skill.title, header: skill.header, body: skill.body ?? '',
                 ...(skill.minModelTier ? { minModelTier: skill.minModelTier } : {}),
@@ -711,7 +700,7 @@ async function applyManifestDocument(
         for (const prompt of resources.prompts ?? []) {
             const choice = choiceFor('prompts', prompt.key);
             if (choice.action === 'skip') continue;
-            if (choice.action === 'reuse') { setKey('prompts', prompt.key, existingKey('prompts', prompt.key, choice.key)); continue; }
+            if (choice.action === 'reuse') { setKey('prompts', prompt.key, choice.key); continue; }
             const record = await createPrompt(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, {
                 key: prompt.key, name: prompt.name, template: prompt.template,
                 ...(prompt.description ? { description: prompt.description } : {}),
@@ -725,7 +714,7 @@ async function applyManifestDocument(
         for (const tool of resources.tools ?? []) {
             const choice = choiceFor('tools', tool.key);
             if (choice.action === 'skip') continue;
-            if (choice.action === 'reuse') { setKey('tools', tool.key, existingKey('tools', tool.key, choice.key)); continue; }
+            if (choice.action === 'reuse') { setKey('tools', tool.key, choice.key); continue; }
             const auth = mergeAuth(tool.auth, choice.auth);
             if (!authIsComplete(auth)) {
                 warnings.push({ code: 'credentials_missing', message: `Tool "${tool.name}" was created without its ${auth.type} credential — add it under Tools before running the agent.` });
@@ -750,7 +739,7 @@ async function applyManifestDocument(
         for (const server of resources.mcpServers ?? []) {
             const choice = choiceFor('mcpServers', server.key);
             if (choice.action === 'skip') continue;
-            if (choice.action === 'reuse') { setKey('mcpServers', server.key, existingKey('mcpServers', server.key, choice.key)); continue; }
+            if (choice.action === 'reuse') { setKey('mcpServers', server.key, choice.key); continue; }
             const auth = mergeAuth(server.auth, choice.auth);
             if (!authIsComplete(auth) && server.sourceType !== 'remote') {
                 warnings.push({ code: 'credentials_missing', message: `MCP server "${server.name}" was created without its ${auth.type} credential — add it under MCP before running the agent.` });
@@ -793,31 +782,24 @@ async function applyManifestDocument(
 
         const remapped = remapSpecResourceKeys(manifest.spec, remap);
         const spec = input.modelKey ? { ...remapped, modelKey: input.modelKey } : remapped;
-        const { resources: _embedded, ...bare } = manifest;
-        void _embedded;
-        const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, { ...bare, spec }, {
+        const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, { ...manifest, resources: undefined, spec }, {
             mode: input.overwrite ? 'upsert' : 'create',
             key,
             name: input.name,
         });
-        const strip = <T extends { id: string }>(list: T[]) => list.map(({ id: _id, ...rest }) => { void _id; return rest; });
         return {
             agent: result.agent,
             action: result.action,
             created: {
-                mcpServers: strip(created.mcpServers),
-                skills: strip(created.skills),
-                prompts: strip(created.prompts),
-                tools: strip(created.tools),
+                mcpServers: withoutIds(created.mcpServers),
+                skills: withoutIds(created.skills),
+                prompts: withoutIds(created.prompts),
+                tools: withoutIds(created.tools),
             },
             warnings: [
                 ...warnings,
                 ...result.missing.map((dep) => ({ code: 'missing_dependency', message: `${dep.type} "${dep.key}" does not exist in this project.` })),
             ],
         };
-    } catch (error) {
-        await rollback();
-        if (error instanceof AgentManifestError) throw new AgentImportError(error.message, 400, { issues: error.issues });
-        throw error;
-    }
+    });
 }

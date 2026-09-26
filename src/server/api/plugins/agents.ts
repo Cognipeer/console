@@ -5,7 +5,7 @@ import {
   previewAgentDocumentImport,
   type ApplyAgentDocumentImportInput,
 } from '@/lib/services/agents/import/importService';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
 import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IUser } from '@/lib/database';
@@ -22,9 +22,6 @@ import {
   listAgents,
   listAgentVersions,
   listConversations,
-  normalizeA2aMetadataUpdate,
-  prepareConnectionForStorage,
-  publishAgent,
   updateAgentRecord,
 } from '@/lib/services/agents';
 // By path: the agents barrel does not export the error class.
@@ -36,7 +33,10 @@ import {
   // cannot cross the job queue).
   executePlaygroundChatLocal,
 } from '@/lib/services/agents/agentService';
-import { invalidConfigBody, validateAgentConfig } from '@/lib/services/agents/agentConfigValidation';
+import {
+  validateAgentConfig,
+  type AgentConfigIssue,
+} from '@/lib/services/agents/agentConfigValidation';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import {
   AgentManifestError,
@@ -73,94 +73,29 @@ import {
 import type { LicenseType } from '@/lib/license/license-manager';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
+  applyStreamHeaders,
   readJsonBody,
   requireProjectContextForRequest,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
+import {
+  applyConfigGuardrailBindings,
+  connectedConfigForUpdate,
+  normalizeA2aUpdate,
+  prepareNewAgentConfig,
+  publishValidatedAgent,
+  redactAgent,
+  sendAgentGuardrailBlock,
+  validateNativeConfigUpdate,
+} from './agent-config-write';
 
 const logger = createLogger('api:agents');
 
-/**
- * A guardrail refusal is a POLICY decision, not a server fault: answered with
- * the same `guardrail_block` envelope and status the inference routes use for
- * `GuardrailBlockError`, so a client can branch on `error.type` whether it
- * called a model or an agent. Returns null for any other error so the caller's
- * own fallback still applies.
- */
-function sendAgentGuardrailBlock(
-  reply: Parameters<typeof sendProjectContextError>[0],
-  error: unknown,
-) {
-  if (!(error instanceof AgentGuardrailBlockedError)) return null;
-  return reply.code(error.status).send({
-    error: {
-      type: 'guardrail_block',
-      action: 'block',
-      message: error.message,
-      reason: error.reason,
-      guardrail_key: error.guardrailKey ?? null,
-      hook: error.hook ?? null,
-    },
-  });
-}
-
-/**
- * Strip secret material (encrypted inline API keys) from an agent before it
- * leaves the API. The presence of a key is surfaced as `connection.hasApiKey`.
- */
 /** A version snapshot carries the config it froze — sandbox secrets included. */
 function redactVersion<T extends { snapshot?: { config?: IAgentConfig } }>(version: T): T {
   if (!version?.snapshot?.config?.sandbox) return version;
   return { ...version, snapshot: maskAgentSandboxSecrets(version.snapshot) } as T;
-}
-
-function redactAgent<T extends IAgent>(input: T): T {
-  // Sandbox secrets: keys with a masked value, never the sealed payload.
-  const agent = maskAgentSandboxSecrets(input);
-  const connection = agent.config?.connection;
-  if (!connection) return agent;
-  const { apiKeyEnc, ...rest } = connection;
-  return {
-    ...agent,
-    config: {
-      ...agent.config,
-      connection: { ...rest, hasApiKey: Boolean(apiKeyEnc) },
-    },
-  } as unknown as T;
-}
-
-/**
- * Normalize an incoming agent config. For connected (external) agents the
- * connection is validated and its inline API key encrypted; native agents must
- * carry a modelKey. Throws (Error) on invalid input — callers map to 400.
- *
- * A connected agent's config is rebuilt from scratch so nothing but the
- * validated connection is stored — EXCEPT its guardrail bindings, which are
- * carried through (`carriedGuardrailFields`) and validated by
- * `applyConfigGuardrailBindings` right after. Dropping them here is what made
- * the connected-agent enforcement branch unreachable: the binding list saved
- * with a 200 and `resolveBindings` read `{ kind, connection }` as "nothing bound".
- */
-function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
-  if (!rawConfig || typeof rawConfig !== 'object') {
-    throw new Error('Agent config is required');
-  }
-  const cfg = rawConfig as Record<string, unknown>;
-
-  if (cfg.kind === 'external') {
-    return {
-      kind: 'external',
-      connection: prepareConnectionForStorage(cfg.connection),
-      ...carriedGuardrailFields(cfg),
-    };
-  }
-
-  if (typeof cfg.modelKey !== 'string' || !cfg.modelKey) {
-    throw new Error('Model configuration is required');
-  }
-  return cfg as IAgentConfig;
 }
 
 /**
@@ -174,35 +109,6 @@ function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
  * resolveProjectContext already grants them, and agents stored without a
  * projectId stay tenant-wide.
  */
-/**
- * Validate `config.guardrails` and stamp the deprecated single slots back onto
- * the config from it, in place.
- *
- * Done here rather than in `normalizeAgentConfig` because it needs the tenant
- * database and the caller's project scope, and `normalizeAgentConfig` is
- * deliberately synchronous and DB-free. Returns the 400 message, or null.
- *
- * Runs for connected (external) agents too: their `input.pre` / `output.pre`
- * bindings are enforced by `executeAgentChatLocal`'s external branch, so they
- * are validated exactly like a native agent's.
- */
-async function applyConfigGuardrailBindings(
-  config: IAgentConfig,
-  tenantDbName: string,
-  projectId: string,
-  user?: Pick<IUser, 'role'>,
-): Promise<string | null> {
-  const resolved = await resolveConfigGuardrailBindings(
-    tenantDbName,
-    projectId,
-    config.guardrails,
-    user,
-  );
-  if (resolved.error) return resolved.error;
-  if (resolved.patch) Object.assign(config, resolved.patch);
-  return null;
-}
-
 async function agentInProjectScope(
   tenantDbName: string,
   agentId: string,
@@ -214,6 +120,30 @@ async function agentInProjectScope(
   if (user.role === 'owner' || user.role === 'admin') return agent;
   if (!agent.projectId) return agent;
   return String(agent.projectId) === String(projectId) ? agent : null;
+}
+
+/**
+ * The caller's project context plus the agent `:agentId` names, or null —
+ * with the 404 already sent — when it is missing or out of scope.
+ */
+async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) {
+  const context = await requireProjectContextForRequest(request);
+  const { agentId } = request.params as { agentId: string };
+  const agent = await agentInProjectScope(context.session.tenantDbName, agentId, context.projectId, context.user);
+  if (!agent) {
+    void reply.code(404).send({ error: 'Agent not found' });
+    return null;
+  }
+  return { ...context, agentId, agent };
+}
+
+/**
+ * Logs a failed route and answers it: the project-context status when that is
+ * what failed, else a 500 with `message`.
+ */
+function sendRouteError(reply: FastifyReply, error: unknown, logMessage: string, message: string) {
+  logger.error(logMessage, { error });
+  return sendProjectContextError(reply, error) ?? reply.code(500).send({ error: message });
 }
 
 /**
@@ -247,905 +177,6 @@ const SESSION_BUSY_BODY = {
   code: 'agent_run_conflict',
 };
 
-export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/agents', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const query = (request.query ?? {}) as { search?: string; status?: string };
-      const agents = await listAgents(session.tenantDbName, {
-        projectId,
-        search: query.search,
-        status: query.status as AgentStatus | undefined,
-      });
-
-      return reply.code(200).send({ agents: agents.map(redactAgent) });
-    } catch (error) {
-      logger.error('List agents error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to list agents' });
-    }
-  }));
-
-  app.post('/agents', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session, user } = await requireProjectContextForRequest(request);
-      const body = readJsonBody<Record<string, unknown>>(request);
-
-      if (typeof body.name !== 'string') {
-        return reply.code(400).send({ error: 'Agent name is required' });
-      }
-
-      let config: IAgentConfig;
-      try {
-        config = normalizeAgentConfig(body.config);
-      } catch (validationError) {
-        return reply.code(400).send({
-          error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
-        });
-      }
-
-      const bindingError = await applyConfigGuardrailBindings(
-        config,
-        session.tenantDbName,
-        projectId,
-        user,
-      );
-      if (bindingError) {
-        return reply.code(400).send({ error: bindingError });
-      }
-
-      const validation = await validateAgentConfig({ tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, config });
-      if (validation.errors.length > 0) {
-        return reply.code(400).send(invalidConfigBody(validation));
-      }
-
-      const agent = await createAgentRecord(
-        session.tenantDbName,
-        session.tenantId,
-        projectId,
-        session.userId,
-        {
-          config,
-          description: body.description as string | undefined,
-          name: body.name,
-        },
-      );
-
-      return reply.code(201).send({ agent: redactAgent(agent), warnings: validation.warnings });
-    } catch (error) {
-      logger.error('Create agent error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to create agent' });
-    }
-  }));
-
-  app.get('/agents/:agentId', withApiRequestContext(async (request, reply) => {
-    try {
-      await requireProjectContextForRequest(request);
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-
-      if (!agent) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-
-      return reply.code(200).send({ agent: redactAgent(agent) });
-    } catch (error) {
-      logger.error('Get agent error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to get agent' });
-    }
-  }));
-
-  app.patch('/agents/:agentId', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const scoped = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!scoped) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-      const body = readJsonBody<Record<string, unknown>>(request);
-      let warnings: Array<{ field: string; message: string }> = [];
-
-      if (body.config && typeof body.config === 'object') {
-        const cfg = body.config as Record<string, unknown>;
-        if (cfg.kind === 'external') {
-          // Connected-agent config: validate connection & preserve the stored
-          // API key when the client edits without resending it.
-          const conn = { ...((cfg.connection as Record<string, unknown>) ?? {}) };
-          if (!conn.apiKey && !conn.apiKeyEnc) {
-            const existing = await getAgentById(session.tenantDbName, agentId);
-            const existingEnc = existing?.config?.connection?.apiKeyEnc;
-            if (existingEnc) conn.apiKeyEnc = existingEnc;
-          }
-          let externalConfig: IAgentConfig;
-          try {
-            externalConfig = {
-              kind: 'external',
-              connection: prepareConnectionForStorage(conn),
-              // Carried, then validated below — see `normalizeAgentConfig`.
-              ...carriedGuardrailFields(cfg),
-            };
-          } catch (validationError) {
-            return reply.code(400).send({
-              error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
-            });
-          }
-          const bindingError = await applyConfigGuardrailBindings(
-            externalConfig,
-            session.tenantDbName,
-            projectId,
-            user,
-          );
-          if (bindingError) {
-            return reply.code(400).send({ error: bindingError });
-          }
-          body.config = externalConfig;
-        } else {
-          // Guard: never let a native-shaped config silently clobber a stored
-          // connected agent's connection (e.g. a stray playground auto-save).
-          const existing = await getAgentById(session.tenantDbName, agentId);
-          if (existing?.config?.kind === 'external') {
-            delete body.config;
-          } else {
-            const resolved = await resolveConfigGuardrailBindings(
-              session.tenantDbName,
-              projectId,
-              cfg.guardrails,
-              user,
-            );
-            if (resolved.error) {
-              return reply.code(400).send({ error: resolved.error });
-            }
-            // The config replaces the stored one wholesale, so the projected
-            // legacy slots must be written on the SAME object — leaving them
-            // out would clear the columns an older binary still reads.
-            if (resolved.patch) Object.assign(cfg, resolved.patch);
-
-            // A config that would not run as configured is not saved: the
-            // runtime would skip the broken parts silently.
-            const validation = await validateAgentConfig({
-              tenantDbName: session.tenantDbName,
-              tenantId: session.tenantId,
-              projectId,
-              config: cfg as IAgentConfig,
-              agentKey: scoped.key,
-            });
-            if (validation.errors.length > 0) {
-              return reply.code(400).send(invalidConfigBody(validation));
-            }
-            warnings = validation.warnings;
-          }
-        }
-      }
-
-      // A2A exposure updates: whitelist fields and keep the endpoint slug
-      // server-owned (existing slug is preserved, never client-chosen).
-      if (body.metadata && typeof body.metadata === 'object'
-        && (body.metadata as Record<string, unknown>).a2a !== undefined) {
-        const metadata = body.metadata as Record<string, unknown>;
-        const existing = await getAgentById(session.tenantDbName, agentId);
-        metadata.a2a = normalizeA2aMetadataUpdate(metadata.a2a, existing);
-      }
-
-      const agent = await updateAgentRecord(session.tenantDbName, agentId, body, session.userId);
-
-      if (!agent) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-
-      return reply.code(200).send({ agent: redactAgent(agent), warnings });
-    } catch (error) {
-      logger.error('Update agent error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to update agent' });
-    }
-  }));
-
-  app.delete('/agents/:agentId', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      if (!(await agentInProjectScope(session.tenantDbName, agentId, projectId, user))) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-      const deleted = await deleteAgentRecord(session.tenantDbName, agentId);
-
-      if (!deleted) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-
-      return reply.code(200).send({ success: true });
-    } catch (error) {
-      logger.error('Delete agent error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to delete agent' });
-    }
-  }));
-
-  app.get('/agents/:agentId/versions', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const query = (request.query ?? {}) as { limit?: string; skip?: string; version?: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-
-      if (!agent) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-
-      if (query.version) {
-        const version = await getAgentVersion(
-          session.tenantDbName,
-          agentId,
-          Number.parseInt(query.version, 10),
-        );
-
-        if (!version) {
-          return reply.code(404).send({ error: 'Version not found' });
-        }
-
-        return reply.code(200).send({ version: redactVersion(version) });
-      }
-
-      const result = await listAgentVersions(session.tenantDbName, agentId, {
-        limit: Number.parseInt(query.limit ?? '50', 10),
-        skip: Number.parseInt(query.skip ?? '0', 10),
-      });
-
-      return reply.code(200).send({
-        publishedVersion: agent.publishedVersion ?? null,
-        total: result.total,
-        versions: result.versions.map(redactVersion),
-      });
-    } catch (error) {
-      logger.error('List agent versions error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to list agent versions' });
-    }
-  }));
-
-  /**
-   * Flattens `promptKey` + `promptVariables` into a literal `systemPrompt` for
-   * code export. The generated project has no Prompts module and no runtime
-   * context, so anything left unresolved here would stay unresolved forever.
-   */
-  async function resolveConfigForExport(
-    tenantDbName: string,
-    projectId: string,
-    agent: IAgent,
-    config: IAgentConfig,
-  ): Promise<IAgentConfig> {
-    let template = config.systemPrompt;
-    if (!template && config.promptKey) {
-      const db = await getDatabase();
-      await db.switchToTenant(tenantDbName);
-      const prompt = await db.findPromptByKey(config.promptKey, projectId);
-      template = prompt?.template;
-    }
-    if (!template) return config;
-
-    const variables = buildPromptVariables({
-      config,
-      agentKey: agent.key,
-      agentName: agent.name,
-      version: agent.publishedVersion ?? null,
-    });
-    const rendered = renderPromptTemplate(template, variables);
-    return { ...config, systemPrompt: rendered.text, promptKey: undefined };
-  }
-
-  // ── Manifest export / import ───────────────────────────────────────────
-
-  app.get('/agents/:agentId/export', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const query = (request.query ?? {}) as { format?: string; version?: string; download?: string; include?: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-
-      const format: AgentManifestFormat = query.format === 'yaml' ? 'yaml' : 'json';
-      // `include=skills,prompts,mcp,tools` (or `all`) embeds those definitions
-      // so the manifest can be imported into a project that lacks them.
-      let include;
-      try {
-        include = parseResourceInclude(query.include);
-      } catch (error) {
-        return reply.code(400).send({ error: (error as Error).message });
-      }
-
-      // No `version` exports the DRAFT config — what the playground runs. A
-      // version number exports that immutable snapshot instead, which is what
-      // anyone promoting between environments actually wants.
-      let config = agent.config;
-      let version: number | null = null;
-      if (query.version) {
-        const requested = Number.parseInt(query.version, 10);
-        if (!Number.isFinite(requested)) {
-          return reply.code(400).send({ error: 'version must be a number' });
-        }
-        const snapshot = await getAgentVersion(session.tenantDbName, agentId, requested);
-        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
-        config = snapshot.snapshot.config;
-        version = requested;
-      }
-
-      const { resources, skipped } = await collectManifestResources(session.tenantDbName, projectId, config, include);
-      const manifest = buildAgentManifest(agent, config, version, resources);
-      const body = serializeAgentManifest(manifest, format);
-
-      if (query.download === '1') {
-        return reply
-          .code(200)
-          .header('content-type', format === 'yaml' ? 'application/yaml' : 'application/json')
-          .header(
-            'content-disposition',
-            `attachment; filename="${agent.key}${version !== null ? `-v${version}` : ''}.${format}"`,
-          )
-          .send(body);
-      }
-
-      return reply.code(200).send({ format, manifest, content: body, skippedResources: skipped });
-    } catch (error) {
-      logger.error('Export agent error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to export agent' });
-    }
-  }));
-
-  app.post('/agents/import', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const body = await readJsonBody<{
-        content?: string;
-        manifest?: unknown;
-        format?: AgentManifestFormat;
-        /** `true` validates and reports only — nothing is written. */
-        dryRun?: boolean;
-        mode?: 'create' | 'update' | 'upsert';
-        key?: string;
-        name?: string;
-        allowMissingDependencies?: boolean;
-      }>(request);
-
-      if (!body?.content && !body?.manifest) {
-        return reply.code(400).send({ error: 'content or manifest is required' });
-      }
-
-      const manifest = body.content
-        ? parseAgentManifest(body.content, body.format)
-        : parseAgentManifest(JSON.stringify(body.manifest), 'json');
-
-      if (body.dryRun) {
-        const preview = await previewAgentImport(session.tenantDbName, projectId, manifest);
-        return reply.code(200).send(preview);
-      }
-
-      const result = await applyAgentManifest(
-        session.tenantDbName,
-        session.tenantId,
-        projectId,
-        String(user._id),
-        manifest,
-        {
-          mode: body.mode,
-          key: body.key,
-          name: body.name,
-          allowMissingDependencies: body.allowMissingDependencies,
-        },
-      );
-
-      return reply.code(result.action === 'created' ? 201 : 200).send({
-        agent: redactAgent(result.agent),
-        action: result.action,
-        missing: result.missing,
-      });
-    } catch (error) {
-      if (error instanceof AgentManifestError) {
-        return reply.code(400).send({ error: error.message, issues: error.issues });
-      }
-      logger.error('Import agent error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to import agent' });
-    }
-  }));
-
-  // ── Import from a definition document (New → Import) ────────────────
-  // Any supported format — the console manifest or a Claude Managed Agent
-  // (JSON / YAML / Markdown front-matter) — auto-detected unless `format`
-  // says otherwise. `/preview` writes nothing.
-  const sendImportError = (reply: FastifyReply, error: unknown) => {
-    if (error instanceof AgentDocumentParseError) return reply.code(400).send({ error: error.message });
-    if (error instanceof AgentImportError) {
-      return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
-    }
-    if (error instanceof AgentManifestError) return reply.code(400).send({ error: error.message, issues: error.issues });
-    return null;
-  };
-
-  app.post('/agents/import/document/preview', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const body = await readJsonBody<{ content?: string; format?: string }>(request);
-      if (typeof body?.content !== 'string' || !body.content.trim()) {
-        return reply.code(400).send({ error: 'content is required' });
-      }
-      const preview = await previewAgentDocumentImport(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
-        body.content,
-        body.format,
-      );
-      return reply.code(200).send(preview);
-    } catch (error) {
-      const handled = sendImportError(reply, error);
-      if (handled) return handled;
-      logger.error('Preview agent document import error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to read the document' });
-    }
-  }));
-
-  app.post('/agents/import/document', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const body = await readJsonBody<ApplyAgentDocumentImportInput>(request);
-      if (typeof body?.content !== 'string' || !body.content.trim()) {
-        return reply.code(400).send({ error: 'content is required' });
-      }
-      const result = await applyAgentDocumentImport(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
-        body,
-      );
-      return reply.code(result.action === 'created' ? 201 : 200).send({
-        agent: redactAgent(result.agent),
-        action: result.action,
-        created: result.created,
-        warnings: result.warnings,
-      });
-    } catch (error) {
-      const handled = sendImportError(reply, error);
-      if (handled) return handled;
-      logger.error('Agent document import error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to import agent' });
-    }
-  }));
-
-  // ── Schedules ──────────────────────────────────────────────────────────
-
-  app.get('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-
-      const schedules = readSchedules(agent);
-      return reply.code(200).send({
-        schedules,
-        // Recomputed for display rather than trusted from storage: a stored
-        // nextRunAt goes stale the moment the cron is edited elsewhere.
-        nextRuns: Object.fromEntries(
-          schedules.map((schedule) => [schedule.id, computeScheduleNextRun(schedule)?.toISOString() ?? null]),
-        ),
-        publishedVersion: agent.publishedVersion ?? null,
-      });
-    } catch (error) {
-      logger.error('List agent schedules error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to list schedules' });
-    }
-  }));
-
-  app.post('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-
-      const body = await readJsonBody<AgentScheduleInput>(request);
-      if (!body) return reply.code(400).send({ error: 'A schedule body is required' });
-
-      const { schedule, schedules } = await upsertAgentSchedule(
-        session.tenantDbName,
-        agent,
-        body,
-        String(user._id),
-      );
-      return reply.code(body.id ? 200 : 201).send({ schedule, schedules });
-    } catch (error) {
-      // Validation failures here are the operator's cron, not a server fault.
-      const message = error instanceof Error ? error.message : String(error);
-      if (/^(name|message) is required|cron|interval|schedule/i.test(message)) {
-        return reply.code(400).send({ error: message });
-      }
-      logger.error('Save agent schedule error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to save schedule' });
-    }
-  }));
-
-  app.delete('/agents/:agentId/schedules/:scheduleId', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId, scheduleId } = request.params as { agentId: string; scheduleId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-
-      const schedules = await deleteAgentSchedule(session.tenantDbName, agent, scheduleId, String(user._id));
-      return reply.code(200).send({ schedules });
-    } catch (error) {
-      logger.error('Delete agent schedule error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to delete schedule' });
-    }
-  }));
-
-  app.post('/agents/:agentId/schedules/:scheduleId/run', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId, scheduleId } = request.params as { agentId: string; scheduleId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-      if (!agent.publishedVersion) {
-        return reply.code(409).send({
-          error: 'Publish the agent first — a scheduled run always uses the published version',
-        });
-      }
-
-      const schedule = readSchedules(agent).find((entry) => entry.id === scheduleId);
-      if (!schedule) return reply.code(404).send({ error: 'Schedule not found' });
-
-      // A manual run is awaited (the operator is watching) but must NOT advance
-      // `nextRunAt` — testing a schedule should not skip its next real fire.
-      const result = await runAgentSchedule({
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        projectId: agent.projectId,
-        agent,
-        schedule,
-        trigger: 'manual',
-        userId: String(user._id),
-      });
-
-      return reply.code(200).send(result);
-    } catch (error) {
-      const guardrail = sendAgentGuardrailBlock(reply, error);
-      if (guardrail) return guardrail;
-      logger.error('Manual schedule run error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to run schedule' });
-    }
-  }));
-
-  // ── Code export ────────────────────────────────────────────────────────
-
-  app.post('/agents/:agentId/codegen', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const body = await readJsonBody<{
-        target?: AgentCodegenTarget;
-        packageName?: string;
-        consoleBaseUrl?: string;
-        includeDockerfile?: boolean;
-        version?: number;
-        /** `zip` streams an archive; anything else returns the file list as JSON. */
-        format?: 'zip' | 'json';
-      }>(request);
-
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-
-      const target = body?.target ?? 'server';
-      if (!['cli', 'server', 'worker', 'lambda'].includes(target)) {
-        return reply.code(400).send({ error: `Unknown target "${target}"` });
-      }
-
-      let config = agent.config;
-      if (typeof body?.version === 'number') {
-        const snapshot = await getAgentVersion(session.tenantDbName, agentId, body.version);
-        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
-        config = snapshot.snapshot.config;
-      }
-
-      // Resolve the prompt the way the runtime does before handing it to the
-      // generator. Without this an agent backed by a shared prompt exports with
-      // no system prompt at all, and one with variables exports the hollow
-      // template — both produce a project that quietly behaves differently from
-      // the agent it was generated from.
-      const exportConfig = await resolveConfigForExport(session.tenantDbName, projectId, agent, config);
-
-      const result = generateAgentProject(agent, exportConfig, {
-        target,
-        packageName: body?.packageName,
-        consoleBaseUrl: body?.consoleBaseUrl,
-        includeDockerfile: body?.includeDockerfile,
-      });
-
-      if (body?.format === 'zip') {
-        const { default: JSZip } = await import('jszip');
-        const zip = new JSZip();
-        const root = zip.folder(result.rootDir);
-        for (const file of result.files) root?.file(file.path, file.contents);
-        const buffer = await zip.generateAsync({ type: 'nodebuffer' });
-        return reply
-          .code(200)
-          .header('content-type', 'application/zip')
-          .header('content-disposition', `attachment; filename="${result.rootDir}.zip"`)
-          .send(buffer);
-      }
-
-      return reply.code(200).send(result);
-    } catch (error) {
-      logger.error('Agent codegen error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to generate agent code' });
-    }
-  }));
-
-  app.post('/agents/:agentId/publish', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const scoped = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!scoped) {
-        // Same failure an unknown id already raises inside publishAgent, so the
-        // route cannot confirm that another project's agent exists.
-        throw new Error(`Agent "${agentId}" not found`);
-      }
-      // A draft saved before validation existed (or whose tool was deleted
-      // since) must not become what every API caller runs.
-      const validation = await validateAgentConfig({
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        projectId,
-        config: scoped.config,
-        agentKey: scoped.key,
-      });
-      if (validation.errors.length > 0) {
-        return reply.code(400).send(invalidConfigBody(validation));
-      }
-      const body = readJsonBody<Record<string, unknown>>(request);
-      const version = await publishAgent(
-        session.tenantDbName,
-        agentId,
-        session.userId,
-        typeof body.changelog === 'string' ? body.changelog : undefined,
-      );
-
-      return reply.code(201).send({ version });
-    } catch (error) {
-      logger.error('Publish agent error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({
-          error: error instanceof Error ? error.message : 'Failed to publish agent',
-        });
-    }
-  }));
-
-  /**
-   * Sends one tiny completion to a model through the agent runtime's own path,
-   * so a wrong provider key is caught on the Configure page instead of in the
-   * agent's first session. Always 200: the check's own verdict is the body.
-   */
-  /**
-   * What the Sandbox section of an agent can offer: whether this deployment
-   * has the sandbox module, whether the tenant's license unlocks it, and the
-   * templates to pick from. Always 200 — `available: false` with a `reason`
-   * is an answer the UI renders, not a failure.
-   */
-  app.get('/agents/sandbox/capabilities', withApiRequestContext(async (request, reply) => {
-    try {
-      const { session } = await requireProjectContextForRequest(request);
-      const availability = await resolveSandboxAvailability(session.tenantId);
-      if (!availability.available) {
-        return reply.code(200).send({ available: false, reason: availability.reason, templates: [] });
-      }
-      const templates = await availability.runner.listTemplates(session.tenantDbName, session.tenantId)
-        .catch((error: unknown) => {
-          logger.warn('Could not list sandbox templates', { error });
-          return [];
-        });
-      return reply.code(200).send({ available: true, templates });
-    } catch (error) {
-      logger.error('Agent sandbox capabilities error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to read sandbox capabilities' });
-    }
-  }));
-
-  // Effective execution ceilings for this tenant/project (env ∧ quota) —
-  // the Build → Execution card shows them as the maximum an agent may set.
-  app.get('/agents/execution/limits', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const limits = await resolveAgentExecutionLimits({
-        quotaContext: {
-          tenantDbName: session.tenantDbName,
-          tenantId: session.tenantId,
-          projectId,
-          licenseType: session.licenseType as LicenseType,
-          userId: session.userId,
-        },
-      });
-      return reply.code(200).send({
-        syncTimeoutSeconds: Math.floor(limits.syncTimeoutMs / 1000),
-        backgroundMaxDurationMinutes: Math.floor(limits.backgroundMaxDurationMs / 60_000),
-        maxConcurrentRunsPerTenant: limits.maxConcurrentRunsPerTenant,
-        maxConcurrentRunsPerProject: limits.maxConcurrentRunsPerProject,
-      });
-    } catch (error) {
-      logger.error('Agent execution limits error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to read execution limits' });
-    }
-  }));
-
-  // Background runs of one agent, newest first (Sessions → Background runs).
-  app.get('/agents/:agentId/runs', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
-      const allowed = new Set(['queued', 'running', 'succeeded', 'failed', 'canceled']);
-      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'>;
-      const runs = await listAgentRuns(session.tenantDbName, {
-        tenantId: session.tenantId,
-        projectId,
-        agentKey: agent.key,
-        mode: 'background',
-        ...(status.length > 0 ? { status } : {}),
-        ...(query.conversationId ? { conversationId: query.conversationId } : {}),
-        limit: Math.min(Number(query.limit) || 100, 500),
-      });
-      return reply.code(200).send({ runs: runs.map(serializeAgentRun) });
-    } catch (error) {
-      logger.error('List agent runs error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to list runs' });
-    }
-  }));
-
-  app.post('/agents/:agentId/runs/:runId/cancel', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId, runId } = request.params as { agentId: string; runId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-      // Ownership first: the run must belong to THIS agent, not merely to the project.
-      const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
-      if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
-        return reply.code(404).send({ error: 'Run not found' });
-      }
-      const outcome = await requestAgentRunCancellation(session.tenantDbName, session.tenantId, projectId, runId);
-      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Run not found' });
-      if (outcome.kind === 'already_terminal') {
-        return reply.code(409).send({ error: `Run is already ${outcome.run.status}` });
-      }
-      return reply.code(200).send({ run: serializeAgentRun(outcome.run) });
-    } catch (error) {
-      logger.error('Cancel agent run error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to cancel run' });
-    }
-  }));
-
-  app.post('/agents/model-check', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, session } = await requireProjectContextForRequest(request);
-      const body = readJsonBody<Record<string, unknown>>(request);
-      if (typeof body.modelKey !== 'string' || !body.modelKey) {
-        return reply.code(400).send({ error: 'modelKey is required' });
-      }
-      const result = await checkAgentModel(session.tenantDbName, session.tenantId, projectId, body.modelKey);
-      return reply.code(200).send(result);
-    } catch (error) {
-      logger.error('Agent model check error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to check the model' });
-    }
-  }));
-
-  /**
-   * Validates a config without saving it — the stored draft, or the `config`
-   * in the body (what the editor currently holds). The Configure page calls
-   * this to mark broken fields before Save.
-   */
-  app.post('/agents/:agentId/validate', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const scoped = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!scoped) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-      const body = readJsonBody<Record<string, unknown>>(request);
-      const config = body.config && typeof body.config === 'object'
-        ? body.config as IAgentConfig
-        : scoped.config;
-      const validation = await validateAgentConfig({
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        projectId,
-        config,
-        agentKey: scoped.key,
-      });
-      return reply.code(200).send({ valid: validation.errors.length === 0, ...validation });
-    } catch (error) {
-      logger.error('Validate agent config error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to validate agent config' });
-    }
-  }));
-
-  app.get('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-
-      if (!agent) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-
-      const conversations = await listConversations(session.tenantDbName, agent.key, {
-        limit: 50,
-        projectId,
-      });
-
-      return reply.code(200).send({ conversations });
-    } catch (error) {
-      logger.error('List agent conversations error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to list conversations' });
-    }
-  }));
-
-  app.post('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
-    try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-
-      if (!agent) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-
-      const body = readJsonBody<Record<string, unknown>>(request);
-      const conversation = await createConversation(
-        session.tenantDbName,
-        session.tenantId,
-        projectId,
-        session.userId,
-        agent.key,
-        typeof body.title === 'string' ? body.title : undefined,
-        { source: 'console' },
-      );
-
-      return reply.code(201).send({ conversation });
-    } catch (error) {
-      logger.error('Create agent conversation error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to create conversation' });
-    }
-  }));
-
-  // ── Sessions ─────────────────────────────────────────────────────────
-  //
-  // A Session is the conversation record, presented under the name the
-  // Sessions page uses. Kept as its own route group rather than renaming
-  // `/conversations` above — nothing else in the codebase depends on that
-  // name yet, but adding rather than renaming means neither guess can be
-  // wrong about who else might.
-
-
 /**
  * Dashboard chat may only extend a console session. API / A2A / scheduled /
  * eval sessions are real traffic — the UI shows them read-only, and this keeps
@@ -1157,6 +188,60 @@ async function readOnlySessionSource(tenantDbName: string, conversationId: unkno
   const conversation = await getConversationById(tenantDbName, conversationId);
   const source = conversation?.metadata?.source;
   return typeof source === 'string' && source !== 'console' ? source : null;
+}
+
+/**
+ * What `/chat` and `/chat/stream` both check before a playground turn runs:
+ * the message, the agent in scope, a writable session and its run slot. Null —
+ * with the refusal already sent — when any of them is missing. Otherwise the
+ * held reservation (release it when the turn ends) and the run input.
+ */
+async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply) {
+  const { projectId, user, session } = await requireProjectContextForRequest(request);
+  const { agentId } = request.params as { agentId: string };
+  const body = readJsonBody<Record<string, unknown>>(request);
+
+  if (typeof body.message !== 'string') {
+    void reply.code(400).send({ error: 'Message is required' });
+    return null;
+  }
+  const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+  if (!agent) {
+    void reply.code(404).send({ error: 'Agent not found' });
+    return null;
+  }
+  const readOnlySource = await readOnlySessionSource(session.tenantDbName, body.conversationId);
+  if (readOnlySource) {
+    void reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
+    return null;
+  }
+  const reservation = await reserveDashboardSession({
+    session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
+  });
+  if (reservation === null) {
+    void reply.code(409).send(SESSION_BUSY_BODY);
+    return null;
+  }
+
+  return {
+    body,
+    reservation,
+    run: {
+      agentKey: agent.key,
+      // Playground JSON editor: caller-supplied runtime context (downstream
+      // headers/metadata), stamped with the dashboard user's identity.
+      runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+        userId: session.userId,
+        source: 'playground',
+      }),
+      projectId,
+      tenantDbName: session.tenantDbName,
+      tenantId: session.tenantId,
+      userMessage: body.message,
+      ...(typeof body.version === 'number' ? { version: body.version } : {}),
+      ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+    },
+  };
 }
 
 /**
@@ -1227,12 +312,759 @@ function summariseConversation(conversation: IAgentConversation) {
   };
 }
 
-  app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
+  app.get('/agents', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const query = (request.query ?? {}) as { search?: string; status?: string };
+      const agents = await listAgents(session.tenantDbName, {
+        projectId,
+        search: query.search,
+        status: query.status as AgentStatus | undefined,
+      });
+
+      return reply.code(200).send({ agents: agents.map(redactAgent) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agents error', 'Failed to list agents');
+    }
+  }));
+
+  app.post('/agents', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session, user } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+
+      if (typeof body.name !== 'string') {
+        return reply.code(400).send({ error: 'Agent name is required' });
+      }
+
+      const prepared = await prepareNewAgentConfig(body.config, {
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        user,
+      });
+      if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
+
+      const agent = await createAgentRecord(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        session.userId,
+        {
+          config: prepared.config,
+          description: body.description as string | undefined,
+          name: body.name,
+        },
+      );
+
+      return reply.code(201).send({ agent: redactAgent(agent), warnings: prepared.warnings });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Create agent error', 'Failed to create agent');
+    }
+  }));
+
+  app.get('/agents/:agentId', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      return reply.code(200).send({ agent: redactAgent(scoped.agent) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Get agent error', 'Failed to get agent');
+    }
+  }));
+
+  app.patch('/agents/:agentId', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent: existing, agentId, projectId, session, user } = scoped;
+      const body = readJsonBody<Record<string, unknown>>(request);
+      let warnings: AgentConfigIssue[] = [];
+
+      if (body.config && typeof body.config === 'object') {
+        const cfg = body.config as Record<string, unknown>;
+        if (cfg.kind === 'external') {
+          let externalConfig: IAgentConfig;
+          try {
+            externalConfig = connectedConfigForUpdate(cfg, existing);
+          } catch (validationError) {
+            return reply.code(400).send({
+              error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
+            });
+          }
+          const bindingError = await applyConfigGuardrailBindings(
+            externalConfig,
+            session.tenantDbName,
+            projectId,
+            user,
+          );
+          if (bindingError) {
+            return reply.code(400).send({ error: bindingError });
+          }
+          body.config = externalConfig;
+        } else if (existing.config?.kind === 'external') {
+          // Guard: never let a native-shaped config silently clobber a stored
+          // connected agent's connection (e.g. a stray playground auto-save).
+          delete body.config;
+        } else {
+          const checked = await validateNativeConfigUpdate(cfg, existing.key, {
+            tenantDbName: session.tenantDbName,
+            tenantId: session.tenantId,
+            projectId,
+            user,
+          });
+          if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
+          warnings = checked.warnings;
+        }
+      }
+
+      normalizeA2aUpdate(body, existing);
+
+      const agent = await updateAgentRecord(session.tenantDbName, agentId, body, session.userId);
+
+      if (!agent) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      return reply.code(200).send({ agent: redactAgent(agent), warnings });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Update agent error', 'Failed to update agent');
+    }
+  }));
+
+  app.delete('/agents/:agentId', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const deleted = await deleteAgentRecord(scoped.session.tenantDbName, scoped.agentId);
+
+      if (!deleted) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      return reply.code(200).send({ success: true });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Delete agent error', 'Failed to delete agent');
+    }
+  }));
+
+  app.get('/agents/:agentId/versions', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, agentId, session } = scoped;
+      const query = (request.query ?? {}) as { limit?: string; skip?: string; version?: string };
+
+      if (query.version) {
+        const version = await getAgentVersion(
+          session.tenantDbName,
+          agentId,
+          Number.parseInt(query.version, 10),
+        );
+
+        if (!version) {
+          return reply.code(404).send({ error: 'Version not found' });
+        }
+
+        return reply.code(200).send({ version: redactVersion(version) });
+      }
+
+      const result = await listAgentVersions(session.tenantDbName, agentId, {
+        limit: Number.parseInt(query.limit ?? '50', 10),
+        skip: Number.parseInt(query.skip ?? '0', 10),
+      });
+
+      return reply.code(200).send({
+        publishedVersion: agent.publishedVersion ?? null,
+        total: result.total,
+        versions: result.versions.map(redactVersion),
+      });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agent versions error', 'Failed to list agent versions');
+    }
+  }));
+
+  /**
+   * Flattens `promptKey` + `promptVariables` into a literal `systemPrompt` for
+   * code export. The generated project has no Prompts module and no runtime
+   * context, so anything left unresolved here would stay unresolved forever.
+   */
+  async function resolveConfigForExport(
+    tenantDbName: string,
+    projectId: string,
+    agent: IAgent,
+    config: IAgentConfig,
+  ): Promise<IAgentConfig> {
+    let template = config.systemPrompt;
+    if (!template && config.promptKey) {
+      const db = await getDatabase();
+      await db.switchToTenant(tenantDbName);
+      const prompt = await db.findPromptByKey(config.promptKey, projectId);
+      template = prompt?.template;
+    }
+    if (!template) return config;
+
+    const variables = buildPromptVariables({
+      config,
+      agentKey: agent.key,
+      agentName: agent.name,
+      version: agent.publishedVersion ?? null,
+    });
+    const rendered = renderPromptTemplate(template, variables);
+    return { ...config, systemPrompt: rendered.text, promptKey: undefined };
+  }
+
+  // ── Manifest export / import ───────────────────────────────────────────
+
+  app.get('/agents/:agentId/export', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, agentId, projectId, session } = scoped;
+      const query = (request.query ?? {}) as { format?: string; version?: string; download?: string; include?: string };
+
+      const format: AgentManifestFormat = query.format === 'yaml' ? 'yaml' : 'json';
+      // `include=skills,prompts,mcp,tools` (or `all`) embeds those definitions
+      // so the manifest can be imported into a project that lacks them.
+      let include;
+      try {
+        include = parseResourceInclude(query.include);
+      } catch (error) {
+        return reply.code(400).send({ error: (error as Error).message });
+      }
+
+      // No `version` exports the DRAFT config — what the playground runs. A
+      // version number exports that immutable snapshot instead, which is what
+      // anyone promoting between environments actually wants.
+      let config = agent.config;
+      let version: number | null = null;
+      if (query.version) {
+        const requested = Number.parseInt(query.version, 10);
+        if (!Number.isFinite(requested)) {
+          return reply.code(400).send({ error: 'version must be a number' });
+        }
+        const snapshot = await getAgentVersion(session.tenantDbName, agentId, requested);
+        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
+        config = snapshot.snapshot.config;
+        version = requested;
+      }
+
+      const { resources, skipped } = await collectManifestResources(session.tenantDbName, projectId, config, include);
+      const manifest = buildAgentManifest(agent, config, version, resources);
+      const body = serializeAgentManifest(manifest, format);
+
+      if (query.download === '1') {
+        return reply
+          .code(200)
+          .header('content-type', format === 'yaml' ? 'application/yaml' : 'application/json')
+          .header(
+            'content-disposition',
+            `attachment; filename="${agent.key}${version !== null ? `-v${version}` : ''}.${format}"`,
+          )
+          .send(body);
+      }
+
+      return reply.code(200).send({ format, manifest, content: body, skippedResources: skipped });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Export agent error', 'Failed to export agent');
+    }
+  }));
+
+  app.post('/agents/import', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const body = await readJsonBody<{
+        content?: string;
+        manifest?: unknown;
+        format?: AgentManifestFormat;
+        /** `true` validates and reports only — nothing is written. */
+        dryRun?: boolean;
+        mode?: 'create' | 'update' | 'upsert';
+        key?: string;
+        name?: string;
+        allowMissingDependencies?: boolean;
+      }>(request);
+
+      if (!body?.content && !body?.manifest) {
+        return reply.code(400).send({ error: 'content or manifest is required' });
+      }
+
+      const manifest = body.content
+        ? parseAgentManifest(body.content, body.format)
+        : parseAgentManifest(JSON.stringify(body.manifest), 'json');
+
+      if (body.dryRun) {
+        const preview = await previewAgentImport(session.tenantDbName, projectId, manifest);
+        return reply.code(200).send(preview);
+      }
+
+      const result = await applyAgentManifest(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        String(user._id),
+        manifest,
+        {
+          mode: body.mode,
+          key: body.key,
+          name: body.name,
+          allowMissingDependencies: body.allowMissingDependencies,
+        },
+      );
+
+      return reply.code(result.action === 'created' ? 201 : 200).send({
+        agent: redactAgent(result.agent),
+        action: result.action,
+        missing: result.missing,
+      });
+    } catch (error) {
+      if (error instanceof AgentManifestError) {
+        return reply.code(400).send({ error: error.message, issues: error.issues });
+      }
+      return sendRouteError(reply, error, 'Import agent error', 'Failed to import agent');
+    }
+  }));
+
+  // ── Import from a definition document (New → Import) ────────────────
+  // Any supported format — the console manifest or a Claude Managed Agent
+  // (JSON / YAML / Markdown front-matter) — auto-detected unless `format`
+  // says otherwise. `/preview` writes nothing.
+  const sendImportError = (reply: FastifyReply, error: unknown) => {
+    if (error instanceof AgentDocumentParseError) return reply.code(400).send({ error: error.message });
+    if (error instanceof AgentImportError) {
+      return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
+    }
+    if (error instanceof AgentManifestError) return reply.code(400).send({ error: error.message, issues: error.issues });
+    return null;
+  };
+
+  app.post('/agents/import/document/preview', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const body = await readJsonBody<{ content?: string; format?: string }>(request);
+      if (typeof body?.content !== 'string' || !body.content.trim()) {
+        return reply.code(400).send({ error: 'content is required' });
+      }
+      const preview = await previewAgentDocumentImport(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
+        body.content,
+        body.format,
+      );
+      return reply.code(200).send(preview);
+    } catch (error) {
+      return sendImportError(reply, error)
+        ?? sendRouteError(reply, error, 'Preview agent document import error', 'Failed to read the document');
+    }
+  }));
+
+  app.post('/agents/import/document', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const body = await readJsonBody<ApplyAgentDocumentImportInput>(request);
+      if (typeof body?.content !== 'string' || !body.content.trim()) {
+        return reply.code(400).send({ error: 'content is required' });
+      }
+      const result = await applyAgentDocumentImport(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
+        body,
+      );
+      return reply.code(result.action === 'created' ? 201 : 200).send({
+        agent: redactAgent(result.agent),
+        action: result.action,
+        created: result.created,
+        warnings: result.warnings,
+      });
+    } catch (error) {
+      return sendImportError(reply, error)
+        ?? sendRouteError(reply, error, 'Agent document import error', 'Failed to import agent');
+    }
+  }));
+
+  // ── Schedules ──────────────────────────────────────────────────────────
+
+  app.get('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent } = scoped;
+
+      const schedules = readSchedules(agent);
+      return reply.code(200).send({
+        schedules,
+        // Recomputed for display rather than trusted from storage: a stored
+        // nextRunAt goes stale the moment the cron is edited elsewhere.
+        nextRuns: Object.fromEntries(
+          schedules.map((schedule) => [schedule.id, computeScheduleNextRun(schedule)?.toISOString() ?? null]),
+        ),
+        publishedVersion: agent.publishedVersion ?? null,
+      });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agent schedules error', 'Failed to list schedules');
+    }
+  }));
+
+  app.post('/agents/:agentId/schedules', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, session, user } = scoped;
+
+      const body = await readJsonBody<AgentScheduleInput>(request);
+      if (!body) return reply.code(400).send({ error: 'A schedule body is required' });
+
+      const { schedule, schedules } = await upsertAgentSchedule(
+        session.tenantDbName,
+        agent,
+        body,
+        String(user._id),
+      );
+      return reply.code(body.id ? 200 : 201).send({ schedule, schedules });
+    } catch (error) {
+      // Validation failures here are the operator's cron, not a server fault.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/^(name|message) is required|cron|interval|schedule/i.test(message)) {
+        return reply.code(400).send({ error: message });
+      }
+      return sendRouteError(reply, error, 'Save agent schedule error', 'Failed to save schedule');
+    }
+  }));
+
+  app.delete('/agents/:agentId/schedules/:scheduleId', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, session, user } = scoped;
+      const { scheduleId } = request.params as { scheduleId: string };
+
+      const schedules = await deleteAgentSchedule(session.tenantDbName, agent, scheduleId, String(user._id));
+      return reply.code(200).send({ schedules });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Delete agent schedule error', 'Failed to delete schedule');
+    }
+  }));
+
+  app.post('/agents/:agentId/schedules/:scheduleId/run', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, session, user } = scoped;
+      const { scheduleId } = request.params as { scheduleId: string };
+      if (!agent.publishedVersion) {
+        return reply.code(409).send({
+          error: 'Publish the agent first — a scheduled run always uses the published version',
+        });
+      }
+
+      const schedule = readSchedules(agent).find((entry) => entry.id === scheduleId);
+      if (!schedule) return reply.code(404).send({ error: 'Schedule not found' });
+
+      // A manual run is awaited (the operator is watching) but must NOT advance
+      // `nextRunAt` — testing a schedule should not skip its next real fire.
+      const result = await runAgentSchedule({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId: agent.projectId,
+        agent,
+        schedule,
+        trigger: 'manual',
+        userId: String(user._id),
+      });
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      return sendAgentGuardrailBlock(reply, error)
+        ?? sendRouteError(reply, error, 'Manual schedule run error', 'Failed to run schedule');
+    }
+  }));
+
+  // ── Code export ────────────────────────────────────────────────────────
+
+  app.post('/agents/:agentId/codegen', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, user, session } = await requireProjectContextForRequest(request);
       const { agentId } = request.params as { agentId: string };
+      const body = await readJsonBody<{
+        target?: AgentCodegenTarget;
+        packageName?: string;
+        consoleBaseUrl?: string;
+        includeDockerfile?: boolean;
+        version?: number;
+        /** `zip` streams an archive; anything else returns the file list as JSON. */
+        format?: 'zip' | 'json';
+      }>(request);
+
       const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
       if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+      const target = body?.target ?? 'server';
+      if (!['cli', 'server', 'worker', 'lambda'].includes(target)) {
+        return reply.code(400).send({ error: `Unknown target "${target}"` });
+      }
+
+      let config = agent.config;
+      if (typeof body?.version === 'number') {
+        const snapshot = await getAgentVersion(session.tenantDbName, agentId, body.version);
+        if (!snapshot) return reply.code(404).send({ error: 'Version not found' });
+        config = snapshot.snapshot.config;
+      }
+
+      // Resolve the prompt the way the runtime does before handing it to the
+      // generator. Without this an agent backed by a shared prompt exports with
+      // no system prompt at all, and one with variables exports the hollow
+      // template — both produce a project that quietly behaves differently from
+      // the agent it was generated from.
+      const exportConfig = await resolveConfigForExport(session.tenantDbName, projectId, agent, config);
+
+      const result = generateAgentProject(agent, exportConfig, {
+        target,
+        packageName: body?.packageName,
+        consoleBaseUrl: body?.consoleBaseUrl,
+        includeDockerfile: body?.includeDockerfile,
+      });
+
+      if (body?.format === 'zip') {
+        const { default: JSZip } = await import('jszip');
+        const zip = new JSZip();
+        const root = zip.folder(result.rootDir);
+        for (const file of result.files) root?.file(file.path, file.contents);
+        const buffer = await zip.generateAsync({ type: 'nodebuffer' });
+        return reply
+          .code(200)
+          .header('content-type', 'application/zip')
+          .header('content-disposition', `attachment; filename="${result.rootDir}.zip"`)
+          .send(buffer);
+      }
+
+      return reply.code(200).send(result);
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent codegen error', 'Failed to generate agent code');
+    }
+  }));
+
+  app.post('/agents/:agentId/publish', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, user, session } = await requireProjectContextForRequest(request);
+      const { agentId } = request.params as { agentId: string };
+      const scoped = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
+      if (!scoped) {
+        // Same failure an unknown id already raises inside publishAgent, so the
+        // route cannot confirm that another project's agent exists.
+        throw new Error(`Agent "${agentId}" not found`);
+      }
+      const published = await publishValidatedAgent(
+        request,
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId },
+        scoped,
+        agentId,
+        session.userId,
+      );
+      if ('badRequest' in published) return reply.code(400).send(published.badRequest);
+      return reply.code(201).send({ version: published.version });
+    } catch (error) {
+      return sendRouteError(
+        reply,
+        error,
+        'Publish agent error',
+        error instanceof Error ? error.message : 'Failed to publish agent',
+      );
+    }
+  }));
+
+  /**
+   * What the Sandbox section of an agent can offer: whether this deployment
+   * has the sandbox module, whether the tenant's license unlocks it, and the
+   * templates to pick from. Always 200 — `available: false` with a `reason`
+   * is an answer the UI renders, not a failure.
+   */
+  app.get('/agents/sandbox/capabilities', withApiRequestContext(async (request, reply) => {
+    try {
+      const { session } = await requireProjectContextForRequest(request);
+      const availability = await resolveSandboxAvailability(session.tenantId);
+      if (!availability.available) {
+        return reply.code(200).send({ available: false, reason: availability.reason, templates: [] });
+      }
+      const templates = await availability.runner.listTemplates(session.tenantDbName, session.tenantId)
+        .catch((error: unknown) => {
+          logger.warn('Could not list sandbox templates', { error });
+          return [];
+        });
+      return reply.code(200).send({ available: true, templates });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent sandbox capabilities error', 'Failed to read sandbox capabilities');
+    }
+  }));
+
+  // Effective execution ceilings for this tenant/project (env ∧ quota) —
+  // the Build → Execution card shows them as the maximum an agent may set.
+  app.get('/agents/execution/limits', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const limits = await resolveAgentExecutionLimits({
+        quotaContext: {
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          projectId,
+          licenseType: session.licenseType as LicenseType,
+          userId: session.userId,
+        },
+      });
+      return reply.code(200).send({
+        syncTimeoutSeconds: Math.floor(limits.syncTimeoutMs / 1000),
+        backgroundMaxDurationMinutes: Math.floor(limits.backgroundMaxDurationMs / 60_000),
+        maxConcurrentRunsPerTenant: limits.maxConcurrentRunsPerTenant,
+        maxConcurrentRunsPerProject: limits.maxConcurrentRunsPerProject,
+      });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent execution limits error', 'Failed to read execution limits');
+    }
+  }));
+
+  // Background runs of one agent, newest first (Sessions → Background runs).
+  app.get('/agents/:agentId/runs', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
+      const allowed = new Set(['queued', 'running', 'succeeded', 'failed', 'canceled']);
+      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'>;
+      const runs = await listAgentRuns(session.tenantDbName, {
+        tenantId: session.tenantId,
+        projectId,
+        agentKey: agent.key,
+        mode: 'background',
+        ...(status.length > 0 ? { status } : {}),
+        ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+        limit: Math.min(Number(query.limit) || 100, 500),
+      });
+      return reply.code(200).send({ runs: runs.map(serializeAgentRun) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agent runs error', 'Failed to list runs');
+    }
+  }));
+
+  app.post('/agents/:agentId/runs/:runId/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const { runId } = request.params as { runId: string };
+      // Ownership first: the run must belong to THIS agent, not merely to the project.
+      const existing = await getAgentRunStatus(session.tenantDbName, session.tenantId, projectId, runId);
+      if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
+        return reply.code(404).send({ error: 'Run not found' });
+      }
+      const outcome = await requestAgentRunCancellation(session.tenantDbName, session.tenantId, projectId, runId);
+      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Run not found' });
+      if (outcome.kind === 'already_terminal') {
+        return reply.code(409).send({ error: `Run is already ${outcome.run.status}` });
+      }
+      return reply.code(200).send({ run: serializeAgentRun(outcome.run) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Cancel agent run error', 'Failed to cancel run');
+    }
+  }));
+
+  /**
+   * Sends one tiny completion to a model through the agent runtime's own path,
+   * so a wrong provider key is caught on the Configure page instead of in the
+   * agent's first session. Always 200: the check's own verdict is the body.
+   */
+  app.post('/agents/model-check', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (typeof body.modelKey !== 'string' || !body.modelKey) {
+        return reply.code(400).send({ error: 'modelKey is required' });
+      }
+      const result = await checkAgentModel(session.tenantDbName, session.tenantId, projectId, body.modelKey);
+      return reply.code(200).send(result);
+    } catch (error) {
+      return sendRouteError(reply, error, 'Agent model check error', 'Failed to check the model');
+    }
+  }));
+
+  /**
+   * Validates a config without saving it — the stored draft, or the `config`
+   * in the body (what the editor currently holds). The Configure page calls
+   * this to mark broken fields before Save.
+   */
+  app.post('/agents/:agentId/validate', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const config = body.config && typeof body.config === 'object'
+        ? body.config as IAgentConfig
+        : agent.config;
+      const validation = await validateAgentConfig({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        projectId,
+        config,
+        agentKey: agent.key,
+      });
+      return reply.code(200).send({ valid: validation.errors.length === 0, ...validation });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Validate agent config error', 'Failed to validate agent config');
+    }
+  }));
+
+  app.get('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+
+      const conversations = await listConversations(session.tenantDbName, agent.key, {
+        limit: 50,
+        projectId,
+      });
+
+      return reply.code(200).send({ conversations });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agent conversations error', 'Failed to list conversations');
+    }
+  }));
+
+  app.post('/agents/:agentId/conversations', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+
+      const body = readJsonBody<Record<string, unknown>>(request);
+      const conversation = await createConversation(
+        session.tenantDbName,
+        session.tenantId,
+        projectId,
+        session.userId,
+        agent.key,
+        typeof body.title === 'string' ? body.title : undefined,
+        { source: 'console' },
+      );
+
+      return reply.code(201).send({ conversation });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Create agent conversation error', 'Failed to create conversation');
+    }
+  }));
+
+  // ── Sessions ─────────────────────────────────────────────────────────
+  //
+  // A Session is the conversation record, presented under the name the
+  // Sessions page uses. Kept as its own route group rather than renaming
+  // `/conversations` above — nothing else in the codebase depends on that
+  // name yet, but adding rather than renaming means neither guess can be
+  // wrong about who else might.
+
+  app.get('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
 
       const sessions = await listConversations(session.tenantDbName, agent.key, {
         limit: 100,
@@ -1244,18 +1076,15 @@ function summariseConversation(conversation: IAgentConversation) {
       // one transcript it actually shows.
       return reply.code(200).send({ sessions: sessions.map(summariseConversation) });
     } catch (error) {
-      logger.error('List agent sessions error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to list sessions' });
+      return sendRouteError(reply, error, 'List agent sessions error', 'Failed to list sessions');
     }
   }));
 
   app.post('/agents/:agentId/sessions', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
 
       const body = readJsonBody<Record<string, unknown>>(request);
 
@@ -1280,18 +1109,16 @@ function summariseConversation(conversation: IAgentConversation) {
       );
       return reply.code(201).send({ session: created });
     } catch (error) {
-      logger.error('Create agent session error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to create session' });
+      return sendRouteError(reply, error, 'Create agent session error', 'Failed to create session');
     }
   }));
 
   app.get('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId, sessionId } = request.params as { agentId: string; sessionId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const { sessionId } = request.params as { sessionId: string };
 
       const found = await getConversationById(session.tenantDbName, sessionId);
       // Scope check, not just existence — a session id valid for a sibling
@@ -1301,18 +1128,16 @@ function summariseConversation(conversation: IAgentConversation) {
       }
       return reply.code(200).send({ session: found });
     } catch (error) {
-      logger.error('Get agent session error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to load session' });
+      return sendRouteError(reply, error, 'Get agent session error', 'Failed to load session');
     }
   }));
 
   app.delete('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId, sessionId } = request.params as { agentId: string; sessionId: string };
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const { sessionId } = request.params as { sessionId: string };
 
       const found = await getConversationById(session.tenantDbName, sessionId);
       if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
@@ -1321,9 +1146,7 @@ function summariseConversation(conversation: IAgentConversation) {
       await deleteConversation(session.tenantDbName, sessionId);
       return reply.code(200).send({ success: true });
     } catch (error) {
-      logger.error('Delete agent session error', { error });
-      return sendProjectContextError(reply, error)
-        ?? reply.code(500).send({ error: 'Failed to delete session' });
+      return sendRouteError(reply, error, 'Delete agent session error', 'Failed to delete session');
     }
   }));
 
@@ -1348,32 +1171,10 @@ function summariseConversation(conversation: IAgentConversation) {
    * surface and the reason this is not the path production traffic takes.
    */
   app.post('/agents/:agentId/chat/stream', withApiRequestContext(async (request, reply) => {
-    const { projectId, user, session } = await requireProjectContextForRequest(request);
-    const { agentId } = request.params as { agentId: string };
-    const body = readJsonBody<Record<string, unknown>>(request);
+    const turn = await prepareDashboardTurn(request, reply);
+    if (!turn) return reply;
 
-    if (typeof body.message !== 'string') {
-      return reply.code(400).send({ error: 'Message is required' });
-    }
-    const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-    if (!agent) {
-      return reply.code(404).send({ error: 'Agent not found' });
-    }
-    const readOnlySource = await readOnlySessionSource(session.tenantDbName, body.conversationId);
-    if (readOnlySource) {
-      return reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
-    }
-
-    const reservation = await reserveDashboardSession({
-      session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
-    });
-    if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
-
-    reply.raw.setHeader('Content-Type', 'text/event-stream');
-    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    // Proxies that buffer would defeat the whole point of this endpoint.
-    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    applyStreamHeaders(reply);
     reply.raw.flushHeaders?.();
 
     let closed = false;
@@ -1388,20 +1189,8 @@ function summariseConversation(conversation: IAgentConversation) {
     };
 
     try {
-      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
-        userId: session.userId,
-        source: 'playground',
-      });
-
       const result = await executePlaygroundChatLocal({
-        agentKey: agent.key,
-        runtimeContext,
-        projectId,
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        userMessage: body.message,
-        ...(typeof body.version === 'number' ? { version: body.version } : {}),
-        ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+        ...turn.run,
         onToolEvent: (event) => send('tool', event),
         onTextChunk: (text) => send('text', { text }),
         // The agent summarized its context mid-run: shown in the transcript
@@ -1411,25 +1200,22 @@ function summariseConversation(conversation: IAgentConversation) {
 
       send('result', result);
     } catch (error) {
+      // The status line is long gone by now, so the error travels as an
+      // event. A client that only listened for `result` would otherwise hang
+      // until the socket closed and call it a network fault.
       if (error instanceof AgentGuardrailBlockedError) {
         logger.info('Agent playground stream blocked by guardrail', {
           guardrailKey: error.guardrailKey,
           hook: error.hook,
         });
-      } else {
-        logger.error('Agent playground stream error', { error });
-      }
-      // The status line is long gone by now, so the error travels as an
-      // event. A client that only listened for `result` would otherwise hang
-      // until the socket closed and call it a network fault.
-      if (error instanceof AgentGuardrailBlockedError) {
         send('error', { error: error.message, type: 'guardrail_block' });
       } else {
+        logger.error('Agent playground stream error', { error });
         const classified = classifyAgentRunError(error, { exposeInternal: true });
         send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
     } finally {
-      await reservation?.release();
+      await turn.reservation?.release();
       if (!closed) reply.raw.end();
     }
     return reply;
@@ -1437,66 +1223,27 @@ function summariseConversation(conversation: IAgentConversation) {
 
   app.post('/agents/:agentId/chat', withApiRequestContext(async (request, reply) => {
     try {
-      const { projectId, user, session } = await requireProjectContextForRequest(request);
-      const { agentId } = request.params as { agentId: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
-
-      if (typeof body.message !== 'string') {
-        return reply.code(400).send({ error: 'Message is required' });
-      }
-
-      const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
-      if (!agent) {
-        return reply.code(404).send({ error: 'Agent not found' });
-      }
-      const readOnlySource = await readOnlySessionSource(session.tenantDbName, body.conversationId);
-      if (readOnlySource) {
-        return reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
-      }
-
-      // Playground JSON editor: caller-supplied runtime context (downstream
-      // headers/metadata), stamped with the dashboard user's identity.
-      const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
-        userId: session.userId,
-        source: 'playground',
-      });
-
-      const reservation = await reserveDashboardSession({
-        session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
-      });
-      if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
+      const turn = await prepareDashboardTurn(request, reply);
+      if (!turn) return reply;
+      const { body } = turn;
 
       let result: Awaited<ReturnType<typeof executePlaygroundChat>>;
       try {
         result = await executePlaygroundChat({
-          agentKey: agent.key,
-          runtimeContext,
+          ...turn.run,
           // Ignored server-side when conversationId is set (history loads from
           // the session instead) — still parsed so a stateless call (no
           // conversationId) keeps working exactly as before.
           history: Array.isArray(body.history)
-            ? body.history
-              .filter((item): item is { content: string; role: string } =>
-                Boolean(
-                  item
-                  && typeof item === 'object'
-                  && 'content' in item
-                  && 'role' in item
-                  && typeof (item as { content?: unknown }).content === 'string'
-                  && typeof (item as { role?: unknown }).role === 'string',
-                ),
-              )
-              .map((item) => ({ content: item.content, role: item.role }))
+            ? (body.history as Array<{ content?: unknown; role?: unknown } | null>).flatMap((item) => (
+              typeof item?.content === 'string' && typeof item.role === 'string'
+                ? [{ content: item.content, role: item.role }]
+                : []
+            ))
             : undefined,
-          projectId,
-          tenantDbName: session.tenantDbName,
-          tenantId: session.tenantId,
-          userMessage: body.message,
-          ...(typeof body.version === 'number' ? { version: body.version } : {}),
-          ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
         });
       } finally {
-        await reservation?.release();
+        await turn.reservation?.release();
       }
 
       return reply.code(200).send(result);

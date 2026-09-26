@@ -24,18 +24,8 @@ import TokenStats from '@/components/common/ui/TokenStats';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
-import type { ChatMessage } from '../session/sessionTypes';
-import { isContinuableSession, messageCountOf, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
-
-interface SessionRecord {
-    _id: string;
-    title?: string;
-    createdAt?: string;
-    updatedAt?: string;
-    createdBy?: string;
-    messages?: ChatMessage[];
-    metadata?: Record<string, unknown>;
-}
+import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
+import { isContinuableSession, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
 
 export interface SessionDetailDrawerProps {
     agentId: string;
@@ -56,7 +46,7 @@ function toItems(messages: ChatMessage[]): LlmRequestItem[] {
     messages.forEach((message, index) => {
         if (message.role === 'user') {
             turn += 1;
-            const at = (message as { timestamp?: string }).timestamp;
+            const at = message.timestamp;
             items.push({
                 itemType: 'divider',
                 label: `Turn ${turn}${at ? ` · ${new Date(at).toLocaleTimeString()}` : ''}`,
@@ -105,15 +95,16 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         if (!session) return null;
         const messages = record?.messages ?? [];
         const continuable = isContinuableSession(session.source);
-        const toolNames = [...new Set(messages.flatMap((m) => (m.steps ?? []).map((step) => step.name)))];
-        const failedSteps = messages.flatMap((m) => m.steps ?? []).filter((step) => step.status === 'error' || step.error).length;
+        const steps = messages.flatMap((m) => m.steps ?? []);
+        const toolNames = [...new Set(steps.map((step) => step.name))];
+        const failedSteps = steps.filter(stepFailed).length;
 
         const properties: PropertyRow[] = [
             { key: 'created', label: 'Created', value: <Text size="sm">{session.createdAt ? new Date(session.createdAt).toLocaleString() : '—'}</Text> },
             { key: 'updated', label: 'Last activity', value: <Text size="sm">{formatRelativeTime(session.updatedAt ?? session.createdAt)}</Text> },
             { key: 'id', label: 'Session ID', value: <Code style={{ fontSize: 11, wordBreak: 'break-all' }}>{session._id}</Code> },
             { key: 'source', label: 'Source', value: <Text size="sm">{sessionSourceLabel(session.source)}</Text> },
-            { key: 'turns', label: 'Turns', value: <Text size="sm">{session.turns ?? 0} · {messageCountOf(session)} messages</Text> },
+            { key: 'turns', label: 'Turns', value: <Text size="sm">{session.turns ?? 0} · {session.messageCount ?? 0} messages</Text> },
             {
                 key: 'tokens',
                 label: 'Tokens',

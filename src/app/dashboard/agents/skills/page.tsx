@@ -83,17 +83,15 @@ export default function SkillsPage() {
     }
   };
 
+  const openEditor = (skill: SkillView | null) => {
+    setEditing(skill);
+    setEditorOpen(true);
+  };
+
   const filtered = useMemo(() => {
-    return skills.filter((s) => {
-      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
-      if (query) {
-        const q = query.toLowerCase();
-        if (!s.title.toLowerCase().includes(q) && !s.header.toLowerCase().includes(q) && !s.key.toLowerCase().includes(q)) {
-          return false;
-        }
-      }
-      return true;
-    });
+    const q = query.toLowerCase();
+    return skills.filter((s) => (statusFilter === 'all' || s.status === statusFilter)
+      && (!q || [s.title, s.header, s.key].some((field) => field.toLowerCase().includes(q))));
   }, [skills, query, statusFilter]);
 
   const totalSkills = skills.length;
@@ -136,7 +134,7 @@ export default function SkillsPage() {
         title="Skills"
         subtitle="Reusable capabilities an agent can discover and open on demand — Anthropic-style progressive disclosure."
         actions={
-          <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={() => { setEditing(null); setEditorOpen(true); }}>
+          <Button color="teal" size="sm" leftSection={<IconPlus size={14} stroke={1.7} />} onClick={() => openEditor(null)}>
             New skill
           </Button>
         }
@@ -152,7 +150,7 @@ export default function SkillsPage() {
         records={filtered}
         loading={loading}
         rowKey={(s) => s._id}
-        onRowClick={(s) => { setEditing(s); setEditorOpen(true); }}
+        onRowClick={openEditor}
         columns={columns}
         search={{ value: query, onChange: setQuery, placeholder: 'Filter by title, key, or header…' }}
         filters={[
@@ -176,7 +174,7 @@ export default function SkillsPage() {
           primaryAction: {
             label: 'Create your first skill',
             icon: <IconPlus size={14} stroke={1.7} />,
-            onClick: () => { setEditing(null); setEditorOpen(true); },
+            onClick: () => openEditor(null),
           },
         }}
         footerLeft={`Showing ${filtered.length} of ${totalSkills} skills`}
@@ -185,7 +183,7 @@ export default function SkillsPage() {
             id: 'edit',
             label: 'Edit',
             icon: <IconEdit size={14} />,
-            onClick: () => { setEditing(s); setEditorOpen(true); },
+            onClick: () => openEditor(s),
           },
           {
             id: 'toggle',

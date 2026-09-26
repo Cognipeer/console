@@ -6,8 +6,9 @@
  * Cards were fine when a session was "a chat someone had", but a session now
  * carries what it cost and how long the agent worked, and those are numbers
  * you compare BETWEEN rows — which is a table, in aligned columns, not a
- * stack of cards each phrasing its own summary. Expanding a row shows the
- * detail that does not deserve a column of its own.
+ * stack of cards each phrasing its own summary. Clicking a row opens it in
+ * the session drawer (SessionDetailDrawer), which holds the detail that does
+ * not deserve a column of its own.
  *
  * Every total is computed server-side from the turns themselves
  * (`summariseConversation`), so no transcript is shipped just to draw a row.
@@ -82,19 +83,6 @@ function windowBounds(filter: WindowFilter, range: DateRange): [number | undefin
     return [Date.now() - WINDOW_MS[filter], undefined];
 }
 
-interface Filters {
-    query: string;
-    timeWindow: WindowFilter;
-    activity: ActivityFilter;
-    status: StatusFilter;
-    source: string;
-}
-
-function filtersApplied(f: Filters): boolean {
-    return Boolean(f.query.trim()) || f.timeWindow !== 'all' || f.activity !== 'all'
-        || f.status !== 'all' || f.source !== 'all';
-}
-
 function sortSessions(sessions: SessionListItem[], sort: SortState): SessionListItem[] {
     const factor = sort.direction === 'asc' ? 1 : -1;
     return [...sessions].sort((a, b) => {
@@ -163,12 +151,6 @@ export interface SessionListItem {
     /** Where the session came from (`metadata.source`) — see AgentConversationSource. */
     source?: string;
     hasContext?: boolean;
-    /**
-     * Only the older, unsummarised shape carries this. Kept so a cached page
-     * rendered against a previous server build still counts its messages
-     * instead of showing a dash.
-     */
-    messages?: Array<{ role: string }>;
 }
 
 const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
@@ -207,20 +189,11 @@ export interface SessionListProps {
     /** Resume a console session in the chat view. */
     onContinue?: (sessionId: string) => void;
     onStart: () => void;
-    starting?: boolean;
-    /** Cap how many rows render — Overview shows a handful, the Sessions tab shows all. */
-    limit?: number;
-    /** Overview wants the bare table; the Sessions tab wants to search it. */
-    searchable?: boolean;
     /** Reload the list (Sessions tab). */
     onRefresh?: () => void;
     refreshing?: boolean;
     /** The same runs as traces — span-level detail lives in Tracing. */
     tracesHref?: string;
-}
-
-export function messageCountOf(session: SessionListItem): number {
-    return session.messageCount ?? session.messages?.length ?? 0;
 }
 
 export default function SessionList({
@@ -229,9 +202,6 @@ export default function SessionList({
     onOpen,
     onContinue,
     onStart,
-    starting,
-    limit,
-    searchable,
     onRefresh,
     refreshing,
     tracesHref,
@@ -288,7 +258,8 @@ export default function SessionList({
         ];
     }, [sessions]);
 
-    const current: Filters = { query, timeWindow, activity, status, source };
+    const filtersActive = Boolean(query.trim()) || timeWindow !== 'all' || activity !== 'all'
+        || status !== 'all' || source !== 'all';
     const clearFilters = () => {
         setQuery(''); setTimeWindow('all'); setRange([null, null]); setActivity('all'); setStatus('all'); setSource('all');
     };
@@ -317,7 +288,7 @@ export default function SessionList({
                 description="Start a session to try this agent — every message, tool call and answer is saved so you can come back to it."
                 minHeight={200}
                 action={
-                    <Button size="sm" leftSection={<IconPlus size={14} />} loading={starting} onClick={onStart}>
+                    <Button size="sm" leftSection={<IconPlus size={14} />} onClick={onStart}>
                         Start new session
                     </Button>
                 }
@@ -325,131 +296,127 @@ export default function SessionList({
         );
     }
 
-    const rows = limit ? filtered.slice(0, limit) : filtered;
-
     return (
         <Stack gap="sm">
-            {searchable ? (
-                <Group justify="space-between" gap="xs" wrap="wrap">
-                    <Group gap="xs" wrap="wrap">
-                        <TextInput
+            <Group justify="space-between" gap="xs" wrap="wrap">
+                <Group gap="xs" wrap="wrap">
+                    <TextInput
+                        size="xs"
+                        placeholder="Search by name or session id"
+                        leftSection={<IconSearch size={13} />}
+                        value={query}
+                        onChange={(event) => setQuery(event.currentTarget.value)}
+                        w={260}
+                    />
+                    <Select
+                        size="xs"
+                        w={140}
+                        data={[
+                            { value: 'all', label: 'Any time' },
+                            { value: '24h', label: 'Last 24 hours' },
+                            { value: '7d', label: 'Last 7 days' },
+                            { value: '30d', label: 'Last 30 days' },
+                            { value: 'custom', label: 'Custom range…' },
+                        ]}
+                        value={timeWindow}
+                        onChange={(next) => setTimeWindow((next as WindowFilter) ?? 'all')}
+                        allowDeselect={false}
+                        aria-label="Filter by last activity"
+                    />
+                    {timeWindow === 'custom' ? (
+                        <DatePickerInput
+                            type="range"
                             size="xs"
-                            placeholder="Search by name or session id"
-                            leftSection={<IconSearch size={13} />}
-                            value={query}
-                            onChange={(event) => setQuery(event.currentTarget.value)}
-                            w={260}
+                            w={220}
+                            placeholder="Pick dates"
+                            value={range}
+                            onChange={(value) => setRange(value as DateRange)}
+                            leftSection={<IconCalendar size={13} />}
+                            clearable
+                            aria-label="Last activity between"
                         />
+                    ) : null}
+                    <Select
+                        size="xs"
+                        w={150}
+                        data={[
+                            { value: 'all', label: 'Any status' },
+                            { value: 'success', label: 'Completed' },
+                            { value: 'error', label: 'Has errors' },
+                            { value: 'stopped', label: 'Stopped early' },
+                        ]}
+                        value={status}
+                        onChange={(next) => setStatus((next as StatusFilter) ?? 'all')}
+                        allowDeselect={false}
+                        aria-label="Filter by status"
+                    />
+                    {sourceOptions.length > 2 ? (
                         <Select
                             size="xs"
                             w={140}
-                            data={[
-                                { value: 'all', label: 'Any time' },
-                                { value: '24h', label: 'Last 24 hours' },
-                                { value: '7d', label: 'Last 7 days' },
-                                { value: '30d', label: 'Last 30 days' },
-                                { value: 'custom', label: 'Custom range…' },
-                            ]}
-                            value={timeWindow}
-                            onChange={(next) => setTimeWindow((next as WindowFilter) ?? 'all')}
+                            data={sourceOptions}
+                            value={source}
+                            onChange={(next) => setSource(next ?? 'all')}
                             allowDeselect={false}
-                            aria-label="Filter by last activity"
+                            aria-label="Filter by source"
                         />
-                        {timeWindow === 'custom' ? (
-                            <DatePickerInput
-                                type="range"
-                                size="xs"
-                                w={220}
-                                placeholder="Pick dates"
-                                value={range}
-                                onChange={(value) => setRange(value as DateRange)}
-                                leftSection={<IconCalendar size={13} />}
-                                clearable
-                                aria-label="Last activity between"
-                            />
-                        ) : null}
-                        <Select
-                            size="xs"
-                            w={150}
-                            data={[
-                                { value: 'all', label: 'Any status' },
-                                { value: 'success', label: 'Completed' },
-                                { value: 'error', label: 'Has errors' },
-                                { value: 'stopped', label: 'Stopped early' },
-                            ]}
-                            value={status}
-                            onChange={(next) => setStatus((next as StatusFilter) ?? 'all')}
-                            allowDeselect={false}
-                            aria-label="Filter by status"
-                        />
-                        {sourceOptions.length > 2 ? (
-                            <Select
-                                size="xs"
-                                w={140}
-                                data={sourceOptions}
-                                value={source}
-                                onChange={(next) => setSource(next ?? 'all')}
-                                allowDeselect={false}
-                                aria-label="Filter by source"
-                            />
-                        ) : null}
-                        <Select
-                            size="xs"
-                            w={170}
-                            data={[
-                                { value: 'all', label: 'All sessions' },
-                                { value: 'used', label: 'Has turns' },
-                                // Started and abandoned: these are the rows
-                                // that make a session count look busier than
-                                // the agent actually was.
-                                { value: 'empty', label: 'Never used' },
-                                { value: 'unpriced', label: 'Unpriced turns' },
-                            ]}
-                            value={activity}
-                            onChange={(next) => setActivity((next as ActivityFilter) ?? 'all')}
-                            allowDeselect={false}
-                            aria-label="Filter by activity"
-                        />
-                        {filtersApplied(current) ? (
-                            <Button
-                                size="compact-xs"
-                                variant="subtle"
-                                color="gray"
-                                leftSection={<IconX size={12} />}
-                                onClick={clearFilters}
-                            >
-                                Clear
-                            </Button>
-                        ) : null}
-                    </Group>
-                    <Group gap="xs" wrap="nowrap">
-                        <Text size="xs" c="dimmed">
-                            {filtered.length === sessions.length
-                                ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}`
-                                : `${filtered.length} of ${sessions.length}`}
-                        </Text>
-                        {tracesHref ? (
-                            <Button
-                                component={Link}
-                                href={tracesHref}
-                                size="compact-xs"
-                                variant="subtle"
-                                color="gray"
-                                leftSection={<IconTimeline size={12} />}
-                            >
-                                Traces
-                            </Button>
-                        ) : null}
-                        {onRefresh ? (
-                            <Tooltip label="Refresh" withArrow>
-                                <ActionIcon size="sm" variant="subtle" color="gray" loading={refreshing} onClick={onRefresh} aria-label="Refresh sessions">
-                                    <IconRefresh size={14} />
-                                </ActionIcon>
-                            </Tooltip>
-                        ) : null}
-                    </Group>
+                    ) : null}
+                    <Select
+                        size="xs"
+                        w={170}
+                        data={[
+                            { value: 'all', label: 'All sessions' },
+                            { value: 'used', label: 'Has turns' },
+                            // Started and abandoned: these are the rows
+                            // that make a session count look busier than
+                            // the agent actually was.
+                            { value: 'empty', label: 'Never used' },
+                            { value: 'unpriced', label: 'Unpriced turns' },
+                        ]}
+                        value={activity}
+                        onChange={(next) => setActivity((next as ActivityFilter) ?? 'all')}
+                        allowDeselect={false}
+                        aria-label="Filter by activity"
+                    />
+                    {filtersActive ? (
+                        <Button
+                            size="compact-xs"
+                            variant="subtle"
+                            color="gray"
+                            leftSection={<IconX size={12} />}
+                            onClick={clearFilters}
+                        >
+                            Clear
+                        </Button>
+                    ) : null}
                 </Group>
-            ) : null}
+                <Group gap="xs" wrap="nowrap">
+                    <Text size="xs" c="dimmed">
+                        {filtered.length === sessions.length
+                            ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}`
+                            : `${filtered.length} of ${sessions.length}`}
+                    </Text>
+                    {tracesHref ? (
+                        <Button
+                            component={Link}
+                            href={tracesHref}
+                            size="compact-xs"
+                            variant="subtle"
+                            color="gray"
+                            leftSection={<IconTimeline size={12} />}
+                        >
+                            Traces
+                        </Button>
+                    ) : null}
+                    {onRefresh ? (
+                        <Tooltip label="Refresh" withArrow>
+                            <ActionIcon size="sm" variant="subtle" color="gray" loading={refreshing} onClick={onRefresh} aria-label="Refresh sessions">
+                                <IconRefresh size={14} />
+                            </ActionIcon>
+                        </Tooltip>
+                    ) : null}
+                </Group>
+            </Group>
 
             {filtered.length === 0 ? (
                 <Text size="sm" c="dimmed" ta="center" py="xl">
@@ -487,7 +454,7 @@ export default function SessionList({
                     </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
-                    {rows.map((session) => (
+                    {filtered.map((session) => (
                                 <Table.Tr key={session._id} className={classes.row}>
                                     <Table.Td>
                                         <Group gap={6} wrap="nowrap">

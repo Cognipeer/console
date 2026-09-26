@@ -27,6 +27,7 @@ import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 
 /** Reserved top-level names the caller cannot override. */
 export const BUILT_IN_PROMPT_VARIABLES = ['agent', 'now', 'user'] as const;
+const BUILT_INS: ReadonlySet<string> = new Set(BUILT_IN_PROMPT_VARIABLES);
 
 export interface PromptVariableInput {
     config: IAgentConfig;
@@ -41,8 +42,6 @@ export interface PromptVariableInput {
 export interface ResolvedPromptVariables {
     /** The render context handed to Mustache. */
     values: Record<string, unknown>;
-    /** Placeholder names the template asks for but nothing supplied. */
-    unresolved: string[];
     /** Names that were filled from caller-supplied runtime metadata. */
     fromCaller: string[];
 }
@@ -81,7 +80,7 @@ export function buildPromptVariables(input: PromptVariableInput): ResolvedPrompt
     const values: Record<string, unknown> = { ...defaults };
 
     for (const [key, value] of Object.entries(metadata)) {
-        if ((BUILT_IN_PROMPT_VARIABLES as readonly string[]).includes(key)) continue;
+        if (BUILT_INS.has(key)) continue;
         values[key] = value;
         fromCaller.push(key);
     }
@@ -101,7 +100,7 @@ export function buildPromptVariables(input: PromptVariableInput): ResolvedPrompt
     };
     values.user = { id: input.userId ?? input.runtimeContext?.userId ?? null };
 
-    return { values, unresolved: [], fromCaller };
+    return { values, fromCaller };
 }
 
 export interface RenderedPrompt {
@@ -155,5 +154,5 @@ export function shouldRenderInlinePrompt(config: IAgentConfig, template?: string
     if (Object.keys(config.promptVariables ?? {}).length > 0) return true;
     if (!template) return false;
     const referenced = collectTemplateVariables(template);
-    return referenced.some((name) => (BUILT_IN_PROMPT_VARIABLES as readonly string[]).includes(name));
+    return referenced.some((name) => BUILT_INS.has(name));
 }

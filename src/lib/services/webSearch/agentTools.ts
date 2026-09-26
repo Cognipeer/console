@@ -18,17 +18,10 @@ interface WebSearchToolBindCtx {
   projectId?: string;
   /** Instance key. Omit to use the project's single active instance. */
   providerKey?: string;
-  /** Called after each tool call (used by run loop to broadcast progress). */
-  onToolCall?: (info: {
-    name: string;
-    input: unknown;
-    output: unknown;
-    error?: string;
-  }) => void;
 }
 
 export function buildWebSearchAgentTools(ctx: WebSearchToolBindCtx) {
-  const searchTool = createTool({
+  return [createTool({
     name: 'web_search',
     description:
       'Search the web and return ranked results (title, url, snippet). Set includeAnswer to also get a synthesized answer when the instance has AI answers configured; otherwise results are returned without one.',
@@ -44,20 +37,14 @@ export function buildWebSearchAgentTools(ctx: WebSearchToolBindCtx) {
     }),
     func: async (input) => {
       try {
-        const result = await runWebSearch(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
+        return await runWebSearch(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
           ...input,
           providerKey: ctx.providerKey,
           source: 'api',
         });
-        ctx.onToolCall?.({ name: 'web_search', input, output: result });
-        return result;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        ctx.onToolCall?.({ name: 'web_search', input, output: null, error: message });
-        return { ok: false, error: message };
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
-  });
-
-  return [searchTool];
+  })];
 }

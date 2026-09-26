@@ -24,7 +24,7 @@
  */
 
 import type { FastifyPluginAsync } from 'fastify';
-import type { PiiAction, PiiLanguage } from '@/lib/database';
+import type { PiiAction } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   buildDefaultPolicyCategories,
@@ -37,6 +37,7 @@ import {
 } from '@/lib/services/pii';
 import type { PiiScanResult, PiiVault } from '@/lib/services/pii';
 import { parseCustomPatternsInput } from '@/lib/services/pii';
+import { parsePiiLanguages, parsePiiLocale } from '@/lib/services/pii/categories';
 import {
   getApiTokenContextForRequest,
   readJsonBody,
@@ -48,30 +49,6 @@ const logger = createLogger('api:client-pii');
 
 const VALID_ACTIONS: PiiAction[] = ['detect', 'redact', 'mask', 'block', 'tokenize'];
 const ACTIONS_HINT = 'detect, redact, mask, block, or tokenize';
-const VALID_LANGS: PiiLanguage[] = ['global', 'en', 'tr', 'de', 'fr', 'es', 'it', 'pt', 'ar', 'ja', 'zh'];
-
-function parseLocale(value: unknown): PiiLanguage {
-  if (typeof value === 'string' && (VALID_LANGS as string[]).includes(value)) {
-    return value as PiiLanguage;
-  }
-  return 'en';
-}
-
-function parseLanguages(input: unknown): PiiLanguage[] | undefined {
-  if (input === undefined || input === null) return undefined;
-  let arr: unknown[] = [];
-  if (Array.isArray(input)) arr = input;
-  else if (typeof input === 'string') arr = input.split(',').map((s) => s.trim()).filter(Boolean);
-  else return undefined;
-  const out: PiiLanguage[] = [];
-  for (const item of arr) {
-    if (typeof item === 'string' && (VALID_LANGS as string[]).includes(item)) {
-      out.push(item as PiiLanguage);
-    }
-  }
-  return out.length ? out : undefined;
-}
-
 /** Shape the internal (camelCase) scan result into the snake_case client response. */
 function toClientResult(result: PiiScanResult): Record<string, unknown> {
   const body: Record<string, unknown> = {
@@ -126,7 +103,7 @@ export const clientPiiApiPlugin: FastifyPluginAsync = async (app) => {
           projectId: ctx.projectId,
           text: body.text,
           actionOverride,
-          locale: parseLocale(body.locale),
+          locale: parsePiiLocale(body.locale),
         });
 
         return reply.code(200).send({
@@ -187,7 +164,7 @@ export const clientPiiApiPlugin: FastifyPluginAsync = async (app) => {
         defaultAction,
         categories,
         customPatterns: customPatterns.patterns ?? [],
-        languages: parseLanguages(body.languages),
+        languages: parsePiiLanguages(body.languages),
         enabled: typeof body.enabled === 'boolean' ? body.enabled : true,
         metadata: typeof body.metadata === 'object' && body.metadata !== null
           ? (body.metadata as Record<string, unknown>)
@@ -227,7 +204,7 @@ export const clientPiiApiPlugin: FastifyPluginAsync = async (app) => {
         defaultAction: body.defaultAction as PiiAction | undefined,
         categories: body.categories as Record<string, boolean> | undefined,
         customPatterns: customPatterns.patterns,
-        languages: parseLanguages(body.languages),
+        languages: parsePiiLanguages(body.languages),
         enabled: body.enabled as boolean | undefined,
         metadata: body.metadata as Record<string, unknown> | undefined,
       });

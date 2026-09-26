@@ -9,7 +9,7 @@
  * so a session reopened a week later shows the same numbers it showed live.
  */
 
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import {
     Badge,
     Box,
@@ -26,9 +26,9 @@ import {
 } from '@mantine/core';
 import { IconCheck, IconCopy } from '@tabler/icons-react';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
-import type { ChatMessage, PlaygroundStep, TurnCompaction } from './sessionTypes';
+import { stepFailed, type ChatMessage, type PlaygroundStep, type TurnCompaction } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
-import ContextCompactionCard, { compactionSavings } from './ContextCompactionCard';
+import ContextCompactionCard, { compactionShrinkLabel } from './ContextCompactionCard';
 import {
     collectConfiguredTools,
     countUnnamedToolSurfaces,
@@ -55,12 +55,6 @@ export interface SessionSidePanelProps {
     onGoToTurn: (index: number) => void;
 }
 
-/** The SDK's verdict when it gave one; the thrown-error flag otherwise. */
-function stepFailed(step: PlaygroundStep): boolean {
-    if (step.status) return step.status === 'error' || step.status === 'rejected';
-    return Boolean(step.error);
-}
-
 interface FlatEvent {
     turnIndex: number;
     step: PlaygroundStep;
@@ -81,7 +75,6 @@ export default function SessionSidePanel({
     running,
     onGoToTurn,
 }: SessionSidePanelProps) {
-    const [tab, setTab] = useState<string>('session');
     const totals = useMemo(() => summariseSession(messages), [messages]);
 
     const events = useMemo<FlatEvent[]>(() => {
@@ -129,7 +122,7 @@ export default function SessionSidePanel({
         return rows.sort((a, b) => (b.calls - a.calls) || a.name.localeCompare(b.name));
     }, [events, agentConfig]);
 
-    const unnamedSurfaces = useMemo(() => countUnnamedToolSurfaces(agentConfig), [agentConfig]);
+    const unnamedSurfaces = countUnnamedToolSurfaces(agentConfig);
 
     /**
      * Every summarization in the session, oldest first. The LAST one is what
@@ -160,8 +153,7 @@ export default function SessionSidePanel({
 
     return (
         <Tabs
-            value={tab}
-            onChange={(value) => setTab(value ?? 'session')}
+            defaultValue="session"
             className={classes.sidePanel}
             classNames={{ list: classes.sideTabs, tab: classes.sideTab }}
         >
@@ -365,40 +357,32 @@ export default function SessionSidePanel({
                             <Box>
                                 <Text size="xs" fw={600} mb={6}>History</Text>
                                 <Stack gap={4}>
-                                    {compactions.map(({ turnIndex, compaction }, index) => {
-                                        const savings = compactionSavings(compaction);
-                                        return (
-                                            <UnstyledButton
-                                                key={`${turnIndex}-${index}`}
-                                                onClick={() => onGoToTurn(turnIndex)}
-                                                className={classes.eventRow}
-                                            >
-                                                <Group gap="xs" wrap="nowrap">
-                                                    <Badge
-                                                        size="xs"
-                                                        variant="light"
-                                                        color={compaction.failed ? 'orange' : 'indigo'}
-                                                        className={classes.eventBadge}
-                                                    >
-                                                        {index + 1}
-                                                    </Badge>
-                                                    <Box className={classes.eventName}>
-                                                        <Text size="xs">
-                                                            {compaction.tokensBefore !== undefined && compaction.tokensAfter !== undefined
-                                                                ? `${formatCompactTokens(compaction.tokensBefore)} → ${formatCompactTokens(compaction.tokensAfter)}`
-                                                                : 'Context summarized'}
-                                                            {savings !== undefined ? ` (−${savings}%)` : ''}
-                                                        </Text>
-                                                        <Text size="10px" c="dimmed">
-                                                            Turn {Math.floor(turnIndex / 2) + 1}
-                                                            {compaction.messagesCompressed ? ` · ${compaction.messagesCompressed} results compacted` : ''}
-                                                            {compaction.failed ? ' · fallback' : ''}
-                                                        </Text>
-                                                    </Box>
-                                                </Group>
-                                            </UnstyledButton>
-                                        );
-                                    })}
+                                    {compactions.map(({ turnIndex, compaction }, index) => (
+                                        <UnstyledButton
+                                            key={`${turnIndex}-${index}`}
+                                            onClick={() => onGoToTurn(turnIndex)}
+                                            className={classes.eventRow}
+                                        >
+                                            <Group gap="xs" wrap="nowrap">
+                                                <Badge
+                                                    size="xs"
+                                                    variant="light"
+                                                    color={compaction.failed ? 'orange' : 'indigo'}
+                                                    className={classes.eventBadge}
+                                                >
+                                                    {index + 1}
+                                                </Badge>
+                                                <Box className={classes.eventName}>
+                                                    <Text size="xs">{compactionShrinkLabel(compaction) ?? 'Context summarized'}</Text>
+                                                    <Text size="10px" c="dimmed">
+                                                        Turn {Math.floor(turnIndex / 2) + 1}
+                                                        {compaction.messagesCompressed ? ` · ${compaction.messagesCompressed} results compacted` : ''}
+                                                        {compaction.failed ? ' · fallback' : ''}
+                                                    </Text>
+                                                </Box>
+                                            </Group>
+                                        </UnstyledButton>
+                                    ))}
                                 </Stack>
                             </Box>
                         </Stack>
@@ -431,8 +415,8 @@ export default function SessionSidePanel({
                                             {tool.name}
                                         </Text>
                                         <Group gap={4}>
-                                            <Text size="10px" c="dimmed">{originLabel(tool.origin)}</Text>
-                                            {'sourceKey' in tool && tool.sourceKey ? (
+                                            <Text size="10px" c="dimmed">{ORIGIN_LABELS[tool.origin]}</Text>
+                                            {tool.sourceKey ? (
                                                 <Text size="10px" c="dimmed" truncate>· {tool.sourceKey}</Text>
                                             ) : null}
                                             {tool.failed > 0 ? (
@@ -540,12 +524,12 @@ function UsageRow({
     );
 }
 
-function originLabel(origin: string): string {
-    if (origin === 'mcp') return 'MCP';
-    if (origin === 'system') return 'built-in';
-    if (origin === 'knowledge') return 'knowledge engine';
-    if (origin === 'memory') return 'memory';
-    if (origin === 'sandbox') return 'sandbox';
-    if (origin === 'runtime') return 'not in config';
-    return 'tool';
-}
+const ORIGIN_LABELS: Record<ToolOrigin, string> = {
+    tool: 'tool',
+    mcp: 'MCP',
+    system: 'built-in',
+    knowledge: 'knowledge engine',
+    memory: 'memory',
+    sandbox: 'sandbox',
+    runtime: 'not in config',
+};

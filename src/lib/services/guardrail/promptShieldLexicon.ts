@@ -98,15 +98,15 @@ const DECODE_VERB_RE = /\b(?:decode|execute|run|eval|çöz|çalıştır)\b/i;
  * it needs two co-occurring signals (a decode-shaped blob AND a verb asking
  * to act on it), not one regex.
  */
-function detectEncodingObfuscation(text: string): { hit: boolean; evidence: string } {
+function detectEncodingObfuscation(text: string): string | null {
   if (ZERO_WIDTH_RE.test(text)) {
-    return { hit: true, evidence: 'zero-width characters present (common obfuscation/exfiltration channel)' };
+    return 'zero-width characters present (common obfuscation/exfiltration channel)';
   }
   const [firstBlob] = text.match(BASE64_BLOB_RE) ?? [];
   if (firstBlob && DECODE_VERB_RE.test(text)) {
-    return { hit: true, evidence: `a base64-shaped blob paired with a decode/execute instruction ("${firstBlob.slice(0, 24)}…")` };
+    return `a base64-shaped blob paired with a decode/execute instruction ("${firstBlob.slice(0, 24)}…")`;
   }
-  return { hit: false, evidence: '' };
+  return null;
 }
 
 /**
@@ -127,25 +127,21 @@ export function runPatternPromptShieldPolicy(text: string, globalAction: Guardra
     if (!current || rank[rule.severity] > rank[current]) bestByCategory.set(rule.category, rule.severity);
   }
 
-  const findings: GuardrailFinding[] = [...bestByCategory.entries()].map(([category, severity]) => ({
-    type: 'prompt_shield' as const,
+  const finding = (category: string, severity: Severity, message: string): GuardrailFinding => ({
+    type: 'prompt_shield',
     category,
     severity,
-    message: `Pattern match for prompt-shield category "${category}"`,
+    message,
     action: globalAction,
     block: globalAction === 'block',
-  }));
+  });
+  const findings = [...bestByCategory.entries()].map(([category, severity]) =>
+    finding(category, severity, `Pattern match for prompt-shield category "${category}"`),
+  );
 
   const encoding = detectEncodingObfuscation(text);
-  if (encoding.hit) {
-    findings.push({
-      type: 'prompt_shield',
-      category: 'encoding_obfuscation',
-      severity: 'medium',
-      message: `Pattern match for prompt-shield category "encoding_obfuscation": ${encoding.evidence}`,
-      action: globalAction,
-      block: globalAction === 'block',
-    });
+  if (encoding) {
+    findings.push(finding('encoding_obfuscation', 'medium', `Pattern match for prompt-shield category "encoding_obfuscation": ${encoding}`));
   }
 
   return findings;

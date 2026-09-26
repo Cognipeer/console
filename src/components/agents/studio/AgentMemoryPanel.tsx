@@ -29,12 +29,12 @@ export interface AgentMemoryPanelProps {
     value: IAgentMemoryConfig | undefined;
     onChange: (next: IAgentMemoryConfig | undefined) => void;
     stores: MemoryStoreOption[];
-    disabled?: boolean;
 }
 
-export default function AgentMemoryPanel({ value, onChange, stores, disabled }: AgentMemoryPanelProps) {
+export default function AgentMemoryPanel({ value, onChange, stores }: AgentMemoryPanelProps) {
     const enabled = value?.enabled ?? false;
     const patch = (patch: Partial<IAgentMemoryConfig>) => onChange({ ...(value ?? {}), ...patch });
+    const tools = value?.tools ?? 'readwrite';
 
     const activeStores = stores.filter((s) => s.status === 'active');
 
@@ -45,7 +45,6 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                 description="Recall relevant memories before answering, and let the SDK's own summarizer decide what's worth saving as it compacts context."
                 checked={enabled}
                 onChange={(event) => patch({ enabled: event.currentTarget.checked })}
-                disabled={disabled}
             />
 
             {enabled ? (
@@ -67,7 +66,6 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                             value={value?.memoryStoreKey ?? null}
                             onChange={(next) => patch({ memoryStoreKey: next ?? undefined })}
                             searchable
-                            disabled={disabled}
                         />
                     )}
 
@@ -86,7 +84,6 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                             // profile. Showing 'session' here said otherwise.
                             value={value?.scope ?? 'workspace'}
                             onChange={(next) => patch({ scope: (next as AgentMemoryScope) ?? undefined })}
-                            disabled={disabled}
                             allowDeselect={false}
                         />
                         <Select
@@ -102,7 +99,6 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                             ]}
                             value={value?.writePolicy ?? 'auto_important'}
                             onChange={(next) => patch({ writePolicy: (next as AgentMemoryWritePolicy) ?? undefined })}
-                            disabled={disabled}
                             allowDeselect={false}
                         />
                         <Select
@@ -114,7 +110,6 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                             ]}
                             value={value?.readPolicy ?? 'hybrid'}
                             onChange={(next) => patch({ readPolicy: (next as AgentMemoryReadPolicy) ?? undefined })}
-                            disabled={disabled}
                             allowDeselect={false}
                         />
                     </Group>
@@ -137,9 +132,8 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                             { value: 'read', label: 'search only — the agent cannot change stored facts' },
                             { value: 'off', label: 'no tools — pre-injected recall only' },
                         ]}
-                        value={value?.tools ?? 'readwrite'}
+                        value={tools}
                         onChange={(next) => patch({ tools: (next as AgentMemoryToolMode) ?? undefined })}
-                        disabled={disabled}
                         allowDeselect={false}
                     />
 
@@ -155,12 +149,12 @@ export default function AgentMemoryPanel({ value, onChange, stores, disabled }: 
                             conversation that never grows past the summarization threshold writes nothing,
                             however much it was told.
                         </Text>
-                        {(value?.tools ?? 'readwrite') !== 'off' ? (
+                        {tools !== 'off' ? (
                             <Text size="xs" mt={6}>
                                 The tools above close that gap:{' '}
                                 <Code>memory_search</Code> lets the agent look something up when the
                                 pre-injected slice missed it
-                                {(value?.tools ?? 'readwrite') === 'readwrite' ? (
+                                {tools === 'readwrite' ? (
                                     <>, and <Code>memory_write</Code> / <Code>memory_forget</Code> let it
                                     record a fact the moment it is told, rather than waiting for a
                                     compaction that may never come</>

@@ -35,6 +35,14 @@ function asObject(value: unknown, envelope: string): Record<string, unknown> {
     return value as Record<string, unknown>;
 }
 
+function parseOr(parse: (text: string) => unknown, text: string, failure: string): unknown {
+    try {
+        return parse(text);
+    } catch (error) {
+        throw new AgentDocumentParseError(`${failure}: ${(error as Error).message}`);
+    }
+}
+
 export function parseAgentDocument(text: string): ParsedAgentDocument {
     if (typeof text !== 'string' || !text.trim()) {
         throw new AgentDocumentParseError('The document is empty.');
@@ -46,29 +54,14 @@ export function parseAgentDocument(text: string): ParsedAgentDocument {
 
     const frontMatter = FRONT_MATTER.exec(trimmed);
     if (frontMatter) {
-        let data: unknown;
-        try {
-            data = YAML.parse(frontMatter[1]);
-        } catch (error) {
-            throw new AgentDocumentParseError(`Front-matter is not valid YAML: ${(error as Error).message}`);
-        }
+        const data = parseOr((t) => YAML.parse(t), frontMatter[1], 'Front-matter is not valid YAML');
         const body = frontMatter[2]?.trim();
         return { data: asObject(data, 'front-matter'), ...(body ? { body } : {}), envelope: 'markdown' };
     }
 
     if (trimmed.startsWith('{')) {
-        try {
-            return { data: asObject(JSON.parse(trimmed), 'JSON'), envelope: 'json' };
-        } catch (error) {
-            if (error instanceof AgentDocumentParseError) throw error;
-            throw new AgentDocumentParseError(`Not valid JSON: ${(error as Error).message}`);
-        }
+        return { data: asObject(parseOr(JSON.parse, trimmed, 'Not valid JSON'), 'JSON'), envelope: 'json' };
     }
 
-    try {
-        return { data: asObject(YAML.parse(trimmed), 'YAML'), envelope: 'yaml' };
-    } catch (error) {
-        if (error instanceof AgentDocumentParseError) throw error;
-        throw new AgentDocumentParseError(`Not valid YAML or JSON: ${(error as Error).message}`);
-    }
+    return { data: asObject(parseOr((t) => YAML.parse(t), trimmed, 'Not valid YAML or JSON'), 'YAML'), envelope: 'yaml' };
 }

@@ -32,10 +32,9 @@ export interface AgentSkillsPanelProps {
     onChange: (skills: string[], policy: IAgentSkillPolicy | undefined) => void;
     /** A skill created from this panel — the page adds it to its library copy. */
     onLibraryAdd?: (skill: SkillView) => void;
-    disabled?: boolean;
 }
 
-export default function AgentSkillsPanel({ skills, policy, library, onChange, onLibraryAdd, disabled }: AgentSkillsPanelProps) {
+export default function AgentSkillsPanel({ skills, policy, library, onChange, onLibraryAdd }: AgentSkillsPanelProps) {
     const [creating, setCreating] = useState(false);
     const options = useMemo(
         () => library
@@ -66,7 +65,6 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                     variant="light"
                     leftSection={<IconPlus size={14} />}
                     onClick={() => setCreating(true)}
-                    disabled={disabled}
                 >
                     New skill
                 </Button>
@@ -92,7 +90,6 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                 onChange={(next) => onChange(next, next.length === 0 ? undefined : policy)}
                 searchable
                 clearable
-                disabled={disabled}
             />
 
             {library.length === 0 ? (
@@ -139,7 +136,6 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                             onChange={(next) =>
                                 patchPolicy({ disclosure: (next as 'catalog' | 'search') ?? undefined })
                             }
-                            disabled={disabled}
                             allowDeselect={false}
                         />
                         <Group grow>
@@ -149,7 +145,6 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                                 min={1}
                                 value={policy?.maxOpenSkills ?? ''}
                                 onChange={(next) => patchPolicy({ maxOpenSkills: next === '' ? undefined : Number(next) })}
-                                disabled={disabled}
                             />
                             <NumberInput
                                 label="Max tools per skill"
@@ -157,7 +152,6 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                                 min={1}
                                 value={policy?.maxBoundToolsPerSkill ?? ''}
                                 onChange={(next) => patchPolicy({ maxBoundToolsPerSkill: next === '' ? undefined : Number(next) })}
-                                disabled={disabled}
                             />
                             <NumberInput
                                 label="Max tools total"
@@ -165,7 +159,6 @@ export default function AgentSkillsPanel({ skills, policy, library, onChange, on
                                 min={1}
                                 value={policy?.maxBoundToolsTotal ?? ''}
                                 onChange={(next) => patchPolicy({ maxBoundToolsTotal: next === '' ? undefined : Number(next) })}
-                                disabled={disabled}
                             />
                         </Group>
                     </Stack>

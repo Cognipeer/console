@@ -16,7 +16,7 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
-import type { QuotaDomain, QuotaScope, QuotaLimits } from '@/lib/quota/types';
+import type { QuotaDomain, QuotaScope, QuotaLimits, QuotaRateLimit } from '@/lib/quota/types';
 import { useTranslations } from '@/lib/i18n';
 import { ScopeIdSelector } from './ScopeIdSelector';
 
@@ -29,7 +29,6 @@ interface QuotaPolicyModalProps {
   defaultDomain?: QuotaDomain;
   allowedDomains?: QuotaDomain[];
   allowedScopes?: QuotaScope[];
-  title?: string;
   resourceOptions?: { value: string; label: string }[];
 }
 
@@ -64,6 +63,10 @@ const hasAnyValue = (obj?: object | null) =>
     (v) => v !== undefined && v !== null && v !== '',
   );
 
+const RATE_KINDS = ['requests', 'tokens', 'vectors', 'files', 'storage'] as const;
+
+const anyDefined = (o?: object) => !!o && Object.values(o).some((v) => v !== undefined);
+
 export function QuotaPolicyModal({
   opened,
   onClose,
@@ -73,7 +76,6 @@ export function QuotaPolicyModal({
   defaultDomain = 'global',
   allowedDomains,
   allowedScopes,
-  title,
   resourceOptions = [],
 }: QuotaPolicyModalProps) {
   const isEditing = !!policy;
@@ -103,53 +105,23 @@ export function QuotaPolicyModal({
 
   useEffect(() => {
     if (policy) {
+      const rl = policy.limits?.rateLimit;
       const normalizedLimits: QuotaLimits = {
-        ...emptyLimits,
         ...policy.limits,
-        rateLimit: {
-          requests: {
-            ...emptyLimits.rateLimit?.requests,
-            ...policy.limits?.rateLimit?.requests,
-          },
-          tokens: {
-            ...emptyLimits.rateLimit?.tokens,
-            ...policy.limits?.rateLimit?.tokens,
-          },
-          vectors: {
-            ...emptyLimits.rateLimit?.vectors,
-            ...policy.limits?.rateLimit?.vectors,
-          },
-          files: {
-            ...emptyLimits.rateLimit?.files,
-            ...policy.limits?.rateLimit?.files,
-          },
-          storage: {
-            ...emptyLimits.rateLimit?.storage,
-            ...policy.limits?.rateLimit?.storage,
-          },
-        },
-        perRequest: {
-          ...emptyLimits.perRequest,
-          ...policy.limits?.perRequest,
-        },
-        quotas: {
-          ...emptyLimits.quotas,
-          ...policy.limits?.quotas,
-        },
-        budget: {
-          ...emptyLimits.budget,
-          ...policy.limits?.budget,
-        },
+        rateLimit: Object.fromEntries(RATE_KINDS.map((k) => [k, { ...rl?.[k] }] as const)),
+        perRequest: { ...policy.limits?.perRequest },
+        quotas: { ...policy.limits?.quotas },
+        budget: { ...policy.limits?.budget },
       };
 
       form.setValues({
         scope: policy.scope,
-        scopeId: (policy as { scopeId?: string }).scopeId || '',
+        scopeId: policy.scopeId || '',
         domain: policy.domain,
-        priority: (policy as { priority?: number }).priority || 0,
-        enabled: (policy as { enabled?: boolean }).enabled !== false,
-        label: (policy as { label?: string }).label || '',
-        description: (policy as { description?: string }).description || '',
+        priority: policy.priority || 0,
+        enabled: policy.enabled !== false,
+        label: policy.label || '',
+        description: policy.description || '',
         limits: normalizedLimits,
       });
     } else {
@@ -163,48 +135,17 @@ export function QuotaPolicyModal({
   const handleSubmit = async () => {
     const values = form.getValues();
 
-    // Clean up empty values
-    const cleanLimits: QuotaLimits = {};
-
-    if (values.limits.rateLimit) {
-      const { requests, tokens, vectors, files, storage } = values.limits.rateLimit;
-      cleanLimits.rateLimit = {};
-
-      if (requests && Object.values(requests).some((v) => v !== undefined)) {
-        cleanLimits.rateLimit.requests = requests;
-      }
-      if (tokens && Object.values(tokens).some((v) => v !== undefined)) {
-        cleanLimits.rateLimit.tokens = tokens;
-      }
-      if (vectors && Object.values(vectors).some((v) => v !== undefined)) {
-        cleanLimits.rateLimit.vectors = vectors;
-      }
-      if (files && Object.values(files).some((v) => v !== undefined)) {
-        cleanLimits.rateLimit.files = files;
-      }
-      if (storage && Object.values(storage).some((v) => v !== undefined)) {
-        cleanLimits.rateLimit.storage = storage;
-      }
-
-      if (Object.keys(cleanLimits.rateLimit).length === 0) {
-        delete cleanLimits.rateLimit;
-      }
-    }
-
-    if (values.limits.quotas && Object.values(values.limits.quotas).some((v) => v !== undefined)) {
-      cleanLimits.quotas = values.limits.quotas;
-    }
-
-    if (
-      values.limits.perRequest &&
-      Object.values(values.limits.perRequest).some((v) => v !== undefined)
-    ) {
-      cleanLimits.perRequest = values.limits.perRequest;
-    }
-
-    if (values.limits.budget && Object.values(values.limits.budget).some((v) => v !== undefined)) {
-      cleanLimits.budget = values.limits.budget;
-    }
+    // Clean up empty values: a group with nothing set is left out entirely.
+    const { rateLimit, quotas, perRequest, budget } = values.limits;
+    const rates = Object.fromEntries(
+      RATE_KINDS.map((k) => [k, rateLimit?.[k]] as const).filter(([, w]) => anyDefined(w)),
+    );
+    const cleanLimits: QuotaLimits = {
+      ...(Object.keys(rates).length > 0 ? { rateLimit: rates } : {}),
+      ...(anyDefined(quotas) ? { quotas } : {}),
+      ...(anyDefined(perRequest) ? { perRequest } : {}),
+      ...(anyDefined(budget) ? { budget } : {}),
+    };
 
     await onSubmit({
       ...values,
@@ -234,8 +175,8 @@ export function QuotaPolicyModal({
   const showTokens =
     currentDomain === 'global' || currentDomain === 'llm' || currentDomain === 'embedding';
   const showVectors = currentDomain === 'global' || currentDomain === 'vector';
+  // Storage limits belong to the file domain, so showFiles also gates them.
   const showFiles = currentDomain === 'global' || currentDomain === 'file';
-  const showStorage = currentDomain === 'global' || currentDomain === 'file';
   const showTracing = currentDomain === 'global' || currentDomain === 'tracing';
   const showCreationQuotas = currentScope === 'tenant' || currentScope === 'user';
 
@@ -243,15 +184,12 @@ export function QuotaPolicyModal({
   const identityDone = !!values.label && !!values.domain;
   const scopeDone =
     !!values.scope && (currentScope === 'tenant' || !!values.scopeId);
-  const limitsDone =
-    hasAnyValue(limits.rateLimit?.requests) ||
-    hasAnyValue(limits.rateLimit?.tokens) ||
-    hasAnyValue(limits.rateLimit?.vectors) ||
-    hasAnyValue(limits.rateLimit?.files) ||
-    hasAnyValue(limits.rateLimit?.storage) ||
-    hasAnyValue(limits.perRequest) ||
-    hasAnyValue(limits.quotas) ||
-    hasAnyValue(limits.budget);
+  const limitsDone = [
+    ...RATE_KINDS.map((k) => limits.rateLimit?.[k]),
+    limits.perRequest,
+    limits.quotas,
+    limits.budget,
+  ].some((g) => hasAnyValue(g));
 
   const checklist = useMemo(
     () => [
@@ -264,8 +202,58 @@ export function QuotaPolicyModal({
     [values.label, values.domain, scopeDone, limitsDone, values.enabled],
   );
 
-  const headerTitle =
-    title || (isEditing ? t('title.edit') : t('title.create', { domain: tDomains(defaultDomain) }));
+  const headerTitle = isEditing
+    ? t('title.edit')
+    : t('title.create', { domain: tDomains(defaultDomain) });
+
+  // Every limit is optional: '' in the input means "not set" and is written back
+  // as undefined (never 0), so handleSubmit can drop untouched groups. `scale`
+  // shows a stored unit in a friendlier one (bytes → MB, ms → s).
+  const limitField = (
+    label: string,
+    path: string,
+    value: number | undefined,
+    {
+      placeholder = t('placeholder'),
+      min = 0,
+      decimalScale,
+      scale,
+    }: { placeholder?: string; min?: number; decimalScale?: number; scale?: number } = {},
+  ) => (
+    <FormField label={label} optional>
+      <NumberInput
+        placeholder={placeholder}
+        min={min}
+        allowDecimal={decimalScale !== undefined}
+        decimalScale={decimalScale}
+        value={toFormValue(scale ? (value ? value / scale : undefined) : value)}
+        onChange={(v) => {
+          const n = fromFormValue(v);
+          form.setFieldValue(path, scale && n !== undefined ? n * scale : n);
+        }}
+      />
+    </FormField>
+  );
+
+  // The per-minute/hour/day/month grid shared by every rate-limit section.
+  const rateWindowRows = (kind: keyof QuotaRateLimit) => {
+    const cell = (win: 'perMinute' | 'perHour' | 'perDay' | 'perMonth', label: string) =>
+      limitField(label, `limits.rateLimit.${kind}.${win}`, limits.rateLimit?.[kind]?.[win]);
+    return (
+      <>
+        <FormRow cols={2}>
+          {cell('perMinute', t('rateLimits.perMinute'))}
+          {cell('perHour', t('rateLimits.perHour'))}
+        </FormRow>
+        <FormRow cols={2}>
+          {cell('perDay', t('rateLimits.perDay'))}
+          {cell('perMonth', t('rateLimits.perMonth'))}
+        </FormRow>
+      </>
+    );
+  };
+
+  const planLimit = { placeholder: t('planLimit') };
 
   const summary = (
     <>
@@ -461,66 +449,13 @@ export function QuotaPolicyModal({
         title="Request rate limits"
         description="Cap how many requests can be made within rolling windows."
       >
-        <FormRow cols={2}>
-          <FormField label={t('rateLimits.perMinute')} optional>
-            <NumberInput
-              placeholder={t('placeholder')}
-              min={0}
-              allowDecimal={false}
-              value={toFormValue(limits.rateLimit?.requests?.perMinute)}
-              onChange={(v) =>
-                form.setFieldValue('limits.rateLimit.requests.perMinute', fromFormValue(v))
-              }
-            />
-          </FormField>
-          <FormField label={t('rateLimits.perHour')} optional>
-            <NumberInput
-              placeholder={t('placeholder')}
-              min={0}
-              allowDecimal={false}
-              value={toFormValue(limits.rateLimit?.requests?.perHour)}
-              onChange={(v) =>
-                form.setFieldValue('limits.rateLimit.requests.perHour', fromFormValue(v))
-              }
-            />
-          </FormField>
-        </FormRow>
-        <FormRow cols={2}>
-          <FormField label={t('rateLimits.perDay')} optional>
-            <NumberInput
-              placeholder={t('placeholder')}
-              min={0}
-              allowDecimal={false}
-              value={toFormValue(limits.rateLimit?.requests?.perDay)}
-              onChange={(v) =>
-                form.setFieldValue('limits.rateLimit.requests.perDay', fromFormValue(v))
-              }
-            />
-          </FormField>
-          <FormField label={t('rateLimits.perMonth')} optional>
-            <NumberInput
-              placeholder={t('placeholder')}
-              min={0}
-              allowDecimal={false}
-              value={toFormValue(limits.rateLimit?.requests?.perMonth)}
-              onChange={(v) =>
-                form.setFieldValue('limits.rateLimit.requests.perMonth', fromFormValue(v))
-              }
-            />
-          </FormField>
-        </FormRow>
+        {rateWindowRows('requests')}
         <FormRow cols={1}>
-          <FormField label={t('perRequest.maxConcurrentRequests')} optional>
-            <NumberInput
-              placeholder={t('placeholder')}
-              min={0}
-              allowDecimal={false}
-              value={toFormValue(limits.perRequest?.maxConcurrentRequests)}
-              onChange={(v) =>
-                form.setFieldValue('limits.perRequest.maxConcurrentRequests', fromFormValue(v))
-              }
-            />
-          </FormField>
+          {limitField(
+            t('perRequest.maxConcurrentRequests'),
+            'limits.perRequest.maxConcurrentRequests',
+            limits.perRequest?.maxConcurrentRequests,
+          )}
         </FormRow>
       </FormSection>
 
@@ -530,90 +465,25 @@ export function QuotaPolicyModal({
           title={t('rateLimits.tokens')}
           description="Throttle token throughput for LLM and embedding workloads."
         >
+          {rateWindowRows('tokens')}
           <FormRow cols={2}>
-            <FormField label={t('rateLimits.perMinute')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.tokens?.perMinute)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.tokens.perMinute', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perHour')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.tokens?.perHour)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.tokens.perHour', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label={t('rateLimits.perDay')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.tokens?.perDay)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.tokens.perDay', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perMonth')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.tokens?.perMonth)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.tokens.perMonth', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label={t('perRequest.maxInputTokens')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.perRequest?.maxInputTokens)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.perRequest.maxInputTokens', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('perRequest.maxOutputTokens')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.perRequest?.maxOutputTokens)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.perRequest.maxOutputTokens', fromFormValue(v))
-                }
-              />
-            </FormField>
+            {limitField(
+              t('perRequest.maxInputTokens'),
+              'limits.perRequest.maxInputTokens',
+              limits.perRequest?.maxInputTokens,
+            )}
+            {limitField(
+              t('perRequest.maxOutputTokens'),
+              'limits.perRequest.maxOutputTokens',
+              limits.perRequest?.maxOutputTokens,
+            )}
           </FormRow>
           <FormRow cols={1}>
-            <FormField label={t('perRequest.maxTotalTokens')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.perRequest?.maxTotalTokens)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.perRequest.maxTotalTokens', fromFormValue(v))
-                }
-              />
-            </FormField>
+            {limitField(
+              t('perRequest.maxTotalTokens'),
+              'limits.perRequest.maxTotalTokens',
+              limits.perRequest?.maxTotalTokens,
+            )}
           </FormRow>
         </FormSection>
       ) : null}
@@ -624,77 +494,18 @@ export function QuotaPolicyModal({
           title={t('rateLimits.vectors')}
           description="Upsert and query throughput for vector indexes."
         >
+          {rateWindowRows('vectors')}
           <FormRow cols={2}>
-            <FormField label={t('rateLimits.perMinute')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.vectors?.perMinute)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.vectors.perMinute', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perHour')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.vectors?.perHour)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.vectors.perHour', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label={t('rateLimits.perDay')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.vectors?.perDay)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.vectors.perDay', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perMonth')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.vectors?.perMonth)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.vectors.perMonth', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label={t('perRequest.maxVectorsPerUpsert')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.perRequest?.maxVectorsPerUpsert)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.perRequest.maxVectorsPerUpsert', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('perRequest.maxQueryResults')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.perRequest?.maxQueryResults)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.perRequest.maxQueryResults', fromFormValue(v))
-                }
-              />
-            </FormField>
+            {limitField(
+              t('perRequest.maxVectorsPerUpsert'),
+              'limits.perRequest.maxVectorsPerUpsert',
+              limits.perRequest?.maxVectorsPerUpsert,
+            )}
+            {limitField(
+              t('perRequest.maxQueryResults'),
+              'limits.perRequest.maxQueryResults',
+              limits.perRequest?.maxQueryResults,
+            )}
           </FormRow>
         </FormSection>
       ) : null}
@@ -705,143 +516,30 @@ export function QuotaPolicyModal({
           title={t('rateLimits.files')}
           description="Per-request and rate limits for file operations."
         >
+          {rateWindowRows('files')}
           <FormRow cols={2}>
-            <FormField label={t('rateLimits.perMinute')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.files?.perMinute)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.files.perMinute', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perHour')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.files?.perHour)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.files.perHour', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label={t('rateLimits.perDay')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.files?.perDay)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.files.perDay', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perMonth')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.files?.perMonth)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.files.perMonth', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label={t('perRequest.maxFileSizeMB')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(
-                  limits.perRequest?.maxFileSize
-                    ? limits.perRequest.maxFileSize / 1024 / 1024
-                    : undefined,
-                )}
-                onChange={(v) => {
-                  const mb = fromFormValue(v);
-                  form.setFieldValue(
-                    'limits.perRequest.maxFileSize',
-                    mb === undefined ? undefined : mb * 1024 * 1024,
-                  );
-                }}
-              />
-            </FormField>
-            <FormField label={t('perRequest.maxFilesPerRequest')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.perRequest?.maxFilesPerRequest)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.perRequest.maxFilesPerRequest', fromFormValue(v))
-                }
-              />
-            </FormField>
+            {limitField(
+              t('perRequest.maxFileSizeMB'),
+              'limits.perRequest.maxFileSize',
+              limits.perRequest?.maxFileSize,
+              { scale: 1024 * 1024 },
+            )}
+            {limitField(
+              t('perRequest.maxFilesPerRequest'),
+              'limits.perRequest.maxFilesPerRequest',
+              limits.perRequest?.maxFilesPerRequest,
+            )}
           </FormRow>
         </FormSection>
       ) : null}
 
-      {showStorage ? (
+      {showFiles ? (
         <FormSection
           number={7}
           title={t('rateLimits.storage')}
           description="Throttle storage I/O measured in bytes."
         >
-          <FormRow cols={2}>
-            <FormField label={t('rateLimits.perMinute')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.storage?.perMinute)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.storage.perMinute', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perHour')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.storage?.perHour)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.storage.perHour', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
-          <FormRow cols={2}>
-            <FormField label={t('rateLimits.perDay')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.storage?.perDay)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.storage.perDay', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('rateLimits.perMonth')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.rateLimit?.storage?.perMonth)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.rateLimit.storage.perMonth', fromFormValue(v))
-                }
-              />
-            </FormField>
-          </FormRow>
+          {rateWindowRows('storage')}
         </FormSection>
       ) : null}
 
@@ -852,36 +550,17 @@ export function QuotaPolicyModal({
           description="Limits for observability session size and duration."
         >
           <FormRow cols={2}>
-            <FormField label={t('perRequest.maxEventsPerSession')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.perRequest?.maxEventsPerSession)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.perRequest.maxEventsPerSession', fromFormValue(v))
-                }
-              />
-            </FormField>
-            <FormField label={t('perRequest.maxSessionDurationSec')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(
-                  limits.perRequest?.maxSessionDurationMs
-                    ? limits.perRequest.maxSessionDurationMs / 1000
-                    : undefined,
-                )}
-                onChange={(v) => {
-                  const seconds = fromFormValue(v);
-                  form.setFieldValue(
-                    'limits.perRequest.maxSessionDurationMs',
-                    seconds === undefined ? undefined : seconds * 1000,
-                  );
-                }}
-              />
-            </FormField>
+            {limitField(
+              t('perRequest.maxEventsPerSession'),
+              'limits.perRequest.maxEventsPerSession',
+              limits.perRequest?.maxEventsPerSession,
+            )}
+            {limitField(
+              t('perRequest.maxSessionDurationSec'),
+              'limits.perRequest.maxSessionDurationMs',
+              limits.perRequest?.maxSessionDurationMs,
+              { scale: 1000 },
+            )}
           </FormRow>
         </FormSection>
       ) : null}
@@ -895,129 +574,84 @@ export function QuotaPolicyModal({
           <>
             <FormRow cols={2}>
               {showTokens ? (
-                <FormField label={t('quotas.maxModels')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={0}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxModels)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxModels', fromFormValue(v))
-                    }
-                  />
-                </FormField>
+                limitField(
+                  t('quotas.maxModels'),
+                  'limits.quotas.maxModels',
+                  limits.quotas?.maxModels,
+                  planLimit,
+                )
               ) : (
                 <div />
               )}
               {showVectors ? (
-                <FormField label={t('quotas.maxVectorIndexes')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={0}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxVectorIndexes)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxVectorIndexes', fromFormValue(v))
-                    }
-                  />
-                </FormField>
+                limitField(
+                  t('quotas.maxVectorIndexes'),
+                  'limits.quotas.maxVectorIndexes',
+                  limits.quotas?.maxVectorIndexes,
+                  planLimit,
+                )
               ) : (
                 <div />
               )}
             </FormRow>
             <FormRow cols={2}>
               {showFiles ? (
-                <FormField label={t('quotas.maxFileBuckets')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={0}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxFileBuckets)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxFileBuckets', fromFormValue(v))
-                    }
-                  />
-                </FormField>
+                limitField(
+                  t('quotas.maxFileBuckets'),
+                  'limits.quotas.maxFileBuckets',
+                  limits.quotas?.maxFileBuckets,
+                  planLimit,
+                )
               ) : (
                 <div />
               )}
               {showTracing ? (
-                <FormField label={t('quotas.maxTracingSessions')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={0}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxTracingSessions)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxTracingSessions', fromFormValue(v))
-                    }
-                  />
-                </FormField>
+                limitField(
+                  t('quotas.maxTracingSessions'),
+                  'limits.quotas.maxTracingSessions',
+                  limits.quotas?.maxTracingSessions,
+                  planLimit,
+                )
               ) : (
                 <div />
               )}
             </FormRow>
             {currentDomain === 'global' && currentScope === 'tenant' ? (
               <FormRow cols={2}>
-                <FormField label={t('quotas.maxApiTokens')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={0}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxApiTokens)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxApiTokens', fromFormValue(v))
-                    }
-                  />
-                </FormField>
-                <FormField label={t('quotas.maxUsers')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={0}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxUsers)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxUsers', fromFormValue(v))
-                    }
-                  />
-                </FormField>
+                {limitField(
+                  t('quotas.maxApiTokens'),
+                  'limits.quotas.maxApiTokens',
+                  limits.quotas?.maxApiTokens,
+                  planLimit,
+                )}
+                {limitField(
+                  t('quotas.maxUsers'),
+                  'limits.quotas.maxUsers',
+                  limits.quotas?.maxUsers,
+                  planLimit,
+                )}
               </FormRow>
             ) : null}
             {currentDomain === 'global' ? (
               <FormRow cols={3}>
-                <FormField label={t('quotas.maxAgentSyncTimeoutSeconds')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={5}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxAgentSyncTimeoutSeconds)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxAgentSyncTimeoutSeconds', fromFormValue(v))
-                    }
-                  />
-                </FormField>
-                <FormField label={t('quotas.maxAgentBackgroundDurationMinutes')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={1}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxAgentBackgroundDurationMinutes)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxAgentBackgroundDurationMinutes', fromFormValue(v))
-                    }
-                  />
-                </FormField>
-                <FormField label={t('quotas.maxConcurrentAgentRuns')} optional>
-                  <NumberInput
-                    placeholder={t('planLimit')}
-                    min={0}
-                    allowDecimal={false}
-                    value={toFormValue(limits.quotas?.maxConcurrentAgentRuns)}
-                    onChange={(v) =>
-                      form.setFieldValue('limits.quotas.maxConcurrentAgentRuns', fromFormValue(v))
-                    }
-                  />
-                </FormField>
+                {limitField(
+                  t('quotas.maxAgentSyncTimeoutSeconds'),
+                  'limits.quotas.maxAgentSyncTimeoutSeconds',
+                  limits.quotas?.maxAgentSyncTimeoutSeconds,
+                  { ...planLimit, min: 5 },
+                )}
+                {limitField(
+                  t('quotas.maxAgentBackgroundDurationMinutes'),
+                  'limits.quotas.maxAgentBackgroundDurationMinutes',
+                  limits.quotas?.maxAgentBackgroundDurationMinutes,
+                  { ...planLimit, min: 1 },
+                )}
+                {limitField(
+                  t('quotas.maxConcurrentAgentRuns'),
+                  'limits.quotas.maxConcurrentAgentRuns',
+                  limits.quotas?.maxConcurrentAgentRuns,
+                  planLimit,
+                )}
               </FormRow>
             ) : null}
           </>
@@ -1025,40 +659,21 @@ export function QuotaPolicyModal({
 
         <FormRow cols={2}>
           {showVectors ? (
-            <FormField label={t('quotas.maxVectorsTotal')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(limits.quotas?.maxVectorsTotal)}
-                onChange={(v) =>
-                  form.setFieldValue('limits.quotas.maxVectorsTotal', fromFormValue(v))
-                }
-              />
-            </FormField>
+            limitField(
+              t('quotas.maxVectorsTotal'),
+              'limits.quotas.maxVectorsTotal',
+              limits.quotas?.maxVectorsTotal,
+            )
           ) : (
             <div />
           )}
           {showFiles ? (
-            <FormField label={t('quotas.maxStorageMB')} optional>
-              <NumberInput
-                placeholder={t('placeholder')}
-                min={0}
-                allowDecimal={false}
-                value={toFormValue(
-                  limits.quotas?.maxStorageBytes
-                    ? limits.quotas.maxStorageBytes / 1024 / 1024
-                    : undefined,
-                )}
-                onChange={(v) => {
-                  const mb = fromFormValue(v);
-                  form.setFieldValue(
-                    'limits.quotas.maxStorageBytes',
-                    mb === undefined ? undefined : mb * 1024 * 1024,
-                  );
-                }}
-              />
-            </FormField>
+            limitField(
+              t('quotas.maxStorageMB'),
+              'limits.quotas.maxStorageBytes',
+              limits.quotas?.maxStorageBytes,
+              { scale: 1024 * 1024 },
+            )
           ) : (
             <div />
           )}
@@ -1071,32 +686,21 @@ export function QuotaPolicyModal({
         description={t('budget.description')}
       >
         <FormRow cols={2}>
-          <FormField label={t('budget.dailyLimit')} optional>
-            <NumberInput
-              placeholder={t('placeholder')}
-              min={0}
-              decimalScale={2}
-              value={toFormValue(limits.budget?.dailySpendLimit)}
-              onChange={(v) =>
-                form.setFieldValue('limits.budget.dailySpendLimit', fromFormValue(v))
-              }
-            />
-          </FormField>
-          <FormField label={t('budget.monthlyLimit')} optional>
-            <NumberInput
-              placeholder={t('placeholder')}
-              min={0}
-              decimalScale={2}
-              value={toFormValue(limits.budget?.monthlySpendLimit)}
-              onChange={(v) =>
-                form.setFieldValue('limits.budget.monthlySpendLimit', fromFormValue(v))
-              }
-            />
-          </FormField>
+          {limitField(
+            t('budget.dailyLimit'),
+            'limits.budget.dailySpendLimit',
+            limits.budget?.dailySpendLimit,
+            { decimalScale: 2 },
+          )}
+          {limitField(
+            t('budget.monthlyLimit'),
+            'limits.budget.monthlySpendLimit',
+            limits.budget?.monthlySpendLimit,
+            { decimalScale: 2 },
+          )}
         </FormRow>
       </FormSection>
 
-      {/* Keep ToggleList/ToggleRow imports usage for status reaffirmation */}
       <FormSection
         number={11}
         title="Activation"

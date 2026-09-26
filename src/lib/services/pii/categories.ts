@@ -150,7 +150,7 @@ function validateCalendarDate(value: string): boolean {
   // yyyy-mm-dd if the first group is 4 digits wide, else dd-mm-yyyy.
   const isIso = String(parts[0]).length === 4 || a > 31;
   const year = isIso ? a : c;
-  const month = isIso ? b : b;
+  const month = b;
   const day = isIso ? c : a;
   if (month < 1 || month > 12 || day < 1) return false;
   const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
@@ -517,17 +517,52 @@ export const PII_CATEGORIES_BY_ID: Record<string, PiiCategoryDefinition> = Objec
 );
 
 /**
- * Return categories whose `languages` overlap with the requested set.
+ * Predicate: does a category's `languages` overlap with the requested set?
  * `requested` may include 'global' explicitly or omit it; 'global' categories
- * are ALWAYS returned. An empty `requested` returns every category (no filter).
+ * ALWAYS match. An empty `requested` matches every category (no filter).
+ * Shared by both engines' catalogs.
  */
+export function matchesLanguages(
+  requested: PiiLanguage[] | undefined,
+): (c: { languages: PiiLanguage[] }) => boolean {
+  if (!requested || requested.length === 0) return () => true;
+  const set = new Set<PiiLanguage>(requested);
+  return (c) => c.languages.includes('global') || c.languages.some((l) => set.has(l));
+}
+
+/** Return the categories whose `languages` match `requested` (see `matchesLanguages`). */
 export function filterCategoriesByLanguages(
   requested: PiiLanguage[] | undefined,
   list: PiiCategoryDefinition[] = PII_CATEGORIES,
 ): PiiCategoryDefinition[] {
-  if (!requested || requested.length === 0) return list;
-  const set = new Set<PiiLanguage>(requested);
-  return list.filter((c) => c.languages.includes('global') || c.languages.some((l) => set.has(l)));
+  return list.filter(matchesLanguages(requested));
+}
+
+/** Languages a request may name; also the catalog's `supportedLanguages`. */
+export const PII_LANGUAGES: PiiLanguage[] = ['global', 'en', 'tr', 'de', 'fr', 'es', 'it', 'pt', 'ar', 'ja', 'zh'];
+
+/** A request `locale`; anything unknown falls back to 'en'. */
+export function parsePiiLocale(value: unknown): PiiLanguage {
+  if (typeof value === 'string' && (PII_LANGUAGES as string[]).includes(value)) {
+    return value as PiiLanguage;
+  }
+  return 'en';
+}
+
+/** A request `languages` field (array or comma list); unknown entries dropped, undefined when none remain. */
+export function parsePiiLanguages(input: unknown): PiiLanguage[] | undefined {
+  if (input === undefined || input === null) return undefined;
+  let arr: unknown[] = [];
+  if (Array.isArray(input)) arr = input;
+  else if (typeof input === 'string') arr = input.split(',').map((s) => s.trim()).filter(Boolean);
+  else return undefined;
+  const out: PiiLanguage[] = [];
+  for (const item of arr) {
+    if (typeof item === 'string' && (PII_LANGUAGES as string[]).includes(item)) {
+      out.push(item as PiiLanguage);
+    }
+  }
+  return out.length ? out : undefined;
 }
 
 /** Pick a locale-aware label for a category. Falls back to English. */

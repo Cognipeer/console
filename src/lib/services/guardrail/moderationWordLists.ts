@@ -27,7 +27,7 @@
  *     (`guardrail_word_lists`, uploaded via the dashboard) is for, and
  *     `moderationLexicon.ts` accepts a tenant list mapped to any of these
  *     category ids for exactly this reason. `child_safety` gets a
- *     STRUCTURAL detector instead (age-reference + sexual-content
+ *     STRUCTURAL detector instead (age-reference + grooming-phrase
  *     co-occurrence, in `moderationLexicon.ts`) that needs no slur list at
  *     all. `misinformation` has no reliable keyword signal by nature (a
  *     false claim usually reads exactly like a true one) and is left to the

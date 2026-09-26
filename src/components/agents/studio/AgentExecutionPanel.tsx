@@ -17,7 +17,6 @@ import { useEffect, useState } from 'react';
 import {
     Alert,
     Code,
-    Group,
     NumberInput,
     PasswordInput,
     SegmentedControl,
@@ -30,8 +29,7 @@ import {
 import { IconInfoCircle } from '@tabler/icons-react';
 import type { IAgentExecutionConfig } from '@/lib/database/provider/types.domain';
 import { ConfigBlock } from './ConfigSection';
-
-export const EXECUTION_SECRET_MASK = '••••••';
+import { SANDBOX_SECRET_MASK } from './AgentSandboxPanel';
 
 interface ExecutionLimits {
     syncTimeoutSeconds: number;
@@ -43,7 +41,6 @@ interface ExecutionLimits {
 export interface AgentExecutionPanelProps {
     value: IAgentExecutionConfig | undefined;
     onChange: (next: IAgentExecutionConfig | undefined) => void;
-    disabled?: boolean;
 }
 
 /** Drops keys left empty so an untouched agent saves no `execution` at all. */
@@ -52,7 +49,7 @@ function compact(next: IAgentExecutionConfig): IAgentExecutionConfig | undefined
     return entries.length > 0 ? (Object.fromEntries(entries) as IAgentExecutionConfig) : undefined;
 }
 
-export default function AgentExecutionPanel({ value, onChange, disabled }: AgentExecutionPanelProps) {
+export default function AgentExecutionPanel({ value, onChange }: AgentExecutionPanelProps) {
     const [limits, setLimits] = useState<ExecutionLimits | null>(null);
 
     useEffect(() => {
@@ -76,24 +73,21 @@ export default function AgentExecutionPanel({ value, onChange, disabled }: Agent
     return (
         <Stack gap="lg">
             <ConfigBlock title="Synchronous calls">
-                <Stack gap="sm">
-                    <NumberInput
-                        label="Timeout (seconds)"
-                        description={
-                            limits
-                                ? `A call that runs longer returns 504; the turn is stopped. Ceiling here: ${limits.syncTimeoutSeconds}s.`
-                                : 'A call that runs longer returns 504; the turn is stopped.'
-                        }
-                        placeholder={limits ? String(limits.syncTimeoutSeconds) : 'Default'}
-                        min={5}
-                        max={limits?.syncTimeoutSeconds}
-                        allowDecimal={false}
-                        value={current.syncTimeoutSeconds ?? ''}
-                        onChange={(v) => set({ syncTimeoutSeconds: typeof v === 'number' ? v : undefined })}
-                        disabled={disabled}
-                        maw={320}
-                    />
-                </Stack>
+                <NumberInput
+                    label="Timeout (seconds)"
+                    description={
+                        limits
+                            ? `A call that runs longer returns 504; the turn is stopped. Ceiling here: ${limits.syncTimeoutSeconds}s.`
+                            : 'A call that runs longer returns 504; the turn is stopped.'
+                    }
+                    placeholder={limits ? String(limits.syncTimeoutSeconds) : 'Default'}
+                    min={5}
+                    max={limits?.syncTimeoutSeconds}
+                    allowDecimal={false}
+                    value={current.syncTimeoutSeconds ?? ''}
+                    onChange={(v) => set({ syncTimeoutSeconds: typeof v === 'number' ? v : undefined })}
+                    maw={320}
+                />
             </ConfigBlock>
 
             <ConfigBlock title="Background runs">
@@ -106,7 +100,6 @@ export default function AgentExecutionPanel({ value, onChange, disabled }: Agent
                             backgroundEnabled: event.currentTarget.checked ? undefined : false,
                             ...(event.currentTarget.checked ? {} : { defaultMode: undefined }),
                         })}
-                        disabled={disabled}
                     />
                     {backgroundEnabled ? (
                         <>
@@ -120,7 +113,6 @@ export default function AgentExecutionPanel({ value, onChange, disabled }: Agent
                                         { value: 'sync', label: 'Run synchronously' },
                                         { value: 'background', label: 'Run in background' },
                                     ]}
-                                    disabled={disabled}
                                 />
                                 <Text size="xs" c="dimmed">
                                     An explicit <Code>background: true|false</Code> in the request always wins.
@@ -139,7 +131,6 @@ export default function AgentExecutionPanel({ value, onChange, disabled }: Agent
                                 allowDecimal={false}
                                 value={current.backgroundMaxDurationMinutes ?? ''}
                                 onChange={(v) => set({ backgroundMaxDurationMinutes: typeof v === 'number' ? v : undefined })}
-                                disabled={disabled}
                                 maw={320}
                             />
                         </>
@@ -160,15 +151,14 @@ export default function AgentExecutionPanel({ value, onChange, disabled }: Agent
                                 placeholder="https://example.com/hooks/agent-runs"
                                 value={current.callbackUrl ?? ''}
                                 onChange={(event) => set({ callbackUrl: event.currentTarget.value || undefined })}
-                                disabled={disabled}
                             />
                             <PasswordInput
                                 label="Signing secret"
                                 description="16+ characters. Sent back as X-Cognipeer-Signature: t=…,v1=HMAC-SHA256."
-                                placeholder={current.callbackSecret === EXECUTION_SECRET_MASK ? 'Stored — type to replace' : 'Optional'}
-                                value={current.callbackSecret === EXECUTION_SECRET_MASK ? '' : current.callbackSecret ?? ''}
-                                onChange={(event) => set({ callbackSecret: event.currentTarget.value || (value?.callbackSecret === EXECUTION_SECRET_MASK ? EXECUTION_SECRET_MASK : undefined) })}
-                                disabled={disabled || !current.callbackUrl}
+                                placeholder={current.callbackSecret === SANDBOX_SECRET_MASK ? 'Stored — type to replace' : 'Optional'}
+                                value={current.callbackSecret === SANDBOX_SECRET_MASK ? '' : current.callbackSecret ?? ''}
+                                onChange={(event) => set({ callbackSecret: event.currentTarget.value || (value?.callbackSecret === SANDBOX_SECRET_MASK ? SANDBOX_SECRET_MASK : undefined) })}
+                                disabled={!current.callbackUrl}
                             />
                         </SimpleGrid>
                     </Stack>
@@ -176,21 +166,19 @@ export default function AgentExecutionPanel({ value, onChange, disabled }: Agent
             ) : null}
 
             <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />} p="sm">
-                <Group gap={6}>
-                    <Text size="xs">
-                        Effective now: sync timeout{' '}
-                        <b>{Number.isFinite(effectiveSync) ? `${effectiveSync}s` : '—'}</b>
-                        {backgroundEnabled ? (
-                            <>
-                                {' '}· background max <b>{Number.isFinite(effectiveBackground) ? `${effectiveBackground} min` : '—'}</b>
-                                {limits && limits.maxConcurrentRunsPerTenant > 0
-                                    ? <> · {limits.maxConcurrentRunsPerTenant} concurrent runs per tenant</>
-                                    : null}
-                            </>
-                        ) : <> · background runs off</>}
-                        . Applies immediately — no publish needed.
-                    </Text>
-                </Group>
+                <Text size="xs">
+                    Effective now: sync timeout{' '}
+                    <b>{Number.isFinite(effectiveSync) ? `${effectiveSync}s` : '—'}</b>
+                    {backgroundEnabled ? (
+                        <>
+                            {' '}· background max <b>{Number.isFinite(effectiveBackground) ? `${effectiveBackground} min` : '—'}</b>
+                            {limits && limits.maxConcurrentRunsPerTenant > 0
+                                ? <> · {limits.maxConcurrentRunsPerTenant} concurrent runs per tenant</>
+                                : null}
+                        </>
+                    ) : <> · background runs off</>}
+                    . Applies immediately — no publish needed.
+                </Text>
             </Alert>
         </Stack>
     );
