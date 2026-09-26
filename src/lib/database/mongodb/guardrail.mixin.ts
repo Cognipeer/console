@@ -288,9 +288,11 @@ export function GuardrailMixin<TBase extends Constructor<MongoDBProviderBase>>(B
       ];
       const [totals] = await db.collection(COLLECTIONS.guardrailEvalLogs).aggregate(pipeline).toArray();
 
-      // Aggregate findings by type and severity
+      // Aggregate findings by type and severity across EVERY log: `passed`
+      // means "no blocking finding", so redact/warn verdicts are logged
+      // passed=true WITH findings and must still be counted.
       const findPipeline = [
-        { $match: { ...matchStage, passed: false } },
+        { $match: matchStage },
         { $unwind: '$findings' },
         {
           $facet: {
