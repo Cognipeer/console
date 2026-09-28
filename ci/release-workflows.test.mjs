@@ -92,8 +92,15 @@ test('workflow preserves self-hosted runners and gates publishing on identity an
   assert.deepEqual(workflow.jobs['notify-crm'].needs, ['build', 'sync-console-ee']);
   assert.ok(workflow.jobs['sync-console-ee'].steps.find((step) => step.run === 'bash ci/wait-community-compat.sh').env.COMMUNITY_SHA);
   for (const job of Object.values(workflow.jobs)) {
-    assert.equal(job['runs-on'], 'self-hosted-runner-cgate-azure');
+    assert.equal(job['runs-on'], 'cognipeer-azure-runners');
     for (const step of job.steps ?? []) {
+      assert.equal(step.env?.CRM_OPTIONAL, undefined);
+      if (step.run?.includes('ci/notify-release-crm.sh')) {
+        assert.deepEqual(
+          [step.env.PRODUCT, step.env.TARGET_KEY, step.env.CRM_ENVIRONMENT],
+          ['console', 'community', 'artifacts'],
+        );
+      }
       if (!step.run) continue;
       assert.doesNotMatch(step.run, /\bgh (api|pr)\b/);
       const syntax = spawnSync('bash', ['-n'], { input: step.run, encoding: 'utf8' });

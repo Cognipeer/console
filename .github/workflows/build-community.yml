@@ -92,9 +92,12 @@ jobs:
         env:
           WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
-          CRM_OPTIONAL: "true"
+          PRODUCT: console
+          TARGET_KEY: community
+          CRM_ENVIRONMENT: artifacts
           COMMIT_SHA: ${{ steps.vars.outputs.commit_sha }}
           RELEASE_VERSION: ${{ steps.vars.outputs.release_tag }}
+          IMAGE_REF: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
           RELEASE_STATUS: pending
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash ci/notify-release-crm.sh
@@ -229,11 +232,14 @@ jobs:
         env:
           WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
-          CRM_OPTIONAL: "true"
+          PRODUCT: console
+          TARGET_KEY: community
+          CRM_ENVIRONMENT: artifacts
           BUILD_RESULT: ${{ needs.build.result }}
           COMPAT_SYNC_RESULT: ${{ needs.sync-console-ee.result }}
           COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
-          IMAGE_DIGEST: ${{ needs.build.outputs.image_digest }}
+          IMAGE_REF: ghcr.io/cognipeer/console:${{ needs.build.outputs.release_tag }}
+          IMMUTABLE_REF: ghcr.io/cognipeer/console@${{ needs.build.outputs.image_digest }}
           RELEASE_VERSION: ${{ needs.build.outputs.release_tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
