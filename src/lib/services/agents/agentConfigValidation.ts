@@ -18,6 +18,7 @@ import { getConfig } from '@/lib/core/config';
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
 import { getDisabledToolNames } from '@/lib/services/mcp/mcpService';
 import { AGENT_SANDBOX_SECRET_MASK } from './agentSandboxSecrets';
+import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 
 export interface AgentConfigIssue {
@@ -197,8 +198,8 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
 
     const sandbox = config.sandbox;
     if (sandbox?.enabled) {
-        if (sandbox.mode !== undefined && sandbox.mode !== 'ephemeral' && sandbox.mode !== 'persist') {
-            issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: ephemeral, persist' });
+        if (sandbox.mode !== undefined && !SANDBOX_MODES.includes(sandbox.mode)) {
+            issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: session, ephemeral' });
         }
         checkNumber(issues, 'sandbox.commandTimeoutSec', sandbox.commandTimeoutSec, { min: 1, max: 600, integer: true });
         checkNumber(issues, 'sandbox.retentionHours', sandbox.retentionHours, { min: 1, max: 24 * 30, integer: true });

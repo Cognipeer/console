@@ -31,7 +31,8 @@ import {
     Tooltip,
 } from '@mantine/core';
 import { IconInfoCircle, IconLock, IconPlus, IconTrash } from '@tabler/icons-react';
-import type { AgentSandboxMode, IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
+import type { IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
+import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import { ConfigBlock } from './ConfigSection';
 
 export const SANDBOX_SECRET_MASK = '••••••';
@@ -69,7 +70,7 @@ const SANDBOX_TOOLS = [
 export default function AgentSandboxPanel({ value, onChange }: AgentSandboxPanelProps) {
     const [capabilities, setCapabilities] = useState<SandboxCapabilities | null>(null);
     const enabled = value?.enabled ?? false;
-    const mode: AgentSandboxMode = value?.mode ?? 'ephemeral';
+    const mode = resolveSandboxMode(value?.mode);
     const tools = { exec: true, code: true, files: true, ...(value?.tools ?? {}) };
     const patch = (next: Partial<IAgentSandboxConfig>) => onChange({ ...(value ?? {}), ...next });
     const patchPreview = (next: Partial<NonNullable<IAgentSandboxConfig['preview']>>) =>
@@ -190,16 +191,16 @@ export default function AgentSandboxPanel({ value, onChange }: AgentSandboxPanel
                         <Stack gap="sm">
                             <SegmentedControl
                                 value={mode}
-                                onChange={(next) => patch({ mode: next as AgentSandboxMode })}
+                                onChange={(next) => patch({ mode: next as ResolvedSandboxMode })}
                                 data={[
-                                    { value: 'ephemeral', label: 'Ephemeral' },
-                                    { value: 'persist', label: 'Persistent' },
+                                    { value: 'session', label: 'Session' },
+                                    { value: 'ephemeral', label: 'Per message' },
                                 ]}
                             />
                             <Text size="xs" c="dimmed">
                                 {mode === 'ephemeral'
-                                    ? 'A fresh sandbox for every reply, deleted when the reply is done. Nothing carries over between turns.'
-                                    : 'One sandbox per conversation. Files and installed packages carry over between turns; the machine is stopped between turns and deleted with the conversation. A call without a conversation still gets a throwaway sandbox.'}
+                                    ? 'A fresh sandbox for every message, deleted when the reply is done. Nothing carries over between turns.'
+                                    : 'One sandbox per conversation, kept running between messages: files and installed packages carry over, and every use extends its life. It is shut down and deleted once it has been idle for the sandbox idle timeout (Sandbox → Settings, or the template\'s own), or with the conversation; the next message then starts a fresh one. A call without a conversation gets a throwaway sandbox.'}
                             </Text>
                             <Group grow align="flex-start">
                                 <NumberInput
@@ -211,17 +212,6 @@ export default function AgentSandboxPanel({ value, onChange }: AgentSandboxPanel
                                     value={value?.commandTimeoutSec ?? ''}
                                     onChange={(next) => patch({ commandTimeoutSec: optionalNumber(next) })}
                                 />
-                                {mode === 'persist' ? (
-                                    <NumberInput
-                                        label="Keep for (hours)"
-                                        description="An unused sandbox older than this starts over fresh."
-                                        placeholder="24"
-                                        min={1}
-                                        max={720}
-                                        value={value?.retentionHours ?? ''}
-                                        onChange={(next) => patch({ retentionHours: optionalNumber(next) })}
-                                    />
-                                ) : null}
                             </Group>
                         </Stack>
                     </ConfigBlock>

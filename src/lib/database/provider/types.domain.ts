@@ -2433,14 +2433,17 @@ export interface IAgentConfig {
 
 /**
  * How long an agent's sandbox lives.
- *  - `ephemeral`: a fresh sandbox per run (turn), created on the first
+ *  - `session` (default): one sandbox per conversation, kept running between
+ *    turns — files and installed packages carry over. Every use extends its
+ *    life; the sandbox module shuts it down (and deletes it) once it has been
+ *    idle for its own idle timeout, or it goes with the conversation. A later
+ *    message then gets a fresh one. Without a conversation (a stateless call)
+ *    there is nothing to keep it against, so it lasts one message.
+ *  - `ephemeral`: a fresh sandbox per message (run), created on the first
  *    sandbox tool call and deleted when the run ends. Nothing carries over.
- *  - `persist`: one sandbox per conversation. Files and installed packages
- *    carry over from turn to turn; the machine is stopped between turns (its
- *    disk kept) and deleted with the conversation, or when it has not been
- *    used for `retentionHours`.
+ *  - `persist`: the former name of `session`, still accepted as such.
  */
-export type AgentSandboxMode = 'ephemeral' | 'persist';
+export type AgentSandboxMode = 'session' | 'ephemeral' | 'persist';
 
 /**
  * Gives an agent a sandbox (the enterprise Agent Runtime Sandbox module) and
@@ -2456,11 +2459,11 @@ export interface IAgentSandboxConfig {
   enabled?: boolean;
   /** Sandbox template key. Absent → the tenant's default (`multi-base`). */
   templateKey?: string;
-  /** Default `ephemeral`. */
+  /** Default `session`. */
   mode?: AgentSandboxMode;
   /** Per-command timeout. Default 60, max 600. */
   commandTimeoutSec?: number;
-  /** `persist` only: an unused sandbox older than this is replaced by a fresh one. Default 24. */
+  /** @deprecated No longer used — a session sandbox closes by the sandbox module's idle timeout. Still accepted so saved configs load. */
   retentionHours?: number;
   resources?: { cpuCores?: number; memoryMb?: number };
   /** Cut the sandbox off from the network. */
@@ -2481,7 +2484,7 @@ export interface IAgentSandboxConfig {
    * A machine the agent issued a link for is NOT stopped/deleted when the
    * reply ends — the link would die with it. It keeps running while the
    * preview is used and is stopped after `keepAliveMinutes` without activity
-   * (an ephemeral machine is then deleted, a persistent one keeps its disk).
+   * (and deleted).
    */
   preview?: {
     enabled?: boolean;
