@@ -75,6 +75,7 @@ import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
 import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
+import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import type { SkillView } from '@/components/skills/types';
 import type {
@@ -1155,7 +1156,7 @@ export default function AgentDetailPage() {
               <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} />,
               sandboxConfig?.enabled ? (
                 <Badge size="xs" color="grape" variant="light" w="fit-content">
-                  {sandboxConfig.mode === 'persist' ? 'persistent' : 'ephemeral'}
+                  {resolveSandboxMode(sandboxConfig.mode) === 'session' ? 'session' : 'per message'}
                 </Badge>
               ) : null,
             )}

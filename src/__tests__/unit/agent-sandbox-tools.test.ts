@@ -39,12 +39,14 @@ import type { IAgentSandboxConfig } from '@/lib/database';
 function fakeRunner() {
     const calls: Array<{ op: string; args: unknown[] }> = [];
     let seq = 0;
+    /** Machines the sandbox module's idle reaper has already closed. */
+    const closed = new Set<string>();
     const runner: AgentSandboxRunner = {
         listTemplates: async () => [{ key: 'multi-base', name: 'Multi base' }],
         ensureInstance: async (...args) => {
             calls.push({ op: 'ensureInstance', args });
             const reuse = args[1].instanceId;
-            return reuse ? { instanceId: reuse, created: false } : { instanceId: `sbx-${++seq}`, created: true };
+            return reuse && !closed.has(reuse) ? { instanceId: reuse, created: false } : { instanceId: `sbx-${++seq}`, created: true };
         },
         exec: async (...args) => {
             calls.push({ op: 'exec', args });
@@ -68,7 +70,7 @@ function fakeRunner() {
         stop: async (...args) => { calls.push({ op: 'stop', args }); },
         destroy: async (...args) => { calls.push({ op: 'destroy', args }); },
     };
-    return { runner, calls, ops: () => calls.map((c) => c.op) };
+    return { runner, calls, closed, ops: () => calls.map((c) => c.op) };
 }
 
 const passthroughProtect = (_name: string, tool: unknown) => tool;
@@ -180,44 +182,91 @@ describe('secrets', () => {
     });
 });
 
-describe('persistent sandbox', () => {
-    it('keeps one machine per conversation: stopped between turns, reused on the next', async () => {
+describe('session sandbox', () => {
+    it('is the default: one machine per conversation, left running between turns and reused by the next', async () => {
         conversations.set('conv-1', { _id: 'conv-1', metadata: { runtimeContext: { a: 1 } } });
         const conversation = { _id: 'conv-1', metadata: { runtimeContext: { a: 1 } } };
 
-        const first = await build({ enabled: true, mode: 'persist' }, { conversation });
+        const first = await build({ enabled: true }, { conversation });
         await first.byName('sandbox_exec').invoke({ command: 'pip install pandas' });
         await first.cleanup();
 
         const stored = conversations.get('conv-1')!.metadata as Record<string, any>;
-        expect(stored.sandbox.instanceId).toBe('sbx-1');
+        expect(stored.sandbox).toMatchObject({ instanceId: 'sbx-1', lifecycle: 'session' });
         // Other metadata survives the write.
         expect(stored.runtimeContext).toEqual({ a: 1 });
 
-        const second = await build({ enabled: true, mode: 'persist' }, { conversation });
+        const second = await build({ enabled: true }, { conversation });
         await second.byName('sandbox_exec').invoke({ command: 'python -c "import pandas"' });
         await second.cleanup();
 
-        expect(fake.ops()).toEqual(['ensureInstance', 'exec', 'stop', 'ensureInstance', 'exec', 'stop']);
-        expect(fake.calls[3].args[1]).toMatchObject({ persist: true, instanceId: 'sbx-1' });
+        // Never stopped, never deleted: the sandbox module closes it once idle.
+        expect(fake.ops()).toEqual(['ensureInstance', 'exec', 'ensureInstance', 'exec']);
+        // Not a persistent machine — a stop of one is a full close, and the idle reaper applies.
+        expect(fake.calls[0].args[1]).toMatchObject({ persist: false });
+        expect(fake.calls[2].args[1]).toMatchObject({ persist: false, instanceId: 'sbx-1' });
         expect((fake.calls[0].args[0] as { conversationId: string }).conversationId).toBe('conv-1');
     });
 
-    it('replaces a sandbox unused for longer than the retention window', async () => {
-        const old = new Date(Date.now() - 5 * 3_600_000).toISOString();
+    it('records the machine as soon as it exists, not only when the run ends', async () => {
+        conversations.set('conv-1', { _id: 'conv-1', metadata: {} });
+        const { byName } = await build({ enabled: true }, { conversation: { _id: 'conv-1' } });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        // No cleanup: the process died mid-run. The next turn must still find it.
+        expect((conversations.get('conv-1')!.metadata as Record<string, any>).sandbox.instanceId).toBe('sbx-1');
+    });
+
+    it('the persist mode of earlier versions is read as session', async () => {
+        conversations.set('conv-1', { _id: 'conv-1', metadata: {} });
+        const { byName, cleanup } = await build({ enabled: true, mode: 'persist' }, { conversation: { _id: 'conv-1' } });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        await cleanup();
+        expect(fake.ops()).toEqual(['ensureInstance', 'exec']);
+    });
+
+    it('starts a fresh machine when the recorded one was closed by the idle reaper', async () => {
+        conversations.set('conv-1', {
+            _id: 'conv-1',
+            metadata: { sandbox: { instanceId: 'sbx-gone', lifecycle: 'session', createdAt: '2026-09-01T00:00:00.000Z', lastUsedAt: '2026-09-01T00:00:00.000Z' } },
+        });
+        fake.closed.add('sbx-gone');
+        const { byName, cleanup } = await build({ enabled: true }, { conversation: { _id: 'conv-1' } });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        await cleanup();
+
+        expect(fake.calls[0].args[1]).toMatchObject({ instanceId: 'sbx-gone' });
+        // The record now points at the new machine, with a new birth date.
+        const record = (conversations.get('conv-1')!.metadata as Record<string, any>).sandbox;
+        expect(record.instanceId).toBe('sbx-1');
+        expect(record.createdAt).not.toBe('2026-09-01T00:00:00.000Z');
+    });
+
+    it('replaces a machine made under the old persist mode instead of adopting it', async () => {
         conversations.set('conv-2', {
             _id: 'conv-2',
-            metadata: { sandbox: { instanceId: 'sbx-old', createdAt: old, lastUsedAt: old } },
+            metadata: { sandbox: { instanceId: 'sbx-old', createdAt: '2026-09-24T00:00:00.000Z', lastUsedAt: '2026-09-24T00:00:00.000Z' } },
         });
-        const { byName } = await build({ enabled: true, mode: 'persist', retentionHours: 2 }, { conversation: { _id: 'conv-2' } });
+        const { byName } = await build({ enabled: true }, { conversation: { _id: 'conv-2' } });
         await byName('sandbox_list_files').invoke({});
+        // A persistent machine is exempt from the idle reaper — adopting it would leave it running forever.
         expect(fake.ops().slice(0, 2)).toEqual(['destroy', 'ensureInstance']);
         expect(fake.calls[0].args[1]).toBe('sbx-old');
         expect((fake.calls[1].args[1] as { instanceId?: string }).instanceId).toBeUndefined();
     });
 
-    it('without a conversation, persist falls back to a throwaway sandbox', async () => {
-        const { byName, cleanup } = await build({ enabled: true, mode: 'persist' });
+    it('replaces the machine when the agent now wants another template', async () => {
+        conversations.set('conv-4', {
+            _id: 'conv-4',
+            metadata: { sandbox: { instanceId: 'sbx-py', templateKey: 'py', lifecycle: 'session', createdAt: 'x', lastUsedAt: 'x' } },
+        });
+        const { byName } = await build({ enabled: true, templateKey: 'node' }, { conversation: { _id: 'conv-4' } });
+        await byName('sandbox_list_files').invoke({});
+        expect(fake.ops().slice(0, 2)).toEqual(['destroy', 'ensureInstance']);
+        expect(fake.calls[0].args[1]).toBe('sbx-py');
+    });
+
+    it('without a conversation, it lasts one message', async () => {
+        const { byName, cleanup } = await build({ enabled: true });
         await byName('sandbox_exec').invoke({ command: 'ls' });
         await cleanup();
         expect(fake.calls[0].args[1]).toMatchObject({ persist: false });
@@ -231,6 +280,19 @@ describe('persistent sandbox', () => {
             conversation: { _id: 'conv-3', agentKey: 'builder', projectId: 'p1', metadata: { sandbox: { instanceId: 'sbx-9' } } },
         });
         expect(fake.calls).toEqual([{ op: 'destroy', args: [expect.objectContaining({ conversationId: 'conv-3' }), 'sbx-9'] }]);
+    });
+});
+
+describe('per-message sandbox on a conversation', () => {
+    it('is deleted when the reply is done, and nothing is recorded on the conversation', async () => {
+        conversations.set('conv-5', { _id: 'conv-5', metadata: { keep: true } });
+        const { byName, cleanup } = await build({ enabled: true, mode: 'ephemeral' }, { conversation: { _id: 'conv-5' } });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        await cleanup();
+
+        expect(fake.ops()).toEqual(['ensureInstance', 'exec', 'destroy']);
+        expect((fake.calls[0].args[0] as { conversationId?: string }).conversationId).toBeUndefined();
+        expect(conversations.get('conv-5')!.metadata).toEqual({ keep: true });
     });
 });
 
@@ -256,12 +318,13 @@ describe('preview', () => {
         expect(fake.ops()).not.toContain('destroy');
     });
 
-    it('a persistent machine with a live preview is not stopped after the turn, but still recorded', async () => {
+    it('a session machine with a live preview is kept and recorded, and stops itself once idle', async () => {
         conversations.set('conv-p', { _id: 'conv-p', metadata: {} });
-        const { byName, cleanup } = await build({ enabled: true, mode: 'persist', preview: { enabled: true } }, { conversation: { _id: 'conv-p' } });
+        const { byName, cleanup } = await build({ enabled: true, mode: 'session', preview: { enabled: true } }, { conversation: { _id: 'conv-p' } });
         await byName('sandbox_preview_link').invoke({ port: 3000 });
         await cleanup();
-        expect(fake.ops()).not.toContain('stop');
+        expect(fake.ops()).not.toContain('destroy');
+        expect(fake.calls[0].args[1]).toMatchObject({ idleStopSeconds: 1800 });
         expect((conversations.get('conv-p')!.metadata as Record<string, any>).sandbox.instanceId).toBe('sbx-1');
     });
 

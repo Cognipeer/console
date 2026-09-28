@@ -113,15 +113,21 @@ function readAssistantsMetadata(conversation: IAgentConversation): AssistantsMet
 }
 
 /** Full-column-replace persistence (both DB backends), so the write always
- * carries the caller's OTHER metadata keys forward untouched. */
-async function writeAssistantsMetadata(
+ * carries the caller's OTHER metadata keys forward untouched.
+ *
+ * The keys come from a fresh read, not from `conversation`: that snapshot was
+ * loaded before the run, and the run itself writes to `metadata` (its sandbox
+ * record) — replacing the column from the snapshot would erase that write and
+ * cost the thread its sandbox on every run. */
+export async function writeAssistantsMetadata(
   conversationId: string,
   conversation: IAgentConversation,
   patch: AssistantsMetadata,
 ): Promise<void> {
   const db = await getDatabase();
-  const metadata = { ...(conversation.metadata ?? {}) };
-  metadata.assistantsApi = { ...readAssistantsMetadata(conversation), ...patch };
+  const current = (await db.findAgentConversationById(conversationId)) ?? conversation;
+  const metadata = { ...(current.metadata ?? {}) };
+  metadata.assistantsApi = { ...readAssistantsMetadata(current), ...patch };
   await db.updateAgentConversation(conversationId, { metadata });
 }
 
@@ -595,6 +601,12 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
         // patching `metadata` must not be able to erase pending messages or
         // run history it never knew existed.
         merged.assistantsApi = readAssistantsMetadata(loaded.conversation);
+        // Same for the thread's sandbox record: the run path owns it, and a
+        // caller-supplied `sandbox` key would point the thread at someone
+        // else's machine (or drop it).
+        const sandboxRecord = (loaded.conversation.metadata as Record<string, unknown> | undefined)?.sandbox;
+        if (sandboxRecord === undefined) delete merged.sandbox;
+        else merged.sandbox = sandboxRecord;
         await db.updateAgentConversation(conversationId, { metadata: merged });
       }
       const refreshed = await getConversationById(ctx.tenantDbName, conversationId);
