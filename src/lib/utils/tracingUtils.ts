@@ -69,6 +69,51 @@ export const humanize = (str: string | undefined): string => {
     .join(' ');
 };
 
+/** A session/thread status as a `StatusBadge` variant. */
+export function statusVariant(status?: string) {
+  if (!status) return 'info' as const;
+  const v = status.toLowerCase();
+  if (v === 'success' || v === 'completed') return 'ok' as const;
+  if (v === 'error' || v === 'failed') return 'err' as const;
+  return 'info' as const;
+}
+
+const titleCase = (value: string) => (value.includes('_') ? formatToolName(value) : value);
+
+/** An event's actor (a name, or `{ scope, name, role, version }`) as one ` · `-joined label. */
+export const formatActor = (actor: unknown): string => {
+  if (!actor) return '';
+  if (typeof actor === 'string') return titleCase(actor);
+  if (typeof actor === 'object') {
+    const record = actor as Record<string, unknown>;
+    return [record.scope, record.name, record.role, record.version]
+      .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+      .map(titleCase)
+      .join(' · ');
+  }
+  return String(actor);
+};
+
+/** A section's content as text: strings as-is, anything else pretty-printed JSON. */
+export const formatSectionContent = (content: unknown): string => {
+  if (content === null || content === undefined) return '';
+  if (typeof content === 'string') return content;
+  try {
+    return JSON.stringify(content, null, 2);
+  } catch {
+    return String(content);
+  }
+};
+
+/** False for a null, blank, or empty array/object section field. */
+export const shouldDisplaySectionField = (value: unknown): boolean => {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
+  return true;
+};
+
 /**
  * Share of total input tokens (uncached + cached) that were served from cache.
  * Cached tokens are billed/counted separately from `inputTokens`, so the total

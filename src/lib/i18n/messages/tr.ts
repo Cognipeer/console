@@ -67,6 +67,40 @@ export const tr: typeof en = {
     supportErrorTitle: 'Destek açılamadı',
     supportErrorMessage: 'Destek şu anda açılamadı. Lütfen kısa süre sonra tekrar deneyin.',
   },
+  settings: {
+    ...en.settings,
+    addUserModal: {
+      ...en.settings.addUserModal,
+      invitationPanel: {
+        ...en.settings.addUserModal.invitationPanel,
+        title: 'Davet Hazır',
+        deliveryLabel: 'E-posta teslimatı',
+        emailSentTitle: 'E-posta gönderildi',
+        emailNotSentTitle: 'E-posta gönderilemedi',
+        emailSentDescription: 'Davet e-postası gönderildi. Bağlantıyı aşağıdan da kopyalayabilirsiniz.',
+        emailNotSentDescription: 'E-posta teslimatı doğrulanamadı. Bu bağlantıyı kopyalayıp güvenli biçimde paylaşın.',
+        linkLabel: 'Davet bağlantısı',
+        copy: 'Davet bağlantısını kopyala',
+        copied: 'Kopyalandı!',
+        done: 'Tamam',
+      },
+    },
+    userManagement: {
+      ...en.settings.userManagement,
+      actions: {
+        ...en.settings.userManagement.actions,
+        copyInvitationLink: 'Davet bağlantısını kopyala',
+      },
+      errors: {
+        ...en.settings.userManagement.errors,
+        copyInvitationLink: 'Davet bağlantısı kopyalanamadı',
+      },
+      messages: {
+        ...en.settings.userManagement.messages,
+        invitationLinkCopied: 'Davet bağlantısı panoya kopyalandı',
+      },
+    },
+  },
   license: {
     ...en.license,
     actions: {
@@ -102,6 +136,18 @@ export const tr: typeof en = {
     promptOptimizerDescription: 'Bir promptu hedefe göre iyileştir: varyant üret, test edip puanla, en iyisini yayınla',
     cost: 'Maliyet ve Optimizasyon',
     costDescription: 'Model ve agent bazında harcama, fiyatlandırma, model geçiş önerileri ve parite testleri',
+  },
+  navigationFeedback: {
+    loadingPage: 'Sayfa yükleniyor…',
+    loadingContent: 'İçerik yükleniyor…',
+    refreshing: 'Yenileniyor…',
+    retry: 'Tekrar dene',
+    loadFailed: 'Bu bölüm yüklenemedi.',
+  },
+  dashboardOverview: {
+    ...en.dashboardOverview,
+    statsError: 'Çalışma alanı istatistikleri yüklenemedi.',
+    activityError: 'Son etkinlikler yüklenemedi.',
   },
   breadcrumbs: {
     ...en.breadcrumbs,
@@ -428,6 +474,8 @@ export const tr: typeof en = {
         key: 'Politika anahtarı',
         enabled: 'Politika etkin',
         defaultAction: 'Varsayılan aksiyon',
+        engine: 'Tespit motoru',
+        engineHelper: 'Bu politikanın taramasını hangi dedektörün çalıştıracağı. Motor değiştirildiğinde kategoriler yeni motorun kendi varsayılanlarına sıfırlanır — iki motor aynı kategori kelime dağarcığını paylaşmaz.',
         languages: 'Diller',
         languagesHelper: 'Desenleri belirli dillere kısıtlayın. Global desenler her zaman çalışır.',
       },
@@ -489,6 +537,12 @@ export const tr: typeof en = {
       mask: 'Maskele',
       block: 'Engelle',
       tokenize: 'Tokenize (geri alınabilir)',
+    },
+    engines: {
+      regex: 'Regex (yerleşik)',
+      regexDescription: 'Bu konsolun kendi köklü dedektörü — regex/sağlama desenleri, opsiyonel sözlük ve NER katmanlarıyla.',
+      cognipeer: 'cognipeer-pii',
+      cognipeerDescription: 'Çevrimdışı, paket içi @cognipeer/pii — farklı bir kimlik kelime dağarcığına sahip kendi 31 kategorilik katalogu.',
     },
     languages: {
       global: 'Global',

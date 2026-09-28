@@ -1098,6 +1098,16 @@ export function validateGuardrailHooks(hooks: GuardrailHooksConfig): string[] {
           errors.push(`Policy "${label}" must use an https:// webhook url`);
         }
         break;
+      case 'cognipeer_guardrail_moderation':
+      case 'cognipeer_guardrail_prompt_shield':
+        // No reference field to validate: the model ships inside the
+        // `@cognipeer/guardrail` npm package, so there is no modelKey or
+        // policyKey an enabled policy could be missing. An explicit no-op arm
+        // rather than falling into `default` — this switch has NO compile
+        // error for a family with a real required field that lands in
+        // `default` by omission (see catalog/families.ts's own "ADDING A
+        // TENTH FAMILY" checklist).
+        break;
       default:
         break;
     }

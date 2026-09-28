@@ -51,23 +51,48 @@ export interface IGuardrailModerationPolicy {
    * Which detector runs this policy.
    *  - `llm` (default): the chat model named by `modelKey` judges the text.
    *  - `model`: the moderation-category model named by `modelKey` classifies it.
+   *  - `lexicon`: no model call at all — `moderationLexicon.ts`'s built-in,
+   *    category-scoped keyword lists (reusing the word-filter matcher) plus
+   *    a structural `child_safety` check. Zero cost/latency, materially
+   *    lower recall on figurative/coded/novel phrasing than either model
+   *    path — see `moderationLexicon.ts`'s header for the categories it
+   *    covers and the ones it deliberately doesn't.
    *
-   * The judge is the universal fallback — it works against any chat model — but
-   * it costs a full completion on the hot path of every guarded request, and it
-   * can only report a coarse severity. Where the provider has a real
-   * classifier, `model` is both far cheaper and the only path that yields true
-   * per-category probabilities.
+   * The judge is the universal fallback — it works against any chat model —
+   * but it costs a full completion on the hot path of every guarded
+   * request, and it can only report a coarse severity. Where the provider
+   * has a real classifier, `model` is both far cheaper and the only path
+   * that yields true per-category probabilities. `lexicon` is cheaper
+   * still, and — per `families/llm.ts`'s `runIf` gating — a natural
+   * pre-filter for either model path rather than only a standalone choice.
    */
-  detector?: 'llm' | 'model';
-  /** Chat model (detector `llm`) or moderation model (detector `model`). */
+  detector?: 'llm' | 'model' | 'lexicon';
+  /** Chat model (detector `llm`) or moderation model (detector `model`). Unused by `lexicon`. */
   modelKey?: string;
   categories: Record<string, boolean>;
+  /**
+   * detector `lexicon` only: tenant word-list keys (the existing
+   * `guardrail_word_lists` feature) mapped onto a moderation category id.
+   * This is how `hate`/`harassment`/`sexual`/`sexual/minors` — which ship
+   * with no built-in lexicon, see `moderationWordLists.ts` — get real
+   * coverage, and how any built-in category's seed list can be extended.
+   */
+  lexiconCustomLists?: Record<string, string[]>;
 }
 
 export interface IGuardrailPromptShieldPolicy {
   enabled: boolean;
   modelKey?: string;
   sensitivity: 'low' | 'balanced' | 'high';
+  /**
+   * `llm` (default): the judge in `llmEvaluator.ts`. `pattern`: no model
+   * call — `promptShieldLexicon.ts`'s mechanical/structural pattern set
+   * (override phrases, fake system blocks, exfiltration requests, encoding
+   * tricks). Covers roughly a third of `PROMPT_SHIELD_ISSUES` — the
+   * categories that turn on textual SHAPE rather than intent; see that
+   * file's header for exactly which and why the rest stay LLM-only.
+   */
+  detector?: 'llm' | 'pattern';
 }
 
 export interface IGuardrailPresetPolicy {
@@ -165,7 +190,7 @@ export type GuardrailMode = 'enforce' | 'monitor' | 'disabled';
  */
 export type GuardrailSafetyAction = 'allow' | GuardrailAction;
 
-/** The nine policy families a hook can run. */
+/** The eleven policy families a hook can run. */
 export type GuardrailPolicyFamily =
   | 'pii'
   | 'secrets'
@@ -175,7 +200,9 @@ export type GuardrailPolicyFamily =
   | 'prompt_shield'
   | 'custom'
   | 'tool_access'
-  | 'webhook';
+  | 'webhook'
+  | 'cognipeer_guardrail_moderation'
+  | 'cognipeer_guardrail_prompt_shield';
 
 export interface GuardrailPolicyBase<F extends GuardrailPolicyFamily> {
   /** Stable within the guardrail and never reused — it appears on every finding. */
@@ -349,17 +376,11 @@ export interface GuardrailRegexPolicyConfig extends GuardrailPolicyBase<'regex'>
   rules: GuardrailRegexRule[];
 }
 
-export interface GuardrailModerationPolicyConfig extends GuardrailPolicyBase<'moderation'> {
-  /** See `IGuardrailModerationPolicy.detector`. */
-  detector?: 'llm' | 'model';
-  modelKey?: string;
-  categories: Record<string, boolean>;
-}
+export interface GuardrailModerationPolicyConfig
+  extends GuardrailPolicyBase<'moderation'>, IGuardrailModerationPolicy {}
 
-export interface GuardrailPromptShieldPolicyConfig extends GuardrailPolicyBase<'prompt_shield'> {
-  modelKey?: string;
-  sensitivity: 'low' | 'balanced' | 'high';
-}
+export interface GuardrailPromptShieldPolicyConfig
+  extends GuardrailPolicyBase<'prompt_shield'>, IGuardrailPromptShieldPolicy {}
 
 export interface GuardrailCustomPolicyConfig extends GuardrailPolicyBase<'custom'> {
   modelKey?: string;
@@ -469,6 +490,48 @@ export interface GuardrailWebhookPolicyConfig extends GuardrailPolicyBase<'webho
   retries?: 0 | 1 | 2;
 }
 
+/**
+ * Two bundled, offline classifiers — split across TWO families rather than
+ * one, deliberately mirroring the `moderation` / `prompt_shield` split above
+ * even though both run the SAME `@cognipeer/guardrail` npm package model:
+ * an operator configures, binds, and enables/disables the content gate and
+ * the injection gate independently (same reason a hosted moderation model and
+ * an LLM prompt-shield judge are two separate policies today, not one), and
+ * this pair is meant to sit ALONGSIDE `moderation`/`prompt_shield` — an
+ * additional, no-model detector an operator can turn on next to them — not to
+ * be folded into either.
+ *
+ * The model itself answers both gates from ONE inference regardless of which
+ * family calls it — see `families/cognipeerGuardrail.ts`'s shared instance
+ * cache — so running both costs one extra classifier call, not two model
+ * loads.
+ *
+ * NO `modelKey` on either: the model ships inside the npm package, so there
+ * is nothing for an operator to register or point at.
+ */
+export interface GuardrailCognipeerGuardrailModerationPolicyConfig
+  extends GuardrailPolicyBase<'cognipeer_guardrail_moderation'> {
+  /** Six content category ids, verbatim from the package's `manifest.json`:
+   *  `insult`, `hate`, `sexual`, `violence`, `self_harm`, `illegal`. */
+  categories: Record<string, boolean>;
+  /**
+   * A false-positive BUDGET, not a raw cutoff — see `Guardrail.load`'s own doc
+   * comment in the package. `sexual`/`violence`/`self_harm`/`illegal` score
+   * identically in every profile; only the noisier `insult`/`hate` move.
+   */
+  profile: 'strict' | 'balanced' | 'sensitive';
+}
+
+export interface GuardrailCognipeerGuardrailPromptShieldPolicyConfig
+  extends GuardrailPolicyBase<'cognipeer_guardrail_prompt_shield'> {
+  /** Three prompt-shield category ids, verbatim from the package's
+   *  `manifest.json`: `jailbreak`, `prompt_injection`, `data_exfiltration`. */
+  categories: Record<string, boolean>;
+  /** Same budget as the moderation twin; here it is the shield categories
+   *  that move between profiles. */
+  profile: 'strict' | 'balanced' | 'sensitive';
+}
+
 export type GuardrailPolicy =
   | GuardrailPiiPolicyConfig
   | GuardrailSecretsPolicyConfig
@@ -478,7 +541,9 @@ export type GuardrailPolicy =
   | GuardrailPromptShieldPolicyConfig
   | GuardrailCustomPolicyConfig
   | GuardrailToolAccessPolicyConfig
-  | GuardrailWebhookPolicyConfig;
+  | GuardrailWebhookPolicyConfig
+  | GuardrailCognipeerGuardrailModerationPolicyConfig
+  | GuardrailCognipeerGuardrailPromptShieldPolicyConfig;
 
 export interface GuardrailHookBinding {
   enabled: boolean;
@@ -733,6 +798,20 @@ export interface IEvaluationTarget {
   description?: string;
   kind: EvaluationTargetKind;
   agentKey?: string;
+  /**
+   * `agent` targets: pin the run to one published version instead of following
+   * whatever is published now.
+   *
+   * Absent means "the published version", which is the right default for a
+   * suite that guards production. Pinning is what makes a comparison run
+   * meaningful: two targets on the same agent at v3 and v4 answer "did the new
+   * version regress?", and that question is unanswerable while both silently
+   * follow the same moving pointer.
+   *
+   * `null` is how a PATCH clears an existing pin: both provider mixins treat
+   * `undefined` as "leave this field alone", so an absent key cannot unpin.
+   */
+  agentVersion?: number | null;
   modelKey?: string;
   external?: IEvaluationExternalTarget;
   /** `rag` targets: which module to retrieve from, and how much. */
@@ -2037,11 +2116,263 @@ export interface IExternalAgentConnection {
   runtimeHeaders?: { allow?: boolean; allowedNames?: string[] };
 }
 
+// ── Agent runtime configuration (agent-sdk surface) ──────────────────────
+//
+// Every field below is optional and absent by default: an agent that has never
+// been touched in the Advanced settings tab produces exactly the option object
+// the module used to hard-code, so this is a pure widening of the config.
+
+export type AgentRuntimeProfile = 'fast' | 'balanced' | 'deep' | 'research';
+export type AgentPlanningMode = 'off' | 'todo' | 'planner_executor' | 'reasoning_then_tools';
+export type AgentReplanPolicy = 'never' | 'on_failure' | 'on_conflict' | 'every_n_steps';
+export type AgentContextPolicy = 'raw' | 'summary_only' | 'hybrid';
+export type AgentToolResponsePolicy = 'keep_full' | 'keep_structured' | 'summarize_archive' | 'drop';
+export type AgentChildContextPolicy = 'minimal' | 'scoped' | 'full';
+export type AgentSubagentMode = 'off' | 'registry_only' | 'registry_and_adhoc';
+export type AgentMemoryScope = 'session' | 'user' | 'workspace' | 'tenant';
+export type AgentMemoryWritePolicy = 'manual' | 'auto_important' | 'always';
+export type AgentMemoryReadPolicy = 'recent_only' | 'semantic' | 'hybrid';
+export type AgentReasoningLevel = 'minimal' | 'low' | 'medium' | 'high';
+export type AgentReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
+
+export interface IAgentLimits {
+  maxToolCalls?: number;
+  maxParallelTools?: number;
+  maxContextTokens?: number;
+  maxTotalOutputTokens?: number;
+  /** Requires a cost estimator on the run; ignored when none is wired. */
+  maxCostUsd?: number;
+  maxWallClockMs?: number;
+}
+
+export interface IAgentSummarizationConfig {
+  enable?: boolean;
+  maxTokens?: number;
+  summaryTriggerTokens?: number;
+  summaryPromptMaxTokens?: number;
+  summaryMode?: 'incremental' | 'full_rewrite';
+  integrityCheck?: boolean;
+}
+
+export interface IAgentContextConfig {
+  policy?: AgentContextPolicy;
+  lastTurnsToKeep?: number;
+  toolResponsePolicy?: AgentToolResponsePolicy;
+}
+
+export interface IAgentPlanningConfig {
+  mode?: AgentPlanningMode;
+  replanPolicy?: AgentReplanPolicy;
+  everyNSteps?: number;
+}
+
+export interface IAgentContextPilotConfig {
+  enabled?: boolean;
+  /** Tool names ContextPilot must never compress (raw payload always kept). */
+  excludeTools?: string[];
+}
+
+export interface IAgentReasoningConfig {
+  enabled?: boolean;
+  level?: AgentReasoningLevel;
+  /** Provider-native effort. `none` is a value that gets SENT, not "off". */
+  effort?: AgentReasoningEffort;
+  budgetTokens?: number;
+  includeThoughts?: boolean;
+  /** SDK reflection pass. Absent = SDK default; `false` disables it. */
+  reflection?: boolean;
+}
+
+/**
+ * Memory backing for an agent — routed through console's OWN memory module
+ * (vector-backed stores manageable at `/dashboard/memory`), not a bare
+ * SDK-provider string: an operator picks a STORE, the same one the Memory
+ * module itself lists.
+ *
+ * At run time this resolves to a `MemoryStore` implementation
+ * (`agentMemoryAdapter.ts`) backed by `recallForChat`/`addMemory` on that
+ * store, passed as `memory.store` to the SDK — so the SDK's own structured
+ * summarization pipeline (`writeSummaryFactsToMemory`) is what decides what
+ * gets remembered, not a bespoke heuristic here.
+ */
+export interface IAgentMemoryConfig {
+  enabled?: boolean;
+  /** Key of an existing `IMemoryStore` (from the Memory module). Required when enabled. */
+  memoryStoreKey?: string;
+  scope?: AgentMemoryScope;
+  writePolicy?: AgentMemoryWritePolicy;
+  readPolicy?: AgentMemoryReadPolicy;
+  /**
+   * Whether the agent also gets memory as callable tools.
+   *
+   * The SDK gives it neither: recall is pre-injected as a system message and
+   * writes only happen when a compaction produces a summary, so an agent can
+   * neither look something up nor record what it was just told. `agentMemoryTools.ts`
+   * adds `memory_search` / `memory_write` / `memory_forget` over the same store.
+   *
+   * Defaults to 'readwrite' when memory is enabled — being told to remember
+   * something and silently not doing so is the worse surprise.
+   */
+  tools?: AgentMemoryToolMode;
+}
+
+/** 'read' drops the write/forget tools, for a curated store the agent must not pollute. */
+export type AgentMemoryToolMode = 'off' | 'read' | 'readwrite';
+
+/**
+ * A reusable capability the model can discover and open on demand —
+ * Anthropic-style progressive disclosure (see agent-sdk's `Skill` type).
+ *
+ * Deliberately NOT the SDK's file-based `SKILL.md` loader
+ * (`loadSkillsFromDisk`/`SkillFs`): there is no filesystem to scan here, a
+ * skill is a console-managed record like a Prompt, edited in the dashboard
+ * and referenced by key from `IAgentConfig.skills`. `agentSkillService.ts`
+ * builds the SDK's `Skill` objects directly from these fields — `header` is
+ * what the model always sees in its catalog, `body` is returned only once
+ * the model opens the skill.
+ */
+export interface IAgentSkill {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  key: string;
+  title: string;
+  /** One-line "what it does + when to use it" — always in the model's catalog. */
+  header: string;
+  /** Full instructions, disclosed only once the model opens this skill. */
+  body: string;
+  /** Hide this skill from a small-tier model — see agent-sdk's `SkillModelTier`. */
+  minModelTier?: 'small' | 'large';
+  status: 'active' | 'inactive';
+  createdBy: string;
+  updatedBy?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export interface IAgentSkillPolicy {
+  /** Max distinct skills open at once. SDK default: unbounded-ish; console default applied at resolve time. */
+  maxOpenSkills?: number;
+  maxBoundToolsPerSkill?: number;
+  maxBoundToolsTotal?: number;
+  /** 'catalog' (default): every header in the system prompt. 'search': a `search_skills` tool instead. */
+  disclosure?: 'catalog' | 'search';
+}
+
+export interface IAgentToolResponsesConfig {
+  defaultPolicy?: AgentToolResponsePolicy;
+  maxToolResponseChars?: number;
+  maxToolResponseTokens?: number;
+  retentionByTool?: Record<string, AgentToolResponsePolicy>;
+}
+
+/**
+ * Advanced runtime knobs, surfaced in the Settings → Advanced tab. Basic
+ * settings (model, prompt, temperature, tools) stay on `IAgentConfig` itself.
+ */
+export interface IAgentRuntimeConfig {
+  profile?: AgentRuntimeProfile;
+  limits?: IAgentLimits;
+  planning?: IAgentPlanningConfig;
+  summarization?: IAgentSummarizationConfig;
+  context?: IAgentContextConfig;
+  toolResponses?: IAgentToolResponsesConfig;
+  contextPilot?: IAgentContextPilotConfig;
+  reasoning?: IAgentReasoningConfig;
+  /**
+   * @deprecated IGNORED. Used to expose the SDK's `ask_user_question` tool,
+   * but no console channel can deliver the answer back: the agent paused on a
+   * question nobody could see, and the conversation stayed locked. Kept on the
+   * type only because stored configs may still carry it.
+   */
+  askUser?: boolean;
+}
+
+/** JSON-schema contract enforced on the agent's final answer. */
+export interface IAgentStructuredOutput {
+  enabled?: boolean;
+  /** Schema name surfaced to the provider. Defaults to `<agentKey>_output`. */
+  name?: string;
+  /** JSON Schema (draft-07 subset); converted to a zod schema at runtime. */
+  schema?: Record<string, unknown>;
+  /** Forbid extra properties and require every declared property. */
+  strict?: boolean;
+}
+
+/**
+ * A sub-agent the orchestrator may delegate to. Two flavours:
+ *  - `inline` — defined here, inside this agent's config
+ *  - `ref`    — points at another console agent, whose config is loaded at run time
+ */
+export interface IAgentSubagent {
+  kind: 'inline' | 'ref';
+  /** `delegate_to` name. Must be unique within the agent. */
+  name: string;
+  title?: string;
+  /** One-line "what it does + when to use it", shown in the delegation catalog. */
+  header: string;
+  /** inline only — role/system prompt for the child. */
+  systemPrompt?: string;
+  /** inline only — model override; falls back to the parent's model. */
+  modelKey?: string;
+  /** inline only — tool surface for the child. */
+  toolBindings?: IAgentToolBinding[];
+  /** inline only — knowledge engine attached to the child. */
+  knowledgeEngineKey?: string;
+  /** ref only — key of the console agent backing this sub-agent. */
+  agentKey?: string;
+  /** ref only — pin to a published version; absent = the published version. */
+  agentVersion?: number;
+  limits?: IAgentLimits;
+  childContextPolicy?: AgentChildContextPolicy;
+  /** JSON Schema for the child's structured result. */
+  outputSchema?: Record<string, unknown>;
+  /** Absent or true = available to the orchestrator. */
+  enabled?: boolean;
+}
+
+export interface IAgentSubagentPolicy {
+  mode?: AgentSubagentMode;
+  maxDepth?: number;
+  maxChildCalls?: number;
+  maxParallel?: number;
+  childContextPolicy?: AgentChildContextPolicy;
+  allowAdhocTools?: boolean;
+}
+
+export interface IAgentExecutionConfig {
+  /** Synchronous ceiling for this agent, seconds. */
+  syncTimeoutSeconds?: number;
+  /** false = API calls may not run this agent in the background. Default true. */
+  backgroundEnabled?: boolean;
+  /** Longest a background run of this agent may take, minutes. */
+  backgroundMaxDurationMinutes?: number;
+  /** What an API call that does not say `background` gets. Default 'sync'. */
+  defaultMode?: 'sync' | 'background';
+  /** Callback for background runs started without their own `callback_url`. */
+  callbackUrl?: string;
+  /** Write-only HMAC secret for that callback: plaintext in, masked out. */
+  callbackSecret?: string;
+  /** Sealed `callbackSecret`; never returned by the API. */
+  callbackSecretSealed?: string;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
   systemPrompt?: string;
   promptKey?: string;
+  /**
+   * Static values for the `{{placeholders}}` in `promptKey`'s template (or in
+   * an inline `systemPrompt`). A caller can override any of these per run via
+   * `runtimeContext.metadata`; `agent`, `now` and `user` are reserved and
+   * always win.
+   *
+   * Declaring any variable here also switches on Mustache rendering for an
+   * inline `systemPrompt`, which is otherwise left untouched so a prompt
+   * containing literal braces keeps working.
+   */
+  promptVariables?: Record<string, string>;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
@@ -2077,6 +2408,94 @@ export interface IAgentConfig {
   kind?: AgentKind;
   /** Connection settings — present only when kind === 'external'. */
   connection?: IExternalAgentConnection;
+  /** Advanced agent-sdk runtime knobs (Settings → Advanced). */
+  runtime?: IAgentRuntimeConfig;
+  /** JSON-schema contract for the final answer. */
+  structuredOutput?: IAgentStructuredOutput;
+  /** Delegable sub-agents — inline definitions and references to other agents. */
+  subagents?: IAgentSubagent[];
+  /** Guards around delegation. Absent = SDK defaults with `registry_only`. */
+  subagentPolicy?: IAgentSubagentPolicy;
+  /** Skills this agent can discover and open — keys into the project's skill library. */
+  skills?: string[];
+  skillPolicy?: IAgentSkillPolicy;
+  /** Memory — its own tab (Settings → Advanced stays about the loop, not what the agent remembers). */
+  memory?: IAgentMemoryConfig;
+  /** Sandbox access — an isolated machine the agent can run commands in (Enterprise). */
+  sandbox?: IAgentSandboxConfig;
+  /**
+   * How API calls to this agent execute (docs/guide/agent-background-execution.md).
+   * Every limit here is an upper bound the agent opts into; the effective
+   * value is min(env ceiling, tenant quota, this).
+   */
+  execution?: IAgentExecutionConfig;
+}
+
+/**
+ * How long an agent's sandbox lives.
+ *  - `ephemeral`: a fresh sandbox per run (turn), created on the first
+ *    sandbox tool call and deleted when the run ends. Nothing carries over.
+ *  - `persist`: one sandbox per conversation. Files and installed packages
+ *    carry over from turn to turn; the machine is stopped between turns (its
+ *    disk kept) and deleted with the conversation, or when it has not been
+ *    used for `retentionHours`.
+ */
+export type AgentSandboxMode = 'ephemeral' | 'persist';
+
+/**
+ * Gives an agent a sandbox (the enterprise Agent Runtime Sandbox module) and
+ * the tools to use it: run a command, run code, read/write/list files.
+ *
+ * `secrets` are write-only. On save they are sealed into `secretsSealed`
+ * (AES-256-GCM) and the plaintext is dropped; every read returns the keys
+ * with a masked value. At run time they are decrypted and passed as
+ * environment variables to each command — never stored on the sandbox
+ * instance — and scrubbed from what the tools return to the model.
+ */
+export interface IAgentSandboxConfig {
+  enabled?: boolean;
+  /** Sandbox template key. Absent → the tenant's default (`multi-base`). */
+  templateKey?: string;
+  /** Default `ephemeral`. */
+  mode?: AgentSandboxMode;
+  /** Per-command timeout. Default 60, max 600. */
+  commandTimeoutSec?: number;
+  /** `persist` only: an unused sandbox older than this is replaced by a fresh one. Default 24. */
+  retentionHours?: number;
+  resources?: { cpuCores?: number; memoryMb?: number };
+  /** Cut the sandbox off from the network. */
+  blockNetwork?: boolean;
+  /** Plain (non-secret) environment variables. */
+  env?: Record<string, string>;
+  /** Secret environment variables — write-only, see above. */
+  secrets?: Record<string, string>;
+  /** Sealed form of `secrets`; never leaves the server. */
+  secretsSealed?: string;
+  /** Which tool groups to give the agent. All on by default. */
+  tools?: { exec?: boolean; code?: boolean; files?: boolean };
+  /**
+   * Preview: lets the agent serve something from its sandbox (a web app, a
+   * report, a dashboard on a port) and hand out a link to it with the
+   * `sandbox_preview_link` tool.
+   *
+   * A machine the agent issued a link for is NOT stopped/deleted when the
+   * reply ends — the link would die with it. It keeps running while the
+   * preview is used and is stopped after `keepAliveMinutes` without activity
+   * (an ephemeral machine is then deleted, a persistent one keeps its disk).
+   */
+  preview?: {
+    enabled?: boolean;
+    /**
+     * Public links: a signed URL anyone with the link can open, for
+     * `linkTtlHours` (needs SANDBOX_PREVIEW_SECRET on the server). Otherwise
+     * links open only for signed-in console users with sandbox access.
+     */
+    public?: boolean;
+    /** Public link lifetime. Default 24, max 168. */
+    linkTtlHours?: number;
+    /** Idle time after which a previewed machine is stopped. Default 30. */
+    keepAliveMinutes?: number;
+  };
 }
 
 /** A single tool-source binding for an agent */
@@ -2089,6 +2508,40 @@ export interface IAgentToolBinding {
   toolNames: string[];
   /** Optional configuration for the binding (e.g. { browserId } for system browser_use) */
   config?: Record<string, unknown>;
+}
+
+/**
+ * A recurring run of an agent.
+ *
+ * Schedules live in `agent.metadata.schedules` rather than their own
+ * collection: they are small, always read alongside the agent, and never
+ * queried independently. A run's record is the conversation it creates —
+ * stamped with the schedule id in its metadata — so history came for free
+ * rather than needing a second write path.
+ *
+ * It extends `ICrawlerSchedule` so both features share `schedulePlanner`;
+ * cron semantics that diverge between two schedulers in the same product is
+ * a support ticket waiting to happen.
+ */
+export interface IAgentSchedule extends ICrawlerSchedule {
+  /** Stable id, generated on create. Stamped onto every run's conversation. */
+  id: string;
+  name: string;
+  /** The message sent to the agent on each fire. Supports prompt variables. */
+  message: string;
+  /**
+   * Per-run values merged into the prompt-variable context, exactly as a live
+   * caller's `runtimeContext.metadata` would be. A nightly digest and an hourly
+   * triage can therefore share one prompt and differ only here.
+   */
+  variables?: Record<string, string>;
+  /** Outcome of the most recent fire, for the schedule list. */
+  lastStatus?: 'ok' | 'error';
+  lastError?: string;
+  /** Conversation created by the most recent fire. */
+  lastConversationId?: string;
+  createdBy?: string;
+  createdAt?: Date;
 }
 
 export interface IAgent {
@@ -2132,21 +2585,166 @@ export interface IAgentVersion {
   createdAt?: Date;
 }
 
+/** One tool call as a debug session shows it — see `IAgentConversationMessage`. */
+export interface IAgentConversationStep {
+  id?: string;
+  name: string;
+  args?: unknown;
+  /**
+   * What the MODEL saw. With `toolResponsePolicy: 'summarize_archive'` (the
+   * console default) this can be a summary of the real result, not the result
+   * — see `rawOutput`.
+   */
+  output?: unknown;
+  /** The untouched tool result, stored only when it differs from `output`. */
+  rawOutput?: unknown;
+  /** Present when the tool threw. */
+  error?: string;
+  /** Sub-agent that made the call, when delegation was involved. */
+  subagent?: string;
+  /**
+   * The SDK's own verdict. Authoritative: the old code sniffed the output for
+   * an `error` key, which both missed a guardrail-`rejected` call and flagged
+   * any tool that legitimately returns a field called `error`.
+   */
+  status?: 'success' | 'error' | 'rejected' | 'handoff';
+  /** Served from the response cache — no upstream call was made. */
+  fromCache?: boolean;
+  /** `output` is a compaction of the result; `originalTokenCount` is its pre-compaction size. */
+  summarized?: boolean;
+  originalTokenCount?: number;
+  timestamp?: string;
+  /**
+   * What the model wrote in the same message that made this call ("Let me
+   * search for …"), set on the first call of that message only. Kept so the
+   * transcript shows it where it happened — before the call — instead of
+   * dropping it (it is not part of the final answer).
+   */
+  narration?: string;
+}
+
+export interface IAgentConversationMessage {
+  role: string;
+  content: string;
+  /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
+  reasoning?: string;
+  timestamp: Date;
+  /**
+   * Debug detail for an assistant turn produced by a Session (not the live
+   * `/v1/responses` path, which deliberately returns content only — see
+   * `agentService.ts`'s `AgentPlaygroundChatResult`). Persisted so reopening a
+   * session shows what happened, not just what was said.
+   */
+  steps?: IAgentConversationStep[];
+  /** Parsed structured output, when the agent declares an output schema. */
+  output?: unknown;
+  /** Why the structured contract failed, when it did. */
+  outputError?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    /** A discounted slice of `inputTokens`, not an addition to it. */
+    cachedInputTokens?: number;
+    totalTokens?: number;
+    /** Priced from the model's own `pricing` at the time of the run — see `calculateCost`. */
+    costUsd?: number;
+  };
+  /** Which agent config produced this turn: a version number, or null for the draft. */
+  version?: number | null;
+  /** Wall-clock time the turn took, measured server-side. */
+  latencyMs?: number;
+  /**
+   * Set when the run ended WITHOUT a final answer: a `limits` budget, a
+   * cancellation, or a pause no channel can resume. `content` is then the
+   * last text the agent wrote, if any. Absent on a normal answer.
+   */
+  stopReason?: 'limit' | 'cancelled' | 'paused';
+  /** The runtime's wording, e.g. "maxWallClockMs (30000ms) exceeded". */
+  stopDetail?: string;
+  /** Context summarizations that ran during this turn — see `IAgentTurnCompaction`. */
+  compactions?: IAgentTurnCompaction[];
+  /** The tool results those summarizations replaced with a placeholder. */
+  compactedTools?: Array<{ toolName: string; toolCallId: string }>;
+  /**
+   * Things that went wrong without failing the turn — a memory lookup that
+   * failed, a knowledge search that errored — so an answer built without them
+   * is not mistaken for one built with them.
+   */
+  warnings?: string[];
+}
+
+/** One context summarization during a turn, as the session view shows it. */
+export interface IAgentTurnCompaction {
+  at: string;
+  /** Tool results the pass compacted. */
+  messagesCompressed?: number;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  durationMs?: number;
+  /** The summarizer's own model call. */
+  inputTokens?: number;
+  outputTokens?: number;
+  summary?: {
+    userDirectives?: string[];
+    facts?: Array<{ key: string; value: string }>;
+    goals?: string[];
+    openQuestions?: string[];
+    discarded?: string[];
+  };
+  integrityNotes?: string[];
+  /** The summarizer call failed and a local fallback summary was used. */
+  failed?: boolean;
+}
+
 export interface IAgentConversation {
   _id?: ObjectId | string;
   tenantId: string;
   projectId: string;
   agentKey: string;
   title?: string;
-  messages: Array<{
-    role: string;
-    content: string;
-    /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
-    reasoning?: string;
-    timestamp: Date;
-  }>;
+  messages: IAgentConversationMessage[];
+  /**
+   * `metadata.runtimeContext` holds the context entered once when the session
+   * is started, merged UNDER every turn's own runtime context (so a
+   * per-message override still wins) — see `executePlaygroundChatLocal`.
+   */
   metadata?: Record<string, unknown>;
   createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+/**
+ * The agent runtime's own state for a conversation, carried between turns.
+ *
+ * `messages` on the conversation is the transcript people read: user and
+ * assistant TEXT. It is not what the agent worked from. Rebuilding the agent's
+ * state from it each turn dropped the tool calls and results it had already
+ * made (it re-queried them), the context summaries it had built, and — with a
+ * summarizing policy — the standing instructions those summaries carried.
+ * This record is the agent-sdk snapshot of the state a turn ended in, restored
+ * at the start of the next one.
+ *
+ * Kept out of the conversation record on purpose: it can be large (tool
+ * results) and the session list reads conversations in bulk.
+ */
+export interface IAgentConversationState {
+  _id?: ObjectId | string;
+  conversationId: string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  /** `JSON.stringify` of the agent-sdk `AgentSnapshot`. */
+  snapshot: string;
+  /**
+   * `conversation.messages.length` right after the turn that produced the
+   * snapshot. A mismatch at load time means the transcript was written by
+   * something that did not save state (an older build, a connected agent) and
+   * the snapshot no longer describes it — the runtime then falls back to the
+   * transcript rather than resume from a stale state.
+   */
+  messageCount: number;
+  sizeBytes: number;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -2873,6 +3471,31 @@ export interface ICrawlResult {
  */
 export type PiiAction = 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
 
+/**
+ * Which detector actually runs a policy's scan. 'regex' (default, absent on
+ * every policy created before this field existed) is the console's own
+ * long-standing engine (`services/pii/detector.ts`) — regex/checksum,
+ * opt-in dictionary and NER layers, tuned by `IPiiPolicy.detection`.
+ * 'cognipeer' delegates the whole scan to the bundled, offline
+ * `@cognipeer/pii` npm package instead (`services/pii/cognipeerEngine.ts`) —
+ * a genuinely different category catalog (31 ids, its own id vocabulary —
+ * e.g. `tc_kimlik` there vs `tckn` here), so `IPiiPolicy.categories` is
+ * interpreted entirely differently depending on this field. Extensible: a
+ * future third engine (e.g. a cloud PII API) is one more member here plus one
+ * more file under `services/pii/`, same shape as this one.
+ *
+ * DELIBERATELY ONE ENGINE PER POLICY, not a list run together: unlike two
+ * guardrail hook families that can be genuinely complementary (see
+ * `cognipeer_guardrail_moderation`/`_prompt_shield`), two PII engines mostly
+ * cover the SAME ground (email, phone, national id, ...), so running both
+ * would mean the same span gets found — and its redaction proposed — twice,
+ * with no established conflict-resolution for it the way `FAMILY_PRECEDENCE`
+ * resolves an overlap WITHIN one engine's own findings. An operator picks
+ * one; switching later means re-picking categories from the new engine's own
+ * catalog, not merging two.
+ */
+export type PiiEngine = 'regex' | 'cognipeer';
+
 /** Language scope for built-in patterns. 'global' = language-independent. */
 export type PiiLanguage = 'global' | 'en' | 'tr' | 'de' | 'fr' | 'es' | 'it' | 'pt' | 'ar' | 'ja' | 'zh';
 
@@ -2918,7 +3541,11 @@ export interface IPiiPolicy {
   description?: string;
   /** Default action applied to findings from this policy. */
   defaultAction: PiiAction;
-  /** Built-in categories toggled on/off. Keys are category ids (e.g. 'email'). */
+  /** Which detector runs this policy. Absent = 'regex' — see `PiiEngine`'s
+   *  own doc comment for why this changes what `categories` below means. */
+  engine?: PiiEngine;
+  /** Built-in categories toggled on/off. Keys are category ids (e.g. 'email').
+   *  A DIFFERENT id vocabulary per `engine` — see `PiiEngine`. */
   categories: Record<string, boolean>;
   /** Custom regex patterns defined per tenant. */
   customPatterns?: IPiiCustomPattern[];
@@ -2927,10 +3554,52 @@ export interface IPiiPolicy {
   /** Whether the policy is enabled overall. */
   enabled: boolean;
   metadata?: Record<string, unknown>;
+  /**
+   * PII v2: opt-in NLP layers on top of the pattern engine. Absent/undefined
+   * on every policy created before this field existed, and the detector's
+   * default ('pattern' mode, no dictionary/NER pass, no confidence filter)
+   * reproduces the pre-v2 behaviour exactly — this is additive, not a
+   * migration.
+   */
+  detection?: PiiDetectionConfig;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/**
+ * Config for the PII v2 detection pipeline (`services/pii/detector.ts`).
+ * See `internal-notes/pii-v2-nlp-ve-asset-registry-plani.md` for the full
+ * 5-layer design; this is the subset implemented against local model/dict
+ * files rather than the (not-yet-built) GitHub asset registry.
+ */
+export interface PiiDetectionConfig {
+  /**
+   * 'pattern' (default): regex + checksum only, identical to pre-v2 output.
+   * 'pattern+dictionary': adds the Aho-Corasick gazetteer pass (person/org/
+   * location candidates).
+   * 'pattern+dictionary+ner': also runs the local ONNX NER model.
+   */
+  mode?: 'pattern' | 'pattern+dictionary' | 'pattern+dictionary+ner';
+  /** Findings below this confidence are dropped. 0 = no filtering (default). */
+  minConfidence?: number;
+  /** Boost a finding's confidence when a category's context word appears
+   *  within ±60 chars. Default true; has no effect on categories with no
+   *  configured context words. */
+  contextBoost?: boolean;
+  ner?: {
+    /** Local model ids to run, e.g. ['tr-ner']. See `pii/ner.ts` NER_MODELS. */
+    models?: string[];
+    /** Hard cap on characters sent to the model per scan. Default 4000. */
+    maxChars?: number;
+    /** Per-window soft timeout; a window that misses it is skipped and
+     *  reported as degraded rather than blocking the scan. Default 1500. */
+    timeoutMs?: number;
+    /** 'open' (default): a model error/timeout lets that window's NER
+     *  findings pass silently. 'closed': surfaces as a scan-level warning. */
+    failMode?: 'open' | 'closed';
+  };
 }
 
 // ── Prescriptions (automated analysis reports) types ─────────────────────
@@ -2968,4 +3637,110 @@ export interface IPrescriptionReport {
   createdAt?: Date;
   updatedAt?: Date;
   finishedAt?: Date | null;
+}
+
+// ── Agent Runs (background execution) types ───────────────────────────────
+// See docs/guide/agent-background-execution.md for the full design. Diverges
+// deliberately from the ICrawlJob precedent on crash recovery/retry (§12.1):
+// agent turns can carry irreversible tool side effects that crawl jobs do not.
+
+/**
+ * Which path created this row. A `'sync'` row exists only to hold the
+ * single-active-run reservation (see `createAgentRun` in contract.ts for
+ * `conversationId`, §6/§12.14) for the duration of an inline call — it is
+ * always deleted when the call ends (success, timeout, or error), never left
+ * in a terminal state and never intended to be polled.
+ */
+export type AgentRunMode = 'sync' | 'background';
+
+/**
+ * No `timeout` state: a timeout only happens in synchronous mode, whose
+ * reservation row is deleted when the call ends, never finalized (§6).
+ */
+export type AgentRunStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+
+/**
+ * Distinguishes an agent-side failure, a worker that died mid-run (§12.1),
+ * the server-side background ceiling firing (§12.13), and an explicit caller
+ * cancel — three different causes should not collapse into one generic value.
+ */
+export type AgentRunErrorReason =
+  | 'agent_error'
+  | 'worker_lost'
+  | 'max_duration_exceeded'
+  | 'canceled_by_caller'
+  /** The agent was disabled/deleted, or the submitting API token revoked, before the worker started it. */
+  | 'precondition_failed'
+  | null;
+
+/** Durable delivery state for the optional callback webhook (§12.6). */
+export type AgentRunCallbackStatus = 'pending' | 'delivered' | 'failed';
+
+export interface IAgentRun extends IUsageAttributionFields {
+  _id?: ObjectId | string;
+  mode: AgentRunMode;
+  tenantId: string;
+  tenantDbName: string;
+  /** Required, checked on every read/write path (§12.11) — never optional. */
+  projectId: string;
+  agentKey: string;
+  /**
+   * Conversation this turn is appended to. Guarded (SQLite partial unique
+   * index / Mongo agent_run_locks) so at most one active (`queued`/`running`)
+   * run can exist per conversation regardless of mode (§6, §12.14).
+   */
+  conversationId: string;
+  userMessage: string;
+  /**
+   * Which agent config the worker re-runs the turn with. The queue message
+   * carries only ids; the worker loads the rest from this row (§7 step 2).
+   */
+  version?: number | null;
+  usePublished?: boolean;
+  /** Serialized `AgentRuntimeContext` (already plain data — see its own doc comment). */
+  runtimeContext?: Record<string, unknown> | null;
+  /**
+   * Caller-supplied, from an `Idempotency-Key` header — background mode only
+   * (§12.15). Scoped by tenantId+projectId at lookup time.
+   */
+  idempotencyKey?: string | null;
+  /** Hash of `{ agentKey, conversationId, userMessage, version }` (§12.15). */
+  idempotencyRequestHash?: string | null;
+  status: AgentRunStatus;
+  errorReason?: AgentRunErrorReason;
+  /** The same response payload a synchronous call would have returned. */
+  result?: Record<string, unknown> | null;
+  errorMessage?: string | null;
+  /**
+   * Set by a cancel request possibly arriving on a different node than the
+   * one executing the run; the owning worker observes it on its next poll
+   * (crawler-proven pattern, `ICrawlJob.cancelRequestedAt`).
+   */
+  cancelRequestedAt?: Date | null;
+  /** The node currently (or last) executing this run — see the reconciler. */
+  workerId?: string | null;
+  /** Updated periodically by the executing worker while `status = running`. */
+  heartbeatAt?: Date | null;
+  callbackUrl?: string | null;
+  /**
+   * Sealed (`encryptSecretValue`) shared secret the callback is HMAC-signed
+   * with. Never returned by the API.
+   */
+  callbackSecret?: string | null;
+  /** Effective background ceiling resolved at submit time (env ∧ tenant quota ∧ agent). */
+  maxDurationMs?: number | null;
+  callbackStatus?: AgentRunCallbackStatus | null;
+  /** Incremented per delivery attempt, persisted so a restart doesn't lose count. */
+  callbackAttempts?: number;
+  createdAt?: Date;
+  startedAt?: Date | null;
+  completedAt?: Date | null;
+  /** Retention cutoff (§12.10) — userMessage/result are not kept indefinitely. */
+  expiresAt?: Date | null;
+  updatedAt?: Date;
 }

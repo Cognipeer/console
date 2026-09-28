@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Alert,
@@ -414,7 +415,7 @@ export default function AgentTracingAgentPage() {
         <Text size="sm">
           System-prompt checks, per-turn tool-menu stats, repeated-call waste and recurring
           errors for this agent live on the optimization workbench:{' '}
-          <Anchor size="sm" href={`/dashboard/cost/analysis`}>
+          <Anchor component={Link} size="sm" href="/dashboard/cost/analysis">
             open Analysis
           </Anchor>
           .
@@ -616,7 +617,7 @@ export default function AgentTracingAgentPage() {
           Need to instrument another agent? Use the tracing ingestion endpoint at{' '}
           <span className="ds-mono">/api/client/tracing/sessions</span>
           {' '}with your API token from{' '}
-          <Anchor href="/dashboard/tokens">API Tokens</Anchor>.
+          <Anchor component={Link} href="/dashboard/tokens">API Tokens</Anchor>.
           {' '}See our{' '}
           <Anchor component="button" onClick={() => openDocs('examples-tracing')}>
             LangChain/LangGraph integration examples

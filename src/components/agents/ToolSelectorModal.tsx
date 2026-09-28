@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import CreateMcpModal from '@/components/mcp/CreateMcpModal';
 import {
   Modal,
   Stack,
@@ -22,41 +23,78 @@ import {
 import {
   IconChevronDown,
   IconChevronRight,
+  IconPlus,
   IconServer,
   IconSearch,
   IconTool,
   IconBrowser,
+  IconWorldSearch,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import type { IAgentToolBinding } from '@/lib/database/provider/types.domain';
 
-// ── Generic tool-binding shape ──────────────────────────────────────────
-// Mirrors IAgentToolBinding from the DB but kept local so the component
-// stays self-contained.  Supports unified 'tool', legacy 'mcp', and 'system' sources.
-
-export interface ToolBinding {
-  source: 'tool' | 'mcp' | 'system';
-  sourceKey: string;
-  toolNames: string[];
-  config?: Record<string, unknown>;
-}
+export type ToolBinding = IAgentToolBinding;
 
 // ── Source-agnostic tool source descriptor ───────────────────────────────
 
 interface ToolSourceGroup {
   /** Discriminator – matches ToolBinding.source */
-  source: 'tool' | 'mcp' | 'system';
+  source: ToolBinding['source'];
   /** Unique key of the source (e.g. tool key, MCP server key, or system tool key) */
   sourceKey: string;
   /** Human-readable name */
   name: string;
   description?: string;
   /** Source type label (OpenAPI / MCP / System) */
-  typeLabel?: string;
+  typeLabel: string;
   /** Available tools within this source */
   tools: { name: string; description: string }[];
 }
 
-interface BrowserOption { id: string; name: string; key: string; status: string }
+/**
+ * System tools whose whole binding is one config field picked from a
+ * `Select` (a browser, a web search instance) rather than a checkbox list of
+ * discrete tool names. Each renders as its own group, in this order.
+ */
+const SYSTEM_TOOLS = [
+  {
+    sourceKey: 'browser_use',
+    field: 'browserId',
+    icon: IconBrowser,
+    name: 'Browser Use',
+    description: 'Drive a Playwright browser session: navigate, click, type, snapshot, screenshot, extract, close.',
+    toolDescription: 'Bundle of browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_extract and more.',
+    label: 'Browser',
+    placeholder: 'Select a browser to add Browser Use',
+    emptyPlaceholder: 'No browsers available',
+    hint: 'Selecting a browser adds the Browser Use system tool to this agent.',
+    nothingFound: 'No browsers',
+  },
+  {
+    sourceKey: 'web_search',
+    field: 'providerKey',
+    icon: IconWorldSearch,
+    name: 'Web Search',
+    description: 'Search the web through a configured Web Search instance and return ranked results, optionally with a synthesized answer.',
+    toolDescription: 'Search the web and return ranked results (title, url, snippet), with an optional AI-synthesized answer.',
+    label: 'Web Search instance',
+    placeholder: 'Select an instance to add Web Search',
+    emptyPlaceholder: 'No web search instances available',
+    hint: 'Selecting an instance adds the Web Search system tool to this agent.',
+    nothingFound: 'No web search instances',
+  },
+] as const;
+
+const systemToolFor = (source: string, sourceKey: string) =>
+  source === 'system' ? SYSTEM_TOOLS.find((tool) => tool.sourceKey === sourceKey) : undefined;
+
+/** Adds `key` to a copy of `set`, or removes it if present. */
+const toggleIn = (set: Set<string>, key: string) => {
+  const next = new Set(set);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+};
 
 // ── Props ────────────────────────────────────────────────────────────────
 
@@ -89,12 +127,16 @@ export function ToolSelectorModal({
 
   // Selection state – keyed by "source::sourceKey::toolName"
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // An MCP server created from here: once the list reloads, all its tools
+  // are selected — the reason it was created from inside the agent.
+  const [createMcpOpen, setCreateMcpOpen] = useState(false);
+  const [pendingServerKey, setPendingServerKey] = useState<string | null>(null);
 
   // Per-binding config state for system tools (e.g. browser_use needs a browserId)
   const [systemConfigs, setSystemConfigs] = useState<Record<string, Record<string, unknown>>>({});
 
-  // Browser options for the browser_use picker
-  const [browsers, setBrowsers] = useState<BrowserOption[]>([]);
+  // Picker options per config-only system tool (sourceKey → browsers / web search instances)
+  const [systemOptions, setSystemOptions] = useState<Record<string, Array<{ value: string; label: string }>>>({});
 
   // ── Helpers ─────────────────────────────────────────────────────
 
@@ -114,10 +156,8 @@ export function ToolSelectorModal({
     const initialConfigs: Record<string, Record<string, unknown>> = {};
     for (const b of value) {
       const bindingId = `${b.source}::${b.sourceKey}`;
-      if (b.source === 'system' && b.sourceKey === 'browser_use') {
-        if (b.config) {
-          initialConfigs[bindingId] = b.config;
-        }
+      if (systemToolFor(b.source, b.sourceKey)) {
+        if (b.config) initialConfigs[bindingId] = b.config;
         continue;
       }
       for (const tn of b.toolNames) {
@@ -180,26 +220,31 @@ export function ToolSelectorModal({
 
       // System Tools (built-in, hardcoded)
       const browsersRes = await fetch('/api/browser/browsers?status=active', { cache: 'no-store' });
-      let browserList: BrowserOption[] = [];
-      if (browsersRes.ok) {
-        const browsersData = await browsersRes.json();
-        browserList = (browsersData.browsers ?? []).map((b: { id: string; name: string; key: string; status: string }) => ({
-          id: b.id, name: b.name, key: b.key, status: b.status,
-        }));
-      }
-      setBrowsers(browserList);
+      const browsers: Array<{ id: string; name: string; key: string }> =
+        browsersRes.ok ? ((await browsersRes.json()).browsers ?? []) : [];
+      setSystemOptions((prev) => ({
+        ...prev,
+        browser_use: browsers.map((b) => ({ value: b.id, label: `${b.name} (${b.key})` })),
+      }));
 
-      const systemGroup: ToolSourceGroup = {
-        source: 'system',
-        sourceKey: 'browser_use',
-        name: 'Browser Use',
-        description: 'Drive a Playwright browser session: navigate, click, type, snapshot, screenshot, extract, close.',
+      const webSearchRes = await fetch('/api/websearch/providers', { cache: 'no-store' });
+      const providers: Array<{ key: string; label: string; status: string }> =
+        webSearchRes.ok ? ((await webSearchRes.json()).providers ?? []) : [];
+      setSystemOptions((prev) => ({
+        ...prev,
+        web_search: providers
+          .filter((p) => p.status === 'active')
+          .map((p) => ({ value: p.key, label: `${p.label} (${p.key})` })),
+      }));
+
+      allGroups.unshift(...SYSTEM_TOOLS.map((tool) => ({
+        source: 'system' as const,
+        sourceKey: tool.sourceKey,
+        name: tool.name,
+        description: tool.description,
         typeLabel: 'System',
-        tools: [
-          { name: 'browser_use', description: 'Bundle of browser_navigate, browser_click, browser_type, browser_snapshot, browser_screenshot, browser_extract and more.' },
-        ],
-      };
-      allGroups.unshift(systemGroup);
+        tools: [{ name: tool.sourceKey, description: tool.toolDescription }],
+      })));
 
       setSources(allGroups);
 
@@ -228,27 +273,26 @@ export function ToolSelectorModal({
     if (opened) loadSources();
   }, [opened, loadSources]);
 
-  // ── Toggle helpers ──────────────────────────────────────────────
-
-  const toggleSource = (source: string, sourceKey: string) => {
-    const id = `${source}::${sourceKey}`;
-    setExpandedSources((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const toggleTool = (source: string, sourceKey: string, toolName: string) => {
-    const key = toKey(source, sourceKey, toolName);
+  useEffect(() => {
+    if (!pendingServerKey) return;
+    const group = sources.find((g) => g.source === 'mcp' && g.sourceKey === pendingServerKey);
+    if (!group) return;
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      for (const tool of group.tools) next.add(toKey('mcp', group.sourceKey, tool.name));
       return next;
     });
-  };
+    setExpandedSources((prev) => new Set(prev).add(`mcp::${group.sourceKey}`));
+    setPendingServerKey(null);
+  }, [pendingServerKey, sources]);
+
+  // ── Toggle helpers ──────────────────────────────────────────────
+
+  const toggleSource = (source: string, sourceKey: string) =>
+    setExpandedSources((prev) => toggleIn(prev, `${source}::${sourceKey}`));
+
+  const toggleTool = (source: string, sourceKey: string, toolName: string) =>
+    setSelected((prev) => toggleIn(prev, toKey(source, sourceKey, toolName)));
 
   const toggleAllToolsInSource = (group: ToolSourceGroup, checked: boolean) => {
     setSelected((prev) => {
@@ -271,7 +315,7 @@ export function ToolSelectorModal({
       const id = `${source}::${sourceKey}`;
       if (!map.has(id)) {
         const binding: ToolBinding = {
-          source: source as 'tool' | 'mcp' | 'system',
+          source: source as ToolBinding['source'],
           sourceKey,
           toolNames: [],
         };
@@ -283,20 +327,13 @@ export function ToolSelectorModal({
       map.get(id)!.toolNames.push(toolName);
     }
 
-    const browserUseConfig = systemConfigs['system::browser_use'];
-    const browserId =
-      typeof browserUseConfig?.browserId === 'string' ? browserUseConfig.browserId : '';
-
-    if (browserId) {
-      map.set('system::browser_use', {
-        source: 'system',
-        sourceKey: 'browser_use',
-        toolNames: ['browser_use'],
-        config: {
-          ...browserUseConfig,
-          browserId,
-        },
-      });
+    for (const tool of SYSTEM_TOOLS) {
+      const id = `system::${tool.sourceKey}`;
+      const cfg = systemConfigs[id];
+      const picked = cfg?.[tool.field];
+      if (typeof picked === 'string' && picked) {
+        map.set(id, { source: 'system', sourceKey: tool.sourceKey, toolNames: [tool.sourceKey], config: { ...cfg } });
+      }
     }
 
     return Array.from(map.values());
@@ -323,15 +360,13 @@ export function ToolSelectorModal({
   // ── Count helpers ──────────────────────────────────────────────
 
   const selectedCountForSource = (group: ToolSourceGroup) => {
-    if (group.source === 'system' && group.sourceKey === 'browser_use') {
-      return systemConfigs['system::browser_use']?.browserId ? 1 : 0;
-    }
-
+    const sys = systemToolFor(group.source, group.sourceKey);
+    if (sys) return systemConfigs[`system::${group.sourceKey}`]?.[sys.field] ? 1 : 0;
     return group.tools.filter((t) => selected.has(toKey(group.source, group.sourceKey, t.name))).length;
   };
 
   const totalSelected =
-    selected.size + (systemConfigs['system::browser_use']?.browserId ? 1 : 0);
+    selected.size + SYSTEM_TOOLS.filter((tool) => systemConfigs[`system::${tool.sourceKey}`]?.[tool.field]).length;
 
   // ── Confirm ────────────────────────────────────────────────────
 
@@ -355,11 +390,26 @@ export function ToolSelectorModal({
           {t('config.toolSelectorDescription')}
         </Text>
 
-        <TextInput
-          placeholder="Search tools..."
-          leftSection={<IconSearch size={14} />}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+        <Group gap="xs" wrap="nowrap">
+          <TextInput
+            style={{ flex: 1 }}
+            placeholder="Search tools..."
+            leftSection={<IconSearch size={14} />}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <Button variant="light" leftSection={<IconPlus size={14} />} onClick={() => setCreateMcpOpen(true)}>
+            New MCP server
+          </Button>
+        </Group>
+        <CreateMcpModal
+          opened={createMcpOpen}
+          onClose={() => setCreateMcpOpen(false)}
+          onCreated={(server) => {
+            setCreateMcpOpen(false);
+            setPendingServerKey(server.key);
+            void loadSources();
+          }}
         />
 
         {loading ? (
@@ -380,6 +430,9 @@ export function ToolSelectorModal({
               const count = selectedCountForSource(group);
               const allSelected = count === group.tools.length && group.tools.length > 0;
               const someSelected = count > 0 && !allSelected;
+              const systemTool = systemToolFor(group.source, group.sourceKey);
+              const GroupIcon = systemTool?.icon ?? IconServer;
+              const options = systemTool ? systemOptions[group.sourceKey] ?? [] : [];
 
               return (
                 <Paper key={sourceId} withBorder radius="sm" mb="xs">
@@ -397,7 +450,7 @@ export function ToolSelectorModal({
                           <IconChevronRight size={16} />
                         )}
                         <ThemeIcon size="sm" variant="light" color={group.source === 'system' ? 'grape' : 'blue'}>
-                          {group.source === 'system' ? <IconBrowser size={12} /> : <IconServer size={12} />}
+                          <GroupIcon size={12} />
                         </ThemeIcon>
                         <div>
                           <Text size="sm" fw={600}>
@@ -417,7 +470,7 @@ export function ToolSelectorModal({
                           </Badge>
                         )}
                         <Badge size="xs" variant="light" color={group.source === 'system' ? 'grape' : 'gray'}>
-                          {group.typeLabel || (group.source === 'tool' ? 'Tool' : group.source === 'mcp' ? 'MCP' : 'System')}
+                          {group.typeLabel}
                         </Badge>
                       </Group>
                     </Group>
@@ -427,24 +480,24 @@ export function ToolSelectorModal({
                   <Collapse in={isExpanded}>
                     <Divider />
                     <Stack gap={0} p="xs" pt={0}>
-                      {group.source === 'system' && group.sourceKey === 'browser_use' ? (
+                      {systemTool ? (
                         <Select
                           mt="xs"
                           mb="xs"
-                          label="Browser"
-                          placeholder={browsers.length === 0 ? 'No browsers available' : 'Select a browser to add Browser Use'}
-                          description="Selecting a browser adds the Browser Use system tool to this agent."
-                          data={browsers.map((b) => ({ value: b.id, label: `${b.name} (${b.key})` }))}
-                          value={(systemConfigs[sourceId]?.browserId as string) ?? null}
+                          label={systemTool.label}
+                          placeholder={options.length === 0 ? systemTool.emptyPlaceholder : systemTool.placeholder}
+                          description={systemTool.hint}
+                          data={options}
+                          value={(systemConfigs[sourceId]?.[systemTool.field] as string) ?? null}
                           onChange={(value) => {
                             setSystemConfigs((prev) => ({
                               ...prev,
-                              [sourceId]: { ...(prev[sourceId] ?? {}), browserId: value ?? '' },
+                              [sourceId]: { ...(prev[sourceId] ?? {}), [systemTool.field]: value ?? '' },
                             }));
                           }}
                           searchable
                           clearable
-                          nothingFoundMessage="No browsers"
+                          nothingFoundMessage={systemTool.nothingFound}
                         />
                       ) : (
                         <>

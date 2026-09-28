@@ -49,6 +49,25 @@ const nextConfig: NextConfig = {
     // export Node's cjs-module-lexer can't detect, so loading it unbundled
     // crashes the server at startup; webpack handles that interop.
     '@napi-rs/canvas',
+    // PII v2's local NER layer (services/pii/ner.ts). Same reason as
+    // @napi-rs/canvas above: onnxruntime-node ships a platform-specific
+    // `.node` binary webpack cannot parse, and @huggingface/transformers
+    // dynamically resolves onnxruntime-node/onnxruntime-web/sharp backends
+    // in a way webpack's static analysis can't follow either. Node's own
+    // `require` handles both fine at runtime; externalizing just skips
+    // webpack's bundling attempt.
+    'onnxruntime-node',
+    '@huggingface/transformers',
+    // The `cognipeer_guardrail` guardrail family (services/guardrail/families/
+    // cognipeerGuardrail.ts). Same reason as onnxruntime-node above, plus its
+    // own: the package locates its bundled model.onnx via
+    // `path.join(__dirname, '..', 'model')` at RUNTIME, which only resolves
+    // correctly when the package is loaded unbundled — webpack rewrites
+    // `__dirname` for anything it bundles.
+    '@cognipeer/guardrail',
+    // The 'cognipeer' PII engine (services/pii/cognipeerEngine.ts) — same
+    // reason as @cognipeer/guardrail directly above.
+    '@cognipeer/pii',
   ],
   turbopack: {
     root: path.resolve(process.cwd(), '..'),

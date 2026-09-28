@@ -27,10 +27,13 @@ import ServiceSubNav, {
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
 import { LauncherProvider } from './launcher/LauncherContext';
+import { DashboardUserProvider, type DashboardUser } from './DashboardUserContext';
 import { openSupport } from '@/lib/support/openSupport';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import classes from './launcher/LauncherShell.module.css';
 import { DocsDrawerProvider } from '@/components/docs/DocsDrawerContext';
+import NavigationProgress from '@/components/common/navigation/NavigationProgress';
+import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
 import {
   getDashboardServices,
@@ -53,6 +56,7 @@ const SETTINGS_NAV_ORDER: string[] = [
 interface DashboardLayoutProps {
   children: ReactNode;
   supportEnabled?: boolean;
+  isOnPrem?: boolean;
   user?: {
     name: string;
     email: string;
@@ -62,8 +66,9 @@ interface DashboardLayoutProps {
   };
 }
 
-export default function DashboardLayout({ children, supportEnabled = false, user }: DashboardLayoutProps) {
+export default function DashboardLayout({ children, supportEnabled = false, isOnPrem = false, user }: DashboardLayoutProps) {
   const router = useRouter();
+  const { push: navigate } = useNavigationFeedback();
   const pathname = usePathname() ?? '';
   const [docsOpened, docsControls] = useDisclosure(false);
   const [docsDocId, setDocsDocId] = useState<SdkDocId>(DEFAULT_SDK_DOC);
@@ -123,14 +128,34 @@ export default function DashboardLayout({ children, supportEnabled = false, user
 
   const isTenantAdmin = defaultUser.role === 'owner' || defaultUser.role === 'admin';
 
+  // Only the real signed-in user (not the placeholder above) is shared with pages.
+  const hasShellUser = Boolean(user);
+  const shellUserName = user?.name ?? '';
+  const shellUserEmail = user?.email ?? '';
+  const shellUserLicense = user?.licenseType ?? '';
+  const shellUserRole = user?.role;
+  const dashboardUser = useMemo<DashboardUser | null>(
+    () =>
+      hasShellUser
+        ? {
+            name: shellUserName,
+            email: shellUserEmail,
+            licenseType: shellUserLicense,
+            role: shellUserRole,
+          }
+        : null,
+    [hasShellUser, shellUserName, shellUserEmail, shellUserLicense, shellUserRole],
+  );
+
   const allowedServices = useMemo(
     () =>
       getDashboardServices({
         isTenantAdmin,
         role: defaultUser.role,
         servicePermissions: defaultUser.servicePermissions,
+        isOnPrem,
       }),
-    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin],
+    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin, isOnPrem],
   );
 
   const settingsServices = useMemo(
@@ -209,9 +234,9 @@ export default function DashboardLayout({ children, supportEnabled = false, user
         openDocs(DEFAULT_SDK_DOC);
         return;
       }
-      router.push(href);
+      navigate(href);
     },
-    [openDocs, router],
+    [openDocs, navigate],
   );
 
   const docsAside = (
@@ -268,6 +293,7 @@ export default function DashboardLayout({ children, supportEnabled = false, user
       recentServices,
       isTenantAdmin,
       openLauncher: () => setLauncherOpen(true),
+      hydrated,
     }),
     [
       pinned,
@@ -278,12 +304,15 @@ export default function DashboardLayout({ children, supportEnabled = false, user
       pinnedServices,
       recentServices,
       isTenantAdmin,
+      hydrated,
     ],
   );
 
   return (
     <DocsDrawerProvider value={{ openDocs }}>
+      <DashboardUserProvider value={dashboardUser}>
       <LauncherProvider value={launcherContextValue}>
+      <NavigationProgress />
       <CommandPalette isTenantAdmin={isTenantAdmin} />
       <AppShell
         header={{ height: 0 }}
@@ -358,7 +387,7 @@ export default function DashboardLayout({ children, supportEnabled = false, user
               recents={recentServices}
               pinnedIds={pinned}
               onTogglePin={togglePin}
-              onSelect={(svc) => router.push(svc.href)}
+              onSelect={(svc) => navigate(svc.href)}
             />
           ) : null}
 
@@ -386,6 +415,7 @@ export default function DashboardLayout({ children, supportEnabled = false, user
         {docsAside}
       </AppShell>
       </LauncherProvider>
+      </DashboardUserProvider>
     </DocsDrawerProvider>
   );
 }

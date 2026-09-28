@@ -184,18 +184,12 @@
         </div>
 
         <div class="credentials">
-            <strong>Your login credentials:</strong><br><br>
-            <strong>Email:</strong> {{email}}<br>
-            <strong>Temporary password:</strong> <code>{{tempPassword}}</code><br><br>
-            <small>Please change your password after your first login.</small>
-        </div>
-
-        <div class="alert">
-            <strong>Important:</strong> When logging in, you will need to enter your company slug: <strong>{{slug}}</strong>.
+            <strong>Accept your invitation:</strong><br><br>
+            Use the secure invitation link below to choose your password. The link expires in 7 days and can only be used once.
         </div>
 
         <div style="text-align: center;">
-            <a href="{{loginUrl}}" class="button">Accept invitation and log in</a>
+            <a href="{{inviteUrl}}" class="button">Accept invitation and set your password</a>
         </div>
 
         <p>Once logged in, you will have access to:</p>
@@ -209,11 +203,9 @@
 
         <p><strong>How to log in:</strong></p>
         <ol>
-            <li>Go to the login page</li>
-            <li>Enter company slug: <code>{{slug}}</code></li>
-            <li>Enter your email: <code>{{email}}</code></li>
-            <li>Enter the temporary password provided above</li>
-            <li>You will be prompted to change your password</li>
+            <li>Open the secure invitation link above</li>
+            <li>Choose a password for your account</li>
+            <li>Sign in with your email: <code>{{email}}</code></li>
         </ol>
 
         <p>If you have any questions, please reach out to your team administrator.</p>

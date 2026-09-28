@@ -104,6 +104,8 @@ import {
 } from '../hooks/contract';
 import type {
   BlockReasonClass,
+  CognipeerGuardrailModerationPolicyConfig,
+  CognipeerGuardrailPromptShieldPolicyConfig,
   CustomPolicyConfig,
   GuardrailPolicy,
   HookId,
@@ -120,7 +122,12 @@ import type {
   WordFilterPolicyConfig,
 } from '../hooks/contract';
 import { BLOCK_REASON_FOR_FAMILY } from '../hooks/messages';
-import { MODERATION_CATEGORIES, WORD_FILTER_BUILTIN_LISTS } from '../constants';
+import {
+  COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES,
+  COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES,
+  MODERATION_CATEGORIES,
+  WORD_FILTER_BUILTIN_LISTS,
+} from '../constants';
 // The one module outside the dependency rule's original three, and it is inside
 // its SPIRIT: `families/secrets.ts` imports `../hooks/contract` and nothing else
 // (checked, and its own header makes purity a stated requirement — the gateway
@@ -211,11 +218,27 @@ export type PolicyFamilyDefinition<F extends PolicyFamily> = Omit<
 
 // ── shared option sets ──────────────────────────────────────────────────────
 
+function categoryOptions(defs: readonly { id: string; label: string }[]): PolicyFieldOption[] {
+  return defs.map((d) => ({ value: d.id, label: d.label }));
+}
+
+/** `{ [id]: defaultEnabled }` over a definition list. */
+function defaultFlags(defs: readonly { id: string; defaultEnabled: boolean }[]): Record<string, boolean> {
+  return Object.fromEntries(defs.map((d) => [d.id, d.defaultEnabled]));
+}
+
 /** Derived from the definitions the moderation family already ships, so the
  *  picker cannot fall behind the classifier's category set. */
-const MODERATION_CATEGORY_OPTIONS: readonly PolicyFieldOption[] = MODERATION_CATEGORIES.map(
-  (category) => ({ value: category.id, label: category.label }),
-);
+const MODERATION_CATEGORY_OPTIONS: readonly PolicyFieldOption[] = categoryOptions(MODERATION_CATEGORIES);
+
+/** Derived from the model's own manifest, split into the two families' own
+ *  gates — `cognipeer_guardrail_moderation` never offers a shield category to
+ *  switch on, and vice versa. */
+const COGNIPEER_GUARDRAIL_MODERATION_CATEGORY_OPTIONS: readonly PolicyFieldOption[] =
+  categoryOptions(COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES);
+
+const COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORY_OPTIONS: readonly PolicyFieldOption[] =
+  categoryOptions(COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES);
 
 const BUILTIN_WORD_LIST_OPTIONS: readonly PolicyFieldOption[] = WORD_FILTER_BUILTIN_LISTS.map(
   (list) => ({ value: list.id, label: list.label, description: list.description }),
@@ -305,6 +328,11 @@ const summary = (parts: Array<string | false | undefined>, fallback: string): st
   const kept = parts.filter((part): part is string => typeof part === 'string' && part.length > 0);
   return kept.length > 0 ? kept.join(' · ') : fallback;
 };
+
+function categoryCount(map: unknown, total: number): string {
+  const on = enabledKeys(map).length;
+  return on > 0 ? `${on} of ${total} categories` : 'No categories switched on';
+}
 
 /** First line of a prose field, clipped. Never the whole prompt: the card is
  *  one line and a 4KB rule would push every other card off the screen. */
@@ -702,9 +730,7 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
       ...base('word_filter'),
       // Derived from the definitions, so a new built-in list arrives switched
       // on or off exactly as its author declared rather than as this file guessed.
-      builtinLists: Object.fromEntries(
-        WORD_FILTER_BUILTIN_LISTS.map((list) => [list.id, list.defaultEnabled]),
-      ),
+      builtinLists: defaultFlags(WORD_FILTER_BUILTIN_LISTS),
     }),
     summarise: (policy) =>
       summary(
@@ -744,8 +770,9 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         options: [
           { value: 'llm', label: 'LLM judge', description: 'Any chat model. Works everywhere; costs a completion per run and reports a coarse severity.' },
           { value: 'model', label: 'Moderation model', description: 'A model whose category is "moderation". One cheap call with real per-category scores.' },
+          { value: 'lexicon', label: 'Lexicon (no model)', description: 'Built-in keyword lists + a structural child-safety check. Zero cost/latency; lower recall on figurative or coded phrasing than either model option — pairs a tenant word list per category for hate/harassment/sexual coverage.' },
         ],
-        help: 'Which detector runs this policy. The model picked below has to match: a chat model for the judge, a moderation model for the classifier.',
+        help: 'Which detector runs this policy. The model picked below has to match: a chat model for the judge, a moderation model for the classifier. Lexicon needs no model at all.',
       },
       {
         kind: 'reference',
@@ -753,7 +780,7 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         resource: 'model',
         label: 'Model',
         required: true,
-        help: 'The classifier. An enabled policy with no model reads as active while nothing runs, so the server refuses to save one.',
+        help: 'The classifier. An enabled policy with no model reads as active while nothing runs, so the server refuses to save one. Ignored by the Lexicon detector.',
         emptyHint: 'No models available on this project yet.',
       },
       {
@@ -764,6 +791,16 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         defaultValue: false,
         help: 'Only the categories switched on are sent to the classifier, and only they can produce a finding.',
       },
+      {
+        kind: 'key_list',
+        key: 'lexiconCustomLists',
+        label: 'Lexicon custom lists (per category)',
+        keyLabel: 'Category',
+        valueLabel: 'Word list key',
+        keyPlaceholder: 'e.g. hate',
+        valuePlaceholder: 'e.g. tenant-hate-terms',
+        help: 'Lexicon detector only. Maps a moderation category id to one or more of your uploaded word lists (Guardrails → Word lists) — the only way "hate", "harassment", "sexual" and "sexual/minors" get real lexicon coverage, since no built-in list ships for those.',
+      },
     ]),
     defaults: () => ({
       ...base('moderation'),
@@ -771,17 +808,15 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
       // serve, so a policy created before anyone registers a moderation model
       // still runs.
       detector: 'llm' as const,
-      categories: Object.fromEntries(
-        MODERATION_CATEGORIES.map((category) => [category.id, category.defaultEnabled]),
-      ),
+      categories: defaultFlags(MODERATION_CATEGORIES),
     }),
     summarise: (policy) => {
-      const on = enabledKeys(policy.categories).length;
+      const detectorLabel = policy.detector === 'model' ? 'classifier' : policy.detector === 'lexicon' ? 'lexicon (no model)' : 'LLM judge';
       return summary(
         [
-          on > 0 ? `${on} of ${MODERATION_CATEGORIES.length} categories` : 'No categories switched on',
-          policy.detector === 'model' ? 'classifier' : 'LLM judge',
-          policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen',
+          categoryCount(policy.categories, MODERATION_CATEGORIES.length),
+          detectorLabel,
+          ...(policy.detector === 'lexicon' ? [] : [policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen']),
         ],
         'Not configured yet.',
       );
@@ -805,12 +840,22 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
     needsFailMode: true,
     fields: fieldsFor<PromptShieldPolicyConfig>([
       {
+        kind: 'select',
+        key: 'detector',
+        label: 'Detector',
+        options: [
+          { value: 'llm', label: 'LLM judge', description: 'Understands intent — catches framing/social-engineering attacks a pattern cannot. Costs a model call.' },
+          { value: 'pattern', label: 'Pattern (no model)', description: 'Matches mechanical attack shapes (override phrases, fake system blocks, exfiltration requests, encoding tricks). Zero cost/latency; misses intent-based attacks (hypothetical framing, social engineering) by design — see the field help.' },
+        ],
+        help: 'Pattern only catches attacks with a recognisable textual SHAPE. Attacks that rely on framing or persuasion rather than a fixed phrase (hypothetical scenarios, social engineering, payload splitting) need the LLM judge.',
+      },
+      {
         kind: 'reference',
         key: 'modelKey',
         resource: 'model',
         label: 'Model',
         required: true,
-        help: 'The judge. An enabled policy with no model reads as active while nothing runs.',
+        help: 'The judge. An enabled policy with no model reads as active while nothing runs. Ignored by the Pattern detector.',
         emptyHint: 'No models available on this project yet.',
       },
       {
@@ -825,13 +870,108 @@ const DEFINITIONS: PolicyFamilyDefinitions = {
         ],
       },
     ]),
-    defaults: () => ({ ...base('prompt_shield'), sensitivity: 'balanced' }),
+    defaults: () => ({ ...base('prompt_shield'), detector: 'llm' as const, sensitivity: 'balanced' }),
     summarise: (policy) =>
       summary(
         [
           `${policy.sensitivity ?? 'balanced'} sensitivity`,
-          policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen',
+          policy.detector === 'pattern' ? 'pattern (no model)' : (policy.modelKey ? `via ${policy.modelKey}` : 'no model chosen'),
         ],
+        'Not configured yet.',
+      ),
+  },
+
+  cognipeer_guardrail_moderation: {
+    label: 'Cognipeer Guardrail — Moderation',
+    description:
+      'A bundled, offline classifier (@cognipeer/guardrail) — no model to pick, no network call. Six content categories from a 1.4 MB on-device character-CNN. Its sibling, Cognipeer Guardrail — Prompt Shield, is the same model’s other gate, managed as its own policy.',
+    icon: 'cpu',
+    color: 'green',
+    catalog: {
+      group: 'content',
+      order: 40,
+      keywords: ['cognipeer', 'guardrail', 'classifier', 'offline', 'local', 'bundled', 'cnn', 'onnx', 'moderation', 'insult', 'hate'],
+    },
+    // The model load or one inference call can fail (a bad onnxruntime-node
+    // native binding, a corrupt/missing bundled model file); unlike lexicon
+    // and pattern, this is not a pure in-memory string operation.
+    needsFailMode: true,
+    fields: fieldsFor<CognipeerGuardrailModerationPolicyConfig>([
+      {
+        kind: 'flag_map',
+        key: 'categories',
+        label: 'Categories',
+        options: COGNIPEER_GUARDRAIL_MODERATION_CATEGORY_OPTIONS,
+        defaultValue: false,
+        help: 'Only the categories switched on are scored, and only they can produce a finding.',
+      },
+      {
+        kind: 'select',
+        key: 'profile',
+        label: 'Profile',
+        required: true,
+        options: [
+          { value: 'strict', label: 'Strict', description: 'The default. ~2% false positives on insult/hate. Best for a public-facing assistant, where a wrongly-blocked message is the visible failure.' },
+          { value: 'balanced', label: 'Balanced', description: '~4% — meaningfully higher recall than strict.' },
+          { value: 'sensitive', label: 'Sensitive', description: 'Uncapped on insult/hate. For a workspace that would rather review more false alarms than miss real abuse.' },
+        ],
+        help: 'A false-positive BUDGET, not a raw cutoff. sexual/violence/self_harm/illegal score identically in every profile — only insult and hate move.',
+      },
+    ]),
+    defaults: () => ({
+      ...base('cognipeer_guardrail_moderation'),
+      categories: defaultFlags(COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES),
+      profile: 'strict' as const,
+    }),
+    summarise: (policy) =>
+      summary(
+        [categoryCount(policy.categories, COGNIPEER_GUARDRAIL_MODERATION_CATEGORIES.length), `${policy.profile ?? 'strict'} profile`],
+        'Not configured yet.',
+      ),
+  },
+
+  cognipeer_guardrail_prompt_shield: {
+    label: 'Cognipeer Guardrail — Prompt Shield',
+    description:
+      'A bundled, offline classifier (@cognipeer/guardrail) — no model to pick, no network call. Three prompt-injection/jailbreak categories from the same 1.4 MB on-device character-CNN as Cognipeer Guardrail — Moderation, managed as its own policy.',
+    icon: 'cpu',
+    color: 'lime',
+    catalog: {
+      group: 'content',
+      order: 50,
+      keywords: ['cognipeer', 'guardrail', 'classifier', 'offline', 'local', 'bundled', 'cnn', 'onnx', 'jailbreak', 'injection', 'exfiltration'],
+    },
+    needsFailMode: true,
+    fields: fieldsFor<CognipeerGuardrailPromptShieldPolicyConfig>([
+      {
+        kind: 'flag_map',
+        key: 'categories',
+        label: 'Categories',
+        options: COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORY_OPTIONS,
+        defaultValue: false,
+        help: 'Only the categories switched on are scored, and only they can produce a finding.',
+      },
+      {
+        kind: 'select',
+        key: 'profile',
+        label: 'Profile',
+        required: true,
+        options: [
+          { value: 'strict', label: 'Strict', description: 'The default. ~1% false positives. Flags 1 of 124 hand-written must-not-flag strings in the package’s own regression suite.' },
+          { value: 'balanced', label: 'Balanced', description: '~2% — meaningfully higher recall than strict.' },
+          { value: 'sensitive', label: 'Sensitive', description: '~5%. For an assistant wired to private data or tools, where a missed injection costs more than a reviewed false alarm.' },
+        ],
+        help: 'A false-positive BUDGET, not a raw cutoff — see the package README’s own reasoning against picking the F1-optimal point.',
+      },
+    ]),
+    defaults: () => ({
+      ...base('cognipeer_guardrail_prompt_shield'),
+      categories: defaultFlags(COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES),
+      profile: 'strict' as const,
+    }),
+    summarise: (policy) =>
+      summary(
+        [categoryCount(policy.categories, COGNIPEER_GUARDRAIL_PROMPT_SHIELD_CATEGORIES.length), `${policy.profile ?? 'strict'} profile`],
         'Not configured yet.',
       ),
   },

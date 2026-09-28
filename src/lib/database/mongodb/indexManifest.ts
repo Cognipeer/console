@@ -91,6 +91,24 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { tenantId: 1, createdAt: -1 }, options: { name: 'idx_tenant_createdAt' } },
   ],
   crawl_results: [{ key: { jobId: 1, createdAt: 1 }, options: { name: 'idx_job_createdAt' } }],
+  // Enforces "at most one queued/running run per conversation" at the DB
+  // layer (docs/guide/agent-background-execution.md §6/§12.14) — a partial
+  // unique index, not a read-then-write application check, so the guard is
+  // race-free. `{status:1, heartbeatAt:1}` backs the reconciler's stale-run
+  // sweep (§7.1); `{expiresAt:1}` backs retention cleanup (§12.10).
+  agent_runs: [
+    {
+      key: { conversationId: 1 },
+      options: {
+        name: 'idx_agent_runs_active_per_conversation',
+        unique: true,
+        partialFilterExpression: { status: { $in: ['queued', 'running'] } },
+      },
+    },
+    { key: { status: 1, heartbeatAt: 1 }, options: { name: 'idx_status_heartbeat' } },
+    { key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } },
+    { key: { tenantId: 1, projectId: 1, idempotencyKey: 1 }, options: { name: 'idx_tenant_project_idempotencyKey' } },
+  ],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
     { key: { vectorId: 1 }, options: { name: 'idx_vectorId' } },
@@ -161,6 +179,7 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [{ key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } }],
+  agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
   mcp_request_logs: [
     { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },

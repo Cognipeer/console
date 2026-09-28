@@ -61,6 +61,26 @@ export interface AppConfig {
     dataDir: string;
   };
 
+  pii: {
+    /**
+     * Directory containing local ONNX NER models, laid out as
+     * `<nerModelPath>/<modelId>/{config.json,tokenizer.json,onnx/model*.onnx}`
+     * — the layout `@huggingface/transformers` expects for a local model.
+     * Empty (default): the NER layer is unavailable and any policy asking
+     * for `detection.mode: 'pattern+dictionary+ner'` runs dictionary-only
+     * and reports itself degraded. This is the LOCAL stand-in for the
+     * planned GitHub-Releases asset registry (see
+     * `internal-notes/pii-v2-nlp-ve-asset-registry-plani.md` §3) — not
+     * itself the registry.
+     */
+    nerModelPath: string;
+    /** In-process concurrency cap on simultaneous NER inference calls. No
+     *  worker pool (product decision, 2026-09-09): runs inline in the app
+     *  process; isolation is deferred to a future sandbox-executor
+     *  integration. */
+    nerMaxConcurrent: number;
+  };
+
   database: {
     provider: 'mongodb' | 'sqlite';
     uri: string;
@@ -179,10 +199,11 @@ export interface AppConfig {
      * honestly. Empty (default) preserves the existing `trustProxy: true`
      * behaviour -- every hop is trusted, including one the caller
      * themselves controls if a request can reach this process directly.
-     * Set to your real reverse proxy/load balancer's IP(s) or CIDR(s) (or a
-     * small integer hop count, e.g. "1") to close that gap; anything not
-     * matching this list falls back to the raw socket address instead of a
-     * spoofable header.
+    * Set to your real reverse proxy/load balancer's IP(s) or CIDR(s) to
+    * close that gap. Numeric hop counts are intentionally unsupported:
+    * they cannot authenticate the immediate peer and fail closed. Anything
+    * not matching this list falls back to the raw socket address instead of
+    * a spoofable header.
      */
     trustedProxies: string[];
   };
@@ -195,6 +216,10 @@ export interface AppConfig {
   };
 
   app: {
+    /**
+     * Canonical external URL for server-generated links. Resolved from APP_URL
+     * first, with NEXT_PUBLIC_APP_URL retained as a legacy fallback.
+     */
     url: string;
     shutdownTimeoutMs: number;
   };
@@ -319,11 +344,57 @@ export interface AppConfig {
     defaultAttempts: number;
     defaultBackoffMs: number;
   };
+
+  /**
+   * Agent background execution (docs/guide/agent-background-execution.md).
+   * Both timeouts are server-operated ceilings, distinct from the agent's
+   * own `runtime.limits.maxWallClockMs` (§5, §12.5/§12.13) — deploy-time
+   * config must keep `syncTimeoutMs` below the shortest infrastructure
+   * timeout in the deployment (Decision 6).
+   */
+  agent: {
+    /** Hard wall-clock ceiling for a synchronous (non-background) agent turn. Default 10 min. */
+    syncTimeoutMs: number;
+    /** Server-operated upper bound on a background run, independent of the agent's own limit. */
+    backgroundMaxDurationMs: number;
+    /** Simple per-tenant cap on simultaneous queued+running background runs (§12.8). */
+    backgroundMaxConcurrentRunsPerTenant: number;
+    /** Retention TTL for AgentRun records (§12.10), following the tracing-retention precedent. */
+    runRetentionDays: number;
+    /** How often a background worker writes heartbeatAt while a run is `running`. */
+    runHeartbeatIntervalMs: number;
+    /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
+    runHeartbeatStaleMs: number;
+    /** Per-project cap on simultaneous queued+running background runs; 0 = only the tenant cap applies. */
+    backgroundMaxConcurrentRunsPerProject: number;
+    /** Background runs executed at once per node (own queue, so they never starve chat). */
+    runConcurrency: number;
+    /** A `queued` run older than this with no worker is republished by the reconciler. */
+    runRequeueAfterMs: number;
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
+
+/**
+ * The run-timing knobs, clamped to values that cannot wedge the system: a 0
+ * heartbeat would spin a hot interval, a stale window at or below the
+ * heartbeat would fail every live run as `worker_lost`, and a 0 sync timeout
+ * would 504 every call before it starts.
+ */
+function boundedAgentRunConfig(source: ConfigSource) {
+  const atLeast = (value: number, min: number) => (Number.isFinite(value) ? Math.max(value, min) : min);
+  const runHeartbeatIntervalMs = atLeast(int(source, 'AGENT_RUN_HEARTBEAT_INTERVAL_MS', 15_000), 1_000);
+  return {
+    runHeartbeatIntervalMs,
+    runHeartbeatStaleMs: atLeast(int(source, 'AGENT_RUN_HEARTBEAT_STALE_MS', 45_000), runHeartbeatIntervalMs * 3),
+    backgroundMaxConcurrentRunsPerProject: atLeast(int(source, 'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_PROJECT', 0), 0),
+    runConcurrency: atLeast(int(source, 'AGENT_RUN_CONCURRENCY', 4), 1),
+    runRequeueAfterMs: atLeast(int(source, 'AGENT_RUN_REQUEUE_AFTER_MS', 120_000), 10_000),
+  };
+}
 
 function str(source: ConfigSource, key: string, fallback: string): string {
   return source.get(key) ?? fallback;
@@ -359,6 +430,40 @@ function oneOf<T extends string>(
   return fallback;
 }
 
+const DEFAULT_APP_URL = 'http://localhost:3000';
+
+function resolveAppUrl(source: ConfigSource): string {
+  return source.get('APP_URL')?.trim()
+    || source.get('NEXT_PUBLIC_APP_URL')?.trim()
+    || DEFAULT_APP_URL;
+}
+
+function validateProductionAppUrl(value: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return 'must be an absolute http(s) URL';
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return 'must use the http or https protocol';
+  }
+
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname === '::1'
+    || hostname === '0.0.0.0'
+    || hostname.startsWith('127.')
+  ) {
+    return 'must not point to a loopback address';
+  }
+
+  return null;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Config Builder                                                    */
 /* ------------------------------------------------------------------ */
@@ -366,6 +471,13 @@ function oneOf<T extends string>(
 function buildConfig(source: ConfigSource): AppConfig {
   const nodeEnv = str(source, 'NODE_ENV', 'development');
   const databaseProvider = oneOf(source, 'DB_PROVIDER', ['mongodb', 'sqlite'], 'sqlite');
+  const smtpUser = str(source, 'SMTP_USER', '');
+  const smtpPass = str(source, 'SMTP_PASS', '');
+  const sendGridApiKey = str(source, 'SENDGRID_API_KEY', '');
+  const hasExplicitSmtpTransport = Boolean(
+    source.get('SMTP_HOST') || smtpUser || smtpPass,
+  );
+  const useSendGrid = Boolean(sendGridApiKey && !hasExplicitSmtpTransport);
   // SQLite is the self-hosted default, so it decides the mode unless an operator says otherwise.
   const deploymentMode = oneOf(
     source,
@@ -392,6 +504,11 @@ function buildConfig(source: ConfigSource): AppConfig {
 
     storage: {
       dataDir: str(source, 'DATA_DIR', './data'),
+    },
+
+    pii: {
+      nerModelPath: str(source, 'PII_NER_MODEL_PATH', ''),
+      nerMaxConcurrent: int(source, 'PII_NER_MAX_CONCURRENT', 2),
     },
 
     database: {
@@ -432,12 +549,13 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     smtp: {
-      host: str(source, 'SMTP_HOST', 'smtp.gmail.com'),
+      host: str(source, 'SMTP_HOST', useSendGrid ? 'smtp.sendgrid.net' : 'smtp.gmail.com'),
       port: int(source, 'SMTP_PORT', 587),
       secure: bool(source, 'SMTP_SECURE', false),
-      user: str(source, 'SMTP_USER', ''),
-      pass: str(source, 'SMTP_PASS', ''),
-      from: str(source, 'SMTP_FROM', '') || str(source, 'SMTP_USER', ''),
+      user: smtpUser || (useSendGrid ? 'apikey' : ''),
+      pass: smtpPass || (useSendGrid ? sendGridApiKey : ''),
+      from: str(source, 'SMTP_FROM', '')
+        || (useSendGrid ? str(source, 'SENDGRID_FROM_EMAIL', '') : smtpUser),
     },
 
     gateway: {
@@ -499,7 +617,7 @@ function buildConfig(source: ConfigSource): AppConfig {
     },
 
     app: {
-      url: str(source, 'NEXT_PUBLIC_APP_URL', 'http://localhost:3000'),
+      url: resolveAppUrl(source),
       shutdownTimeoutMs: int(source, 'SHUTDOWN_TIMEOUT_MS', 15000),
     },
 
@@ -569,6 +687,18 @@ function buildConfig(source: ConfigSource): AppConfig {
       },
       defaultAttempts: int(source, 'QUEUE_DEFAULT_ATTEMPTS', 3),
       defaultBackoffMs: int(source, 'QUEUE_DEFAULT_BACKOFF_MS', 1_000),
+    },
+
+    agent: {
+      syncTimeoutMs: Math.max(int(source, 'AGENT_SYNC_TIMEOUT_MS', 600_000), 5_000),
+      backgroundMaxDurationMs: Math.max(int(source, 'AGENT_BACKGROUND_MAX_DURATION_MS', 1_800_000), 10_000),
+      backgroundMaxConcurrentRunsPerTenant: int(
+        source,
+        'AGENT_BACKGROUND_MAX_CONCURRENT_RUNS_PER_TENANT',
+        10,
+      ),
+      runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
+      ...boundedAgentRunConfig(source),
     },
   };
 }
@@ -677,6 +807,15 @@ export function validateConfig(cfg: AppConfig): ConfigValidationError[] {
   // Hard-fail if request/response body logging is enabled in production.
   // These flags expose secrets (auth headers, API keys, prompts) to logs.
   if (cfg.nodeEnv === 'production') {
+    const appUrlError = validateProductionAppUrl(cfg.app.url);
+    if (appUrlError) {
+      errors.push({
+        key: 'APP_URL',
+        message:
+          `APP_URL ${appUrlError} in production. Set APP_URL (preferred) or `
+          + 'NEXT_PUBLIC_APP_URL (legacy) to the public Console origin.',
+      });
+    }
     if (cfg.logging.logRequestBody) {
       errors.push({
         key: 'LOG_REQUEST_BODY',

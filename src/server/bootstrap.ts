@@ -30,6 +30,8 @@ import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsum
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
+import { startAgentScheduler } from '@/lib/services/agents/agentScheduler';
+import { reconcileOrphanedAgentRuns, startAgentRunReconciler } from '@/lib/services/agents/agentRunReconciler';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
 import { startVectorMigrationQueueConsumer } from '@/lib/services/vector/vectorMigrationConsumer';
 import { resumeInterruptedVectorMigrations } from '@/lib/services/vector/vectorMigrationJob';
@@ -80,6 +82,19 @@ const FATAL_EXIT_DELAY_MS = 1000;
 function scheduleFatalExit(message: string): void {
   logger.error(`FATAL: ${message}`);
   setTimeout(() => process.exit(1), FATAL_EXIT_DELAY_MS).unref();
+}
+
+/** One boot step that must never stop the rest of boot: a failure is logged and boot carries on. */
+async function bestEffort(
+  step: () => unknown,
+  message: string,
+  level: 'warn' | 'error' = 'warn',
+): Promise<void> {
+  try {
+    await step();
+  } catch (error) {
+    logger[level](message, { error: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 export function bootstrapApplication(): Promise<void> {
@@ -169,8 +184,8 @@ async function runBootstrap(): Promise<void> {
   // only sets up process-local providers (cache/cluster/queue), while
   // `tenantReconciliation` scans tenant databases. Running them
   // concurrently (instead of one long sequential await chain) is what
-  // actually shortens boot time; each step keeps its original try/catch so
-  // a failure in one never blocks the rest, same as before.
+  // actually shortens boot time; each step goes through `bestEffort` so a
+  // failure in one never blocks the rest.
   //
   // `tenantReconciliation`'s three steps stay sequential *with each other*:
   // they all read/write through the shared `db` singleton's tenant-switch
@@ -178,7 +193,7 @@ async function runBootstrap(): Promise<void> {
   // one in-flight tenant-scoped call at a time — see the scheduler comments
   // in redTeamScheduler.ts / analysisScheduler.ts for the same rule.
   const coreInfraInit = (async () => {
-    try {
+    await bestEffort(async () => {
       await getCache();
       registerHealthCheck('cache', async () => {
         try {
@@ -197,17 +212,13 @@ async function runBootstrap(): Promise<void> {
           };
         }
       });
-    } catch (error) {
-      logger.error('Failed to initialize cache provider', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    }, 'Failed to initialize cache provider', 'error');
 
     // Cluster + queue init. Both are safe no-ops on a single-node deployment:
     // the registry creates a single row in the `nodes` table and the queue
     // resolves to its in-memory driver when Redis is not configured. No
     // existing service is migrated yet — these are opt-in for future code.
-    try {
+    await bestEffort(async () => {
       await registerThisNode();
       registerShutdownHandler('node-registry', async () => {
         await deregisterThisNode();
@@ -231,13 +242,9 @@ async function runBootstrap(): Promise<void> {
           };
         }
       });
-    } catch (error) {
-      logger.warn('Cluster node registration failed; continuing without it', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    }, 'Cluster node registration failed; continuing without it');
 
-    try {
+    await bestEffort(async () => {
       const queue = await getQueue();
       registerShutdownHandler('queue', async () => {
         await destroyQueue();
@@ -246,43 +253,26 @@ async function runBootstrap(): Promise<void> {
         status: 'ok',
         details: { provider: queue.name },
       }));
-    } catch (error) {
-      logger.warn('Queue provider init failed; continuing without it', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    }, 'Queue provider init failed; continuing without it');
   })();
 
   const tenantReconciliation = (async () => {
-    try {
-      await reconcileOrphanedBrowserSessions();
-    } catch (error) {
-      logger.warn('Browser session reconciliation failed during startup', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await bestEffort(reconcileOrphanedBrowserSessions, 'Browser session reconciliation failed during startup');
 
     // On-prem: seed the single organization + owner from BOOTSTRAP_* envs.
     // No-op when the envs are unset or a tenant already exists.
-    try {
-      await ensureBootstrapOrganization();
-    } catch (error) {
-      logger.error('Bootstrap organization creation failed during startup', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await bestEffort(ensureBootstrapOrganization, 'Bootstrap organization creation failed during startup', 'error');
 
     // Must complete BEFORE the crawler scheduler/consumers below start taking
     // new work: it treats every `running`/`queued` job as orphaned (resets it
     // and deletes its partial results), so a post-listen job must never be
     // observable here.
-    try {
-      await reconcileOrphanedCrawlJobs();
-    } catch (error) {
-      logger.warn('Crawl job reconciliation failed during startup', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await bestEffort(reconcileOrphanedCrawlJobs, 'Crawl job reconciliation failed during startup');
+
+    // Same "must complete before new work starts" requirement as the crawl
+    // reconciler above, for the identical reason: a run created after this
+    // point must never be observable as orphaned here.
+    await bestEffort(reconcileOrphanedAgentRuns, 'Agent run reconciliation failed during startup');
   })();
 
   await Promise.all([coreInfraInit, tenantReconciliation]);
@@ -291,83 +281,56 @@ async function runBootstrap(): Promise<void> {
   // Runs enterprise bootstrap reconcilers (e.g. sandbox runtime reconcile).
   // No-op in the community edition.
   for (const reconcile of enterpriseReconcilers) {
-    try {
-      await reconcile();
-    } catch (error) {
-      logger.warn('Enterprise reconciler failed during startup', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await bestEffort(reconcile, 'Enterprise reconciler failed during startup');
   }
 
   startPollScheduler();
   startAlertScheduler();
   startCrawlerScheduler();
+  startAgentScheduler();
+  startAgentRunReconciler();
   startAnalysisScheduler();
   startRedTeamScheduler();
 
   // Register queue consumers on every node so that whenever instance
   // routing forwards a job to another node, that node can execute it.
   // The consumers are no-ops for memory queue + single-node deployments.
-  try {
-    await Promise.all([
-      startAgentQueueConsumer(),
-      startMcpQueueConsumer(),
-      startBrowserQueueConsumer(),
-      startCrawlerQueueConsumer(),
-      startOcrJobQueueConsumer(),
-      startBatchQueueConsumer(),
-      startDatasetGenerationConsumer(),
-      startSnapshotQueueConsumer(),
-      startRedTeamQueueConsumer(),
-      startEvaluationRunQueueConsumer(),
-      startVectorMigrationQueueConsumer(),
-      startRagReindexQueueConsumer(),
-      startRagIngestQueueConsumer(),
-      // Enterprise modules contribute their consumers through the seam;
-      // the collection is empty in the community edition.
-      ...enterpriseQueueConsumers.map((start) => start()),
-      startAnalysisRunQueueConsumer(),
-    ]);
-  } catch (error) {
-    logger.warn('Queue consumer registration failed; cluster routing limited', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  await bestEffort(() => Promise.all([
+    startAgentQueueConsumer(),
+    startMcpQueueConsumer(),
+    startBrowserQueueConsumer(),
+    startCrawlerQueueConsumer(),
+    startOcrJobQueueConsumer(),
+    startBatchQueueConsumer(),
+    startDatasetGenerationConsumer(),
+    startSnapshotQueueConsumer(),
+    startRedTeamQueueConsumer(),
+    startEvaluationRunQueueConsumer(),
+    startVectorMigrationQueueConsumer(),
+    startRagReindexQueueConsumer(),
+    startRagIngestQueueConsumer(),
+    // Enterprise modules contribute their consumers through the seam;
+    // the collection is empty in the community edition.
+    ...enterpriseQueueConsumers.map((start) => start()),
+    startAnalysisRunQueueConsumer(),
+  ]), 'Queue consumer registration failed; cluster routing limited');
 
   // Index migrations interrupted by a restart resume from their persisted
   // cursor. Must run AFTER the consumer above is registered.
-  try {
-    await resumeInterruptedVectorMigrations();
-  } catch (error) {
-    logger.warn('Vector migration resume failed during startup', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  await bestEffort(resumeInterruptedVectorMigrations, 'Vector migration resume failed during startup');
 
   // Same contract for Knowledge Engine re-index runs: they resume from the
   // last document they finished, and only after their consumer is registered.
-  try {
-    await resumeInterruptedRagReindexRuns();
-  } catch (error) {
-    logger.warn('Knowledge Engine re-index resume failed during startup', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  await bestEffort(resumeInterruptedRagReindexRuns, 'Knowledge Engine re-index resume failed during startup');
 
   // Documents left `pending` by a restart: the memory queue driver drops
   // in-flight jobs, so without this sweep a deferred ingest would never run.
-  try {
-    await resumePendingRagIngests();
-  } catch (error) {
-    logger.warn('Knowledge Engine ingest resume failed during startup', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  await bestEffort(resumePendingRagIngests, 'Knowledge Engine ingest resume failed during startup');
 
   applicationReady = true;
 
   logger.info('Application started', {
+    appUrl: cfg.app.url,
     cacheProvider: cfg.cache.provider,
     corsEnabled: cfg.cors.enabled,
     logLevel: cfg.logging.level,

@@ -77,6 +77,21 @@ function sanitizeMinScore(raw: unknown): number | undefined {
   return raw >= 0 && raw <= 1 ? raw : undefined;
 }
 
+/**
+ * `null` is meaningful here and `undefined` is not: a PATCH that clears the pin
+ * sends `null`, and the update must write "follow the published version" rather
+ * than leave the old pin in place. A non-number is dropped to `undefined` (the
+ * field is left out / untouched); a number below 1 becomes `null` ("follow
+ * published", a state the runner can execute) rather than a pin that cannot
+ * resolve.
+ */
+function sanitizeAgentVersion(raw: unknown): number | null | undefined {
+  if (raw === null) return null;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
+  const version = Math.trunc(raw);
+  return version >= 1 ? version : null;
+}
+
 function internalError(reply: import('fastify').FastifyReply, error: unknown) {
   return (
     sendProjectContextError(reply, error)
@@ -254,6 +269,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         description: typeof body.description === 'string' ? body.description : undefined,
         kind: body.kind as EvaluationTargetKind,
         agentKey: body.agentKey as string | undefined,
+        agentVersion: sanitizeAgentVersion(body.agentVersion),
         modelKey: body.modelKey as string | undefined,
         external: body.external as never,
         ragModuleKey: typeof body.ragModuleKey === 'string' ? body.ragModuleKey : undefined,
@@ -295,6 +311,7 @@ export const evaluationsApiPlugin: FastifyPluginAsync = async (app) => {
         name: body.name as string | undefined,
         description: body.description as string | undefined,
         agentKey: body.agentKey as string | undefined,
+        agentVersion: sanitizeAgentVersion(body.agentVersion),
         modelKey: body.modelKey as string | undefined,
         ragModuleKey: body.ragModuleKey as string | undefined,
         retrievalTopK: sanitizeTopK(body.retrievalTopK),

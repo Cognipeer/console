@@ -15,7 +15,7 @@ Community edition is available under AGPL-3.0. Commercial licensing, hosted depl
 
 **Agents & Automation**
 - **MCP Hub** — Curate, host, and discover Model Context Protocol servers (OpenAPI, remote, stdio) with per-tool controls
-- **Agent Sandboxes** — Isolated coding-agent dev environments with snapshot/fork/resume and port-forwarded previews
+- **Sandbox** — Isolated runtime environments for code, agents and previews with snapshot/fork/resume and port-forwarded previews
 - **Browser Automation** — Managed browser profiles, live sessions, and per-browser MCP endpoints
 - **A2A Protocol** — Publish Console-managed agents as Agent-to-Agent servers with agent cards
 - **Prompt Management** — Versioned templates with environment-based deployment (dev/staging/prod) and a built-in prompt optimizer

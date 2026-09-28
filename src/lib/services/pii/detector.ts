@@ -11,8 +11,9 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { performance } from 'node:perf_hooks';
 
-import type { PiiLanguage, IPiiCustomPattern } from '@/lib/database';
+import type { PiiAction, PiiLanguage, IPiiCustomPattern, PiiDetectionConfig } from '@/lib/database';
 // The regex family's interruptible sweep — a V8 context with a timeout, the
 // only thing that can stop a backtracking regex. Custom patterns are
 // tenant-authored and run on caller-controlled text, so they get exactly the
@@ -26,7 +27,6 @@ import {
 } from '@/lib/services/guardrail/families/regex';
 import type { PiiFinding, PiiVault } from './types';
 import {
-  PII_CATEGORIES,
   PII_CATEGORIES_BY_ID,
   filterCategoriesByLanguages,
   categoryLabel,
@@ -34,6 +34,19 @@ import {
   type PiiMaskStrategy,
   type PiiSeverity,
 } from './categories';
+// PII v2 — L2 (dictionary) and L3 (NER) passes, and the confidence
+// primitives `detectAsync` uses to fuse their output with L1 (this file's
+// regex sweep). `detect()` itself stays untouched control-flow-wise; see
+// that function's own comment for exactly what v2 adds to it.
+import { CONTEXT_WORDS } from './contextWords';
+import { findContextWord, applyContextBoost, noisyOr, type Candidate } from './confidence';
+// `scanCustomPhrases` (tenant custom phrase lists via Aho-Corasick) is
+// implemented and unit-tested in `dictionary.ts` but not yet wired into
+// `DetectorConfig` — see the plan's Faz 1 note on tenant dictionaries.
+import { scanDictionary } from './dictionary';
+import { runNer } from './ner';
+import { byStartThenLongest } from './ahoCorasick';
+import { getConfig } from '@/lib/core/config';
 
 const SEVERITY_WEIGHT: Record<PiiSeverity, number> = { low: 1, medium: 2, high: 3 };
 
@@ -57,8 +70,8 @@ export interface CustomPatternSkip {
 interface CustomPatternReport {
   skipped: CustomPatternSkip[];
   budgetMs: number;
-  /** Epoch ms. ONE deadline for every `detect()` call made under the report. */
-  deadline: number;
+  /** Remaining execution budget shared by every `detect()` call under the report. */
+  remainingBudgetMs: number;
 }
 
 /**
@@ -83,13 +96,24 @@ export async function withCustomPatternBudget<T>(
   fn: () => Promise<T>,
   budgetMs = DEFAULT_REGEX_BUDGET_MS,
 ): Promise<{ result: T; skipped: CustomPatternSkip[] }> {
-  const report: CustomPatternReport = { skipped: [], budgetMs, deadline: Date.now() + budgetMs };
+  const report: CustomPatternReport = { skipped: [], budgetMs, remainingBudgetMs: budgetMs };
   const result = await reportStore.run(report, fn);
   return { result, skipped: report.skipped };
 }
 
-function customFlags(p: Pick<IPiiCustomPattern, 'flags'>): string {
-  return (p.flags ?? '').includes('g') ? (p.flags ?? 'g') : `${p.flags ?? ''}g`;
+const withGlobalFlag = (flags: string): string => (flags.includes('g') ? flags : `${flags}g`);
+
+/** Compile a custom pattern, or return why it will be refused at runtime. */
+function compileCustomRegex(p: Pick<IPiiCustomPattern, 'pattern' | 'flags'>): RegExp | string {
+  if (!p.pattern || typeof p.pattern !== 'string') return 'pattern is empty, so it can never fire';
+  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) {
+    return `pattern source is ${p.pattern.length} characters, over the ${MAX_CUSTOM_PATTERN_SOURCE_CHARS} character limit`;
+  }
+  try {
+    return new RegExp(p.pattern, withGlobalFlag(p.flags ?? ''));
+  } catch (error) {
+    return `pattern does not compile: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 /**
@@ -100,16 +124,8 @@ function customFlags(p: Pick<IPiiCustomPattern, 'flags'>): string {
 export function explainCustomPatternError(
   p: Pick<IPiiCustomPattern, 'pattern' | 'flags'>,
 ): string | null {
-  if (!p.pattern || typeof p.pattern !== 'string') return 'pattern is empty, so it can never fire';
-  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) {
-    return `pattern source is ${p.pattern.length} characters, over the ${MAX_CUSTOM_PATTERN_SOURCE_CHARS} character limit`;
-  }
-  try {
-    new RegExp(p.pattern, customFlags(p));
-    return null;
-  } catch (error) {
-    return `pattern does not compile: ${error instanceof Error ? error.message : String(error)}`;
-  }
+  const r = compileCustomRegex(p);
+  return typeof r === 'string' ? r : null;
 }
 
 /** Configuration consumed by `detect()`. */
@@ -123,6 +139,12 @@ export interface DetectorConfig {
   languages?: PiiLanguage[];
   /** Locale for labels & messages. */
   locale?: PiiLanguage;
+  /**
+   * PII v2 — opt-in dictionary/NER layers, only consulted by `detectAsync`.
+   * `detect()` (sync) never reads this field: a policy with no `detection`
+   * (or `mode: 'pattern'`) behaves byte-for-byte like pre-v2.
+   */
+  detection?: PiiDetectionConfig;
 }
 
 interface CompiledPattern {
@@ -133,50 +155,48 @@ interface CompiledPattern {
   validate?: (value: string) => boolean;
   label: string;
   mask: PiiMaskStrategy;
+  /** This category/pattern's own confidence before any context boost — see `categories.ts`'s `PiiCategoryDefinition.baseScore` doc. */
+  baseScore: number;
   /** The tenant pattern this came from — present on `source: 'custom'` only,
    *  so a skip can name it. */
   custom?: IPiiCustomPattern;
 }
 
+/** Custom patterns have no author-supplied base confidence — approximate one from the severity the tenant picked, the same way a built-in category's baseScore roughly tracks its severity. */
+function defaultBaseScoreForSeverity(severity: PiiSeverity): number {
+  return severity === 'high' ? 0.7 : severity === 'medium' ? 0.55 : 0.4;
+}
+
 function compileBuiltin(
-  cat: PiiCategoryDefinition,
+  cat: PiiCategoryDefinition & { pattern: RegExp },
   locale: PiiLanguage,
 ): CompiledPattern {
-  const flags = cat.pattern.flags.includes('g') ? cat.pattern.flags : `${cat.pattern.flags}g`;
   return {
     source: 'builtin',
     categoryId: cat.id,
     severity: cat.severity,
-    regex: new RegExp(cat.pattern.source, flags),
+    regex: new RegExp(cat.pattern.source, withGlobalFlag(cat.pattern.flags)),
     validate: cat.validate,
     label: categoryLabel(cat, locale),
     mask: cat.mask,
+    baseScore: cat.baseScore,
   };
 }
 
 function compileCustom(
   p: IPiiCustomPattern,
   locale: PiiLanguage,
-): CompiledPattern | null {
-  if (!p.enabled) return null;
-  if (!p.pattern || typeof p.pattern !== 'string') return null;
-  // The source cap is enforced HERE, at compile, so that the save path can
-  // reject the same pattern by calling `explainCustomPatternError` and the
-  // scan refuses it even when a row was written past the validator.
-  if (p.pattern.length > MAX_CUSTOM_PATTERN_SOURCE_CHARS) return null;
-  let regex: RegExp;
-  try {
-    regex = new RegExp(p.pattern, customFlags(p));
-  } catch {
-    return null;
-  }
+  regex: RegExp,
+): CompiledPattern {
+  const severity = p.severity ?? 'medium';
   return {
     source: 'custom',
     categoryId: p.categoryId,
-    severity: p.severity ?? 'medium',
+    severity,
     regex,
     label: p.labels?.[locale] ?? p.label,
-    mask: { kind: 'fixed', replacement: `[REDACTED_${p.categoryId.toUpperCase()}]` },
+    mask: { kind: 'fixed', replacement: redactReplacement(p.categoryId) },
+    baseScore: defaultBaseScoreForSeverity(severity),
     custom: p,
   };
 }
@@ -221,7 +241,7 @@ function buildReplacement(value: string, mask: PiiMaskStrategy, categoryId: stri
     }
     case 'keep-domain': {
       const at = value.indexOf('@');
-      if (at <= 0) return `[REDACTED_${categoryId.toUpperCase()}]`;
+      if (at <= 0) return redactReplacement(categoryId);
       const local = value.slice(0, at);
       const domain = value.slice(at);
       const masked = local.length <= 1 ? '*' : `${local[0]}${'*'.repeat(Math.max(1, local.length - 1))}`;
@@ -236,10 +256,7 @@ function redactReplacement(categoryId: string): string {
 
 /** Stable-sort findings: lower start first, longer-match wins ties. */
 function sortFindings(findings: PiiFinding[]): PiiFinding[] {
-  return findings.slice().sort((a, b) => {
-    if (a.start !== b.start) return a.start - b.start;
-    return (b.end - b.start) - (a.end - a.start);
-  });
+  return findings.slice().sort(byStartThenLongest);
 }
 
 /**
@@ -265,6 +282,33 @@ function resolveOverlaps(findings: PiiFinding[]): PiiFinding[] {
   return out;
 }
 
+/** Build a finding from a detected span — the one place `message`, `action`,
+ *  `block` and `replacement` are derived, for the pattern sweep and the
+ *  fusion path alike. */
+function toFinding(
+  f: Omit<PiiFinding, 'message' | 'action' | 'block' | 'replacement'>,
+  mask: PiiMaskStrategy,
+  locale: PiiLanguage,
+  actionMode: PiiAction,
+): PiiFinding {
+  return {
+    category: f.category,
+    source: f.source,
+    severity: f.severity,
+    value: f.value,
+    start: f.start,
+    end: f.end,
+    label: f.label,
+    message: formatMessage(f.label, locale),
+    action: actionMode,
+    block: actionMode === 'block',
+    replacement: actionMode === 'redact' ? redactReplacement(f.category) : buildReplacement(f.value, mask, f.category),
+    confidence: f.confidence,
+    detector: f.detector,
+    evidence: f.evidence,
+  };
+}
+
 /**
  * Detect PII findings in `text` given the supplied config.
  *
@@ -278,7 +322,7 @@ function resolveOverlaps(findings: PiiFinding[]): PiiFinding[] {
 export function detect(
   text: string,
   config: DetectorConfig = {},
-  actionMode: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize' = 'detect',
+  actionMode: PiiAction = 'detect',
 ): PiiFinding[] {
   if (!text) return [];
 
@@ -290,43 +334,46 @@ export function detect(
     report?.skipped.push({ patternId: p.id, categoryId: p.categoryId, reason });
   };
 
-  // Built-ins
+  // Built-ins. Categories with no `pattern` (PII v2's `person`/`organization`/
+  // `location` — see categories.ts's file header) are dictionary/NER-only and
+  // skipped here; `detectAsync` raises them through `scanDictionary`/`runNer`.
   for (const cat of pickActiveBuiltins(config)) {
-    builtins.push(compileBuiltin(cat, locale));
+    if (!cat.pattern) continue;
+    builtins.push(compileBuiltin(cat as PiiCategoryDefinition & { pattern: RegExp }, locale));
   }
 
   // Custom patterns
   for (const p of config.customPatterns ?? []) {
     if (!p.enabled) continue;
     if (!customAppliesToLanguages(p, config.languages)) continue;
-    const c = compileCustom(p, locale);
-    if (c) {
-      customs.push(c);
-    } else {
-      skip(p, explainCustomPatternError(p) ?? 'pattern does not compile');
+    const regex = compileCustomRegex(p);
+    if (typeof regex === 'string') {
+      skip(p, regex);
+      continue;
     }
+    customs.push(compileCustom(p, locale, regex));
   }
+
+  // PII v2: context boost is on by default, off only if a policy explicitly
+  // says so. It only ever RAISES `confidence` — a new, additive field — so
+  // this has zero effect on which findings `detect()` returns.
+  const contextBoostEnabled = config.detection?.contextBoost !== false;
 
   const raw: PiiFinding[] = [];
   const push = (c: CompiledPattern, value: string, start: number): void => {
     if (c.validate && !c.validate(value)) return;
     const end = start + value.length;
-    const replacement = actionMode === 'redact'
-      ? redactReplacement(c.categoryId)
-      : buildReplacement(value, c.mask, c.categoryId);
-    raw.push({
-      category: c.categoryId,
-      source: c.source,
-      severity: c.severity,
-      value,
-      start,
-      end,
-      label: c.label,
-      message: formatMessage(c.label, locale),
-      action: actionMode,
-      block: actionMode === 'block',
-      replacement,
-    });
+    const contextWord = contextBoostEnabled ? findContextWord(text, start, end, CONTEXT_WORDS[c.categoryId]) : null;
+    const confidence = applyContextBoost(c.baseScore, !!contextWord);
+    const evidence: string[] = [];
+    if (c.validate) evidence.push('checksum/format validated');
+    if (contextWord) evidence.push(`context word "${contextWord}"`);
+    raw.push(toFinding(
+      { category: c.categoryId, source: c.source, severity: c.severity, value, start, end, label: c.label, confidence, detector: 'pattern', evidence },
+      c.mask,
+      locale,
+      actionMode,
+    ));
   };
 
   // Built-in patterns are vetted, fixed and anchored; they sweep on the main
@@ -345,7 +392,7 @@ export function detect(
   }
 
   // Custom patterns are tenant-authored, so they sweep under the regex family's
-  // bound: one wall-clock budget for the whole list (shared across every
+  // bound: one execution budget for the whole list (shared across every
   // `detect()` call under a `withCustomPatternBudget`), an input cap, a match
   // cap, and a V8 timeout that can actually interrupt `(a+)+$`. A pattern that
   // cannot finish is dropped and reported — a partial sweep would make the
@@ -357,14 +404,16 @@ export function detect(
       }
     } else {
       const budgetMs = report?.budgetMs ?? DEFAULT_REGEX_BUDGET_MS;
-      const deadline = report?.deadline ?? Date.now() + budgetMs;
+      let remainingBudgetMs = report?.remainingBudgetMs ?? budgetMs;
       for (const c of customs) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
+        if (remainingBudgetMs <= 0) {
           if (c.custom) skip(c.custom, `not run: the ${budgetMs}ms scan budget was spent by earlier patterns`);
           continue;
         }
-        const swept = execRuleBounded(c.regex, text, undefined, DEFAULT_MAX_MATCHES_PER_RULE, remaining);
+        const startedAt = performance.now();
+        const swept = execRuleBounded(c.regex, text, undefined, DEFAULT_MAX_MATCHES_PER_RULE, remainingBudgetMs);
+        remainingBudgetMs = Math.max(0, remainingBudgetMs - (performance.now() - startedAt));
+        if (report) report.remainingBudgetMs = remainingBudgetMs;
         if (swept.timedOut) {
           if (c.custom) {
             skip(
@@ -383,7 +432,196 @@ export function detect(
     }
   }
 
-  return resolveOverlaps(raw);
+  const resolved = resolveOverlaps(raw);
+  const minConfidence = config.detection?.minConfidence;
+  if (!minConfidence || minConfidence <= 0) return resolved; // legacy behaviour: no filtering
+  return resolved.filter((f) => (f.confidence ?? 1) >= minConfidence);
+}
+
+// ── PII v2 — the L1+L2+L3 fusion entry point ────────────────────────────────
+
+export interface DetectAsyncResult {
+  findings: PiiFinding[];
+  /** Human-readable notes about anything that didn't run as requested (NER model unavailable, a window timed out, input clipped). Never throws for these unless `detection.ner.failMode === 'closed'`. */
+  degraded: string[];
+}
+
+function findingToCandidate(f: PiiFinding): Candidate {
+  return {
+    category: f.category,
+    start: f.start,
+    end: f.end,
+    value: f.value,
+    baseScore: f.confidence ?? 0.5,
+    detector: 'pattern',
+    severity: f.severity,
+    label: f.label,
+    evidence: f.evidence ?? [],
+  };
+}
+
+function candidateToFinding(c: Candidate, locale: PiiLanguage, actionMode: PiiAction): PiiFinding {
+  const mask: PiiMaskStrategy = PII_CATEGORIES_BY_ID[c.category]?.mask ?? { kind: 'fixed', replacement: redactReplacement(c.category) };
+  return toFinding(
+    {
+      ...c,
+      // Dictionary/NER findings are catalog detections, not tenant customPatterns —
+      // 'builtin' is the correct `source` for them the same way it is for a
+      // built-in regex category.
+      source: 'builtin',
+      confidence: Math.round(c.baseScore * 1000) / 1000,
+    },
+    mask,
+    locale,
+    actionMode,
+  );
+}
+
+/**
+ * Merge every layer's candidates into a final set:
+ *   1. SAME-CATEGORY overlaps (multiple detectors independently flagging the
+ *      same thing) combine via noisy-OR — two weak-but-independent 0.4
+ *      signals compound to ~0.64, clearing a threshold neither alone would.
+ *   2. Remaining CROSS-CATEGORY overlaps resolve by highest confidence
+ *      (ties: severity, then span length) — the confidence-aware analogue
+ *      of `resolveOverlaps` above, used only on this fused path so the pure
+ *      pattern path (`detect()`) keeps its original severity-only ordering.
+ *   3. `minConfidence` is applied last, once, on the fused score.
+ */
+export function fuseCandidates(text: string, candidates: Candidate[], minConfidence: number): Candidate[] {
+  if (candidates.length === 0) return [];
+
+  const byCategory = new Map<string, Candidate[]>();
+  for (const c of candidates) {
+    const list = byCategory.get(c.category);
+    if (list) list.push(c);
+    else byCategory.set(c.category, [c]);
+  }
+
+  const merged: Candidate[] = [];
+  for (const list of byCategory.values()) {
+    const sorted = list.slice().sort(byStartThenLongest);
+    for (const c of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && last.category === c.category && c.start < last.end) {
+        last.baseScore = noisyOr([last.baseScore, c.baseScore]);
+        last.start = Math.min(last.start, c.start);
+        last.end = Math.max(last.end, c.end);
+        last.value = text.slice(last.start, last.end);
+        last.evidence = [...last.evidence, ...c.evidence];
+        continue;
+      }
+      merged.push({ ...c });
+    }
+  }
+  merged.sort((a, b) => a.start - b.start);
+
+  const resolved: Candidate[] = [];
+  for (const c of merged) {
+    const last = resolved[resolved.length - 1];
+    if (last && c.start < last.end) {
+      // A span that fully CONTAINS the other is usually the more complete,
+      // more useful finding — e.g. `address_tr`'s whole "Kızılay Mahallesi
+      // Atatürk Caddesi No:12" vs. a NER `location` hit on just "Kızılay"
+      // inside it. Plain confidence comparison used to let the short,
+      // often very-high-score NER span silently replace (not merge with —
+      // they're different categories, so step 1's noisy-OR never runs)
+      // the longer structural match, throwing away the address's street/
+      // number half. Prefer the container UNLESS the contained span is
+      // substantially (30%+) more confident, which suggests the long span
+      // is the spurious one instead (e.g. an overreaching regex match).
+      const lastContainsC = last.start <= c.start && last.end >= c.end;
+      const cContainsLast = c.start <= last.start && c.end >= last.end;
+      if (lastContainsC && last.end - last.start > c.end - c.start) {
+        if (c.baseScore > last.baseScore * 1.3) resolved[resolved.length - 1] = c;
+        continue;
+      }
+      if (cContainsLast && c.end - c.start > last.end - last.start) {
+        if (last.baseScore <= c.baseScore * 1.3) resolved[resolved.length - 1] = c;
+        continue;
+      }
+      const scoreLast = last.baseScore * 1000 + SEVERITY_WEIGHT[last.severity] * 10;
+      const scoreC = c.baseScore * 1000 + SEVERITY_WEIGHT[c.severity] * 10;
+      if (scoreC > scoreLast) resolved[resolved.length - 1] = c;
+      continue;
+    }
+    resolved.push(c);
+  }
+
+  return resolved.filter((c) => c.baseScore >= minConfidence);
+}
+
+/**
+ * The opt-in async detection pipeline: runs `detect()` (L1, regex) as
+ * always, and — only when `config.detection.mode` asks for it — also runs
+ * the L2 dictionary pass and/or the L3 NER pass, fusing all of it into one
+ * finding list via `fuseCandidates`.
+ *
+ * `mode: 'pattern'` (the default) takes a fast path that is EXACTLY
+ * `detect()`'s own output: no dictionary scan, no NER, no fusion pass, and
+ * therefore no behaviour or performance change over calling `detect()`
+ * directly. This is what makes the mode='pattern' arm of the load test a
+ * fair baseline rather than a slightly-different code path.
+ */
+export async function detectAsync(
+  text: string,
+  config: DetectorConfig = {},
+  actionMode: PiiAction = 'detect',
+): Promise<DetectAsyncResult> {
+  const mode = config.detection?.mode ?? 'pattern';
+  if (mode === 'pattern' || !text) {
+    return { findings: detect(text, config, actionMode), degraded: [] };
+  }
+
+  const locale: PiiLanguage = config.locale ?? 'en';
+  const minConfidence = config.detection?.minConfidence ?? 0;
+  const contextBoostEnabled = config.detection?.contextBoost !== false;
+  const degraded: string[] = [];
+
+  // Run the pattern layer WITHOUT its own minConfidence filter — a weak
+  // pattern hit (e.g. a context-less `tr_vkn`) must still reach fusion so it
+  // can be rescued by noisy-OR agreement with a dictionary/NER candidate on
+  // the same span, instead of being dropped before fusion ever sees it.
+  const patternFindings = detect(text, { ...config, detection: { ...config.detection, minConfidence: 0 } }, actionMode);
+  const candidates: Candidate[] = patternFindings.map(findingToCandidate);
+
+  const boost = (c: Candidate): Candidate => {
+    if (!contextBoostEnabled) return c;
+    const contextWord = findContextWord(text, c.start, c.end, CONTEXT_WORDS[c.category]);
+    if (!contextWord) return c;
+    return { ...c, baseScore: applyContextBoost(c.baseScore, true), evidence: [...c.evidence, `context word "${contextWord}"`] };
+  };
+
+  if (mode === 'pattern+dictionary' || mode === 'pattern+dictionary+ner') {
+    for (const c of scanDictionary(text, config.languages)) candidates.push(boost(c));
+  }
+
+  if (mode === 'pattern+dictionary+ner') {
+    const appConfig = getConfig();
+    const nerModelPath = appConfig.pii.nerModelPath;
+    const nerOpts = config.detection?.ner ?? {};
+    if (!nerModelPath) {
+      degraded.push('detection.mode requested NER but PII_NER_MODEL_PATH is not configured — ran pattern+dictionary only');
+    } else {
+      const nerResult = await runNer(text, {
+        nerModelPath,
+        models: nerOpts.models,
+        maxChars: nerOpts.maxChars,
+        timeoutMs: nerOpts.timeoutMs,
+        maxConcurrent: appConfig.pii.nerMaxConcurrent,
+        failMode: nerOpts.failMode,
+      });
+      for (const c of nerResult.candidates) candidates.push(boost(c));
+      for (const note of nerResult.degraded) {
+        degraded.push(`ner[${note.modelId}] @${note.windowOffset}: ${note.reason}`);
+      }
+      if (!nerResult.modelsAvailable) degraded.push('no requested NER model could be loaded from PII_NER_MODEL_PATH');
+    }
+  }
+
+  const fused = fuseCandidates(text, candidates, minConfidence);
+  const findings = fused.map((c) => candidateToFinding(c, locale, actionMode)).sort((a, b) => a.start - b.start);
+  return { findings, degraded };
 }
 
 const MESSAGE_TEMPLATES: Partial<Record<PiiLanguage, (label: string) => string>> = {
@@ -449,7 +687,7 @@ export function tokenize(
   const tokenized: PiiFinding[] = [];
 
   for (const f of sorted) {
-    const key = `${f.category} ${f.value}`;
+    const key = `${f.category}\u0000${f.value}`;
     let token = tokenByKey.get(key);
     if (!token) {
       const prefix = tokenPrefix(f.category);
@@ -481,10 +719,3 @@ export function detokenize(text: string, vault: PiiVault | undefined | null): st
   }
   return out;
 }
-
-/** Convenience: enumerate built-in catalog ids (used by API). */
-export function builtinCategoryIds(): string[] {
-  return PII_CATEGORIES.map((c) => c.id);
-}
-
-export { PII_CATEGORIES, PII_CATEGORIES_BY_ID };

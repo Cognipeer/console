@@ -47,6 +47,11 @@ class EmailService {
       return null;
     }
 
+    if (!cfg.smtp.from) {
+      log.warn('SMTP sender not configured. Emails will not be sent.');
+      return null;
+    }
+
     this.transporter = nodemailer.createTransport(smtpConfig);
     return this.transporter;
   }

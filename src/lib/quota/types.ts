@@ -101,6 +101,11 @@ export interface QuotaResourceCaps {
   maxApiTokens?: number;
   maxUsers?: number;
   maxAgents?: number;
+
+  // Agent execution (background runs) — each an upper bound under the env ceiling
+  maxAgentSyncTimeoutSeconds?: number;
+  maxAgentBackgroundDurationMinutes?: number;
+  maxConcurrentAgentRuns?: number;
 }
 
 export interface QuotaBudget {

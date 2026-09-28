@@ -86,9 +86,10 @@ Requests then opt in per call with `include_answer: true`; the top results are
 handed to the model, which answers the query citing result numbers (`[1]`,
 `[2]`). The response carries `answer` and `answer_model`.
 
-If a request asks for an answer while the instance has AI answers disabled (or
-no model selected), the request fails with a clear error **before** the search
-provider is called.
+`include_answer` is best-effort. If a request asks for an answer while the
+instance has AI answers disabled (or no model selected), or the model call
+fails, the search still succeeds: the results come back without an AI `answer`
+and a `warnings` array explains why.
 
 ## API
 

@@ -125,7 +125,7 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'license', label: 'License', description: 'Offline license activation and limits.', category: 'admin', adminService: true },
   { id: 'audit', label: 'Audit Log', description: 'Security and administrative audit events.', category: 'admin', adminService: true },
   { id: 'gpu-fleet', label: 'GPU Fleet', description: 'GPU hosts, MIG slices, model deployments, and terminal access.', category: 'operate', adminService: true },
-  { id: 'sandbox', label: 'Agent Sandbox', description: 'Agent runtime sandboxes: runners, templates, instances, volumes, and terminal access.', category: 'operate', adminService: true },
+  { id: 'sandbox', label: 'Sandbox', description: 'Isolated runtime sandboxes: runners, templates, instances, volumes, and terminal access.', category: 'operate', adminService: true },
   // @deprecated Folded into 'guardrails'. Present so a stored `aegis` grant is
   // still a recognised key (see the union member) and so audit rows written
   // against it keep resolving to a definition instead of the array's [0]

@@ -1,7 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
+import Link from 'next/link';
 import {
   Badge,
   Button,
@@ -11,14 +19,25 @@ import {
   ThemeIcon,
   UnstyledButton,
 } from '@mantine/core';
-import LoadingState from '@/components/common/LoadingState';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
+import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLauncher } from '@/components/layout/launcher/LauncherContext';
+import {
+  useIntentPrefetch,
+  useIsNavigationPending,
+} from '@/components/common/navigation/useNavigationFeedback';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import RefreshIndicator from '@/components/common/ui/RefreshIndicator';
+import { SkeletonText, StatGridSkeleton } from '@/components/common/ui/Skeletons';
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import {
+  ActivityListSkeleton,
+  PinnedServicesSkeleton,
+} from '@/components/dashboard/OverviewSkeletons';
+import {
   IconActivity,
+  IconAlertTriangle,
   IconArrowRight,
   IconBolt,
   IconBook,
@@ -26,16 +45,14 @@ import {
   IconChevronRight,
   IconDatabase,
   IconPlus,
+  IconRefresh,
   IconRobot,
   IconRocket,
   IconSparkles,
   IconTimeline,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import {
-  buildDashboardDateSearchParams,
-  defaultDashboardDateFilter,
-} from '@/lib/utils/dashboardDateFilter';
+import { buildDashboardDateSearchParams } from '@/lib/utils/dashboardDateFilter';
 
 interface DashboardStats {
   models: { total: number; llm: number; embedding: number };
@@ -70,33 +87,95 @@ const SPARK_LAT = sparkSeries(2, 16, 420, 30);
 const SPARK_SESSIONS = sparkSeries(3, 16, 28, 8);
 const SPARK_INDEXES = sparkSeries(4, 16, 12, 4);
 
+const SDK_PACKAGE_URL = 'https://www.npmjs.com/package/@cognipeer/agent-sdk';
+
+// Height of a stat row with sparklines; keeps the error state in place.
+const STAT_ROW_MIN_HEIGHT = 134;
+
+const TILE_STYLE: CSSProperties = { background: 'var(--ds-surface-1)', textAlign: 'left' };
+
+/**
+ * Tile descriptions always take two lines (clamped, space reserved), so tile
+ * heights do not depend on copy length and match the skeleton tiles.
+ */
+function twoLineText(fontSize: number, lineHeight: number): CSSProperties {
+  return {
+    fontSize,
+    lineHeight,
+    minHeight: `${lineHeight * 2}em`,
+    display: '-webkit-box',
+    WebkitBoxOrient: 'vertical',
+    WebkitLineClamp: 2,
+    overflow: 'hidden',
+  };
+}
+
+const PINNED_DESCRIPTION_STYLE = twoLineText(11.5, 1.4);
+const QUICK_START_DESCRIPTION_STYLE = twoLineText(12.5, 1.45);
+
+const RESOURCE_ROW_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 12,
+  padding: '10px 12px',
+  border: '1px solid var(--ds-border-soft)',
+  borderRadius: 'var(--ds-r-sm)',
+  cursor: 'pointer',
+};
+
+function emailLocalPart(email?: string | null): string | null {
+  return email ? email.split('@')[0] : null;
+}
+
 export default function DashboardOverviewPage() {
-  const router = useRouter();
   const t = useTranslations('dashboardOverview');
   const tNav = useTranslations('navigation');
+  const shellUser = useDashboardUser();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const requestRef = useRef<AbortController | null>(null);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
-  const { pinnedServices, services, openLauncher } = useLauncher();
+  const { pinnedServices, services, openLauncher, hydrated } = useLauncher();
+  // Pinned services are restored from local storage after mount.
+  const launcherReady = hydrated !== false;
 
   const fetchDashboard = useCallback(async () => {
+    // Latest request wins: a newer date range aborts the one in flight.
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setLoading(true);
+    setFailed(false);
     try {
-      setLoading(true);
       const params = buildDashboardDateSearchParams(dateFilter);
-      const res = await fetch(`/api/dashboard?${params.toString()}`, { cache: 'no-store' });
-      if (res.ok) {
-        const json = await res.json();
-        setData(json);
-      }
+      const res = await fetch(`/api/dashboard?${params.toString()}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`Dashboard request failed with status ${res.status}`);
+      const json = (await res.json()) as DashboardData;
+      if (!controller.signal.aborted) setData(json);
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error('Failed to fetch dashboard data:', err);
+      setFailed(true);
     } finally {
-      setLoading(false);
+      if (requestRef.current === controller) {
+        requestRef.current = null;
+        setLoading(false);
+      }
     }
   }, [dateFilter]);
 
   useEffect(() => {
-    fetchDashboard();
+    void fetchDashboard();
+  }, [fetchDashboard]);
+
+  useEffect(() => () => requestRef.current?.abort(), []);
+
+  const retry = useCallback(() => {
+    void fetchDashboard();
   }, [fetchDashboard]);
 
   const activity = useMemo(() => {
@@ -107,9 +186,14 @@ export default function DashboardOverviewPage() {
     }));
   }, [data]);
 
-  const licenseType = data?.user?.licenseType ?? '—';
-  const userName = data?.user?.name
-    || (data?.user?.email ? data.user.email.split('@')[0] : null);
+  const hasData = data !== null;
+  // First load: data regions show skeletons. Later loads refresh in place.
+  const firstLoad = !hasData && !failed;
+  const refreshing = loading && hasData;
+
+  const licenseType = data?.user?.licenseType ?? shellUser?.licenseType ?? '—';
+  const userName =
+    data?.user?.name || emailLocalPart(data?.user?.email) || emailLocalPart(shellUser?.email);
   const totalServices = services.filter(
     (s) => s.id !== 'services-home' && !s.isSettings,
   ).length;
@@ -147,18 +231,19 @@ export default function DashboardOverviewPage() {
         title={userName ? `Welcome back, ${userName}` : t('title')}
         subtitle={
           <>
-            {pinnedServices.length} pinned · {totalServices} services available ·{' '}
-            <span className="ds-mono">{licenseType}</span>
+            {launcherReady ? pinnedServices.length : '–'} pinned · {totalServices} services
+            available · <span className="ds-mono">{licenseType}</span>
           </>
         }
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
             <Button
+              component={Link}
+              href="/dashboard/models"
               color="teal"
               size="sm"
               leftSection={<IconPlus size={14} stroke={1.7} />}
-              onClick={() => router.push('/dashboard/models')}
             >
               Deploy model
             </Button>
@@ -167,14 +252,21 @@ export default function DashboardOverviewPage() {
       />
 
       {/* Stat tiles */}
-      {loading ? (
-        <LoadingState
-          label={t('commonLoading', { defaultValue: 'Loading dashboard overview...' })}
-          minHeight={260}
-        />
-      ) : (
-        <>
-          <div className="ds-stat-grid" style={{ marginBottom: 16 }}>
+      <div
+        style={{ position: 'relative', marginBottom: 16 }}
+        aria-busy={loading || undefined}
+      >
+        <RefreshIndicator active={refreshing} />
+        {failed ? (
+          <SectionError
+            message={t('statsError')}
+            onRetry={retry}
+            style={{ minHeight: STAT_ROW_MIN_HEIGHT }}
+          />
+        ) : firstLoad ? (
+          <StatGridSkeleton count={4} spark />
+        ) : (
+          <div className="ds-stat-grid">
             <StatTile
               label={t('stats.apiRequests')}
               icon={<IconBolt size={14} stroke={1.7} />}
@@ -206,323 +298,411 @@ export default function DashboardOverviewPage() {
               sparkColor="#c97a16"
             />
           </div>
+        )}
+      </div>
 
-          {/* Pinned services launcher */}
-          {pinnedServices.length > 0 ? (
-            <div className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
-              <div className="ds-row-between" style={{ marginBottom: 14 }}>
-                <div>
-                  <div className="ds-h3">Your pinned services</div>
-                  <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                    {pinnedServices.length} pinned ·{' '}
-                    {Math.max(0, totalServices - pinnedServices.length)} more available
-                  </div>
-                </div>
-                <Button
-                  variant="subtle"
-                  size="xs"
-                  leftSection={<IconPlus size={12} />}
-                  onClick={openLauncher}
-                >
-                  Pin more
-                </Button>
-              </div>
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))',
-                  gap: 10,
-                }}
-              >
-                {pinnedServices.map((svc) => {
-                  const Icon = svc.icon;
-                  return (
-                    <UnstyledButton
-                      key={svc.id}
-                      onClick={() => router.push(svc.href)}
-                      className="ds-card ds-card-pad-sm interactive"
-                      style={{ background: 'var(--ds-surface-1)', textAlign: 'left' }}
-                    >
-                      <div className="ds-row ds-gap-sm" style={{ marginBottom: 8 }}>
-                        <div
-                          style={{
-                            width: 32,
-                            height: 32,
-                            borderRadius: 8,
-                            background: 'var(--ds-accent-soft)',
-                            color: 'var(--ds-accent)',
-                            display: 'grid',
-                            placeItems: 'center',
-                          }}
-                        >
-                          <Icon size={16} stroke={1.7} />
-                        </div>
-                        <div style={{ minWidth: 0, flex: 1 }}>
-                          <div style={{ fontSize: 13, fontWeight: 500 }}>
-                            {tNav(svc.navLabelKey)}
-                          </div>
-                          <div
-                            className="ds-faint"
-                            style={{ fontSize: 10.5, textTransform: 'capitalize' }}
-                          >
-                            {svc.category}
-                          </div>
-                        </div>
-                      </div>
-                      <div
-                        className="ds-muted"
-                        style={{ fontSize: 11.5, lineHeight: 1.4 }}
-                      >
-                        {tNav(svc.navDescriptionKey)}
-                      </div>
-                    </UnstyledButton>
-                  );
-                })}
-                <UnstyledButton
-                  onClick={openLauncher}
-                  className="ds-card ds-card-pad-sm interactive"
-                  style={{
-                    background: 'transparent',
-                    borderStyle: 'dashed',
-                    display: 'grid',
-                    placeItems: 'center',
-                    color: 'var(--ds-text-muted)',
-                  }}
-                >
-                  <Group gap={6}>
-                    <IconPlus size={14} />
-                    <Text size="sm">Add service</Text>
-                  </Group>
-                </UnstyledButton>
+      {/* Pinned services launcher */}
+      {!launcherReady ? (
+        <PinnedServicesSkeleton />
+      ) : pinnedServices.length > 0 ? (
+        <div className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
+          <div className="ds-row-between" style={{ marginBottom: 14 }}>
+            <div>
+              <div className="ds-h3">Your pinned services</div>
+              <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+                {pinnedServices.length} pinned ·{' '}
+                {Math.max(0, totalServices - pinnedServices.length)} more available
               </div>
             </div>
-          ) : null}
-
-          {/* Quick start + Activity */}
+            <Button
+              variant="subtle"
+              size="xs"
+              leftSection={<IconPlus size={12} />}
+              onClick={openLauncher}
+            >
+              Pin more
+            </Button>
+          </div>
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)',
-              gap: 16,
-              marginBottom: 16,
+              gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))',
+              gap: 10,
             }}
-            className="ds-grid-two"
           >
-            <div className="ds-card ds-card-pad-lg">
-              <div className="ds-row-between" style={{ marginBottom: 14 }}>
-                <div className="ds-h3">Get started</div>
-                <Text size="xs" c="dimmed">
-                  Quick paths into your project
-                </Text>
-              </div>
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
-                  gap: 12,
-                }}
-              >
-                {quickStart.map((s) => {
-                  const Icon = s.icon;
-                  return (
-                    <UnstyledButton
-                      key={s.step}
-                      onClick={() => router.push(s.href)}
-                      className="ds-card ds-card-pad-sm interactive"
-                      style={{ background: 'var(--ds-surface-1)', textAlign: 'left' }}
-                    >
-                      <div className="ds-row ds-gap-sm" style={{ marginBottom: 10 }}>
-                        <div
-                          style={{
-                            width: 32,
-                            height: 32,
-                            borderRadius: 8,
-                            background: 'var(--ds-accent-soft)',
-                            color: 'var(--ds-accent)',
-                            display: 'grid',
-                            placeItems: 'center',
-                          }}
-                        >
-                          <Icon size={16} stroke={1.7} />
-                        </div>
-                        <span className="ds-eyebrow">Step {s.step}</span>
-                      </div>
-                      <div className="ds-h4" style={{ marginBottom: 4 }}>
-                        {s.title}
-                      </div>
-                      <div
-                        className="ds-muted"
-                        style={{ fontSize: 12.5, lineHeight: 1.45 }}
-                      >
-                        {s.desc}
-                      </div>
-                    </UnstyledButton>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="ds-card ds-card-pad-lg">
-              <div className="ds-row-between" style={{ marginBottom: 12 }}>
-                <div className="ds-h3">Activity</div>
-                <Button
-                  variant="subtle"
-                  size="xs"
-                  rightSection={<IconChevronRight size={12} />}
-                  onClick={() => router.push('/dashboard/tracing')}
+            {pinnedServices.map((svc) => {
+              const Icon = svc.icon;
+              return (
+                <CardLink
+                  key={svc.id}
+                  href={svc.href}
+                  className="ds-card ds-card-pad-sm interactive"
+                  style={TILE_STYLE}
                 >
-                  {t('activity.viewAll')}
-                </Button>
-              </div>
-              <Stack gap="xs">
-                {activity.length === 0 ? (
-                  <Text size="sm" c="dimmed">
-                    {t('activity.empty')}
-                  </Text>
-                ) : (
-                  activity.map((a) => (
+                  <div className="ds-row ds-gap-sm" style={{ marginBottom: 8 }}>
                     <div
-                      key={a.id}
-                      className="ds-row"
-                      style={{ gap: 10, padding: '4px 0', fontSize: 13 }}
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 8,
+                        background: 'var(--ds-accent-soft)',
+                        color: 'var(--ds-accent)',
+                        display: 'grid',
+                        placeItems: 'center',
+                      }}
                     >
+                      <Icon size={16} stroke={1.7} />
+                    </div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 500 }}>
+                        {tNav(svc.navLabelKey)}
+                      </div>
                       <div
-                        style={{
-                          width: 26,
-                          height: 26,
-                          borderRadius: '50%',
-                          background:
-                            a.status === 'success'
-                              ? 'linear-gradient(135deg, var(--teal-500), var(--teal-4))'
-                              : 'var(--ds-surface-2)',
-                          color: 'white',
-                          display: 'grid',
-                          placeItems: 'center',
-                          fontSize: 11,
-                          fontWeight: 600,
-                          flexShrink: 0,
-                        }}
+                        className="ds-faint"
+                        style={{ fontSize: 10.5, textTransform: 'capitalize' }}
                       >
-                        {a.service.charAt(0).toUpperCase()}
+                        {svc.category}
                       </div>
-                      <div style={{ flex: 1, minWidth: 0, lineHeight: 1.35 }}>
-                        <span style={{ fontWeight: 500 }}>{a.service}</span>{' '}
-                        <span className="ds-muted">{a.type}</span>{' '}
-                        <span className="ds-mono" style={{ fontSize: 12.5 }}>
-                          {a.endpoint}
-                        </span>
-                      </div>
-                      <StatusBadge status={a.status} />
-                      <span className="ds-faint" style={{ fontSize: 11.5 }}>
-                        {a.relTime}
+                    </div>
+                  </div>
+                  <div className="ds-muted" style={PINNED_DESCRIPTION_STYLE}>
+                    {tNav(svc.navDescriptionKey)}
+                  </div>
+                </CardLink>
+              );
+            })}
+            <UnstyledButton
+              onClick={openLauncher}
+              className="ds-card ds-card-pad-sm interactive"
+              style={{
+                background: 'transparent',
+                borderStyle: 'dashed',
+                display: 'grid',
+                placeItems: 'center',
+                color: 'var(--ds-text-muted)',
+              }}
+            >
+              <Group gap={6}>
+                <IconPlus size={14} />
+                <Text size="sm">Add service</Text>
+              </Group>
+            </UnstyledButton>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Quick start + Activity */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)',
+          gap: 16,
+          marginBottom: 16,
+        }}
+        className="ds-grid-two"
+      >
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-row-between" style={{ marginBottom: 14 }}>
+            <div className="ds-h3">Get started</div>
+            <Text size="xs" c="dimmed">
+              Quick paths into your project
+            </Text>
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+              gap: 12,
+            }}
+          >
+            {quickStart.map((s) => {
+              const Icon = s.icon;
+              return (
+                <CardLink
+                  key={s.step}
+                  href={s.href}
+                  className="ds-card ds-card-pad-sm interactive"
+                  style={TILE_STYLE}
+                >
+                  <div className="ds-row ds-gap-sm" style={{ marginBottom: 10 }}>
+                    <div
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 8,
+                        background: 'var(--ds-accent-soft)',
+                        color: 'var(--ds-accent)',
+                        display: 'grid',
+                        placeItems: 'center',
+                      }}
+                    >
+                      <Icon size={16} stroke={1.7} />
+                    </div>
+                    <span className="ds-eyebrow">Step {s.step}</span>
+                  </div>
+                  <div className="ds-h4" style={{ marginBottom: 4 }}>
+                    {s.title}
+                  </div>
+                  <div className="ds-muted" style={QUICK_START_DESCRIPTION_STYLE}>
+                    {s.desc}
+                  </div>
+                </CardLink>
+              );
+            })}
+          </div>
+        </div>
+
+        <div
+          className="ds-card ds-card-pad-lg"
+          style={{ position: 'relative', overflow: 'hidden' }}
+          aria-busy={loading || undefined}
+        >
+          <RefreshIndicator active={refreshing} />
+          <div className="ds-row-between" style={{ marginBottom: 12 }}>
+            <div className="ds-h3">Activity</div>
+            <Button
+              component={Link}
+              href="/dashboard/tracing"
+              variant="subtle"
+              size="xs"
+              rightSection={<IconChevronRight size={12} />}
+            >
+              {t('activity.viewAll')}
+            </Button>
+          </div>
+          {failed ? (
+            <SectionError bare message={t('activityError')} onRetry={retry} />
+          ) : firstLoad ? (
+            <ActivityListSkeleton />
+          ) : (
+            <Stack gap="xs">
+              {activity.length === 0 ? (
+                <Text size="sm" c="dimmed">
+                  {t('activity.empty')}
+                </Text>
+              ) : (
+                activity.map((a) => (
+                  <div
+                    key={a.id}
+                    className="ds-row"
+                    style={{ gap: 10, padding: '4px 0', fontSize: 13 }}
+                  >
+                    <div
+                      style={{
+                        width: 26,
+                        height: 26,
+                        borderRadius: '50%',
+                        background:
+                          a.status === 'success'
+                            ? 'linear-gradient(135deg, var(--teal-500), var(--teal-4))'
+                            : 'var(--ds-surface-2)',
+                        color: 'white',
+                        display: 'grid',
+                        placeItems: 'center',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {a.service.charAt(0).toUpperCase()}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0, lineHeight: 1.35 }}>
+                      <span style={{ fontWeight: 500 }}>{a.service}</span>{' '}
+                      <span className="ds-muted">{a.type}</span>{' '}
+                      <span className="ds-mono" style={{ fontSize: 12.5 }}>
+                        {a.endpoint}
                       </span>
                     </div>
-                  ))
-                )}
-              </Stack>
-            </div>
-          </div>
-
-          {/* Plan + Resources */}
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)',
-              gap: 16,
-            }}
-            className="ds-grid-two"
-          >
-            <div className="ds-card ds-card-pad-lg">
-              <div className="ds-row-between" style={{ marginBottom: 14 }}>
-                <div>
-                  <div className="ds-h3">Top resources</div>
-                  <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                    Quick links into your build surface
+                    <StatusBadge status={a.status} />
+                    <span className="ds-faint" style={{ fontSize: 11.5 }}>
+                      {a.relTime}
+                    </span>
                   </div>
-                </div>
-                <Button
-                  variant="subtle"
-                  size="xs"
-                  rightSection={<IconArrowRight size={12} />}
-                  onClick={() => router.push('/dashboard/models')}
-                >
-                  All models
-                </Button>
-              </div>
-              <Stack gap="xs">
-                <ResourceRow
-                  icon={<IconBrain size={15} stroke={1.7} />}
-                  label="Models"
-                  value={data?.stats.models.total ?? 0}
-                  hint={`${data?.stats.models.llm ?? 0} LLM · ${data?.stats.models.embedding ?? 0} embedding`}
-                  onClick={() => router.push('/dashboard/models')}
-                />
-                <ResourceRow
-                  icon={<IconDatabase size={15} stroke={1.7} />}
-                  label="Vector indexes"
-                  value={data?.stats.vectors.indexes ?? 0}
-                  hint={`${data?.stats.vectors.providers ?? 0} provider${(data?.stats.vectors.providers ?? 0) === 1 ? '' : 's'}`}
-                  onClick={() => router.push('/dashboard/vector')}
-                />
-                <ResourceRow
-                  icon={<IconActivity size={15} stroke={1.7} />}
-                  label="Trace sessions"
-                  value={data?.stats.tracing.totalSessions ?? 0}
-                  hint={`${(data?.stats.tracing.totalTokens ?? 0).toLocaleString()} tokens`}
-                  onClick={() => router.push('/dashboard/tracing')}
-                />
-              </Stack>
-            </div>
+                ))
+              )}
+            </Stack>
+          )}
+        </div>
+      </div>
 
-            <div className="ds-card ds-card-pad-lg">
-              <div className="ds-h3" style={{ marginBottom: 12 }}>
-                Resources
+      {/* Plan + Resources */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)',
+          gap: 16,
+        }}
+        className="ds-grid-two"
+      >
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-row-between" style={{ marginBottom: 14 }}>
+            <div>
+              <div className="ds-h3">Top resources</div>
+              <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+                Quick links into your build surface
               </div>
-              <Stack gap="xs">
-                <ResourceLink
-                  icon={<IconBook size={16} stroke={1.7} />}
-                  title={t('resources.docs')}
-                  description={t('resources.docsDesc')}
-                  onClick={() => router.push('/dashboard/docs')}
-                />
-                <ResourceLink
-                  icon={<IconRocket size={16} stroke={1.7} />}
-                  title={t('resources.sdk')}
-                  description={t('resources.sdkDesc')}
-                  onClick={() =>
-                    window.open(
-                      'https://www.npmjs.com/package/@cognipeer/agent-sdk',
-                      '_blank',
-                      'noopener,noreferrer',
-                    )
-                  }
-                />
-                <div style={{ marginTop: 4 }}>
-                  <Text size="xs" c="dimmed" mb={6}>
-                    {t('plan.title')}
-                  </Text>
-                  <Group gap={6}>
-                    <Badge variant="light" color="teal" size="sm">
-                      {licenseType}
-                    </Badge>
-                    {(data?.stats.models.total ?? 0) > 0 ? (
-                      <Badge variant="dot" color="teal" size="sm">
-                        {data!.stats.models.total} Models
-                      </Badge>
-                    ) : null}
-                    {(data?.stats.vectors.indexes ?? 0) > 0 ? (
-                      <Badge variant="dot" color="violet" size="sm">
-                        {data!.stats.vectors.indexes} Indexes
-                      </Badge>
-                    ) : null}
-                  </Group>
-                </div>
-              </Stack>
             </div>
+            <Button
+              component={Link}
+              href="/dashboard/models"
+              variant="subtle"
+              size="xs"
+              rightSection={<IconArrowRight size={12} />}
+            >
+              All models
+            </Button>
           </div>
-        </>
-      )}
+          <Stack gap="xs">
+            <ResourceRow
+              icon={<IconBrain size={15} stroke={1.7} />}
+              label="Models"
+              href="/dashboard/models"
+              pending={firstLoad}
+              value={data ? data.stats.models.total : null}
+              hint={
+                data
+                  ? `${data.stats.models.llm} LLM · ${data.stats.models.embedding} embedding`
+                  : '—'
+              }
+            />
+            <ResourceRow
+              icon={<IconDatabase size={15} stroke={1.7} />}
+              label="Vector indexes"
+              href="/dashboard/vector"
+              pending={firstLoad}
+              value={data ? data.stats.vectors.indexes : null}
+              hint={
+                data
+                  ? `${data.stats.vectors.providers} provider${data.stats.vectors.providers === 1 ? '' : 's'}`
+                  : '—'
+              }
+            />
+            <ResourceRow
+              icon={<IconActivity size={15} stroke={1.7} />}
+              label="Trace sessions"
+              href="/dashboard/tracing"
+              pending={firstLoad}
+              value={data ? data.stats.tracing.totalSessions : null}
+              hint={data ? `${data.stats.tracing.totalTokens.toLocaleString()} tokens` : '—'}
+            />
+          </Stack>
+        </div>
+
+        <div className="ds-card ds-card-pad-lg">
+          <div className="ds-h3" style={{ marginBottom: 12 }}>
+            Resources
+          </div>
+          <Stack gap="xs">
+            <ResourceLink
+              icon={<IconBook size={16} stroke={1.7} />}
+              title={t('resources.docs')}
+              description={t('resources.docsDesc')}
+              href="/dashboard/docs"
+            />
+            <ResourceLink
+              icon={<IconRocket size={16} stroke={1.7} />}
+              title={t('resources.sdk')}
+              description={t('resources.sdkDesc')}
+              href={SDK_PACKAGE_URL}
+              external
+            />
+            <div style={{ marginTop: 4 }}>
+              <Text size="xs" c="dimmed" mb={6}>
+                {t('plan.title')}
+              </Text>
+              <Group gap={6}>
+                <Badge variant="light" color="teal" size="sm">
+                  {licenseType}
+                </Badge>
+                {(data?.stats.models.total ?? 0) > 0 ? (
+                  <Badge variant="dot" color="teal" size="sm">
+                    {data!.stats.models.total} Models
+                  </Badge>
+                ) : null}
+                {(data?.stats.vectors.indexes ?? 0) > 0 ? (
+                  <Badge variant="dot" color="violet" size="sm">
+                    {data!.stats.vectors.indexes} Indexes
+                  </Badge>
+                ) : null}
+              </Group>
+            </div>
+          </Stack>
+        </div>
+      </div>
     </PageContainer>
+  );
+}
+
+/**
+ * Card-style internal link: intent prefetch (hover, focus, pointer down) and
+ * an instant pending state while its navigation is in flight.
+ */
+function CardLink({
+  href,
+  className,
+  style,
+  children,
+}: {
+  href: string;
+  className?: string;
+  style?: CSSProperties;
+  children: ReactNode;
+}) {
+  const pending = useIsNavigationPending(href);
+  const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
+  return (
+    <UnstyledButton
+      component={Link}
+      href={href}
+      prefetch={false}
+      className={className}
+      style={style}
+      data-pending={pending || undefined}
+      {...getIntentProps(href)}
+    >
+      {children}
+    </UnstyledButton>
+  );
+}
+
+/** Inline error with a retry action for a data region. */
+function SectionError({
+  message,
+  onRetry,
+  bare = false,
+  style,
+}: {
+  message: string;
+  onRetry: () => void;
+  /** Render without the card chrome (inside an existing card). */
+  bare?: boolean;
+  style?: CSSProperties;
+}) {
+  const tFeedback = useTranslations('navigationFeedback');
+  return (
+    <div
+      role="alert"
+      className={bare ? undefined : 'ds-card ds-card-pad'}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: bare ? 'flex-start' : 'center',
+        ...style,
+      }}
+    >
+      <Group gap="sm" wrap="wrap">
+        <IconAlertTriangle size={16} stroke={1.7} color="var(--ds-err)" />
+        <Text size="sm">{message}</Text>
+        <Button
+          variant="default"
+          size="xs"
+          leftSection={<IconRefresh size={12} stroke={1.7} />}
+          onClick={onRetry}
+        >
+          {tFeedback('retry')}
+        </Button>
+      </Group>
+    </div>
   );
 }
 
@@ -531,27 +711,23 @@ function ResourceRow({
   label,
   value,
   hint,
-  onClick,
+  href,
+  pending = false,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
-  value: number;
-  hint?: string;
-  onClick?: () => void;
+  /** `null` when the value is unavailable. */
+  value: number | null;
+  hint: string;
+  href: string;
+  /** First load: draw placeholders for the data-driven parts. */
+  pending?: boolean;
 }) {
   return (
-    <UnstyledButton
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '10px 12px',
-        background: 'var(--ds-surface-1)',
-        border: '1px solid var(--ds-border-soft)',
-        borderRadius: 'var(--ds-r-sm)',
-        cursor: 'pointer',
-      }}
+    <CardLink
+      href={href}
+      className="ds-link-row"
+      style={{ ...RESOURCE_ROW_STYLE, background: 'var(--ds-surface-1)' }}
     >
       <ThemeIcon size={32} radius="md" variant="light" color="teal">
         {icon}
@@ -560,17 +736,15 @@ function ResourceRow({
         <Text size="sm" fw={500}>
           {label}
         </Text>
-        {hint ? (
-          <Text size="xs" c="dimmed">
-            {hint}
-          </Text>
-        ) : null}
+        <Text size="xs" c="dimmed" component="div">
+          {pending ? <SkeletonText width="55%" /> : hint}
+        </Text>
       </div>
-      <Text size="lg" fw={600} className="ds-mono">
-        {value.toLocaleString()}
+      <Text size="lg" fw={600} className="ds-mono" component="div">
+        {pending ? <SkeletonText width={28} /> : value === null ? '—' : value.toLocaleString()}
       </Text>
       <IconChevronRight size={14} stroke={1.7} color="var(--ds-text-faint)" />
-    </UnstyledButton>
+    </CardLink>
   );
 }
 
@@ -578,27 +752,18 @@ function ResourceLink({
   icon,
   title,
   description,
-  onClick,
+  href,
+  external = false,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   title: string;
   description: string;
-  onClick?: () => void;
+  href: string;
+  /** Opens outside the app, in a new tab. */
+  external?: boolean;
 }) {
-  return (
-    <UnstyledButton
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '10px 12px',
-        border: '1px solid var(--ds-border-soft)',
-        borderRadius: 'var(--ds-r-sm)',
-        background: 'transparent',
-        cursor: 'pointer',
-      }}
-    >
+  const content = (
+    <>
       <ThemeIcon size={32} radius="md" variant="light" color="gray">
         {icon}
       </ThemeIcon>
@@ -611,7 +776,25 @@ function ResourceLink({
         </Text>
       </div>
       <IconChevronRight size={14} stroke={1.7} color="var(--ds-text-faint)" />
+    </>
+  );
+  const style: CSSProperties = { ...RESOURCE_ROW_STYLE, background: 'transparent' };
+
+  return external ? (
+    <UnstyledButton
+      component="a"
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="ds-link-row"
+      style={style}
+    >
+      {content}
     </UnstyledButton>
+  ) : (
+    <CardLink href={href} className="ds-link-row" style={style}>
+      {content}
+    </CardLink>
   );
 }
 

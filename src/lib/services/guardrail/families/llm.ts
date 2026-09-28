@@ -62,6 +62,13 @@ import {
   runModerationPolicy,
   runPromptShieldPolicy,
 } from '../llmEvaluator';
+// Non-LLM alternatives for `moderation` (detector: 'lexicon') and
+// `prompt_shield` (detector: 'pattern') — see each module's header for
+// scope and the trade-off against the LLM path above.
+import { runLexiconModerationPolicy } from '../moderationLexicon';
+import { runPatternPromptShieldPolicy } from '../promptShieldLexicon';
+import { resolveCustomWordLists } from '../wordListService';
+import type { ResolvedWordList } from '../wordFilter';
 
 const logger = createLogger('guardrail-family-llm');
 
@@ -593,7 +600,7 @@ export async function runLlmPolicy(
  * third-party judge model. That was explicit in the enforcement plane it
  * replaces (aegis/engine.ts:255-258) and is invisible from here.
  */
-function dispatch(
+async function dispatch(
   subject: HookSubject,
   policy: LlmPolicyConfig,
   effectiveAction: SafetyAction,
@@ -617,6 +624,26 @@ function dispatch(
 
   switch (policy.family) {
     case 'moderation':
+      // `lexicon` needs no model at all — a fully separate, synchronous
+      // (no LLM round-trip) path. See `moderationLexicon.ts`'s header for
+      // what it does and does not catch.
+      if (policy.detector === 'lexicon') {
+        const listKeys = Object.values(policy.lexiconCustomLists ?? {}).flat();
+        const resolved = listKeys.length > 0
+          ? await resolveCustomWordLists(scope.tenantDbName, scope.projectId, listKeys)
+          : [];
+        const byKey = new Map(resolved.map((l) => [l.key, l]));
+        const customListsByCategory: Record<string, ResolvedWordList[]> = {};
+        for (const [categoryId, keys] of Object.entries(policy.lexiconCustomLists ?? {})) {
+          customListsByCategory[categoryId] = keys.map((k) => byKey.get(k)).filter((l): l is ResolvedWordList => Boolean(l));
+        }
+        return runLexiconModerationPolicy(
+          text,
+          { enabled: true, detector: 'lexicon', categories: policy.categories ?? {} },
+          action,
+          { customListsByCategory },
+        );
+      }
       return runModerationPolicy(
         text,
         {
@@ -633,6 +660,9 @@ function dispatch(
         action,
       );
     case 'prompt_shield':
+      if (policy.detector === 'pattern') {
+        return runPatternPromptShieldPolicy(text, action);
+      }
       return runPromptShieldPolicy(
         text,
         { enabled: true, modelKey, sensitivity: policy.sensitivity ?? 'balanced' },

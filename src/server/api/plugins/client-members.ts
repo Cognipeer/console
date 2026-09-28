@@ -11,7 +11,6 @@
 
 import bcrypt from 'bcryptjs';
 import type { FastifyPluginAsync } from 'fastify';
-import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type { IGroup, IUser } from '@/lib/database';
@@ -24,6 +23,7 @@ import {
   SERVICE_PERMISSION_LEVELS,
   type UserRole,
 } from '@/lib/security/rbac';
+import { createInvitationUrl } from '@/lib/services/auth/invitation';
 import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
@@ -210,19 +210,30 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      // Fire-and-forget invitation email carrying the temp password. The plaintext
-      // password is deliberately NOT returned in the API response.
-      sendEmail(body.email, 'user-invitation', {
-        companyName: tenant.companyName,
-        email: body.email,
-        inviterName: auth.user?.role ?? 'admin',
-        loginUrl: `${getConfig().app.url}/login`,
-        name: body.name,
-        slug: tenant.slug,
-        tempPassword,
-      }).catch((error: Error) => logger.error('Failed to send invitation email', { error }));
+      const invitationUrl = await createInvitationUrl(user, tenant.slug);
+      let invitationEmailSent = false;
+      try {
+        invitationEmailSent = await sendEmail(body.email, 'user-invitation', {
+          companyName: tenant.companyName,
+          email: body.email,
+          inviterName: auth.user?.role ?? 'admin',
+          inviteUrl: invitationUrl,
+          name: body.name,
+          slug: tenant.slug,
+        });
+      } catch (error) {
+        logger.error('Failed to send invitation email', { error });
+      }
 
-      return reply.code(201).send({ user: serializeUser(user) });
+      if (!invitationEmailSent) {
+        logger.warn('Invitation email was not delivered', { userId: String(user._id) });
+      }
+
+      return reply.code(201).send({
+        invitationEmailSent,
+        invitationUrl,
+        user: serializeUser(user),
+      });
     } catch (error) {
       logger.error('Client invite member error', { error });
       return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });

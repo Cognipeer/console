@@ -1,8 +1,8 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import {
   ActionIcon,
   Button,
@@ -68,6 +68,9 @@ import LlmRequestDetailModal, {
 import { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import Spark from '@/components/common/ui/Spark';
 import Toolbar from '@/components/common/ui/Toolbar';
+import RefreshIndicator from '@/components/common/ui/RefreshIndicator';
+import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
+import { ModelDetailSkeleton } from '@/components/models/ModelSkeletons';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -446,7 +449,7 @@ function dynamicConfigOf(model: { settings?: Record<string, unknown> } | null): 
 
 export default function ModelDetailPage() {
   const params = useParams<{ id: string }>();
-  const router = useRouter();
+  const { push: navigate } = useNavigationFeedback();
   const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelDetail');
 
@@ -471,6 +474,21 @@ export default function ModelDetailPage() {
   const [logLevel, setLogLevel] = useState<'all' | 'error'>('all');
 
   const modelId = params?.id;
+  // Latest request wins: a newer date range or refresh aborts the one in flight.
+  const detailRequestRef = useRef<AbortController | null>(null);
+  const logsRequestRef = useRef<AbortController | null>(null);
+
+  // A different model: drop the previous model's data while rendering, so it
+  // is never shown under the new id (the page shows its skeleton instead).
+  const [modelIdInView, setModelIdInView] = useState(modelId);
+  if (modelIdInView !== modelId) {
+    setModelIdInView(modelId);
+    setModel(null);
+    setUsage(null);
+    setLogs([]);
+    setHasMoreLogs(false);
+    setLoading(true);
+  }
 
   const selectedProvider = useMemo(() => {
     if (!model?.providerKey) return null;
@@ -495,36 +513,35 @@ export default function ModelDetailPage() {
 
   const fetchDetail = async (showNotifications = false) => {
     if (!modelId) return;
-    setRefreshing(!loading);
+    detailRequestRef.current?.abort();
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
+    const { signal } = controller;
+    setRefreshing(true);
     try {
       const usageParams = buildDashboardDateSearchParams(dateFilter);
       usageParams.set('groupBy', 'day');
       const [modelResponse, usageResponse, providerResponse, guardrailResponse] = await Promise.all([
-        fetch(`/api/models/${modelId}`),
-        fetch(`/api/models/${modelId}/usage?${usageParams.toString()}`),
-        fetch('/api/models/providers'),
+        fetch(`/api/models/${modelId}`, { signal }),
+        fetch(`/api/models/${modelId}/usage?${usageParams.toString()}`, { signal }),
+        fetch('/api/models/providers', { signal }),
         // Unfiltered: a guardrail disabled AFTER it was bound must still
         // resolve here. Filtered to enabled ones, such a binding rendered as
         // "missing", which reads as deleted when it is merely switched off.
-        fetch('/api/guardrails'),
+        fetch('/api/guardrails', { signal }),
       ]);
       if (!modelResponse.ok) throw new Error('modelFailed');
-      const modelData = await modelResponse.json();
+      const [modelData, usageData, providerData, guardrailData] = await Promise.all([
+        modelResponse.json(),
+        usageResponse.ok ? usageResponse.json() : null,
+        providerResponse.ok ? providerResponse.json() : null,
+        guardrailResponse.ok ? guardrailResponse.json() : null,
+      ]);
+      if (signal.aborted) return;
       setModel(modelData.model);
-      if (usageResponse.ok) {
-        const usageData = await usageResponse.json();
-        setUsage(usageData.usage);
-      } else {
-        setUsage(null);
-      }
-      if (providerResponse.ok) {
-        const providerData = await providerResponse.json();
-        setProviders(providerData.providers ?? []);
-      }
-      if (guardrailResponse.ok) {
-        const guardrailData = await guardrailResponse.json();
-        setGuardrails(guardrailData.guardrails ?? []);
-      }
+      setUsage(usageData ? usageData.usage : null);
+      if (providerData) setProviders(providerData.providers ?? []);
+      if (guardrailData) setGuardrails(guardrailData.guardrails ?? []);
       if (showNotifications) {
         notifications.show({
           title: t('notifications.refreshedTitle'),
@@ -533,6 +550,7 @@ export default function ModelDetailPage() {
         });
       }
     } catch (error) {
+      if (signal.aborted) return;
       console.error('Failed to load model detail', error);
       notifications.show({
         title: t('notifications.errorTitle'),
@@ -540,13 +558,20 @@ export default function ModelDetailPage() {
         color: 'red',
       });
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (detailRequestRef.current === controller) {
+        detailRequestRef.current = null;
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
   const fetchLogs = async () => {
     if (!modelId) return;
+    logsRequestRef.current?.abort();
+    const controller = new AbortController();
+    logsRequestRef.current = controller;
+    const { signal } = controller;
     setLogsLoading(true);
     try {
       const params = buildDashboardDateSearchParams(dateFilter);
@@ -554,27 +579,28 @@ export default function ModelDetailPage() {
       params.set('skip', String((logsPage - 1) * logsPageSize));
       const logsResponse = await fetch(
         `/api/models/${modelId}/logs?${params.toString()}`,
+        { signal },
       );
-      if (logsResponse.ok) {
-        const logsData = await logsResponse.json();
-        const next: UsageLogDto[] = logsData.logs ?? [];
-        setLogs(next);
-        setHasMoreLogs(next.length === logsPageSize);
-      } else {
-        setLogs([]);
-        setHasMoreLogs(false);
-      }
+      const logsData = logsResponse.ok ? await logsResponse.json() : null;
+      if (signal.aborted) return;
+      const next: UsageLogDto[] = logsData?.logs ?? [];
+      setLogs(next);
+      setHasMoreLogs(logsData ? next.length === logsPageSize : false);
     } catch (error) {
+      if (signal.aborted) return;
       console.error('Failed to load model logs', error);
       setLogs([]);
       setHasMoreLogs(false);
     } finally {
-      setLogsLoading(false);
+      if (logsRequestRef.current === controller) {
+        logsRequestRef.current = null;
+        setLogsLoading(false);
+      }
     }
   };
 
+  // Date range changes refresh in place: current content stays visible.
   useEffect(() => {
-    setLoading(true);
     setLogsPage(1);
     void fetchDetail();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -584,6 +610,14 @@ export default function ModelDetailPage() {
     void fetchLogs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelId, logsPage, logsPageSize, dateFilter]);
+
+  useEffect(
+    () => () => {
+      detailRequestRef.current?.abort();
+      logsRequestRef.current?.abort();
+    },
+    [],
+  );
 
   const successRate = useMemo(() => {
     if (!usage?.totalCalls || usage.totalCalls === 0) return 0;
@@ -645,7 +679,7 @@ export default function ModelDetailPage() {
         message: t('notifications.deleteSuccessMessage'),
         color: 'teal',
       });
-      router.push('/dashboard/models');
+      navigate('/dashboard/models');
     } catch (error) {
       notifications.show({
         title: t('notifications.deleteErrorTitle'),
@@ -659,11 +693,7 @@ export default function ModelDetailPage() {
   };
 
   if (loading) {
-    return (
-      <Center py="xl">
-        <Loader size="md" />
-      </Center>
-    );
+    return <ModelDetailSkeleton />;
   }
 
   if (!model) {
@@ -672,8 +702,9 @@ export default function ModelDetailPage() {
         <Stack gap="sm" align="center">
           <Text c="dimmed">{t('errors.notFound')}</Text>
           <Button
+            component={Link}
+            href="/dashboard/models"
             leftSection={<IconArrowLeft size={16} />}
-            onClick={() => router.push('/dashboard/models')}
           >
             {t('actions.backToList')}
           </Button>
@@ -1223,7 +1254,12 @@ function OverviewTab({
       {/* Left column */}
       <div className="ds-col ds-gap-md">
         {/* Performance card */}
-        <div className="ds-card ds-card-pad-lg">
+        <div
+          className="ds-card ds-card-pad-lg"
+          style={{ position: 'relative', overflow: 'hidden' }}
+          aria-busy={refreshing || undefined}
+        >
+          <RefreshIndicator active={refreshing} />
           <div className="ds-row-between" style={{ marginBottom: 14 }}>
             <div className="ds-h3">Performance · {periodLabel(dateFilter.period)}</div>
             <div className="ds-row ds-gap-xs">

@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { redactPiiFromLogPayload, redactPiiFromLogString } from '@/lib/services/logPiiRedaction';
 
 describe('redactPiiFromLogPayload', () => {
-  it('redacts an email nested inside messages[].content, matching the assessment\'s synthetic example', () => {
+  it('redacts an email nested inside messages[].content, matching the assessment\'s synthetic example', async () => {
     const payload = {
       apiKey: 'sk-should-be-untouched-by-this-module', // logRedaction.ts's job, not this one
       messages: [
@@ -18,62 +18,62 @@ describe('redactPiiFromLogPayload', () => {
       ],
     };
 
-    const result = redactPiiFromLogPayload(payload);
+    const result = await redactPiiFromLogPayload(payload);
 
     expect(result.messages[0].content).not.toContain('jane.doe@example.com');
     expect(result.apiKey).toBe('sk-should-be-untouched-by-this-module');
   });
 
-  it('leaves content with no PII completely unchanged', () => {
+  it('leaves content with no PII completely unchanged', async () => {
     const payload = { messages: [{ role: 'user', content: 'What is the capital of France?' }] };
-    const result = redactPiiFromLogPayload(payload);
+    const result = await redactPiiFromLogPayload(payload);
     expect(result).toEqual(payload);
   });
 
-  it('walks arrays and nested objects', () => {
+  it('walks arrays and nested objects', async () => {
     const payload = {
       choices: [
         { message: { content: 'Contact support at help@example.com for assistance.' } },
       ],
     };
-    const result = redactPiiFromLogPayload(payload);
+    const result = await redactPiiFromLogPayload(payload);
     expect(result.choices[0].message.content).not.toContain('help@example.com');
   });
 
-  it('preserves Date, Buffer, and Error instances instead of flattening them to {}', () => {
+  it('preserves Date, Buffer, and Error instances instead of flattening them to {}', async () => {
     const date = new Date('2026-09-06T00:00:00Z');
     const buf = Buffer.from('binary');
     const err = new Error('boom');
     const payload = { date, buf, err };
 
-    const result = redactPiiFromLogPayload(payload);
+    const result = await redactPiiFromLogPayload(payload);
 
     expect(result.date).toBe(date);
     expect(result.buf).toBe(buf);
     expect(result.err).toBe(err);
   });
 
-  it('handles a circular reference without throwing', () => {
+  it('handles a circular reference without throwing', async () => {
     const payload: Record<string, unknown> = { note: 'hi' };
     payload.self = payload;
 
-    expect(() => redactPiiFromLogPayload(payload)).not.toThrow();
+    await expect(redactPiiFromLogPayload(payload)).resolves.not.toThrow();
   });
 
-  it('passes null/undefined through unchanged', () => {
-    expect(redactPiiFromLogPayload(null)).toBeNull();
-    expect(redactPiiFromLogPayload(undefined)).toBeUndefined();
+  it('passes null/undefined through unchanged', async () => {
+    expect(await redactPiiFromLogPayload(null)).toBeNull();
+    expect(await redactPiiFromLogPayload(undefined)).toBeUndefined();
   });
 });
 
 describe('redactPiiFromLogString', () => {
-  it('redacts an email inside a free-text error message', () => {
-    const result = redactPiiFromLogString('Delivery failed for jane.doe@example.com: mailbox full');
+  it('redacts an email inside a free-text error message', async () => {
+    const result = await redactPiiFromLogString('Delivery failed for jane.doe@example.com: mailbox full');
     expect(result).not.toContain('jane.doe@example.com');
   });
 
-  it('passes an empty/undefined string through unchanged', () => {
-    expect(redactPiiFromLogString(undefined)).toBeUndefined();
-    expect(redactPiiFromLogString('')).toBe('');
+  it('passes an empty/undefined string through unchanged', async () => {
+    expect(await redactPiiFromLogString(undefined)).toBeUndefined();
+    expect(await redactPiiFromLogString('')).toBe('');
   });
 });

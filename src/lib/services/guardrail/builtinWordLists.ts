@@ -170,6 +170,15 @@ function dedupe(words: string[], blocklist?: Set<string>): string[] {
   return [...out];
 }
 
+// PII v2 follow-on: category-scoped lexicons for the non-LLM moderation
+// detector (`moderationLexicon.ts`). A different feature's data, kept in
+// its own file (`moderationWordLists.ts`) — merged in here because
+// `wordFilter.ts`'s `compileLists` resolves `policy.builtinLists` entries
+// against THIS map, and `moderationLexicon.ts` reuses `scanWordFilter`
+// itself (folding, leetspeak, stretched/spaced-letter handling) rather than
+// re-implementing it, one call per moderation category.
+import { MODERATION_WORD_LISTS } from './moderationWordLists';
+
 export const BUILTIN_WORD_LISTS: Record<string, BuiltinWordList> = {
   'profanity-en': {
     words: dedupe(PROFANITY_EN_WORDS, FOLDED_BLOCKLIST),
@@ -181,4 +190,5 @@ export const BUILTIN_WORD_LISTS: Record<string, BuiltinWordList> = {
     rawWords: dedupe(PROFANITY_TR_RAW),
     stems: PROFANITY_TR_STEMS,
   },
+  ...MODERATION_WORD_LISTS,
 };

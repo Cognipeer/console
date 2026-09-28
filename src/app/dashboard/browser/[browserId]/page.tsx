@@ -54,6 +54,7 @@ import {
   IconWorld,
   IconX,
 } from '@tabler/icons-react';
+import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import BrowserOverview from '@/components/browser/BrowserOverview';
@@ -109,6 +110,7 @@ function formatDate(value: unknown): string {
 
 export default function BrowserDetailPage() {
   const params = useParams<{ browserId: string }>();
+  const { push: navigate } = useNavigationFeedback();
   const browserId = params?.browserId ?? '';
 
   const [browser, setBrowser] = useState<BrowserView | null>(null);
@@ -227,7 +229,7 @@ export default function BrowserDetailPage() {
       });
       setRecordTarget(null);
       setRecordName('');
-      window.location.href = `/dashboard/browser/flows/${data.flow.id}`;
+      navigate(`/dashboard/browser/flows/${data.flow.id}`);
     } catch (err) {
       notifications.show({
         color: 'red',

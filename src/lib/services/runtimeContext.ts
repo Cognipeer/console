@@ -30,7 +30,7 @@ export interface AgentRuntimeContext {
    * Target-scoped headers win over the global `headers` map.
    */
   connections?: Record<string, RuntimeConnectionOverride>;
-  /** Free-form caller metadata (surfaced to logs/traces, never to prompts yet). */
+  /** Free-form caller metadata: surfaced to logs/traces, and fills the `{{placeholders}}` a prompt declares — see promptVariables.ts. */
   metadata?: Record<string, unknown>;
   /** Stamped by the server from the authenticated caller — not client-writable. */
   userId?: string;
@@ -184,9 +184,20 @@ export function buildRuntimeContextFromRequest(
 ): AgentRuntimeContext | undefined {
   const fromBody = parseRuntimeContext(rawContext);
   const merged = mergeRuntimeContext(fromBody, collectRuntimeHeadersFromHttpHeaders(httpHeaders));
-  if (!merged) return undefined;
+  // An empty `merged` used to return undefined, which threw away the caller
+  // stamp along with it: an authenticated request carrying no headers and no
+  // runtime_context reached the agent with no `userId` at all. That is a fact
+  // about WHO called, not data the caller supplied, and things downstream
+  // depend on it — user-scoped memory keys off `userId`, so dropping it
+  // silently gave every such call the same unscoped memory.
+  //
+  // Still undefined when there is genuinely nothing: no context, no headers
+  // and an anonymous caller. `source` alone has no consumer that a missing
+  // context would mislead, and that case is a documented part of this
+  // function's contract.
+  if (!merged && !caller.userId && !caller.tokenId) return undefined;
   return {
-    ...merged,
+    ...(merged ?? {}),
     ...(caller.userId ? { userId: caller.userId } : {}),
     ...(caller.tokenId ? { tokenId: caller.tokenId } : {}),
     source: caller.source,
@@ -219,8 +230,7 @@ export function resolveRuntimeHeaders(
   targetKey: string,
   policy: RuntimeHeaderPolicy | undefined,
 ): Record<string, string> | undefined {
-  if (!ctx) return undefined;
-  if (!policy?.allow) return undefined;
+  if (!ctx || !policy?.allow) return undefined;
 
   const scoped = ctx.connections?.[`${targetKind}:${targetKey}`]?.headers
     ?? ctx.connections?.[targetKey]?.headers;

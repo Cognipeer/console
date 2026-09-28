@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
+import { AgentGuardrailBlockedError, type AgentChatResponse } from '@/lib/services/agents/agentService';
 import { createLogger } from '@/lib/core/logger';
 import {
   GuardrailBlockError,
@@ -11,7 +12,18 @@ import {
   handleImageRequest,
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
+import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import type { IAgent } from '@/lib/database';
+import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import {
+  resolveAgentModel,
+  runAgentCompletion,
+  toChatChunk,
+  toChatCompletion,
+  type OpenAiMessage,
+} from './agent-openai-bridge';
 import {
   calculateCost,
   logModelUsage,
@@ -151,6 +163,124 @@ function invalidJson(reply: FastifyReply) {
   });
 }
 
+/**
+ * Runs an agent and answers in the chat-completions shape, streaming when
+ * the caller asked for it.
+ *
+ * Quota and usage accounting stay the agent runtime's own: `executeAgentChat`
+ * records the turn against the agent, which is where an agent run belongs.
+ * Charging it again here, as a model call, would double-count every agent
+ * invocation in the tenant's bill.
+ */
+async function handleAgentChatCompletion(input: {
+  agent: IAgent;
+  auth: ApiTokenContext;
+  body: Record<string, unknown>;
+  headers: FastifyRequest['headers'];
+  model: string;
+  reply: FastifyReply;
+}) {
+  const { agent, auth, body, model, reply } = input;
+  const id = `chatcmpl-${crypto.randomUUID()}`;
+  const streaming = body.stream === true;
+
+  const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, input.headers, {
+    userId: auth.tokenRecord.userId,
+    tokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+    source: 'api',
+  });
+
+  const common = {
+    agent,
+    model,
+    messages: body.messages as OpenAiMessage[] | undefined,
+    ...(typeof body.conversation_id === 'string' ? { conversationId: body.conversation_id } : {}),
+    ...(typeof body.version === 'number' ? { version: body.version } : {}),
+    runtimeContext,
+    ctx: {
+      tenantDbName: auth.tenantDbName,
+      tenantId: auth.tenantId,
+      projectId: auth.projectId,
+      userId: auth.tokenRecord.userId,
+    },
+  };
+
+  if (!streaming) {
+    let result: Awaited<ReturnType<typeof runAgentCompletion>>;
+    try {
+      result = await runAgentCompletion(common);
+    } catch (error) {
+      if (error instanceof AgentGuardrailBlockedError) {
+        return reply.code(error.status).send({
+          error: {
+            type: 'guardrail_block',
+            action: 'block',
+            message: error.message,
+            reason: error.reason,
+            guardrail_key: error.guardrailKey ?? null,
+            hook: error.hook ?? null,
+          },
+        });
+      }
+      logger.error('Agent chat completion failed', { error });
+      const classified = classifyAgentRunError(error);
+      return reply.code(classified.status).send({ error: classified.error });
+    }
+    if ('error' in result) {
+      return reply.code(result.status).send({
+        error: { message: result.error, type: 'invalid_request_error' },
+      });
+    }
+    return reply.code(200).send(toChatCompletion({ id, model, ...result }));
+  }
+
+  applyStreamHeaders(reply);
+  reply.raw.flushHeaders?.();
+
+  let closed = false;
+  reply.raw.on('close', () => { closed = true; });
+  const send = (payload: unknown) => {
+    if (closed) return;
+    try {
+      reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch {
+      closed = true;
+    }
+  };
+
+  let streamed = '';
+  let stopReason: AgentChatResponse['stop_reason'];
+  try {
+    const result = await runAgentCompletion({
+      ...common,
+      onTextChunk: (text) => {
+        streamed += text;
+        send(toChatChunk({ id, model, delta: text }));
+      },
+    });
+
+    if ('error' in result) {
+      send({ error: { message: result.error, type: 'invalid_request_error' } });
+    } else {
+      // A routed run streams nothing (the callback cannot cross the job
+      // queue), and a caller that asked for a stream must still receive the
+      // answer rather than an empty one followed by [DONE].
+      if (!streamed && result.content) send(toChatChunk({ id, model, delta: result.content }));
+      stopReason = result.stopReason;
+    }
+    send(toChatChunk({ id, model, finish: true, stopReason }));
+  } catch (error) {
+    logger.error('Agent chat completion stream failed', { error });
+    send({ error: classifyAgentRunError(error).error });
+  } finally {
+    if (!closed) {
+      reply.raw.write('data: [DONE]\n\n');
+      reply.raw.end();
+    }
+  }
+  return reply;
+}
+
 export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/chat/completions', withOpenAiApiRequestContext(async (request, reply, auth) => {
     const startedAt = Date.now();
@@ -180,6 +310,34 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       modelKey = body.model;
+
+      /*
+       * An agent can be addressed here by key, so any OpenAI client can call
+       * one without knowing this console exists.
+       *
+       * Checked AFTER the model lookup for a bare name (`resolveAgentModel`
+       * asks `modelExists` first): no existing caller may have its traffic
+       * re-routed because someone later created an agent whose key collides
+       * with a model. The run is delegated to `executeAgentChat` — the same
+       * entry point `/responses` uses — so there is one agent runtime, not a
+       * second one hiding behind an OpenAI-shaped door.
+       */
+      const agent = await resolveAgentModel(
+        modelKey,
+        { tenantDbName: auth.tenantDbName, projectId: auth.projectId },
+        async (key) => Boolean(await getModelByKey(auth.tenantDbName, key, auth.projectId)),
+      );
+      if (agent) {
+        return handleAgentChatCompletion({
+          agent,
+          auth,
+          body: body as Record<string, unknown>,
+          headers: request.headers,
+          model: modelKey,
+          reply,
+        });
+      }
+
       const requestedOutputTokens =
         typeof body.max_completion_tokens === 'number'
           ? body.max_completion_tokens

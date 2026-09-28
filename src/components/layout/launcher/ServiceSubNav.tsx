@@ -55,7 +55,13 @@ import {
   IconWorld,
   type Icon,
 } from '@tabler/icons-react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import {
+  useIntentPrefetch,
+  usePendingNavigationKey,
+} from '@/components/common/navigation/useNavigationFeedback';
+import { isNavigationPendingFor } from '@/lib/navigation/navigationProgress';
 import classes from './LauncherShell.module.css';
 
 export interface SubNavItem {
@@ -575,7 +581,8 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       icon: IconLayoutDashboard,
       matcher: (p) =>
         p.startsWith('/dashboard/agents') &&
-        !p.startsWith('/dashboard/agents/tools'),
+        !p.startsWith('/dashboard/agents/tools') &&
+        !p.startsWith('/dashboard/agents/skills'),
     },
     {
       id: 'tools',
@@ -583,6 +590,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/agents/tools',
       icon: IconTool,
       matcher: (p) => p.startsWith('/dashboard/agents/tools'),
+    },
+    {
+      id: 'skills',
+      label: 'Skills',
+      href: '/dashboard/agents/skills',
+      icon: IconBulb,
+      matcher: (p) => p.startsWith('/dashboard/agents/skills'),
     },
   ],
   mcp: [
@@ -726,8 +740,9 @@ export default function ServiceSubNav({
   items,
   hidePin = false,
 }: ServiceSubNavProps) {
-  const router = useRouter();
   const rawSearchParams = useSearchParams();
+  const pendingKey = usePendingNavigationKey();
+  const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
   const searchParams = new URLSearchParams(rawSearchParams?.toString() ?? '');
   const tNav = useTranslations('navigation');
   const ServiceIcon = service.icon;
@@ -771,19 +786,24 @@ export default function ServiceSubNav({
           const active = item.matcher
             ? item.matcher(pathname, searchParams)
             : pathname === item.href;
+          const pending =
+            !active &&
+            typeof window !== 'undefined' &&
+            isNavigationPendingFor(pendingKey, item.href, window.location.href);
           return (
-            <button
+            <Link
               key={item.id}
-              type="button"
+              href={item.href}
               className={`${classes.subnavItem} ${active ? classes.subnavItemActive : ''}`}
-              onClick={() => router.push(item.href)}
-              aria-current={active ? 'page' : undefined}>
+              aria-current={active ? 'page' : undefined}
+              data-pending={pending ? 'true' : undefined}
+              {...getIntentProps(item.href)}>
               <ItemIcon size={15} stroke={1.7} />
               <span className={classes.subnavItemLabel}>{item.label}</span>
               {item.badge ? (
                 <span className={classes.subnavBadge}>{item.badge}</span>
               ) : null}
-            </button>
+            </Link>
           );
         })}
 

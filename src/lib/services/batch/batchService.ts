@@ -39,6 +39,25 @@ async function withTenantDb(tenantDbName: string): Promise<DatabaseProvider> {
   return db;
 }
 
+/**
+ * Load a batch job and verify it belongs to BOTH the caller's tenant AND
+ * project. `tenantId` alone is not enough: the tenant database is shared by
+ * every project in that tenant, so without the `projectId` check a token
+ * scoped to project B could read/cancel a batch created under project A's
+ * token purely by knowing (or guessing) its id — the same class of bug
+ * already fixed for agent conversations, see `previous_response_id` handling
+ * in `client-agents.ts`.
+ */
+async function resolveOwnedBatchJob(
+  ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId' | 'projectId'>,
+  batchId: string,
+): Promise<{ db: DatabaseProvider; job: IBatchJob } | null> {
+  const db = await withTenantDb(ctx.tenantDbName);
+  const job = await db.findBatchJobById(batchId);
+  if (!job || job.tenantId !== ctx.tenantId || job.projectId !== ctx.projectId) return null;
+  return { db, job };
+}
+
 export function isSupportedBatchEndpoint(value: unknown): value is BatchJobEndpoint {
   return typeof value === 'string' && (SUPPORTED_ENDPOINTS as string[]).includes(value);
 }
@@ -204,13 +223,11 @@ export async function createBatch(ctx: BatchContext, input: CreateBatchInput): P
 }
 
 export async function getBatch(
-  ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId'>,
+  ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId' | 'projectId'>,
   batchId: string,
 ): Promise<IBatchJob | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const job = await db.findBatchJobById(batchId);
-  if (!job || job.tenantId !== ctx.tenantId) return null;
-  return job;
+  const owned = await resolveOwnedBatchJob(ctx, batchId);
+  return owned?.job ?? null;
 }
 
 export async function listBatches(
@@ -232,12 +249,12 @@ export async function listBatches(
  * drain.
  */
 export async function cancelBatch(
-  ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId'>,
+  ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId' | 'projectId'>,
   batchId: string,
 ): Promise<IBatchJob | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const job = await db.findBatchJobById(batchId);
-  if (!job || job.tenantId !== ctx.tenantId) return null;
+  const owned = await resolveOwnedBatchJob(ctx, batchId);
+  if (!owned) return null;
+  const { db, job } = owned;
   if (job.status !== 'in_progress' && job.status !== 'validating') {
     throw new BatchValidationError(`Batch is ${job.status}; only in-progress batches can be cancelled`);
   }
@@ -245,14 +262,13 @@ export async function cancelBatch(
 }
 
 export async function getBatchItems(
-  ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId'>,
+  ctx: Pick<BatchContext, 'tenantDbName' | 'tenantId' | 'projectId'>,
   batchId: string,
   options?: { limit?: number; skip?: number; status?: string },
 ): Promise<IBatchJobItem[] | null> {
-  const db = await withTenantDb(ctx.tenantDbName);
-  const job = await db.findBatchJobById(batchId);
-  if (!job || job.tenantId !== ctx.tenantId) return null;
-  return db.listBatchJobItems(batchId, options);
+  const owned = await resolveOwnedBatchJob(ctx, batchId);
+  if (!owned) return null;
+  return owned.db.listBatchJobItems(batchId, options);
 }
 
 /** Shape one finished item as an OpenAI batch-output JSONL line. */

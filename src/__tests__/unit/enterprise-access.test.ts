@@ -70,6 +70,26 @@ describe('checkEnterpriseApiAccess', () => {
   it('never gates community paths', () => {
     expect(checkEnterpriseApiAccess('/api/models', 'FREE')).toBeNull();
   });
+
+  it('blocks LDAP with 404 on SaaS even for an active ENTERPRISE license', () => {
+    const denial = checkEnterpriseApiAccess('/api/ldap/config', 'ENTERPRISE', undefined, false);
+    expect(denial?.status).toBe(404);
+    expect(denial?.body).toMatchObject({ module: 'ldap', requiresOnPrem: true });
+  });
+
+  it('still requires ENTERPRISE for LDAP once onprem', () => {
+    const denial = checkEnterpriseApiAccess('/api/ldap/config', 'FREE', undefined, true);
+    expect(denial?.status).toBe(402);
+    expect(denial?.body).toMatchObject({ module: 'ldap', requiresEnterprise: true });
+  });
+
+  it('allows LDAP only when both onprem and ENTERPRISE', () => {
+    expect(checkEnterpriseApiAccess('/api/ldap/config', 'ENTERPRISE', undefined, true)).toBeNull();
+  });
+
+  it('does not require onprem for modules that never set requiresOnPrem', () => {
+    expect(checkEnterpriseApiAccess('/api/gpu-fleet/hosts', 'ENTERPRISE', undefined, false)).toBeNull();
+  });
 });
 
 describe('LicenseManager.isEnterpriseActive', () => {

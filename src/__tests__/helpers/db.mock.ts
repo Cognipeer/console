@@ -187,6 +187,24 @@ function buildPrimers(): Record<string, Mock> {
 
     // Semantic cache config
     getSemanticCacheConfig: vi.fn().mockResolvedValue(null),
+
+    // Agent runs (background execution) — createResponsesHandler now
+    // unconditionally reserves a `mode: 'sync'` AgentRun row for every
+    // /responses call (§5/§12.14), so ANY test exercising that route needs
+    // a plausible (not undefined) return here, not only tests that care
+    // about background execution specifically. A real provider always sets
+    // `_id`; auto-generate one so `reservation._id` never crashes a caller
+    // that doesn't override this.
+    createAgentRun: vi.fn((record: Record<string, unknown>) => Promise.resolve({
+      _id: `mock-agent-run-${Math.random().toString(36).slice(2, 10)}`,
+      ...record,
+    })),
+    // Lookups a real provider answers with `null` when nothing matches (the
+    // name-based default would be `undefined`). `listAgentRuns`,
+    // `listQueuedAgentRuns`, `countActiveAgentRuns` and `deleteAgentRun`
+    // already get `[]` / `0` / `true` from `defaultReturnFor`.
+    getAgentRunById: vi.fn().mockResolvedValue(null),
+    getAgentRunByIdempotencyKey: vi.fn().mockResolvedValue(null),
   };
 }
 

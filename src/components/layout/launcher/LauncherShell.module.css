@@ -261,6 +261,25 @@
   background: var(--ds-accent);
 }
 
+/* Instant acknowledgement while a navigation to this item is in flight. */
+.railBtn[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: navPendingPulse 0.7s ease-in-out infinite alternate;
+}
+
+.railBtn[data-pending='true']::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--ds-accent);
+  opacity: 0.45;
+}
+
 .railBtnLauncher {
   background: var(--ds-accent-soft);
   color: var(--ds-accent);
@@ -373,6 +392,12 @@
   font-weight: 500;
 }
 
+.subnavItem[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: navPendingPulse 0.7s ease-in-out infinite alternate;
+}
+
 .subnavItemLabel {
   flex: 1;
   min-width: 0;
@@ -413,7 +438,10 @@
 .main {
   grid-column: 3;
   grid-row: 2;
-  padding: 16px 24px 32px;
+  /* Exposed so a sticky footer (e.g. the agent Build Save bar) can sit flush
+     with the bottom edge instead of floating above this padding. */
+  --shell-main-pb: 32px;
+  padding: 16px 24px var(--shell-main-pb);
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
@@ -980,6 +1008,12 @@
   font-weight: 500;
 }
 
+.mobileNavItem[data-pending='true'] {
+  color: var(--ds-accent);
+  background: var(--ds-surface-2);
+  animation: navPendingPulse 0.7s ease-in-out infinite alternate;
+}
+
 .mobileNavItemIcon {
   width: 22px;
   height: 22px;
@@ -1007,7 +1041,8 @@
 
   .main {
     grid-column: 1;
-    padding: 12px 14px 24px;
+    --shell-main-pb: 24px;
+    padding: 12px 14px var(--shell-main-pb);
   }
 
   .searchBox {
@@ -1064,5 +1099,22 @@
     width: 1px;
     height: 24px;
     margin: 0 4px;
+  }
+}
+
+@keyframes navPendingPulse {
+  from {
+    background-color: var(--ds-surface-2);
+  }
+  to {
+    background-color: var(--ds-accent-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .railBtn[data-pending='true'],
+  .subnavItem[data-pending='true'],
+  .mobileNavItem[data-pending='true'] {
+    animation: none;
   }
 }

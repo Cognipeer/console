@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   Stack,
@@ -249,7 +250,7 @@ export default function AgentTracingPage() {
           </Text>
           <Text size="xs" c="dimmed">
             Prefer HTTP? Generate an API key under{' '}
-            <Anchor href="/dashboard/tokens" size="xs">API Tokens</Anchor>{' '}
+            <Anchor component={Link} href="/dashboard/tokens" size="xs">API Tokens</Anchor>{' '}
             and POST your agent payloads to{' '}
             <span className="ds-mono" style={{ background: 'var(--ds-surface-raised)', padding: '1px 4px', borderRadius: 3 }}>
               /api/client/v1/tracing/sessions

@@ -117,6 +117,7 @@ export const OCR_TENANT_SCHEMA_SQL = `
     pdfMaxPages INTEGER,
     callbackUrl TEXT,
     callbackSecret TEXT,
+    maxDurationMs INTEGER,
     callbackEvents TEXT,
     itemsTotal INTEGER NOT NULL DEFAULT 0,
     itemsProcessed INTEGER NOT NULL DEFAULT 0,
@@ -1547,6 +1548,39 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
 
+  -- Agent runtime state per conversation (see IAgentConversationState)
+  CREATE TABLE IF NOT EXISTS agent_conversation_states (
+    id TEXT PRIMARY KEY,
+    conversationId TEXT NOT NULL UNIQUE,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentKey TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    messageCount INTEGER NOT NULL DEFAULT 0,
+    sizeBytes INTEGER NOT NULL DEFAULT 0,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  -- Agent skills (a project-scoped library, like prompts/tools — see IAgentSkill)
+  CREATE TABLE IF NOT EXISTS agent_skills (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    header TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    minModelTier TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    createdBy TEXT NOT NULL,
+    updatedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_askill_project ON agent_skills(projectId);
+  CREATE INDEX IF NOT EXISTS idx_askill_key ON agent_skills(key);
+
   -- Config groups
   CREATE TABLE IF NOT EXISTS config_groups (
     id TEXT PRIMARY KEY,
@@ -2054,6 +2088,54 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_crawl_results_jobId_createdAt ON crawl_results(jobId, createdAt DESC);
   CREATE INDEX IF NOT EXISTS idx_crawl_results_tenant_url ON crawl_results(tenantId, url);
 
+  -- Agent runs (background execution) — see
+  -- docs/guide/agent-background-execution.md §6/§7/§12.
+  CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL,
+    tenantId TEXT NOT NULL,
+    tenantDbName TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    agentKey TEXT NOT NULL,
+    conversationId TEXT NOT NULL,
+    userMessage TEXT NOT NULL,
+    version INTEGER,
+    usePublished INTEGER,
+    runtimeContext TEXT,
+    idempotencyKey TEXT,
+    idempotencyRequestHash TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    errorReason TEXT,
+    result TEXT,
+    errorMessage TEXT,
+    cancelRequestedAt TEXT,
+    workerId TEXT,
+    heartbeatAt TEXT,
+    callbackUrl TEXT,
+    callbackSecret TEXT,
+    callbackStatus TEXT,
+    callbackAttempts INTEGER NOT NULL DEFAULT 0,
+    userId TEXT,
+    apiTokenId TEXT,
+    actorType TEXT,
+    createdAt TEXT NOT NULL,
+    startedAt TEXT,
+    completedAt TEXT,
+    expiresAt TEXT,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_tenantId ON agent_runs(tenantId);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project ON agent_runs(tenantId, projectId);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_status_heartbeat ON agent_runs(status, heartbeatAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_expiresAt ON agent_runs(expiresAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project_idempotencyKey ON agent_runs(tenantId, projectId, idempotencyKey);
+  -- Enforces "at most one queued/running run per conversation" at the DB
+  -- layer (§6/§12.14) — a partial unique index, not a read-then-write
+  -- application check, so the guard is race-free (SQLite partial indexes
+  -- supported since 3.8.0).
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_active_per_conversation
+    ON agent_runs(conversationId) WHERE status IN ('queued', 'running');
+
   ${OCR_TENANT_SCHEMA_SQL}
 
   ${BATCH_TENANT_SCHEMA_SQL}
@@ -2362,6 +2444,7 @@ export const TENANT_SCHEMA_SQL = `
     blockNetwork INTEGER NOT NULL DEFAULT 0,
     previewEnabled INTEGER NOT NULL DEFAULT 1,
     previewPublic INTEGER NOT NULL DEFAULT 0,
+    idleStopSeconds INTEGER,
     resources TEXT,
     warm INTEGER NOT NULL DEFAULT 0,
     warmKey TEXT,

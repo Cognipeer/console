@@ -918,6 +918,7 @@
       "tenantAdminOnly": true,
       "settings": true,
       "requiresEnterprise": true,
+      "requiresOnPrem": true,
       "enterpriseModule": "ldap"
     }
   ]

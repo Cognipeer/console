@@ -46,6 +46,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
   Alert,
   Anchor,
@@ -140,10 +141,10 @@ export type UsageSurface = 'model' | 'agent' | 'mcp';
  * HOOK_IDS). It therefore renders as inert on every consumer, which is true.
  *
  * The runtime says the same thing once per run through
- * `agentService.warnUnservableAgentBindings` (the stream and prompt hooks) and
- * `warnUnservableExternalBindings` (those plus the tool hooks, on a connected
- * agent), so a binding that cannot fire is reported on both the screen where it
- * is made and the log of the run that ignored it.
+ * `agentService.warnUnservableStreamBinding` (the stream hook) and
+ * `warnUnservableExternalBindings` (that, plus prompt.pre and the tool hooks,
+ * on a connected agent), so a binding that cannot fire is reported on both the
+ * screen where it is made and the log of the run that ignored it.
  */
 export const SURFACE_HOOKS: Readonly<Record<UsageSurface, readonly HookId[]>> = {
   model: ['input.pre', 'output.pre', 'output.stream.delta'],
@@ -775,12 +776,12 @@ export default function GuardrailUsagePanel({
               <List size="sm" spacing="xs">
                 <List.Item>
                   <b>On a model</b> —{' '}
-                  <Anchor href="/dashboard/models" size="sm">Model Hub</Anchor> → the model row menu →{' '}
+                  <Anchor component={Link} href="/dashboard/models" size="sm">Model Hub</Anchor> → the model row menu →{' '}
                   <b>Guardrail settings</b> → tick the hooks this guardrail should cover there.
                 </List.Item>
                 <List.Item>
                   <b>On an agent</b> —{' '}
-                  <Anchor href="/dashboard/agents" size="sm">Agents</Anchor> → the agent →{' '}
+                  <Anchor component={Link} href="/dashboard/agents" size="sm">Agents</Anchor> → the agent →{' '}
                   <b>Configuration → Guardrails</b> → attach it and tick its hooks.
                 </List.Item>
               </List>
@@ -1564,7 +1565,7 @@ export default function GuardrailUsagePanel({
             >
               <List size="sm" spacing="xs">
                 <List.Item>
-                  <Anchor href="/dashboard/mcp" size="sm">MCP Servers</Anchor> → the server →{' '}
+                  <Anchor component={Link} href="/dashboard/mcp" size="sm">MCP Servers</Anchor> → the server →{' '}
                   <b>Overview → Guardrail</b>.
                 </List.Item>
                 <List.Item>

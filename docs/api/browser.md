@@ -145,7 +145,7 @@ Runs a slice of the flow against a session the caller already holds, instead of 
 { "sessionKey": "bs_…", "from": 2, "to": 5, "inputs": { "reference": "EXP-1" }, "captures": { "total": "42" } }
 ```
 
-`from` defaults to the first step, `to` (exclusive) to the end. `captures` carries what an earlier slice read so `{{step.x}}` still resolves. It returns `{ results, captures, failedStepIndex?, errorMessage? }` and **records no run** — a half-replay while building is not part of the flow's history. Inputs bind leniently here: a required input with no value yet leaves its placeholder in the payload rather than refusing, which is what makes a half-built flow replayable at all. A real run still refuses.
+`from` defaults to the first step, `to` (exclusive) to the end. `captures` carries what an earlier slice read so <code v-pre>{{step.x}}</code> still resolves. It returns `{ results, captures, failedStepIndex?, errorMessage? }` and **records no run** — a half-replay while building is not part of the flow's history. Inputs bind leniently here: a required input with no value yet leaves its placeholder in the payload rather than refusing, which is what makes a half-built flow replayable at all. A real run still refuses.
 
 ### Declared Outputs
 
@@ -155,7 +155,7 @@ A flow may declare the shape of the JSON it returns, in `outputs`:
 { "name": "amount", "source": "{{step.amountText}}", "type": "number", "required": true }
 ```
 
-`source` is a template over `{{step.<captureAs>}}` and `{{input.<name>}}`; a lone placeholder passes the captured value through as-is, anything else renders to a string. `type` (`string` | `number` | `boolean` | `json`) is an optional cast — omit it to return the value exactly as captured. A cast that fails leaves the field out rather than returning `NaN`, and a **required** field that does not resolve fails the run even when every step succeeded.
+`source` is a template over <code v-pre>{{step.&lt;captureAs&gt;}}</code> and <code v-pre>{{input.&lt;name&gt;}}</code>; a lone placeholder passes the captured value through as-is, anything else renders to a string. `type` (`string` | `number` | `boolean` | `json`) is an optional cast — omit it to return the value exactly as captured. A cast that fails leaves the field out rather than returning `NaN`, and a **required** field that does not resolve fails the run even when every step succeeded.
 
 With nothing declared, `run.outputs` is the raw `captureAs` map, exactly as before. Either way the raw map is also returned as `run.captures`. Changing `steps` or `outputs` bumps the flow's `version`; a run records the version it executed.
 

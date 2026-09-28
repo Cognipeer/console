@@ -1,3 +1,4 @@
+import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
 /**
  * Inbound A2A (Agent2Agent) server — exposes Cognipeer agents to external
  * A2A clients over JSON-RPC 2.0 (spec v1.0).
@@ -19,15 +20,11 @@
  * `tasks/get` can rebuild it without a separate task collection.
  */
 
+import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
-import {
-  createConversation,
-  executeAgentChat,
-  getAgentByKey,
-  getConversationById,
-} from '@/lib/services/agents/agentService';
+import { getAgentByKey, getConversationById } from '@/lib/services/agents/agentService';
 import { isA2aEnabled } from '@/lib/services/agents/a2aExposure';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -36,6 +33,7 @@ import {
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
+import { resolveConversation } from './agent-openai-bridge';
 
 const logger = createLogger('api:client-a2a');
 
@@ -45,8 +43,6 @@ const JSONRPC_VERSION = '2.0';
 // A2A-specific JSON-RPC error codes (spec §8).
 const ERR_TASK_NOT_FOUND = -32001;
 const ERR_UNSUPPORTED_OPERATION = -32004;
-
-export { isA2aEnabled };
 
 interface A2aPart {
   kind?: string;
@@ -75,8 +71,8 @@ function jsonRpcOk(id: string | number | null, result: unknown) {
   return { id, jsonrpc: JSONRPC_VERSION, result };
 }
 
-function jsonRpcError(id: string | number | null, code: number, message: string) {
-  return { error: { code, message }, id, jsonrpc: JSONRPC_VERSION };
+function jsonRpcError(id: string | number | null, code: number, message: string, data?: Record<string, unknown>) {
+  return { error: { code, message, ...(data ? { data } : {}) }, id, jsonrpc: JSONRPC_VERSION };
 }
 
 function extractText(parts: A2aPart[] | undefined): string {
@@ -101,15 +97,30 @@ function completedTask(
   id: string,
   contextId: string,
   assistantText: string,
+  /** Why the run ended without a final answer (a run limit, a cancellation). */
+  stop?: { reason: string; detail?: string },
 ): Record<string, unknown> {
   return {
     kind: 'task',
     id,
     contextId,
     status: {
+      // A2A has no "truncated" state; the task is still terminal. The reason
+      // goes in the status message and in metadata, where a client can act on it.
       state: 'completed',
       timestamp: new Date().toISOString(),
+      ...(stop
+        ? {
+          message: {
+            kind: 'message',
+            role: 'agent',
+            messageId: `${id}_status`,
+            parts: [{ kind: 'text', text: `Run stopped early: ${stop.detail ?? stop.reason}` }],
+          },
+        }
+        : {}),
     },
+    ...(stop ? { metadata: { stopReason: stop.reason, ...(stop.detail ? { stopDetail: stop.detail } : {}) } } : {}),
     artifacts: [
       {
         artifactId: `${id}_artifact`,
@@ -209,28 +220,18 @@ export async function handleA2aRpc(
         );
       }
 
-      // contextId ↔ conversationId: reuse the Responses API conversation store.
-      let conversationId: string | undefined;
-      if (typeof message.contextId === 'string' && message.contextId) {
-        const conversation = await getConversationById(ctx.tenantDbName, message.contextId);
-        // agentKey alone is not unique across projects — see the identical
-        // check in client-agents.ts's previous_response_id handling.
-        if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
-          return reply.code(200).send(
-            jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'),
-          );
-        }
-        conversationId = message.contextId;
-      } else {
-        const conversation = await createConversation(
-          ctx.tenantDbName,
-          ctx.tenantId,
-          ctx.projectId,
-          ctx.userId,
-          agent.key,
-        );
-        conversationId = String(conversation._id);
+      // contextId ↔ conversationId: reuse the Responses API conversation
+      // store, scoped on agent AND project like every other agent surface.
+      const resolved = await resolveConversation(
+        typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined,
+        agent,
+        ctx,
+        'a2a',
+      );
+      if ('error' in resolved) {
+        return reply.code(200).send(jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'));
       }
+      const { conversationId } = resolved;
 
       const runtimeContext = buildRuntimeContextFromRequest(
         message.metadata?.runtime_context,
@@ -242,7 +243,7 @@ export async function handleA2aRpc(
         },
       );
 
-      const result = await executeAgentChat({
+      const result = await executeAgentChatExclusive({
         agentKey: agent.key,
         conversationId,
         projectId: ctx.projectId,
@@ -262,7 +263,14 @@ export async function handleA2aRpc(
 
       return reply.code(200).send(jsonRpcOk(
         rpcId,
-        completedTask(taskId(conversationId, messageIndex), conversationId, assistantText),
+        completedTask(
+          taskId(conversationId, messageIndex),
+          conversationId,
+          assistantText,
+          result.stop_reason && result.stop_reason !== 'completed'
+            ? { reason: result.stop_reason, ...(result.stop_detail ? { detail: result.stop_detail } : {}) }
+            : undefined,
+        ),
       ));
     }
 
@@ -281,7 +289,12 @@ export async function handleA2aRpc(
       }
       return reply.code(200).send(jsonRpcOk(
         rpcId,
-        completedTask(requestedId, parsed.conversationId, message.content),
+        completedTask(
+          requestedId,
+          parsed.conversationId,
+          message.content,
+          message.stopReason ? { reason: message.stopReason, ...(message.stopDetail ? { detail: message.stopDetail } : {}) } : undefined,
+        ),
       ));
     }
 
@@ -295,7 +308,11 @@ export async function handleA2aRpc(
     return reply.code(200).send(jsonRpcError(rpcId, -32601, `Method not found: ${method}`));
   } catch (error) {
     logger.error('A2A request error', { error });
-    return reply.code(200).send(jsonRpcError(rpcId, -32603, 'Internal error'));
+    const classified = classifyAgentRunError(error);
+    return reply.code(200).send(jsonRpcError(rpcId, -32603, classified.error.message, {
+      type: classified.error.type,
+      ...(classified.error.code ? { code: classified.error.code } : {}),
+    }));
   }
 }
 

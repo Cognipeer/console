@@ -1,33 +1,22 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import {
   Paper,
   Text,
   Group,
   Stack,
   Button,
-  TextInput,
   Textarea,
   Select,
-  Slider,
   ActionIcon,
-  Loader,
-  Center,
-  ScrollArea,
-  ThemeIcon,
   Tabs,
   Divider,
   Badge,
   Code,
   CopyButton,
   Tooltip,
-  Box,
-  NumberInput,
-  Pagination,
-  Collapse,
-  UnstyledButton,
   Modal,
   Table,
   VisuallyHidden,
@@ -36,22 +25,12 @@ import {
   Alert,
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
-import { DatePickerInput } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
 import {
-  IconRobot,
-  IconSend,
   IconMessageCircle,
-  IconTimeline,
   IconCode,
   IconCopy,
   IconCheck,
-  IconTrash,
-  IconCalendar,
-  IconRefresh,
-  IconBrain,
-  IconChevronDown,
-  IconChevronRight,
   IconSettings,
   IconDatabase,
   IconShield,
@@ -61,26 +40,55 @@ import {
   IconArrowsExchange,
   IconPlugConnected,
   IconPencil,
-  IconWorld,
   IconAlertTriangle,
+  IconLayoutDashboard,
+  IconPlus,
+  IconArrowsLeftRight,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import EmptyState from '@/components/common/EmptyState';
 import GuardrailBindingList, {
+  bindingRowsFromLegacySlots,
   bindingRowsFromStored,
   type GuardrailBindingOption,
   type GuardrailBindingRow,
 } from '@/components/guardrails/GuardrailBindingList';
-import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import LoadingState from '@/components/common/LoadingState';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
-import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import SectionCard from '@/components/common/SectionCard';
-import SessionTable from '@/components/tracing/SessionTable';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { ToolSelectorModal, type ToolBinding } from './ToolSelectorModal';
 import ConnectAgentModal from './ConnectAgentModal';
+import AgentAdvancedSettings from './studio/AgentAdvancedSettings';
+import AgentStructuredOutputEditor from './studio/AgentStructuredOutputEditor';
+import AgentSubagentsPanel from './studio/AgentSubagentsPanel';
+import AgentExportPanel from './studio/AgentExportPanel';
+import AgentPromptPanel, { type PromptOption } from './studio/AgentPromptPanel';
+import AgentOverviewPanel from './studio/AgentOverviewPanel';
+import SessionList, { type SessionListItem } from './studio/SessionList';
+import StartSessionModal from './studio/StartSessionModal';
+import SessionDetailDrawer from './studio/SessionDetailDrawer';
+import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentRunsTable from './studio/AgentRunsTable';
+import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections } from './studio/configSections';
+import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
+import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
+import AgentSkillsPanel from './studio/AgentSkillsPanel';
+import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPanel';
+import AgentSandboxPanel from './studio/AgentSandboxPanel';
+import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
+import type { SkillView } from '@/components/skills/types';
+import type {
+  IAgentConfig,
+  IAgentMemoryConfig,
+  IAgentSandboxConfig,
+  IAgentExecutionConfig,
+  IAgentRuntimeConfig,
+  IAgentSkillPolicy,
+  IAgentStructuredOutput,
+  IAgentSubagent,
+  IAgentSubagentPolicy,
+  IExternalAgentConnection,
+} from '@/lib/database/provider/types.domain';
 import classes from './AgentDetailPage.module.css';
 
 interface A2aMetadata {
@@ -96,32 +104,9 @@ interface Agent {
   key: string;
   name: string;
   description?: string;
-  config: {
-    modelKey?: string;
-    systemPrompt?: string;
-    promptKey?: string;
-    temperature?: number;
-    topP?: number;
-    maxTokens?: number;
-    knowledgeEngineKey?: string;
-    /** Multi-guardrail binding. Authoritative when present — the two slots
-     *  below are then derived from it, not read. */
-    guardrails?: Array<{ key: string; hooks?: HookId[] }>;
-    /** @deprecated Read only as the fallback when `guardrails` is absent. */
-    inputGuardrailKey?: string;
-    /** @deprecated See `inputGuardrailKey`. */
-    outputGuardrailKey?: string;
-    toolBindings?: ToolBinding[];
-    kind?: 'native' | 'external';
-    connection?: {
-      protocol?: string;
-      url?: string;
-      model?: string;
-      responsePath?: string;
-      credentialProviderKey?: string;
-      hasApiKey?: boolean;
-      headers?: Record<string, string>;
-    };
+  // The API never returns the encrypted key — only whether one is stored.
+  config: Omit<IAgentConfig, 'connection'> & {
+    connection?: Partial<Omit<IExternalAgentConnection, 'apiKeyEnc'>> & { hasApiKey?: boolean };
   };
   status: string;
   publishedVersion?: number | null;
@@ -145,26 +130,12 @@ interface AgentVersion {
   createdAt: string;
 }
 
-interface ChatMessage {
-  role: string;
-  content: string;
-  /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
-  reasoning?: string;
-}
-
 interface Model {
   _id: string;
   key: string;
   name: string;
   modelId: string;
   category: string;
-}
-
-interface Prompt {
-  _id: string;
-  key: string;
-  name: string;
-  template: string;
 }
 
 interface RagModule {
@@ -174,85 +145,125 @@ interface RagModule {
   status: string;
 }
 
-/**
- * `GuardrailBindingOption` is the shape the binding list needs — including the
- * `hooks` config, which is what decides whether a hook checkbox is available.
- * Extended rather than redeclared so the two cannot drift.
- */
-interface Guardrail extends GuardrailBindingOption {
-  _id: string;
-  target?: string;
+/** Loads one list endpoint into state; a failed load is logged and leaves the list as it was. */
+async function loadList<T>(
+  url: string,
+  pick: (data: Record<string, unknown>) => unknown,
+  set: (rows: T[]) => void,
+  what: string,
+) {
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (res.ok) set((pick(await res.json()) ?? []) as T[]);
+  } catch (err) {
+    console.error(`Failed to load ${what}`, err);
+  }
 }
 
-interface TracingSessionRecord {
-  sessionId: string;
-  threadId?: string;
-  agentName?: string;
-  status?: string;
-  startedAt?: string;
-  endedAt?: string;
-  durationMs?: number;
-  totalEvents?: number;
-  totalTokens?: number;
-}
-
-const DEFAULT_PAGE_SIZE = 25;
-
 /**
- * The legacy single slots, rendered as the equivalent binding list.
+ * Deep-link compatibility for `?tab=`.
  *
- * The output slot seeds `output.pre` ONLY. `resolveBindings` also projects the
- * legacy key onto `output.stream.delta`, but a guardrail written before the
- * hook plane declares no streaming binding, so the stream gate evaluates
- * nothing for it today — seeding that hook would show a ticked box that does
- * nothing and the API would reject it. The checkbox unlocks itself the moment
- * the guardrail enables streaming.
+ * The page used to have thirteen flat tabs; they are now five, and Configure
+ * and Deploy are single pages whose `sub` is a section to scroll to rather
+ * than a pane to show. Every old value still resolves —
+ * a bookmark or the Sessions page's own back link must not land on a tab that
+ * no longer exists.
  */
-function seedGuardrailsFromLegacySlots(
-  inputKey: string | undefined,
-  outputKey: string | undefined,
-): GuardrailBindingRow[] {
-  // Materialised rows: a legacy slot names ONE direction, so "wherever the
-  // guardrail declares" (an absent `hooks`) is not what it meant — the
-  // conversion has to be the exact equivalent of the two slots.
-  const rows: Array<Required<GuardrailBindingRow>> = [];
-  const bind = (key: string | undefined, hook: HookId) => {
-    if (!key) return;
-    const existing = rows.find((row) => row.key === key);
-    if (existing) {
-      if (!existing.hooks.includes(hook)) existing.hooks.push(hook);
-      return;
-    }
-    rows.push({ key, hooks: [hook] });
-  };
-  bind(inputKey || undefined, 'input.pre');
-  bind(outputKey || undefined, 'output.pre');
-  return rows;
+const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
+  overview: { top: 'overview' },
+  sessions: { top: 'sessions' },
+  playground: { top: 'sessions' },
+  configure: { top: 'configure' },
+  build: { top: 'configure' },
+  ship: { top: 'deploy' },
+  // Operate was folded into Sessions (same list, its filters moved there).
+  operate: { top: 'sessions' },
+  settings: { top: 'configure', sub: 'basic' },
+  basic: { top: 'configure', sub: 'basic' },
+  prompt: { top: 'configure', sub: 'prompt' },
+  subagents: { top: 'configure', sub: 'subagents' },
+  skills: { top: 'configure', sub: 'skills' },
+  memory: { top: 'configure', sub: 'memory' },
+  sandbox: { top: 'configure', sub: 'sandbox' },
+  execution: { top: 'configure', sub: 'execution' },
+  advanced: { top: 'configure', sub: 'advanced' },
+  output: { top: 'configure', sub: 'output' },
+  deploy: { top: 'deploy' },
+  versions: { top: 'deploy', sub: 'versions' },
+  publish: { top: 'deploy', sub: 'publish' },
+  schedules: { top: 'deploy', sub: 'schedules' },
+  export: { top: 'deploy', sub: 'export' },
+  observe: { top: 'sessions' },
+  traces: { top: 'sessions' },
+  usage: { top: 'usage' },
+  api: { top: 'usage' },
+};
+
+function resolveTabFromQuery(raw: string | null): string {
+  return TAB_ALIASES[raw ?? '']?.top ?? 'overview';
+}
+
+/** The sub-tab a deep link asks for, or the group's default. */
+function resolveSubTabFromQuery(raw: string | null, group: string, fallback: string): string {
+  const alias = TAB_ALIASES[raw ?? ''];
+  return alias?.top === group && alias.sub ? alias.sub : fallback;
 }
 
 export default function AgentDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const agentId = params.agentId as string;
   const t = useTranslations('agents');
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
-  const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [prompts, setPrompts] = useState<PromptOption[]>([]);
   const [ragModules, setRagModules] = useState<RagModule[]>([]);
-  const [guardrails, setGuardrails] = useState<Guardrail[]>([]);
+  const [guardrails, setGuardrails] = useState<GuardrailBindingOption[]>([]);
   const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string }>>([]);
   const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<string | null>('playground');
+  // Overview is the landing tab — it's the one screen that answers "is this
+  // agent healthy and what has it been doing", which is a better first thing
+  // to see than a blank chat box. A deep link (Sessions' "back to agent",
+  // a bookmark) can still land on any tab via `?tab=`.
+  const [activeTab, setActiveTab] = useState<string | null>(() => resolveTabFromQuery(searchParams.get('tab')));
+  // Configure has no rail any more, so this is no longer "which pane is
+  // showing" — it is "which section a deep link asked for", and the effect
+  // below scrolls to it.
+  const [configureTab, setConfigureTab] = useState<string | null>(
+    () => resolveSubTabFromQuery(searchParams.get('tab'), 'configure', 'basic'),
+  );
+  const [deployTab, setDeployTab] = useState<string | null>(
+    () => resolveSubTabFromQuery(searchParams.get('tab'), 'deploy', 'versions'),
+  );
 
-  // Collapsible section state
-  const [knowledgeEngineOpen, setKnowledgeEngineOpen] = useState(false);
-  const [guardrailsOpen, setGuardrailsOpen] = useState(false);
-  const [toolsOpen, setToolsOpen] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [toolSelectorOpen, setToolSelectorOpen] = useState(false);
   const [toolBindings, setToolBindings] = useState<ToolBinding[]>([]);
+
+  // Advanced runtime knobs, structured output and the delegation roster. These
+  // live outside `configForm` for the same reason the guardrail bindings do:
+  // they are nested objects and lists, and `getInputProps` has nothing to offer
+  // them. Absent stays absent — an untouched agent must serialize the same
+  // config it had before these sections existed.
+  const [runtimeConfig, setRuntimeConfig] = useState<IAgentRuntimeConfig>({});
+  const [structuredOutput, setStructuredOutput] = useState<IAgentStructuredOutput | undefined>(undefined);
+  const [subagents, setSubagents] = useState<IAgentSubagent[]>([]);
+  const [subagentPolicy, setSubagentPolicy] = useState<IAgentSubagentPolicy | undefined>(undefined);
+  /** Other agents in the project — the `ref` sub-agent picker's options. */
+  const [projectAgents, setProjectAgents] = useState<Array<{ key: string; name: string; publishedVersion?: number | null }>>([]);
+  const [skills, setSkills] = useState<string[]>([]);
+  const [skillPolicy, setSkillPolicy] = useState<IAgentSkillPolicy | undefined>(undefined);
+  const [skillLibrary, setSkillLibrary] = useState<SkillView[]>([]);
+  const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
+  const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
+  const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
+  // Build page: the published snapshot, to flag changed sections.
+  const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
+  const [onlyChanged, setOnlyChanged] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [memoryStores, setMemoryStores] = useState<MemoryStoreOption[]>([]);
 
   // Guardrail bindings live outside `configForm`: they are a list of objects,
   // not a scalar field, and the form's `getInputProps` contract has nothing to
@@ -285,13 +296,24 @@ export default function AgentDetailPage() {
   const [compareVersionB, setCompareVersionB] = useState<string | null>(null);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
 
-  // Chat state (in-memory only — no DB conversations)
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [runtimeContextJson, setRuntimeContextJson] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
-  const chatViewportRef = useRef<HTMLDivElement>(null);
-
+  // Sessions list (for the Sessions tab — the actual chat now lives at its
+  // own route, see AgentSessionView).
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [startSessionOpen, setStartSessionOpen] = useState(false);
+  const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
+  const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
+  const [activeRunCount, setActiveRunCount] = useState(0);
+  const [savingConfig, setSavingConfig] = useState(false);
+  /**
+   * What the server's config check said on the last save: errors blocked it,
+   * warnings did not. Shown next to the Save button, where the operator is
+   * looking — a toast alone listed one problem and disappeared.
+   */
+  const [configIssues, setConfigIssues] = useState<{
+    errors: Array<{ field: string; message: string }>;
+    warnings: Array<{ field: string; message: string }>;
+  } | null>(null);
   // Config form
   const configForm = useForm({
     initialValues: {
@@ -299,29 +321,9 @@ export default function AgentDetailPage() {
       promptMode: 'custom' as 'custom' | 'prompt',
       systemPrompt: '',
       promptKey: '',
-      temperature: 0.7,
-      topP: 1,
-      maxTokens: 4096,
       knowledgeEngineKey: '',
-      inputGuardrailKey: '',
-      outputGuardrailKey: '',
     },
   });
-
-  // Tracing state (with pagination & date filter)
-  const [tracingSessions, setTracingSessions] = useState<TracingSessionRecord[]>([]);
-  const [tracingTotal, setTracingTotal] = useState(0);
-  const [tracingLoading, setTracingLoading] = useState(false);
-  const [tracingRefreshing, setTracingRefreshing] = useState(false);
-  const [tracingPage, setTracingPage] = useState(1);
-  const [tracingPageSize, setTracingPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [tracingStatusFilter, setTracingStatusFilter] = useState<string | null>(null);
-  const [tracingDateRange, setTracingDateRange] = useState<[Date | null, Date | null]>([null, null]);
-
-  const tracingPagination = useMemo(() => {
-    const totalPages = Math.max(1, Math.ceil(tracingTotal / tracingPageSize));
-    return { totalPages };
-  }, [tracingTotal, tracingPageSize]);
 
   // ── Data Loading ──────────────────────────────────────────────
 
@@ -339,133 +341,36 @@ export default function AgentDetailPage() {
           promptMode: cfg.promptKey ? 'prompt' : 'custom',
           systemPrompt: cfg.systemPrompt || '',
           promptKey: cfg.promptKey || '',
-          temperature: cfg.temperature ?? 0.7,
-          topP: cfg.topP ?? 1,
-          maxTokens: cfg.maxTokens ?? 4096,
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
-          inputGuardrailKey: cfg.inputGuardrailKey || '',
-          outputGuardrailKey: cfg.outputGuardrailKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
+        setRuntimeConfig(cfg.runtime ?? {});
+        setStructuredOutput(cfg.structuredOutput);
+        setSubagents(cfg.subagents ?? []);
+        setSubagentPolicy(cfg.subagentPolicy);
+        setSkills(cfg.skills ?? []);
+        setSkillPolicy(cfg.skillPolicy);
+        setMemoryConfig(cfg.memory);
+        setSandboxConfig(cfg.sandbox);
+        setExecutionConfig(cfg.execution);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
         // fall back to the legacy slots.
-        if (Array.isArray(cfg.guardrails)) {
-          // Shared mapping: an absent `hooks` means "wherever the guardrail
-          // declares it runs" and must stay absent, or the binding is silently
-          // parked the next time this config is saved for any reason, while the
-          // row still renders as attached.
-          setGuardrailBindings(
-            bindingRowsFromStored(cfg.guardrails as Array<{ key: string; hooks?: HookId[] }>),
-          );
-        } else {
-          const seeded = seedGuardrailsFromLegacySlots(
-            cfg.inputGuardrailKey,
-            cfg.outputGuardrailKey,
-          );
-          setGuardrailBindings(seeded);
-        }
+        //
+        // Shared mapping: an absent `hooks` means "wherever the guardrail
+        // declares it runs" and must stay absent, or the binding is silently
+        // parked the next time this config is saved for any reason, while the
+        // row still renders as attached.
+        setGuardrailBindings(Array.isArray(cfg.guardrails)
+          ? bindingRowsFromStored(cfg.guardrails)
+          : bindingRowsFromLegacySlots(cfg.inputGuardrailKey, cfg.outputGuardrailKey));
       }
     } catch (err) {
       console.error('Failed to load agent', err);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
-
-  const loadModels = async () => {
-    try {
-      const res = await fetch('/api/models?category=llm', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setModels(data.models ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load models', err);
-    }
-  };
-
-  const loadPrompts = async () => {
-    try {
-      const res = await fetch('/api/prompts', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setPrompts(data.prompts ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load prompts', err);
-    }
-  };
-
-  const loadRagModules = async () => {
-    try {
-      const res = await fetch('/api/rag/modules?status=active', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setRagModules(data.modules ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load RAG modules', err);
-    }
-  };
-
-  const loadGuardrails = async () => {
-    try {
-      // Unfiltered on purpose: a guardrail disabled AFTER it was bound must
-      // still render as a (badged) row in the binding list, which keeps
-      // disabled ones out of its picker instead.
-      const res = await fetch('/api/guardrails', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setGuardrails(data.guardrails ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load guardrails', err);
-    }
-  };
-
-  const loadProviders = async () => {
-    try {
-      const res = await fetch('/api/providers?scope=tenant', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        setProviders(data.providers ?? []);
-      }
-    } catch (err) {
-      console.error('Failed to load providers', err);
-    }
-  };
-
-  const loadTracingSessions = useCallback(async (isRefresh = false) => {
-    if (!agent) return;
-    if (isRefresh) setTracingRefreshing(true);
-    else setTracingLoading(true);
-
-    try {
-      const params = new URLSearchParams();
-      params.set('agent', agent.name);
-      params.set('limit', tracingPageSize.toString());
-      params.set('skip', ((tracingPage - 1) * tracingPageSize).toString());
-      if (tracingStatusFilter) params.set('status', tracingStatusFilter);
-      const [from, to] = tracingDateRange;
-      if (from) params.set('from', from.toISOString());
-      if (to) params.set('to', to.toISOString());
-
-      const res = await fetch(`/api/tracing/sessions?${params.toString()}`, {
-        cache: 'no-store',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setTracingSessions(data.sessions ?? []);
-        setTracingTotal(data.total ?? 0);
-      }
-    } catch (err) {
-      console.error('Failed to load tracing sessions', err);
-    } finally {
-      setTracingLoading(false);
-      setTracingRefreshing(false);
-    }
-  }, [agent, tracingPage, tracingPageSize, tracingStatusFilter, tracingDateRange]);
 
   const loadVersions = useCallback(async () => {
     if (!agent) return;
@@ -485,6 +390,36 @@ export default function AgentDetailPage() {
       setVersionsLoading(false);
     }
   }, [agent, agentId]);
+
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/sessions`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to load sessions', err);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [agentId]);
+
+  /**
+   * Sessions are created from StartSessionModal, which collects the name and
+   * the session context before the first message — that context is stored on
+   * the session and applied to every turn, so it has to exist by turn one.
+   *
+   * The chat itself lives at its own route now (AgentSessionView), not on this
+   * page, and the config save-before-chat the old inline playground did is
+   * gone: a Session always runs a real config (the draft, or a version pinned
+   * on the session page), so there is nothing here that needs saving first.
+   */
+  const handleSessionStarted = (sessionId: string, pinnedVersion: string) => {
+    const query = pinnedVersion ? `?version=${encodeURIComponent(pinnedVersion)}` : '';
+    router.push(`/dashboard/agents/${agentId}/sessions/${sessionId}${query}`);
+  };
 
   const handlePublish = async () => {
     setPublishing(true);
@@ -506,7 +441,7 @@ export default function AgentDetailPage() {
         setPublishChangelog('');
         // Reload agent to update publishedVersion, and refresh versions list
         await loadAgent();
-        if (activeTab === 'versions') {
+        if (activeTab === 'deploy') {
           await loadVersions();
         }
       } else {
@@ -528,37 +463,104 @@ export default function AgentDetailPage() {
   useEffect(() => {
     (async () => {
       setLoading(true);
-      await Promise.all([loadAgent(), loadModels(), loadPrompts(), loadRagModules(), loadGuardrails(), loadProviders()]);
+      await Promise.all([
+        loadAgent(),
+        loadList('/api/models?category=llm', (d) => d.models, setModels, 'models'),
+        loadList('/api/prompts', (d) => d.prompts, setPrompts, 'prompts'),
+        loadList('/api/rag/modules?status=active', (d) => d.modules, setRagModules, 'RAG modules'),
+        // Unfiltered on purpose: a guardrail disabled AFTER it was bound must
+        // still render as a (badged) row in the binding list, which keeps
+        // disabled ones out of its picker instead.
+        loadList('/api/guardrails', (d) => d.guardrails, setGuardrails, 'guardrails'),
+        loadList('/api/providers?scope=tenant', (d) => d.providers, setProviders, 'providers'),
+        // Native agents only: a connected agent is an HTTP endpoint, and the
+        // runtime refuses to flatten one into a sub-agent, so offering it here
+        // would only produce a binding that silently drops at run time.
+        loadList(
+          '/api/agents',
+          (d) => ((d.agents ?? []) as Agent[])
+            .filter((entry) => entry.config?.kind !== 'external')
+            .map((entry) => ({ key: entry.key, name: entry.name, publishedVersion: entry.publishedVersion ?? null })),
+          setProjectAgents,
+          'project agents',
+        ),
+        loadList('/api/skills', (d) => d.skills, setSkillLibrary, 'skill library'),
+        loadList('/api/memory/stores', (d) => d.stores, setMemoryStores, 'memory stores'),
+      ]);
       setLoading(false);
     })();
   }, [loadAgent]);
 
   useEffect(() => {
-    if (activeTab === 'traces' && agent) {
-      loadTracingSessions();
-    }
-  }, [activeTab, agent, loadTracingSessions]);
-
-  useEffect(() => {
-    if (activeTab === 'versions' && agent) {
+    // Export needs the version list too: it offers "export v3" as a source, and
+    // a version the operator cannot pick is a version they will assume is gone.
+    // Versions and Export both offer "which snapshot?" pickers, and they now
+    // live behind the same tab — one load covers both.
+    if (activeTab === 'deploy' && agent) {
       loadVersions();
     }
   }, [activeTab, agent, loadVersions]);
 
-  // ── Chat Actions (in-memory, no DB) ──────────────────────────
+  useEffect(() => {
+    if ((activeTab === 'sessions' || activeTab === 'overview') && agent) {
+      void loadSessions();
+    }
+  }, [activeTab, agent, loadSessions]);
 
-  const clearChat = () => {
-    setChatMessages([]);
-    setChatInput('');
-  };
+  /**
+   * Configure is one long page, so "go to the Prompt section" is a scroll,
+   * not a pane switch. Waits a frame because the section only exists once
+   * the tab panel has rendered.
+   */
+  useEffect(() => {
+    // Configure and Deploy are both single pages now, so either one's
+    // sub-target is a section anchor to scroll to.
+    const section = activeTab === 'configure' ? configureTab : activeTab === 'deploy' ? deployTab : null;
+    if (!section || !agent) return;
+    const frame = requestAnimationFrame(() => {
+      document.getElementById(`config-${section}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeTab, configureTab, deployTab, agent]);
+
+  const publishedVersionNumber = agent?.publishedVersion ?? null;
+  useEffect(() => {
+    let cancelled = false;
+    if (!publishedVersionNumber) {
+      setPublishedConfig(null);
+      return;
+    }
+    fetch(`/api/agents/${agentId}/versions?version=${publishedVersionNumber}`, { cache: 'no-store' })
+      .then(async (res) => (res.ok ? res.json() : null))
+      .then((data: { version?: AgentVersion } | null) => {
+        if (cancelled) return;
+        setPublishedConfig((data?.version?.snapshot?.config as Record<string, unknown> | undefined) ?? null);
+      })
+      .catch(() => { if (!cancelled) setPublishedConfig(null); });
+    return () => { cancelled = true; };
+  }, [agentId, publishedVersionNumber]);
+
+  const changedSections = useMemo(
+    () => changedConfigSections(agent?.config as Record<string, unknown> | undefined, publishedConfig),
+    [agent?.config, publishedConfig],
+  );
+
+  const sectionVisible = (id: string) => !onlyChanged || changedSections.has(id);
+  // The divider above a section is skipped for the first one SHOWN — with
+  // "only changed" on, that is not always General.
+  const firstVisibleSection = (agent?.config?.kind === 'external' ? ['basic'] : Object.keys(CONFIG_SECTION_KEYS)).find(sectionVisible);
 
   const buildConfigPayload = (bindings: ToolBinding[] = toolBindings): Record<string, unknown> => {
     const values = configForm.values;
     const nextConfig: Record<string, unknown> = {
       modelKey: values.modelKey,
-      temperature: values.temperature,
-      topP: values.topP,
-      maxTokens: values.maxTokens,
+      // No temperature / maxTokens. The form used to send 0.7 and 4096 on
+      // every save, so every agent was silently capped at 4096 output tokens
+      // and pinned to a temperature — settings nobody chose and, once the
+      // fields were removed, nobody could see. Leaving them out lets the
+      // model record's own settings govern; the next save clears any value
+      // an older save wrote. topP went the same way.
       knowledgeEngineKey: values.knowledgeEngineKey || undefined,
       toolBindings: bindings.length > 0 ? bindings : undefined,
     };
@@ -567,6 +569,27 @@ export default function AgentDetailPage() {
     // deprecated slots from it, so an older console binary on the same tenant
     // database keeps enforcing and the two can never disagree.
     nextConfig.guardrails = guardrailBindings;
+
+    // `undefined` rather than `{}` / `[]` for the untouched case: an empty
+    // object here would be indistinguishable from "operator cleared every knob"
+    // and would start showing up in every manifest and diff for no reason.
+    nextConfig.runtime = Object.keys(runtimeConfig).length > 0 ? runtimeConfig : undefined;
+    nextConfig.structuredOutput = structuredOutput?.enabled || structuredOutput?.schema ? structuredOutput : undefined;
+    nextConfig.subagents = subagents.length > 0 ? subagents : undefined;
+    nextConfig.subagentPolicy = subagents.length > 0 ? subagentPolicy : undefined;
+    nextConfig.skills = skills.length > 0 ? skills : undefined;
+    nextConfig.skillPolicy = skills.length > 0 ? skillPolicy : undefined;
+    nextConfig.memory = memoryConfig?.enabled || memoryConfig?.memoryStoreKey ? memoryConfig : undefined;
+    // Kept even when disabled, so turning the sandbox off does not throw away
+    // the template, limits and secrets someone set up. Secrets come back from
+    // the server masked; sending the mask back keeps the stored value.
+    nextConfig.sandbox = sandboxConfig && Object.keys(sandboxConfig).length > 0 ? sandboxConfig : undefined;
+    nextConfig.execution = executionConfig && Object.keys(executionConfig).length > 0 ? executionConfig : undefined;
+    // No editor writes this from here anymore (see the Prompt tab) — pass
+    // through whatever is already stored so a save from THIS page can never
+    // silently wipe a value an import or the API set, since `config` replaces
+    // the stored object wholesale rather than merging.
+    nextConfig.promptVariables = agent?.config?.promptVariables;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -592,11 +615,31 @@ export default function AgentDetailPage() {
       });
 
       if (!res.ok) {
+        // Used to `return false` in silence, so a rejected save looked
+        // exactly like a button that did nothing — and the operator kept
+        // the config they thought they had stored. Say what the server said.
+        const body = await res.json().catch(() => ({} as {
+          error?: string;
+          validation?: { errors: Array<{ field: string; message: string }>; warnings: Array<{ field: string; message: string }> };
+        }));
+        if (body?.validation) setConfigIssues(body.validation);
+        if (notify) {
+          notifications.show({
+            title: t('notifications.error'),
+            message: body?.validation?.errors?.length
+              ? `The config has ${body.validation.errors.length} problem${body.validation.errors.length === 1 ? '' : 's'} — see the list above Save.`
+              : body?.error || `${t('notifications.saveFailed')} (HTTP ${res.status})`,
+            color: 'red',
+          });
+        }
         return false;
       }
 
       const data = await res.json();
       setAgent(data.agent);
+      setConfigIssues(Array.isArray(data.warnings) && data.warnings.length > 0
+        ? { errors: [], warnings: data.warnings }
+        : null);
       if (notify) {
         notifications.show({
           title: t('notifications.saved'),
@@ -667,88 +710,15 @@ export default function AgentDetailPage() {
     }
   };
 
-  const sendMessage = async () => {
-    if (!chatInput.trim() || chatLoading) return;
-
-    const message = chatInput.trim();
-    setChatLoading(true);
-
-    // Connected agents have no editable config; never auto-save (it would
-    // overwrite the stored connection with an empty native config).
-    if (agent?.config?.kind !== 'external') {
-      const saved = await saveAgentConfig({ notify: false });
-      if (!saved) {
-        notifications.show({
-          title: t('notifications.error'),
-          message: 'Failed to save current agent configuration before chat.',
-          color: 'red',
-        });
-        setChatLoading(false);
-        return;
-      }
-    }
-
-    setChatInput('');
-
-    // Optimistic update: add user message
-    const updatedMessages: ChatMessage[] = [
-      ...chatMessages,
-      { role: 'user', content: message },
-    ];
-    setChatMessages(updatedMessages);
-
-    try {
-      const res = await fetch(`/api/agents/${agentId}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message,
-          history: chatMessages, // send previous messages as context
-          runtime_context: parseRuntimeContextJson(runtimeContextJson),
-        }),
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Chat failed');
-      }
-
-      const data = await res.json();
-      setChatMessages([
-        ...updatedMessages,
-        {
-          role: 'assistant',
-          content: data.content,
-          ...(typeof data.reasoning === 'string' && data.reasoning
-            ? { reasoning: data.reasoning }
-            : {}),
-        },
-      ]);
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Unknown error';
-      notifications.show({
-        title: t('notifications.error'),
-        message: errMsg,
-        color: 'red',
-      });
-      // Revert optimistic update
-      setChatMessages(chatMessages);
-    } finally {
-      setChatLoading(false);
-    }
-  };
-
-  // Auto-scroll chat
-  useEffect(() => {
-    if (chatViewportRef.current) {
-      chatViewportRef.current.scrollTop = chatViewportRef.current.scrollHeight;
-    }
-  }, [chatMessages]);
-
   // ── Config Save ──────────────────────────────────────────────
 
   const handleSaveConfig = async () => {
-    await saveAgentConfig();
+    setSavingConfig(true);
+    try {
+      await saveAgentConfig();
+    } finally {
+      setSavingConfig(false);
+    }
   };
 
   if (loading) {
@@ -773,6 +743,171 @@ export default function AgentDetailPage() {
     : `${origin}/api/client/v1/a2a/${agent.key}`;
   const a2aCardUrl = `${a2aEndpointUrl}/.well-known/agent-card.json`;
 
+  /**
+   * The General section's fields, all open.
+   *
+   * These used to be four collapsibles ("Knowledge Engine", "Guardrails",
+   * "Tools", "Advanced Settings") inside their own card, each hiding one or
+   * two inputs. That is a lot of clicking to answer "what is this agent wired
+   * to", and the answer is short enough to just show — so the accordions are
+   * gone and each group is a labelled block instead.
+   */
+  const renderBasicSettings = () => (
+    isConnected ? (
+      <Stack gap="sm">
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
+          <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
+        </div>
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
+          <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
+            {connection?.url ?? '—'}
+          </Text>
+        </div>
+        {connection?.model ? (
+          <div>
+            <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
+            <Text size="sm" className="ds-mono">{connection.model}</Text>
+          </div>
+        ) : null}
+        <div>
+          <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
+          <Text size="sm">
+            {connection?.hasApiKey
+              ? t('connectModal.apiKey')
+              : connection?.credentialProviderKey
+                ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
+                : '—'}
+          </Text>
+        </div>
+        {connection?.responsePath ? (
+          <div>
+            <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
+            <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
+          </div>
+        ) : null}
+        <Text size="xs" c="dimmed" fs="italic" mt="xs">
+          {t('connectModal.subtitle')}
+        </Text>
+        <Button
+          variant="light"
+          size="xs"
+          leftSection={<IconPencil size={14} />}
+          onClick={() => setEditConnectionOpen(true)}
+          w="fit-content"
+        >
+          {t('connectModal.editButton')}
+        </Button>
+      </Stack>
+    ) : (
+      <Stack gap="xl">
+        <Select
+          label={t('config.model')}
+          placeholder={t('config.modelPlaceholder')}
+          data={models.map((m) => ({
+            value: m.key,
+            label: `${m.name} (${m.modelId})`,
+          }))}
+          searchable
+          {...configForm.getInputProps('modelKey')}
+        />
+
+        {/* Prompt configuration (mode / template / managed prompt) lives in
+            its own "Prompt" section — see AgentPromptPanel. Editing the prompt
+            is common and deep enough (switching modes, editing the managed
+            Prompt record's template inline) to earn its own block instead of
+            sharing this one with the model picker. */}
+
+        <ConfigBlock icon={<IconDatabase size={15} />} title={t('config.knowledgeEngine')}>
+          <Select
+            description={t('config.knowledgeEngineDescription')}
+            placeholder={t('config.knowledgeEnginePlaceholder')}
+            data={ragModules.map((r) => ({ value: r.key, label: r.name }))}
+            searchable
+            clearable
+            leftSection={<IconDatabase size={14} />}
+            {...configForm.getInputProps('knowledgeEngineKey')}
+          />
+        </ConfigBlock>
+
+        <ConfigBlock icon={<IconShield size={15} />} title={t('config.guardrails')}>
+          {/*
+            One guardrail per row, each naming the hooks it covers on THIS
+            agent. The tool hooks are the new capability here: an agent's own
+            action tools are the surface a tool policy could never reach
+            through the old direction slots.
+          */}
+          <GuardrailBindingList
+            options={guardrails}
+            value={guardrailBindings}
+            onChange={setGuardrailBindings}
+            surface="agent"
+          />
+        </ConfigBlock>
+
+        <ConfigBlock icon={<IconTool size={15} />} title={t('config.tools')}>
+          <Stack gap="sm">
+            <Text size="xs" c="dimmed">{t('config.toolsDescription')}</Text>
+
+            {toolBindings.length > 0 ? (
+              <Stack gap={4}>
+                {toolBindings.map((b) => (
+                  <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
+                    <Badge size="xs" variant="light" color="gray">{b.source.toUpperCase()}</Badge>
+                    <Text size="xs" fw={500}>{b.sourceKey}</Text>
+                    <Badge size="xs" variant="light" color="blue">
+                      {b.toolNames.length} tool(s)
+                    </Badge>
+                  </Group>
+                ))}
+              </Stack>
+            ) : (
+              <Text size="xs" c="dimmed" fs="italic">{t('config.noToolsSelected')}</Text>
+            )}
+
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconTool size={14} />}
+              onClick={() => setToolSelectorOpen(true)}
+              w="fit-content"
+            >
+              {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
+            </Button>
+          </Stack>
+
+          <ToolSelectorModal
+            opened={toolSelectorOpen}
+            onClose={() => setToolSelectorOpen(false)}
+            value={toolBindings}
+            onChange={handleToolBindingsChange}
+          />
+        </ConfigBlock>
+
+      </Stack>
+    )
+  );
+
+  /**
+   * One Build section, or nothing when "only changed" hides it. A connected
+   * agent has only General. Sections are always open: the config is edited as
+   * a whole and saved by one button, so folding them only hid what the agent is.
+   */
+  const buildSection = (id: string, description: string, body: ReactNode, meta?: ReactNode) =>
+    (id === 'basic' || !isConnected) && sectionVisible(id) ? (
+      <ConfigSection
+        id={id}
+        title={CONFIG_SECTION_TITLES[id]}
+        description={description}
+        meta={meta}
+        changed={changedSections.has(id)}
+        first={id === firstVisibleSection}
+      >
+        {body}
+      </ConfigSection>
+    ) : null;
+
   return (
     <PageContainer>
       <PageHeader
@@ -781,6 +916,24 @@ export default function AgentDetailPage() {
         subtitle={agent.description || agent.key}
         actions={
           <Group gap="sm">
+            {!isConnected && (agent.latestVersion ?? 0) > 0 ? (
+              <Button
+                size="xs"
+                variant="default"
+                leftSection={<IconArrowsLeftRight size={14} />}
+                onClick={() => setCompareOpen(true)}
+              >
+                Compare
+              </Button>
+            ) : null}
+            <Button
+              size="xs"
+              variant="light"
+              leftSection={<IconPlus size={14} />}
+              onClick={() => setStartSessionOpen(true)}
+            >
+              Start session
+            </Button>
             {isConnected ? (
               <Badge size="sm" variant="light" color="violet" leftSection={<IconPlugConnected size={12} />}>
                 {connection?.protocol ?? t('connectedBadge')}
@@ -811,839 +964,279 @@ export default function AgentDetailPage() {
 
       <Tabs value={activeTab} onChange={setActiveTab}>
         <Tabs.List mb="md">
-          <Tabs.Tab value="playground" leftSection={<IconMessageCircle size={14} />}>
-            {t('tabs.playground')}
+          <Tabs.Tab value="overview" leftSection={<IconLayoutDashboard size={14} />}>
+            Overview
           </Tabs.Tab>
-          {!isConnected ? (
-            <Tabs.Tab value="versions" leftSection={<IconGitBranch size={14} />}>
-              {t('tabs.versions')}
-            </Tabs.Tab>
-          ) : null}
-          <Tabs.Tab value="publish" leftSection={<IconWorld size={14} />}>
-            {t('tabs.publish')}
+          <Tabs.Tab value="sessions" leftSection={<IconMessageCircle size={14} />}>
+            Sessions
+            {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
           </Tabs.Tab>
-          <Tabs.Tab value="traces" leftSection={<IconTimeline size={14} />}>
-            {t('tabs.traces')}
+          <Tabs.Tab value="configure" leftSection={<IconSettings size={14} />}>
+            Build
+            {changedSections.size > 0 ? (
+              <Tooltip label={`${changedSections.size} section${changedSections.size === 1 ? '' : 's'} changed since v${agent.publishedVersion}`} withArrow>
+                <Badge size="xs" variant="light" color="orange" ml={6}>{changedSections.size}</Badge>
+              </Tooltip>
+            ) : null}
+          </Tabs.Tab>
+          <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
+            Ship
           </Tabs.Tab>
           <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
             {t('tabs.usage')}
           </Tabs.Tab>
         </Tabs.List>
 
-        {/* ── Playground Tab ──────────────────────────────────── */}
-        <Tabs.Panel value="playground">
-          <div className={classes.playgroundLayout}>
-            {/* Left: Configuration Panel */}
-            <Paper
-              withBorder
-              radius="md"
-              p="md"
-              className={classes.configPanel}
-            >
-              <Stack gap="md">
-                <Text size="sm" fw={600}>
-                  {t('config.title')}
-                </Text>
+        {/* ── Overview ────────────────────────────────────────── */}
+        <Tabs.Panel value="overview">
+          <AgentOverviewPanel
+            agent={agent}
+            isConnected={isConnected}
+            sessionCount={sessions.length}
+            onStartSession={() => setStartSessionOpen(true)}
+            // Overview links by the OLD flat names on purpose — it should not
+            // have to know how the tabs are grouped, so the alias table that
+            // already exists for deep links resolves the rail for it too.
+            onGoToTab={(tab) => {
+              const alias = TAB_ALIASES[tab];
+              if (!alias) return;
+              setActiveTab(alias.top);
+              if (!alias.sub) return;
+              if (alias.top === 'configure') setConfigureTab(alias.sub);
+              if (alias.top === 'deploy') setDeployTab(alias.sub);
+            }}
+          />
+        </Tabs.Panel>
 
-                {isConnected ? (
-                  <Stack gap="sm">
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.protocol')}</Text>
-                      <Text size="sm" fw={500}>{connection?.protocol ?? '—'}</Text>
-                    </div>
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.url')}</Text>
-                      <Text size="sm" className="ds-mono" style={{ wordBreak: 'break-all' }}>
-                        {connection?.url ?? '—'}
-                      </Text>
-                    </div>
-                    {connection?.model ? (
-                      <div>
-                        <Text size="xs" c="dimmed">{t('connectModal.model')}</Text>
-                        <Text size="sm" className="ds-mono">{connection.model}</Text>
-                      </div>
-                    ) : null}
-                    <div>
-                      <Text size="xs" c="dimmed">{t('connectModal.authSection')}</Text>
-                      <Text size="sm">
-                        {connection?.hasApiKey
-                          ? t('connectModal.apiKey')
-                          : connection?.credentialProviderKey
-                            ? `${t('connectModal.credentialProvider')}: ${connection.credentialProviderKey}`
-                            : '—'}
-                      </Text>
-                    </div>
-                    {connection?.responsePath ? (
-                      <div>
-                        <Text size="xs" c="dimmed">{t('connectModal.responsePath')}</Text>
-                        <Text size="sm" className="ds-mono">{connection.responsePath}</Text>
-                      </div>
-                    ) : null}
-                    <Text size="xs" c="dimmed" fs="italic" mt="xs">
-                      {t('connectModal.subtitle')}
-                    </Text>
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={<IconPencil size={14} />}
-                      onClick={() => setEditConnectionOpen(true)}
-                    >
-                      {t('connectModal.editButton')}
-                    </Button>
-                  </Stack>
-                ) : (
-                <>
-                <Select
-                  label={t('config.model')}
-                  placeholder={t('config.modelPlaceholder')}
-                  data={models.map((m) => ({
-                    value: m.key,
-                    label: `${m.name} (${m.modelId})`,
-                  }))}
-                  searchable
-                  {...configForm.getInputProps('modelKey')}
-                />
+        {/* ── Sessions ────────────────────────────────────────── */}
+        <Tabs.Panel value="sessions">
+          <SectionCard
+            title="Sessions"
+            description="Every conversation with this agent — console tests, API, A2A and scheduled runs. Click one to inspect it; sessions started here can be continued."
+          >
+            <SegmentedControl
+              mb="md"
+              size="sm"
+              w="fit-content"
+              value={sessionsView}
+              onChange={(value) => setSessionsView(value as 'sessions' | 'runs')}
+              data={[
+                { value: 'sessions', label: `Sessions · ${sessions.length}` },
+                { value: 'runs', label: activeRunCount > 0 ? `Background runs · ${activeRunCount} active` : 'Background runs' },
+              ]}
+            />
+            {sessionsView === 'sessions' ? (
+              <SessionList
+                sessions={sessions}
+                loading={sessionsLoading}
+                onOpen={(id) => setViewedSessionId(id)}
+                onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+                onStart={() => setStartSessionOpen(true)}
+                onRefresh={() => void loadSessions()}
+                refreshing={sessionsLoading}
+                tracesHref={`/dashboard/tracing/sessions?agent=${encodeURIComponent(agent.name)}`}
+              />
+            ) : null}
+            {/* Mounted even while hidden so the active-run count stays live for the toggle label. */}
+            <div style={{ display: sessionsView === 'runs' ? 'block' : 'none' }}>
+              <AgentRunsTable
+                agentId={agentId}
+                onOpenConversation={(conversationId) => setViewedSessionId(conversationId)}
+                onActiveCountChange={setActiveRunCount}
+              />
+            </div>
+            <SessionDetailDrawer
+              agentId={agentId}
+              session={viewedSessionId
+                ? sessions.find((s) => s._id === viewedSessionId) ?? { _id: viewedSessionId, source: 'api' }
+                : null}
+              onClose={() => setViewedSessionId(null)}
+              onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+            />
+          </SectionCard>
+        </Tabs.Panel>
 
-                <Divider label={t('config.promptSection')} labelPosition="center" />
+        {/*
+          Configure — everything that changes what the agent IS, as one page.
 
-                <Select
-                  label={t('config.promptMode')}
-                  data={[
-                    { value: 'custom', label: t('config.customPrompt') },
-                    { value: 'prompt', label: t('config.selectPrompt') },
-                  ]}
-                  {...configForm.getInputProps('promptMode')}
-                />
-
-                {configForm.values.promptMode === 'custom' ? (
-                  <Textarea
-                    label={t('config.systemPrompt')}
-                    placeholder={t('config.systemPromptPlaceholder')}
-                    minRows={4}
-                    maxRows={12}
-                    autosize
-                    {...configForm.getInputProps('systemPrompt')}
-                  />
-                ) : (
-                  <Select
-                    label={t('config.prompt')}
-                    placeholder={t('config.promptPlaceholder')}
-                    data={prompts.map((p) => ({
-                      value: p.key,
-                      label: p.name,
-                    }))}
-                    searchable
-                    {...configForm.getInputProps('promptKey')}
-                  />
-                )}
-
-                {/* ── Knowledge Engine (collapsible) ───────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setKnowledgeEngineOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {knowledgeEngineOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconDatabase size={16} />
-                    <Text size="sm" fw={600}>{t('config.knowledgeEngine')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={knowledgeEngineOpen}>
-                  <Stack gap="md" mt="xs">
-                    <Select
-                      label={t('config.knowledgeEngine')}
-                      description={t('config.knowledgeEngineDescription')}
-                      placeholder={t('config.knowledgeEnginePlaceholder')}
-                      data={ragModules.map((r) => ({
-                        value: r.key,
-                        label: r.name,
-                      }))}
-                      searchable
-                      clearable
-                      leftSection={<IconDatabase size={14} />}
-                      {...configForm.getInputProps('knowledgeEngineKey')}
-                    />
-                  </Stack>
-                </Collapse>
-
-                {/* ── Guardrails (collapsible) ─────────────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setGuardrailsOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {guardrailsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconShield size={16} />
-                    <Text size="sm" fw={600}>{t('config.guardrails')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={guardrailsOpen}>
-                  <Stack gap="md" mt="xs">
-                    {/*
-                      One guardrail per row, each naming the hooks it covers on
-                      THIS agent. The tool hooks are the new capability here:
-                      an agent's own action tools are the surface a tool policy
-                      could never reach through the old direction slots.
-                    */}
-                    <GuardrailBindingList
-                      options={guardrails}
-                      value={guardrailBindings}
-                      onChange={setGuardrailBindings}
-                      surface="agent"
-                    />
-                  </Stack>
-                </Collapse>
-
-                {/* ── Tools (collapsible) ──────────────────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setToolsOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {toolsOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconTool size={16} />
-                    <Text size="sm" fw={600}>{t('config.tools')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={toolsOpen}>
-                  <Stack gap="md" mt="xs">
-                    <Text size="xs" c="dimmed">
-                      {t('config.toolsDescription')}
-                    </Text>
-
-                    {toolBindings.length > 0 ? (
-                      <Stack gap={4}>
-                        {toolBindings.map((b) => (
-                          <Group key={`${b.source}::${b.sourceKey}`} gap="xs">
-                            <Badge size="xs" variant="light" color="gray">
-                              {b.source.toUpperCase()}
-                            </Badge>
-                            <Text size="xs" fw={500}>{b.sourceKey}</Text>
-                            <Badge size="xs" variant="light" color="blue">
-                              {b.toolNames.length} tool(s)
-                            </Badge>
-                          </Group>
-                        ))}
-                      </Stack>
-                    ) : (
-                      <Text size="xs" c="dimmed" fs="italic">
-                        {t('config.noToolsSelected')}
-                      </Text>
-                    )}
-
-                    <Button
-                      variant="light"
-                      size="xs"
-                      leftSection={<IconTool size={14} />}
-                      onClick={() => setToolSelectorOpen(true)}
-                    >
-                      {toolBindings.length > 0 ? t('config.editTools') : t('config.addTools')}
-                    </Button>
-                  </Stack>
-                </Collapse>
-
-                <ToolSelectorModal
-                  opened={toolSelectorOpen}
-                  onClose={() => setToolSelectorOpen(false)}
-                  value={toolBindings}
-                  onChange={handleToolBindingsChange}
-                />
-
-                {/* ── Advanced Settings (collapsible) ─────── */}
-                <Divider />
-                <UnstyledButton
-                  onClick={() => setAdvancedOpen((o) => !o)}
-                  className={classes.sectionToggle}
-                >
-                  <Group gap="xs">
-                    {advancedOpen ? <IconChevronDown size={16} /> : <IconChevronRight size={16} />}
-                    <IconSettings size={16} />
-                    <Text size="sm" fw={600}>{t('config.advancedSettings')}</Text>
-                  </Group>
-                </UnstyledButton>
-
-                <Collapse in={advancedOpen}>
-                  <Stack gap="md" mt="xs">
-                    <div>
-                      <Text size="sm" mb={4}>
-                        {t('config.temperature')}: {configForm.values.temperature}
-                      </Text>
-                      <Slider
-                        min={0}
-                        max={2}
-                        step={0.1}
-                        marks={[
-                          { value: 0, label: '0' },
-                          { value: 1, label: '1' },
-                          { value: 2, label: '2' },
-                        ]}
-                        {...configForm.getInputProps('temperature')}
-                      />
-                    </div>
-
-                    <div>
-                      <Text size="sm" mb={4}>
-                        {t('config.topP')}: {configForm.values.topP}
-                      </Text>
-                      <Slider
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        marks={[
-                          { value: 0, label: '0' },
-                          { value: 0.5, label: '0.5' },
-                          { value: 1, label: '1' },
-                        ]}
-                        {...configForm.getInputProps('topP')}
-                      />
-                    </div>
-
-                    <NumberInput
-                      label={t('config.maxTokens')}
-                      min={1}
-                      max={128000}
-                      {...configForm.getInputProps('maxTokens')}
-                    />
-                  </Stack>
-                </Collapse>
-
-                <Button onClick={handleSaveConfig} size="sm" fullWidth>
-                  {t('config.save')}
-                </Button>
-                </>
-                )}
-              </Stack>
-            </Paper>
-
-            {/* Right: Chat Area */}
-            <Paper
-              withBorder
-              radius="md"
-              className={classes.chatPanel}
-            >
-              {/* Chat Header */}
-              <Group
-                p="sm"
-                justify="space-between"
-                className={classes.panelHeader}
+          It used to be a vertical rail, which hid six of seven sections
+          behind a click. Wrong trade for a form edited as a whole and saved
+          by one button: you could not see what the agent was without touring
+          it. Deep links still work — `?tab=prompt` scrolls to that section
+          instead of selecting a rail item.
+        */}
+        <Tabs.Panel value="configure">
+          <Group justify="space-between" mb="sm">
+            <Text size="sm" c="dimmed">
+              {isConnected ? 1 : Object.keys(CONFIG_SECTION_KEYS).length} sections
+              {agent.publishedVersion
+                ? ` · ${changedSections.size} changed since v${agent.publishedVersion}`
+                : ' · never published'}
+            </Text>
+            {agent.publishedVersion ? (
+              <Button
+                size="compact-sm"
+                variant={onlyChanged ? 'light' : 'subtle'}
+                color={onlyChanged ? 'orange' : 'gray'}
+                disabled={changedSections.size === 0 && !onlyChanged}
+                onClick={() => setOnlyChanged((value) => !value)}
               >
-                <Group gap="xs">
-                  <Text size="sm" fw={600}>
-                    {t('chat.title')}
-                  </Text>
-                  {chatMessages.length > 0 && (
-                    <Badge size="xs" variant="light" color="gray">
-                      {chatMessages.length} {t('chat.messages')}
-                    </Badge>
-                  )}
-                </Group>
-                <Button
-                  size="xs"
-                  variant="light"
-                  leftSection={<IconTrash size={14} />}
-                  onClick={clearChat}
-                  disabled={chatMessages.length === 0 && !chatLoading}
-                >
-                  {t('chat.newChat')}
-                </Button>
-              </Group>
+                {onlyChanged ? 'Show all sections' : 'Show only changed'}
+              </Button>
+            ) : null}
+          </Group>
+          <Paper withBorder radius="md" p="xl">
+            {buildSection(
+              'basic',
+              'What this agent is, which model answers, and the tools it can call.',
+              renderBasicSettings(),
+            )}
+            {buildSection(
+              'prompt',
+              'Inline text, or a prompt from the Prompts module — editable right here.',
+              <AgentPromptPanel
+                mode={configForm.values.promptMode}
+                onModeChange={(mode) => configForm.setFieldValue('promptMode', mode)}
+                systemPrompt={configForm.values.systemPrompt}
+                onSystemPromptChange={(value) => configForm.setFieldValue('systemPrompt', value)}
+                promptKey={configForm.values.promptKey}
+                onPromptKeyChange={(key) => configForm.setFieldValue('promptKey', key)}
+                prompts={prompts}
+                onPromptsChanged={setPrompts}
+                onSaveAgentConfig={handleSaveConfig}
+              />,
+            )}
+            {buildSection(
+              'subagents',
+              'Roles this agent can hand work to, and the guards around that.',
+              <AgentSubagentsPanel
+                subagents={subagents}
+                policy={subagentPolicy}
+                agents={projectAgents}
+                models={models.map((model) => ({ key: model.key, name: model.name }))}
+                currentAgentKey={agent.key}
+                onChange={(nextSubagents, nextPolicy) => {
+                  setSubagents(nextSubagents);
+                  setSubagentPolicy(nextPolicy);
+                }}
+              />,
+              subagents.length > 0 ? (
+                <Badge size="xs" variant="light" w="fit-content">{subagents.length} sub-agents</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'skills',
+              "Capabilities this agent can discover and open on demand, from the project's skill library.",
+              <AgentSkillsPanel
+                skills={skills}
+                policy={skillPolicy}
+                library={skillLibrary}
+                onLibraryAdd={(skill) => setSkillLibrary((prev) => [...prev.filter((s) => s.key !== skill.key), skill])}
+                onChange={(nextSkills, nextPolicy) => {
+                  setSkills(nextSkills);
+                  setSkillPolicy(nextPolicy);
+                }}
+              />,
+              skills.length > 0 ? (
+                <Badge size="xs" variant="light" w="fit-content">{skills.length} attached</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'memory',
+              'What this agent remembers across runs, backed by a store from the Memory module.',
+              <AgentMemoryPanel value={memoryConfig} onChange={setMemoryConfig} stores={memoryStores} />,
+              memoryConfig?.enabled ? (
+                <Badge size="xs" color="teal" variant="light" w="fit-content">on</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'sandbox',
+              'An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets.',
+              <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} />,
+              sandboxConfig?.enabled ? (
+                <Badge size="xs" color="grape" variant="light" w="fit-content">
+                  {sandboxConfig.mode === 'persist' ? 'persistent' : 'ephemeral'}
+                </Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'execution',
+              'How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling.',
+              <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />,
+              executionConfig?.defaultMode === 'background' ? (
+                <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'advanced',
+              'How the agent loop behaves: planning, budgets, context handling and reasoning.',
+              <AgentAdvancedSettings
+                value={runtimeConfig}
+                onChange={setRuntimeConfig}
+                toolNames={toolBindings.flatMap((binding) => binding.toolNames ?? [])}
+              />,
+            )}
+            {buildSection(
+              'output',
+              'Make the agent answer with JSON that matches a schema instead of free text.',
+              <AgentStructuredOutputEditor value={structuredOutput} onChange={setStructuredOutput} />,
+            )}
+          </Paper>
 
-              {/* Chat Messages */}
-              <div className={classes.panelBody}>
-                {chatMessages.length === 0 && !chatLoading ? (
-                  <Center className={classes.chatEmpty}>
-                    <Stack align="center" gap="sm">
-                      <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-                        <IconRobot size={24} />
-                      </ThemeIcon>
-                      <Text fw={600}>{agent.name}</Text>
-                      <Text size="sm" c="dimmed" ta="center" maw={300}>
-                        {agent.description || t('chat.startDescription')}
-                      </Text>
-                    </Stack>
-                  </Center>
-                ) : (
-                  <>
-                    <ScrollArea
-                      className={classes.chatScroll}
-                      viewportRef={chatViewportRef}
-                      p="md"
-                    >
-                      <Stack gap="md">
-                        {chatMessages.map((msg, i) => (
-                          <Group
-                            key={i}
-                            justify={msg.role === 'user' ? 'flex-end' : 'flex-start'}
-                            align="flex-start"
-                          >
-                            <Paper
-                              p="sm"
-                              radius="md"
-                              withBorder={msg.role === 'assistant'}
-                              className={`${classes.chatBubble} ${msg.role === 'user' ? classes.chatBubbleUser : ''}`}
-                            >
-                              {msg.role === 'assistant' ? (
-                                <Box className={classes.chatMarkdown}>
-                                  {msg.reasoning ? (
-                                    <ReasoningDisclosure reasoning={msg.reasoning} />
-                                  ) : null}
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                    {msg.content}
-                                  </ReactMarkdown>
-                                </Box>
-                              ) : (
-                                <Text size="sm" className={classes.preWrap}>
-                                  {msg.content}
-                                </Text>
-                              )}
-                            </Paper>
-                          </Group>
-                        ))}
-                        {chatLoading && (
-                          <Group justify="flex-start">
-                            <Paper p="sm" radius="md" withBorder>
-                              <Loader size="xs" />
-                            </Paper>
-                          </Group>
-                        )}
-                      </Stack>
-                    </ScrollArea>
-
-                    {/* Input */}
-                    <Group
-                      p="sm"
-                      gap="sm"
-                      className={classes.chatInputRow}
-                    >
-                      <TextInput
-                        placeholder={t('chat.inputPlaceholder')}
-                        value={chatInput}
-                        onChange={(e) => setChatInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            sendMessage();
-                          }
-                        }}
-                        className={classes.flexGrow}
-                        disabled={chatLoading}
-                        rightSection={
-                          <ActionIcon
-                            size="sm"
-                            variant="filled"
-                            onClick={sendMessage}
-                            disabled={!chatInput.trim() || chatLoading}
-                          >
-                            <IconSend size={14} />
-                          </ActionIcon>
-                        }
-                      />
+          {/*
+            One save for the whole page. Every section above edits the same
+            draft config and the PATCH replaces it wholesale, so six separate
+            "Save" buttons only ever meant "save everything, from here".
+          */}
+          {configIssues && (configIssues.errors.length > 0 || configIssues.warnings.length > 0) ? (
+            <Alert
+              mt="md"
+              variant="light"
+              color={configIssues.errors.length > 0 ? 'red' : 'yellow'}
+              icon={<IconAlertTriangle size={16} />}
+              title={configIssues.errors.length > 0
+                ? `Not saved — ${configIssues.errors.length} problem${configIssues.errors.length === 1 ? '' : 's'} to fix`
+                : 'Saved, with warnings'}
+              withCloseButton
+              onClose={() => setConfigIssues(null)}
+            >
+              <Stack gap={4}>
+                {[...configIssues.errors.map((issue) => ({ ...issue, level: 'error' as const })),
+                  ...configIssues.warnings.map((issue) => ({ ...issue, level: 'warning' as const }))]
+                  .map((issue) => (
+                    <Group key={`${issue.level}-${issue.field}-${issue.message}`} gap={6} wrap="nowrap" align="flex-start">
+                      <Badge size="xs" variant="light" color={issue.level === 'error' ? 'red' : 'yellow'}>
+                        {issue.level}
+                      </Badge>
+                      <Text size="xs" ff="monospace" c="dimmed">{issue.field}</Text>
+                      <Text size="xs">{issue.message}</Text>
                     </Group>
-                  </>
-                )}
-
-                {/* Always-visible input when no messages */}
-                {chatMessages.length === 0 && !chatLoading && (
-                  <Group
-                    p="sm"
-                    gap="sm"
-                    className={classes.chatInputRow}
-                  >
-                    <TextInput
-                      placeholder={t('chat.inputPlaceholder')}
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          sendMessage();
-                        }
-                      }}
-                      className={classes.flexGrow}
-                      disabled={chatLoading}
-                      rightSection={
-                        <ActionIcon
-                          size="sm"
-                          variant="filled"
-                          onClick={sendMessage}
-                          disabled={!chatInput.trim() || chatLoading}
-                        >
-                          <IconSend size={14} />
-                        </ActionIcon>
-                      }
-                    />
-                  </Group>
-                )}
-
-                {/* Runtime context sent with every playground turn */}
-                <Box px="sm" pb="sm">
-                  <RuntimeContextEditor
-                    value={runtimeContextJson}
-                    onChange={setRuntimeContextJson}
-                  />
-                </Box>
-              </div>
-            </Paper>
-          </div>
-        </Tabs.Panel>
-
-        {/* ── Traces Tab ─────────────────────────────────────── */}
-        <Tabs.Panel value="traces">
-          <Stack gap="md">
-            {/* Filters */}
-            <SectionCard p="md">
-              <Group gap="md" wrap="wrap">
-                <Select
-                  label={t('traces.statusFilter')}
-                  placeholder={t('traces.allStatuses')}
-                  data={[
-                    { value: 'success', label: 'Success' },
-                    { value: 'error', label: 'Error' },
-                    { value: 'running', label: 'Running' },
-                  ]}
-                  value={tracingStatusFilter}
-                  onChange={(value) => {
-                    setTracingStatusFilter(value);
-                    setTracingPage(1);
-                  }}
-                  clearable
-                  className={classes.filterControlSm}
-                />
-                <DatePickerInput
-                  type="range"
-                  label={t('traces.dateRange')}
-                  placeholder={t('traces.selectRange')}
-                  value={tracingDateRange}
-                  onChange={(value) => {
-                    setTracingDateRange(value as [Date | null, Date | null]);
-                    setTracingPage(1);
-                  }}
-                  leftSection={<IconCalendar size={16} />}
-                  clearable
-                  className={classes.filterControlMd}
-                />
-                <Select
-                  label={t('traces.pageSize')}
-                  data={['25', '50', '100'].map((v) => ({ value: v, label: `${v} rows` }))}
-                  value={tracingPageSize.toString()}
-                  onChange={(v) => {
-                    setTracingPageSize(v ? parseInt(v, 10) : DEFAULT_PAGE_SIZE);
-                    setTracingPage(1);
-                  }}
-                  className={classes.filterControlXs}
-                />
-                <Box className={classes.filterActions}>
-                  <Button
-                    leftSection={<IconRefresh size={14} />}
-                    variant="light"
-                    size="sm"
-                    onClick={() => loadTracingSessions(true)}
-                    loading={tracingRefreshing}
-                  >
-                    {t('traces.refresh')}
-                  </Button>
-                </Box>
-              </Group>
-            </SectionCard>
-
-            {/* Sessions table */}
-            <SectionCard p="md">
-              <Stack gap="md">
-                <Group justify="space-between" align="center">
-                  <Text fw={600}>{t('traces.sessions')}</Text>
-                  <Badge size="sm" variant="light">
-                    {tracingTotal} total
-                  </Badge>
-                </Group>
-
-                <SessionTable
-                  sessions={tracingSessions}
-                  loading={tracingLoading}
-                  onRowClick={(sessionId) =>
-                    router.push(`/dashboard/tracing/sessions/${sessionId}`)
-                  }
-                  onThreadClick={(threadId) =>
-                    router.push(`/dashboard/tracing/threads/${threadId}`)
-                  }
-                />
-
-                {tracingPagination.totalPages > 1 && (
-                  <Group justify="space-between" align="center">
-                    <Text size="sm" c="dimmed">
-                      Page {tracingPage} of {tracingPagination.totalPages}
-                    </Text>
-                    <Pagination
-                      total={tracingPagination.totalPages}
-                      value={tracingPage}
-                      onChange={setTracingPage}
-                    />
-                  </Group>
-                )}
+                  ))}
               </Stack>
-            </SectionCard>
-          </Stack>
+            </Alert>
+          ) : null}
+          <Group justify="flex-end" className={classes.configSaveBar}>
+            <Button onClick={handleSaveConfig} loading={savingConfig}>{t('config.save')}</Button>
+          </Group>
         </Tabs.Panel>
 
-        {/* ── Usage Tab ──────────────────────────────────────── */}
-        <Tabs.Panel value="usage">
-          <Stack gap="md">
-            <SectionCard p="md">
+        {/*
+          Deploy — the lifecycle of a config that is already written:
+          freeze it (Versions), expose it (Publish), run it on a cadence
+          (Schedules), or take it out of the console entirely (Export).
+        */}
+        <Tabs.Panel value="deploy">
+          {/*
+            One page, like Configure — the four things you do with a config
+            that is already written sit one under the other, so "is this
+            published, exposed, scheduled?" is answered by scrolling, not by
+            clicking through a rail. `?tab=versions` etc. scroll here.
+          */}
+          <Paper withBorder radius="md" p="xl">
+            {!isConnected ? (
+            <ConfigSection first id="versions" title={t('versions.title')} description={t('versions.description')}>
               <Stack gap="md">
-                <Text size="lg" fw={600}>
-                  {t('usage.title')}
-                </Text>
-                <Text size="sm" c="dimmed">
-                  {t('usage.description', { name: agent.name })}
-                </Text>
-
-                <Divider />
-
-                {/* ── SDK Usage ─────────────────────────────── */}
-                <Text size="sm" fw={600}>
-                  {t('usage.sdkTitle')}
-                </Text>
-
-                <Text size="sm" c="dimmed" mb="xs">
-                  {t('usage.installLabel')}
-                </Text>
-                <Box>
-                  <Group gap="xs" align="center">
-                    <Code block className={classes.codeGrow}>
-                      npm install @cognipeer/console-sdk
-                    </Code>
-                    <CopyButton value="npm install @cognipeer/console-sdk">
-                      {({ copied, copy }) => (
-                        <Tooltip label={copied ? 'Copied' : 'Copy'}>
-                          <ActionIcon
-                            variant="subtle"
-                            onClick={copy}
-                            color={copied ? 'teal' : 'gray'}
-                          >
-                            {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                          </ActionIcon>
-                        </Tooltip>
-                      )}
-                    </CopyButton>
-                  </Group>
-                </Box>
-
-                <Text size="sm" c="dimmed" mb="xs">
-                  {t('usage.chatLabel')}
-                </Text>
-                <Code block>
-                  {`import { ConsoleClient } from '@cognipeer/console-sdk';
-
-const client = new ConsoleClient({
-  apiKey: 'YOUR_API_KEY',
-  baseURL: '${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}',
-});
-
-// ── Single turn ──────────────────────────────────
-const response = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Hello, how can you help me?',
-});
-console.log(response.output[0].content[0].text);
-
-// ── Multi-turn conversation ──────────────────────
-// Pass previous_response_id to continue the conversation
-const followUp = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Tell me more about that',
-  previous_response_id: response.id,
-});
-console.log(followUp.output[0].content[0].text);
-
-// ── Use a specific published version ─────────────
-const res = await client.agents.responses.create({
-  model: '${agent.key}',
-  input: 'Summarize the key points',
-  version: ${agent.publishedVersion || 1},
-});`}
-                </Code>
-
-                <Divider />
-
-                {/* ── REST Usage ────────────────────────────── */}
-                <Text size="sm" fw={600}>
-                  {t('usage.restTitle')}
-                </Text>
-
-                <Text size="sm" c="dimmed" mb="xs">
-                  {t('usage.restLabel')}
-                </Text>
-                <Code block>
-                  {`# First message
-curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Hello, how can you help me?"
-  }'
-
-# Continue conversation (use the id from the previous response)
-curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Tell me more about that",
-    "previous_response_id": "resp_<conversation_id>"
-  }'
-
-# Use a specific published version
-curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https://your-instance.com'}/api/client/v1/responses \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "${agent.key}",
-    "input": "Hello!",
-    "version": ${agent.publishedVersion || 1}
-  }'`}
-                </Code>
-
-                <Divider />
-
-                {/* ── Response Format ──────────────────────── */}
-                <Text size="sm" fw={600}>
-                  {t('usage.responseTitle')}
-                </Text>
-                <Code block>
-                  {`{
-  "id": "resp_<conversation_id>",
-  "object": "response",
-  "model": "${agent.name}",
-  "output": [
-    {
-      "id": "msg_abc123",
-      "type": "message",
-      "role": "assistant",
-      "content": [
-        {
-          "type": "output_text",
-          "text": "Agent response text..."
-        }
-      ]
-    }
-  ],
-  "status": "completed",
-  "usage": {
-    "input_tokens": 50,
-    "output_tokens": 100,
-    "total_tokens": 150
-  },
-  "created_at": 1719500000,
-  "previous_response_id": null,
-  "version": ${agent.publishedVersion || 'null'}
-}`}
-                </Code>
-              </Stack>
-            </SectionCard>
-          </Stack>
-        </Tabs.Panel>
-
-        {/* ── Publish Tab (A2A exposure) ─────────────────────── */}
-        <Tabs.Panel value="publish">
-          <Stack gap="md">
-            <SectionCard p="md">
-              <Stack gap="md">
-                <div>
-                  <Text size="lg" fw={600}>{t('a2a.title')}</Text>
-                  <Text size="sm" c="dimmed">{t('a2a.description')}</Text>
-                </div>
-
-                <Switch
-                  label={t('a2a.toggle')}
-                  checked={a2aEnabled}
-                  disabled={a2aSaving}
-                  onChange={(event) => updateA2a({ enabled: event.currentTarget.checked })}
-                />
-
-                {a2aEnabled && (
-                  <>
-                    <Divider />
-
-                    <div>
-                      <Text size="sm" fw={600} mb={6}>{t('a2a.accessMode')}</Text>
-                      <SegmentedControl
-                        value={a2aAccessMode}
-                        disabled={a2aSaving}
-                        onChange={(value) =>
-                          updateA2a({ accessMode: value === 'public' ? 'public' : 'token' })
-                        }
-                        data={[
-                          { value: 'token', label: t('a2a.accessToken') },
-                          { value: 'public', label: t('a2a.accessPublic') },
-                        ]}
-                      />
-                      <Text size="xs" c="dimmed" mt={6}>
-                        {a2aAccessMode === 'public'
-                          ? t('a2a.accessPublicDesc')
-                          : t('a2a.accessTokenDesc')}
-                      </Text>
-                    </div>
-
-                    {a2aIsPublic && (
-                      <Alert
-                        color="yellow"
-                        variant="light"
-                        icon={<IconAlertTriangle size={16} />}
-                      >
-                        {t('a2a.publicWarning')}
-                      </Alert>
-                    )}
-
-                    <Text size="sm" c="dimmed">{t('a2a.cardLabel')}</Text>
-                    <CopyableCode value={a2aCardUrl} />
-
-                    <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
-                    <CopyableCode value={a2aEndpointUrl} />
-
-                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
-                    <Code block>
-                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
-  -H "Authorization: Bearer YOUR_API_KEY" \\`}
-  -H "Content-Type: application/json" \\
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{ "kind": "text", "text": "Hello!" }],
-        "messageId": "msg-1"
-      }
-    }
-  }'
-
-# Continue the same conversation: set params.message.contextId
-# to the "contextId" returned in the previous task.`}
-                    </Code>
-                  </>
-                )}
-              </Stack>
-            </SectionCard>
-          </Stack>
-        </Tabs.Panel>
-
-        {/* ── Versions Tab ───────────────────────────────────── */}
-        <Tabs.Panel value="versions">
-          <Stack gap="md">
-            <SectionCard p="md">
-              <Stack gap="md">
-                <Group justify="space-between" align="center">
-                  <div>
-                    <Text size="lg" fw={600}>{t('versions.title')}</Text>
-                    <Text size="sm" c="dimmed">{t('versions.description')}</Text>
-                  </div>
+                <Group justify="flex-end" align="center">
                   <Group gap="xs">
                     <Badge size="sm" variant="light">{versionsTotal} total</Badge>
                     <Button
@@ -1747,8 +1340,379 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
                   </div>
                 )}
               </Stack>
-            </SectionCard>
-          </Stack>
+            </ConfigSection>
+            ) : null}
+
+            <ConfigSection first={isConnected} id="publish" title={t('a2a.title')} description={t('a2a.description')}>
+              <Stack gap="md">
+
+                <Switch
+                  label={t('a2a.toggle')}
+                  checked={a2aEnabled}
+                  disabled={a2aSaving}
+                  onChange={(event) => updateA2a({ enabled: event.currentTarget.checked })}
+                />
+
+                {a2aEnabled && (
+                  <>
+                    <Divider />
+
+                    <div>
+                      <Text size="sm" fw={600} mb={6}>{t('a2a.accessMode')}</Text>
+                      <SegmentedControl
+                        value={a2aAccessMode}
+                        disabled={a2aSaving}
+                        onChange={(value) =>
+                          updateA2a({ accessMode: value === 'public' ? 'public' : 'token' })
+                        }
+                        data={[
+                          { value: 'token', label: t('a2a.accessToken') },
+                          { value: 'public', label: t('a2a.accessPublic') },
+                        ]}
+                      />
+                      <Text size="xs" c="dimmed" mt={6}>
+                        {a2aAccessMode === 'public'
+                          ? t('a2a.accessPublicDesc')
+                          : t('a2a.accessTokenDesc')}
+                      </Text>
+                    </div>
+
+                    {a2aIsPublic && (
+                      <Alert
+                        color="yellow"
+                        variant="light"
+                        icon={<IconAlertTriangle size={16} />}
+                      >
+                        {t('a2a.publicWarning')}
+                      </Alert>
+                    )}
+
+                    <Text size="sm" c="dimmed">{t('a2a.cardLabel')}</Text>
+                    <CopyableCode value={a2aCardUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.endpointLabel')}</Text>
+                    <CopyableCode value={a2aEndpointUrl} />
+
+                    <Text size="sm" c="dimmed">{t('a2a.exampleLabel')}</Text>
+                    <Code block>
+                      {`curl -X POST ${a2aEndpointUrl} \\${a2aIsPublic ? '' : `
+  -H "Authorization: Bearer YOUR_API_KEY" \\`}
+  -H "Content-Type: application/json" \\
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{ "kind": "text", "text": "Hello!" }],
+        "messageId": "msg-1"
+      }
+    }
+  }'
+
+# Continue the same conversation: set params.message.contextId
+# to the "contextId" returned in the previous task.`}
+                    </Code>
+                  </>
+                )}
+              </Stack>
+            </ConfigSection>
+
+            {!isConnected ? (
+              <ConfigSection
+                id="schedules"
+                title="Recurring runs"
+                description="Run this agent on a cadence. Each fire uses the published version and its own conversation."
+              >
+                <AgentSchedulesPanel agentId={agentId} publishedVersion={agent.publishedVersion ?? null} />
+              </ConfigSection>
+            ) : null}
+
+            <ConfigSection
+              id="export"
+              title="Export"
+              description="Take the agent out of the console — a manifest to re-import elsewhere, or a runnable agent-sdk project."
+            >
+              <AgentExportPanel
+                agentId={agentId}
+                agentKey={agent.key}
+                versions={versions.map((version) => ({ version: version.version }))}
+                publishedVersion={agent.publishedVersion ?? null}
+                onImported={() => void loadAgent()}
+              />
+            </ConfigSection>
+          </Paper>
+        </Tabs.Panel>
+
+        {/*
+          Usage — how to call this agent from outside the console. Its own
+          tab because it is what someone integrating the agent opens first,
+          and it had been buried as the second item of Observe's rail.
+        */}
+        <Tabs.Panel value="usage">
+          <SectionCard p="md">
+            <Stack gap="md">
+              <Text size="lg" fw={600}>
+                {t('usage.title')}
+              </Text>
+              <Text size="sm" c="dimmed">
+                {t('usage.description', { name: agent.name })}
+              </Text>
+
+              <Divider />
+
+              {/* ── SDK Usage ─────────────────────────────── */}
+              <Text size="sm" fw={600}>
+                {t('usage.sdkTitle')}
+              </Text>
+
+              <Text size="sm" c="dimmed" mb="xs">
+                {t('usage.installLabel')}
+              </Text>
+              <CopyableCode value="npm install @cognipeer/console-sdk" />
+
+              <Text size="sm" c="dimmed" mb="xs">
+                {t('usage.chatLabel')}
+              </Text>
+              <Code block>
+                {`import { ConsoleClient } from '@cognipeer/console-sdk';
+
+const client = new ConsoleClient({
+  apiKey: 'YOUR_API_KEY',
+  baseURL: '${origin}',
+});
+
+// ── Single turn ──────────────────────────────────
+const response = await client.agents.responses.create({
+  model: '${agent.key}',
+  input: 'Hello, how can you help me?',
+});
+console.log(response.output[0].content[0].text);
+
+// ── Multi-turn conversation ──────────────────────
+// Pass previous_response_id to continue the conversation
+const followUp = await client.agents.responses.create({
+  model: '${agent.key}',
+  input: 'Tell me more about that',
+  previous_response_id: response.id,
+});
+console.log(followUp.output[0].content[0].text);
+
+// ── Use a specific published version ─────────────
+const res = await client.agents.responses.create({
+  model: '${agent.key}',
+  input: 'Summarize the key points',
+  version: ${agent.publishedVersion || 1},
+});`}
+              </Code>
+
+              <Divider />
+
+              {/* ── REST Usage ────────────────────────────── */}
+              <Text size="sm" fw={600}>
+                {t('usage.restTitle')}
+              </Text>
+
+              <Text size="sm" c="dimmed" mb="xs">
+                {t('usage.restLabel')}
+              </Text>
+              <Code block>
+                {`# First message
+curl -X POST ${origin}/api/client/v1/responses \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Hello, how can you help me?"
+  }'
+
+# Continue conversation (use the id from the previous response)
+curl -X POST ${origin}/api/client/v1/responses \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Tell me more about that",
+    "previous_response_id": "resp_<conversation_id>"
+  }'
+
+# Use a specific published version
+curl -X POST ${origin}/api/client/v1/responses \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Hello!",
+    "version": ${agent.publishedVersion || 1}
+  }'`}
+              </Code>
+
+              <Divider />
+
+              {/* ── Response Format ──────────────────────── */}
+              <Text size="sm" fw={600}>
+                {t('usage.responseTitle')}
+              </Text>
+              <Code block>
+                {`{
+  "id": "resp_<conversation_id>",
+  "object": "response",
+  "model": "${agent.name}",
+  "output": [
+    {
+      "id": "msg_abc123",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Agent response text..."
+        }
+      ]
+    }
+  ],
+  "status": "completed",
+  "usage": {
+    "input_tokens": 50,
+    "output_tokens": 100,
+    "total_tokens": 150
+  },
+  "created_at": 1719500000,
+  "previous_response_id": null,
+  "version": ${agent.publishedVersion || 'null'}
+}`}
+              </Code>
+
+              <Divider />
+
+              {/* ── Background execution ─────────────────── */}
+              <Text size="sm" fw={600}>Background execution (long-running turns)</Text>
+              <Text size="xs" c="dimmed">
+                For turns that may run past a normal HTTP timeout (deep research, long tool chains), add{' '}
+                <code>x-cognipeer-background: true</code> to the same <code>/responses</code> call — or send{' '}
+                <code>&quot;background&quot;: true</code> in the body, as an OpenAI SDK does. The header wins over the
+                body field, and either wins over the agent&apos;s default mode. Instead of
+                the completed answer, you immediately get back a run id to poll — the turn keeps executing
+                server-side even if you disconnect. Optionally set <code>Idempotency-Key</code> so a retried
+                request replays the same run instead of starting a second one, or <code>callback_url</code> to
+                get an HMAC-signed webhook when it finishes instead of polling.
+              </Text>
+              <Code block>
+{`# 1. Start it in the background — returns immediately with 202
+curl -X POST ${origin}/api/client/v1/responses \\
+  -H "Authorization: ******" \\
+  -H "Content-Type: application/json" \\
+  -H "x-cognipeer-background: true" \\
+  -H "Idempotency-Key: <a-client-generated-uuid>" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Research this topic in depth and summarize the findings",
+    "callback_url": "https://your-server.com/webhooks/agent-run"
+  }'
+
+# → 202 { "id": "run_<run_id>", "object": "agent.run", "status": "queued", "created_at": 1719500000 }
+
+# Same thing with the body field instead of the header (what an OpenAI SDK sends).
+# Precedence: x-cognipeer-background header > "background" body field > the agent's default mode.
+curl -X POST ${origin}/api/client/v1/responses \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Research this topic in depth and summarize the findings",
+    "background": true,
+    "callback_url": "https://your-server.com/webhooks/agent-run"
+  }'
+
+# 2. Poll status until it leaves "queued"/"running"
+curl ${origin}/api/client/v1/agents/runs/run_<run_id> \\
+  -H "Authorization: ******"
+
+# → 200 { "id": "run_<run_id>", "object": "agent.run", "status": "succeeded",
+#         "result": { ...same shape as a synchronous response... }, "error": null,
+#         "created_at": ..., "started_at": ..., "completed_at": ... }
+# status is one of: queued | running | succeeded | failed | canceled
+
+# 3. (optional) Cancel it before it finishes
+curl -X POST ${origin}/api/client/v1/agents/runs/run_<run_id>/cancel \\
+  -H "Authorization: ******"
+
+# Once succeeded, continue the conversation with a normal (synchronous) call —
+# the run's own "resp_" id inside "result.id" works as previous_response_id too:
+curl -X POST ${origin}/api/client/v1/responses \\
+  -H "Authorization: ******" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${agent.key}",
+    "input": "Now write it up as a one-pager",
+    "previous_response_id": "run_<run_id>"
+  }'`}
+              </Code>
+              <Text size="xs" c="dimmed">
+                Only one background (or synchronous) run may be in flight per conversation at a time — a
+                second request against the same conversation is rejected with <code>409 agent_run_conflict</code>{' '}
+                until the first one finishes.
+              </Text>
+
+              {/*
+                Every other surface the agent is reachable on. They were
+                built one at a time and only the Responses API was ever
+                documented here, so an integrator reading this tab would
+                not know an OpenAI client could call the agent at all.
+              */}
+              <Divider />
+              <Text size="sm" fw={600}>OpenAI-compatible (chat/completions)</Text>
+              <Text size="xs" c="dimmed">
+                Any OpenAI SDK can call this agent — put its key in <code>model</code> (or <code>agent:{agent.key}</code> if a
+                model shares the name). Runs the published version. Pass back <code>conversation_id</code> to continue a thread;
+                set <code>stream: true</code> for token deltas.
+              </Text>
+              <Code block>
+{`from openai import OpenAI
+
+client = OpenAI(base_url="${origin}/api/client/v1", api_key="YOUR_API_TOKEN")
+
+stream = client.chat.completions.create(
+    model="${agent.key}",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")`}
+              </Code>
+              <Code block>
+{`curl -N -X POST ${origin}/api/client/v1/chat/completions \\
+  -H "Authorization: Bearer YOUR_API_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "${agent.key}", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'`}
+              </Code>
+
+              <Divider />
+              <Text size="sm" fw={600}>A2A (agent-to-agent)</Text>
+              <Text size="xs" c="dimmed">
+                {a2aEnabled
+                  ? 'Exposed. Other agents discover it from the card and talk JSON-RPC — settings under Deploy → Publish.'
+                  : 'Not exposed yet — turn it on under Deploy → Publish, then other agents can discover it from the card below.'}
+              </Text>
+              <Code block>{`GET ${a2aCardUrl}`}</Code>
+
+              <Divider />
+              <Text size="sm" fw={600}>Assistants API</Text>
+              <Text size="xs" c="dimmed">
+                For clients built on OpenAI Assistants. This agent already IS an assistant — its id is
+                {' '}<code>asst_{agent.key}</code> — so there is nothing to create; <code>POST /assistants</code> would make
+                a new, separate agent. Start a thread and run it in one call:
+              </Text>
+              <Code block>
+{`POST ${origin}/api/client/v1/threads/runs
+{
+  "assistant_id": "asst_${agent.key}",
+  "thread": { "messages": [{ "role": "user", "content": "Hello" }] }
+}`}
+              </Code>
+            </Stack>
+          </SectionCard>
         </Tabs.Panel>
       </Tabs>
 
@@ -1802,6 +1766,25 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
         />
       </Modal>
 
+      <CompareVersionsDrawer
+        opened={compareOpen}
+        onClose={() => setCompareOpen(false)}
+        agentId={agentId}
+        publishedVersion={agent.publishedVersion ?? null}
+        versions={Array.from({ length: agent.latestVersion ?? 0 }, (_, index) => (agent.latestVersion ?? 0) - index)}
+        changedSections={[...changedSections].map((id) => CONFIG_SECTION_TITLES[id] ?? id)}
+      />
+      <StartSessionModal
+        opened={startSessionOpen}
+        onClose={() => setStartSessionOpen(false)}
+        agentId={agentId}
+        agentName={agent.name}
+        versions={versions}
+        publishedVersion={agent.publishedVersion ?? null}
+        isConnected={isConnected}
+        onStarted={handleSessionStarted}
+      />
+
       {isConnected ? (
         <ConnectAgentModal
           opened={editConnectionOpen}
@@ -1818,7 +1801,7 @@ curl -X POST ${typeof window !== 'undefined' ? window.location.origin : 'https:/
   );
 }
 
-/** One-line code block with a copy button (endpoint URLs on the Publish tab). */
+/** One-line code block with a copy button. */
 function CopyableCode({ value }: { value: string }) {
   return (
     <Group gap="xs" align="center">
@@ -1977,42 +1960,4 @@ function computeJsonDiff(
   }
 
   return diffs;
-}
-
-/** Collapsible "thinking" trace shown above an assistant reply from a reasoning model. */
-function ReasoningDisclosure({ reasoning }: { reasoning: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Box mb="xs">
-      <UnstyledButton
-        onClick={() => setOpen((v) => !v)}
-        style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-      >
-        <IconBrain size={13} color="var(--mantine-color-violet-6)" />
-        <Text size="xs" fw={500} c="violet.6">
-          Reasoning
-        </Text>
-        {open ? (
-          <IconChevronDown size={12} color="var(--mantine-color-violet-6)" />
-        ) : (
-          <IconChevronRight size={12} color="var(--mantine-color-violet-6)" />
-        )}
-      </UnstyledButton>
-      <Collapse in={open}>
-        <Text
-          size="xs"
-          c="dimmed"
-          mt={4}
-          pl="xs"
-          style={{
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            borderLeft: '2px solid var(--mantine-color-violet-2)',
-          }}
-        >
-          {reasoning}
-        </Text>
-      </Collapse>
-    </Box>
-  );
 }

@@ -3,7 +3,7 @@
  * Pure-function tests (no DB, no fastify).
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { detect, applyReplacements, tokenize, detokenize } from '@/lib/services/pii/detector';
 
 describe('pii service · detector — email', () => {
@@ -82,6 +82,31 @@ describe('pii service · detector — custom patterns', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].category).toBe('order_id');
     expect(findings[0].source).toBe('custom');
+  });
+
+  it('does not skip a benign custom regex when the wall clock advances before its sweep', () => {
+    const realNow = Date.now;
+    let calls = 0;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + (calls++ === 0 ? 0 : 51));
+
+    try {
+      const findings = detect('Order CUS-12345 for pickup', {
+        categories: {},
+        customPatterns: [
+          {
+            id: 'p1',
+            categoryId: 'order_id',
+            label: 'Order ID',
+            pattern: 'CUS-\\d{5}',
+            severity: 'medium',
+            enabled: true,
+          },
+        ],
+      });
+      expect(findings).toHaveLength(1);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('skips disabled custom patterns', () => {

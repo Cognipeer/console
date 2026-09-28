@@ -1,0 +1,462 @@
+/*
+ * Full page, not a cramped tab: the whole viewport minus the dashboard chrome
+ * and this page's own header, split into a transcript that scrolls and an
+ * inspector that does not.
+ */
+.workspace {
+  height: calc(100vh - 13rem);
+  height: calc(100dvh - 13rem);
+  min-height: 28rem;
+  align-items: stretch;
+}
+
+.transcriptPanel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.transcriptToolbar {
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+}
+
+/*
+ * The turn strip: one segment per answer, width proportional to how long that
+ * answer took. A 40s tool-heavy turn next to a 1s reply is the thing you are
+ * looking for when a session feels slow, and a list of timestamps does not
+ * show it.
+ */
+.timelineScroll {
+  border-bottom: 1px solid var(--mantine-color-gray-3);
+  flex-shrink: 0;
+}
+
+.timelineSegment {
+  height: 1.25rem;
+  border-radius: 2px;
+  background: var(--mantine-color-blue-4);
+  flex-shrink: 0;
+  transition: background 120ms ease;
+}
+
+.timelineSegment:hover {
+  background: var(--mantine-color-blue-6);
+}
+
+.timelineSegmentFailed {
+  background: var(--mantine-color-red-4);
+}
+
+.timelineSegmentFailed:hover {
+  background: var(--mantine-color-red-6);
+}
+
+.panelBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chatEmpty {
+  flex: 1;
+}
+
+.chatScroll {
+  flex: 1;
+  min-height: 0;
+}
+
+/*
+ * Full-width turns rather than chat bubbles: a turn here carries reasoning,
+ * a tool timeline and a structured-output block, none of which fit a 75%-wide
+ * bubble, and reading a transcript top-to-bottom beats ping-ponging across
+ * the page.
+ */
+.turn {
+  scroll-margin-block: 3rem;
+}
+
+.chatMarkdown {
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.preWrap {
+  white-space: pre-wrap;
+}
+
+.disclosureButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.reasoningBody {
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 2px solid var(--mantine-color-violet-2);
+}
+
+.payloadCode {
+  font-size: 11px;
+  max-height: 13.75rem;
+  overflow: auto;
+}
+
+.outputCode {
+  font-size: 11px;
+  max-height: 16.25rem;
+  overflow: auto;
+}
+
+.composer {
+  border-top: 1px solid var(--mantine-color-gray-3);
+}
+
+.flexGrow {
+  flex: 1;
+}
+
+.noWrap {
+  white-space: nowrap;
+}
+
+/* ── Inspector ──────────────────────────────────────────────────────── */
+
+.inspectorPanel {
+  width: 23rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidePanel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.sidePanelBody {
+  flex: 1;
+  min-height: 0;
+}
+
+.metaRow {
+  padding-block: 5px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.metaRow:last-child {
+  border-bottom: 0;
+}
+
+/* ── Inspector summary + tabs ── */
+.sideSummary {
+  padding: 12px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.stat {
+  padding: 7px 9px;
+  border-radius: var(--ds-r-sm, 8px);
+  background: var(--ds-surface-2, var(--mantine-color-gray-0));
+  min-width: 0;
+  cursor: default;
+}
+
+.statValue {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.liveDot,
+.idleDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.liveDot {
+  background: var(--ds-accent);
+  box-shadow: 0 0 0 3px var(--ds-accent-ring);
+}
+
+.idleDot {
+  background: var(--ds-text-faint);
+}
+
+.sideTabs {
+  padding-inline: 6px;
+  flex-wrap: nowrap;
+}
+
+.sideTab {
+  padding: 9px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sideTab[data-active] {
+  font-weight: 600;
+}
+
+.tabCount {
+  margin-left: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ds-text-muted);
+  background: var(--ds-surface-2);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.metaValue {
+  min-width: 0;
+  max-width: 60%;
+  text-align: right;
+}
+
+.copyId {
+  max-width: 100%;
+}
+
+.costChart {
+  height: 3.5rem;
+}
+
+.costBar {
+  flex: 1;
+  min-width: 3px;
+  max-width: 1.5rem;
+  border-radius: 2px 2px 0 0;
+  background: var(--mantine-color-teal-4);
+}
+
+.costBar:hover {
+  background: var(--mantine-color-teal-6);
+}
+
+.usageTable td {
+  padding-inline: 0;
+}
+
+.sidePanelCode {
+  font-size: 11px;
+  max-height: 12.5rem;
+  overflow: auto;
+}
+
+.eventRow {
+  padding: 4px 6px;
+  border-radius: var(--mantine-radius-sm);
+}
+
+.eventRow:hover {
+  background: var(--ds-surface-2);
+}
+
+.eventBadge {
+  flex-shrink: 0;
+}
+
+.eventName {
+  min-width: 0;
+}
+
+@media (max-width: 64em) {
+  /*
+   * Below a laptop width the two panes stop fitting side by side, so the
+   * inspector moves under the transcript rather than squeezing it.
+   */
+  .workspace {
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+  }
+
+  .transcriptPanel {
+    height: calc(100vh - 18rem);
+    height: calc(100dvh - 18rem);
+    min-height: 24rem;
+  }
+
+  .inspectorPanel {
+    width: 100%;
+    max-height: 28rem;
+  }
+}
+
+.toolRow {
+  padding: 4px 6px;
+  border-radius: var(--mantine-radius-sm);
+}
+
+.toolRow:hover {
+  background: var(--mantine-color-gray-0);
+}
+
+/*
+ * TypographyStylesProvider is built for article-sized prose; inside a
+ * transcript turn its default margins leave a heading floating half a screen
+ * from the paragraph it introduces.
+ */
+.markdownBody :global(h1),
+.markdownBody :global(h2),
+.markdownBody :global(h3) {
+  margin-block: var(--app-space-3) var(--app-space-1);
+  font-size: var(--mantine-font-size-md);
+}
+
+.markdownBody :global(p),
+.markdownBody :global(ul),
+.markdownBody :global(ol),
+.markdownBody :global(table) {
+  margin-block: var(--app-space-1);
+  font-size: var(--mantine-font-size-sm);
+}
+
+.markdownBody :global(pre) {
+  font-size: 12px;
+}
+
+.markdownBody :global(:first-child) {
+  margin-block-start: 0;
+}
+
+.liveToolIcon {
+  color: var(--mantine-color-dimmed);
+  flex-shrink: 0;
+}
+
+/*
+ * A context summarization, inline in the turn where it happened. Indigo so it
+ * reads as a system event — distinct from tool calls (blue), reasoning
+ * (violet) and failures (red) — with a before/after bar that shows at a
+ * glance how much of the context the agent let go of.
+ */
+.compactionCard {
+  border: 1px dashed var(--mantine-color-indigo-3);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-indigo-0);
+  overflow: hidden;
+}
+
+.compactionCardWarn {
+  border-color: var(--mantine-color-orange-3);
+  background: var(--mantine-color-orange-0);
+}
+
+.compactionHeader {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+}
+
+.compactionHeader:disabled {
+  cursor: default;
+}
+
+.compactionIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: var(--mantine-color-white);
+  background: var(--mantine-color-indigo-5);
+}
+
+.compactionIcon[data-tone='orange'] {
+  background: var(--mantine-color-orange-5);
+}
+
+.compactionBar {
+  position: relative;
+  flex: 1;
+  max-width: 220px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--mantine-color-gray-3);
+  overflow: hidden;
+}
+
+.compactionBarAfter {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--mantine-color-indigo-5);
+}
+
+.compactionBarAfter[data-tone='orange'] {
+  background: var(--mantine-color-orange-5);
+}
+
+.compactionBody {
+  padding: 4px 12px 12px 42px;
+}
+
+.compactionSectionIcon {
+  display: flex;
+}
+
+.compactionDirective {
+  white-space: pre-wrap;
+  padding: 4px 8px;
+  border-left: 3px solid var(--mantine-color-indigo-5);
+  border-radius: 2px;
+  background: var(--mantine-color-white);
+}
+
+.compactionFactKey {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow-wrap: anywhere;
+}
+
+/* A failed turn stays in the transcript, where the question was asked. */
+.errorTurn {
+  border-left: 3px solid var(--mantine-color-red-5);
+  padding-left: 10px;
+}
+
+[data-mantine-color-scheme='dark'] .compactionCard {
+  border-color: var(--mantine-color-indigo-8);
+  background: rgba(76, 110, 245, 0.08);
+}
+
+[data-mantine-color-scheme='dark'] .compactionCardWarn {
+  border-color: var(--mantine-color-orange-8);
+  background: rgba(253, 126, 20, 0.08);
+}
+
+[data-mantine-color-scheme='dark'] .compactionBar {
+  background: var(--mantine-color-dark-4);
+}
+
+[data-mantine-color-scheme='dark'] .compactionDirective {
+  background: var(--mantine-color-dark-6);
+}

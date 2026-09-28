@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   IconArrowRight,
   IconBrain,
@@ -33,6 +32,7 @@ import {
   type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
+import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
 
 /* ──────────────────────────────────────────────────────────────────────
    Public API: <CommandPalette /> mounted globally + openCommandPalette()
@@ -345,7 +345,7 @@ interface CommandPaletteProps {
 }
 
 export default function CommandPalette({ isTenantAdmin = false }: CommandPaletteProps) {
-  const router = useRouter();
+  const { push: navigate } = useNavigationFeedback();
   const tNav = useTranslations('navigation');
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -548,9 +548,9 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
     (item: ResultItem) => {
       pushRecent(item.id);
       setOpen(false);
-      router.push(item.href);
+      navigate(item.href);
     },
-    [router],
+    [navigate],
   );
 
   /* ── Keyboard navigation on the list ─────────────────────────────── */

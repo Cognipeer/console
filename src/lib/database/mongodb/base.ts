@@ -78,6 +78,8 @@ export const COLLECTIONS = {
   agents: 'agents',
   agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
+  agentConversationStates: 'agent_conversation_states',
+  agentSkills: 'agent_skills',
   tenants: 'tenants',
   users: 'users',
   apiTokens: 'api_tokens',
@@ -97,6 +99,8 @@ export const COLLECTIONS = {
   ocrJobItems: 'ocr_job_items',
   batchJobs: 'batch_jobs',
   batchJobItems: 'batch_job_items',
+  agentRuns: 'agent_runs',
+  agentRunLocks: 'agent_run_locks',
   realtimeModels: 'realtime_models',
   realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────

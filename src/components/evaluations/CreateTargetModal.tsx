@@ -30,6 +30,8 @@ interface FormValues {
   kind: 'agent' | 'model' | 'external' | 'rag';
   modelKey: string;
   agentKey: string;
+  /** '' means "follow the published version". Held as a string for Mantine's Select. */
+  agentVersion: string;
   /** Retrieval targets: which Knowledge Engine module to query, and how much. */
   ragModuleKey: string;
   retrievalTopK: number | '';
@@ -63,6 +65,23 @@ function referenceValue(v: FormValues): string {
   return (v.kind === 'agent' ? v.agentKey : v.kind === 'rag' ? v.ragModuleKey : v.modelKey) || '—';
 }
 
+const isJson = (text: string) => {
+  try { JSON.parse(text); return true; } catch { return false; }
+};
+
+type Named = { key: string; name: string };
+const toOption = (r: Named) => ({ value: r.key, label: r.name });
+
+/** GET a list endpoint; `apply` runs only on success, so a failed fetch leaves the dropdown as it was. */
+async function loadList<T>(url: string, field: string, apply: (rows: T[]) => void): Promise<void> {
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (res.ok) apply(((await res.json())[field] ?? []) as T[]);
+  } catch {
+    /* non-fatal — the dropdown stays empty */
+  }
+}
+
 /** Assemble the OpenAI-shaped response_format the target will send. */
 function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined {
   if (v.responseMode === 'none') return undefined;
@@ -76,13 +95,15 @@ function buildResponseFormat(v: FormValues): Record<string, unknown> | undefined
 
 export default function CreateTargetModal({ opened, onClose, onCreated, models = [], editing = null }: CreateTargetModalProps) {
   const [loading, setLoading] = useState(false);
-  const [agents, setAgents] = useState<{ value: string; label: string }[]>([]);
+  const [agents, setAgents] = useState<{ value: string; label: string; _id: string }[]>([]);
+  const [agentVersionOptions, setAgentVersionOptions] = useState<{ value: string; label: string }[]>([]);
+  const [agentVersionsLoading, setAgentVersionsLoading] = useState(false);
   const [prompts, setPrompts] = useState<{ value: string; label: string }[]>([]);
   const [ragModules, setRagModules] = useState<{ value: string; label: string }[]>([]);
   const isEdit = Boolean(editing);
   const form = useForm<FormValues>({
     initialValues: {
-      name: '', description: '', kind: 'model', modelKey: '', agentKey: '',
+      name: '', description: '', kind: 'model', modelKey: '', agentKey: '', agentVersion: '',
       ragModuleKey: '', retrievalTopK: '', retrievalMinScore: '',
       promptMode: 'none', promptKey: '', systemPrompt: '',
       responseMode: 'none', jsonSchema: '', maxTokens: '',
@@ -97,7 +118,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       jsonSchema: (v, values) => {
         if (values.responseMode !== 'json_schema') return null;
         if (!v.trim()) return 'Paste the JSON schema';
-        try { JSON.parse(v); return null; } catch { return 'Not valid JSON'; }
+        return isJson(v) ? null : 'Not valid JSON';
       },
     },
   });
@@ -114,6 +135,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         kind: editing.kind,
         modelKey: editing.modelKey ?? '',
         agentKey: editing.agentKey ?? '',
+        agentVersion: typeof editing.agentVersion === 'number' ? String(editing.agentVersion) : '',
         ragModuleKey: editing.ragModuleKey ?? '',
         retrievalTopK: editing.retrievalTopK ?? '',
         retrievalMinScore: editing.retrievalMinScore ?? '',
@@ -128,36 +150,60 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
       });
     }
     void (async () => {
-      try {
-        const res = await fetch('/api/agents', { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          setAgents(((data.agents ?? []) as Array<{ key: string; name: string }>).map((a) => ({ value: a.key, label: a.name })));
-        }
-      } catch {
-        /* non-fatal — agent dropdown stays empty */
-      }
-      try {
-        const res = await fetch('/api/prompts', { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          setPrompts(((data.prompts ?? []) as Array<{ key: string; name: string }>).map((p) => ({ value: p.key, label: p.name })));
-        }
-      } catch {
-        /* non-fatal — prompt dropdown stays empty */
-      }
-      try {
-        const res = await fetch('/api/rag/modules', { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          setRagModules(((data.modules ?? []) as Array<{ key: string; name: string }>).map((m) => ({ value: m.key, label: m.name })));
-        }
-      } catch {
-        /* non-fatal — Knowledge Engine dropdown stays empty */
-      }
+      await loadList<Named & { _id: string }>('/api/agents', 'agents', (rows) =>
+        setAgents(rows.map((a) => ({ ...toOption(a), _id: a._id }))),
+      );
+      await loadList<Named>('/api/prompts', 'prompts', (rows) => setPrompts(rows.map(toOption)));
+      await loadList<Named>('/api/rag/modules', 'modules', (rows) => setRagModules(rows.map(toOption)));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
+
+  const v = form.getValues();
+  const kind = v.kind;
+
+  /**
+   * Versions are fetched per agent rather than bundled into the agent list:
+   * an agent's history can run to dozens of entries, and the list endpoint is
+   * also what the Agents page pages through.
+   */
+  useEffect(() => {
+    if (!opened || kind !== 'agent' || !v.agentKey) {
+      setAgentVersionOptions([]);
+      return;
+    }
+    const agentId = agents.find((entry) => entry.value === v.agentKey)?._id;
+    if (!agentId) {
+      setAgentVersionOptions([]);
+      return;
+    }
+
+    let cancelled = false;
+    setAgentVersionsLoading(true);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/agents/${agentId}/versions?limit=100`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const published: number | null = data.publishedVersion ?? null;
+        setAgentVersionOptions(
+          ((data.versions ?? []) as Array<{ version: number }>).map((entry) => ({
+            value: String(entry.version),
+            label: `v${entry.version}${entry.version === published ? ' · published' : ''}`,
+          })),
+        );
+      } catch {
+        /* non-fatal — the picker falls back to "published" */
+      } finally {
+        if (!cancelled) setAgentVersionsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, kind, v.agentKey, agents.length]);
 
   const handleSubmit = async () => {
     if (form.validate().hasErrors) return;
@@ -169,6 +215,9 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
         description: v.description || undefined,
         modelKey: v.kind === 'model' ? v.modelKey : undefined,
         agentKey: v.kind === 'agent' ? v.agentKey.trim() : undefined,
+        // `null`, not `undefined`: an absent key means "leave alone" on both DB
+        // providers, so clearing the pin on an edit needs an explicit value.
+        agentVersion: v.kind === 'agent' ? (v.agentVersion ? Number(v.agentVersion) : null) : undefined,
         ragModuleKey: v.kind === 'rag' ? v.ragModuleKey : undefined,
         // Left empty, the module's own defaultTopK / defaultMinScore apply —
         // which is what a suite should test unless it is testing the knobs.
@@ -204,8 +253,6 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     }
   };
 
-  const v = form.getValues();
-  const kind = v.kind;
   const validName = v.name.trim().length > 0;
   const validRef = kind === 'model' ? Boolean(v.modelKey)
     : kind === 'agent' ? v.agentKey.trim().length > 0
@@ -215,9 +262,7 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
     v.promptMode === 'promptKey' ? Boolean(v.promptKey)
       : v.promptMode === 'inline' ? v.systemPrompt.trim().length > 0
         : true;
-  const validSchema = v.responseMode !== 'json_schema' || (() => {
-    try { JSON.parse(v.jsonSchema); return true; } catch { return false; }
-  })();
+  const validSchema = v.responseMode !== 'json_schema' || isJson(v.jsonSchema);
   const canSubmit = validName && validRef && (kind !== 'model' || (validPrompt && validSchema));
 
   const checklist = [
@@ -290,14 +335,41 @@ export default function CreateTargetModal({ opened, onClose, onCreated, models =
           </FormField>
         )}
         {kind === 'agent' && (
-          <FormField label="Agent" required>
-            <Select
-              placeholder={agents.length ? 'Select an agent…' : 'No registered agents found'}
-              data={agents}
-              searchable
-              {...form.getInputProps('agentKey')}
-            />
-          </FormField>
+          <>
+            <FormField label="Agent" required>
+              <Select
+                placeholder={agents.length ? 'Select an agent…' : 'No registered agents found'}
+                data={agents}
+                searchable
+                {...form.getInputProps('agentKey')}
+                onChange={(next) => {
+                  // A version number is only meaningful for the agent it came
+                  // from, so switching agents clears the pin rather than
+                  // carrying "v4" onto an agent that may only have two.
+                  form.setFieldValue('agentKey', next ?? '');
+                  form.setFieldValue('agentVersion', '');
+                }}
+              />
+            </FormField>
+            <FormField
+              label="Version"
+              hint="Pin the suite to one published version. Left on “published”, the target follows whatever is live — right for a guard suite, wrong for an A/B."
+            >
+              <Select
+                placeholder={
+                  !v.agentKey
+                    ? 'Select an agent first'
+                    : agentVersionsLoading
+                      ? 'Loading versions…'
+                      : 'Published (follows the live version)'
+                }
+                data={agentVersionOptions}
+                disabled={!v.agentKey || agentVersionsLoading}
+                clearable
+                {...form.getInputProps('agentVersion')}
+              />
+            </FormField>
+          </>
         )}
         {kind === 'rag' && (
           <FormField label="Knowledge Engine module" required hint="Each dataset item's user message becomes a query against this module.">

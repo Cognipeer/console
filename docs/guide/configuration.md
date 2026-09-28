@@ -146,12 +146,15 @@ See [Cluster](/guide/cluster) for the full topology / assignment model.
 | `SMTP_USER` | SMTP username | — |
 | `SMTP_PASS` | SMTP password | — |
 | `SMTP_FROM` | From address | Falls back to `SMTP_USER` |
+| `SENDGRID_API_KEY` | SendGrid API key; used through SendGrid SMTP when `SMTP_*` credentials are absent | — |
+| `SENDGRID_FROM_EMAIL` | Verified SendGrid sender address | — |
 
 ### Application
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NEXT_PUBLIC_APP_URL` | Public application URL | `http://localhost:3000` |
+| `APP_URL` | Server public application URL used in emails and generated links | `http://localhost:3000` |
+| `NEXT_PUBLIC_APP_URL` | Legacy fallback for `APP_URL` | `http://localhost:3000` |
 | `SHUTDOWN_TIMEOUT_MS` | Graceful shutdown timeout | `15000` |
 | `TRACING_MAX_BODY_SIZE_MB` | Max tracing payload size | `10` |
 | `HEALTH_ENDPOINT_ENABLED` | Enable health endpoints | `true` |

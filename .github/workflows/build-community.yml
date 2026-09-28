@@ -124,8 +124,6 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: mode=min
           tags: ghcr.io/cognipeer/console:${{ steps.vars.outputs.release_tag }}
           labels: |

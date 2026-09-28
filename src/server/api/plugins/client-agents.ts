@@ -1,102 +1,57 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgent, IAgentConfig } from '@/lib/database';
+import type { AgentStatus, IAgentConfig } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
   createConversation,
   deleteAgentRecord,
-  executeAgentChat,
   getAgentByKey,
   getConversationById,
   listAgents,
-  normalizeA2aMetadataUpdate,
-  prepareConnectionForStorage,
-  publishAgent,
   updateAgentRecord,
+  runSyncAgentTurn,
+  createBackgroundAgentRun,
+  getAgentRunStatus,
+  isBackgroundModeRequested,
+  agentRunConflictErrorBody,
+  agentSyncTimeoutErrorBody,
+  idempotencyKeyRequiresBackgroundErrorBody,
+  idempotencyKeyConflictErrorBody,
+  agentRunConcurrencyLimitErrorBody,
 } from '@/lib/services/agents';
+import {
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  agentDefaultCallback,
+  backgroundDisabledErrorBody,
+  invalidRequestErrorBody,
+  lookupIdempotentAgentRun,
+  resolveAgentExecutionLimits,
+  serializeAgentRun,
+  validateCallbackRequest,
+} from '@/lib/services/agents/agentRunService';
+import type { LicenseType } from '@/lib/license/license-manager';
+import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   getApiTokenContextForRequest,
+  getHeaderValue,
   readJsonBody,
   withClientApiRequestContext,
 } from '../fastify-utils';
-import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
+import {
+  connectedConfigForUpdate,
+  normalizeA2aUpdate,
+  prepareNewAgentConfig,
+  publishValidatedAgent,
+  redactAgent,
+  sendAgentGuardrailBlock,
+  validateNativeConfigUpdate,
+} from './agent-config-write';
+import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 
 const logger = createLogger('api:client-agents');
-
-/**
- * A guardrail refusal answered as the inference routes answer
- * `GuardrailBlockError`: same status, same `{ error: { type: 'guardrail_block' } }`
- * envelope, so an SDK client branches on `error.type` and reads `guardrail_key`
- * and `reason` whether it called `/chat/completions` or `/responses`. Before
- * this the client API returned `500 Internal server error` for a policy
- * decision — no reason, no key, indistinguishable from an outage.
- */
-function sendAgentGuardrailBlock(
-  reply: { code: (status: number) => { send: (body: unknown) => unknown } },
-  error: unknown,
-) {
-  if (!(error instanceof AgentGuardrailBlockedError)) return null;
-  return reply.code(error.status).send({
-    error: {
-      type: 'guardrail_block',
-      action: 'block',
-      message: error.message,
-      reason: error.reason,
-      guardrail_key: error.guardrailKey ?? null,
-      hook: error.hook ?? null,
-    },
-  });
-}
-
-/**
- * Strip secret material (encrypted inline API keys) from an agent before it
- * leaves the API. Mirrors the dashboard `agents.ts` helper — the presence of a
- * key is surfaced as `connection.hasApiKey`.
- */
-function redactAgent<T extends IAgent>(agent: T): T {
-  const connection = agent.config?.connection;
-  if (!connection) return agent;
-  const { apiKeyEnc, ...rest } = connection;
-  return {
-    ...agent,
-    config: {
-      ...agent.config,
-      connection: { ...rest, hasApiKey: Boolean(apiKeyEnc) },
-    },
-  } as unknown as T;
-}
-
-/**
- * Normalize an incoming agent config. For connected (external) agents the
- * connection is validated and its inline API key encrypted; native agents must
- * carry a modelKey. Throws (Error) on invalid input — callers map to 400.
- */
-function normalizeAgentConfig(rawConfig: unknown): IAgentConfig {
-  if (!rawConfig || typeof rawConfig !== 'object') {
-    throw new Error('Agent config is required');
-  }
-  const cfg = rawConfig as Record<string, unknown>;
-
-  if (cfg.kind === 'external') {
-    // Guardrail bindings are carried through and validated by the caller with
-    // `resolveConfigGuardrailBindings`; dropping them here is what left a
-    // connected agent's saved bindings unenforced (the enforcement branch reads
-    // them off the stored config). Mirrors the dashboard `agents.ts` helper.
-    return {
-      kind: 'external',
-      connection: prepareConnectionForStorage(cfg.connection),
-      ...carriedGuardrailFields(cfg),
-    };
-  }
-
-  if (typeof cfg.modelKey !== 'string' || !cfg.modelKey) {
-    throw new Error('Model configuration is required');
-  }
-  return cfg as IAgentConfig;
-}
 
 function extractUserMessage(input: unknown): string | null {
   if (typeof input === 'string') {
@@ -133,8 +88,22 @@ function extractUserMessage(input: unknown): string | null {
   return null;
 }
 
-function conversationIdFromResponseId(responseId: string): string | null {
-  return responseId.startsWith('resp_') ? responseId.slice(5) : null;
+/**
+ * Dual-prefix (§8, §12.3): `resp_<id>` is the synchronous scheme's id
+ * (conversation-scoped) and also what a completed background run embeds as
+ * its OWN `result.id` (`resp_<runId>`, §8); `run_<id>` is the background
+ * run RESOURCE's own top-level id (the status-envelope `id` a caller
+ * polling `GET /runs/:id` actually sees and is the most natural thing to
+ * copy back as `previous_response_id`). Both must be accepted. Returns
+ * `null` for anything else — an unrecognized prefix must 404, not silently
+ * fall through to starting a brand-new conversation.
+ */
+function conversationIdFromResponseId(
+  responseId: string,
+): { strippedId: string; kind: 'resp' | 'run' } | null {
+  if (responseId.startsWith('resp_')) return { strippedId: responseId.slice(5), kind: 'resp' };
+  if (responseId.startsWith('run_')) return { strippedId: responseId.slice(4), kind: 'run' };
+  return null;
 }
 
 function createResponsesHandler(usePublished: boolean) {
@@ -174,22 +143,103 @@ function createResponsesHandler(usePublished: boolean) {
       }
 
       let conversationId: string | undefined;
+      // §12.15's hash must never depend on a conversationId that is FRESH
+      // on this specific attempt — a caller retrying "start a new
+      // conversation" (no previous_response_id) gets a brand-new
+      // conversationId on every attempt, so including it in the hash would
+      // make the SAME logical retry never match itself. Only stabilize the
+      // hash on conversationId when the caller explicitly continued an
+      // EXISTING conversation via previous_response_id.
+      let idempotencyConversationScope: string | null = null;
       if (typeof body.previous_response_id === 'string') {
-        const resolvedConversationId = conversationIdFromResponseId(body.previous_response_id);
-        if (resolvedConversationId) {
-          const conversation = await getConversationById(ctx.tenantDbName, resolvedConversationId);
-          // agentKey alone is not unique across projects (findAgentByKey takes
-          // an optional projectId precisely because the same key can exist in
-          // more than one) — without the projectId check, a token in project B
-          // could reuse a previous_response_id from project A's conversation
-          // with the same-keyed agent and read/append to project A's history.
-          if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
-            return reply.code(404).send({
-              error: 'previous_response_id does not match a valid conversation',
-            });
-          }
-          conversationId = resolvedConversationId;
+        // Dual-mode (§8, §12.3): a background/run response is polled by its
+        // OWN `run_<runId>` id, and its embedded `result.id` is
+        // `resp_<runId>` — a caller may reasonably pass either back as
+        // `previous_response_id`. A `run_` id MUST resolve via the AgentRun
+        // lookup (no raw-conversationId fallback: that scheme never existed
+        // for run ids). A `resp_` id keeps the existing dual-mode: try the
+        // AgentRun lookup first, fall back to the raw-conversationId scheme
+        // (the synchronous, conversation-scoped id) only if no run matches.
+        //
+        // agentKey alone is not unique across projects (findAgentByKey takes
+        // an optional projectId precisely because the same key can exist in
+        // more than one) — without the projectId check, a token in project B
+        // could reuse a previous_response_id from project A's conversation
+        // with the same-keyed agent and read/append to project A's history.
+        const parsed = conversationIdFromResponseId(body.previous_response_id);
+        const run = parsed
+          ? await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, parsed.strippedId)
+          : null;
+        const resolvedConversationId = run ? run.conversationId : parsed?.kind === 'resp' ? parsed.strippedId : undefined;
+        const conversation = resolvedConversationId !== undefined
+          ? await getConversationById(ctx.tenantDbName, resolvedConversationId)
+          : null;
+        if (resolvedConversationId === undefined || !conversation
+          || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
+          return reply.code(404).send({
+            error: 'previous_response_id does not match a valid conversation',
+          });
         }
+        conversationId = resolvedConversationId;
+        idempotencyConversationScope = resolvedConversationId;
+      }
+
+      // Effective execution limits: min(env ceiling, tenant quota, the
+      // agent's own Execution settings). Execution settings are operational
+      // and apply without publishing, so they are read from the live agent.
+      const limits = await resolveAgentExecutionLimits({
+        agentConfig: agent.config,
+        quotaContext: {
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          licenseType: ctx.tenant.licenseType as LicenseType,
+          userId: ctx.tokenRecord.userId,
+          tokenId: ctx.tokenRecord._id?.toString(),
+        },
+      });
+
+      const idempotencyKey = getHeaderValue(request, 'idempotency-key');
+      const background = isBackgroundModeRequested(
+        getHeaderValue(request, 'x-cognipeer-background'),
+        body,
+        limits.defaultMode,
+      );
+      // §9/§12.15: Idempotency-Key is background-only — sync mode persists
+      // nothing to key a retry against, so honoring it would silently do
+      // nothing. Rejected loudly instead.
+      if (idempotencyKey && !background) {
+        return reply.code(400).send(idempotencyKeyRequiresBackgroundErrorBody());
+      }
+      if (idempotencyKey && idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+        return reply.code(400).send(invalidRequestErrorBody(`Idempotency-Key must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`, 'idempotency_key_too_long'));
+      }
+      if (background && !limits.backgroundEnabled) {
+        return reply.code(400).send(backgroundDisabledErrorBody());
+      }
+
+      let callback: { url?: string; secret?: string } = {};
+      if (background) {
+        const requested = await validateCallbackRequest(body.callback_url, body.callback_secret);
+        if (!requested.ok) return reply.code(400).send(invalidRequestErrorBody(requested.message, 'invalid_callback'));
+        callback = requested.url ? { url: requested.url, secret: requested.secret } : agentDefaultCallback(agent.config);
+      }
+
+      // A replayed request must not mint a fresh conversation first — every
+      // retry of "start a new conversation" would leave an orphan behind.
+      if (background && idempotencyKey) {
+        const prior = await lookupIdempotentAgentRun({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentKey: agent.key,
+          userMessage,
+          version: requestedVersion,
+          idempotencyKey,
+          idempotencyConversationScope,
+        });
+        if (prior.kind === 'conflict') return reply.code(409).send(idempotencyKeyConflictErrorBody());
+        if (prior.kind === 'replay') return reply.code(200).send(serializeAgentRun(prior.run));
       }
 
       if (!conversationId) {
@@ -199,30 +249,79 @@ function createResponsesHandler(usePublished: boolean) {
           ctx.projectId,
           ctx.tokenRecord.userId,
           agent.key,
+          undefined,
+          { source: 'api' },
         );
         conversationId = String(conversation._id);
       }
 
+      const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
       const runtimeContext = buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
         userId: ctx.tokenRecord.userId,
-        tokenId: ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined,
+        tokenId: apiTokenId,
         source: 'api',
       });
 
-      const result = await executeAgentChat({
-        agentKey: agent.key,
-        conversationId,
-        projectId: ctx.projectId,
-        tenantDbName: ctx.tenantDbName,
-        tenantId: ctx.tenantId,
-        usePublished,
-        userId: ctx.tokenRecord.userId,
-        userMessage,
-        version: requestedVersion,
-        runtimeContext,
-      });
+      if (background) {
+        const outcome = await createBackgroundAgentRun({
+          tenantId: ctx.tenantId,
+          tenantDbName: ctx.tenantDbName,
+          projectId: ctx.projectId,
+          agentKey: agent.key,
+          conversationId,
+          userMessage,
+          userId: ctx.tokenRecord.userId,
+          version: requestedVersion,
+          usePublished,
+          runtimeContext,
+          apiTokenId,
+          callbackUrl: callback.url,
+          callbackSecret: callback.secret,
+          idempotencyKey: idempotencyKey ?? undefined,
+          idempotencyConversationScope,
+          limits,
+        });
+        if (outcome.kind === 'conflict') {
+          return reply.code(409).send(agentRunConflictErrorBody());
+        }
+        if (outcome.kind === 'idempotency_conflict') {
+          return reply.code(409).send(idempotencyKeyConflictErrorBody());
+        }
+        if (outcome.kind === 'concurrency_limit') {
+          return reply.code(429).send(agentRunConcurrencyLimitErrorBody(outcome.limit, outcome.scope));
+        }
+        // `idempotent_replay` returns the SAME run a prior identical request
+        // already created — 200, not 202, since no new work was queued here.
+        return reply.code(outcome.kind === 'idempotent_replay' ? 200 : 202).send(serializeAgentRun(outcome.run));
+      }
 
-      const { _conversation_messages, ...responseBody } = result;
+      // §3.2/§12.14: the same single-active-run check runs against
+      // AgentRun before running inline — a background run already
+      // `queued`/`running` for this conversation rejects a synchronous
+      // request the same way it would reject a second background one.
+      const syncOutcome = await runSyncAgentTurn({
+        request: {
+          agentKey: agent.key,
+          conversationId,
+          projectId: ctx.projectId,
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          usePublished,
+          userId: ctx.tokenRecord.userId,
+          userMessage,
+          version: requestedVersion,
+          runtimeContext,
+        },
+        syncTimeoutMs: limits.syncTimeoutMs,
+      });
+      if (syncOutcome.kind === 'conflict') {
+        return reply.code(409).send(agentRunConflictErrorBody());
+      }
+      if (syncOutcome.kind === 'timeout') {
+        return reply.code(504).send(agentSyncTimeoutErrorBody());
+      }
+
+      const { _conversation_messages, ...responseBody } = syncOutcome.response;
       void _conversation_messages;
       return reply.code(200).send(responseBody);
     } catch (error) {
@@ -235,7 +334,10 @@ function createResponsesHandler(usePublished: boolean) {
         return sendAgentGuardrailBlock(reply, error);
       }
       logger.error('Client agent responses error', { error });
-      return reply.code(500).send({ error: 'Internal server error' });
+      // Which failure it was — a provider rejecting its key, a model that no
+      // longer exists, a rate limit — instead of one opaque 500 for all.
+      const classified = classifyAgentRunError(error);
+      return reply.code(classified.status).send({ error: classified.error });
     }
   });
 }
@@ -321,28 +423,16 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'Agent name is required' });
       }
 
-      let config: IAgentConfig;
-      try {
-        config = normalizeAgentConfig(body.config);
-      } catch (validationError) {
-        return reply.code(400).send({
-          error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
-        });
-      }
-
       // Guardrail bindings, validated exactly as the dashboard route validates
       // them. No `user`: a token is scoped to its project, so a guardrail owned
       // by another project is out of reach and only a tenant-wide one (no
       // projectId) falls back.
-      const bindings = await resolveConfigGuardrailBindings(
-        ctx.tenantDbName,
-        ctx.projectId,
-        config.guardrails,
-      );
-      if (bindings.error) {
-        return reply.code(400).send({ error: bindings.error });
-      }
-      if (bindings.patch) Object.assign(config, bindings.patch);
+      const prepared = await prepareNewAgentConfig(body.config, {
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+      });
+      if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
 
       const agent = await createAgentRecord(
         ctx.tenantDbName,
@@ -350,7 +440,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.projectId,
         ctx.tokenRecord.userId,
         {
-          config,
+          config: prepared.config,
           description: typeof body.description === 'string' ? body.description : undefined,
           name: body.name,
           status: body.status as AgentStatus | undefined,
@@ -381,21 +471,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (body.config && typeof body.config === 'object') {
         const cfg = body.config as Record<string, unknown>;
         if (cfg.kind === 'external') {
-          // Connected-agent config: validate connection & preserve the stored
-          // API key when the client edits without resending it.
-          const conn = { ...((cfg.connection as Record<string, unknown>) ?? {}) };
-          if (!conn.apiKey && !conn.apiKeyEnc) {
-            const existingEnc = existing.config?.connection?.apiKeyEnc;
-            if (existingEnc) conn.apiKeyEnc = existingEnc;
-          }
           let externalConfig: IAgentConfig;
           try {
-            externalConfig = {
-              kind: 'external',
-              connection: prepareConnectionForStorage(conn),
-              // Carried, then validated below — see `normalizeAgentConfig`.
-              ...carriedGuardrailFields(cfg),
-            };
+            externalConfig = connectedConfigForUpdate(cfg, existing);
           } catch (validationError) {
             return reply.code(400).send({
               error: validationError instanceof Error ? validationError.message : 'Invalid agent config',
@@ -416,27 +494,16 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           // connected agent's connection.
           delete body.config;
         } else {
-          const bindings = await resolveConfigGuardrailBindings(
-            ctx.tenantDbName,
-            ctx.projectId,
-            cfg.guardrails,
-          );
-          if (bindings.error) {
-            return reply.code(400).send({ error: bindings.error });
-          }
-          // The config replaces the stored one wholesale, so the projected
-          // legacy slots must ride along on the SAME object.
-          if (bindings.patch) Object.assign(cfg, bindings.patch);
+          const checked = await validateNativeConfigUpdate(cfg, existing.key, {
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+          });
+          if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
         }
       }
 
-      // A2A exposure updates: whitelist fields and keep the endpoint slug
-      // server-owned (existing slug is preserved, never client-chosen).
-      if (body.metadata && typeof body.metadata === 'object'
-        && (body.metadata as Record<string, unknown>).a2a !== undefined) {
-        const metadata = body.metadata as Record<string, unknown>;
-        metadata.a2a = normalizeA2aMetadataUpdate(metadata.a2a, existing);
-      }
+      normalizeA2aUpdate(body, existing);
 
       const agent = await updateAgentRecord(
         ctx.tenantDbName,
@@ -491,15 +558,15 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
-      const body = readJsonBody<Record<string, unknown>>(request);
-      const version = await publishAgent(
-        ctx.tenantDbName,
+      const published = await publishValidatedAgent(
+        request,
+        { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+        existing,
         String(existing._id),
         ctx.tokenRecord.userId,
-        typeof body.changelog === 'string' ? body.changelog : undefined,
       );
-
-      return reply.code(201).send({ version });
+      if ('badRequest' in published) return reply.code(400).send(published.badRequest);
+      return reply.code(201).send({ version: published.version });
     } catch (error) {
       logger.error('Publish client agent error', { error });
       return reply.code(500).send({

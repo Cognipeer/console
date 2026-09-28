@@ -88,6 +88,8 @@ export const TABLES = {
   agents: 'agents',
   agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
+  agentConversationStates: 'agent_conversation_states',
+  agentSkills: 'agent_skills',
   vectorCounters: 'vector_counters',
   vectorMigrations: 'vector_migrations',
   vectorMigrationLogs: 'vector_migration_logs',
@@ -103,6 +105,7 @@ export const TABLES = {
   ocrJobItems: 'ocr_job_items',
   batchJobs: 'batch_jobs',
   batchJobItems: 'batch_job_items',
+  agentRuns: 'agent_runs',
   realtimeModels: 'realtime_models',
   realtimeSessions: 'realtime_sessions',
   // ── Project membership & future groups ──────────────────────────────
@@ -602,6 +605,7 @@ export class SQLiteProviderBase {
     // same failure mode imageRef exists to prevent for docker-mode snapshots).
     this.ensureTableColumn(db, 'sandbox_instances', 'studioTemplateKey', 'studioTemplateKey TEXT');
     this.ensureTableColumn(db, 'sandbox_instances', 'studioTemplateVersion', 'studioTemplateVersion INTEGER');
+    this.ensureTableColumn(db, 'sandbox_instances', 'idleStopSeconds', 'idleStopSeconds INTEGER');
     // Promoting a builder instance now upserts a real sandbox_templates row
     // (see instanceService.promoteInstanceToTemplate) so Template Studio
     // output shows up directly in the normal template list/picker — these
@@ -1003,6 +1007,23 @@ export class SQLiteProviderBase {
     // canLogin=false have no password login capability. Missing/undefined is
     // treated as true everywhere it's read, so existing rows default to 1.
     this.ensureTableColumn(db, TABLES.users, 'canLogin', 'canLogin INTEGER NOT NULL DEFAULT 1');
+    // PII v2 (NLP/dictionary/NER layers): opt-in detection config living
+    // alongside categories/customPatterns. Absent/null on old rows, which
+    // `mapPiiPolicyRow` reads back as `undefined` — the detector's default
+    // ('pattern' mode) then matches pre-v2 behaviour exactly.
+    this.ensureTableColumn(db, TABLES.piiPolicies, 'detection', 'detection TEXT');
+    // PII engine selector: which detector runs the policy's scan ('regex' /
+    // 'cognipeer' — see `PiiEngine`'s own doc comment). Absent on old rows;
+    // `mapPiiPolicyRow` reads that back as `undefined`, which every caller
+    // (`scanWithPolicy`, etc.) treats as 'regex' — pre-existing behaviour.
+    this.ensureTableColumn(db, TABLES.piiPolicies, 'engine', 'engine TEXT');
+    // Sealed HMAC secret for agent-run callbacks (agentRunService).
+    this.ensureTableColumn(db, TABLES.agentRuns, 'callbackSecret', 'callbackSecret TEXT');
+    this.ensureTableColumn(db, TABLES.agentRuns, 'maxDurationMs', 'maxDurationMs INTEGER');
+    // One run per Idempotency-Key per project, race-free (two concurrent
+    // requests with the same key must not both execute).
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency_unique
+      ON ${TABLES.agentRuns}(tenantId, projectId, idempotencyKey) WHERE idempotencyKey IS NOT NULL`);
   }
 
   private migrateOcrJobsSchema(db: Database.Database): void {

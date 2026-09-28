@@ -26,6 +26,7 @@ import { notifications } from '@mantine/notifications';
 import { IconAlertCircle, IconCheck, IconShield } from '@tabler/icons-react';
 import FormShell, { FormSection } from '@/components/common/ui/FormShell';
 import GuardrailBindingList, {
+  bindingRowsFromLegacySlots,
   bindingRowsFromStored,
   type GuardrailBindingOption,
   type GuardrailBindingRow,
@@ -43,40 +44,6 @@ interface ModelGuardrailModalProps {
   onSaved: (bindings: GuardrailBindingRow[]) => void;
 }
 
-/**
- * The legacy slots, as the equivalent binding list.
- *
- * The output slot seeds `output.pre` ONLY, not `output.stream.delta`, even
- * though `resolveBindings` projects the legacy key onto both. A guardrail
- * written before the hook plane declares no streaming binding, so the stream
- * gate evaluates nothing for it today — seeding a hook the guardrail cannot
- * serve would render as a ticked box that does nothing, and the server would
- * reject it. The checkbox becomes available the moment the guardrail itself
- * enables streaming.
- */
-function seedFromLegacySlots(
-  inputKey: string | undefined,
-  outputKey: string | undefined,
-): GuardrailBindingRow[] {
-  // Materialised rows: a legacy slot names ONE direction, so "wherever the
-  // guardrail declares" (an absent `hooks`) is not what it meant — the
-  // conversion has to be the exact equivalent of the two slots or it is not a
-  // conversion.
-  const rows: Array<Required<GuardrailBindingRow>> = [];
-  const bind = (key: string | undefined, hook: Required<GuardrailBindingRow>['hooks'][number]) => {
-    if (!key) return;
-    const existing = rows.find((row) => row.key === key);
-    if (existing) {
-      if (!existing.hooks.includes(hook)) existing.hooks.push(hook);
-      return;
-    }
-    rows.push({ key, hooks: [hook] });
-  };
-  bind(inputKey, 'input.pre');
-  bind(outputKey, 'output.pre');
-  return rows;
-}
-
 export default function ModelGuardrailModal({
   opened,
   modelId,
@@ -88,9 +55,6 @@ export default function ModelGuardrailModal({
 }: ModelGuardrailModalProps) {
   const [options, setOptions] = useState<GuardrailBindingOption[]>([]);
   const [bindings, setBindings] = useState<GuardrailBindingRow[]>([]);
-  /** True while the model is still on the legacy slots and the operator has not
-   *  converted. The list is read-only until then, so the one-way conversion is
-   *  an explicit act and not a side effect of saving an unrelated change. */
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -132,10 +96,10 @@ export default function ModelGuardrailModal({
         return;
       }
 
-      const inputKey = model?.inputGuardrailKey ?? initialInputGuardrailKey;
-      const outputKey = model?.outputGuardrailKey ?? initialOutputGuardrailKey;
-      const seeded = seedFromLegacySlots(inputKey || undefined, outputKey || undefined);
-      setBindings(seeded);
+      setBindings(bindingRowsFromLegacySlots(
+        model?.inputGuardrailKey ?? initialInputGuardrailKey,
+        model?.outputGuardrailKey ?? initialOutputGuardrailKey,
+      ));
       // A model with neither slot set is simply unbound, not legacy: showing it
       // a migration banner would ask an operator to convert nothing.
     } catch (err) {

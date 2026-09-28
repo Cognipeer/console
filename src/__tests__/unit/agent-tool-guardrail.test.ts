@@ -58,6 +58,7 @@ const hoisted = vi.hoisted(() => ({
   resolveBrowser: vi.fn(),
   createBrowserSession: vi.fn(),
   closeBrowserSession: vi.fn(),
+  buildWebSearchAgentTools: vi.fn(),
 }));
 
 // The engine, not the barrel: mocking `@/lib/services/guardrail` would take the
@@ -97,6 +98,10 @@ vi.mock('@/lib/services/browser', () => ({
   resolveBrowser: hoisted.resolveBrowser,
   createBrowserSession: hoisted.createBrowserSession,
   closeBrowserSession: hoisted.closeBrowserSession,
+}));
+
+vi.mock('@/lib/services/webSearch', () => ({
+  buildWebSearchAgentTools: hoisted.buildWebSearchAgentTools,
 }));
 
 import { buildBoundTools, createAgentToolGuard } from '@/lib/services/agents/agentService';
@@ -627,5 +632,64 @@ describe('browser system tools', () => {
     const { tools } = await build([BROWSER_BINDING], ARMED);
 
     expect(tools[0]).toEqual({ name: 'browser_broken' });
+  });
+});
+
+describe('web search system tools', () => {
+  /** A record shaped like `createTool`'s: one closure behind four aliases. */
+  function webSearchTool(name: string, run: (args: Record<string, unknown>) => Promise<unknown>) {
+    return { name, description: `${name} description`, invoke: run, call: run, run, func: run };
+  }
+
+  const WEB_SEARCH_BINDING = {
+    source: 'system',
+    sourceKey: 'web_search',
+    toolNames: [],
+    config: { providerKey: 'ws-1' },
+  };
+
+  it('guards every executor alias, not just `invoke`', async () => {
+    const executor = vi.fn(async () => ({ results: [] }));
+    hoisted.buildWebSearchAgentTools.mockReturnValue([webSearchTool('web_search', executor)]);
+    hoisted.runHook.mockImplementation(async ({ hook }: HookCall) =>
+      hook === 'tool.pre' ? blockVerdict(hook, 'Web search is not permitted.') : pass(hook),
+    );
+
+    const { tools } = await build([WEB_SEARCH_BINDING], ARMED);
+    const record = tools[0] as unknown as Record<string, (args: Record<string, unknown>) => Promise<unknown>>;
+
+    // The SDK resolves an executor by walking invoke -> call -> func -> run;
+    // an unreplaced alias is a silently unguarded tool.
+    for (const alias of ['invoke', 'call', 'func', 'run']) {
+      expect(await record[alias]({ query: 'weather today' })).toContain('Web search is not permitted.');
+    }
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it('evaluates the web search tool under its own name, verbatim', async () => {
+    hoisted.buildWebSearchAgentTools.mockReturnValue([
+      webSearchTool('web_search', async () => ({ results: [] })),
+    ]);
+
+    const { tools, definitions } = await build([WEB_SEARCH_BINDING], ARMED);
+    expect(await invoke(tools[0], { query: 'weather today' })).toEqual({ results: [] });
+
+    expect(evaluations()).toEqual([
+      ['tool.pre', 'agent.websearch.web_search'],
+      ['tool.post', 'agent.websearch.web_search'],
+    ]);
+    // The trace menu still describes the tool the model sees.
+    expect(definitions[0]).toEqual({
+      name: 'web_search',
+      description: 'web_search description',
+    });
+  });
+
+  it('leaves a tool with no callable alone rather than fabricating one', async () => {
+    hoisted.buildWebSearchAgentTools.mockReturnValue([{ name: 'web_search_broken' }]);
+
+    const { tools } = await build([WEB_SEARCH_BINDING], ARMED);
+
+    expect(tools[0]).toEqual({ name: 'web_search_broken' });
   });
 });

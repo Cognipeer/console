@@ -5,13 +5,10 @@ import type {
   FastifyRequest,
 } from 'fastify';
 import { isApplicationReady } from '@/server/bootstrap';
-import { getDatabase } from '@/lib/database';
+import { getConfig } from '@/lib/core/config';
 import { LicenseManager } from '@/lib/license/license-manager';
+import { resolveLiveLicenseForTenant } from '@/lib/license/tenantLicense';
 import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
-import {
-  getCachedEnterpriseLicense,
-  setCachedEnterpriseLicense,
-} from '@/lib/license/enterprise-license-cache';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
@@ -21,6 +18,7 @@ import { applyCorsHeaders } from './cors';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
+import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
 import { clientAssistantsApiPlugin } from './plugins/client-assistants';
 import { clientAnalyticsApiPlugin } from './plugins/client-analytics';
 import { clientAuditApiPlugin } from './plugins/client-audit';
@@ -85,6 +83,7 @@ import { metricsApiPlugin } from './plugins/metrics';
 import { modelsApiPlugin } from './plugins/models';
 import { groupsApiPlugin } from './plugins/groups';
 import { promptsApiPlugin } from './plugins/prompts';
+import { skillsApiPlugin } from './plugins/skills';
 import { providersApiPlugin } from './plugins/providers';
 import { projectsApiPlugin } from './plugins/projects';
 import { quotaApiPlugin } from './plugins/quota';
@@ -201,38 +200,6 @@ function unauthorized(
   status = 401,
 ) {
   return reply.code(status).send(body);
-}
-
-/**
- * Resolve a tenant's CURRENT effective license for the enterprise API guard,
- * instead of trusting the licenseType/licenseExpiresAt embedded in the
- * caller's session JWT. A JWT can be up to JWT_EXPIRES_IN old (default 7
- * days), so trusting it here would let every other already-logged-in user
- * of a tenant keep enterprise access for the life of their cookie after an
- * owner/admin downgrades or removes the tenant's license.
- *
- * Backed by a short TTL cache (`enterprise-license-cache.ts`) so this
- * doesn't add a DB round-trip to every gated request; the license admin
- * endpoints invalidate that cache entry immediately on change, so both
- * upgrades and downgrades are visible on the very next request.
- */
-async function resolveLiveLicenseForTenant(
-  tenantId: string,
-): Promise<{ licenseType: string; licenseExpiresAt?: string }> {
-  const cached = await getCachedEnterpriseLicense(tenantId);
-  if (cached) {
-    return cached;
-  }
-
-  const db = await getDatabase();
-  const tenant = await db.findTenantById(tenantId);
-  const effective = LicenseManager.getEffectiveLicenseForTenant(tenant);
-  const resolved = {
-    licenseExpiresAt: effective.expiresAt?.toISOString(),
-    licenseType: effective.licenseType,
-  };
-  await setCachedEnterpriseLicense(tenantId, resolved);
-  return resolved;
 }
 
 function getAuditOutcome(
@@ -423,6 +390,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
         pathname,
         liveLicense.licenseType,
         liveLicense.licenseExpiresAt,
+        getConfig().deployment.isOnPrem,
       );
       if (enterpriseDenial) {
         return reply.code(enterpriseDenial.status).send(enterpriseDenial.body);
@@ -440,6 +408,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(authApiPlugin);
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
+  await app.register(clientAgentRunsApiPlugin);
   await app.register(clientAssistantsApiPlugin);
   await app.register(clientAnalyticsApiPlugin);
   await app.register(clientAuditApiPlugin);
@@ -509,6 +478,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(metricsApiPlugin);
   await app.register(modelsApiPlugin);
   await app.register(promptsApiPlugin);
+  await app.register(skillsApiPlugin);
   await app.register(providersApiPlugin);
   await app.register(projectsApiPlugin);
   await app.register(groupsApiPlugin);

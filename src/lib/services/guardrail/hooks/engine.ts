@@ -85,6 +85,10 @@ import {
   missingModelMessage,
   runLlmPolicy,
 } from '../families/llm';
+import {
+  runCognipeerGuardrailModerationPolicy,
+  runCognipeerGuardrailPromptShieldPolicy,
+} from '../families/cognipeerGuardrail';
 import type { LlmPolicyConfig } from '../families/llm';
 import { runPiiPolicy } from '../families/pii';
 import { runRegexPolicy } from '../families/regex';
@@ -1097,6 +1101,10 @@ async function dispatchPolicy<S extends HookSubject>(
         return await runToolAccessPolicy({ policy, subject, hook, scope, action });
       case 'word_filter':
         return await runWordFilterPolicy(subject, policy, { hook, scope, action });
+      case 'cognipeer_guardrail_moderation':
+        return await runCognipeerGuardrailModerationPolicy({ policy, subject, hook, scope, action });
+      case 'cognipeer_guardrail_prompt_shield':
+        return await runCognipeerGuardrailPromptShieldPolicy({ policy, subject, hook, scope, action });
       case 'moderation':
       case 'prompt_shield':
       case 'custom':

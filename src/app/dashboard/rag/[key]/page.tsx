@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import {
   Badge,
@@ -1136,7 +1137,7 @@ export default function RagModuleDetailPage() {
                     <Badge
                       variant="light"
                       color="teal"
-                      component="a"
+                      component={Link}
                       href={`/dashboard/reranker/${encodeURIComponent(mod.rerankerKey)}`}
                       style={{ cursor: 'pointer' }}
                     >

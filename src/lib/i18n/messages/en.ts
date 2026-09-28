@@ -67,7 +67,7 @@ export const en = {
     clusterDescription: 'Manage cluster nodes and assign service instances to them',
     gpuFleet: 'GPU Fleet',
     gpuFleetDescription: 'Onboard GPU hosts, deploy models from the curated library, manage pools',
-    sandbox: 'Agent Sandbox',
+    sandbox: 'Sandbox',
     sandboxDescription: 'Remote, API-driven runtime sandboxes for code, files, terminals and previews',
     aiAppGateway: 'AI App Gateway',
     aiAppGatewayDescription: 'Control plane for AI coding agents: who uses Claude Code, Codex and Copilot, what they send, and what they may do',
@@ -111,6 +111,13 @@ export const en = {
     websearchDescription: 'Search the web through configurable providers: Bing, Brave, Serper, Tavily, SearxNG, DuckDuckGo',
     ocr: 'OCR Jobs',
     ocrDescription: 'Batch OCR + extraction over files and images with summary and structured output',
+  },
+  navigationFeedback: {
+    loadingPage: 'Loading page…',
+    loadingContent: 'Loading content…',
+    refreshing: 'Refreshing…',
+    retry: 'Retry',
+    loadFailed: 'Couldn’t load this section.',
   },
   notifications: {
     logoutSuccessTitle: 'Logged Out',
@@ -449,6 +456,7 @@ export const en = {
       actions: {
         invite: 'Invite User',
         addUser: 'Add User',
+        copyInvitationLink: 'Copy invitation link',
       },
       table: {
         name: 'Name',
@@ -476,9 +484,11 @@ export const en = {
         fetch: 'Failed to fetch users',
         load: 'Failed to load users',
         delete: 'Failed to delete user',
+        copyInvitationLink: 'Failed to copy invitation link',
       },
       messages: {
         deleteSuccess: 'User deleted successfully',
+        invitationLinkCopied: 'Invitation link copied to clipboard',
       },
       deleteModal: {
         title: 'Delete User',
@@ -753,6 +763,9 @@ export const en = {
           maxUsers: 'Max Users',
           maxFileBuckets: 'Max Document Stores',
           maxTracingSessions: 'Max Observability Sessions',
+          maxAgentSyncTimeoutSeconds: 'Agent sync timeout (s)',
+          maxAgentBackgroundDurationMinutes: 'Agent background max (min)',
+          maxConcurrentAgentRuns: 'Concurrent background runs',
           maxVectorsTotal: 'Max Total Vectors',
           maxStorageMB: 'Max Storage (MB)',
         },
@@ -876,6 +889,18 @@ export const en = {
         copied: 'Copied!',
         created: 'Created',
         done: 'Done, I copied it',
+      },
+      invitationPanel: {
+        title: 'Invitation Ready',
+        deliveryLabel: 'Email delivery',
+        emailSentTitle: 'Email sent',
+        emailNotSentTitle: 'Email not sent',
+        emailSentDescription: 'The invitation email was sent. You can also copy the link below.',
+        emailNotSentDescription: 'Email delivery was not confirmed. Copy this link and share it securely.',
+        linkLabel: 'Invitation link',
+        copy: 'Copy invitation link',
+        copied: 'Copied!',
+        done: 'Done',
       },
       errors: {
         create: 'Failed to add user',
@@ -1098,6 +1123,8 @@ export const en = {
       sdk: 'Agent SDK',
       sdkDesc: 'Instrument agents with the SDK',
     },
+    statsError: 'Couldn’t load workspace stats.',
+    activityError: 'Couldn’t load recent activity.',
   },
   models: {
     list: {
@@ -2510,6 +2537,8 @@ export const en = {
         key: 'Policy key',
         enabled: 'Policy enabled',
         defaultAction: 'Default action',
+        engine: 'Detection engine',
+        engineHelper: 'Which detector runs this policy\'s scan. Switching resets categories to the new engine\'s own defaults — the two engines do not share a category vocabulary.',
         languages: 'Languages',
         languagesHelper: 'Restrict patterns to specific languages. Global patterns always run.',
       },
@@ -2571,6 +2600,12 @@ export const en = {
       mask: 'Mask',
       block: 'Block',
       tokenize: 'Tokenize (reversible)',
+    },
+    engines: {
+      regex: 'Regex (built-in)',
+      regexDescription: 'This console\'s own long-standing detector — regex/checksum patterns, with optional dictionary and NER layers.',
+      cognipeer: 'cognipeer-pii',
+      cognipeerDescription: 'Offline, bundled @cognipeer/pii package — its own 31-category catalog with a different id vocabulary.',
     },
     languages: {
       global: 'Global',

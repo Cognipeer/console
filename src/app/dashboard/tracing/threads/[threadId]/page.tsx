@@ -51,6 +51,10 @@ import {
   humanize,
   formatToolName,
   calcCacheHitRate,
+  formatActor,
+  formatSectionContent,
+  shouldDisplaySectionField,
+  statusVariant,
 } from '@/lib/utils/tracingUtils';
 import { messageContentToText } from '@/components/common/ui/MessageBlock';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
@@ -153,94 +157,6 @@ const SECTION_HEADER_PROPS = [
 const isInProgressStatus = (status?: string) => {
   const value = (status || '').toLowerCase();
   return value === 'in_progress' || value === 'in-progress' || value === 'running';
-};
-
-function statusVariant(status?: string) {
-  if (!status) return 'info' as const;
-  const v = status.toLowerCase();
-  if (v === 'success' || v === 'completed') return 'ok' as const;
-  if (v === 'error' || v === 'failed') return 'err' as const;
-  if (v === 'running' || v === 'in_progress' || v === 'pending') return 'info' as const;
-  return 'info' as const;
-}
-
-const formatActor = (actor: unknown): string => {
-  if (!actor) return '';
-  if (typeof actor === 'string') {
-    if (actor.includes('_')) {
-      return actor
-        .toLowerCase()
-        .split('_')
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(' ');
-    }
-    return actor;
-  }
-  if (typeof actor === 'object') {
-    const record = actor as Record<string, unknown>;
-
-    if (Object.keys(record).length === 0) return '';
-
-    const parts = [record.scope, record.name, record.role, record.version]
-      .map((value) => {
-        if (typeof value === 'string' && value.trim() !== '') {
-          if (value.includes('_')) {
-            return value
-              .toLowerCase()
-              .split('_')
-              .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-              .join(' ');
-          }
-          return value;
-        }
-        return null;
-      })
-      .filter((value): value is string => value !== null);
-
-    if (parts.length > 0) {
-      return parts.join(' · ');
-    }
-
-    return '';
-  }
-
-  return String(actor);
-};
-
-const formatSectionContent = (content: unknown): string => {
-  if (content === null || content === undefined) {
-    return '';
-  }
-
-  if (typeof content === 'string') {
-    return content;
-  }
-
-  try {
-    return JSON.stringify(content, null, 2);
-  } catch {
-    return String(content);
-  }
-};
-
-const shouldDisplaySectionField = (value: unknown): boolean => {
-  if (value === null || value === undefined) {
-    return false;
-  }
-
-  if (typeof value === 'string') {
-    return value.trim().length > 0;
-  }
-
-  if (Array.isArray(value)) {
-    return value.length > 0;
-  }
-
-  if (typeof value === 'object') {
-    return Object.keys(value as Record<string, unknown>).length > 0;
-  }
-
-  return true;
 };
 
 const renderSectionFieldValue = (value: unknown) => {
@@ -818,9 +734,7 @@ export default function ThreadDetailPage({
                             variant="light"
                             color={resolveStatusColor(session.status)}
                           >
-                            {isInProgressStatus(session.status) ? (
-                              <IconActivity size={14} />
-                            ) : session.status === 'error' ? (
+                            {isInProgressStatus(session.status) || session.status === 'error' ? (
                               <IconActivity size={14} />
                             ) : (
                               <IconBrain size={14} />

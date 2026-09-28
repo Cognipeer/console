@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Badge, Button, Group, Modal, Select, Stack, Text, Tooltip } from '@mantine/core';
-import { IconExternalLink, IconMail, IconShieldCheck, IconTrash, IconUpload, IconUserPlus } from '@tabler/icons-react';
+import { IconCopy, IconExternalLink, IconMail, IconShieldCheck, IconTrash, IconUpload, IconUserPlus } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import AddUserModal from './AddUserModal';
 import ImportUsersModal from './ImportUsersModal';
@@ -108,6 +108,34 @@ export default function UserManagement() {
     setUserToEditPermissions(user);
     setPermissionDraft(user.servicePermissions ?? {});
     setPermissionsModalOpened(true);
+  };
+
+  const handleCopyInvitationLink = async (user: User) => {
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(user._id)}/invitation-link`, {
+        method: 'POST',
+      });
+      const data = await response.json().catch(() => ({})) as {
+        error?: string;
+        invitationUrl?: string;
+      };
+      if (!response.ok || !data.invitationUrl) {
+        throw new Error(data.error || t('errors.copyInvitationLink'));
+      }
+
+      await navigator.clipboard.writeText(data.invitationUrl);
+      notifications.show({
+        title: tCommon('success'),
+        message: t('messages.invitationLinkCopied'),
+        color: 'green',
+      });
+    } catch (error) {
+      notifications.show({
+        title: tNotifications('errorTitle'),
+        message: error instanceof Error ? error.message : t('errors.copyInvitationLink'),
+        color: 'red',
+      });
+    }
   };
 
   const savePermissions = async () => {
@@ -312,6 +340,14 @@ export default function UserManagement() {
                   icon: <IconExternalLink size={14} />,
                   onClick: () => router.push(`/dashboard/members/${user._id}`),
                 },
+                ...(user.canLogin !== false && user.invitedBy && !user.inviteAcceptedAt ? [{
+                  id: 'copy-invitation-link',
+                  label: t('actions.copyInvitationLink'),
+                  icon: <IconCopy size={14} />,
+                  onClick: () => {
+                    void handleCopyInvitationLink(user);
+                  },
+                }] : []),
                 {
                   id: 'permissions',
                   label: 'Service permissions',

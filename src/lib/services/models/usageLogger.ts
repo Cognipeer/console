@@ -179,6 +179,17 @@ export async function logModelUsage(
     attribution: payload.attribution,
   });
 
+  // Secret scrub first (known key names / outbound secret values), then a
+  // free-text PII pass -- a customer's email or name inside
+  // messages[].content has no distinctive key or known value to match
+  // against the way a secret does, so it can only be found by scanning
+  // the text itself. See logPiiRedaction.ts.
+  const [providerRequest, providerResponse, errorMessage] = await Promise.all([
+    redactPiiFromLogPayload(redactLogPayload(payload.providerRequest)),
+    redactPiiFromLogPayload(redactLogPayload(payload.providerResponse)),
+    redactPiiFromLogString(redactLogString(payload.errorMessage)),
+  ]);
+
   await db.createModelUsageLog({
     userId: attribution.userId,
     apiTokenId: attribution.apiTokenId,
@@ -194,14 +205,9 @@ export async function logModelUsage(
     requestId: payload.requestId,
     route: payload.route,
     status: payload.status,
-    // Secret scrub first (known key names / outbound secret values), then a
-    // free-text PII pass -- a customer's email or name inside
-    // messages[].content has no distinctive key or known value to match
-    // against the way a secret does, so it can only be found by scanning
-    // the text itself. See logPiiRedaction.ts.
-    providerRequest: toRecord(redactPiiFromLogPayload(redactLogPayload(payload.providerRequest))),
-    providerResponse: toRecord(redactPiiFromLogPayload(redactLogPayload(payload.providerResponse))),
-    errorMessage: redactPiiFromLogString(redactLogString(payload.errorMessage)),
+    providerRequest: toRecord(providerRequest),
+    providerResponse: toRecord(providerResponse),
+    errorMessage,
     latencyMs: payload.latencyMs,
     inputTokens: usage.inputTokens ?? 0,
     outputTokens: usage.outputTokens ?? 0,

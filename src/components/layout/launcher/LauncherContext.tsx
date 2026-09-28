@@ -13,6 +13,8 @@ export interface LauncherContextValue {
   recentServices: DashboardServiceDefinition[];
   isTenantAdmin: boolean;
   openLauncher: () => void;
+  /** False until pins/recents are restored from local storage (treat missing as true). */
+  hydrated?: boolean;
 }
 
 const LauncherContext = createContext<LauncherContextValue | null>(null);

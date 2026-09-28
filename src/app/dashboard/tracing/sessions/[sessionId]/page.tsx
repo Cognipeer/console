@@ -55,6 +55,10 @@ import {
     humanize,
     formatToolName,
     calcCacheHitRate,
+    formatActor,
+    formatSectionContent,
+    shouldDisplaySectionField,
+    statusVariant,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
@@ -72,52 +76,6 @@ import { isAbnormalFinishReason, isTruncatedFinishReason, normalizeFinishReason 
 dayjs.extend(relativeTime);
 
 // ─── Type helpers ──────────────────────────────────────────────
-
-const formatActor = (actor: unknown): string => {
-    if (!actor) return '';
-    if (typeof actor === 'string') {
-        if (actor.includes('_')) {
-            return actor
-                .toLowerCase()
-                .split('_')
-                .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ');
-        }
-        return actor;
-    }
-    if (typeof actor === 'object') {
-        const record = actor as Record<string, unknown>;
-        if (Object.keys(record).length === 0) return '';
-        const parts = [record.scope, record.name, record.role, record.version]
-            .map((value) => {
-                if (typeof value === 'string' && value.trim() !== '') {
-                    if (value.includes('_')) {
-                        return value
-                            .toLowerCase()
-                            .split('_')
-                            .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-                            .join(' ');
-                    }
-                    return value;
-                }
-                return null;
-            })
-            .filter((value): value is string => value !== null);
-        if (parts.length > 0) return parts.join(' · ');
-        return '';
-    }
-    return String(actor);
-};
-
-const formatSectionContent = (content: unknown): string => {
-    if (content === null || content === undefined) return '';
-    if (typeof content === 'string') return content;
-    try {
-        return JSON.stringify(content, null, 2);
-    } catch {
-        return String(content);
-    }
-};
 
 type SectionEntry = {
     [key: string]: unknown;
@@ -258,28 +216,11 @@ function sourceBadge(source?: string) {
     );
 }
 
-function statusVariant(status?: string) {
-    if (!status) return 'info' as const;
-    const v = status.toLowerCase();
-    if (v === 'success' || v === 'completed') return 'ok' as const;
-    if (v === 'error' || v === 'failed') return 'err' as const;
-    if (v === 'running' || v === 'in_progress' || v === 'pending') return 'info' as const;
-    return 'info' as const;
-}
-
 // ─── Section rendering ─────────────────────────────────────────
 
 const SECTION_HEADER_PROPS = [
     'label', 'title', 'kind', 'id', 'role', 'tool', 'toolName', 'contentType', 'truncated', 'metadata',
 ];
-
-const shouldDisplaySectionField = (value: unknown): boolean => {
-    if (value === null || value === undefined) return false;
-    if (typeof value === 'string') return value.trim().length > 0;
-    if (Array.isArray(value)) return value.length > 0;
-    if (typeof value === 'object') return Object.keys(value as Record<string, unknown>).length > 0;
-    return true;
-};
 
 const renderFieldValue = (value: unknown) => {
     if (typeof value === 'object' && value !== null) {
@@ -824,8 +765,12 @@ function ToolDetailsBlock({ event }: { event: TracingEvent }) {
 // ─── Span identity block ──────────────────────────────────────
 
 function SpanIdentityBlock({ event }: { event: TracingEvent }) {
-    const hasIds = event.traceId || event.spanId || event.parentSpanId;
-    if (!hasIds) return null;
+    const ids = [
+        { label: 'Trace ID', id: event.traceId },
+        { label: 'Span ID', id: event.spanId },
+        { label: 'Parent ID', id: event.parentSpanId },
+    ].filter((row): row is { label: string; id: string } => Boolean(row.id));
+    if (ids.length === 0) return null;
 
     return (
         <Paper withBorder p="xs" radius="md">
@@ -834,48 +779,20 @@ function SpanIdentityBlock({ event }: { event: TracingEvent }) {
                 <Text size="xs" fw={600} c="dimmed">Span Identity</Text>
             </Group>
             <Stack gap={2}>
-                {event.traceId && (
-                    <Group gap="xs" wrap="nowrap">
-                        <Text size="xs" c="dimmed" style={{ minWidth: 70 }}>Trace ID</Text>
-                        <CopyButton value={event.traceId} timeout={1500}>
+                {ids.map(({ label, id }) => (
+                    <Group key={label} gap="xs" wrap="nowrap">
+                        <Text size="xs" c="dimmed" style={{ minWidth: 70 }}>{label}</Text>
+                        <CopyButton value={id} timeout={1500}>
                             {({ copied, copy }) => (
                                 <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
                                     <Code style={{ fontSize: 10, cursor: 'pointer' }} onClick={copy}>
-                                        {event.traceId}
+                                        {id}
                                     </Code>
                                 </Tooltip>
                             )}
                         </CopyButton>
                     </Group>
-                )}
-                {event.spanId && (
-                    <Group gap="xs" wrap="nowrap">
-                        <Text size="xs" c="dimmed" style={{ minWidth: 70 }}>Span ID</Text>
-                        <CopyButton value={event.spanId} timeout={1500}>
-                            {({ copied, copy }) => (
-                                <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
-                                    <Code style={{ fontSize: 10, cursor: 'pointer' }} onClick={copy}>
-                                        {event.spanId}
-                                    </Code>
-                                </Tooltip>
-                            )}
-                        </CopyButton>
-                    </Group>
-                )}
-                {event.parentSpanId && (
-                    <Group gap="xs" wrap="nowrap">
-                        <Text size="xs" c="dimmed" style={{ minWidth: 70 }}>Parent ID</Text>
-                        <CopyButton value={event.parentSpanId} timeout={1500}>
-                            {({ copied, copy }) => (
-                                <Tooltip label={copied ? 'Copied' : 'Copy'} withArrow>
-                                    <Code style={{ fontSize: 10, cursor: 'pointer' }} onClick={copy}>
-                                        {event.parentSpanId}
-                                    </Code>
-                                </Tooltip>
-                            )}
-                        </CopyButton>
-                    </Group>
-                )}
+                ))}
             </Stack>
         </Paper>
     );
@@ -912,12 +829,6 @@ function RawJsonView({ event }: { event: TracingEvent }) {
 
 // ─── Event detail panel ────────────────────────────────────────
 
-/**
- * Maps one tracing event onto the shared `LlmRequestDetailData` shape — the
- * same normalization job Model Hub and AI App Gateway do for their own raw
- * payloads — so "View full request" opens the exact same viewer used
- * everywhere else a single LLM request/response is inspected.
- */
 /**
  * Maps tracing sections onto the shared item stream. `message`/`tool_call`/
  * `tool_result` become typed items (a `tool_call` and the `tool_result` that
@@ -957,6 +868,12 @@ function sectionsToItems(sections: SectionEntry[], includeOther: boolean): LlmRe
     return items;
 }
 
+/**
+ * Maps one tracing event onto the shared `LlmRequestDetailData` shape — the
+ * same normalization job Model Hub and AI App Gateway do for their own raw
+ * payloads — so "View full request" opens the exact same viewer used
+ * everywhere else a single LLM request/response is inspected.
+ */
 function buildEventDetailData(event: TracingEvent): LlmRequestDetailData {
     const items = sectionsToItems(event.sections ?? [], false);
 

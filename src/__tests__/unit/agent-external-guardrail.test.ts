@@ -458,8 +458,12 @@ describe('connected agent playground', () => {
       params.guardrailKey === 'gr-out' ? redacted('gr-out', safeAnswer) : allow(params.guardrailKey),
     );
 
-    // The playground persists nothing, so the returned string is the only copy.
-    expect(await executePlaygroundChatLocal(playgroundRequest())).toEqual({ content: safeAnswer });
+    // No conversationId in this request, so nothing persists — same as
+    // before Sessions existed — and the returned string is the only copy.
+    expect(await executePlaygroundChatLocal(playgroundRequest())).toEqual({
+      content: safeAnswer,
+      version: null,
+    });
     expect(evaluations()).toEqual([
       ['gr-in', 'input', 'agent-playground'],
       ['gr-out', 'output', 'agent-playground'],

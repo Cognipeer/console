@@ -7,8 +7,7 @@
  * body) has no distinctive key name or known value to match against — it can
  * only be found by scanning the text itself. This module does that scan,
  * using the same detector the PII guardrail enforces requests with
- * (`@/lib/services/pii/piiService`), which already existed but — per its own
- * file header — was "intentionally not wired into other modules... yet".
+ * (`@/lib/services/pii/piiService`).
  *
  * A guardrail binding is a per-request, per-tenant DECISION about whether to
  * block/warn on PII in a LIVE call. This is unconditional and always runs
@@ -24,18 +23,9 @@ import { redactPii } from '@/lib/services/pii/piiService';
 
 const MAX_DEPTH = 8;
 
-function scrubPiiValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+async function scrubPiiValue(value: unknown, depth: number, seen: WeakSet<object>): Promise<unknown> {
   if (value === null || value === undefined) return value;
-  if (typeof value === 'string') {
-    if (!value) return value;
-    try {
-      return redactPii({ text: value }).outputText;
-    } catch {
-      // A detector failure must never block or corrupt the write path --
-      // fall back to the untouched string rather than throw.
-      return value;
-    }
-  }
+  if (typeof value === 'string') return redactPiiFromLogString(value);
   if (typeof value !== 'object') return value;
   // Preserve native instances, matching logRedaction.ts's scrubValue: walking
   // a Date/Buffer/Error as a plain object would erase it (Object.entries is
@@ -46,13 +36,13 @@ function scrubPiiValue(value: unknown, depth: number, seen: WeakSet<object>): un
   seen.add(value as object);
 
   if (Array.isArray(value)) {
-    return value.map((item) => scrubPiiValue(item, depth + 1, seen));
+    return Promise.all(value.map((item) => scrubPiiValue(item, depth + 1, seen)));
   }
 
+  const entries = Object.entries(value as Record<string, unknown>);
+  const scrubbed = await Promise.all(entries.map(([, val]) => scrubPiiValue(val, depth + 1, seen)));
   const out: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-    out[key] = scrubPiiValue(val, depth + 1, seen);
-  }
+  entries.forEach(([key], i) => { out[key] = scrubbed[i]; });
   return out;
 }
 
@@ -63,17 +53,19 @@ function scrubPiiValue(value: unknown, depth: number, seen: WeakSet<object>): un
  * sensitive-named key is already masked to a fixed marker before this ever
  * sees it.
  */
-export function redactPiiFromLogPayload<T>(payload: T): T {
+export async function redactPiiFromLogPayload<T>(payload: T): Promise<T> {
   if (payload === null || payload === undefined) return payload;
-  return scrubPiiValue(payload, 0, new WeakSet()) as T;
+  return scrubPiiValue(payload, 0, new WeakSet()) as Promise<T>;
 }
 
 /** Same scan, for a single free-text field (e.g. an error message). */
-export function redactPiiFromLogString(str: string | undefined): string | undefined {
+export async function redactPiiFromLogString(str: string | undefined): Promise<string | undefined> {
   if (!str) return str;
   try {
-    return redactPii({ text: str }).outputText;
+    return (await redactPii({ text: str })).outputText;
   } catch {
+    // A detector failure must never block or corrupt the write path --
+    // fall back to the untouched string rather than throw.
     return str;
   }
 }

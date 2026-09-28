@@ -14,7 +14,7 @@
  *   · `state.ctx.__guardrailBlocked` — set by `createAgent` (dist/index.mjs:7609)
  *     and by the preModelCall/postModelCall gates (:4074, :4201), but NOT by
  *     `createSmartAgent`'s prompt-denial branch (:10316), which is the branch
- *     `createConsoleSdkAgent` actually takes;
+ *     `buildLocalAgentRun` actually takes;
  *   · the trailing `{ role: 'assistant', name: 'guardrail' }` message, which
  *     BOTH branches write (:7614, :10319);
  *   · the `${plugin}: ` prefix the host puts on every reason (:6744) with no

@@ -14,6 +14,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useLocale, useTranslations } from '@/lib/i18n';
+import type { PiiAction, PiiEngine } from '@/lib/services/pii/types';
 import type { PiiCustomPatternForm } from './PiiPolicyEditor';
 
 interface Finding {
@@ -25,7 +26,7 @@ interface Finding {
   end: number;
   label: string;
   message: string;
-  action: 'detect' | 'redact' | 'mask' | 'block' | 'tokenize';
+  action: PiiAction;
   block: boolean;
   replacement: string;
 }
@@ -41,9 +42,12 @@ interface Props {
   categories: Record<string, boolean>;
   customPatterns: PiiCustomPatternForm[];
   languages: string[];
+  /** Which detector to test against — reflects the (possibly unsaved) draft's
+   *  current selection, not necessarily what the saved policy still has. */
+  engine: PiiEngine;
 }
 
-export default function PiiTestPanel({ categories, customPatterns, languages }: Props) {
+export default function PiiTestPanel({ categories, customPatterns, languages, engine }: Props) {
   const t = useTranslations('pii.test');
   const tSev = useTranslations('pii.severity');
   const locale = useLocale();
@@ -67,6 +71,7 @@ export default function PiiTestPanel({ categories, customPatterns, languages }: 
           customPatterns,
           languages,
           locale,
+          engine,
         }),
       });
       if (!res.ok) {

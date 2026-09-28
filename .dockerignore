@@ -4,6 +4,7 @@ node_modules/
 # Version control
 .git/
 .gitignore
+Dockerfile
 
 # Build outputs
 .next/
