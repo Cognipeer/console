@@ -3,7 +3,7 @@ name: Console Community Build
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+-community'
+      - 'v[0-9]+.[0-9]+.[0-9]+-community' 
 
 permissions:
   contents: read
