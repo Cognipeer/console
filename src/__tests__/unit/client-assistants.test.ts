@@ -6,11 +6,17 @@ import type { IAgentConversation } from '@/lib/database';
 // connection this test has none of, and hang. `switchToTenant` and every
 // other DB call the rest of this suite touches are stubbed no-ops; only
 // `findRagModuleByKey` carries a real (fake) answer.
+const dbStub = vi.hoisted(() => ({
+  findAgentConversationById: vi.fn(),
+  updateAgentConversation: vi.fn(),
+}));
+
 vi.mock('@/lib/database', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/database')>();
   return {
     ...actual,
     getDatabase: vi.fn().mockResolvedValue({
+      ...dbStub,
       switchToTenant: vi.fn(),
       findRagModuleByKey: vi.fn().mockImplementation((key: string) =>
         Promise.resolve(key === 'docs-v1' ? { key: 'docs-v1' } : null)),
@@ -31,6 +37,7 @@ import {
   toDate,
   toMessageObject,
   toolBindingsFromAssistantBody,
+  writeAssistantsMetadata,
 } from '@/server/api/plugins/client-assistants';
 
 describe('id scheme', () => {
@@ -230,5 +237,37 @@ describe('toolBindingsFromAssistantBody', () => {
     await expect(
       toolBindingsFromAssistantBody('tdb', 'p1', { tools: [{ type: 'retrieval' }] }),
     ).rejects.toThrow(AssistantRequestError);
+  });
+});
+
+describe('writeAssistantsMetadata — keeps what the run itself wrote', () => {
+  it('builds on the stored metadata, not the snapshot loaded before the run', async () => {
+    // The run's cleanup recorded the thread's sandbox after `snapshot` was
+    // loaded. Replacing the column from the snapshot erased it, and every run
+    // then got a fresh sandbox.
+    const snapshot = conversation({ metadata: { runtimeContext: { a: 1 } } });
+    dbStub.findAgentConversationById.mockResolvedValue(conversation({
+      metadata: { runtimeContext: { a: 1 }, sandbox: { instanceId: 'sbx-1', lifecycle: 'session' } },
+    }));
+    dbStub.updateAgentConversation.mockClear();
+
+    await writeAssistantsMetadata('conv-1', snapshot, { runs: [] });
+
+    expect(dbStub.updateAgentConversation).toHaveBeenCalledWith('conv-1', {
+      metadata: {
+        runtimeContext: { a: 1 },
+        sandbox: { instanceId: 'sbx-1', lifecycle: 'session' },
+        assistantsApi: { runs: [] },
+      },
+    });
+  });
+
+  it('falls back to the snapshot when the row cannot be read back', async () => {
+    dbStub.findAgentConversationById.mockResolvedValue(null);
+    dbStub.updateAgentConversation.mockClear();
+    await writeAssistantsMetadata('conv-1', conversation({ metadata: { keep: true } }), { pendingMessages: [] });
+    expect(dbStub.updateAgentConversation).toHaveBeenCalledWith('conv-1', {
+      metadata: { keep: true, assistantsApi: { pendingMessages: [] } },
+    });
   });
 });

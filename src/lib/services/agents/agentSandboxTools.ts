@@ -5,12 +5,15 @@
  * model actually calls a sandbox tool — an agent that could use a sandbox but
  * answers from memory costs no machine.
  *
+ *  - `session` (default): one sandbox per conversation, recorded on the
+ *    conversation (`metadata.sandbox`) as soon as it exists. It is left
+ *    running when a run ends and reused by the next turn; the sandbox module
+ *    closes it (a full delete) after its own idle timeout, and every command
+ *    counts as activity. The conversation's record then points at nothing and
+ *    the next message gets a fresh sandbox. Without a conversation (a
+ *    stateless playground call) there is nothing to keep it against, so the
+ *    run is per-message.
  *  - `ephemeral`: a fresh sandbox for the run, deleted when the run ends.
- *  - `persist`: one sandbox per conversation, recorded on the conversation
- *    (`metadata.sandbox`). It is stopped (disk kept) when the run ends and
- *    started again on the next turn; one unused for `retentionHours` is
- *    replaced by a fresh one. Without a conversation (a stateless playground
- *    call) there is nothing to persist against, so the run is ephemeral.
  *
  * Secrets are decrypted per run and passed to each command as environment
  * variables — never set on the instance, so they are not stored on its row —
@@ -32,6 +35,7 @@ import {
 import { getDatabase, type IAgentConversation, type IAgentSandboxConfig } from '@/lib/database';
 import { isTenantEnterpriseLicensed } from '@/lib/license/tenantLicense';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
+import { resolveSandboxMode } from './agentSandboxMode';
 import { openAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecrets';
 
 const logger = createLogger('agent-sandbox');
@@ -42,16 +46,21 @@ const DEFAULT_KEEP_ALIVE_MINUTES = 30;
 
 const DEFAULT_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 600;
-const DEFAULT_RETENTION_HOURS = 24;
 /** Per stream: a build log can be megabytes, and the end is what explains a failure. */
 const MAX_STREAM_CHARS = 16_000;
 const MAX_FILE_CHARS = 100_000;
 const WORKDIR = '/workspace';
 
-/** What a persistent sandbox leaves on its conversation. */
+/** What a session sandbox leaves on its conversation. */
 export interface ConversationSandboxRecord {
     instanceId: string;
     templateKey?: string;
+    /**
+     * Set on every record this version writes. A record without it belongs to
+     * a sandbox made when `persist` meant "stop between turns" — a machine the
+     * idle reaper never closes — so it is replaced rather than adopted.
+     */
+    lifecycle?: 'session';
     createdAt: string;
     lastUsedAt: string;
 }
@@ -88,11 +97,6 @@ function tail(text: string, limit: number): string {
     return `… [${(text.length - limit).toLocaleString()} earlier characters omitted]\n${text.slice(-limit)}`;
 }
 
-function isStale(record: ConversationSandboxRecord, retentionHours: number): boolean {
-    const lastUsed = Date.parse(record.lastUsedAt);
-    return Number.isFinite(lastUsed) && Date.now() - lastUsed > retentionHours * 3_600_000;
-}
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = any;
 
@@ -102,7 +106,7 @@ export interface BuildAgentSandboxToolsInput {
     tenantId: string;
     projectId: string;
     agentKey: string;
-    /** The Session / API conversation — required for `persist`. */
+    /** The Session / API conversation — required for `session`. */
     conversation?: Pick<IAgentConversation, '_id' | 'metadata'> | null;
     createToolFn: typeof import('@cognipeer/agent-sdk').createTool;
     zod: typeof import('zod').z;
@@ -114,7 +118,7 @@ export interface BuildAgentSandboxToolsInput {
 export interface AgentSandboxTools {
     tools: AnyTool[];
     definitions: TraceToolDefinition[];
-    /** Deletes (ephemeral) or stops (persist) the sandbox this run used. */
+    /** Deletes the sandbox this run used (ephemeral); a session sandbox is left up and only recorded. */
     cleanup: () => Promise<void>;
 }
 
@@ -132,20 +136,20 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     const { runner } = availability;
 
     const conversationId = input.conversation?._id ? String(input.conversation._id) : undefined;
-    const persistConversationId = config.mode === 'persist' ? conversationId : undefined;
-    const persist = Boolean(persistConversationId);
-    if (config.mode === 'persist' && !conversationId) {
-        logger.debug('Persistent sandbox requested without a conversation; running ephemeral', { agentKey: input.agentKey });
+    const mode = resolveSandboxMode(config.mode);
+    const sessionConversationId = mode === 'session' ? conversationId : undefined;
+    const session = Boolean(sessionConversationId);
+    if (mode === 'session' && !conversationId) {
+        logger.debug('Session sandbox requested without a conversation; running per-message', { agentKey: input.agentKey });
     }
     const ref: AgentSandboxRef = {
         tenantDbName: input.tenantDbName,
         tenantId: input.tenantId,
         projectId: input.projectId,
         agentKey: input.agentKey,
-        ...(persistConversationId ? { conversationId: persistConversationId } : {}),
+        ...(sessionConversationId ? { conversationId: sessionConversationId } : {}),
     };
     const timeoutSec = clampTimeout(config.commandTimeoutSec);
-    const retentionHours = config.retentionHours && config.retentionHours > 0 ? config.retentionHours : DEFAULT_RETENTION_HOURS;
     const secrets = openAgentSandboxSecrets(config);
     const scrub = (text: string) => scrubSecretValues(text, secrets);
     const preview = config.preview?.enabled
@@ -162,16 +166,41 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     let instance: Promise<string> | null = null;
     let createdAt: string | undefined;
 
+    /**
+     * Writes the conversation's sandbox record. `metadata` is replaced
+     * wholesale by the database layer, so the write starts from a fresh read —
+     * the transcript write for this turn may have landed after the
+     * conversation was loaded, and merging into a stale copy would drop it.
+     */
+    const saveRecord = async (instanceId: string): Promise<void> => {
+        if (!sessionConversationId) return;
+        const db = await getDatabase();
+        await db.switchToTenant(input.tenantDbName);
+        const latest = await db.findAgentConversationById(sessionConversationId);
+        const now = new Date().toISOString();
+        const record: ConversationSandboxRecord = {
+            instanceId,
+            ...(config.templateKey ? { templateKey: config.templateKey } : {}),
+            lifecycle: 'session',
+            createdAt: createdAt ?? now,
+            lastUsedAt: now,
+        };
+        await db.updateAgentConversation(sessionConversationId, {
+            metadata: { ...(latest?.metadata ?? {}), sandbox: record },
+        });
+    };
+
     const provision = async (): Promise<string> => {
         let previous: ConversationSandboxRecord | undefined;
-        if (persistConversationId) {
+        if (sessionConversationId) {
             const db = await getDatabase();
             await db.switchToTenant(input.tenantDbName);
-            const fresh = await db.findAgentConversationById(persistConversationId);
+            const fresh = await db.findAgentConversationById(sessionConversationId);
             previous = fresh?.metadata?.sandbox as ConversationSandboxRecord | undefined;
-            if (previous && (isStale(previous, retentionHours)
+            if (previous && (previous.lifecycle !== 'session'
                 || (config.templateKey && previous.templateKey && previous.templateKey !== config.templateKey))) {
-                // Too old, or the agent now wants a different template: start over.
+                // Made under the old `persist` (a machine the idle reaper never
+                // closes), or the agent now wants a different template: start over.
                 await runner.destroy(ref, previous.instanceId).catch((error: unknown) => {
                     logger.warn('Could not delete a replaced conversation sandbox', { error: String(error) });
                 });
@@ -180,7 +209,9 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         }
         const { instanceId, created } = await runner.ensureInstance(ref, {
             templateKey: config.templateKey,
-            persist,
+            // Never a persistent machine: a stop is then a full close, and the
+            // sandbox module's idle reaper applies — that is what ends a session.
+            persist: false,
             ...(config.resources ? { resources: config.resources } : {}),
             ...(config.blockNetwork ? { blockNetwork: true } : {}),
             ...(config.env && Object.keys(config.env).length > 0 ? { env: config.env } : {}),
@@ -191,7 +222,19 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
             idleStopSeconds: preview ? preview.keepAliveSeconds : null,
         });
         createdAt = created || !previous ? new Date().toISOString() : previous.createdAt;
-        logger.info('Agent sandbox ready', { agentKey: input.agentKey, instanceId, created, persist });
+        logger.info('Agent sandbox ready', {
+            agentKey: input.agentKey,
+            instanceId,
+            created,
+            session,
+            // A record pointed at a machine that has since been closed.
+            replaced: Boolean(created && previous),
+        });
+        // Recorded now, not when the run ends: a run that never gets to clean
+        // up (a restart, a crash) must not orphan the machine it just made.
+        await saveRecord(instanceId).catch((error: unknown) => {
+            logger.warn('Could not record the conversation sandbox', { instanceId, error: error instanceof Error ? error.message : String(error) });
+        });
         return instanceId;
     };
 
@@ -211,8 +254,8 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         stderr: scrub(tail(result.stderr ?? '', MAX_STREAM_CHARS)),
     });
 
-    const lifetime = persist
-        ? 'Files and installed packages persist across turns of this conversation.'
+    const lifetime = session
+        ? 'Files and installed packages stay across turns of this conversation while you keep using the sandbox. After a long idle period it is shut down and the next use starts a fresh, empty one.'
         : 'The sandbox is discarded when this reply is finished.';
     const secretNote = Object.keys(secrets).length > 0
         ? ` Environment variables available to commands: ${Object.keys(secrets).join(', ')} (secret — never print them).`
@@ -343,33 +386,17 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                 // preview has been idle for `keepAliveMinutes`
                 // (idleStopSeconds on the instance).
                 logger.info('Agent sandbox left running for its preview', { agentKey: input.agentKey, instanceId });
-            } else if (persistConversationId) {
-                await runner.stop(ref, instanceId);
-            } else {
+            } else if (!session) {
                 await runner.destroy(ref, instanceId);
             }
-            if (persistConversationId) {
-                const db = await getDatabase();
-                await db.switchToTenant(input.tenantDbName);
-                // Re-read: the transcript write for this turn happened after
-                // the conversation was loaded, and `metadata` is replaced
-                // wholesale — merging into a stale copy would drop it.
-                const latest = await db.findAgentConversationById(persistConversationId);
-                const record: ConversationSandboxRecord = {
-                    instanceId,
-                    ...(config.templateKey ? { templateKey: config.templateKey } : {}),
-                    createdAt: createdAt ?? new Date().toISOString(),
-                    lastUsedAt: new Date().toISOString(),
-                };
-                await db.updateAgentConversation(persistConversationId, {
-                    metadata: { ...(latest?.metadata ?? {}), sandbox: record },
-                });
-            }
+            // A session sandbox is left up on purpose: the next turn reuses it,
+            // and the sandbox module closes it once it has sat idle.
+            if (session) await saveRecord(instanceId);
         } catch (error) {
             logger.warn('Agent sandbox cleanup failed', {
                 agentKey: input.agentKey,
                 instanceId,
-                persist,
+                session,
                 error: error instanceof Error ? error.message : String(error),
             });
         }
@@ -385,7 +412,7 @@ function resolvePath(path: string): string {
 }
 
 /**
- * Deletes the persistent sandbox recorded on a conversation. Called when the
+ * Deletes the session sandbox recorded on a conversation. Called when the
  * conversation itself is deleted — the machine must not outlive the thread
  * that owned it. Best-effort, and a no-op without the enterprise module.
  */
