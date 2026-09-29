@@ -15,12 +15,10 @@ import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import type { IProviderRecord } from '@/lib/database';
+import { DEFAULT_RESULTS, asSafeSearch, asString, clampCount } from './searchOptions';
 import type { WebSearchInput, WebSearchResultItem } from './types';
 
 const logger = createLogger('websearch-adapter');
-
-const MAX_RESULTS = 50;
-const DEFAULT_RESULTS = 10;
 
 interface AdapterCallResult {
   results: WebSearchResultItem[];
@@ -67,21 +65,6 @@ export async function callWebSearchProvider(
           'Use Bing, Brave Search, Serper, Tavily, SearxNG, or DuckDuckGo.',
       );
   }
-}
-
-function clampCount(count?: number): number {
-  if (typeof count !== 'number' || !Number.isFinite(count) || count <= 0) {
-    return DEFAULT_RESULTS;
-  }
-  return Math.min(Math.floor(count), MAX_RESULTS);
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
-}
-
-function asSafeSearch(value: unknown): 'off' | 'moderate' | 'strict' | undefined {
-  return value === 'off' || value === 'moderate' || value === 'strict' ? value : undefined;
 }
 
 function requireApiKey(input: DriverCallInput, providerLabel: string): string {

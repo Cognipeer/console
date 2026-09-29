@@ -91,6 +91,43 @@ instance has AI answers disabled (or no model selected), or the model call
 fails, the search still succeeds: the results come back without an AI `answer`
 and a `warnings` array explains why.
 
+## Semantic cache
+
+Repeated or near-identical queries do not have to hit the search engine (and its
+quota). Enable **Configuration → Semantic cache → Cache enabled** on an
+instance and choose:
+
+- a **vector provider** and **vector index** to hold cache entries — the
+  provider must support metadata filters, and the index dimension must match
+  the embedding model;
+- an **embedding model** from the project's Model Hub;
+- a **similarity threshold** from 0 to 1 (default 0.8).
+
+With caching on, every search embeds the query and looks it up in the index
+before the engine is called. A cached query whose similarity is **at least** the
+threshold returns its saved results without calling the engine. Otherwise the
+engine runs and the query embedding, the original query (as a `keyword`) and
+the complete result set are written to the index.
+
+- **Isolation** — entries are bound to tenant, project and instance, so an
+  index can be shared without one scope ever seeing another's results.
+- **Options matter** — `count`, `offset`, `language`, `country` and safe search
+  (after falling back to the instance settings) and the instance's own engine
+  settings are part of the entry's identity: a 5-result answer is never served
+  to a 10-result request. `include_answer` is not: AI answers are always
+  generated per request from the (cached or fresh) results.
+- **Response** — `cached` says whether the results came from the cache; `cache`
+  carries `status` (`hit` / `miss` / `error`) and the hit `similarity`. Logs
+  record the outcome per search (`metadata.cache`), shown as a Cache column and
+  a badge in the log detail.
+- **Failures** — a cache that cannot be reached (embedding, vector search or
+  write failure, or a broken configuration) never fails the search: it runs
+  uncached and the response carries a `warnings` entry. Warnings and logs name
+  the failing stage only, never provider error text or credentials.
+
+Settings are validated when saved: the vector provider/index and embedding
+model must exist in the active project, and the threshold must be within 0–1.
+
 ## API
 
 Token-authenticated endpoints live under `/api/client/v1/websearch/*`:

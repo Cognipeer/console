@@ -82,6 +82,7 @@ Response:
       "score": 0.92
     }
   ],
+  "cached": false,
   "latency_ms": 412
 }
 ```
@@ -90,6 +91,11 @@ Response:
   or when the engine returns a native answer (Tavily, Serper answer box).
 - `answer_model` is set only for AI-interpreted answers.
 - `source` is the origin engine for metasearch instances (SearxNG).
+- `cached` is `true` when the results came from the instance's semantic cache
+  instead of the search engine. `cache` (`{ "status": "hit" | "miss" | "error",
+  "similarity"? }`) appears only on instances with caching enabled. On `error`
+  the cache could not be consulted, the search ran uncached and `warnings`
+  says why.
 
 Errors follow the standard `{ "error": "…" }` envelope with status 400 — e.g.
 a missing query, an unknown instance key, or `include_answer` against an
