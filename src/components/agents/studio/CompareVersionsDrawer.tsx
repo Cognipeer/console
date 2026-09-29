@@ -9,37 +9,41 @@
  * session into the list or the published agent's traffic.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
     Alert,
     Badge,
     Button,
     Drawer,
+    Grid,
     Group,
     Loader,
     Paper,
     ScrollArea,
+    SegmentedControl,
     Select,
     SimpleGrid,
     Stack,
     Text,
     Textarea,
+    Tooltip,
 } from '@mantine/core';
 import { IconArrowsLeftRight, IconRefresh, IconSend } from '@tabler/icons-react';
 import MessageBlock from '@/components/common/ui/MessageBlock';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber } from '@/lib/utils/tracingUtils';
+import AgentMarkdown from '../session/AgentMarkdown';
 import { formatCost } from '../session/sessionUsage';
 import type { PlaygroundStep } from '../session/sessionTypes';
-
-interface Turn {
-    role: 'user' | 'assistant' | 'error';
-    content: string;
-    steps?: PlaygroundStep[];
-    latencyMs?: number;
-    totalTokens?: number;
-    costUsd?: number;
-}
+import {
+    DEFAULT_RESPONSE_FORMAT,
+    compareTotals,
+    isResponseFormat,
+    readTurnUsage,
+    type CompareResponseFormat,
+    type CompareTurn as Turn,
+} from './compareVersionsStats';
 
 const DRAFT = 'draft';
 
@@ -56,21 +60,6 @@ export interface CompareVersionsDrawerProps {
     initialMessage?: string;
 }
 
-function sideLabel(value: string, publishedVersion: number | null): string {
-    if (value === DRAFT) return 'Draft';
-    return `v${value}${Number(value) === publishedVersion ? ' · published' : ''}`;
-}
-
-function totals(turns: Turn[]) {
-    const answers = turns.filter((turn) => turn.role === 'assistant');
-    return {
-        latencyMs: answers.reduce((sum, turn) => sum + (turn.latencyMs ?? 0), 0),
-        tokens: answers.reduce((sum, turn) => sum + (turn.totalTokens ?? 0), 0),
-        cost: answers.reduce((sum, turn) => sum + (turn.costUsd ?? 0), 0),
-        toolCalls: answers.reduce((sum, turn) => sum + (turn.steps?.length ?? 0), 0),
-    };
-}
-
 export default function CompareVersionsDrawer({
     opened,
     onClose,
@@ -80,12 +69,23 @@ export default function CompareVersionsDrawer({
     changedSections,
     initialMessage,
 }: CompareVersionsDrawerProps) {
+    const t = useTranslations('agents.compare');
     const [left, setLeft] = useState<string>(DRAFT);
     const [right, setRight] = useState<string>(publishedVersion ? String(publishedVersion) : String(versions[0] ?? DRAFT));
     const [leftTurns, setLeftTurns] = useState<Turn[]>([]);
     const [rightTurns, setRightTurns] = useState<Turn[]>([]);
     const [input, setInput] = useState('');
     const [running, setRunning] = useState(false);
+    // One mode for both columns, kept across version switches and resets, so
+    // the two answers are always read in the same form.
+    const [responseFormat, setResponseFormat] = useState<CompareResponseFormat>(DEFAULT_RESPONSE_FORMAT);
+
+    const sideLabel = (value: string): string => {
+        if (value === DRAFT) return t('draft');
+        return Number(value) === publishedVersion
+            ? t('publishedVersionOption', { version: value })
+            : t('versionOption', { version: value });
+    };
 
     useEffect(() => {
         if (opened && initialMessage && !input) setInput(initialMessage);
@@ -98,9 +98,14 @@ export default function CompareVersionsDrawer({
     }, [publishedVersion]);
 
     const options = useMemo(() => [
-        { value: DRAFT, label: 'Draft (current config)' },
-        ...versions.map((version) => ({ value: String(version), label: sideLabel(String(version), publishedVersion) })),
-    ], [versions, publishedVersion]);
+        { value: DRAFT, label: t('draftOption') },
+        ...versions.map((version) => ({
+            value: String(version),
+            label: version === publishedVersion
+                ? t('publishedVersionOption', { version })
+                : t('versionOption', { version }),
+        })),
+    ], [versions, publishedVersion, t]);
 
     const reset = () => { setLeftTurns([]); setRightTurns([]); };
 
@@ -125,8 +130,7 @@ export default function CompareVersionsDrawer({
                 content: String(data.content ?? ''),
                 steps: Array.isArray(data.steps) ? data.steps as PlaygroundStep[] : undefined,
                 latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : Date.now() - startedAt,
-                totalTokens: data.usage?.totalTokens,
-                costUsd: data.usage?.costUsd,
+                ...readTurnUsage(data.usage),
             };
         } catch (error) {
             return { role: 'error', content: error instanceof Error ? error.message : String(error) };
@@ -153,7 +157,12 @@ export default function CompareVersionsDrawer({
     };
 
     const column = (side: string, onSide: (value: string) => void, turns: Turn[]) => {
-        const sum = totals(turns);
+        const sum = compareTotals(turns);
+        const tokenValue = (value: number | undefined) => (
+            value === undefined
+                ? <Tooltip label={t('stats.notReported')} withArrow><span>—</span></Tooltip>
+                : formatNumber(value)
+        );
         return (
             <Paper withBorder radius="md" p="md" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 <Group justify="space-between" mb="sm" wrap="nowrap">
@@ -167,13 +176,13 @@ export default function CompareVersionsDrawer({
                         disabled={running}
                     />
                     <Badge variant="light" color={side === DRAFT ? 'orange' : 'teal'}>
-                        {sideLabel(side, publishedVersion)}
+                        {sideLabel(side)}
                     </Badge>
                 </Group>
-                <ScrollArea.Autosize mah="calc(100vh - 360px)" type="auto">
+                <ScrollArea.Autosize mah="calc(100vh - 360px)" type="auto" offsetScrollbars>
                     <Stack gap="sm">
                         {turns.length === 0 ? (
-                            <Text size="sm" c="dimmed">Send a message to compare.</Text>
+                            <Text size="sm" c="dimmed">{t('empty')}</Text>
                         ) : turns.map((turn, index) => (
                             turn.role === 'error' ? (
                                 <Alert key={index} color="red" variant="light" p="xs">
@@ -182,7 +191,20 @@ export default function CompareVersionsDrawer({
                             ) : (
                                 <Paper key={index} withBorder={turn.role === 'assistant'} radius="md" p="sm" bg={turn.role === 'user' ? 'var(--ds-surface-sunken, var(--mantine-color-gray-0))' : undefined}>
                                     <Stack gap={6}>
-                                        <MessageBlock messageRole={turn.role} content={turn.content} />
+                                        {turn.role === 'assistant' && responseFormat === 'markdown' ? (
+                                            turn.content.trim() ? (
+                                                <Stack gap={6}>
+                                                    <Text size="sm" fw={700}>{t('roleAssistant')}</Text>
+                                                    <AgentMarkdown text={turn.content} />
+                                                </Stack>
+                                            ) : null
+                                        ) : (
+                                            <MessageBlock
+                                                messageRole={turn.role}
+                                                content={turn.content}
+                                                roleLabel={turn.role === 'assistant' ? t('roleAssistant') : t('roleUser')}
+                                            />
+                                        )}
                                         {turn.steps?.length ? (
                                             <Group gap={4}>
                                                 {turn.steps.map((step, stepIndex) => (
@@ -198,7 +220,7 @@ export default function CompareVersionsDrawer({
                                         {turn.role === 'assistant' ? (
                                             <Group gap="md">
                                                 {turn.latencyMs ? <Text size="xs" c="dimmed">{formatDuration(turn.latencyMs)}</Text> : null}
-                                                {turn.totalTokens ? <Text size="xs" c="dimmed">{formatNumber(turn.totalTokens)} tokens</Text> : null}
+                                                {turn.totalTokens ? <Text size="xs" c="dimmed">{t('turnTokens', { count: formatNumber(turn.totalTokens) })}</Text> : null}
                                                 {turn.costUsd ? <Text size="xs" c="dimmed">{formatCost(turn.costUsd)}</Text> : null}
                                             </Group>
                                         ) : null}
@@ -206,16 +228,55 @@ export default function CompareVersionsDrawer({
                                 </Paper>
                             )
                         ))}
-                        {running ? <Group gap="xs"><Loader size="xs" /><Text size="xs" c="dimmed">Running…</Text></Group> : null}
+                        {running ? <Group gap="xs"><Loader size="xs" /><Text size="xs" c="dimmed">{t('running')}</Text></Group> : null}
                     </Stack>
                 </ScrollArea.Autosize>
                 {turns.some((turn) => turn.role === 'assistant') ? (
-                    <SimpleGrid cols={4} mt="sm" pt="sm" style={{ borderTop: '1px solid var(--ds-border-soft, var(--mantine-color-gray-2))' }}>
-                        <Stat label="Latency" value={formatDuration(sum.latencyMs)} />
-                        <Stat label="Tokens" value={sum.tokens ? formatNumber(sum.tokens) : '—'} />
-                        <Stat label="Cost" value={sum.cost ? formatCost(sum.cost) : '—'} />
-                        <Stat label="Tool calls" value={String(sum.toolCalls)} />
-                    </SimpleGrid>
+                    <Grid
+                        type="container"
+                        breakpoints={STATS_BREAKPOINTS}
+                        columns={6}
+                        gutter="sm"
+                        mt="sm"
+                        pt="sm"
+                        style={{ borderTop: '1px solid var(--ds-border-soft, var(--mantine-color-gray-2))' }}
+                    >
+                        {/*
+                          * Wide: Latency | Cost | Tool calls on the left half, Tokens on the
+                          * right half with its breakdown as a second row directly beneath —
+                          * set off by a divider so the two rows read as one group.
+                          * Narrow: the three scalar stats share a row and the Tokens group
+                          * moves below them, full width, so its breakdown never gets squeezed.
+                          */}
+                        <Grid.Col span={{ base: 2, sm: 1 }}>
+                            <Stat label={t('stats.latency')} value={formatDuration(sum.latencyMs)} />
+                        </Grid.Col>
+                        <Grid.Col span={{ base: 2, sm: 1 }}>
+                            <Stat label={t('stats.cost')} value={sum.cost ? formatCost(sum.cost) : '—'} />
+                        </Grid.Col>
+                        <Grid.Col span={{ base: 2, sm: 1 }}>
+                            <Stat label={t('stats.toolCalls')} value={String(sum.toolCalls)} />
+                        </Grid.Col>
+                        <Grid.Col span={{ base: 6, sm: 3 }}>
+                            <Stack
+                                gap={6}
+                                pl="sm"
+                                style={{ borderLeft: '1px solid var(--ds-border-soft, var(--mantine-color-gray-2))' }}
+                            >
+                                <Stat label={t('stats.tokens')} value={tokenValue(sum.tokens)} />
+                                <SimpleGrid cols={3} spacing="xs">
+                                    <Stat label={t('stats.input')} value={tokenValue(sum.inputTokens)} secondary />
+                                    <Stat label={t('stats.output')} value={tokenValue(sum.outputTokens)} secondary />
+                                    <Stat
+                                        label={t('stats.cache')}
+                                        hint={t('stats.cacheHint')}
+                                        value={tokenValue(sum.cachedInputTokens)}
+                                        secondary
+                                    />
+                                </SimpleGrid>
+                            </Stack>
+                        </Grid.Col>
+                    </Grid>
                 ) : null}
             </Paper>
         );
@@ -230,22 +291,32 @@ export default function CompareVersionsDrawer({
             title={
                 <Group gap="xs">
                     <IconArrowsLeftRight size={16} />
-                    <Text fw={600}>Compare versions</Text>
+                    <Text fw={600}>{t('title')}</Text>
                 </Group>
             }
         >
             <Stack gap="md">
                 {changedSections && changedSections.length > 0 ? (
                     <Group gap={6}>
-                        <Text size="xs" c="dimmed">Changed in draft since v{publishedVersion}:</Text>
+                        <Text size="xs" c="dimmed">{t('changedSince', { version: publishedVersion })}</Text>
                         {changedSections.map((section) => (
                             <Badge key={section} size="sm" variant="light" color="orange">{section}</Badge>
                         ))}
                     </Group>
                 ) : null}
-                <Text size="xs" c="dimmed">
-                    Each side keeps its own history and runs without creating a session.
-                </Text>
+                <Group justify="space-between" gap="xs">
+                    <Text size="xs" c="dimmed">{t('statelessHint')}</Text>
+                    <SegmentedControl
+                        size="xs"
+                        aria-label={t('responseFormat')}
+                        value={responseFormat}
+                        onChange={(value) => { if (isResponseFormat(value)) setResponseFormat(value); }}
+                        data={[
+                            { value: 'markdown', label: t('formatMarkdown') },
+                            { value: 'plain', label: t('formatPlain') },
+                        ]}
+                    />
+                </Group>
                 <SimpleGrid cols={2} spacing="md">
                     {column(left, setLeft, leftTurns)}
                     {column(right, setRight, rightTurns)}
@@ -253,7 +324,7 @@ export default function CompareVersionsDrawer({
                 <Group align="flex-end" wrap="nowrap">
                     <Textarea
                         style={{ flex: 1 }}
-                        placeholder="Send the same message to both…"
+                        placeholder={t('inputPlaceholder')}
                         value={input}
                         onChange={(event) => setInput(event.currentTarget.value)}
                         onKeyDown={(event) => {
@@ -268,25 +339,36 @@ export default function CompareVersionsDrawer({
                         disabled={running}
                     />
                     <Button leftSection={<IconSend size={14} />} onClick={() => void send()} loading={running} disabled={!input.trim()}>
-                        Send to both
+                        {t('send')}
                     </Button>
                     <Button variant="default" leftSection={<IconRefresh size={14} />} onClick={reset} disabled={running}>
-                        Reset
+                        {t('reset')}
                     </Button>
                 </Group>
                 {left === right ? (
-                    <Text size="xs" c="orange">Both sides run the same version.</Text>
+                    <Text size="xs" c="orange">{t('sameVersion')}</Text>
                 ) : null}
             </Stack>
         </Drawer>
     );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+/** Container widths (the column, not the viewport): each side is half a drawer. */
+const STATS_BREAKPOINTS = { xs: '240px', sm: '420px', md: '560px', lg: '720px', xl: '960px' };
+
+function Stat({ label, value, hint, secondary = false }: {
+    label: string;
+    value: ReactNode;
+    /** Explains a label that is easy to misread (e.g. cache is part of input). */
+    hint?: string;
+    /** A breakdown of the stat above it — drawn smaller so the total still leads. */
+    secondary?: boolean;
+}) {
+    const labelText = <Text size="10px" c="dimmed" tt="uppercase" fw={600} truncate>{label}</Text>;
     return (
-        <Stack gap={0}>
-            <Text size="10px" c="dimmed" tt="uppercase" fw={600}>{label}</Text>
-            <Text size="sm" fw={600} ff="monospace">{value}</Text>
+        <Stack gap={0} miw={0}>
+            {hint ? <Tooltip label={hint} withArrow multiline maw={240}>{labelText}</Tooltip> : labelText}
+            <Text size={secondary ? 'xs' : 'sm'} fw={secondary ? 500 : 600} ff="monospace" truncate>{value}</Text>
         </Stack>
     );
 }

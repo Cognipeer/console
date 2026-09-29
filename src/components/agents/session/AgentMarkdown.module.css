@@ -1,0 +1,45 @@
+/*
+ * TypographyStylesProvider is built for article-sized prose; inside a
+ * transcript turn its default margins leave a heading floating half a screen
+ * from the paragraph it introduces.
+ */
+.markdownBody :global(h1),
+.markdownBody :global(h2),
+.markdownBody :global(h3) {
+  margin-block: var(--app-space-3) var(--app-space-1);
+  font-size: var(--mantine-font-size-md);
+}
+
+.markdownBody :global(p),
+.markdownBody :global(ul),
+.markdownBody :global(ol),
+.markdownBody :global(table) {
+  margin-block: var(--app-space-1);
+  font-size: var(--mantine-font-size-sm);
+}
+
+.markdownBody :global(pre) {
+  font-size: 12px;
+}
+
+.markdownBody :global(:first-child) {
+  margin-block-start: 0;
+}
+
+/* Tailwind's preflight strips list markers; an answer's bullets must still read as a list. */
+.markdownBody :global(ul) {
+  list-style: disc;
+}
+
+.markdownBody :global(ol) {
+  list-style: decimal;
+}
+
+.markdownBody :global(ul ul) {
+  list-style: circle;
+}
+
+/* Long URLs and identifiers in an answer must not push a narrow column wider. */
+.markdownBody {
+  overflow-wrap: anywhere;
+}

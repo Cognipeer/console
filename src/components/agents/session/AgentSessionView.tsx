@@ -40,7 +40,6 @@ import {
     Text,
     Textarea,
     TextInput,
-    TypographyStylesProvider,
     ThemeIcon,
     Tooltip,
     UnstyledButton,
@@ -70,9 +69,8 @@ import {
     IconZoomOut,
     IconArrowsLeftRight,
 } from '@tabler/icons-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import DetailShell from '@/components/common/ui/DetailShell';
+import Markdown from './AgentMarkdown';
 import LoadingState from '@/components/common/LoadingState';
 import EmptyState from '@/components/common/EmptyState';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
@@ -762,20 +760,6 @@ function RoleBadge({ user, agentName }: { user?: boolean; agentName: string }) {
         >
             {user ? 'You' : agentName}
         </Badge>
-    );
-}
-
-/**
- * Wrapped so headings, lists and tables in an answer actually look like
- * headings, lists and tables — a bare ReactMarkdown emits real h2/ul/table
- * elements that nothing was styling, so a structured report rendered as one
- * undifferentiated block of text.
- */
-function Markdown({ text }: { text: string }) {
-    return (
-        <TypographyStylesProvider className={classes.markdownBody}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-        </TypographyStylesProvider>
     );
 }
 
