@@ -9,6 +9,7 @@ export default defineConfig({
     setupFiles: ['src/__tests__/setup.ts'],
     include: ['src/__tests__/**/*.test.ts'],
     pool: 'forks',
+    maxWorkers: 2,
     server: {
       deps: {
         // to-markdown's ESM build does `import { fromBuffer } from 'file-type'`
