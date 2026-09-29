@@ -496,10 +496,12 @@ function writeAgent(
         ...(flags.hasStructuredOutput ? ['    outputSchema,'] : []),
         `    runtimeProfile: ${quote(runtime.runtimeProfile ?? 'balanced')},`,
         `    planning: ${literal(runtime.planning, 4)},`,
-        `    limits: ${literal(runtime.limits, 4)},`,
-        `    summarization: ${literal(runtime.summarization, 4)},`,
-        `    context: ${literal(runtime.context, 4)},`,
-        `    toolResponses: ${literal(runtime.toolResponses, 4)},`,
+        // Under a named profile, knobs the operator left unset are omitted so
+        // the SDK applies that profile's preset — same as the live agent.
+        ...(runtime.limits ? [`    limits: ${literal(runtime.limits, 4)},`] : []),
+        ...(runtime.summarization ? [`    summarization: ${literal(runtime.summarization, 4)},`] : []),
+        ...(runtime.context ? [`    context: ${literal(runtime.context, 4)},`] : []),
+        ...(runtime.toolResponses ? [`    toolResponses: ${literal(runtime.toolResponses, 4)},`] : []),
         ...(runtime.contextPilot ? [`    contextPilot: ${literal(runtime.contextPilot, 4)},`] : []),
         ...(runtime.reasoning ? [`    reasoning: ${literal(runtime.reasoning, 4)},`] : []),
         ...(runtime.subagentPolicy ? [`    subagentPolicy: ${literal(runtime.subagentPolicy, 4)},`] : []),

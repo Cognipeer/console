@@ -11,6 +11,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import {
+    DEFAULT_PROFILE_CONFIGS,
+    normalizeSmartAgentOptions,
+    type SmartAgentOptions,
+} from '@cognipeer/agent-sdk';
 
 import type { IAgentConfig } from '@/lib/database/provider/types.domain';
 import {
@@ -98,6 +103,97 @@ const FULL_CONFIG: IAgentConfig = {
     },
 };
 
+/** What the SDK actually runs with, after merging our options over its preset. */
+const effective = (config: IAgentConfig) =>
+    normalizeSmartAgentOptions(resolveAgentRuntimeOptions(config) as SmartAgentOptions);
+
+describe('agent settings — runtime profile presets reach the SDK', () => {
+    it('keeps the console defaults for an agent with no runtime block', () => {
+        const smart = effective({});
+        expect(smart.runtimeProfile).toBe('balanced');
+        expect(smart.limits.maxToolCalls).toBe(CONSOLE_AGENT_DEFAULTS.maxToolCalls);
+        expect(smart.limits.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
+        expect(smart.summarization.maxTokens).toBe(CONSOLE_AGENT_DEFAULTS.summaryMaxTokens);
+        expect(smart.summarization.summaryTriggerTokens).toBe(CONSOLE_AGENT_DEFAULTS.summaryTriggerTokens);
+        expect(smart.summarization.summaryPromptMaxTokens).toBe(CONSOLE_AGENT_DEFAULTS.summaryPromptMaxTokens);
+        expect(smart.context.lastTurnsToKeep).toBe(CONSOLE_AGENT_DEFAULTS.lastTurnsToKeep);
+        expect(smart.toolResponses.maxToolResponseChars).toBe(CONSOLE_AGENT_DEFAULTS.maxToolResponseChars);
+        expect(smart.toolResponses.maxToolResponseTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxToolResponseTokens);
+    });
+
+    it('keeps the console defaults for a runtime block without a profile', () => {
+        const smart = effective({ runtime: { planning: { mode: 'todo' } } });
+        expect(smart.limits.maxToolCalls).toBe(CONSOLE_AGENT_DEFAULTS.maxToolCalls);
+        expect(smart.context.lastTurnsToKeep).toBe(CONSOLE_AGENT_DEFAULTS.lastTurnsToKeep);
+    });
+
+    it.each(['deep', 'research'] as const)('applies the SDK %s preset for knobs left unset', (profile) => {
+        const preset = DEFAULT_PROFILE_CONFIGS[profile];
+        const resolved = resolveAgentRuntimeOptions({ runtime: { profile } });
+        expect(resolved.limits).toBeUndefined();
+        expect(resolved.summarization).toBeUndefined();
+        expect(resolved.context).toBeUndefined();
+        // knowledge_search evidence stays uncompacted under every profile.
+        expect(resolved.toolResponses).toEqual({ toolResponseRetentionByTool: { knowledge_search: 'keep_full' } });
+
+        const smart = effective({ runtime: { profile } });
+        expect(smart.runtimeProfile).toBe(profile);
+        expect(smart.limits.maxToolCalls).toBe(preset.limits.maxToolCalls);
+        expect(smart.limits.maxContextTokens).toBe(preset.limits.maxContextTokens);
+        expect(smart.limits.maxParallelTools).toBe(preset.limits.maxParallelTools);
+        expect(smart.summarization.maxTokens).toBe(preset.summarization.maxTokens);
+        expect(smart.summarization.summaryTriggerTokens).toBe(preset.summarization.summaryTriggerTokens);
+        expect(smart.summarization.summaryPromptMaxTokens).toBe(preset.summarization.summaryPromptMaxTokens);
+        expect(smart.context.lastTurnsToKeep).toBe(preset.context.lastTurnsToKeep);
+        expect(smart.context.policy).toBe(preset.context.policy);
+        expect(smart.toolResponses.maxToolResponseChars).toBe(preset.toolResponses.maxToolResponseChars);
+        expect(smart.toolResponses.maxToolResponseTokens).toBe(preset.toolResponses.maxToolResponseTokens);
+        expect(smart.toolResponses.toolResponseRetentionByTool.knowledge_search).toBe('keep_full');
+    });
+
+    it('pins the documented deep / research preset values', () => {
+        expect(effective({ runtime: { profile: 'deep' } }).limits).toMatchObject({
+            maxToolCalls: 40, maxContextTokens: 200_000,
+        });
+        expect(effective({ runtime: { profile: 'deep' } }).context.lastTurnsToKeep).toBe(30);
+        expect(effective({ runtime: { profile: 'research' } }).limits).toMatchObject({
+            maxToolCalls: 80, maxContextTokens: 400_000,
+        });
+        expect(effective({ runtime: { profile: 'research' } }).context.lastTurnsToKeep).toBe(60);
+    });
+
+    it('still lets an explicit knob override the profile preset', () => {
+        const smart = effective({
+            runtime: {
+                profile: 'research',
+                limits: { maxToolCalls: 5 },
+                context: { lastTurnsToKeep: 4 },
+                summarization: { summaryTriggerTokens: 10_000 },
+                toolResponses: { maxToolResponseChars: 1_234 },
+            },
+        });
+        expect(smart.limits.maxToolCalls).toBe(5);
+        expect(smart.limits.maxContextTokens).toBe(DEFAULT_PROFILE_CONFIGS.research.limits.maxContextTokens);
+        expect(smart.context.lastTurnsToKeep).toBe(4);
+        expect(smart.summarization.summaryTriggerTokens).toBe(10_000);
+        expect(smart.toolResponses.maxToolResponseChars).toBe(1_234);
+    });
+
+    it('emits the same profile-driven options in generated code', () => {
+        const withProfile = generateAgentProject(AGENT, { runtime: { profile: 'deep' } }, { target: 'server' })
+            .files.find((f) => f.path === 'src/agent.ts')!.contents;
+        expect(withProfile).toContain('runtimeProfile: "deep"');
+        expect(withProfile).not.toMatch(/\blimits:/);
+        expect(withProfile).not.toMatch(/\bsummarization:/);
+        expect(withProfile).not.toMatch(/\bcontext:/);
+
+        const legacy = generateAgentProject(AGENT, {}, { target: 'server' })
+            .files.find((f) => f.path === 'src/agent.ts')!.contents;
+        expect(legacy).toMatch(/\blimits:/);
+        expect(legacy).toContain(String(CONSOLE_AGENT_DEFAULTS.maxToolCalls));
+    });
+});
+
 describe('agent settings — runtime resolution', () => {
     const resolved = resolveAgentRuntimeOptions(FULL_CONFIG);
 
@@ -117,10 +213,14 @@ describe('agent settings — runtime resolution', () => {
         expect((resolved as Record<string, unknown>).humanInTheLoop).toBeUndefined();
     });
 
-    it('keeps the module default for a limit the operator did not touch', () => {
-        // The trap this guards: resolving one field of `limits` and dropping
-        // the rest, so raising maxToolCalls silently removes the context cap.
-        expect(resolved.limits?.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
+    it('leaves a limit the operator did not touch to the chosen profile preset', () => {
+        // The trap this guards: raising maxToolCalls on a `deep` agent used to
+        // pin maxContextTokens to the console default (48k) instead of the
+        // profile's own 200k, because the SDK spreads `opts.limits` over the preset.
+        expect(resolved.limits).not.toHaveProperty('maxContextTokens');
+        const smart = normalizeSmartAgentOptions(resolved as SmartAgentOptions);
+        expect(smart.limits.maxToolCalls).toBe(25);
+        expect(smart.limits.maxContextTokens).toBe(DEFAULT_PROFILE_CONFIGS.deep.limits.maxContextTokens);
     });
 
     it('emits a sub-agent policy because the agent has sub-agents', () => {
