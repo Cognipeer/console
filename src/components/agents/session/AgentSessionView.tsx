@@ -79,6 +79,7 @@ import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList'
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import { versionSelectData } from '../studio/StartSessionModal';
 import SessionSidePanel from './SessionSidePanel';
+import TurnTimeline, { DEFAULT_TIMELINE_ZOOM, TIMELINE_ZOOM_LEVELS } from './TurnTimeline';
 import LiveToolCalls, {
     appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
 } from './LiveToolCalls';
@@ -110,10 +111,6 @@ export interface AgentSessionViewProps {
 
 /** How much of a payload is shown before "Show the whole payload". */
 const PAYLOAD_CLIP_CHARS = 1200;
-
-/** Timeline zoom steps, in pixels-per-second of turn latency. */
-const ZOOM_LEVELS = [2, 6, 18, 54];
-const DEFAULT_ZOOM = 1;
 
 /** A failed run, with the server's classification of what failed. */
 class TurnFailure extends Error {
@@ -159,7 +156,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const readOnly = !isContinuableSession(sessionSource);
     const sessionContext = session?.metadata?.runtimeContext as Record<string, unknown> | undefined;
     const [search, setSearch] = useState('');
-    const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+    const [zoom, setZoom] = useState(DEFAULT_TIMELINE_ZOOM);
     const [overrideOpen, setOverrideOpen] = useState(false);
     const [runtimeContextJson, setRuntimeContextJson] = useState('');
     const [pinnedVersion, setPinnedVersion] = useState(searchParams.get('version') ?? '');
@@ -545,8 +542,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             <ActionIcon
                                 size="sm"
                                 variant="subtle"
-                                onClick={() => setZoom((value) => Math.min(ZOOM_LEVELS.length - 1, value + 1))}
-                                disabled={zoom === ZOOM_LEVELS.length - 1}
+                                onClick={() => setZoom((value) => Math.min(TIMELINE_ZOOM_LEVELS.length - 1, value + 1))}
+                                disabled={zoom === TIMELINE_ZOOM_LEVELS.length - 1}
                             >
                                 <IconZoomIn size={14} />
                             </ActionIcon>
@@ -554,29 +551,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     </Group>
 
                     {timeline.length > 0 ? (
-                        <ScrollArea type="hover" scrollbarSize={4} className={classes.timelineScroll}>
-                            <Group gap={2} wrap="nowrap" px="xs" py={6}>
-                                {timeline.map(({ index, message }) => {
-                                    const seconds = (message.latencyMs ?? 0) / 1000;
-                                    const failed = message.role === 'error'
-                                        || Boolean(message.stopReason)
-                                        || message.steps?.some(stepFailed);
-                                    return (
-                                        <Tooltip
-                                            key={index}
-                                            withArrow
-                                            label={`${formatDuration(message.latencyMs)}${message.steps?.length ? ` · ${message.steps.length} tool calls` : ''}`}
-                                        >
-                                            <UnstyledButton
-                                                onClick={() => goToTurn(index)}
-                                                className={`${classes.timelineSegment} ${failed ? classes.timelineSegmentFailed : ''}`}
-                                                style={{ width: Math.max(10, seconds * ZOOM_LEVELS[zoom]) }}
-                                            />
-                                        </Tooltip>
-                                    );
-                                })}
-                            </Group>
-                        </ScrollArea>
+                        <TurnTimeline entries={timeline} zoom={zoom} onSelect={goToTurn} />
                     ) : null}
 
                     <div className={classes.panelBody}>
