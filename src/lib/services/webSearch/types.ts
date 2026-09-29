@@ -30,6 +30,29 @@ export interface WebSearchAiAnswerSettings {
   instructions?: string;
 }
 
+/** Per-instance semantic cache settings (stored under provider settings.cache). */
+export interface WebSearchCacheSettings {
+  enabled: boolean;
+  /** Vector provider key holding the cache index. */
+  vectorProviderKey?: string;
+  /** Vector index key (within the provider) that stores cache entries. */
+  vectorIndexKey?: string;
+  /** Embedding model key used to embed queries. */
+  embeddingModelKey?: string;
+  /** Minimum similarity (0..1, inclusive) for a cached query to be reused. Default 0.8. */
+  similarityThreshold?: number;
+}
+
+/** How the semantic cache took part in one search (present only when the cache is enabled). */
+export interface WebSearchCacheInfo {
+  /** `error` = the cache could not be consulted; the search ran uncached. */
+  status: 'hit' | 'miss' | 'error';
+  /** Similarity of the cached query that was reused (hits only). */
+  similarity?: number;
+  /** Whether a miss was written back to the cache. */
+  stored?: boolean;
+}
+
 export interface WebSearchResultItem {
   title: string;
   url: string;
@@ -53,6 +76,10 @@ export interface WebSearchResult {
   answer?: string;
   /** Model key when the answer was produced by the instance's AI model. */
   answerModel?: string;
+  /** True when the results were served from the semantic cache instead of the provider. */
+  cached: boolean;
+  /** Semantic cache outcome; omitted when caching is disabled on the instance. */
+  cache?: WebSearchCacheInfo;
   /** Non-fatal notes, e.g. an `includeAnswer` request the instance could not serve. */
   warnings?: string[];
   latencyMs: number;

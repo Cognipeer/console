@@ -62,6 +62,22 @@ export interface UpdateProviderConfigInput {
   updatedBy?: string;
 }
 
+/**
+ * Websearch instances carry a semantic-cache config in `settings.cache`.
+ * Loaded lazily: it reaches the vector and model services, which themselves
+ * depend on this module.
+ */
+async function validateWebSearchSettings(
+  tenantDbName: string,
+  tenantId: string,
+  projectId: string | undefined,
+  settings: Record<string, unknown> | undefined,
+): Promise<Record<string, unknown> | undefined> {
+  if (!settings || settings.cache === undefined) return settings;
+  const { validateWebSearchProviderSettings } = await import('@/lib/services/webSearch/cacheValidation');
+  return validateWebSearchProviderSettings({ tenantDbName, tenantId, projectId, settings });
+}
+
 export interface ProviderConfigView
   extends Omit<IProviderRecord, 'credentialsEnc'> {
   hasCredentials: boolean;
@@ -101,6 +117,10 @@ export async function createProviderConfig(
   tenantId: string,
   payload: CreateProviderConfigInput,
 ): Promise<ProviderConfigView> {
+  const settings = payload.type === 'websearch'
+    ? await validateWebSearchSettings(tenantDbName, tenantId, payload.projectId, payload.settings)
+    : payload.settings;
+
   const db = await withTenantDb(tenantDbName);
 
   // Provider keys are tenant-level; project assignment is handled via projectIds.
@@ -121,7 +141,7 @@ export async function createProviderConfig(
       description: payload.description,
       status: payload.status ?? 'active',
       credentialsEnc: encryptObject(payload.credentials),
-      settings: payload.settings ?? {},
+      settings: settings ?? {},
       capabilitiesOverride: payload.capabilitiesOverride ?? undefined,
       metadata: payload.metadata ?? undefined,
       createdBy: payload.createdBy,
@@ -143,6 +163,7 @@ export async function updateProviderConfig(
   tenantDbName: string,
   providerId: string,
   payload: UpdateProviderConfigInput,
+  options?: { projectId?: string },
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
   const updates: Partial<IProviderRecord> = {};
@@ -165,6 +186,17 @@ export async function updateProviderConfig(
 
   if (payload.settings !== undefined) {
     updates.settings = payload.settings;
+    if (payload.settings.cache !== undefined) {
+      const target = await db.findProviderById(providerId);
+      if (target?.type === 'websearch') {
+        updates.settings = await validateWebSearchSettings(
+          tenantDbName,
+          target.tenantId,
+          options?.projectId,
+          payload.settings,
+        );
+      }
+    }
   }
 
   if (payload.capabilitiesOverride !== undefined) {

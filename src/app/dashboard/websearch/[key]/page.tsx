@@ -37,6 +37,7 @@ import type { ProviderDescriptor } from '@/lib/providers/types';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
 import type {
   WebSearchAiAnswerSettings,
+  WebSearchCacheSettings,
   WebSearchResult,
   WebSearchResultItem,
 } from '@/lib/services/webSearch/types';
@@ -50,6 +51,23 @@ function aiAnswerOf(p: ProviderConfigView | null): WebSearchAiAnswerSettings {
   const raw = p?.settings?.aiAnswer;
   return raw && typeof raw === 'object' ? (raw as WebSearchAiAnswerSettings) : {};
 }
+
+function cacheOf(p: ProviderConfigView | null): WebSearchCacheSettings {
+  const raw = p?.settings?.cache;
+  return raw && typeof raw === 'object' ? (raw as WebSearchCacheSettings) : { enabled: false };
+}
+
+/** Cache outcome recorded on a run log (metadata.cache). */
+function cacheStatusOf(log: IWebSearchRunLog): 'hit' | 'miss' | 'error' | undefined {
+  const status = (log.metadata?.cache as { status?: string } | undefined)?.status;
+  return status === 'hit' || status === 'miss' || status === 'error' ? status : undefined;
+}
+
+const CACHE_BADGE: Record<'hit' | 'miss' | 'error', { className: string; label: string }> = {
+  hit: { className: 'ds-badge ds-badge-ok', label: 'cache hit' },
+  miss: { className: 'ds-badge', label: 'cache miss' },
+  error: { className: 'ds-badge ds-badge-warn', label: 'cache error' },
+};
 
 function settingString(p: ProviderConfigView, name: string): string | undefined {
   const value = p.settings?.[name];
@@ -132,6 +150,17 @@ export default function WebSearchInstancePage() {
   const [aiSaving, setAiSaving] = useState(false);
   const [models, setModels] = useState<Array<{ value: string; label: string }>>([]);
 
+  // Semantic cache settings (Configuration tab)
+  const [cacheEnabled, setCacheEnabled] = useState(false);
+  const [cacheVectorProvider, setCacheVectorProvider] = useState<string | null>(null);
+  const [cacheVectorIndex, setCacheVectorIndex] = useState<string | null>(null);
+  const [cacheEmbeddingModel, setCacheEmbeddingModel] = useState<string | null>(null);
+  const [cacheThreshold, setCacheThreshold] = useState<number | string>(0.8);
+  const [cacheSaving, setCacheSaving] = useState(false);
+  const [vectorProviders, setVectorProviders] = useState<Array<{ value: string; label: string }>>([]);
+  const [vectorIndexes, setVectorIndexes] = useState<Array<{ value: string; label: string }>>([]);
+  const [embeddingModels, setEmbeddingModels] = useState<Array<{ value: string; label: string }>>([]);
+
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/websearch/providers/${encodeURIComponent(key)}`, {
@@ -150,6 +179,12 @@ export default function WebSearchInstancePage() {
       setAiEnabled(ai.enabled === true);
       setAiModelKey(ai.modelKey ?? null);
       setAiInstructions(ai.instructions ?? '');
+      const cache = cacheOf(provider);
+      setCacheEnabled(cache.enabled === true);
+      setCacheVectorProvider(cache.vectorProviderKey ?? null);
+      setCacheVectorIndex(cache.vectorIndexKey ?? null);
+      setCacheEmbeddingModel(cache.embeddingModelKey ?? null);
+      setCacheThreshold(cache.similarityThreshold ?? 0.8);
     } catch (err) {
       notifications.show({
         color: 'red',
@@ -199,9 +234,73 @@ export default function WebSearchInstancePage() {
     }
   }, []);
 
+  const loadCacheOptions = useCallback(async () => {
+    try {
+      const [providersRes, embeddingRes] = await Promise.all([
+        fetch('/api/vector/providers', { cache: 'no-store' }),
+        fetch('/api/models?category=embedding', { cache: 'no-store' }),
+      ]);
+      if (providersRes.ok) {
+        const data = await providersRes.json();
+        setVectorProviders(
+          (data.providers ?? []).map((p: { key: string; label?: string }) => ({
+            value: p.key,
+            label: p.label ? `${p.label} (${p.key})` : p.key,
+          })),
+        );
+      }
+      if (embeddingRes.ok) {
+        const data = await embeddingRes.json();
+        setEmbeddingModels(
+          (data.models ?? []).map((m: { key: string; name?: string }) => ({
+            value: m.key,
+            label: m.name ? `${m.name} (${m.key})` : m.key,
+          })),
+        );
+      }
+    } catch (err) {
+      console.error('Failed to load cache options', err);
+    }
+  }, []);
+
+  const loadCacheIndexes = useCallback(async (providerKey: string | null) => {
+    if (!providerKey) {
+      setVectorIndexes([]);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/vector/indexes?providerKey=${encodeURIComponent(providerKey)}`,
+        { cache: 'no-store' },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setVectorIndexes(
+          (data.indexes ?? []).map((idx: { key: string; name?: string }) => ({
+            value: idx.key,
+            label: idx.name ? `${idx.name} (${idx.key})` : idx.key,
+          })),
+        );
+      } else {
+        setVectorIndexes([]);
+      }
+    } catch (err) {
+      console.error('Failed to load vector indexes', err);
+      setVectorIndexes([]);
+    }
+  }, []);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (tab === 'config') void loadCacheOptions();
+  }, [tab, loadCacheOptions]);
+
+  useEffect(() => {
+    if (tab === 'config') void loadCacheIndexes(cacheVectorProvider);
+  }, [tab, cacheVectorProvider, loadCacheIndexes]);
 
   useEffect(() => {
     void loadLogs();
@@ -312,6 +411,56 @@ export default function WebSearchInstancePage() {
     }
   };
 
+  async function saveCacheSettings() {
+    if (!instance) return;
+    const threshold = typeof cacheThreshold === 'number' ? cacheThreshold : Number(cacheThreshold);
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+      notifications.show({
+        color: 'red',
+        title: 'Cache',
+        message: 'Similarity threshold must be between 0 and 1.',
+      });
+      return;
+    }
+    if (cacheEnabled && (!cacheVectorProvider || !cacheVectorIndex || !cacheEmbeddingModel)) {
+      notifications.show({
+        color: 'red',
+        title: 'Cache',
+        message: 'Select a vector provider, a vector index and an embedding model before enabling the cache.',
+      });
+      return;
+    }
+    setCacheSaving(true);
+    try {
+      const cache: WebSearchCacheSettings = {
+        enabled: cacheEnabled,
+        vectorProviderKey: cacheVectorProvider ?? undefined,
+        vectorIndexKey: cacheVectorIndex ?? undefined,
+        embeddingModelKey: cacheEmbeddingModel ?? undefined,
+        similarityThreshold: threshold,
+      };
+      const res = await fetch(`/api/providers/${encodeURIComponent(String(instance._id))}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ settings: { ...instance.settings, cache } }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || 'Failed to save cache settings');
+      }
+      notifications.show({ color: 'teal', title: 'Cache', message: 'Settings saved' });
+      await load();
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: err instanceof Error ? err.message : 'Failed',
+      });
+    } finally {
+      setCacheSaving(false);
+    }
+  }
+
   async function saveAiSettings() {
     if (!instance) return;
     if (aiEnabled && !aiModelKey) {
@@ -392,6 +541,18 @@ export default function WebSearchInstancePage() {
       key: 'resultCount',
       label: 'Results',
       render: (l) => <span className="ds-badge">{l.resultCount}</span>,
+    },
+    {
+      key: 'cache',
+      label: 'Cache',
+      render: (l) => {
+        const status = cacheStatusOf(l);
+        return status ? (
+          <span className={CACHE_BADGE[status].className}>{status}</span>
+        ) : (
+          <span className="ds-faint">—</span>
+        );
+      },
     },
     {
       key: 'answer',
@@ -541,6 +702,17 @@ export default function WebSearchInstancePage() {
             <div style={{ marginTop: 14 }}>
               <div className="ds-faint" style={{ fontSize: 12, marginBottom: 8 }}>
                 {searchResult.results.length} results · {searchResult.latencyMs} ms
+                {searchResult.cache && (
+                  <span
+                    className={CACHE_BADGE[searchResult.cache.status].className}
+                    style={{ marginLeft: 8 }}
+                  >
+                    {CACHE_BADGE[searchResult.cache.status].label}
+                    {searchResult.cached && typeof searchResult.cache.similarity === 'number'
+                      ? ` · ${searchResult.cache.similarity.toFixed(3)}`
+                      : ''}
+                  </span>
+                )}
               </div>
               {searchResult.warnings?.map((warning) => (
                 <div key={warning} className="ds-badge ds-badge-warn" style={{ marginBottom: 8, whiteSpace: 'normal' }}>
@@ -736,6 +908,79 @@ export default function WebSearchInstancePage() {
             </DetailCard>
 
             <DetailCard
+              title="Semantic cache"
+              description="Reuse results of similar earlier queries instead of calling the search engine. Entries are isolated per project and instance and depend on the result options (count, offset, language, country, safe search)."
+              actions={
+                <Button
+                  size="xs"
+                  color="teal"
+                  leftSection={<IconDeviceFloppy size={13} stroke={1.7} />}
+                  loading={cacheSaving}
+                  onClick={() => void saveCacheSettings()}
+                >
+                  Save
+                </Button>
+              }
+            >
+              <div className="ds-col" style={{ gap: 12 }}>
+                <Switch
+                  label="Cache enabled"
+                  description="Embeds each query and searches the selected vector index before calling the search engine."
+                  checked={cacheEnabled}
+                  onChange={(e) => setCacheEnabled(e.currentTarget.checked)}
+                />
+                <Select
+                  label="Vector provider"
+                  placeholder="Select a vector provider"
+                  data={vectorProviders}
+                  value={cacheVectorProvider}
+                  onChange={(value) => {
+                    setCacheVectorProvider(value);
+                    setCacheVectorIndex(null);
+                  }}
+                  searchable
+                  clearable
+                  nothingFoundMessage="No vector providers in this project"
+                  disabled={!cacheEnabled}
+                />
+                <Select
+                  label="Vector index"
+                  placeholder="Select an index"
+                  description="Use an index whose dimension matches the embedding model."
+                  data={vectorIndexes}
+                  value={cacheVectorIndex}
+                  onChange={setCacheVectorIndex}
+                  searchable
+                  clearable
+                  nothingFoundMessage="No indexes for this provider"
+                  disabled={!cacheEnabled || !cacheVectorProvider}
+                />
+                <Select
+                  label="Embedding model"
+                  placeholder="Select an embedding model"
+                  data={embeddingModels}
+                  value={cacheEmbeddingModel}
+                  onChange={setCacheEmbeddingModel}
+                  searchable
+                  clearable
+                  nothingFoundMessage="No embedding models in this project"
+                  disabled={!cacheEnabled}
+                />
+                <NumberInput
+                  label="Similarity threshold"
+                  description="0 to 1. A cached query is reused when its similarity is at least this value."
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  decimalScale={2}
+                  value={cacheThreshold}
+                  onChange={setCacheThreshold}
+                  disabled={!cacheEnabled}
+                />
+              </div>
+            </DetailCard>
+
+            <DetailCard
               title="Configuration"
               description="Engine and search settings for this instance."
               actions={
@@ -819,8 +1064,12 @@ export default function WebSearchInstancePage() {
             label: options.values.base.label,
             description: options.values.base.description,
             status: options.values.base.status,
-            // The generic form only edits driver settings — preserve aiAnswer.
-            settings: { ...options.values.settings, aiAnswer: aiAnswerOf(instance) },
+            // The generic form only edits driver settings — preserve aiAnswer and cache.
+            settings: {
+              ...options.values.settings,
+              aiAnswer: aiAnswerOf(instance),
+              ...(instance.settings?.cache ? { cache: instance.settings.cache } : {}),
+            },
             metadata: options.values.metadata,
           };
           if (Object.keys(options.values.credentials).length > 0) {
@@ -868,6 +1117,11 @@ export default function WebSearchInstancePage() {
                 <span className="ds-badge">{logDetail.latencyMs} ms</span>
               )}
               {logDetail.source && <span className="ds-badge">{logDetail.source}</span>}
+              {cacheStatusOf(logDetail) && (
+                <span className={CACHE_BADGE[cacheStatusOf(logDetail)!].className}>
+                  {CACHE_BADGE[cacheStatusOf(logDetail)!].label}
+                </span>
+              )}
               {logDetail.metadata?.answerModel ? (
                 <span className="ds-badge ds-badge-ok">
                   <IconSparkles size={11} style={{ verticalAlign: -1, marginRight: 3 }} />

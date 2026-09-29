@@ -338,6 +338,39 @@ describe('POST /api/client/v1/websearch/search', () => {
     );
   });
 
+  it('reports cached=false and omits `cache` when the instance has no cache enabled', async () => {
+    (runWebSearch as ReturnType<typeof vi.fn>).mockResolvedValue({ ...MOCK_RESULT, cached: false });
+    const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/websearch/search',
+      headers: { authorization: '******', 'content-type': 'application/json' },
+      payload: JSON.stringify({ query: 'hello' }),
+    });
+    const body = res.json();
+    expect(body.cached).toBe(false);
+    expect(body).not.toHaveProperty('cache');
+  });
+
+  it('exposes semantic cache hits', async () => {
+    (runWebSearch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...MOCK_RESULT,
+      cached: true,
+      cache: { status: 'hit', similarity: 0.93 },
+    });
+    const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/websearch/search',
+      headers: { authorization: '******', 'content-type': 'application/json' },
+      payload: JSON.stringify({ query: 'hello' }),
+    });
+    const body = res.json();
+    expect(body.cached).toBe(true);
+    expect(body.cache).toEqual({ status: 'hit', similarity: 0.93 });
+    expect(body.results[0]).toMatchObject({ title: 'A', position: 1 });
+  });
+
   it('rejects a missing query with 400', async () => {
     const app = await createFastifyApiTestApp(clientWebSearchApiPlugin);
     const res = await app.inject({

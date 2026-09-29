@@ -3,6 +3,9 @@
  * or the project's single active instance) and executes the query through the
  * driver adapter. Optionally interprets the results with the instance's
  * configured AI model (settings.aiAnswer) when the request asks for an answer.
+ * When the instance enables its semantic cache (settings.cache) the query is
+ * looked up in the selected vector index first and the provider is only called
+ * on a miss.
  */
 
 import { createLogger } from '@/lib/core/logger';
@@ -15,8 +18,10 @@ import {
 } from '@/lib/services/providers/providerService';
 import { recordUsageEvent } from '@/lib/services/usage/usageEvents';
 import { callWebSearchProvider } from './webSearchAdapter';
+import { resolveWebSearchCacheSettings } from './cacheSettings';
 import type {
   WebSearchAiAnswerSettings,
+  WebSearchCacheInfo,
   WebSearchInput,
   WebSearchResult,
   WebSearchResultItem,
@@ -178,6 +183,93 @@ async function interpretResults(params: {
   return text.trim();
 }
 
+interface CacheSession {
+  info: WebSearchCacheInfo;
+  /** Cached result set when the query was served from the cache. */
+  hit?: { results: WebSearchResultItem[]; answer?: string };
+  /** Non-fatal notes raised while consulting the cache. */
+  warnings: string[];
+  /** Write a provider result set back after a miss; resolves to a warning on failure. */
+  store(results: WebSearchResultItem[], answer?: string): Promise<string | undefined>;
+}
+
+/**
+ * Consult the instance's semantic cache. Returns undefined when caching is off
+ * (the search is then exactly the uncached flow). A cache that cannot be
+ * consulted never fails the search: it is reported as `error` with a warning.
+ */
+async function openCacheSession(params: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string | undefined;
+  providerKey: string;
+  driver: string;
+  instanceSettings: Record<string, unknown>;
+  query: string;
+  input: WebSearchInput;
+}): Promise<CacheSession | undefined> {
+  const noStore = async () => undefined;
+
+  let settings: ReturnType<typeof resolveWebSearchCacheSettings>;
+  try {
+    settings = resolveWebSearchCacheSettings(params.instanceSettings);
+  } catch {
+    // Enabled-looking but malformed (e.g. edited outside the API).
+    const { describeCacheFailure } = await import('./webSearchCache');
+    return { info: { status: 'error' }, warnings: [describeCacheFailure('config')], store: noStore };
+  }
+  if (!settings) return undefined;
+
+  // Lazy: the cache pulls in the embedding and vector services, which the
+  // uncached path must not load.
+  const cache = await import('./webSearchCache');
+  if (!params.projectId) {
+    return { info: { status: 'error' }, warnings: [cache.describeCacheFailure('config')], store: noStore };
+  }
+
+  const target = {
+    tenantDbName: params.tenantDbName,
+    settings,
+    scope: {
+      tenantId: params.tenantId,
+      projectId: params.projectId,
+      searchKey: params.providerKey,
+      driver: params.driver,
+      instanceSettings: params.instanceSettings,
+      input: params.input,
+    },
+  };
+
+  const lookup = await cache.lookupWebSearchCache({ ...target, query: params.query });
+  if (lookup.status === 'hit') {
+    return {
+      info: { status: 'hit', similarity: lookup.similarity },
+      hit: { results: lookup.results, answer: lookup.answer },
+      warnings: [],
+      store: noStore,
+    };
+  }
+  if (lookup.status === 'error') {
+    return { info: { status: 'error' }, warnings: [cache.describeCacheFailure(lookup.stage)], store: noStore };
+  }
+
+  const info: WebSearchCacheInfo = { status: 'miss', stored: false };
+  return {
+    info,
+    warnings: [],
+    async store(results, answer) {
+      info.stored = await cache.storeWebSearchCache({
+        ...target,
+        query: params.query,
+        embedding: lookup.embedding,
+        results,
+        answer,
+      });
+      return info.stored ? undefined : cache.describeCacheFailure('store');
+    },
+  };
+}
+
 export async function runWebSearch(
   tenantDbName: string,
   tenantId: string,
@@ -238,11 +330,28 @@ export async function runWebSearch(
     source: options.source ?? 'api',
   };
   try {
-    const { results, answer: providerAnswer } = await callWebSearchProvider(
-      record,
-      credentials as Record<string, unknown>,
-      { ...options, query },
-    );
+    const cacheSession = await openCacheSession({
+      tenantDbName,
+      tenantId,
+      projectId,
+      providerKey,
+      driver: record.driver,
+      instanceSettings: (record.settings ?? {}) as Record<string, unknown>,
+      query,
+      input: options,
+    });
+    warnings.push(...(cacheSession?.warnings ?? []));
+
+    const { results, answer: providerAnswer } = cacheSession?.hit
+      ?? await callWebSearchProvider(
+        record,
+        credentials as Record<string, unknown>,
+        { ...options, query },
+      );
+
+    const storeWarning = await cacheSession?.store(results, providerAnswer);
+    if (storeWarning) warnings.push(storeWarning);
+    const cache = cacheSession?.info;
 
     let answer = providerAnswer;
     let answerModel: string | undefined;
@@ -276,8 +385,12 @@ export async function runWebSearch(
       status: 'success',
       results: loggableResults(results),
       answer,
-      metadata: answerModel || warnings.length > 0
-        ? { ...(answerModel ? { answerModel } : {}), ...(warnings.length > 0 ? { warnings } : {}) }
+      metadata: answerModel || warnings.length > 0 || cache
+        ? {
+          ...(answerModel ? { answerModel } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
+          ...(cache ? { cache } : {}),
+        }
         : undefined,
     });
 
@@ -288,6 +401,8 @@ export async function runWebSearch(
       results,
       answer,
       answerModel,
+      cached: cache?.status === 'hit',
+      ...(cache ? { cache } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
       latencyMs,
     };

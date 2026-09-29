@@ -15,6 +15,7 @@ import {
   ProviderCredentialDecryptError,
   updateProviderConfig,
 } from '@/lib/services/providers/providerService';
+import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
 import {
   readJsonBody,
   requireProjectContextForRequest,
@@ -39,6 +40,10 @@ function sendProviderError(reply: FastifyReply, error: unknown) {
 
   if (error instanceof ProviderCredentialDecryptError) {
     return reply.code(409).send({ error: error.message });
+  }
+
+  if (error instanceof WebSearchCacheConfigError) {
+    return reply.code(400).send({ error: error.message });
   }
 
   return reply.code(500).send({
@@ -314,7 +319,7 @@ export const providersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Not found' });
       }
 
-      const updated = await updateProviderConfig(session.tenantDbName, id, payload);
+      const updated = await updateProviderConfig(session.tenantDbName, id, payload, { projectId });
       if (!updated) {
         return reply.code(404).send({ error: 'Not found' });
       }

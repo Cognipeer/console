@@ -21287,6 +21287,25 @@ components:
           description: Normalized results.
           items:
             $ref: "#/components/schemas/WebSearchResultItem"
+        cached:
+          type: boolean
+          description: True when the results were served from the instance's semantic cache instead of the search engine.
+        cache:
+          type: object
+          description: Semantic cache outcome. Present only when the instance has caching enabled.
+          properties:
+            status:
+              type: string
+              enum: [hit, miss, error]
+              description: "`error` means the cache could not be consulted and the search ran uncached (see `warnings`)."
+            similarity:
+              type: number
+              description: Similarity (0..1) of the cached query that was reused. Hits only.
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Non-fatal notes, e.g. an unserved `include_answer` or an unavailable semantic cache.
         latency_ms:
           type: number
           description: Search latency in milliseconds.

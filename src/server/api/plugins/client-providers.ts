@@ -20,6 +20,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import type { ProviderDomain } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { providerRegistry } from '@/lib/providers';
+import { WebSearchCacheConfigError } from '@/lib/services/webSearch/cacheSettings';
 import type {
   CreateProviderConfigInput,
   ProviderStatus,
@@ -143,6 +144,9 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof Error && error.message.includes('already exists')) {
         return reply.code(409).send({ error: error.message });
       }
+      if (error instanceof WebSearchCacheConfigError) {
+        return reply.code(400).send({ error: error.message });
+      }
       if (error instanceof Error && /required|Invalid payload/.test(error.message)) {
         return reply.code(400).send({ error: error.message });
       }
@@ -178,10 +182,18 @@ export const clientProvidersApiPlugin: FastifyPluginAsync = async (app) => {
         && existing.tenantId === auth.tenantId
         && (query.scope === 'tenant' || (auth.projectId && isAssignedToProject(existing, auth.projectId)));
       if (!ok) return reply.code(404).send({ error: 'Not found' });
-      const updated = await updateProviderConfig(auth.tenantDbName, id, payload);
+      const updated = await updateProviderConfig(
+        auth.tenantDbName,
+        id,
+        payload,
+        query.scope === 'tenant' ? undefined : { projectId: auth.projectId },
+      );
       if (!updated) return reply.code(404).send({ error: 'Not found' });
       return reply.code(200).send({ provider: updated });
     } catch (error) {
+      if (error instanceof WebSearchCacheConfigError) {
+        return reply.code(400).send({ error: error.message });
+      }
       logger.error('Client update provider error', { error });
       return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
     }
