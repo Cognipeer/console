@@ -28,17 +28,40 @@
  * looking for when a session feels slow, and a list of timestamps does not
  * show it.
  */
-.timelineScroll {
+.timelineStrip {
   border-bottom: 1px solid var(--mantine-color-gray-3);
   flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.timelineTrack {
+  display: flex;
+  flex-wrap: nowrap;
+  width: 100%;
+  overflow: hidden;
 }
 
 .timelineSegment {
-  height: 1.25rem;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
   border-radius: 2px;
   background: var(--mantine-color-blue-4);
-  flex-shrink: 0;
+  color: var(--mantine-color-white);
   transition: background 120ms ease;
+}
+
+.timelineLabel {
+  padding: 0 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  line-height: 1;
+  pointer-events: none;
 }
 
 .timelineSegment:hover {
