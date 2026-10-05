@@ -11998,6 +11998,11 @@ components:
           type: integer
           nullable: true
           description: Agent version used for this response, or null if not versioned.
+        output_parsed:
+          description: Validated structured-output object. Present only when the agent has structured output enabled and the model's answer parsed and validated against the configured schema. Absent for plain-text agents. (`output` is the OpenAI item array, so the parsed object is exposed under this name.)
+        output_error:
+          type: string
+          description: Why structured output failed (parse or schema validation, missing output, retries exhausted). Present only when structured output is enabled and failed; `output_parsed` is then absent. The text answer in `output` is still returned.
     AgentResponseOutputItem:
       description: "An output item: an assistant message or a reasoning item."
       oneOf:

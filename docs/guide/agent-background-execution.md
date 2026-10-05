@@ -248,6 +248,15 @@ Whether these become the *only* surface, or whether `/client/v1/responses/:id` a
 }
 ```
 
+### Structured output in `result`
+
+When the agent has structured output enabled, `result` (in the status response, the synchronous response body, and the `succeeded` callback `data.result`) carries two additive fields:
+
+- `output_parsed` — the validated parsed object. Present only when parsing and schema validation succeeded.
+- `output_error` — a message describing why it failed. Present only on failure; `output_parsed` is then absent.
+
+`result.output` keeps its OpenAI meaning (the item array), which is why the parsed object is not exposed under that name. A structured-output failure does **not** change the run status: the run is still `succeeded`, so callers must check `result.output_error`. Plain-text agents carry neither field.
+
 ### Initial (background) response shape
 
 ```json

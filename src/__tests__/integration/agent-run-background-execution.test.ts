@@ -50,6 +50,7 @@ import {
   runAgentJobLocal,
   getAgentRunStatus,
   requestAgentRunCancellation,
+  serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
 
 function delay(ms: number): Promise<void> {
@@ -518,4 +519,66 @@ describe('worker hardening', () => {
     expect(after?.status).toBe('failed');
     expect(after?.errorReason).toBe('worker_lost');
   }, 10_000);
+});
+
+describe('structured output through a background run', () => {
+  const callbackJobs = () => hoisted.publish.mock.calls.filter(([queue, name]) => queue === AGENT_RUN_QUEUE && name === 'callback');
+
+  it('persists output_parsed on the run, serializes it in the status envelope, and carries it in the callback', async () => {
+    const run = await createRun('conv-structured-ok', { callbackUrl: 'https://hooks.example.com/run' });
+    const parsed = { verdict: 'bug', confidence: 0.9 };
+    hoisted.executeAgentChatLocal.mockResolvedValue({
+      ...fakeResponse('resp_conv'),
+      output_parsed: parsed,
+      _conversation_messages: [{ role: 'user', content: 'x', timestamp: new Date() }],
+    });
+    hoisted.publish.mockClear();
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    const stored = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id));
+    expect(stored?.status).toBe('succeeded');
+    const envelope = serializeAgentRun(stored!);
+    expect(envelope.result).toMatchObject({ id: `resp_${run._id}`, output_parsed: parsed });
+    expect(envelope.result).not.toHaveProperty('output_error');
+    expect(envelope.result).not.toHaveProperty('_conversation_messages');
+
+    expect(callbackJobs()).toHaveLength(1);
+    expect(callbackJobs()[0][2]).toMatchObject({
+      event: 'succeeded',
+      data: { result: { id: `resp_${run._id}`, output_parsed: parsed } },
+    });
+  });
+
+  it('a structured-output failure is a succeeded run whose result carries output_error', async () => {
+    const run = await createRun('conv-structured-bad', { callbackUrl: 'https://hooks.example.com/run' });
+    hoisted.executeAgentChatLocal.mockResolvedValue({
+      ...fakeResponse('resp_conv'),
+      output_error: 'verdict is required',
+    });
+    hoisted.publish.mockClear();
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    const stored = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id));
+    const envelope = serializeAgentRun(stored!);
+    expect(envelope.status).toBe('succeeded');
+    expect(envelope.error).toBeNull();
+    expect(envelope.result).toMatchObject({ output_error: 'verdict is required' });
+    expect(envelope.result).not.toHaveProperty('output_parsed');
+    expect(callbackJobs()[0][2]).toMatchObject({ event: 'succeeded', data: { result: { output_error: 'verdict is required' } } });
+  });
+
+  it('a plain-text run (no structured output) is unchanged: neither field appears', async () => {
+    const run = await createRun('conv-plain', { callbackUrl: 'https://hooks.example.com/run' });
+    hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_conv'));
+    hoisted.publish.mockClear();
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    const envelope = serializeAgentRun((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id)))!);
+    expect(envelope.result).not.toHaveProperty('output_parsed');
+    expect(envelope.result).not.toHaveProperty('output_error');
+    expect(envelope.result).toMatchObject({ output: [], status: 'completed' });
+  });
 });

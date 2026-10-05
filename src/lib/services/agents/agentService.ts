@@ -2705,6 +2705,14 @@ export interface AgentChatResponse {
     previous_response_id: string | null;
     /** Version used for this response (null if not versioned) */
     version: number | null;
+    /**
+     * Validated structured answer, present only when the agent declares a
+     * structured-output schema and the final answer satisfied it. Additive:
+     * the top-level `output` stays the OpenAI-style item array.
+     */
+    output_parsed?: unknown;
+    /** Why the structured contract failed (parse/validation); mutually exclusive with `output_parsed`. */
+    output_error?: string;
     /** Conversation messages for dashboard playgrounds */
     _conversation_messages?: Array<{ role: string; content: string; reasoning?: string; timestamp: Date }>;
 }
@@ -3074,6 +3082,8 @@ function toAgentChatResponse(input: {
     reasoning?: string;
     outcome?: { stopReason: AgentStopReason; stopDetail?: string };
     usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+    outputParsed?: unknown;
+    outputError?: string;
 }): AgentChatResponse {
     const { reasoning, outcome, usage } = input;
     const responseId = `resp_${input.conversationId}`;
@@ -3108,6 +3118,8 @@ function toAgentChatResponse(input: {
         created_at: Math.floor(Date.now() / 1000),
         previous_response_id: input.priorMessageCount > 0 ? responseId : null,
         version: input.version,
+        ...(input.outputParsed !== undefined ? { output_parsed: input.outputParsed } : {}),
+        ...(input.outputError ? { output_error: input.outputError } : {}),
         _conversation_messages: input.messages,
     };
 }
@@ -3295,6 +3307,8 @@ export async function executeAgentChatLocal(
         // outcome carries why, and the last text the agent did write.
         const outcome = describeTurnOutcome(result, inputState.messages.length);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        const outputParsed = result.output;
+        const outputError = result.outputError ? describeStructuredOutputError(result.outputError) : undefined;
         const compactedTools = compactions.length > 0
             ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
@@ -3314,6 +3328,8 @@ export async function executeAgentChatLocal(
                 ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
                 ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
                 ...(usage ? { usage } : {}),
+                ...(outputParsed !== undefined ? { output: outputParsed } : {}),
+                ...(outputError ? { outputError } : {}),
                 timestamp: new Date(),
             },
         ];
@@ -3357,6 +3373,8 @@ export async function executeAgentChatLocal(
             reasoning: assistantReasoning,
             outcome,
             usage,
+            outputParsed,
+            outputError,
         });
     } finally {
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
