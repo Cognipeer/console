@@ -5,12 +5,19 @@
  * (non-routed) entry points. Producer side stays in agentService.ts;
  * this module only matters when an assignment routes work to another
  * node via BullMQ.
+ *
+ * A routed chat/playground turn may carry a stream-relay descriptor: the
+ * caller's `onTextChunk` / `onToolEvent` / `onCompaction` and its abort
+ * signal, bridged over Redis pub/sub (`withWorkerRelay`). The local entry
+ * point then runs with callbacks that publish back to the caller, and with a
+ * signal the caller's cancel aborts.
  */
 
 import { createLogger } from '@/lib/core/logger';
 import { getQueue, type JobContext, type QueuePayload } from '@/lib/core/queue';
-import { queueNameFor } from '@/lib/core/cluster';
+import { queueNameFor, withWorkerRelay } from '@/lib/core/cluster';
 import {
+  agentRelayCallbacks,
   executeAgentChatLocal,
   executePlaygroundChatLocal,
   type AgentChatRequest,
@@ -36,10 +43,22 @@ export async function startAgentQueueConsumer(): Promise<void> {
   const queue = await getQueue();
   queue.consume(queueNameFor('agent'), async (ctx: JobContext<QueuePayload>) => {
     if (ctx.name === 'chat') {
-      return executeAgentChatLocal(ctx.data as unknown as AgentChatRequest);
+      return withWorkerRelay(ctx.data, (relay, data) => {
+        // `onTextChunk` + `signal` are all a chat turn takes; tool/compaction
+        // events are a playground-only surface.
+        const { onTextChunk, signal } = agentRelayCallbacks(relay);
+        return executeAgentChatLocal({
+          ...(data as unknown as AgentChatRequest),
+          ...(onTextChunk ? { onTextChunk } : {}),
+          ...(signal ? { signal } : {}),
+        });
+      });
     }
     if (ctx.name === 'playground') {
-      return executePlaygroundChatLocal(ctx.data as unknown as AgentPlaygroundChatRequest);
+      return withWorkerRelay(ctx.data, (relay, data) => executePlaygroundChatLocal({
+        ...(data as unknown as AgentPlaygroundChatRequest),
+        ...agentRelayCallbacks(relay),
+      }));
     }
     throw new Error(`Unknown agent job: ${ctx.name}`);
   }, { concurrency: CONCURRENCY });

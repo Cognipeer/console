@@ -27,6 +27,11 @@ export interface SttTranscribeInput {
   timestampGranularities?: SttTimestampGranularity[];
   /** Provider-specific extra fields forwarded as-is. */
   extra?: Record<string, unknown>;
+  /**
+   * Cancels the upstream request (e.g. a speculative realtime transcription
+   * that turned stale). Never sent to the provider (it is not part of `extra`).
+   */
+  signal?: AbortSignal;
 }
 
 export interface SttTranslateInput {
@@ -72,9 +77,36 @@ export interface SttResult {
   raw?: unknown;
 }
 
+export interface SttStreamOptions {
+  /** Rate of the PCM pushed into the stream; the runtime resamples to what its provider needs. */
+  sampleRate: 16000 | 24000;
+  language?: string;
+  prompt?: string;
+  /** Aborting closes the stream (same as `close()`); a pending `finish()` rejects with an AbortError. */
+  signal?: AbortSignal;
+}
+
+/**
+ * One utterance transcribed while it is being spoken (EXPERIMENTAL — only the
+ * realtime engine's `stt_mode: 'streaming'` uses it). Audio is pushed as it
+ * arrives; `finish()` ends the utterance and resolves with the final transcript.
+ */
+export interface SttStream {
+  /** s16le mono samples at `SttStreamOptions.sampleRate`. Ignored after `finish()`/`close()`. */
+  push(pcm16: Int16Array): void;
+  /** Ends the utterance; resolves with the final transcript (`text` is '' when no audio was pushed). */
+  finish(): Promise<SttResult>;
+  /** Interim transcript: `text` is everything so far, `delta` the newly added piece. */
+  onPartial(cb: (text: string, delta: string) => void): void;
+  /** Drops the stream and releases the connection. Safe to call more than once. */
+  close(): void;
+}
+
 export interface SttRuntime {
   transcribe(input: SttTranscribeInput): Promise<SttResult>;
   translate?(input: SttTranslateInput): Promise<SttResult>;
+  /** Streaming transcription (EXPERIMENTAL). Absent when the provider cannot stream. */
+  createStream?(opts: SttStreamOptions): SttStream | Promise<SttStream>;
 }
 
 export type TtsOutputFormat =
@@ -95,6 +127,12 @@ export interface TtsSynthesizeInput {
   /** Free-text voice style instructions (OpenAI gpt-4o-mini-tts supports this). */
   instructions?: string;
   extra?: Record<string, unknown>;
+  /**
+   * Cancels the upstream request — before the response arrives and, for
+   * `synthesizeStream`, while the body is still streaming. Never sent to the
+   * provider (it is not part of `extra`).
+   */
+  signal?: AbortSignal;
 }
 
 export interface TtsUsage {
@@ -115,6 +153,15 @@ export interface TtsResult {
 
 export interface TtsRuntime {
   synthesize(input: TtsSynthesizeInput): Promise<TtsResult>;
+  /**
+   * Streams the synthesized audio as the provider produces it: raw bytes in
+   * `input.format`. Upstream rejections (4xx/5xx) reject the returned promise —
+   * before any byte is yielded — so the caller can retry or fall back; a fault
+   * after that surfaces from the iterator. For `pcm` (s16le mono, 24 kHz on
+   * OpenAI/Azure) every chunk holds whole samples (even byte length), so a
+   * consumer can decode chunks independently. Optional: callers fall back to
+   * `synthesize` when a runtime cannot stream.
+   */
   synthesizeStream?(
     input: TtsSynthesizeInput,
   ): Promise<AsyncIterable<Uint8Array>> | AsyncIterable<Uint8Array>;

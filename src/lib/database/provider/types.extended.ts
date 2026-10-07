@@ -1396,10 +1396,11 @@ export interface BatchJobAggregateDelta {
 // ── Realtime API (named realtime models + session logs) ────────────────────
 
 /**
- * A Realtime Model is a named, reusable session preset: which chat model
- * answers, which STT model transcribes committed audio, which TTS model and
- * voice speak the answers, plus turn-detection settings for telephony
- * bridges. Clients connect with `?model=<key>` and get the whole bundle.
+ * A Realtime Model is a named, reusable session preset: which chat model or
+ * agent answers, which STT model transcribes the user's audio, which TTS
+ * model and voice speak the answers, plus turn detection, first message and
+ * telephony settings. Clients connect with `?model=<key>` and get the whole
+ * bundle.
  */
 export type RealtimeModelStatus = 'active' | 'disabled';
 
@@ -1419,27 +1420,52 @@ export interface IRealtimeModel {
   instructions?: string;
   temperature?: number;
   maxOutputTokens?: number;
-  /** STT model key for committed audio (optional — text-only otherwise). */
+  /** STT model key for user audio (optional — text-only otherwise). */
   sttModelKey?: string;
-  /** Audio MIME type of appended input chunks (default audio/webm). */
-  inputAudioFormat?: string;
   /** TTS model key; when set, responses are also synthesized to audio. */
   ttsModelKey?: string;
   voice?: string;
-  ttsFormat?: string;
-  // ── Turn detection (telephony bridges) ──
-  /** Silence duration that ends a caller turn, in ms (default 700). */
-  turnSilenceMs?: number;
-  /** RMS energy threshold (0..1) below which a frame counts as silence. */
-  turnSilenceThreshold?: number;
-  /** Greeting spoken/sent when a telephony call connects. */
-  greeting?: string;
   /**
    * Filler line announced (emitted as an event and, when TTS is configured,
    * spoken) the first time the agent starts calling tools within a response,
    * e.g. "Bir saniye, kontrol ediyorum…". Only meaningful with `agentKey`.
    */
   toolStatusMessage?: string;
+  /**
+   * Play a soft, procedurally generated "waiting" sound through the audio
+   * output while the agent runs tools, until the answer audio is ready
+   * (default false). Independent of (and combinable with) `toolStatusMessage`.
+   */
+  toolWaitAudio?: boolean;
+  // ── Voice engine ──
+  /**
+   * Server-side turn detection. `null` = manual commit (protocol
+   * `turn_detection: null`); unset = engine default (semantic_vad).
+   */
+  turnDetection?: RealtimeTurnDetectionSettings | null;
+  /** `batch` = speculative batch STT (default); `streaming` when the STT provider supports it. */
+  sttMode?: RealtimeSttMode;
+  /** STT language hint (BCP-47, e.g. `tr`, `en-US`). */
+  sttLanguage?: string;
+  /**
+   * STT vocabulary / spelling hints (brand and product names, jargon), passed
+   * to the transcription model as its prompt (session `transcriptionPrompt`).
+   */
+  sttPrompt?: string;
+  /** Who talks first when a session starts (default `user`). */
+  firstSpeaker?: RealtimeFirstSpeaker;
+  /** What the agent says first. */
+  firstMessage?: RealtimeFirstMessageSettings;
+  /** first_speaker=user: greet anyway after this much silence (ms). */
+  waitForUserMs?: number;
+  /** Continuous speech needed before barge-in cancels the response (ms). */
+  interruptMinMs?: number;
+  /** Agent version used for `agentKey` (default `published`, falls back to draft). */
+  agentVersion?: RealtimeAgentVersion;
+  /** Output audio format (`pcm16` default, `g711_ulaw`, `g711_alaw`). */
+  outputAudioFormat?: string;
+  /** Telephony defaults (Twilio connection, caller id, inbound routing). */
+  telephony?: RealtimeTelephonySettings;
   metadata?: Record<string, unknown>;
   createdBy: string;
   updatedBy?: string;
@@ -1447,8 +1473,128 @@ export interface IRealtimeModel {
   updatedAt?: Date;
 }
 
+/** Preset form of the protocol v2 `turn_detection` block (camelCase). */
+export interface RealtimeTurnDetectionSettings {
+  type: 'semantic_vad' | 'server_vad';
+  /** VAD speech probability threshold (0..1). */
+  threshold?: number;
+  prefixPaddingMs?: number;
+  minSpeechMs?: number;
+  silenceDurationMs?: number;
+  maxTurnSilenceMs?: number;
+  /** Smart Turn probability threshold (0..1). */
+  semanticThreshold?: number;
+  eagerness?: 'low' | 'medium' | 'high' | 'auto';
+  interruptMinMs?: number;
+  maxUtteranceMs?: number;
+  /** Auto `response.create` after a detected turn (default true). */
+  createResponse?: boolean;
+  /** Barge-in cancels the in-flight response (default true). */
+  interruptResponse?: boolean;
+}
+
+export type RealtimeSttMode = 'batch' | 'streaming';
+export type RealtimeFirstSpeaker = 'agent' | 'user';
+export type RealtimeFirstMessageMode = 'none' | 'static' | 'generate';
+export type RealtimeAgentVersion = 'published' | 'draft' | number;
+
+export interface RealtimeFirstMessageSettings {
+  mode: RealtimeFirstMessageMode;
+  /** static: spoken verbatim ({{var}} templated). */
+  text?: string;
+  /** generate: hidden user turn the agent answers ({{var}} templated). */
+  instructions?: string;
+  /** false protects the greeting from barge-in (default true). */
+  interruptible?: boolean;
+}
+
+export interface RealtimeTelephonySettings {
+  /** Telephony connection (Twilio account) key. */
+  connectionKey?: string;
+  /** Default caller id for outbound calls (E.164). */
+  fromNumber?: string;
+  /** Accept inbound calls routed to this preset. */
+  inboundEnabled?: boolean;
+  /** Who talks first on outbound calls (default `user`). */
+  outboundFirstSpeaker?: RealtimeFirstSpeaker;
+}
+
 export type RealtimeSessionTransport = 'websocket' | 'twilio';
-export type RealtimeSessionLogStatus = 'active' | 'ended' | 'error';
+/**
+ * `pending` = an outbound call was placed but its media stream has not
+ * connected yet (the row is created before the WebSocket exists).
+ */
+export type RealtimeSessionLogStatus = 'pending' | 'active' | 'ended' | 'error';
+
+export type RealtimeCallStatus =
+  | 'queued'
+  | 'ringing'
+  | 'in-progress'
+  | 'completed'
+  | 'busy'
+  | 'no-answer'
+  | 'failed'
+  | 'canceled';
+
+/** Telephony call attached to a realtime session. */
+export interface RealtimeCallInfo {
+  provider: 'twilio';
+  direction: 'inbound' | 'outbound';
+  callSid?: string;
+  streamSid?: string;
+  from?: string;
+  to?: string;
+  status?: RealtimeCallStatus;
+  answeredBy?: string;
+  durationSec?: number;
+  connectionKey?: string;
+}
+
+/** Per-turn latency breakdown (ms), mirrored by the `response.metrics` event. */
+export interface RealtimeTurnMetrics {
+  turnDetectionMs?: number;
+  sttMs?: number;
+  sttSpeculativeHit?: boolean;
+  llmFirstTokenMs?: number;
+  llmTotalMs?: number;
+  ttsFirstByteMs?: number;
+  /** User speech end (VAD) → first output audio byte sent. */
+  e2eMs?: number;
+  totalMs?: number;
+}
+
+export type RealtimeTurnKind = 'user' | 'first_message' | 'text';
+export type RealtimeTurnStatus = 'completed' | 'cancelled' | 'failed' | 'blocked';
+export type RealtimeTurnEndReason = 'semantic' | 'silence' | 'max_silence' | 'max_duration' | 'manual';
+
+/** One conversational turn (user input → assistant response) as the engine reports it. */
+export interface RealtimeTurnRecord {
+  turnId: string;
+  /** 0-based position within the session. */
+  index: number;
+  startedAt: Date;
+  kind: RealtimeTurnKind;
+  userText?: string;
+  assistantText?: string;
+  status: RealtimeTurnStatus;
+  interrupted?: boolean;
+  playedMs?: number;
+  turnEndReason?: RealtimeTurnEndReason;
+  endpointProbability?: number;
+  metrics: RealtimeTurnMetrics;
+  toolCalls?: Array<{ name: string; status: 'success' | 'error'; durationMs?: number }>;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  error?: string;
+}
+
+/** Stored turn (`realtime_session_turns`), deleted together with its session. */
+export interface IRealtimeSessionTurn extends RealtimeTurnRecord {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string;
+  sessionId: string;
+  createdAt?: Date;
+}
 
 /** One realtime connection, recorded for the observability dashboard. */
 export interface IRealtimeSessionLog extends IUsageAttributionFields {
@@ -1470,6 +1616,20 @@ export interface IRealtimeSessionLog extends IUsageAttributionFields {
   firstTokenLatencyMs?: number;
   errorMessage?: string;
   clientInfo?: Record<string, unknown>;
+  /** Telephony call info (Twilio bridge / outbound calls). */
+  call?: RealtimeCallInfo;
+  /** `{{var}}` template variables the session was started with. */
+  variables?: Record<string, string>;
+  /** Turns recorded so far (see `realtime_session_turns`). */
+  turnCount: number;
+  /** End-to-end latency aggregates over the session's turns (ms). */
+  avgE2eMs?: number;
+  p50E2eMs?: number;
+  p95E2eMs?: number;
+  /** Why the audio pipeline runs degraded (e.g. VAD model unavailable → energy VAD). */
+  degraded?: string;
+  /** Resolved agent version (undefined = draft / chat model). */
+  agentVersion?: number;
   startedAt: Date;
   endedAt?: Date;
   durationMs?: number;

@@ -41,8 +41,19 @@ import type { FastifyInstance } from 'fastify';
  * 4 — `agentSandboxRunner` added: agents with sandbox access run their
  *     sandbox tools through it. A seam-3 overlay does not export it, and
  *     community `agentSandboxTools.ts` imports it.
+ * 5 — realtime voice engine (protocol v2). The registry's own shape is
+ *     unchanged; the community types and services the overlay imports changed
+ *     in both directions. Added: `IRealtimeSessionTurn`, `RealtimeCallInfo`,
+ *     `RealtimeTurnRecord`, `RealtimeAgentVersion`, the voice-engine fields of
+ *     `IRealtimeModel`, `'telephony'` in `ProviderDomain`, and
+ *     `handleSpeechStreamRequest` / `handleTranscriptionStreamRequest`.
+ *     Removed or changed: `IRealtimeModel.inputAudioFormat` / `ttsFormat` /
+ *     `turnSilenceMs` / `turnSilenceThreshold` / `greeting`, and
+ *     `IRealtimeSessionLog.turnCount` is now required. A seam-4 overlay no
+ *     longer compiles against this tree, and a seam-5 overlay not against a
+ *     seam-4 one.
  */
-export const SEAM_CONTRACT_VERSION = 4;
+export const SEAM_CONTRACT_VERSION = 5;
 
 
 

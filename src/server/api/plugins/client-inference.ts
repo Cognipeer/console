@@ -262,10 +262,22 @@ async function handleAgentChatCompletion(input: {
     if ('error' in result) {
       send({ error: { message: result.error, type: 'invalid_request_error' } });
     } else {
-      // A routed run streams nothing (the callback cannot cross the job
-      // queue), and a caller that asked for a stream must still receive the
-      // answer rather than an empty one followed by [DONE].
-      if (!streamed && result.content) send(toChatChunk({ id, model, delta: result.content }));
+      // A run that streamed nothing (an agent bound to output.pre answers in
+      // one guarded piece; a routed run without relay) must still deliver the
+      // answer rather than an empty one followed by [DONE]. A relayed run may
+      // also have lost its last frames (best-effort pub/sub): when the final
+      // answer extends what streamed, send the missing tail.
+      if (!streamed && result.content) {
+        send(toChatChunk({ id, model, delta: result.content }));
+      } else if (streamed && result.content && result.content.length > streamed.length) {
+        if (result.content.startsWith(streamed)) {
+          send(toChatChunk({ id, model, delta: result.content.slice(streamed.length) }));
+        } else {
+          logger.warn('Streamed agent text diverged from the final answer', {
+            model, streamedLength: streamed.length, finalLength: result.content.length,
+          });
+        }
+      }
       stopReason = result.stopReason;
     }
     send(toChatChunk({ id, model, finish: true, stopReason }));

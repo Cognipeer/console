@@ -306,7 +306,12 @@ not match your build, look for the equivalent section:
 - **Streaming stays on when your request carries `tools`.** If an upstream
   genuinely cannot stream tool calls, set `disableStreamingWithTools: true` in
   that model's **Settings** JSON; the gateway then answers a streamed
-  tool-carrying request in a single frame for that model only.
+  tool-carrying request in a single frame for that model only. Agents that run
+  on such a model stop streaming too: an agent binds tools on nearly every call,
+  so its turns on that model use one non-streaming call, and its answer (in the
+  dashboard session view, a streamed chat completion or a realtime voice
+  session) arrives in one piece instead of token by token. The same applies to
+  the models of its sub-agents.
 - **Token authentication is cached for 60 seconds.** A deleted or newly
   permission-changed token can keep working for up to a minute. Expiry is
   re-checked on every request and is not subject to the cache.

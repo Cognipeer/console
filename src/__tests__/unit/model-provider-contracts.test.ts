@@ -23,6 +23,7 @@ import {
 } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { mswServer } from '../helpers/msw.server';
+import { withAssembledStream } from '@/lib/services/agents/assembledStream';
 
 // ── AWS SDK mock (Bedrock) ───────────────────────────────────────────────────
 vi.mock('@aws-sdk/client-bedrock-runtime', () => ({
@@ -162,6 +163,130 @@ describe('openai-compatible provider', () => {
     const model = runtime
       .createChatModel!({ modelId: 'mistral-large', category: 'llm' });
     assertChatModel(model);
+  });
+
+  it('streams through .stream() when built without options, while invoke() stays non-streaming', async () => {
+    // @langchain/openai turns an explicit `streaming: false` into
+    // `disableStreaming: true`, which made `.stream()` ONE non-streaming call:
+    // native agents (agent-sdk `stream: true` → `.stream()`) answered in one
+    // piece and the realtime voice engine waited for the whole reply.
+    const bodies: Array<Record<string, unknown>> = [];
+    mswServer.use(
+      http.post('https://api.custom.com/v1/chat/completions', async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        bodies.push(body);
+        if (!body.stream) {
+          return HttpResponse.json({
+            id: 'chatcmpl-plain',
+            object: 'chat.completion',
+            created: 1,
+            model: 'mistral-large',
+            choices: [{ index: 0, message: { role: 'assistant', content: 'Hello' }, finish_reason: 'stop' }],
+          });
+        }
+        const frames = ['Hel', 'lo'].map((content, i) => `data: ${JSON.stringify({
+          id: 'chatcmpl-stream',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'mistral-large',
+          choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content } : { content }, finish_reason: null }],
+        })}\n\n`);
+        frames.push('data: [DONE]\n\n');
+        return new HttpResponse(frames.join(''), { headers: { 'content-type': 'text/event-stream' } });
+      }),
+    );
+    const model = runtime.createChatModel!({ modelId: 'mistral-large', category: 'llm' }) as unknown as {
+      disableStreaming?: boolean;
+      stream: (input: unknown) => Promise<AsyncIterable<{ content?: unknown }>>;
+      invoke: (input: unknown) => Promise<{ content?: unknown }>;
+    };
+    expect(model.disableStreaming).toBe(false);
+
+    const chunks: string[] = [];
+    for await (const chunk of await model.stream([{ role: 'user', content: 'hi' }])) {
+      if (typeof chunk.content === 'string' && chunk.content) chunks.push(chunk.content);
+    }
+    expect(bodies[0]?.stream).toBe(true);
+    expect(chunks).toEqual(['Hel', 'lo']);
+
+    const reply = await model.invoke([{ role: 'user', content: 'hi' }]);
+    expect(bodies[1]?.stream).toBeFalsy();
+    expect(reply.content).toBe('Hello');
+  });
+
+  /** An SSE completion whose deltas are exactly `contents`, in order. */
+  const sseCompletion = (contents: string[]) => {
+    const frames = contents.map((content, i) => `data: ${JSON.stringify({
+      id: 'chatcmpl-stream',
+      object: 'chat.completion.chunk',
+      created: 1,
+      model: 'gpt-oss-120b',
+      choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content } : { content }, finish_reason: null }],
+    })}\n\n`);
+    frames.push('data: [DONE]\n\n');
+    return new HttpResponse(frames.join(''), { headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  it('a streamed agent call reads the same as a non-streamed one: a leaked <reasoning> block is stripped from the SSE deltas', async () => {
+    // The wire normaliser only rewrites JSON bodies; an event stream passes
+    // through it untouched. Before agents streamed (`streaming: false` made
+    // `.stream()` one `invoke()`), every agent turn went through the JSON path.
+    mswServer.use(
+      http.post('https://api.custom.com/v1/chat/completions', () =>
+        sseCompletion(['<reasoning>The user wants', ' a greeting</reasoning>', 'Hey there']),
+      ),
+    );
+    const model = runtime.createChatModel!({ modelId: 'gpt-oss-120b', category: 'llm' });
+    const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
+    const agentModel = withAssembledStream(fromLangchainModel(model)) as unknown as {
+      stream: (messages: unknown[]) => AsyncIterable<{ role?: string; content?: unknown; additional_kwargs?: Record<string, unknown> }>;
+    };
+
+    const deltas: string[] = [];
+    let assembled: { content?: unknown; additional_kwargs?: Record<string, unknown> } | undefined;
+    for await (const chunk of agentModel.stream([{ role: 'user', content: 'hi' }])) {
+      if (chunk.role) assembled = chunk;
+      else if (typeof chunk.content === 'string' && chunk.content) deltas.push(chunk.content);
+    }
+
+    expect(deltas.join('')).toBe('Hey there');
+    expect(assembled?.content).toBe('Hey there');
+    expect(assembled?.additional_kwargs?.reasoning_content).toBe('The user wants a greeting');
+  });
+
+  it('options.disableStreaming (an upstream that cannot stream tool calls) keeps .stream() one non-streaming request', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    mswServer.use(
+      http.post('https://api.custom.com/v1/chat/completions', async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        bodies.push(body);
+        return HttpResponse.json({
+          id: 'chatcmpl-plain',
+          object: 'chat.completion',
+          created: 1,
+          model: 'mistral-large',
+          choices: [{ index: 0, message: { role: 'assistant', content: 'Hello' }, finish_reason: 'stop' }],
+        });
+      }),
+    );
+    const model = runtime.createChatModel!({
+      modelId: 'mistral-large',
+      category: 'llm',
+      options: { disableStreaming: true },
+    }) as unknown as {
+      disableStreaming?: boolean;
+      stream: (input: unknown) => Promise<AsyncIterable<{ content?: unknown }>>;
+    };
+    expect(model.disableStreaming).toBe(true);
+
+    const chunks: string[] = [];
+    for await (const chunk of await model.stream([{ role: 'user', content: 'hi' }])) {
+      if (typeof chunk.content === 'string' && chunk.content) chunks.push(chunk.content);
+    }
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].stream).toBeFalsy();
+    expect(bodies[0].stream_options).toBeUndefined();
+    expect(chunks).toEqual(['Hello']);
   });
 
   it('preserves canonical vision content in the provider HTTP payload', async () => {

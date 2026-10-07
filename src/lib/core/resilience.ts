@@ -37,6 +37,18 @@ export interface ResilienceOptions {
    * timeout again, the same way an HTTP client's timeout applies to each try.
    */
   timeoutMs?: number;
+  /**
+   * The CALLER's cancellation (a realtime barge-in, a hung-up client). Aborting
+   * it abandons the call: the operation's own signal aborts with it, nothing is
+   * retried, and `withResilience` rejects with an `AbortError`.
+   *
+   * It is deliberately neither a success nor a failure for the circuit
+   * breaker. An operation that "resolves null" on abort cannot stand in for
+   * this: every resolved attempt counts as a success, which resets the failure
+   * count other callers of the same key are building and closes a half-open
+   * circuit although the provider never answered.
+   */
+  signal?: AbortSignal;
 }
 
 export interface RetryConfig {
@@ -191,8 +203,30 @@ function calculateDelay(attempt: number, cfg: RetryConfig): number {
   return Math.max(0, Math.round(cappedDelay + jitter));
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Resolves after `ms`, or as soon as `signal` aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** The `AbortError` a cancelled call rejects with (the signal's own reason when it is one). */
+export function abortErrorFrom(signal: AbortSignal | undefined): Error {
+  const reason: unknown = signal?.reason;
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
 }
 
 /* ------------------------------------------------------------------ */
@@ -207,33 +241,57 @@ function sleep(ms: number): Promise<void> {
  * request context and (on a streaming call) the provider's generation alive,
  * which is the leak this guards against. Operations that ignore the signal
  * still stop blocking the caller, they just release their socket later.
+ *
+ * The caller's own cancellation (`callerSignal`) ends the attempt the same way:
+ * it aborts the operation's signal and rejects at once, whether or not the
+ * operation listens.
  */
 async function runAttempt<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   key: string,
   timeoutMs: number,
+  callerSignal?: AbortSignal,
 ): Promise<T> {
-  if (timeoutMs <= 0) {
+  if (callerSignal?.aborted) throw abortErrorFrom(callerSignal);
+  if (timeoutMs <= 0 && !callerSignal) {
     return operation(new AbortController().signal);
   }
 
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onCallerAbort: (() => void) | undefined;
+  const interruptions: Array<Promise<never>> = [];
 
-  const expiry = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const error = new RequestTimeoutError(key, timeoutMs);
-      controller.abort(error);
-      reject(error);
-    }, timeoutMs);
-    // Never hold the event loop open for a timer that only guards a request.
-    timer.unref?.();
-  });
+  if (timeoutMs > 0) {
+    interruptions.push(
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new RequestTimeoutError(key, timeoutMs);
+          controller.abort(error);
+          reject(error);
+        }, timeoutMs);
+        // Never hold the event loop open for a timer that only guards a request.
+        timer.unref?.();
+      }),
+    );
+  }
+  if (callerSignal) {
+    interruptions.push(
+      new Promise<never>((_, reject) => {
+        onCallerAbort = () => {
+          controller.abort(callerSignal.reason);
+          reject(abortErrorFrom(callerSignal));
+        };
+        callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+      }),
+    );
+  }
 
   try {
-    return await Promise.race([operation(controller.signal), expiry]);
+    return await Promise.race([operation(controller.signal), ...interruptions]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (onCallerAbort) callerSignal?.removeEventListener('abort', onCallerAbort);
   }
 }
 
@@ -270,6 +328,10 @@ export async function withResilience<T>(
   };
 
   const timeoutMs = options.timeoutMs ?? cfg.gateway.requestTimeoutMs;
+  const callerSignal = options.signal;
+
+  // A call cancelled before it started never touches the circuit.
+  if (callerSignal?.aborted) throw abortErrorFrom(callerSignal);
 
   // Circuit breaker check (before any attempt)
   checkCircuit(options.key, cbCfg);
@@ -280,10 +342,13 @@ export async function withResilience<T>(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const result = await runAttempt(operation, options.key, timeoutMs);
+      const result = await runAttempt(operation, options.key, timeoutMs, callerSignal);
       recordSuccess(options.key, cbCfg);
       return result;
     } catch (error) {
+      // The caller walked away. That is not the provider's doing: no retry, and
+      // nothing recorded either way.
+      if (callerSignal?.aborted) throw abortErrorFrom(callerSignal);
       lastError = error;
 
       // Don't retry non-retryable errors
@@ -301,7 +366,8 @@ export async function withResilience<T>(
         log.warn(`Retry ${attempt}/${maxAttempts} for "${options.key}" in ${delay}ms`, {
           error: error instanceof Error ? error.message : String(error),
         });
-        await sleep(delay);
+        await sleep(delay, callerSignal);
+        if (callerSignal?.aborted) throw abortErrorFrom(callerSignal);
 
         // Re-check circuit breaker before retry
         try {

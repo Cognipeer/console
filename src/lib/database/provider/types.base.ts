@@ -581,7 +581,9 @@ export type ProviderDomain =
   | 'ocr'
   | 'image'
   | 'moderation'
-  | 'websearch';
+  | 'websearch'
+  /** Telephony carriers (Twilio) for the enterprise realtime voice engine. */
+  | 'telephony';
 
 export interface IProviderRecordStatus {
   status: 'active' | 'disabled' | 'errored';
