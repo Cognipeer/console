@@ -39,3 +39,18 @@ export {
   type RouteContext,
   type RouteOptions,
 } from './serviceRouter';
+export {
+  STREAM_RELAY_PAYLOAD_KEY,
+  openCallerRelay,
+  openWorkerRelay,
+  readRelayDescriptor,
+  relayIsUseful,
+  withWorkerRelay,
+  getRelayTransport,
+  setRelayTransportForTests,
+  type CallerRelay,
+  type RelayCallerOptions,
+  type RelayTransport,
+  type StreamRelayDescriptor,
+  type WorkerRelay,
+} from './streamRelay';

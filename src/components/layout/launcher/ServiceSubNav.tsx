@@ -29,6 +29,7 @@ import {
   IconMessage,
   IconMessages,
   IconMicrophone,
+  IconPhone,
   IconPin,
   IconPinFilled,
   IconPlayerPlay,
@@ -571,6 +572,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/realtime/sessions',
       icon: IconTimeline,
       matcher: (p) => p.startsWith('/dashboard/realtime/sessions'),
+    },
+    {
+      id: 'telephony',
+      label: 'Telephony',
+      href: '/dashboard/realtime/telephony',
+      icon: IconPhone,
+      matcher: (p) => p.startsWith('/dashboard/realtime/telephony'),
     },
   ],
   agents: [

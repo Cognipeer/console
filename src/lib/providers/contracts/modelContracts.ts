@@ -19,6 +19,7 @@ import {
   createOpenAiTtsRuntime,
 } from './openaiAudioHelpers';
 import { createVlmOcrRuntime } from './vlmOcrHelpers';
+import { OPENAI_REALTIME_TRANSCRIPTION_URL } from './openaiRealtimeTranscription';
 
 /** One wrapper for every OpenAI-schema chat model built by this module. */
 const reasoningNormalizingFetch = withInlineReasoningNormalization();
@@ -316,7 +317,15 @@ function openAiChatOverrides(
     reasoning: overrides.reasoning,
     modelKwargs: overrides.extraBody,
     ...(overrides.streamUsage === false ? { streamUsage: false } : {}),
-    streaming: options?.streaming ?? false,
+    // Only ever pass `streaming: true`. An explicit `streaming: false` is not
+    // "unset" to @langchain/openai: its constructor turns it into
+    // `disableStreaming: true`, and `.stream()` then silently falls back to ONE
+    // non-streaming call. Agents stream through `.stream()` (agent-sdk
+    // `stream: true`) on models built without options, so that default made
+    // every native agent deliver its answer in one piece — the realtime voice
+    // engine waited for the whole reply before speaking. Unset still means a
+    // plain `invoke()` is non-streaming.
+    ...(options?.streaming ? { streaming: true } : {}),
   };
 }
 
@@ -417,6 +426,9 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
           baseUrl: audioBase,
           organization: settings.organization,
           modelId: config.modelId,
+          // Streaming STT (experimental): verified against api.openai.com only, so
+          // the Azure / OpenAI-compatible runtimes keep batch transcription.
+          realtimeTranscriptionUrl: OPENAI_REALTIME_TRANSCRIPTION_URL,
         }),
       createTtsRuntime: (config) =>
         createOpenAiTtsRuntime({

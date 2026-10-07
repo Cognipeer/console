@@ -1,4 +1,6 @@
 import { upstreamError } from './upstreamError';
+import { alignPcm16Chunks, iterateResponseBody, ttsMimeType } from './audioStream';
+import { createOpenAiRealtimeTranscriptionStream } from './openaiRealtimeTranscription';
 import type {
   SttRuntime,
   SttResult,
@@ -20,19 +22,16 @@ export interface OpenAiAudioClientOptions {
   extraHeaders?: Record<string, string>;
   /** Override the URL builder (Azure has a different shape). */
   buildUrl?: (path: '/audio/transcriptions' | '/audio/translations' | '/audio/speech') => string;
+  /**
+   * WebSocket URL of a Realtime transcription session. When set, the STT
+   * runtime gains `createStream` (EXPERIMENTAL streaming transcription); only
+   * providers whose endpoint is verified to speak the protocol pass it.
+   */
+  realtimeTranscriptionUrl?: string;
 }
 
 /** Fallback when the caller doesn't pick a voice — supported by every OpenAI-style TTS model. */
 const DEFAULT_TTS_VOICE = 'alloy';
-
-const FORMAT_TO_MIME: Record<TtsOutputFormat, string> = {
-  mp3: 'audio/mpeg',
-  opus: 'audio/ogg',
-  aac: 'audio/aac',
-  flac: 'audio/flac',
-  wav: 'audio/wav',
-  pcm: 'audio/L16',
-};
 
 function buildHeaders(opts: OpenAiAudioClientOptions, json = false) {
   const headers: Record<string, string> = {
@@ -194,6 +193,9 @@ export function createOpenAiSttRuntime(opts: OpenAiAudioClientOptions): SttRunti
       method: 'POST',
       headers: buildHeaders(opts, false),
       body: form,
+      // Aborts the upload / the wait for the transcript (a discarded realtime
+      // speculation). Never part of the form sent to the provider.
+      ...(input.signal ? { signal: input.signal } : {}),
     });
 
     if (!response.ok) {
@@ -241,37 +243,58 @@ export function createOpenAiSttRuntime(opts: OpenAiAudioClientOptions): SttRunti
     return parseTranscriptionResponse(raw);
   };
 
-  return { transcribe, translate };
+  const runtime: SttRuntime = { transcribe, translate };
+  const realtimeUrl = opts.realtimeTranscriptionUrl;
+  if (realtimeUrl) {
+    runtime.createStream = (streamOpts) =>
+      createOpenAiRealtimeTranscriptionStream(
+        { url: realtimeUrl, headers: buildHeaders(opts, false), modelId: opts.modelId },
+        streamOpts,
+      );
+  }
+  return runtime;
+}
+
+function buildSpeechBody(
+  opts: OpenAiAudioClientOptions,
+  input: TtsSynthesizeInput,
+  format: TtsOutputFormat,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: opts.modelId,
+    input: input.text,
+    voice: input.voice || DEFAULT_TTS_VOICE,
+    response_format: format,
+  };
+  if (typeof input.speed === 'number') body.speed = input.speed;
+  if (input.instructions) body.instructions = input.instructions;
+  if (input.extra) Object.assign(body, input.extra);
+  return body;
 }
 
 export function createOpenAiTtsRuntime(opts: OpenAiAudioClientOptions): TtsRuntime {
-  const synthesize = async (input: TtsSynthesizeInput): Promise<TtsResult> => {
-    const format: TtsOutputFormat = input.format ?? 'mp3';
-    const body: Record<string, unknown> = {
-      model: opts.modelId,
-      input: input.text,
-      voice: input.voice || DEFAULT_TTS_VOICE,
-      response_format: format,
-    };
-    if (typeof input.speed === 'number') body.speed = input.speed;
-    if (input.instructions) body.instructions = input.instructions;
-    if (input.extra) Object.assign(body, input.extra);
-
-    const url = resolveUrl(opts, '/audio/speech');
-    const response = await fetch(url, {
+  const requestSpeech = async (input: TtsSynthesizeInput, format: TtsOutputFormat) => {
+    const response = await fetch(resolveUrl(opts, '/audio/speech'), {
       method: 'POST',
       headers: buildHeaders(opts, true),
-      body: JSON.stringify(body),
+      body: JSON.stringify(buildSpeechBody(opts, input, format)),
+      signal: input.signal,
     });
 
     if (!response.ok) {
       throw await upstreamError('OpenAI TTS failed', response);
     }
+    return response;
+  };
+
+  const synthesize = async (input: TtsSynthesizeInput): Promise<TtsResult> => {
+    const format: TtsOutputFormat = input.format ?? 'mp3';
+    const response = await requestSpeech(input, format);
 
     const buffer = Buffer.from(await response.arrayBuffer());
     return {
       audio: buffer,
-      contentType: response.headers.get('content-type') ?? FORMAT_TO_MIME[format],
+      contentType: response.headers.get('content-type') ?? ttsMimeType(format),
       format,
       usage: {
         inputCharacters: input.text.length,
@@ -279,5 +302,28 @@ export function createOpenAiTtsRuntime(opts: OpenAiAudioClientOptions): TtsRunti
     };
   };
 
-  return { synthesize };
+  /**
+   * `/audio/speech` sends its body chunked as the audio is generated (every
+   * `response_format`; `pcm` has no container header, so the first chunk is
+   * playable as-is). The promise settles once the response headers arrive —
+   * an upstream rejection throws here, before any byte, like `synthesize`.
+   */
+  const synthesizeStream = async (
+    input: TtsSynthesizeInput,
+  ): Promise<AsyncIterable<Uint8Array>> => {
+    const format: TtsOutputFormat = input.format ?? 'mp3';
+    const response = await requestSpeech(input, format);
+
+    const chunks: AsyncIterable<Uint8Array> = response.body
+      ? iterateResponseBody(response.body)
+      : (async function* bufferedBody() {
+          // No readable body (some fetch polyfills): still a valid, one-chunk stream.
+          const buffer = new Uint8Array(await response.arrayBuffer());
+          if (buffer.byteLength > 0) yield buffer;
+        })();
+
+    return format === 'pcm' ? alignPcm16Chunks(chunks) : chunks;
+  };
+
+  return { synthesize, synthesizeStream };
 }

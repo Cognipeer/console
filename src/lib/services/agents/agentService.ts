@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { createLogger } from '@/lib/core/logger';
-import { routeInstanceCall } from '@/lib/core/cluster';
+import { routeInstanceCall, type RelayCallerOptions, type WorkerRelay } from '@/lib/core/cluster';
 import type { QueuePayload } from '@/lib/core/queue';
 import { agentEntityId } from './agentEntityId';
 import type {
@@ -616,7 +616,9 @@ export class AgentGuardrailBlockedError extends Error {
  *     which `createStreamGate` could hold bytes back.
  *   · When a caller passes `onTextChunk`, `onStream` is forwarded only as a
  *     fire-and-forget copy of the deltas (`textStreamOptions`), so there is
- *     still no point at which a chunk can be withheld.
+ *     still no point at which a chunk can be withheld. That is why an agent
+ *     bound to `output.pre` does not stream at all (agentMayStreamAnswer):
+ *     its caller gets the guarded answer in one piece.
  *
  * So nothing on this path can gate a chunk, and claiming otherwise would be
  * the one failure the hook plane exists to prevent: a verdict claiming
@@ -1492,6 +1494,26 @@ async function buildAgentSubagents(
 }
 
 /**
+ * Provider options for the chat model of an agent run and of its sub-agents.
+ *
+ * Agents stream: the SDK calls `.stream()` for any turn with an `onTextChunk`
+ * (the dashboard Session view, a streamed chat completion, the realtime voice
+ * engine). A model flagged `disableStreamingWithTools` sits behind an upstream
+ * that cannot stream tool calls. The gateway honours that per request — only
+ * when the request carries tools (`prepareCall` in inferenceService) — but an
+ * agent builds ONE model for the whole run and binds tools on nearly every call,
+ * so the flag turns streaming off for the model: `.stream()` then answers with
+ * a single `invoke()`, exactly as every agent model did before the provider
+ * contracts stopped forcing that.
+ */
+function agentChatModelOptions(model: { settings?: unknown }): { disableStreaming: boolean } {
+    const settings = model.settings && typeof model.settings === 'object'
+        ? model.settings as Record<string, unknown>
+        : {};
+    return { disableStreaming: settings.disableStreamingWithTools === true };
+}
+
+/**
  * Builds the LangChain model for a sub-agent's model override. Returns
  * undefined when the key no longer resolves, which makes the child fall back to
  * the parent's model rather than failing the whole run.
@@ -1511,6 +1533,7 @@ async function buildSubagentModel(
             modelId: model.modelId,
             category: 'llm',
             modelSettings: resolveModelInvocationConfig(model, {}),
+            options: agentChatModelOptions(model),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
         return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
@@ -2340,6 +2363,36 @@ export async function resolveAgentConfig(
     return { agent, config: agent.config, resolvedVersion: null };
 }
 
+/**
+ * Which version of an agent a realtime (voice) session should run, as the
+ * `version` to hand `executePlaygroundChat` — undefined means the draft.
+ *
+ * Realtime presets default to `'published'`: a phone line is production
+ * traffic and must not change under it each time someone edits the draft.
+ * With nothing published (or the snapshot missing) it falls back to the draft,
+ * the same rule `resolveAgentConfig` applies to API calls. An unknown agent
+ * resolves to undefined rather than throwing: the run that follows fails with
+ * the proper "not found" error on the path that already reports it.
+ */
+export async function resolveAgentVoiceVersion(params: {
+    tenantDbName: string;
+    projectId?: string;
+    agentKey: string;
+    prefer: 'published' | 'draft';
+}): Promise<number | undefined> {
+    if (params.prefer === 'draft') return undefined;
+    const db = await getDatabase();
+    await db.switchToTenant(params.tenantDbName);
+    const agent = await db.findAgentByKey(params.agentKey, params.projectId);
+    if (!agent) {
+        logger.warn('Voice version lookup: agent not found', { agentKey: params.agentKey });
+        return undefined;
+    }
+    if (!agent.publishedVersion) return undefined;
+    const snapshot = await db.findAgentVersion(String(agent._id), agent.publishedVersion);
+    return snapshot ? snapshot.version : undefined;
+}
+
 // ── Model connection check ───────────────────────────────────────────
 
 export interface AgentModelCheckResult {
@@ -2378,6 +2431,7 @@ async function buildAgentChatModel(
         modelId: model.modelId,
         category: model.category,
         modelSettings: resolveModelInvocationConfig(model, overrides).modelSettings,
+        options: agentChatModelOptions(model),
     });
     return { model, lcModel };
 }
@@ -2523,18 +2577,57 @@ function isCancellationCellTripped(cell: AgentRunCancellationCell | undefined): 
  */
 const CANCELLATION_CELL_POLL_MS = 250;
 
+/**
+ * ONE `cancellationToken` for the SDK out of the two ways a turn can be
+ * stopped: the cell (deadline / background cancel, polled) and the caller's
+ * own `signal` (e.g. a realtime barge-in, event-driven). Either aborts it.
+ * With only a signal there is nothing to poll and the signal is used as is.
+ */
 function bridgeCancellationCell(
     cell: AgentRunCancellationCell | undefined,
+    callerSignal?: AbortSignal,
 ): { signal?: AbortSignal; stop: () => void } {
-    if (!cell) return { stop: () => undefined };
+    if (!cell) return { ...(callerSignal ? { signal: callerSignal } : {}), stop: () => undefined };
     const controller = new AbortController();
-    if (cell.cancelled) controller.abort();
+    const onCallerAbort = () => controller.abort(callerSignal?.reason);
+    if (cell.cancelled || callerSignal?.aborted) controller.abort(callerSignal?.reason);
+    else callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
     const timer = setInterval(() => {
         if (cell.cancelled && !controller.signal.aborted) controller.abort();
     }, CANCELLATION_CELL_POLL_MS);
     timer.unref?.();
-    return { signal: controller.signal, stop: () => clearInterval(timer) };
+    return {
+        signal: controller.signal,
+        stop: () => {
+            clearInterval(timer);
+            callerSignal?.removeEventListener('abort', onCallerAbort);
+        },
+    };
 }
+
+/**
+ * Remembers the text a turn has streamed so far, for the one case where
+ * nothing else can say what was produced: the caller aborted and the model
+ * call REJECTED (a provider that honours the abort signal throws instead of
+ * returning), so there is no result to read the partial answer from.
+ */
+function captureStreamedText(onTextChunk: ((text: string) => void) | undefined): {
+    onTextChunk?: (text: string) => void;
+    text: () => string;
+} {
+    if (!onTextChunk) return { text: () => '' };
+    let streamed = '';
+    return {
+        onTextChunk: (text: string) => {
+            streamed += text;
+            onTextChunk(text);
+        },
+        text: () => streamed,
+    };
+}
+
+/** `stopDetail` of a turn the caller's `signal` ended (the SDK's own wording for it). */
+const CALLER_ABORT_DETAIL = 'aborted';
 
 export interface AgentChatRequest {
     tenantDbName: string;
@@ -2554,9 +2647,11 @@ export interface AgentChatRequest {
      */
     runtimeContext?: AgentRuntimeContext;
     /**
-     * Incremental answer text. Same queue caveat as the playground's: a
-     * function cannot be serialized to another node, so a routed run simply
-     * streams nothing and the caller still gets the complete result.
+     * Incremental answer text — internal agents (model token stream) and
+     * connected agents (SSE) alike. Functions cannot cross the job queue, so
+     * a run routed to another node replays its chunks over the cluster stream
+     * relay (Redis pub/sub); without Redis a routed run streams nothing and
+     * the caller still gets the complete result.
      */
     onTextChunk?: (text: string) => void;
     /**
@@ -2566,6 +2661,17 @@ export interface AgentChatRequest {
      * which keep today's unconditional-persist behavior.
      */
     cancellationCell?: AgentRunCancellationCell;
+    /**
+     * The caller is no longer interested (a realtime barge-in, a closed
+     * client). Stops the agent loop / connected-agent request; the turn then
+     * RESOLVES — never rejects — with the text produced so far and
+     * `stop_reason: 'cancelled'`. A run the SDK stopped at a step boundary
+     * (and a connected agent's partial answer, guarded) is persisted like any
+     * other cancelled run; a model call torn down mid-flight leaves no state
+     * to persist, so the conversation stays as it was. Relayed to the worker
+     * when the run is routed.
+     */
+    signal?: AbortSignal;
 }
 
 /** Tool-call progress notification surfaced while an agent run executes. */
@@ -2621,23 +2727,32 @@ export interface AgentPlaygroundChatRequest {
      */
     runtimeContext?: AgentRuntimeContext;
     /**
-     * In-process only, best-effort: fires as the agent starts/finishes each
-     * tool call so callers (e.g. realtime sessions) can surface progress.
-     * Functions cannot cross the job queue — when the agent is assigned to
-     * another cluster node the run still works, but no events fire.
+     * Best-effort: fires as the agent starts/finishes each tool call so
+     * callers (e.g. realtime sessions) can surface progress. Functions cannot
+     * cross the job queue — when the agent is assigned to another cluster node
+     * the events are replayed over the cluster stream relay (Redis pub/sub);
+     * without it the run still works, but no events fire. Connected agents
+     * run their tools remotely and never fire it.
      */
     onToolEvent?: (event: AgentToolCallEvent) => void;
     /**
-     * Incremental answer text, for a caller that can render it as it arrives.
-     * Same queue caveat as `onToolEvent` — a function cannot be serialized to
-     * another node, so a routed run simply streams nothing.
+     * Incremental answer text, for a caller that can render it as it arrives —
+     * internal agents (model token stream) and connected agents (SSE) alike.
+     * Same relay caveat as `onToolEvent`.
      */
     onTextChunk?: (text: string) => void;
     /**
-     * Fires when the agent summarizes its context mid-run. Same queue caveat
+     * Fires when the agent summarizes its context mid-run. Same relay caveat
      * as `onToolEvent`.
      */
     onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    /**
+     * Abort the turn (realtime barge-in). The run RESOLVES with the text
+     * produced so far, `stopReason: 'cancelled'` and `stopDetail: 'aborted'`;
+     * a Session turn is persisted that way. Relayed to the worker when the
+     * run is routed to another node.
+     */
+    signal?: AbortSignal;
 }
 
 /**
@@ -2724,14 +2839,59 @@ export function incompleteReason(stopReason: AgentStopReason, stopDetail?: strin
     return stopReason;
 }
 
+/**
+ * The live parts of a request that cannot ride in a queue payload, as relay
+ * handlers for `routeInstanceCall`. Event names are the contract with
+ * `agentRelayCallbacks` on the worker.
+ */
+function agentRelayOptions(request: {
+    onTextChunk?: (text: string) => void;
+    onToolEvent?: (event: AgentToolCallEvent) => void;
+    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    signal?: AbortSignal;
+}): RelayCallerOptions {
+    const { onTextChunk, onToolEvent, onCompaction } = request;
+    return {
+        handlers: {
+            text: onTextChunk ? (data) => { if (typeof data === 'string') onTextChunk(data); } : undefined,
+            tool: onToolEvent ? (data) => onToolEvent(data as AgentToolCallEvent) : undefined,
+            compaction: onCompaction ? (data) => onCompaction(data as IAgentTurnCompaction) : undefined,
+        },
+        ...(request.signal ? { signal: request.signal } : {}),
+    };
+}
+
+/**
+ * Worker side of `agentRelayOptions`: callbacks that publish back to the
+ * caller, ONLY for the events the caller listens for (an `onTextChunk` turns
+ * the SDK's streaming on — a caller that did not ask for text must not change
+ * how the model is called), plus the caller-controlled abort signal.
+ * EXPORTED for the queue consumer.
+ */
+export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
+    AgentPlaygroundChatRequest,
+    'onTextChunk' | 'onToolEvent' | 'onCompaction' | 'signal'
+> {
+    if (!relay) return {};
+    return {
+        ...(relay.events.has('text') ? { onTextChunk: (text: string) => relay.emit('text', text) } : {}),
+        ...(relay.events.has('tool') ? { onToolEvent: (event: AgentToolCallEvent) => relay.emit('tool', event) } : {}),
+        ...(relay.events.has('compaction')
+            ? { onCompaction: (compaction: IAgentTurnCompaction) => relay.emit('compaction', compaction) }
+            : {}),
+        ...(relay.signal ? { signal: relay.signal } : {}),
+    };
+}
+
 export async function executeAgentChat(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
-    // The callback cannot be serialized over the queue — stripped from the
-    // payload, kept on the local fast path. A routed run answers in full; it
-    // just does not stream on the way.
+    // The callback and the signal cannot be serialized over the queue —
+    // stripped from the payload, kept on the local fast path, and bridged by
+    // the cluster stream relay when the run is routed.
     const payload = { ...request };
     delete payload.onTextChunk;
+    delete payload.signal;
     return routeInstanceCall(
         {
             entityType: 'agent',
@@ -2740,12 +2900,15 @@ export async function executeAgentChat(
         },
         payload as unknown as QueuePayload,
         () => executeAgentChatLocal(request),
-        // A routed turn with a ceiling waits exactly as long as the ceiling
-        // allows and is never retried: the queue default (60s, 3 attempts)
-        // cut long turns off early and could re-run a turn's tool calls.
-        request.cancellationCell?.deadlineAt !== undefined
-            ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
-            : undefined,
+        {
+            relay: agentRelayOptions(request),
+            // A routed turn with a ceiling waits exactly as long as the ceiling
+            // allows and is never retried: the queue default (60s, 3 attempts)
+            // cut long turns off early and could re-run a turn's tool calls.
+            ...(request.cancellationCell?.deadlineAt !== undefined
+                ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
+                : {}),
+        },
     );
 }
 
@@ -2762,6 +2925,19 @@ export async function executeAgentChat(
  * a tool binding on a connected agent is warned about rather than quietly
  * dropped: silent non-enforcement is the failure this plane exists to end.
  *
+ * STREAMING (`onTextChunk`). A connected agent WITHOUT an `output.pre`
+ * binding that answers over SSE has its text handed to the caller as it
+ * arrives (there is no output check it could bypass). An agent bound to
+ * `output.pre` never streams (agentMayStreamAnswer): its answer is guarded
+ * first and then emitted as a single chunk — the same path as an agent that
+ * answers in one piece — so nothing unchecked reaches the caller.
+ *
+ * ABORT (`signal`). The turn resolves with `cancelled: true` and the text
+ * already emitted. That partial answer is guarded only when `persistPartial`
+ * says it is about to be written somewhere; otherwise it is returned as is —
+ * it is exactly the text the caller has already received chunk by chunk
+ * (nothing, for a guarded agent, which never streams).
+ *
  * Returns the guarded user message (what went upstream), the moment it was
  * sent, and the guarded answer.
  */
@@ -2776,24 +2952,44 @@ async function runExternalAgentTurn(input: {
     userMessage: string;
     runtimeContext?: AgentRuntimeContext;
     source: 'agent' | 'agent-playground';
-}): Promise<{ userMessage: string; sentAt: Date; content: string }> {
-    const { tenantDbName, tenantId, projectId, agentKey, config, connection, source } = input;
+    onTextChunk?: (text: string) => void;
+    signal?: AbortSignal;
+    persistPartial?: boolean;
+}): Promise<{ userMessage: string; sentAt: Date; content: string; cancelled: boolean }> {
+    const { tenantDbName, tenantId, projectId, agentKey, config, connection, source, onTextChunk } = input;
     warnUnservableExternalBindings(config, agentKey);
 
     const userMessage = await evaluateBoundGuardrails({
         tenantDbName, tenantId, projectId, config, hook: 'input.pre', text: input.userMessage, source,
     });
     const sentAt = new Date();
-    const { content: raw } = await invokeExternalAgent(
+    const streamChunks = onTextChunk && agentMayStreamAnswer(config) ? onTextChunk : undefined;
+    const reply = await invokeExternalAgent(
         connection,
         [...input.history, { role: 'user', content: userMessage }],
         { tenantDbName, tenantId, projectId },
         resolveRuntimeHeaders(input.runtimeContext, 'agent', agentKey, connection.runtimeHeaders),
+        {
+            ...(streamChunks ? { onTextChunk: streamChunks } : {}),
+            ...(input.signal ? { signal: input.signal } : {}),
+        },
     );
+    const cancelled = reply.cancelled === true;
+    if (cancelled && !input.persistPartial) {
+        // A guarded agent emitted nothing, and its partial answer is unchecked.
+        return { userMessage, sentAt, content: streamChunks ? reply.content : '', cancelled };
+    }
     const content = await evaluateBoundGuardrails({
-        tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: raw, source,
+        tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: reply.content, source,
     });
-    return { userMessage, sentAt, content };
+    if (onTextChunk && !reply.streamed && !cancelled && content) {
+        try {
+            onTextChunk(content);
+        } catch (callbackError) {
+            logger.warn('onTextChunk callback failed', { agentKey, error: callbackError });
+        }
+    }
+    return { userMessage, sentAt, content, cancelled };
 }
 
 /**
@@ -3053,6 +3249,22 @@ function textStreamOptions(onTextChunk: ((text: string) => void) | undefined, ag
     };
 }
 
+/**
+ * Whether an agent's answer may reach `onTextChunk` while it is generated.
+ *
+ * `output.pre` only ever sees the COMPLETE answer, and it can rewrite it
+ * (PII redaction) or block it. Streaming hands every token to the caller
+ * before that check runs — a voice session would speak the raw card number,
+ * an SSE client would receive it — while only the persisted copy is guarded.
+ * So an agent bound to `output.pre` answers in one piece: nothing reaches
+ * `onTextChunk` during the run and callers deliver the guarded
+ * `result.content` (a connected agent emits it as one chunk, see
+ * runExternalAgentTurn). Agents without an output guardrail stream as usual.
+ */
+export function agentMayStreamAnswer(config: GuardrailBindingSource): boolean {
+    return resolveBindings(config, 'output.pre').length === 0;
+}
+
 /** The first exchange of a "New conversation" names it after what was asked. */
 function firstTurnTitle(conversation: IAgentConversation, messageCount: number, userText: string): string | undefined {
     return conversation.title === 'New conversation' && messageCount <= 2
@@ -3185,12 +3397,19 @@ export async function executeAgentChatLocal(
             userMessage,
             runtimeContext: request.runtimeContext,
             source: 'agent',
+            onTextChunk: request.onTextChunk,
+            signal: request.signal,
+            // A cancelled turn is still written to the conversation below.
+            persistPartial: true,
         });
+        const externalOutcome = turn.cancelled
+            ? { stopReason: 'cancelled' as const, stopDetail: CALLER_ABORT_DETAIL }
+            : undefined;
 
-        const updatedMessages = [
+        const updatedMessages: IAgentConversation['messages'] = [
             ...(conversation.messages || []),
             { role: 'user', content: turn.userMessage, timestamp: turn.sentAt },
-            { role: 'assistant', content: turn.content, timestamp: new Date() },
+            { role: 'assistant', content: turn.content, ...(externalOutcome ?? {}), timestamp: new Date() },
         ];
         // §12.12: a deadline/cancel decision made about this turn while the
         // external HTTP call was in flight must not be overwritten by a late
@@ -3209,6 +3428,7 @@ export async function executeAgentChatLocal(
             version: resolvedVersion,
             content: turn.content,
             messages: updatedMessages,
+            ...(externalOutcome ? { outcome: externalOutcome } : {}),
         });
     }
 
@@ -3251,23 +3471,51 @@ export async function executeAgentChatLocal(
     try {
         // 5. Invoke
         const compactions: IAgentTurnCompaction[] = [];
-        const cancellationBridge = bridgeCancellationCell(request.cancellationCell);
+        const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
+        const streamed = captureStreamedText(request.onTextChunk);
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 if (event.type === 'summarization') compactions.push(compactionFromEvent(event));
             },
-            ...textStreamOptions(request.onTextChunk, agentKey),
+            ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
             ...(request.cancellationCell?.deadlineAt !== undefined
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
                 : {}),
         };
 
-        const result: AgentSdkInvokeResult = await sdkAgent.invoke(inputState, liveInvokeConfig)
+        const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(inputState, liveInvokeConfig)
             .catch((error: unknown) => {
+                // The caller aborted and the in-flight model call threw for
+                // it: an aborted turn resolves with what it had streamed.
+                if (request.signal?.aborted) return null;
                 throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
             })
             .finally(() => cancellationBridge.stop());
+
+        if (!settled) {
+            // No result means no final state and no `result.messages` to read a
+            // `prompt.pre` redaction of the user turn back from — so nothing is
+            // persisted (the conversation keeps its previous state, as for a
+            // superseded turn). The caller gets the text it already streamed.
+            const outcome = { stopReason: 'cancelled' as const, stopDetail: CALLER_ABORT_DETAIL };
+            const partialMessages: IAgentConversation['messages'] = [
+                ...(conversation.messages || []),
+                { role: 'user', content: rewriteLedger.resolve(userMessage), timestamp: now },
+                { role: 'assistant', content: streamed.text(), ...outcome, timestamp: new Date() },
+            ];
+            logger.info('Agent chat aborted by caller mid-call (not persisted)', { agentKey, conversationId });
+            return toAgentChatResponse({
+                conversationId,
+                priorMessageCount: conversation.messages?.length ?? 0,
+                agentName: agent.name,
+                version: resolvedVersion,
+                content: streamed.text(),
+                messages: partialMessages,
+                outcome,
+            });
+        }
+        const result = settled;
 
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;
@@ -3370,11 +3618,14 @@ export async function executeAgentChatLocal(
 export async function executePlaygroundChat(
     request: AgentPlaygroundChatRequest,
 ): Promise<AgentPlaygroundChatResult> {
-    // The callback can't serialize over the queue — keep it out of the payload
-    // (the local fast path still receives the full request).
+    // Callbacks and the signal can't serialize over the queue — kept out of
+    // the payload (the local fast path still receives the full request) and
+    // bridged by the cluster stream relay when the run is routed.
     const payload = { ...request };
     delete payload.onToolEvent;
     delete payload.onTextChunk;
+    delete payload.onCompaction;
+    delete payload.signal;
     return routeInstanceCall(
         {
             entityType: 'agent',
@@ -3383,6 +3634,7 @@ export async function executePlaygroundChat(
         },
         payload as unknown as QueuePayload,
         () => executePlaygroundChatLocal(request),
+        { relay: agentRelayOptions(request) },
     );
 }
 
@@ -3581,7 +3833,8 @@ export async function executePlaygroundChatLocal(
     // the guarded answer: the only copy for a stateless call, and what a
     // Session persists — never the raw upstream reply.
     if (config.kind === 'external' && config.connection) {
-        const { content } = await runExternalAgentTurn({
+        const externalStartedAt = Date.now();
+        const { content, cancelled } = await runExternalAgentTurn({
             tenantDbName,
             tenantId,
             projectId,
@@ -3592,9 +3845,18 @@ export async function executePlaygroundChatLocal(
             userMessage,
             runtimeContext,
             source: 'agent-playground',
+            onTextChunk: request.onTextChunk,
+            signal: request.signal,
+            persistPartial: Boolean(sessionConversation),
         });
 
-        const externalResult: AgentPlaygroundChatResult = { content, version: ranVersion };
+        const externalResult: AgentPlaygroundChatResult = {
+            content,
+            version: ranVersion,
+            ...(cancelled
+                ? { stopReason: 'cancelled' as const, stopDetail: CALLER_ABORT_DETAIL, latencyMs: Date.now() - externalStartedAt }
+                : {}),
+        };
         if (sessionConversation) {
             await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
         }
@@ -3640,8 +3902,9 @@ export async function executePlaygroundChatLocal(
     );
 
     // Surface progress to the caller (best-effort; never fails the run).
-    const { onToolEvent, onCompaction } = request;
+    const { onToolEvent, onCompaction, signal } = request;
     const compactions: IAgentTurnCompaction[] = [];
+    const streamed = captureStreamedText(request.onTextChunk);
     const invokeConfig = {
         onEvent: (event: AgentSdkEvent) => {
             if (event.type === 'summarization') {
@@ -3671,15 +3934,45 @@ export async function executePlaygroundChatLocal(
                 logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
             }
         },
-        ...textStreamOptions(request.onTextChunk, agentKey),
+        ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
+        // The SDK checks it between steps and hands it to the model call.
+        ...(signal ? { cancellationToken: signal } : {}),
     };
 
     const invokeStartedAt = Date.now();
     try {
-        const result: AgentSdkInvokeResult = await sdkAgent.invoke(inputState, invokeConfig)
+        const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(inputState, invokeConfig)
             .catch((error: unknown) => {
+                // The caller aborted and the in-flight model call threw for
+                // it: an aborted turn resolves with what it had streamed.
+                if (signal?.aborted) return null;
                 throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
             });
+
+        if (!settled) {
+            const aborted: AgentPlaygroundChatResult = {
+                content: streamed.text(),
+                latencyMs: Date.now() - invokeStartedAt,
+                version: ranVersion,
+                stopReason: 'cancelled',
+                stopDetail: CALLER_ABORT_DETAIL,
+                ...(compactions.length > 0 ? { compactions } : {}),
+                ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+            };
+            logger.info('Playground chat aborted by caller mid-call', { agentKey });
+            if (sessionConversation) {
+                // The streamed text never reached the SDK's post-model check;
+                // it is guarded before it becomes stored history. No state is
+                // saved — the next turn replays the transcript instead.
+                aborted.content = await evaluateBoundGuardrails({
+                    tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: aborted.content,
+                    source: 'agent-playground',
+                });
+                await persistSessionTurn(db, sessionConversation, userMessage, aborted);
+            }
+            return aborted;
+        }
+        const result = settled;
 
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;

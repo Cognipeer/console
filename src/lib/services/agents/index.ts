@@ -14,6 +14,13 @@ export {
   deleteConversation,
   executeAgentChat,
   executePlaygroundChat,
+  resolveAgentVoiceVersion,
+} from './agentService';
+export type {
+  AgentChatRequest,
+  AgentPlaygroundChatRequest,
+  AgentPlaygroundChatResult,
+  AgentToolCallEvent,
 } from './agentService';
 
 export { prepareConnectionForStorage } from './externalAgent';

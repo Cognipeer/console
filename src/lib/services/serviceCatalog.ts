@@ -162,6 +162,7 @@ export const DOMAIN_LABELS: Record<ProviderDomain, string> = {
   moderation: 'Moderation',
   ocr: 'OCR',
   websearch: 'Web Search',
+  telephony: 'Telephony',
 };
 
 /** First letter of the service name — used as the badge glyph when no icon is provided. */

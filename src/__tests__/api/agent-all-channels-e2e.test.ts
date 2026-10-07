@@ -513,6 +513,30 @@ describe('channel: OpenAI chat/completions', () => {
         expect(res.body.trimEnd().endsWith('data: [DONE]')).toBe(true);
     });
 
+    it('a relayed stream that lost its last frames still ends with the full answer', async () => {
+        // Relay frames are best-effort pub/sub: the run's result is complete
+        // even when the tail of the live stream never arrived.
+        const impl = async (request: { onTextChunk?: (chunk: string) => void }) => {
+            request.onTextChunk?.('The database ');
+            return ANSWER;
+        };
+        mockFn(agentsBarrel.executeAgentChat).mockImplementation(impl);
+        mockFn(agentServiceModule.executeAgentChat).mockImplementation(impl);
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/client/v1/chat/completions',
+            headers: { authorization: 'Bearer tok' },
+            payload: { model: 'field-ops', messages: [{ role: 'user', content: 'hi' }], stream: true },
+        });
+        const parsed = res.body
+            .split('\n\n')
+            .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+            .map((line) => JSON.parse(line.slice(6)));
+        const text = parsed.map((c) => c.choices[0].delta.content ?? '').join('');
+        expect(text).toBe('The database is down.');
+    });
+
     it('rejects a call with no user message', async () => {
         const app = await build();
         const res = await app.inject({

@@ -19,6 +19,11 @@
  *
  * Consumers register on every node that *might* execute the work; the
  * router is the only place that decides who actually runs it.
+ *
+ * Live callbacks (`opts.relay`): the queue carries data, not functions. When a
+ * call is forwarded, the caller's callbacks and abort signal are bridged over
+ * Redis pub/sub (see `streamRelay.ts`); the local paths call the handler,
+ * which closes over the real callbacks, and never open a relay.
  */
 
 import { createLogger } from '../logger';
@@ -27,6 +32,12 @@ import { getThisNodeName } from './nodeRegistry';
 import { resolveInstancePlacement } from './instanceAssignmentStore';
 import { getQueue, type InvokeOptions, type QueuePayload } from '../queue';
 import type { InstanceEntityType } from './types';
+import {
+  STREAM_RELAY_PAYLOAD_KEY,
+  openCallerRelay,
+  relayIsUseful,
+  type RelayCallerOptions,
+} from './streamRelay';
 
 const log = createLogger('cluster.router');
 
@@ -36,6 +47,11 @@ export interface RouteOptions extends Omit<InvokeOptions, 'targetNode'> {
    * created it (e.g. a live browser session bound to a Playwright context).
    */
   forceNodeName?: string;
+  /**
+   * Callbacks/abort signal of a call that may be forwarded to another node.
+   * Ignored on the local paths (the local handler already has them).
+   */
+  relay?: RelayCallerOptions;
 }
 
 export interface RouteContext {
@@ -82,31 +98,55 @@ export async function routeInstanceCall<T extends QueuePayload, R>(
     return localHandler();
   }
 
+  const { relay: relayOptions, ...invokeOpts } = opts;
+  const invokeRemote = async (targetNode: string | undefined): Promise<R> => {
+    const relay = relayIsUseful(relayOptions) ? await openCallerRelay(relayOptions) : null;
+    const routedPayload = relay
+      ? ({ ...payload, [STREAM_RELAY_PAYLOAD_KEY]: relay.descriptor } as T)
+      : payload;
+    try {
+      const result = await queue.invoke<T, R>(queueName, ctx.jobName, routedPayload, {
+        ...invokeOpts,
+        // A relayed call has already handed its live callbacks part of the
+        // answer: a queue retry would re-run the job and replay its text
+        // (and tool events) into the same caller on top of what the failed
+        // attempt streamed — duplicated or, when the first attempt's `end`
+        // won the race, truncated output. So the queue is not asked to retry
+        // it.
+        //
+        // That only covers a FAILED attempt. BullMQ also re-runs a STALLED job
+        // (the worker was killed mid-turn, or lost its lock) whatever
+        // `attempts` says, with the same payload and so the same relay. The
+        // relay is what makes that safe for the caller: each execution stamps
+        // its frames with its own run id and the caller follows only the first
+        // (`streamRelay.ts`).
+        ...(relay ? { attempts: 1 } : {}),
+        targetNode,
+      });
+      await relay?.finish();
+      return result;
+    } catch (error) {
+      await relay?.close();
+      throw error;
+    }
+  };
+
   if (target.mode === 'strict') {
     await assertNodeOnline(target.nodeName, ctx);
-    return queue.invoke<T, R>(queueName, ctx.jobName, payload, {
-      ...opts,
-      targetNode: target.nodeName,
-    });
+    return invokeRemote(target.nodeName);
   }
 
   // Preferred mode: try the targeted node; if it's offline, fall back to
   // the shared "auto" channel so any consumer can pick it up.
   if (await isNodeOnline(target.nodeName)) {
-    return queue.invoke<T, R>(queueName, ctx.jobName, payload, {
-      ...opts,
-      targetNode: target.nodeName,
-    });
+    return invokeRemote(target.nodeName);
   }
   log.warn('Preferred node offline; routing to auto channel', {
     entityType: ctx.entityType,
     entityId: ctx.entityId,
     assigned: target.nodeName,
   });
-  return queue.invoke<T, R>(queueName, ctx.jobName, payload, {
-    ...opts,
-    targetNode: undefined, // auto
-  });
+  return invokeRemote(undefined); // auto
 }
 
 /** Conventional queue name for a given entity type. */
