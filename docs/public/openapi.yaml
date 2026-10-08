@@ -7102,6 +7102,104 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /realtime/sessions/{sessionId}/messages:
+    post:
+      tags:
+        - Realtime
+      summary: Send a message into a running realtime session
+      description: |-
+        Enterprise / license-gated. Adds a message to a **live** realtime session's conversation from outside its socket — a finished background job, a webhook, an operator — and (by default) has the assistant answer it.
+
+        The message enters as a **user** turn marked as an external notification (`conversation.item.created` with `source: "external"`); `system` and `assistant` roles are rejected, and the answer goes through the session's guardrails like any user turn. The session is looked up inside the token's own tenant and project: an unknown session, an ended one and another project's all answer `404`.
+
+        `mode: when_idle` (default) queues the answer behind the one in flight and drops it, keeping the text in the conversation, if the caller speaks first. `mode: now` interrupts the current answer. Limits: 4000 characters per message, 30 accepted messages per session per minute (`429` with `Retry-After`). `Idempotency-Key` makes a retry safe for 10 minutes.
+
+        With several replicas the message is relayed (over Redis) to the one that holds the session; without Redis it is delivered only on the node that has it.
+      operationId: realtimeSessionSendMessage
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: "Realtime session id (`session.created` → `session.id`, or the call's `session_id`)."
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: "Same key within 10 minutes adds the message once and answers `replayed: true`."
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - content
+              properties:
+                content:
+                  type: string
+                  maxLength: 4000
+                  description: The message text.
+                role:
+                  type: string
+                  enum:
+                    - user
+                  description: Only `user` is accepted.
+                respond:
+                  type: boolean
+                  default: true
+                  description: Whether the assistant answers it. `false` adds it silently.
+                mode:
+                  type: string
+                  enum:
+                    - when_idle
+                    - now
+                  default: when_idle
+                label:
+                  type: string
+                  maxLength: 60
+                  description: 'Who is speaking; shown to the assistant as "Notification from <label>". Default `external system`.'
+      responses:
+        "202":
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    enum:
+                      - realtime.session.message
+                  id:
+                    type: string
+                    description: Conversation item id of the added message.
+                  session_id:
+                    type: string
+                  response_queued:
+                    type: boolean
+                  replayed:
+                    type: boolean
+                required:
+                  - object
+                  - id
+                  - session_id
+                  - response_queued
+                  - replayed
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          description: "Too many external messages for this session; `Retry-After` says when."
+        "500":
+          $ref: "#/components/responses/InternalError"
   /realtime/twilio:
     get:
       tags:
