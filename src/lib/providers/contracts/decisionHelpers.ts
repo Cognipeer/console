@@ -30,6 +30,8 @@ export const DECISION_LIMITS = {
 
 /** A request the caller got wrong — maps to HTTP 400. */
 export class DecisionRequestError extends Error {
+  /** Non-retryable for `withResilience`: a malformed request never improves on retry. */
+  readonly status = 400;
   readonly param?: string;
   readonly questionId?: string;
 

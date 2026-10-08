@@ -15,7 +15,12 @@ export const tr: typeof en = {
     decision: {
       title: 'Karar modu',
       description:
-        'Yanıtlar bu modele yapılan yapılandırılmış çıktı çağrısından gelir; fiyatlandırma altta yatan sohbet modeliyle aynıdır. Satıcıya özgü yerel karar uç noktaları henüz kullanılamıyor.',
+        'Yapılandırılmış: yanıtlar bir sohbet modeline yapılan katı şemalı çağrıdan gelir ve onunla aynı fiyatlanır. Yerel: sağlayıcının kendi karar uç noktası (yalnızca girdi token\'ları).',
+      mode: {
+        label: 'Arka uç',
+        structured: 'Yapılandırılmış (sohbet modeli)',
+        native: 'Yerel (satıcı karar API\'si)',
+      },
       acceptsImage: {
         label: 'Görselleri kabul eder',
         description: 'Altta yatan modelin görsel girdileri okuyabildiğini bildirir (decision.supports.image).',

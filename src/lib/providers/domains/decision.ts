@@ -57,8 +57,9 @@ export interface DecisionChoiceAnswer {
   type: 'choice';
   choice: string;
   probabilities: Record<string, number>;
-  confidence: number;
-  confidence_source: DecisionConfidenceSource;
+  /** Omitted when the backend did not report one. */
+  confidence?: number;
+  confidence_source?: DecisionConfidenceSource;
 }
 
 export interface DecisionBooleanAnswer {
@@ -73,9 +74,10 @@ export interface DecisionScoreAnswer {
   /** Level index (as a string) → probability. */
   probabilities: Record<string, number>;
   /** Level index (as a string) → the level's label. */
-  legend: Record<string, string>;
-  confidence: number;
-  confidence_source: DecisionConfidenceSource;
+  /** Omitted when the backend neither sent nor implied level labels. */
+  legend?: Record<string, string>;
+  confidence?: number;
+  confidence_source?: DecisionConfidenceSource;
 }
 
 export interface DecisionRefusalAnswer {
@@ -98,6 +100,8 @@ export interface DecisionResult {
   /** Console extension: present only when `include_rationale` was requested and produced. */
   rationale?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
+  /** Vendor-side identifiers worth a trace row (native backends only). */
+  upstream?: { request_id?: string; latency_ms?: number };
   backend: DecisionBackendInfo;
 }
 

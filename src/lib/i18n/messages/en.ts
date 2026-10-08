@@ -1179,7 +1179,12 @@ export const en = {
     decision: {
       title: 'Decision mode',
       description:
-        'Answers come from a structured-output call to this model, so it is priced like the underlying chat model. Native vendor decision endpoints are not available yet.',
+        'Structured: answers come from a strict-schema call to a chat model and are priced like it. Native: the provider\'s own decision endpoint (input tokens only).',
+      mode: {
+        label: 'Backend',
+        structured: 'Structured (chat model)',
+        native: 'Native (vendor decision API)',
+      },
       acceptsImage: {
         label: 'Accepts images',
         description: 'Declare that the underlying model can read image inputs (decision.supports.image).',
