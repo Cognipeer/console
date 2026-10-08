@@ -31,6 +31,15 @@ import {
     validateAgentConfigShape,
 } from '@/lib/services/agents/agentConfigValidation';
 import type { IAgentConfig } from '@/lib/database';
+import {
+    CONSOLE_AGENT_DEFAULTS,
+    resolveAgentRuntimeOptions,
+} from '@/lib/services/agents/agentRuntimeConfig';
+import {
+    DEFAULT_PROFILE_CONFIGS,
+    normalizeSmartAgentOptions,
+    type SmartAgentOptions,
+} from '@cognipeer/agent-sdk';
 
 const PRICED = { key: 'gpt-main', category: 'llm', pricing: { inputTokenPer1M: 1, outputTokenPer1M: 4 } };
 
@@ -262,5 +271,31 @@ describe('validateAgentConfigShape — execution settings', () => {
         expect(fields(shape({ callbackUrl: 'https://h.example.com', callbackSecret: 'short' }).errors)).toContain('execution.callbackSecret');
         expect(fields(shape({ callbackSecret: 'a'.repeat(20) }).errors)).toContain('execution.callbackSecret');
         expect(shape({ callbackUrl: 'https://h.example.com', callbackSecret: '••••••' }).errors).toEqual([]);
+    });
+});
+
+describe('validateAgentConfigShape — runtime profile without field overrides', () => {
+    it.each(['deep', 'research'] as const)('accepts a bare %s profile and leaves unset knobs to its SDK preset', (profile) => {
+        const config: IAgentConfig = { modelKey: 'gpt-main', runtime: { profile } };
+        expect(validateAgentConfigShape(config).errors).toEqual([]);
+
+        const preset = DEFAULT_PROFILE_CONFIGS[profile];
+        const smart = normalizeSmartAgentOptions(resolveAgentRuntimeOptions(config) as SmartAgentOptions);
+        expect(smart.limits.maxToolCalls).toBe(preset.limits.maxToolCalls);
+        expect(smart.limits.maxContextTokens).toBe(preset.limits.maxContextTokens);
+        expect(smart.context.lastTurnsToKeep).toBe(preset.context.lastTurnsToKeep);
+        expect(smart.summarization.summaryTriggerTokens).toBe(preset.summarization.summaryTriggerTokens);
+        expect(smart.limits.maxToolCalls).not.toBe(CONSOLE_AGENT_DEFAULTS.maxToolCalls);
+    });
+
+    it('keeps the console defaults for a valid config with no runtime block', () => {
+        const config: IAgentConfig = { modelKey: 'gpt-main' };
+        expect(validateAgentConfigShape(config).errors).toEqual([]);
+
+        const smart = normalizeSmartAgentOptions(resolveAgentRuntimeOptions(config) as SmartAgentOptions);
+        expect(smart.limits.maxToolCalls).toBe(CONSOLE_AGENT_DEFAULTS.maxToolCalls);
+        expect(smart.limits.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
+        expect(smart.context.lastTurnsToKeep).toBe(CONSOLE_AGENT_DEFAULTS.lastTurnsToKeep);
+        expect(smart.summarization.summaryTriggerTokens).toBe(CONSOLE_AGENT_DEFAULTS.summaryTriggerTokens);
     });
 });

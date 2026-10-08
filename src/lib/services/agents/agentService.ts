@@ -3204,8 +3204,9 @@ async function buildLocalAgentRun(input: {
         // thing to the host, and the shorter option object is what every other
         // conditional field here does.
         ...(guardrailPlugins.length > 0 ? { plugins: guardrailPlugins } : {}),
-        // Carries the module defaults for every knob an operator left untouched
-        // — see `agentRuntimeConfig.CONSOLE_AGENT_DEFAULTS`.
+        // With no named profile, carries the module defaults for untouched knobs
+        // (`CONSOLE_AGENT_DEFAULTS`); under a named profile, untouched knobs are
+        // omitted so the SDK applies that profile's preset.
         ...resolveAgentRuntimeOptions(config),
         ...(outputSchema ? { outputSchema } : {}),
         ...(subagents.length > 0 ? { subagents } : {}),

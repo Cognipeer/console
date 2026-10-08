@@ -11,8 +11,10 @@
  * this module only covers knobs an operator can set.
  *
  * Every default below is the value the module hard-coded before these knobs
- * existed, so an agent with no `runtime` block produces a byte-identical
- * option object.
+ * existed, so an agent with no runtime profile produces a byte-identical
+ * option object. Once a named profile is chosen, unset limits / summarization /
+ * context / toolResponses knobs are left undefined so the SDK applies that
+ * profile's preset instead.
  */
 
 import { z, type ZodTypeAny } from 'zod';
@@ -75,16 +77,95 @@ function compact<T extends Record<string, unknown>>(input: T): T {
     return out;
 }
 
-function resolveLimits(runtime: IAgentRuntimeConfig | undefined): IAgentLimits {
+/** A positive finite number, or undefined — for knobs the SDK preset should fill. */
+function positiveOrUndefined(value: number | undefined): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Whether the console's own fixed defaults fill unset knobs.
+ *
+ * Only an agent that picked no named profile (or `custom`) gets them — that
+ * is the pre-profile behaviour and it must not move. Once an operator picks
+ * `fast` / `balanced` / `deep` / `research`, unset knobs stay undefined so the
+ * SDK's `normalizeSmartAgentOptions` fills them from that profile's preset;
+ * otherwise `{ ...preset, ...opts }` let the console defaults win every time
+ * and the profile only ever changed `maxParallelTools`.
+ */
+function usesConsoleDefaults(runtime: IAgentRuntimeConfig | undefined): boolean {
+    const profile = runtime?.profile as string | undefined;
+    return !profile || profile === 'custom';
+}
+
+/** Returns undefined for an empty block so it is not emitted at all. */
+function nonEmpty<T extends Record<string, unknown>>(input: T): T | undefined {
+    const out = compact(input);
+    return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function resolveLimits(runtime: IAgentRuntimeConfig | undefined, withDefaults: boolean): IAgentLimits | undefined {
     const limits = runtime?.limits ?? {};
-    return compact({
-        maxToolCalls: positive(limits.maxToolCalls, CONSOLE_AGENT_DEFAULTS.maxToolCalls),
-        maxContextTokens: positive(limits.maxContextTokens, CONSOLE_AGENT_DEFAULTS.maxContextTokens),
+    return nonEmpty({
+        maxToolCalls: withDefaults
+            ? positive(limits.maxToolCalls, CONSOLE_AGENT_DEFAULTS.maxToolCalls)
+            : positiveOrUndefined(limits.maxToolCalls),
+        maxContextTokens: withDefaults
+            ? positive(limits.maxContextTokens, CONSOLE_AGENT_DEFAULTS.maxContextTokens)
+            : positiveOrUndefined(limits.maxContextTokens),
         maxParallelTools: limits.maxParallelTools,
         maxTotalOutputTokens: limits.maxTotalOutputTokens,
         maxCostUsd: limits.maxCostUsd,
         maxWallClockMs: limits.maxWallClockMs,
     });
+}
+
+function resolveSummarization(runtime: IAgentRuntimeConfig | undefined, withDefaults: boolean) {
+    const summarization = runtime?.summarization;
+    const pick = (value: number | undefined, fallback: number) =>
+        withDefaults ? positive(value, fallback) : positiveOrUndefined(value);
+    return nonEmpty({
+        enable: summarization?.enable ?? (withDefaults ? true : undefined),
+        maxTokens: pick(summarization?.maxTokens, CONSOLE_AGENT_DEFAULTS.summaryMaxTokens),
+        summaryTriggerTokens: pick(summarization?.summaryTriggerTokens, CONSOLE_AGENT_DEFAULTS.summaryTriggerTokens),
+        summaryPromptMaxTokens: pick(
+            summarization?.summaryPromptMaxTokens,
+            CONSOLE_AGENT_DEFAULTS.summaryPromptMaxTokens,
+        ),
+        integrityCheck: summarization?.integrityCheck ?? (withDefaults ? true : undefined),
+        summaryMode: summarization?.summaryMode || undefined,
+    }) as ResolvedAgentRuntimeOptions['summarization'];
+}
+
+function resolveContext(runtime: IAgentRuntimeConfig | undefined, withDefaults: boolean) {
+    const context = runtime?.context;
+    return nonEmpty({
+        policy: context?.policy ?? (withDefaults ? 'hybrid' : undefined),
+        lastTurnsToKeep: withDefaults
+            ? positive(context?.lastTurnsToKeep, CONSOLE_AGENT_DEFAULTS.lastTurnsToKeep)
+            : positiveOrUndefined(context?.lastTurnsToKeep),
+        toolResponsePolicy: context?.toolResponsePolicy
+            ?? (withDefaults ? CONSOLE_AGENT_DEFAULTS.toolResponsePolicy : undefined),
+    }) as ResolvedAgentRuntimeOptions['context'];
+}
+
+function resolveToolResponses(runtime: IAgentRuntimeConfig | undefined, withDefaults: boolean) {
+    const toolResponses = runtime?.toolResponses;
+    return nonEmpty({
+        defaultPolicy: toolResponses?.defaultPolicy
+            ?? (withDefaults ? CONSOLE_AGENT_DEFAULTS.toolResponsePolicy : undefined),
+        // Not a tuning default: knowledge_search results are the answer's
+        // evidence under every profile. The SDK layers this over the preset map.
+        toolResponseRetentionByTool: {
+            ...CONSOLE_AGENT_DEFAULTS.toolResponseRetentionByTool,
+            ...(toolResponses?.retentionByTool ?? {}),
+        },
+        maxToolResponseChars: withDefaults
+            ? positive(toolResponses?.maxToolResponseChars, CONSOLE_AGENT_DEFAULTS.maxToolResponseChars)
+            : positiveOrUndefined(toolResponses?.maxToolResponseChars),
+        maxToolResponseTokens: withDefaults
+            ? positive(toolResponses?.maxToolResponseTokens, CONSOLE_AGENT_DEFAULTS.maxToolResponseTokens)
+            : positiveOrUndefined(toolResponses?.maxToolResponseTokens),
+    }) as ResolvedAgentRuntimeOptions['toolResponses'];
 }
 
 /**
@@ -116,11 +197,9 @@ function resolveReasoning(runtime: IAgentRuntimeConfig | undefined) {
 export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentRuntimeOptions {
     const runtime = config.runtime;
     const planning = runtime?.planning;
-    const summarization = runtime?.summarization;
-    const context = runtime?.context;
-    const toolResponses = runtime?.toolResponses;
     const contextPilot = runtime?.contextPilot;
     const policy = config.subagentPolicy;
+    const withDefaults = usesConsoleDefaults(runtime);
 
     const resolved: ResolvedAgentRuntimeOptions = {
         runtimeProfile: runtime?.profile ?? CONSOLE_AGENT_DEFAULTS.runtimeProfile,
@@ -129,41 +208,10 @@ export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentR
             replanPolicy: planning?.replanPolicy ?? 'on_failure',
             everyNSteps: planning?.replanPolicy === 'every_n_steps' ? planning?.everyNSteps : undefined,
         }) as ResolvedAgentRuntimeOptions['planning'],
-        limits: resolveLimits(runtime),
-        summarization: {
-            enable: summarization?.enable ?? true,
-            maxTokens: positive(summarization?.maxTokens, CONSOLE_AGENT_DEFAULTS.summaryMaxTokens),
-            summaryTriggerTokens: positive(
-                summarization?.summaryTriggerTokens,
-                CONSOLE_AGENT_DEFAULTS.summaryTriggerTokens,
-            ),
-            summaryPromptMaxTokens: positive(
-                summarization?.summaryPromptMaxTokens,
-                CONSOLE_AGENT_DEFAULTS.summaryPromptMaxTokens,
-            ),
-            integrityCheck: summarization?.integrityCheck ?? true,
-            ...(summarization?.summaryMode ? { summaryMode: summarization.summaryMode } : {}),
-        },
-        context: {
-            policy: context?.policy ?? 'hybrid',
-            lastTurnsToKeep: positive(context?.lastTurnsToKeep, CONSOLE_AGENT_DEFAULTS.lastTurnsToKeep),
-            toolResponsePolicy: context?.toolResponsePolicy ?? CONSOLE_AGENT_DEFAULTS.toolResponsePolicy,
-        },
-        toolResponses: {
-            defaultPolicy: toolResponses?.defaultPolicy ?? CONSOLE_AGENT_DEFAULTS.toolResponsePolicy,
-            toolResponseRetentionByTool: {
-                ...CONSOLE_AGENT_DEFAULTS.toolResponseRetentionByTool,
-                ...(toolResponses?.retentionByTool ?? {}),
-            },
-            maxToolResponseChars: positive(
-                toolResponses?.maxToolResponseChars,
-                CONSOLE_AGENT_DEFAULTS.maxToolResponseChars,
-            ),
-            maxToolResponseTokens: positive(
-                toolResponses?.maxToolResponseTokens,
-                CONSOLE_AGENT_DEFAULTS.maxToolResponseTokens,
-            ),
-        },
+        limits: resolveLimits(runtime, withDefaults),
+        summarization: resolveSummarization(runtime, withDefaults),
+        context: resolveContext(runtime, withDefaults),
+        toolResponses: resolveToolResponses(runtime, withDefaults),
     };
 
     if (contextPilot?.enabled) {
@@ -196,7 +244,9 @@ export function resolveAgentRuntimeOptions(config: IAgentConfig): ResolvedAgentR
         };
     }
 
-    return resolved;
+    // An unset block under a named profile must be absent, not `undefined`,
+    // so neither the live agent nor generated code carries a placeholder.
+    return compact(resolved);
 }
 
 // ── JSON Schema → zod ────────────────────────────────────────────────────

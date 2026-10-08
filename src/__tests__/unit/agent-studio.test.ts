@@ -83,8 +83,8 @@ describe('resolveAgentRuntimeOptions', () => {
         expect(resolved.planning).toEqual({ mode: 'planner_executor', replanPolicy: 'every_n_steps', everyNSteps: 3 });
         expect(resolved.limits?.maxToolCalls).toBe(40);
         expect(resolved.limits?.maxCostUsd).toBe(2.5);
-        // untouched knob keeps the module default
-        expect(resolved.limits?.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
+        // Under a named profile an untouched knob is left for the SDK preset.
+        expect(resolved.limits).not.toHaveProperty('maxContextTokens');
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
         expect(resolved.reasoning).toEqual({ enabled: true, level: 'high', native: { effort: 'medium' } });
         // A stored `askUser: true` is ignored: no console channel can answer
