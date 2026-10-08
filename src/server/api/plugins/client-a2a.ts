@@ -67,6 +67,28 @@ export interface A2aCallContext {
   tokenId?: string;
 }
 
+/**
+ * Whether an existing conversation may be read (`tasks/get`) or continued
+ * (`message/send` with a contextId) by this caller. Agent + project is not
+ * enough: on the PUBLIC surface anyone holding the endpoint is a caller, and a
+ * contextId / task id is just a conversation id — so without the creator check
+ * an anonymous caller could read, or append to, conversations other callers
+ * (dashboard, API tokens) had with the same agent. Public calls share the
+ * `a2a-public` identity, so they only ever reach public-created conversations.
+ */
+function conversationVisibleTo(
+  conversation: { agentKey?: string; projectId?: string; createdBy?: string } | null | undefined,
+  agent: Pick<IAgent, 'key'>,
+  ctx: A2aCallContext,
+): boolean {
+  return Boolean(
+    conversation
+    && conversation.agentKey === agent.key
+    && conversation.projectId === ctx.projectId
+    && conversation.createdBy === ctx.userId,
+  );
+}
+
 function jsonRpcOk(id: string | number | null, result: unknown) {
   return { id, jsonrpc: JSONRPC_VERSION, result };
 }
@@ -222,8 +244,12 @@ export async function handleA2aRpc(
 
       // contextId ↔ conversationId: reuse the Responses API conversation
       // store, scoped on agent AND project like every other agent surface.
+      const contextId = typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined;
+      if (contextId && !conversationVisibleTo(await getConversationById(ctx.tenantDbName, contextId), agent, ctx)) {
+        return reply.code(200).send(jsonRpcError(rpcId, -32602, 'Invalid params: unknown contextId'));
+      }
       const resolved = await resolveConversation(
-        typeof message.contextId === 'string' && message.contextId ? message.contextId : undefined,
+        contextId,
         agent,
         ctx,
         'a2a',
@@ -281,8 +307,8 @@ export async function handleA2aRpc(
         return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
       }
       const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
-      const message = conversation?.agentKey === agent.key && conversation?.projectId === ctx.projectId
-        ? conversation.messages?.[parsed.messageIndex]
+      const message = conversationVisibleTo(conversation, agent, ctx)
+        ? conversation?.messages?.[parsed.messageIndex]
         : undefined;
       if (!message || message.role !== 'assistant') {
         return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));

@@ -1283,7 +1283,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<ITool | null>;
   deleteTool(id: string): Promise<boolean>;
   findToolById(id: string): Promise<ITool | null>;
-  findToolByKey(key: string, projectId?: string): Promise<ITool | null>;
+  findToolByKey(key: string, projectId?: string | null): Promise<ITool | null>;
   listTools(filters?: {
     projectId?: string;
     type?: ToolSourceType;

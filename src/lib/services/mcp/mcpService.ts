@@ -1531,7 +1531,7 @@ export async function getMcpServer(
 export async function getMcpServerByKey(
   tenantDbName: string,
   key: string,
-  projectId?: string,
+  projectId?: string | null,
 ): Promise<IMcpServer | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

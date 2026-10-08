@@ -250,3 +250,20 @@ export function normalizeA2aUpdate(body: Record<string, unknown>, existing: IAge
     metadata.a2a = normalizeA2aMetadataUpdate(metadata.a2a, existing);
   }
 }
+
+/**
+ * The agent fields a PATCH may write. The body otherwise reaches the store as
+ * a `$set` of whatever the caller sent, so `projectId` (move the agent — and
+ * its runs and credentials — into another project), `tenantId`,
+ * `publishedVersion`, `createdBy` and the timestamps would all be writable.
+ * Everything not listed here is server-owned.
+ */
+const AGENT_UPDATABLE_FIELDS = ['name', 'description', 'config', 'status', 'metadata'] as const;
+
+export function pickAgentUpdateFields(body: Record<string, unknown>): Partial<Pick<IAgent, typeof AGENT_UPDATABLE_FIELDS[number]>> {
+  const picked: Record<string, unknown> = {};
+  for (const field of AGENT_UPDATABLE_FIELDS) {
+    if (body[field] !== undefined) picked[field] = body[field];
+  }
+  return picked as Partial<Pick<IAgent, typeof AGENT_UPDATABLE_FIELDS[number]>>;
+}

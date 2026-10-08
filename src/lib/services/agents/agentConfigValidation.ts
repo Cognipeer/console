@@ -18,6 +18,11 @@ import { getConfig } from '@/lib/core/config';
 import { getDatabase, type IAgentConfig, type IAgentToolBinding } from '@/lib/database';
 import { getDisabledToolNames } from '@/lib/services/mcp/mcpService';
 import { AGENT_SANDBOX_SECRET_MASK } from './agentSandboxSecrets';
+import {
+    resolveAgentBindingMcpServer,
+    resolveAgentBindingTool,
+    resolveAgentKnowledgeModule,
+} from './bindingResolution';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 
@@ -335,8 +340,8 @@ export async function validateAgentConfig(input: {
         }
     };
     const checkKnowledge = async (field: string, key: string) => {
-        if (!(await db.findRagModuleByKey(key).catch(() => null))) {
-            issues.errors.push({ field, message: `Knowledge engine "${key}" does not exist` });
+        if (!(await resolveAgentKnowledgeModule(input.tenantDbName, key, projectId).catch(() => null))) {
+            issues.errors.push({ field, message: `Knowledge engine "${key}" does not exist in this project` });
         }
     };
 
@@ -382,7 +387,7 @@ export async function validateAgentConfig(input: {
         else if (skill.status !== 'active') issues.warnings.push({ field: 'skills', message: `Skill "${key}" is not active and is skipped` });
     }
 
-    await checkBindingReferences(issues, db, 'toolBindings', config.toolBindings);
+    await checkBindingReferences(issues, input.tenantDbName, projectId, 'toolBindings', config.toolBindings);
 
     for (const [index, entry] of (config.subagents ?? []).entries()) {
         const field = `subagents[${index}]`;
@@ -404,17 +409,17 @@ export async function validateAgentConfig(input: {
             }
         }
         if (entry.knowledgeEngineKey) await checkKnowledge(`${field}.knowledgeEngineKey`, entry.knowledgeEngineKey);
-        await checkBindingReferences(issues, db, `${field}.toolBindings`, entry.toolBindings);
+        await checkBindingReferences(issues, input.tenantDbName, projectId, `${field}.toolBindings`, entry.toolBindings);
     }
 
     return issues;
 }
 
-type Db = Awaited<ReturnType<typeof getDatabase>>;
 
 async function checkBindingReferences(
     issues: Issues,
-    db: Db,
+    tenantDbName: string,
+    projectId: string,
     prefix: string,
     bindings: IAgentToolBinding[] | undefined,
 ): Promise<void> {
@@ -423,10 +428,10 @@ async function checkBindingReferences(
         if (!binding?.sourceKey) continue;
         if (binding.source === 'tool') {
             // Resolved exactly as the runtime resolves it (`buildBoundTools`):
-            // tenant-wide, so a tool the agent can run is never rejected here.
-            const tool = await db.findToolByKey(binding.sourceKey).catch(() => null);
+            // this project's row, else the tenant-wide one — never another project's.
+            const tool = await resolveAgentBindingTool(tenantDbName, binding.sourceKey, projectId).catch(() => null);
             if (!tool) {
-                issues.errors.push({ field, message: `Tool "${binding.sourceKey}" does not exist` });
+                issues.errors.push({ field, message: `Tool "${binding.sourceKey}" does not exist in this project` });
                 continue;
             }
             if (tool.status !== 'active') issues.errors.push({ field, message: `Tool "${binding.sourceKey}" is not active` });
@@ -436,9 +441,9 @@ async function checkBindingReferences(
                 }
             }
         } else if (binding.source === 'mcp') {
-            const server = await db.findMcpServerByKey(binding.sourceKey).catch(() => null);
+            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId).catch(() => null);
             if (!server) {
-                issues.errors.push({ field, message: `MCP server "${binding.sourceKey}" does not exist` });
+                issues.errors.push({ field, message: `MCP server "${binding.sourceKey}" does not exist in this project` });
                 continue;
             }
             if (server.status !== 'active') issues.errors.push({ field, message: `MCP server "${binding.sourceKey}" is not active` });

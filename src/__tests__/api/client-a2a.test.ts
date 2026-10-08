@@ -191,7 +191,7 @@ describe('message/send', () => {
   });
 
   it('reuses the conversation for a known contextId and rejects a foreign one', async () => {
-    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockResolvedValue({
       output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'again' }] }],
       _conversation_messages: [{}, {}, {}, {}],
@@ -211,7 +211,7 @@ describe('message/send', () => {
     expect(parseJsonBody<{ result: { contextId: string } }>(ok.body).result.contextId).toBe('conv-9');
     expect(mockFn(createConversation)).not.toHaveBeenCalled();
 
-    mockFn(getConversationById).mockResolvedValue({ agentKey: 'other-agent', projectId: 'proj-1', messages: [] });
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'other-agent', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     const bad = await app.inject({
       method: 'POST',
       url: '/api/client/v1/a2a/support-bot',
@@ -229,7 +229,7 @@ describe('message/send', () => {
 
 describe('message/send — one active turn per conversation', () => {
   it('holds a sync reservation for the conversation during the turn and releases it afterwards', async () => {
-    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockImplementation(async () => {
       // While the turn runs, the slot is held and not yet released.
       expect(createAgentRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -259,7 +259,7 @@ describe('message/send — one active turn per conversation', () => {
   it('REGRESSION: a conversation busy with another run (e.g. a background run) is refused with agent_run_conflict, never run concurrently', async () => {
     const { AgentRunConflictError } = await import('@/lib/database/provider/errors');
     createAgentRun.mockRejectedValue(new AgentRunConflictError('conv-9'));
-    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
 
     const app = await buildApp();
     const res = await app.inject({
@@ -276,7 +276,7 @@ describe('message/send — one active turn per conversation', () => {
   });
 
   it('releases the reservation even when the turn throws', async () => {
-    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', messages: [] });
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockRejectedValue(new Error('provider exploded'));
 
     const app = await buildApp();
@@ -296,6 +296,7 @@ describe('tasks/get and unknown methods', () => {
     mockFn(getConversationById).mockResolvedValue({
       agentKey: 'support-bot',
       projectId: 'proj-1',
+      createdBy: 'user-1',
       messages: [
         { role: 'user', content: 'Hello' },
         { role: 'assistant', content: 'Hi there' },
@@ -332,5 +333,44 @@ describe('tasks/get and unknown methods', () => {
       payload: { jsonrpc: '2.0', id: 5, method: 'message/stream', params: {} },
     });
     expect(parseJsonBody<{ error: { code: number } }>(unknown.body).error.code).toBe(-32601);
+  });
+});
+
+describe('conversation ownership', () => {
+  const foreign = { agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'someone-else', messages: [
+    { role: 'user', content: 'secret question' },
+    { role: 'assistant', content: 'secret answer' },
+  ] };
+
+  it('tasks/get does not return another caller\'s conversation', async () => {
+    mockFn(getConversationById).mockResolvedValue(foreign);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 1, method: 'tasks/get', params: { id: 'task_conv-9_1' } },
+    });
+    const body = parseJsonBody<{ error?: { code: number }; result?: unknown }>(res.body);
+    expect(body.result).toBeUndefined();
+    expect(body.error?.code).toBe(-32001);
+  });
+
+  it('message/send cannot continue another caller\'s conversation', async () => {
+    mockFn(getConversationById).mockResolvedValue(foreign);
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'message/send',
+        params: { message: { parts: [{ kind: 'text', text: 'More' }], contextId: 'conv-9' } },
+      },
+    });
+    expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32602);
+    expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
   });
 });

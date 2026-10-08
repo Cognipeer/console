@@ -98,11 +98,13 @@ export function ToolMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       return row ? this.mapToolRow(row) : null;
     }
 
-    async findToolByKey(key: string, projectId?: string): Promise<ITool | null> {
+    async findToolByKey(key: string, projectId?: string | null): Promise<ITool | null> {
       const db = this.getTenantDb();
       let sql = `SELECT * FROM ${TABLES.tools} WHERE key = ?`;
       const params: unknown[] = [key];
-      if (projectId) { sql += ' AND projectId = ?'; params.push(projectId); }
+      // `null` = the tenant-wide row only; a string = that project's row.
+      if (projectId === null) sql += ' AND projectId IS NULL';
+      else if (projectId) { sql += ' AND projectId = ?'; params.push(projectId); }
       const row = db.prepare(sql).get(...params) as SqliteRow | undefined;
       return row ? this.mapToolRow(row) : null;
     }
