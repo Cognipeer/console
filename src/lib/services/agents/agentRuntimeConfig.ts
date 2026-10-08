@@ -215,6 +215,11 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
         if (values.length === node.enum.length && values.length > 0) {
             return withDescription(z.enum(values as [string, ...string[]]), node);
         }
+        // `enum: ["a", "b", null]` is a nullable enum, not a plain string.
+        const nullCount = node.enum.length - values.length;
+        if (values.length > 0 && nullCount > 0 && node.enum.filter((v: unknown) => v === null).length === nullCount) {
+            return withDescription(z.enum(values as [string, ...string[]]).nullable(), node);
+        }
     }
     if (Array.isArray(node.anyOf) || Array.isArray(node.oneOf)) {
         const variants = (node.anyOf ?? node.oneOf).map((v: unknown) => jsonSchemaToZod(v, strict, permissive));
@@ -224,9 +229,28 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
         if (variants.length === 1) return variants[0];
     }
 
-    const type = Array.isArray(node.type) ? node.type.find((t: string) => t !== 'null') : node.type;
+    // `type: ["string", "null"]` — every listed type is a real alternative,
+    // `null` included. Each one is converted with the node's other constraints
+    // (minLength, properties, items, ...) so only the matching branch applies.
+    if (Array.isArray(node.type)) {
+        const rest = { ...node };
+        delete rest.description;
+        const types: unknown[] = Array.from(new Set(node.type));
+        const nonNull = types.filter((t) => t !== 'null');
+        const allowsNull = nonNull.length < types.length;
+        if (nonNull.length === 0) return allowsNull ? withDescription(z.null(), node) : z.any();
+        const variants = nonNull.map((t) => jsonSchemaToZod({ ...rest, type: t }, strict, permissive));
+        // An unrecognised member degrades the whole node, as an unknown scalar `type` does.
+        if (variants.some((v) => v._def?.typeName === 'ZodAny')) return z.any();
+        const union = variants.length === 1
+            ? variants[0]!
+            : z.union(variants as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]);
+        return withDescription(allowsNull ? union.nullable() : union, node);
+    }
 
-    switch (type) {
+    switch (node.type) {
+        case 'null':
+            return withDescription(z.null(), node);
         case 'string': {
             let out = z.string();
             if (typeof node.minLength === 'number') out = out.min(node.minLength);
@@ -237,7 +261,7 @@ export function jsonSchemaToZod(schema: unknown, strict = false, permissive = fa
         }
         case 'number':
         case 'integer': {
-            let out = type === 'integer' ? z.number().int() : z.number();
+            let out = node.type === 'integer' ? z.number().int() : z.number();
             if (typeof node.minimum === 'number') out = out.min(node.minimum);
             if (typeof node.maximum === 'number') out = out.max(node.maximum);
             return withDescription(out, node);
