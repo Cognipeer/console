@@ -18,6 +18,7 @@ import {
   redactPiiFromLogString,
 } from '@/lib/services/logPiiRedaction';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
+import { recordRoutedUsage } from './dynamicRoutingState';
 
 const TOKENS_PER_MILLION = 1_000_000;
 const SECONDS_PER_THOUSAND = 1_000;
@@ -127,6 +128,9 @@ export async function logModelUsage(
     usage: TokenUsage;
     cacheHit?: boolean;
     routing?: IModelUsageRouting;
+    /** Dynamic LLM child rows: the baseline model's pricing, used to record
+     *  what this call's realized usage would have cost there. Not persisted. */
+    routingBaselinePricing?: IModelPricing;
     /** Explicit attribution for call sites outside the request ALS scope. */
     attribution?: Partial<UsageAttribution>;
     /** Raw provider finish reason for this call (e.g. `stop`, `length`,
@@ -152,6 +156,26 @@ export async function logModelUsage(
     (usage.inputTokens ?? 0) +
       (usage.outputTokens ?? 0) +
       (usage.cachedInputTokens ?? 0);
+
+  let routing = payload.routing;
+  // A semantic-cache hit costs nothing on any model, so it is not a routing
+  // saving — leave its baseline unset rather than credit the router with it.
+  if (routing?.role === 'child' && payload.routingBaselinePricing && !payload.cacheHit) {
+    routing = {
+      ...routing,
+      baselineCostUsd: calculateCost(payload.routingBaselinePricing, usage).totalCost,
+    };
+  }
+  if (routing && (routing.role === 'child' || routing.role === 'decider')) {
+    void recordRoutedUsage({
+      tenantDbName,
+      routing,
+      modelKey: model.key,
+      usage,
+      costUsd: pricingSnapshot.totalCost,
+      status: payload.status,
+    });
+  }
 
   const units: Record<string, number> = {};
   if (usage.toolCalls) units.toolCalls = usage.toolCalls;
@@ -217,7 +241,7 @@ export async function logModelUsage(
     toolCalls: usage.toolCalls ?? 0,
     cacheHit: payload.cacheHit,
     pricingSnapshot,
-    routing: payload.routing,
+    routing,
     finishReason: normalizeFinishReason(payload.finishReason),
   });
 }

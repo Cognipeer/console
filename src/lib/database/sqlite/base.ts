@@ -1071,6 +1071,13 @@ export class SQLiteProviderBase {
         ON ${TABLES.modelUsageLogs}(tenantId, userId, createdAt DESC);
     `);
 
+    // Dynamic LLM analytics: routed (child / decider) rows by router. Same
+    // ordering constraint — `routing` reaches legacy DBs via ensureTableColumn.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_model_usage_router
+        ON ${TABLES.modelUsageLogs}(json_extract(routing, '$.routerKey'), createdAt DESC);
+    `);
+
     // mcp_request_logs.serverId index — must be created here (after
     // applyTenantMigrations), same ordering constraint as above: serverId
     // reaches legacy DBs via ensureTableColumn, and referencing it in

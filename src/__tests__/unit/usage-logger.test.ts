@@ -12,9 +12,14 @@ vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
 }));
 
+vi.mock('@/lib/services/models/dynamicRoutingState', () => ({
+  recordRoutedUsage: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
 import { calculateCost, logModelUsage } from '@/lib/services/models/usageLogger';
+import { recordRoutedUsage } from '@/lib/services/models/dynamicRoutingState';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -191,6 +196,65 @@ describe('logModelUsage', () => {
     expect(payload.modelKey).toBe('gpt-4o');
     expect(payload.tenantId).toBe('tenant-1');
     expect(payload.projectId).toBe('proj-1');
+  });
+
+  describe('Dynamic LLM attribution', () => {
+    const childRouting = {
+      role: 'child' as const,
+      routerKey: 'router',
+      strategy: 'rule-based' as const,
+      decision: 'rule' as const,
+      chosenModelKey: 'gpt-4o',
+      reason: 'matched',
+    };
+    const BASELINE: IModelPricing = { inputTokenPer1M: 50, outputTokenPer1M: 150 };
+
+    it('records the baseline cost of the same usage and feeds routing state', async () => {
+      await logModelUsage('tenant_acme', MOCK_MODEL, {
+        requestId: 'req-r1',
+        route: 'chat.completions',
+        status: 'success',
+        providerRequest: {},
+        providerResponse: {},
+        usage: { inputTokens: 1_000_000, outputTokens: 0 },
+        routing: childRouting,
+        routingBaselinePricing: BASELINE,
+      });
+      const payload = db.createModelUsageLog.mock.calls[0][0];
+      expect(payload.routing?.baselineCostUsd).toBeCloseTo(50);
+      expect(payload.pricingSnapshot?.totalCost).toBeCloseTo(5);
+      expect(recordRoutedUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ modelKey: 'gpt-4o', costUsd: expect.closeTo(5, 6) }),
+      );
+    });
+
+    it('does not credit a semantic-cache hit as a routing saving', async () => {
+      await logModelUsage('tenant_acme', MOCK_MODEL, {
+        requestId: 'req-r2',
+        route: 'chat.completions',
+        status: 'success',
+        providerRequest: {},
+        providerResponse: {},
+        usage: { inputTokens: 1000, outputTokens: 100 },
+        cacheHit: true,
+        routing: childRouting,
+        routingBaselinePricing: BASELINE,
+      });
+      expect(db.createModelUsageLog.mock.calls[0][0].routing?.baselineCostUsd).toBeUndefined();
+    });
+
+    it('leaves router decision rows out of routing state', async () => {
+      await logModelUsage('tenant_acme', MOCK_MODEL, {
+        requestId: 'req-r3',
+        route: 'chat.completions.router',
+        status: 'success',
+        providerRequest: {},
+        providerResponse: {},
+        usage: {},
+        routing: { ...childRouting, role: 'router' },
+      });
+      expect(recordRoutedUsage).not.toHaveBeenCalled();
+    });
   });
 
   it('switches to the correct tenant database', async () => {

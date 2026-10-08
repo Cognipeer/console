@@ -71,6 +71,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { modelKey: 1, createdAt: -1 }, options: { name: 'idx_modelKey_createdAt' } },
     { key: { projectId: 1, createdAt: -1 }, options: { name: 'idx_project_createdAt' } },
     { key: { tenantId: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_user_createdAt' } },
+    // Dynamic LLM analytics: routed rows by router.
+    { key: { 'routing.routerKey': 1, createdAt: -1 }, options: { name: 'idx_routing_routerKey_createdAt' } },
   ],
   // usage_daily's unique dimension index is created by the usage mixin's own
   // ensure routine; these are the report-query indexes.

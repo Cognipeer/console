@@ -1247,6 +1247,39 @@ describeForEachProvider('Model usage log attribution roundtrip', (getDb) => {
     expect(logs[0].actorType).toBe('api_token');
   });
 
+  it('listRoutedUsageLogs returns child + decider rows a router caused, without payloads', async () => {
+    const db = getDb();
+    const base = {
+      tenantId,
+      projectId: 'proj-route',
+      route: 'chat.completions',
+      status: 'success' as const,
+      providerRequest: { messages: ['secret'] },
+      providerResponse: { ok: true },
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+    };
+    const routing = {
+      routerKey: 'smart-router',
+      strategy: 'rule-based' as const,
+      decision: 'rule' as const,
+      chosenModelKey: 'small',
+      reason: 'matched',
+    };
+    await db.createModelUsageLog({ ...base, modelKey: 'small', requestId: 'c1', routing: { ...routing, role: 'child', baselineCostUsd: 0.5 } });
+    await db.createModelUsageLog({ ...base, modelKey: 'decider', requestId: 'd1', routing: { ...routing, role: 'decider' } });
+    await db.createModelUsageLog({ ...base, modelKey: 'smart-router', route: 'chat.completions.router', requestId: 'r1', routing: { ...routing, role: 'router' } });
+    await db.createModelUsageLog({ ...base, modelKey: 'small', requestId: 'o1', routing: { ...routing, routerKey: 'other', role: 'child' } });
+    await db.createModelUsageLog({ ...base, modelKey: 'small', requestId: 'n1' });
+
+    const logs = await db.listRoutedUsageLogs('smart-router', {}, 'proj-route');
+    expect(logs.map((l) => l.requestId).sort()).toEqual(['c1', 'd1']);
+    const child = logs.find((l) => l.requestId === 'c1');
+    expect(child?.routing?.baselineCostUsd).toBe(0.5);
+    expect(child?.providerRequest).toEqual({});
+  });
+
   // Regression: the SQLite provider used to omit every cost field from
   // aggregateModelUsage, so the Model Hub Spend column was permanently empty
   // on SQLite deployments (including the docker-compose quickstart) while the
