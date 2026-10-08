@@ -62,7 +62,7 @@ import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { checkRateLimit, settleUsageBudget } from '@/lib/quota/quotaGuard';
 import { mapSegmentsBounded } from '@/lib/services/models/decisionService';
-import { createStructuredDecisionRuntime } from '@/lib/providers/contracts/structuredDecisionRuntime';
+import { selectDecisionRuntime } from '@/lib/providers/contracts/nativeDecisionRuntime';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 import { clientDecisionsApiPlugin } from '@/server/api/plugins/client-decisions';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -142,7 +142,7 @@ describe('POST /client/v1/decisions', () => {
 
     invoke = vi.fn().mockResolvedValue(CHAT_ANSWER);
     chatRuntime = { createChatModel: vi.fn().mockReturnValue({ invoke }) };
-    chatRuntime.createDecisionRuntime = (config) => createStructuredDecisionRuntime(chatRuntime, config, 'openai');
+    chatRuntime.createDecisionRuntime = (config) => selectDecisionRuntime({ runtime: chatRuntime, config, provider: 'openai' });
     mockFn(buildModelRuntime).mockResolvedValue({ runtime: chatRuntime, record: {} });
 
     app = await createFastifyApiTestApp(clientDecisionsApiPlugin);
@@ -331,11 +331,19 @@ describe('POST /client/v1/decisions', () => {
       expect((await post(BODY)).statusCode).toBe(404);
     });
 
-    it('rejects the reserved native mode', async () => {
+    it('answers 400 for native mode on a provider without a native adapter', async () => {
       mockFn(getModelByKey).mockResolvedValue(decisionModel({ settings: { decision: { mode: 'native' } } }));
       const response = await post(BODY);
       expect(response.statusCode).toBe(400);
-      expect(parseJsonBody<any>(response.body).error.message).toMatch(/native.*not available/);
+      expect(parseJsonBody<any>(response.body).error.message).toBe('Native decision is not supported for provider openai');
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it('answers 400 for an unknown decision mode', async () => {
+      mockFn(getModelByKey).mockResolvedValue(decisionModel({ settings: { decision: { mode: 'magic' } } }));
+      const response = await post(BODY);
+      expect(response.statusCode).toBe(400);
+      expect(parseJsonBody<any>(response.body).error.message).toMatch(/Unknown decision mode/);
     });
 
     it('rejects images unless the model declares support, then accepts them', async () => {

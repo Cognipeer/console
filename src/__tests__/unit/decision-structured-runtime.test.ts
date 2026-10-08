@@ -151,7 +151,8 @@ describe('driver wiring', () => {
     for (const contract of [OpenAiModelProviderContract, OpenAiCompatibleModelProviderContract, AzureModelProviderContract]) {
       expect(contract.capabilities?.['model.categories']).toContain('decision');
       expect(contract.capabilities?.['decision.question_types']).toEqual(['choice', 'boolean', 'score']);
-      expect(contract.capabilities?.['decision.native']).toBe(false);
+      // Only api.openai.com has a native decisions endpoint.
+      expect(contract.capabilities?.['decision.native']).toBe(contract === OpenAiModelProviderContract);
       expect(contract.domains).toContain('decision');
     }
     expect(AnthropicModelProviderContract.capabilities?.['model.categories'] ?? []).not.toContain('decision');

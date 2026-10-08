@@ -78,6 +78,7 @@ const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
 const CAPABILITY_CATEGORIES: ReadonlyArray<ModelCategory> = ['llm'];
 
 type OcrMode = 'native' | 'vlm';
+type DecisionMode = 'structured' | 'native';
 
 type CreateModelModalProps = {
   opened: boolean;
@@ -128,6 +129,7 @@ interface FormValues {
     prompt: string;
   };
   decision: {
+    mode: DecisionMode;
     supportsImage: boolean;
   };
 }
@@ -220,6 +222,7 @@ export default function CreateModelModal({
         prompt: '',
       },
       decision: {
+        mode: 'structured' as DecisionMode,
         supportsImage: false,
       },
     },
@@ -298,6 +301,23 @@ export default function CreateModelModal({
     () => resolveOcrModes(selectedProvider),
     [selectedProvider],
   );
+
+  // Structured needs a chat model on the provider; native needs the provider's own
+  // decision endpoint (decision.native). A provider can offer either or both.
+  const allowedDecisionModes = useMemo((): DecisionMode[] => {
+    const modes: DecisionMode[] = [];
+    if (resolveProviderCategories(selectedProvider).includes('llm')) modes.push('structured');
+    if (selectedProvider?.driverCapabilities?.['decision.native'] === true) modes.push('native');
+    return modes.length > 0 ? modes : ['structured'];
+  }, [selectedProvider]);
+
+  useEffect(() => {
+    if (formValues.category !== 'decision') return;
+    if (!allowedDecisionModes.includes(formValues.decision.mode)) {
+      setFieldValue('decision.mode', allowedDecisionModes[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedDecisionModes, formValues.category]);
 
   useEffect(() => {
     if (formValues.category !== 'ocr') return;
@@ -455,7 +475,7 @@ export default function CreateModelModal({
             // P1 decision models are always served by the structured-output emulator
             // over the chat model named below; `native` is reserved for later phases.
             ...(values.category === 'decision'
-              ? { decision: { mode: 'structured', supports: { image: values.decision.supportsImage } } }
+              ? { decision: { mode: values.decision.mode, supports: { image: values.decision.supportsImage } } }
               : {}),
             ...(values.category === 'ocr'
               ? {
@@ -826,6 +846,20 @@ export default function CreateModelModal({
           description={tWizard('decision.description')}
           done
         >
+          <FormRow cols={1}>
+            <FormField label={tWizard('decision.mode.label')}>
+              <ChipPicker<DecisionMode>
+                options={(
+                  [
+                    { value: 'structured' as const, label: tWizard('decision.mode.structured') },
+                    { value: 'native' as const, label: tWizard('decision.mode.native') },
+                  ] satisfies Array<{ value: DecisionMode; label: string }>
+                ).filter((opt) => allowedDecisionModes.includes(opt.value))}
+                value={formValues.decision.mode}
+                onChange={(v) => setFieldValue('decision.mode', v as DecisionMode)}
+              />
+            </FormField>
+          </FormRow>
           <ToggleList>
             <ToggleRow
               label={tWizard('decision.acceptsImage.label')}

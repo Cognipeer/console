@@ -27,6 +27,7 @@ import {
   type ParsedDecisionRequest,
 } from '@/lib/providers/contracts/decisionHelpers';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
+import { resolveDecisionMode } from '@/lib/providers/contracts/nativeDecisionRuntime';
 import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { getModelByKey } from './modelService';
 import { buildModelRuntime } from './runtimeService';
@@ -68,12 +69,6 @@ export function modelSupportsDecisionImage(model: IModel): boolean {
 function ensureDecisionModel(model: IModel) {
   if (model.category !== 'decision') {
     throw new InvalidRequestError('Model is not configured for decisions');
-  }
-  const mode = decisionSettings(model).mode ?? 'structured';
-  if (mode !== 'structured') {
-    throw new InvalidRequestError(
-      `Decision mode "${String(mode)}" is not available yet; only "structured" is supported`,
-    );
   }
 }
 
@@ -240,7 +235,7 @@ export async function handleDecisionRequest(params: {
   const { runtime } = await buildModelRuntime(tenantDbName, model.tenantId, model.providerKey, projectId);
   if (!runtime.createDecisionRuntime) {
     throw new InvalidRequestError(
-      `Structured decision not yet supported for provider ${model.providerDriver}`,
+      `${resolveDecisionMode(model.settings) === 'native' ? 'Native' : 'Structured'} decision not yet supported for provider ${model.providerDriver}`,
     );
   }
   const decisionRuntime = await runtime.createDecisionRuntime({
@@ -267,7 +262,7 @@ export async function handleDecisionRequest(params: {
       route: 'decisions',
       status: 'success',
       providerRequest: loggableRequest(request),
-      providerResponse: { answers: result.answers, backend: result.backend },
+      providerResponse: { answers: result.answers, backend: result.backend, ...(result.upstream ? { upstream: result.upstream } : {}) },
       latencyMs,
       usage: {
         ...usage,
