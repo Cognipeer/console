@@ -278,6 +278,13 @@ export interface DatabaseProvider {
     options?: { limit?: number; skip?: number; from?: Date; to?: Date },
     projectId?: string,
   ): Promise<IModelUsageLog[]>;
+  /** Dynamic LLM attribution rows (child + decider) a router caused, newest
+   *  first, without request/response payloads. Feeds routing analytics. */
+  listRoutedUsageLogs(
+    routerKey: string,
+    options?: { from?: Date; to?: Date; limit?: number },
+    projectId?: string,
+  ): Promise<IModelUsageLog[]>;
   aggregateModelUsage(
     modelKey: string,
     options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },

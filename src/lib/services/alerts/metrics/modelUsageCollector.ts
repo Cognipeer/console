@@ -97,10 +97,18 @@ export class ModelUsageCollector implements IMetricCollector {
       }
 
       case 'total_cost': {
+        // A Dynamic LLM's own rows are priced at zero — its spend lives on the
+        // child / decider rows it routed, which carry it as `routing.routerKey`.
+        const costWhere = query.scope?.modelKey
+          ? where.replace(
+              'modelKey = @modelKey',
+              "(modelKey = @modelKey OR (json_extract(routing, '$.routerKey') = @modelKey AND json_extract(routing, '$.role') IN ('child', 'decider')))",
+            )
+          : where;
         const row = db.prepare(`
           SELECT SUM(json_extract(pricingSnapshot, '$.totalCost')) as totalCost,
                  COUNT(*) as count
-          FROM model_usage_logs ${where} AND pricingSnapshot IS NOT NULL
+          FROM model_usage_logs ${costWhere} AND pricingSnapshot IS NOT NULL
         `).get(params) as { totalCost: number | null; count: number } | undefined;
         return { value: row?.totalCost || 0, sampleCount: row?.count || 0 };
       }
@@ -197,8 +205,17 @@ export class ModelUsageCollector implements IMetricCollector {
       }
 
       case 'total_cost': {
+        // See the SQLite branch: a router's spend is on the rows it routed.
+        const costFilter: Record<string, unknown> = { ...filter };
+        if (query.scope?.modelKey) {
+          delete costFilter.modelKey;
+          costFilter.$or = [
+            { modelKey: query.scope.modelKey },
+            { 'routing.routerKey': query.scope.modelKey, 'routing.role': { $in: ['child', 'decider'] } },
+          ];
+        }
         const pipeline = [
-          { $match: filter },
+          { $match: costFilter },
           {
             $group: {
               _id: null,

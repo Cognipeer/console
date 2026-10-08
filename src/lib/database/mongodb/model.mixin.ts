@@ -272,6 +272,38 @@ export function ModelMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       }));
     }
 
+    async listRoutedUsageLogs(
+      routerKey: string,
+      options?: { from?: Date; to?: Date; limit?: number },
+      projectId?: string,
+    ): Promise<IModelUsageLog[]> {
+      const db = this.getTenantDb();
+      const query: Record<string, unknown> = {
+        'routing.routerKey': routerKey,
+        'routing.role': { $in: ['child', 'decider'] },
+      };
+      if (projectId) query.projectId = projectId;
+      if (options?.from || options?.to) {
+        const createdAt: { $gte?: Date; $lte?: Date } = {};
+        if (options.from) createdAt.$gte = options.from;
+        if (options.to) createdAt.$lte = options.to;
+        query.createdAt = createdAt;
+      }
+      const limit = Math.min(Math.max(1, options?.limit ?? 5_000), 10_000);
+      const logs = await db
+        .collection<IModelUsageLog>(COLLECTIONS.modelUsageLogs)
+        .find(query, { projection: { providerRequest: 0, providerResponse: 0 } })
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .toArray();
+      return logs.map((logDoc) => ({
+        ...logDoc,
+        providerRequest: {},
+        providerResponse: {},
+        _id: logDoc._id?.toString(),
+      }));
+    }
+
     // ── Usage aggregation ────────────────────────────────────────────
 
     async aggregateModelUsage(

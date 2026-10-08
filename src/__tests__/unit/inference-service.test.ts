@@ -33,6 +33,18 @@ vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => {
   };
 });
 
+// Routing history / counters are I/O (shared cache + usage_daily); the
+// decisions built on them are what is under test here.
+vi.mock('@/lib/services/models/dynamicRoutingState', () => ({
+  getConversationState: vi.fn().mockResolvedValue({}),
+  getConversationCostUsd: vi.fn().mockResolvedValue(0),
+  getRouterSpendUsd: vi.fn().mockResolvedValue(0),
+  getSegmentIoRatio: vi.fn().mockReturnValue(undefined),
+  getModelProfiles: vi.fn().mockImplementation(async (_db: string, _p: string, keys: string[]) =>
+    new Map(keys.map((k) => [k, null]))),
+  recordRoutedUsage: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('@/lib/services/guardrail', () => ({
   evaluateGuardrail: vi.fn().mockResolvedValue({ action: 'allow', findings: [] }),
   // The gate's own behaviour (hold-back windows, overlap scanning, mutation
@@ -58,6 +70,7 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { isSemanticCacheEnabled, lookupCache, storeInCache } from '@/lib/services/models/semanticCacheService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
+import { getConversationState, getRouterSpendUsd } from '@/lib/services/models/dynamicRoutingState';
 import { createStreamGate, evaluateGuardrail } from '@/lib/services/guardrail';
 import {
   toOpenAIChatResponse,
@@ -1988,6 +2001,234 @@ describe('handleChatCompletion · Dynamic LLM', () => {
 
     expect(result.routing?.decision).toBe('fallback');
     expect(result.routing?.chosenModelKey).toBe('small');
+  });
+
+  const priced = (key: string, input: number, output: number, extra: object = {}) =>
+    makeLlmModel({
+      _id: `${key}-id`,
+      key,
+      providerKey: `p-${key}`,
+      pricing: { inputTokenPer1M: input, outputTokenPer1M: output },
+      ...extra,
+    });
+
+  const wireAll = (models: Record<string, object>) => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_db: string, key: string) => models[key] ?? null,
+    );
+  };
+
+  const childRows = () =>
+    (logModelUsage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => c[2])
+      .filter((payload) => payload?.routing?.role === 'child');
+
+  it('pool + best-under-cap: picks the highest tier that fits the cap and attributes the child row', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'large',
+      guards: { maxCostPerRequestUsd: 0.001 },
+      rules: [
+        {
+          label: 'any',
+          target: {
+            pool: [
+              { modelKey: 'small', tier: 1 },
+              { modelKey: 'medium', tier: 2 },
+              { modelKey: 'large', tier: 3 },
+            ],
+            policy: 'best-under-cap',
+          },
+          conditions: [{ signal: 'messageCount', operator: 'gte', value: 1 }],
+        },
+      ],
+    });
+    wireAll({
+      router,
+      small: priced('small', 0.1, 0.4),
+      medium: priced('medium', 1, 2),
+      large: priced('large', 10, 30),
+    });
+
+    // ~250 input tokens + 100 capped output: medium ≈ $0.00045, large ≈ $0.0055.
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'x'.repeat(1000) }], max_tokens: 100 },
+    });
+
+    expect(result.routing?.chosenModelKey).toBe('medium');
+    expect(result.routing?.policy).toBe('best-under-cap');
+    expect(result.routing?.pool?.map((e) => e.modelKey)).toEqual(['small', 'medium', 'large']);
+
+    const [child] = childRows();
+    expect(child.routing).toMatchObject({ role: 'child', routerKey: 'router', chosenModelKey: 'medium', matchedRuleLabel: 'any' });
+    expect(child.routing.estimatedCostUsd).toBeGreaterThan(0);
+    // Savings are measured against the default model's pricing.
+    expect(child.routingBaselinePricing).toEqual({ inputTokenPer1M: 10, outputTokenPer1M: 30 });
+  });
+
+  it('pool: skips candidates that cannot serve the request (tool calling)', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'big',
+      defaultTarget: { pool: [{ modelKey: 'notools' }, { modelKey: 'tools' }], policy: 'cheapest' },
+      rules: [{ label: 'never', targetModelKey: 'big', conditions: [{ signal: 'messageCount', operator: 'gt', value: 99 }] }],
+    });
+    wireAll({
+      router,
+      big,
+      notools: priced('notools', 0.01, 0.01, { metadata: { capabilities: { supportsToolCalls: false } } }),
+      tools: priced('tools', 1, 1),
+    });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: {
+        messages: [{ role: 'user', content: 'call a tool' }],
+        tools: [{ type: 'function', function: { name: 'f', parameters: { type: 'object' } } }],
+      },
+    });
+
+    expect(result.routing?.chosenModelKey).toBe('tools');
+    expect(result.routing?.pool?.find((e) => e.modelKey === 'notools')?.skipped).toBe('no tool calling');
+  });
+
+  it('token-profile: keeps the conversation on its previous model inside the switch margin', async () => {
+    (getConversationState as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ lastModelKey: 'b', ioRatio: 0.5 });
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'a',
+      defaultTarget: { pool: [{ modelKey: 'a' }, { modelKey: 'b' }], policy: 'token-profile' },
+      rules: [{ label: 'never', targetModelKey: 'a', conditions: [{ signal: 'messageCount', operator: 'gt', value: 99 }] }],
+    });
+    wireAll({ router, a: priced('a', 0.95, 0.95), b: priced('b', 1, 1) });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'y'.repeat(800) }] },
+    });
+
+    expect(result.routing?.chosenModelKey).toBe('b');
+    expect(result.routing?.reason).toMatch(/Kept conversation on b/);
+  });
+
+  it('shadow mode: serves the primary model and records what the pool would have chosen', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'big',
+      mode: 'shadow',
+      defaultTarget: { pool: [{ modelKey: 'big' }, { modelKey: 'small' }], policy: 'cheapest' },
+      rules: [{ label: 'never', targetModelKey: 'big', conditions: [{ signal: 'messageCount', operator: 'gt', value: 99 }] }],
+    });
+    wireAll({ router, big: priced('big', 10, 30), small: priced('small', 0.1, 0.4) });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'hello' }] },
+    });
+
+    expect(result.routing?.chosenModelKey).toBe('big');
+    expect(result.routing?.mode).toBe('shadow');
+    expect(result.routing?.shadow?.chosenModelKey).toBe('small');
+    expect(childRows()[0].routing.shadow?.chosenModelKey).toBe('small');
+  });
+
+  it('budget guard: rejects with 429 once the budget is exhausted (onExceeded: reject)', async () => {
+    (getRouterSpendUsd as ReturnType<typeof vi.fn>).mockResolvedValueOnce(12);
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'small',
+      guards: { budget: { windowHours: 24, limitUsd: 10, onExceeded: 'reject' } },
+      rules: [{ label: 'never', targetModelKey: 'big', conditions: [{ signal: 'messageCount', operator: 'gt', value: 99 }] }],
+    });
+    wireAll({ router, small: priced('small', 0.1, 0.4) });
+
+    await expect(
+      handleChatCompletion({ ...BASE_PARAMS, modelKey: 'router', body: { messages: [{ role: 'user', content: 'hi' }] } }),
+    ).rejects.toMatchObject({ status: 429, code: 'router_budget_exceeded' });
+    expect(childRows()).toHaveLength(0);
+  });
+
+  it('budget guard: downgrades a fixed target to the economy model', async () => {
+    (getRouterSpendUsd as ReturnType<typeof vi.fn>).mockResolvedValueOnce(9);
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'big',
+      guards: { budget: { windowHours: 24, limitUsd: 10, downgradeAtPct: 80 }, economyModelKey: 'small' },
+      rules: [{ label: 'never', targetModelKey: 'big', conditions: [{ signal: 'messageCount', operator: 'gt', value: 99 }] }],
+    });
+    wireAll({ router, big: priced('big', 10, 30), small: priced('small', 0.1, 0.4) });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    expect(result.routing?.chosenModelKey).toBe('small');
+    expect(result.routing?.guard).toBe('budget');
+  });
+
+  it('estimatedCostUsd rule signal is computed (it used to never match)', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'big',
+      rules: [
+        {
+          label: 'expensive',
+          targetModelKey: 'small',
+          conditions: [{ signal: 'estimatedCostUsd', operator: 'gt', value: 0.001 }],
+        },
+      ],
+    });
+    wireAll({ router, big: priced('big', 10, 30), small: priced('small', 0.1, 0.4) });
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'z'.repeat(4000) }], max_tokens: 500 },
+    });
+
+    expect(result.routing?.decision).toBe('rule');
+    expect(result.routing?.chosenModelKey).toBe('small');
+  });
+
+  it('model-based: the decider call is billed to the caller and attributed to the router', async () => {
+    const router = makeRouter({
+      strategy: 'model-based',
+      defaultModelKey: 'small',
+      decider: { modelKey: 'decider', labels: [{ label: 'hard', description: 'hard', targetModelKey: 'big' }] },
+    });
+    wireAll({
+      router,
+      big: priced('big', 10, 30),
+      small: priced('small', 0.1, 0.4),
+      decider: priced('decider', 0.1, 0.1),
+    });
+    (toOpenAIChatResponse as ReturnType<typeof vi.fn>).mockReturnValue({
+      id: 'chatcmpl-x',
+      choices: [{ message: { content: 'hard' } }],
+    });
+    const onUsageSettled = vi.fn();
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'prove fermat' }] },
+      onUsageSettled,
+    });
+
+    expect(result.routing?.chosenModelKey).toBe('big');
+    // Decider + child both settle against the caller's budget.
+    expect(onUsageSettled).toHaveBeenCalledTimes(2);
+    const deciderRow = (logModelUsage as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => c[2])
+      .find((payload) => payload?.routing?.role === 'decider');
+    expect(deciderRow?.routing).toMatchObject({ routerKey: 'router', chosenModelKey: 'decider' });
   });
 });
 

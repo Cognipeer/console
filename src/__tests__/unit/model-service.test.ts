@@ -35,6 +35,7 @@ import {
   getModelById,
   deleteModel,
   listUsageLogs,
+  validateDynamicConfigReferences,
 } from '@/lib/services/models/modelService';
 import type { IModel } from '@/lib/database';
 
@@ -188,6 +189,19 @@ describe('deleteModel', () => {
     await deleteModel(TENANT_DB, PROJECT_ID, 'model-1');
     expect(db.switchToTenant).toHaveBeenCalledWith(TENANT_DB);
   });
+
+  it('drops the cached model so a deleted model stops serving immediately', async () => {
+    const model = makeModel({ key: 'cached-then-deleted' });
+    db.findModelByKey.mockResolvedValue(model);
+    expect(await getModelByKey(TENANT_DB, 'cached-then-deleted', PROJECT_ID)).not.toBeNull();
+
+    db.findModelById.mockResolvedValue(model);
+    db.deleteModel.mockResolvedValue(true);
+    db.findModelByKey.mockResolvedValue(null);
+    await deleteModel(TENANT_DB, PROJECT_ID, 'model-1');
+
+    expect(await getModelByKey(TENANT_DB, 'cached-then-deleted', PROJECT_ID)).toBeNull();
+  });
 });
 
 // ── listUsageLogs ─────────────────────────────────────────────────────────────
@@ -287,5 +301,55 @@ describe('createModel - provider validation', () => {
         settings: {},
       }),
     ).rejects.toThrow('Provider is not configured for model operations.');
+  });
+});
+
+// ── validateDynamicConfigReferences ───────────────────────────────────────────
+
+describe('validateDynamicConfigReferences', () => {
+  let db: ReturnType<typeof createMockDb>;
+  const known: Record<string, IModel> = {
+    small: makeModel({ key: 'small' }),
+    big: makeModel({ key: 'big' }),
+    embed: makeModel({ key: 'embed', category: 'embedding' }),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    db = createMockDb();
+    db.findModelByKey.mockImplementation(async (key: string) => known[key] ?? null);
+    (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+  });
+
+  const config = (extra: object = {}) => ({
+    strategy: 'rule-based' as const,
+    defaultModelKey: 'small',
+    rules: [
+      {
+        label: 'r',
+        target: { pool: [{ modelKey: 'small' }, { modelKey: 'big' }] },
+        conditions: [{ signal: 'messageCount' as const, operator: 'gt' as const, value: 1 }],
+      },
+    ],
+    ...extra,
+  });
+
+  it('accepts a config whose targets all exist', async () => {
+    await expect(validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, config(), 'router')).resolves.toBeUndefined();
+  });
+
+  it('names every unknown model key', async () => {
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, config({ fallbackModelKey: 'typo', guards: { economyModelKey: 'nope' } }), 'router'),
+    ).rejects.toThrow('Unknown model keys in routing config: typo, nope');
+  });
+
+  it('rejects a non-LLM target and self-routing', async () => {
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, config({ defaultModelKey: 'embed' }), 'router'),
+    ).rejects.toThrow(/not an LLM/);
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, config({ fallbackModelKey: 'router' }), 'router'),
+    ).rejects.toThrow(/cannot route to itself/);
   });
 });

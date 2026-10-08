@@ -14,6 +14,8 @@ import {
 } from '@/lib/services/models/modelService';
 import { parseMetadataGroupByKey, type UsageBreakdownGroupBy } from '@/lib/services/usage/usageBreakdown';
 import type { IDynamicRoutingConfig, IModelReplica } from '@/lib/database';
+import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
+import { getRoutingAnalytics } from '@/lib/services/models/routingAnalytics';
 import type { UpdateModelInput } from '@/lib/services/models/types';
 import {
   ModelCapabilityValidationError,
@@ -678,6 +680,38 @@ export const modelsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ usage: aggregate });
     } catch (error) {
       logger.error('Fetch model usage error', { error });
+      return sendProjectError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal error',
+        });
+    }
+  }));
+
+  // Dynamic LLM routing analytics: realized spend vs baseline per route,
+  // model, guard and shadow decision. `days` = trailing window (1-90, default 7).
+  app.get('/models/:id/routing-analytics', withApiRequestContext(async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const model = await getModelById(session.tenantDbName, id, projectId);
+
+      if (!model) {
+        return reply.code(404).send({ error: 'Model not found' });
+      }
+      if (!getDynamicRoutingConfig(model)) {
+        return reply.code(400).send({ error: 'Model is not a Dynamic LLM' });
+      }
+
+      const query = (request.query ?? {}) as { days?: string };
+      const parsedDays = Number.parseInt(query.days ?? '7', 10);
+      const days = Number.isFinite(parsedDays) ? Math.min(90, Math.max(1, parsedDays)) : 7;
+      const to = new Date();
+      const from = new Date(to.getTime() - days * 86_400_000);
+      const analytics = await getRoutingAnalytics(session.tenantDbName, model, projectId, { from, to });
+
+      return reply.code(200).send({ analytics });
+    } catch (error) {
+      logger.error('Fetch routing analytics error', { error });
       return sendProjectError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Internal error',

@@ -55,6 +55,7 @@ import OcrPlayground from '@/components/playground/OcrPlayground';
 import ImagePlayground from '@/components/playground/ImagePlayground';
 import EmbeddingPlayground from '@/components/playground/EmbeddingPlayground';
 import ReplicaPoolPanel from '@/components/models/ReplicaPoolPanel';
+import RoutingAnalyticsPanel from '@/components/models/RoutingAnalyticsPanel';
 import PageContainer from '@/components/common/ui/PageContainer';
 import TabsBar from '@/components/common/ui/TabsBar';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -91,7 +92,7 @@ import {
 import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
 import type { HookId } from '@/lib/services/guardrail/hooks/contract';
-import type { IDynamicRoutingConfig } from '@/lib/database';
+import type { IDynamicRoutingConfig, IDynamicRoutingTarget } from '@/lib/database';
 
 interface ModelPricing {
   currency?: string;
@@ -193,6 +194,7 @@ interface UsageAggregateDto {
 }
 
 interface RoutingInfoDto {
+  role?: 'router' | 'child' | 'decider';
   routerKey: string;
   strategy: 'rule-based' | 'model-based';
   decision: 'rule' | 'model' | 'default' | 'fallback';
@@ -204,6 +206,12 @@ interface RoutingInfoDto {
   reason: string;
   signals?: Record<string, unknown>;
   childRequestId?: string;
+  policy?: string;
+  guard?: string;
+  mode?: 'enforce' | 'shadow';
+  estimatedCostUsd?: number;
+  baselineCostUsd?: number;
+  shadow?: { chosenModelKey: string; estimatedCostUsd?: number; reason: string };
 }
 
 interface UsageLogDto {
@@ -895,7 +903,11 @@ export default function ModelDetailPage() {
             <Menu.Dropdown>
               <Menu.Item
                 component={Link}
-                href={`/dashboard/models/${model._id}/edit`}
+                href={
+                  dynamic
+                    ? `/dashboard/models?editDynamic=${model._id}`
+                    : `/dashboard/models/${model._id}/edit`
+                }
                 leftSection={<IconSettings size={14} />}
               >
                 {t('actions.edit')}
@@ -1011,6 +1023,7 @@ export default function ModelDetailPage() {
 
       {tab === 'routing' && dynamic ? (
         <RoutingTab
+          modelId={String(model._id)}
           config={dynamic}
           logs={logs}
           onOpenLog={(l) => {
@@ -1158,10 +1171,30 @@ export default function ModelDetailPage() {
               ) : null}
               {selectedLog.routing ? (
                 <Text size="sm" c="dimmed">
-                  <strong>Routed to:</strong> <code>{selectedLog.routing.chosenModelKey}</code>{' '}
+                  {selectedLog.routing.role === 'child' || selectedLog.routing.role === 'decider' ? (
+                    <>
+                      <strong>{selectedLog.routing.role === 'decider' ? 'Decider for' : 'Routed by'}:</strong>{' '}
+                      <code>{selectedLog.routing.routerKey}</code>
+                    </>
+                  ) : (
+                    <>
+                      <strong>Routed to:</strong> <code>{selectedLog.routing.chosenModelKey}</code>
+                    </>
+                  )}{' '}
                   <span className="ds-badge ds-badge-info">{selectedLog.routing.decision}</span>
+                  {selectedLog.routing.policy ? (
+                    <span className="ds-badge" style={{ marginLeft: 4 }}>{selectedLog.routing.policy}</span>
+                  ) : null}
+                  {selectedLog.routing.mode === 'shadow' ? (
+                    <span className="ds-badge ds-badge-warn" style={{ marginLeft: 4 }}>shadow</span>
+                  ) : null}
                   {' — '}
                   {selectedLog.routing.reason}
+                  {selectedLog.routing.shadow ? (
+                    <>
+                      {' '}(would route to <code>{selectedLog.routing.shadow.chosenModelKey}</code>)
+                    </>
+                  ) : null}
                 </Text>
               ) : null}
             </Stack>
@@ -2179,18 +2212,31 @@ function ConfigureTab({
 
 /* ───────────────────────── Routing Tab (Dynamic LLM) ───────────────────────── */
 
+function describeTarget(spec: { target?: IDynamicRoutingTarget; targetModelKey?: string }): string {
+  const pool = spec.target?.pool;
+  if (pool && pool.length > 0) {
+    return `${spec.target?.policy ?? 'best-under-cap'}: ${pool.map((c) => c.modelKey).join(', ')}`;
+  }
+  return spec.target?.modelKey ?? spec.targetModelKey ?? '—';
+}
+
 function RoutingTab({
+  modelId,
   config,
   logs,
   onOpenLog,
 }: {
+  modelId: string;
   config: IDynamicRoutingConfig;
   logs: UsageLogDto[];
   onOpenLog: (l: UsageLogDto) => void;
 }) {
   const decisions = logs.filter((l) => l.routing);
+  const guards = config.guards;
 
   return (
+    <>
+    <RoutingAnalyticsPanel modelId={modelId} />
     <div
       style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 16 }}
       className="ds-detail-grid"
@@ -2245,6 +2291,12 @@ function RoutingTab({
                         {l.routing?.matchedRuleLabel ? ` · ${l.routing.matchedRuleLabel}` : ''}
                         {l.routing?.deciderLabel ? ` · ${l.routing.deciderLabel}` : ''}
                       </span>
+                      {l.routing?.guard ? (
+                        <span className="ds-badge ds-badge-warn" style={{ marginLeft: 4 }}>{l.routing.guard}</span>
+                      ) : null}
+                      {l.routing?.mode === 'shadow' && l.routing.shadow ? (
+                        <span className="ds-badge" style={{ marginLeft: 4 }}>shadow → {l.routing.shadow.chosenModelKey}</span>
+                      ) : null}
                     </td>
                     <td className="ds-muted" style={{ fontSize: 12, maxWidth: 260 }}>
                       <span
@@ -2276,8 +2328,11 @@ function RoutingTab({
       {/* Right: config summary */}
       <div className="ds-col ds-gap-md">
         <div className="ds-card ds-card-pad-lg">
-          <div className="ds-h4" style={{ marginBottom: 12 }}>
-            Configuration
+          <div className="ds-row-between" style={{ marginBottom: 12 }}>
+            <div className="ds-h4">Configuration</div>
+            <Link href={`/dashboard/models?editDynamic=${modelId}`} style={{ fontSize: 12.5 }}>
+              Edit routing
+            </Link>
           </div>
           <Stack gap="xs">
             <div className="ds-row-between" style={{ fontSize: 12.5 }}>
@@ -2292,8 +2347,60 @@ function RoutingTab({
               <span className="ds-muted">Fallback</span>
               <span className="ds-mono">{config.fallbackModelKey || '—'}</span>
             </div>
+            {config.defaultTarget?.pool ? (
+              <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                <span className="ds-muted">Default pool</span>
+                <span className="ds-mono" style={{ textAlign: 'right' }}>{describeTarget({ target: config.defaultTarget })}</span>
+              </div>
+            ) : null}
+            <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+              <span className="ds-muted">Mode</span>
+              <span className="ds-badge">
+                {config.mode === 'shadow'
+                  ? 'shadow'
+                  : config.canaryPercent !== undefined && config.canaryPercent < 100
+                    ? `canary ${config.canaryPercent}%`
+                    : 'enforce'}
+              </span>
+            </div>
           </Stack>
         </div>
+
+        {guards ? (
+          <div className="ds-card ds-card-pad-lg">
+            <div className="ds-h4" style={{ marginBottom: 12 }}>
+              Cost guards
+            </div>
+            <Stack gap="xs">
+              {guards.maxCostPerRequestUsd !== undefined ? (
+                <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                  <span className="ds-muted">Max / request</span>
+                  <span className="ds-mono">${guards.maxCostPerRequestUsd}</span>
+                </div>
+              ) : null}
+              {guards.conversationBudgetUsd !== undefined ? (
+                <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                  <span className="ds-muted">Per conversation</span>
+                  <span className="ds-mono">${guards.conversationBudgetUsd}</span>
+                </div>
+              ) : null}
+              {guards.budget ? (
+                <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                  <span className="ds-muted">Budget</span>
+                  <span className="ds-mono">
+                    ${guards.budget.limitUsd} / {guards.budget.windowHours}h · {guards.budget.onExceeded ?? 'cheapest'}
+                  </span>
+                </div>
+              ) : null}
+              {guards.economyModelKey ? (
+                <div className="ds-row-between" style={{ fontSize: 12.5 }}>
+                  <span className="ds-muted">Economy model</span>
+                  <span className="ds-mono">{guards.economyModelKey}</span>
+                </div>
+              ) : null}
+            </Stack>
+          </div>
+        ) : null}
 
         {config.strategy === 'rule-based' ? (
           <div className="ds-card ds-card-pad-lg">
@@ -2312,7 +2419,7 @@ function RoutingTab({
                 >
                   <div className="ds-row-between">
                     <span style={{ fontWeight: 500 }}>{rule.label || `rule ${i + 1}`}</span>
-                    <span className="ds-mono ds-faint">→ {rule.targetModelKey}</span>
+                    <span className="ds-mono ds-faint">→ {describeTarget(rule)}</span>
                   </div>
                   <div className="ds-faint" style={{ fontSize: 11.5, marginTop: 2 }}>
                     {(rule.matchType ?? 'all') === 'any' ? 'any of: ' : 'all of: '}
@@ -2345,7 +2452,7 @@ function RoutingTab({
                 >
                   <div className="ds-row-between">
                     <span style={{ fontWeight: 500 }}>{label.label}</span>
-                    <span className="ds-mono ds-faint">→ {label.targetModelKey}</span>
+                    <span className="ds-mono ds-faint">→ {describeTarget(label)}</span>
                   </div>
                   {label.description ? (
                     <div className="ds-faint" style={{ fontSize: 11.5, marginTop: 2 }}>
@@ -2359,6 +2466,7 @@ function RoutingTab({
         )}
       </div>
     </div>
+    </>
   );
 }
 

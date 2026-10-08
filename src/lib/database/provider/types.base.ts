@@ -503,7 +503,11 @@ export type DynamicRoutingSignal =
   | 'hasTools' // request supplies tools / tool_choice
   | 'hasResponseFormat' // request requests a structured response_format
   | 'hasImages' // any message carries image content (multimodal)
-  | 'estimatedCostUsd' // estimated request cost priced at the default model (input est. + max_tokens output)
+  | 'estimatedCostUsd' // estimated request cost priced at the default model (input est. + predicted/capped output)
+  | 'conversationCostUsd' // realized spend of this conversation through this router so far
+  | 'budgetUsedPct' // share of guards.budget.limitUsd spent in its window (0-100+)
+  | 'predictedOutputTokens' // output tokens predicted from this router's history
+  | 'ioRatio' // predicted output / input token ratio
   | 'keyword'; // regex / substring match on the latest user message
 
 export type DynamicRoutingOperator =
@@ -520,9 +524,66 @@ export interface IDynamicRoutingCondition {
   value?: string | number | boolean;
 }
 
+/**
+ * How a pool picks one of its candidates for a request.
+ * - `best-under-cap`: the highest-tier candidate whose estimated cost fits
+ *   `guards.maxCostPerRequestUsd` (highest tier when no cap is set).
+ * - `cheapest`: lowest estimated cost. Meant for quality-equivalent
+ *   candidates (the same model on several providers / regions).
+ * - `token-profile`: lowest expected cost using the request's predicted
+ *   output/input ratio, per-model verbosity and prompt-cache stickiness.
+ */
+export type DynamicPoolPolicy = 'best-under-cap' | 'cheapest' | 'token-profile';
+
+export interface IDynamicPoolCandidate {
+  modelKey: string;
+  /** Quality tier, higher = stronger. Used by `best-under-cap`. Defaults to 1. */
+  tier?: number;
+}
+
+/**
+ * Where a routing decision (a rule, a decider label, or the default) lands:
+ * one fixed model, or a pool of candidates plus the policy that picks one.
+ * Exactly one of `modelKey` / `pool` is set.
+ */
+export interface IDynamicRoutingTarget {
+  modelKey?: string;
+  pool?: IDynamicPoolCandidate[];
+  policy?: DynamicPoolPolicy;
+}
+
+/**
+ * Router-wide cost limits, applied after a target has been resolved. A guard
+ * can only move a request to a cheaper model — the cheapest eligible pool
+ * candidate, or `economyModelKey` for a fixed-model target.
+ */
+export interface IDynamicRoutingGuards {
+  maxCostPerRequestUsd?: number;
+  /** Downgrade once a conversation's realized spend through this router reaches this. */
+  conversationBudgetUsd?: number;
+  budget?: {
+    /** Rolling window in hours (1-168). */
+    windowHours: number;
+    limitUsd: number;
+    /** Downgrade once this share of the limit is spent. Defaults to 80. */
+    downgradeAtPct?: number;
+    /** At 100%: keep serving on the cheapest model, or reject the request. */
+    onExceeded?: 'cheapest' | 'reject';
+  };
+  /** Cheap model a fixed-model target downgrades to when a guard trips. */
+  economyModelKey?: string;
+  /** token-profile: keep a conversation on its previous model (prompt cache). Defaults to true. */
+  sticky?: boolean;
+  /** token-profile: only switch away from the sticky model for at least this % saving. Defaults to 15. */
+  switchMarginPct?: number;
+}
+
 export interface IDynamicRoutingRule {
   label: string;
-  targetModelKey: string;
+  /** Fixed target model. Shorthand for `target: { modelKey }`. */
+  targetModelKey?: string;
+  /** Fixed model or candidate pool; takes precedence over `targetModelKey`. */
+  target?: IDynamicRoutingTarget;
   /** How to combine conditions. Defaults to 'all'. */
   matchType?: 'all' | 'any';
   conditions: IDynamicRoutingCondition[];
@@ -531,7 +592,8 @@ export interface IDynamicRoutingRule {
 export interface IDynamicDeciderLabel {
   label: string;
   description: string;
-  targetModelKey: string;
+  targetModelKey?: string;
+  target?: IDynamicRoutingTarget;
 }
 
 export interface IDynamicDeciderConfig {
@@ -544,18 +606,50 @@ export interface IDynamicDeciderConfig {
 
 export interface IDynamicRoutingConfig {
   strategy: DynamicRoutingStrategy;
-  /** Used when no rule matches / the decider returns an unknown label. */
+  /**
+   * Used when no rule matches / the decider returns an unknown label, as the
+   * last resort when a pool has no eligible candidate, and as the baseline
+   * that savings are measured against (unless `baselineModelKey` is set).
+   */
   defaultModelKey: string;
+  /** Optional pool used instead of `defaultModelKey` when nothing matches. */
+  defaultTarget?: IDynamicRoutingTarget;
   /** Used when the chosen model errors. */
   fallbackModelKey?: string;
   /** rule-based strategy: ordered rules, first match wins. */
   rules?: IDynamicRoutingRule[];
   /** model-based strategy: decider model + label→model mapping. */
   decider?: IDynamicDeciderConfig;
+  guards?: IDynamicRoutingGuards;
+  /** Reference model for "what would this have cost" savings. Defaults to defaultModelKey. */
+  baselineModelKey?: string;
+  /** Output tokens assumed when neither max_tokens nor history is available. Defaults to 512. */
+  defaultOutputTokens?: number;
+  /**
+   * `shadow`: pools and guards are evaluated and logged, but traffic keeps
+   * going to each target's primary model (its fixed model, or the pool's
+   * first candidate). Defaults to `enforce`.
+   */
+  mode?: 'enforce' | 'shadow';
+  /** enforce mode: share (0-100) of conversations that get the enforced decision; the rest run as shadow. Defaults to 100. */
+  canaryPercent?: number;
 }
 
-/** Decision metadata recorded on the router's own usage-log row. */
+/** Per-candidate cost estimate recorded with a pool decision. */
+export interface IDynamicPoolEstimate {
+  modelKey: string;
+  tier: number;
+  estimatedCostUsd?: number;
+  predictedOutputTokens?: number;
+  /** Why the candidate was not eligible (missing capability, context too small, …). */
+  skipped?: string;
+}
+
+/** Decision metadata recorded on the router's own usage-log row (`role: 'router'`)
+ *  and, as attribution, on the child / decider rows it caused. */
 export interface IModelUsageRouting {
+  /** `router` = the decision row; `child` = the routed model's row; `decider` = the classifier's row. Absent on rows written before this field existed (router rows). */
+  role?: 'router' | 'child' | 'decider';
   routerKey: string;
   routerModelDbId?: string;
   strategy: DynamicRoutingStrategy;
@@ -568,6 +662,24 @@ export interface IModelUsageRouting {
   reason: string;
   signals?: Record<string, unknown>;
   childRequestId?: string;
+  /** Pool policy that picked the model, when the target was a pool. */
+  policy?: DynamicPoolPolicy;
+  pool?: IDynamicPoolEstimate[];
+  /** Guard that changed the choice (e.g. `maxCostPerRequestUsd`). */
+  guard?: string;
+  /** Estimated cost of the chosen model at decision time. */
+  estimatedCostUsd?: number;
+  predictedOutputTokens?: number;
+  /** Stable, hashed conversation identifier used for budgets and stickiness. */
+  conversationId?: string;
+  /** Segment the request was bucketed into for history-based prediction. */
+  segment?: string;
+  mode?: 'enforce' | 'shadow';
+  /** shadow / canary: what the enforced decision would have been. */
+  shadow?: { chosenModelKey: string; estimatedCostUsd?: number; reason: string; policy?: DynamicPoolPolicy; guard?: string };
+  baselineModelKey?: string;
+  /** child rows: this call's realized usage priced at the baseline model. */
+  baselineCostUsd?: number;
 }
 
 export type ProviderDomain =

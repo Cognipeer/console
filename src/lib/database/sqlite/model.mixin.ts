@@ -214,6 +214,27 @@ export function ModelMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return rows.map((r) => this.mapUsageRow(r));
     }
 
+    async listRoutedUsageLogs(
+      routerKey: string,
+      options?: { from?: Date; to?: Date; limit?: number },
+      projectId?: string,
+    ): Promise<IModelUsageLog[]> {
+      const db = this.getTenantDb();
+      const clauses: string[] = [
+        "json_extract(routing, '$.routerKey') = @routerKey",
+        "json_extract(routing, '$.role') IN ('child', 'decider')",
+      ];
+      const params: Record<string, unknown> = { routerKey };
+      if (projectId) { clauses.push('projectId = @projectId'); params.projectId = projectId; }
+      if (options?.from) { clauses.push('createdAt >= @from'); params.from = options.from.toISOString(); }
+      if (options?.to) { clauses.push('createdAt <= @to'); params.to = options.to.toISOString(); }
+      const limit = Math.min(Math.max(1, options?.limit ?? 5_000), 10_000);
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.modelUsageLogs} WHERE ${clauses.join(' AND ')} ORDER BY createdAt DESC LIMIT @limit`,
+      ).all({ ...params, limit }) as SqliteRow[];
+      return rows.map((r) => ({ ...this.mapUsageRow(r), providerRequest: {}, providerResponse: {} }));
+    }
+
     async aggregateModelUsage(
       modelKey: string,
       options?: { from?: Date; to?: Date; groupBy?: 'hour' | 'day' | 'month' },

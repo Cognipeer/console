@@ -359,6 +359,16 @@ export default function ModelsPage() {
     setDynamicModalOpen(true);
   };
 
+  // `?editDynamic=<id>` (from a router's detail page) opens its routing editor
+  // once the model list has loaded.
+  const dynamicEditRequested = searchParams.get('editDynamic');
+  useEffect(() => {
+    if (!dynamicEditRequested || !modelsLoaded) return;
+    const target = models.find((m) => m._id === dynamicEditRequested);
+    if (target) openDynamicEdit(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- open once per request id
+  }, [dynamicEditRequested, modelsLoaded]);
+
   const filtered = useMemo(() => {
     return models.filter((m) => {
       if (activeType !== 'all' && m.category !== activeType) return false;
@@ -425,10 +435,11 @@ export default function ModelsPage() {
 
   const closeDynamicModal = () => {
     setDynamicModalOpen(false);
-    if (!dynamicCreateRequested) return;
+    if (!dynamicCreateRequested && !dynamicEditRequested) return;
 
     const nextParams = new URLSearchParams(searchParams.toString());
     nextParams.delete('create');
+    nextParams.delete('editDynamic');
     const queryString = nextParams.toString();
     router.replace(queryString ? `/dashboard/models?${queryString}` : '/dashboard/models');
   };

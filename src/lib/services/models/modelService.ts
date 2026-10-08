@@ -4,12 +4,15 @@ import { getCache } from '@/lib/core/cache';
 import {
   getDatabase,
   IDynamicRoutingConfig,
+  IDynamicRoutingGuards,
+  IDynamicRoutingTarget,
   IModel,
   IModelUsageAggregate,
   IModelUsageLog,
   ModelCategory,
 } from '@/lib/database';
 import { providerRegistry } from '@/lib/providers';
+import { configModelKeys } from './dynamicRouting';
 import {
   createProviderConfig,
   getProviderConfigByKey,
@@ -194,6 +197,10 @@ export async function createModel(
 
   ensureProviderSupportsCategory(provider, payload.category);
   validateSettingsDynamicConfig(payload.settings);
+  const createDynamic = settingsDynamicConfig(payload.settings);
+  if (createDynamic) {
+    await validateDynamicConfigReferences(tenantDbName, projectId, createDynamic, payload.key);
+  }
 
   const keyCandidate = payload.key || payload.name;
   const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
@@ -255,7 +262,78 @@ export interface CreateDynamicModelInput {
 export const DYNAMIC_ROUTING_LIMITS = {
   maxRules: 10,
   maxConditionsPerRule: 5,
+  maxPoolCandidates: 10,
+  maxBudgetWindowHours: 168,
+  maxDefaultOutputTokens: 200_000,
 } as const;
+
+const POOL_POLICIES = new Set(['best-under-cap', 'cheapest', 'token-profile']);
+
+function isFiniteNonNegative(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function validateTarget(
+  spec: { target?: IDynamicRoutingTarget; targetModelKey?: string },
+  where: string,
+): void {
+  const target = spec.target;
+  if (target?.pool !== undefined) {
+    if (!Array.isArray(target.pool) || target.pool.length === 0) {
+      throw new Error(`${where}: a pool needs at least one candidate`);
+    }
+    if (target.pool.length > DYNAMIC_ROUTING_LIMITS.maxPoolCandidates) {
+      throw new Error(`${where}: a pool supports at most ${DYNAMIC_ROUTING_LIMITS.maxPoolCandidates} candidates`);
+    }
+    for (const candidate of target.pool) {
+      if (!candidate || typeof candidate.modelKey !== 'string' || !candidate.modelKey) {
+        throw new Error(`${where}: every pool candidate needs a modelKey`);
+      }
+      if (candidate.tier !== undefined && !(isFiniteNonNegative(candidate.tier) && candidate.tier <= 100)) {
+        throw new Error(`${where}: candidate "${candidate.modelKey}" tier must be a number between 0 and 100`);
+      }
+    }
+    if (target.policy !== undefined && !POOL_POLICIES.has(target.policy)) {
+      throw new Error(`${where}: policy must be "best-under-cap", "cheapest" or "token-profile"`);
+    }
+    return;
+  }
+  if (!target?.modelKey && !spec.targetModelKey) {
+    throw new Error(`${where} needs a target model or pool`);
+  }
+}
+
+function validateGuards(guards: IDynamicRoutingGuards | undefined): void {
+  if (guards === undefined) return;
+  if (!guards || typeof guards !== 'object') throw new Error('guards must be an object');
+  for (const field of ['maxCostPerRequestUsd', 'conversationBudgetUsd'] as const) {
+    if (guards[field] !== undefined && !isFiniteNonNegative(guards[field])) {
+      throw new Error(`guards.${field} must be a non-negative number`);
+    }
+  }
+  if (guards.switchMarginPct !== undefined && !(isFiniteNonNegative(guards.switchMarginPct) && guards.switchMarginPct <= 100)) {
+    throw new Error('guards.switchMarginPct must be between 0 and 100');
+  }
+  const budget = guards.budget;
+  if (budget !== undefined) {
+    if (
+      !isFiniteNonNegative(budget.windowHours) ||
+      budget.windowHours < 1 ||
+      budget.windowHours > DYNAMIC_ROUTING_LIMITS.maxBudgetWindowHours
+    ) {
+      throw new Error(`guards.budget.windowHours must be between 1 and ${DYNAMIC_ROUTING_LIMITS.maxBudgetWindowHours}`);
+    }
+    if (!isFiniteNonNegative(budget.limitUsd) || budget.limitUsd <= 0) {
+      throw new Error('guards.budget.limitUsd must be a positive number');
+    }
+    if (budget.downgradeAtPct !== undefined && !(isFiniteNonNegative(budget.downgradeAtPct) && budget.downgradeAtPct <= 100)) {
+      throw new Error('guards.budget.downgradeAtPct must be between 0 and 100');
+    }
+    if (budget.onExceeded !== undefined && budget.onExceeded !== 'cheapest' && budget.onExceeded !== 'reject') {
+      throw new Error('guards.budget.onExceeded must be "cheapest" or "reject"');
+    }
+  }
+}
 
 /** Validates a routing config; throws with a descriptive message if invalid. */
 export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined): void {
@@ -268,6 +346,7 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
   if (!config.defaultModelKey) {
     throw new Error('defaultModelKey is required');
   }
+  if (config.defaultTarget !== undefined) validateTarget({ target: config.defaultTarget }, 'defaultTarget');
   if (config.strategy === 'rule-based') {
     if (!Array.isArray(config.rules) || config.rules.length === 0) {
       throw new Error('rule-based routing requires at least one rule');
@@ -278,7 +357,7 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
       );
     }
     for (const rule of config.rules) {
-      if (!rule.targetModelKey) throw new Error('every rule needs a targetModelKey');
+      validateTarget(rule, `rule "${rule.label || '(unnamed)'}"`);
       if (!Array.isArray(rule.conditions) || rule.conditions.length === 0) {
         throw new Error(`rule "${rule.label || '(unnamed)'}" needs at least one condition`);
       }
@@ -299,8 +378,25 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
     }
     for (const label of config.decider.labels) {
       if (!label.label) throw new Error('every decider label needs a label name');
-      if (!label.targetModelKey) throw new Error(`decider label "${label.label}" needs a targetModelKey`);
+      validateTarget(label, `decider label "${label.label}"`);
     }
+  }
+  validateGuards(config.guards);
+  if (config.mode !== undefined && config.mode !== 'enforce' && config.mode !== 'shadow') {
+    throw new Error('mode must be "enforce" or "shadow"');
+  }
+  if (config.canaryPercent !== undefined && !(isFiniteNonNegative(config.canaryPercent) && config.canaryPercent <= 100)) {
+    throw new Error('canaryPercent must be between 0 and 100');
+  }
+  if (
+    config.defaultOutputTokens !== undefined &&
+    !(
+      isFiniteNonNegative(config.defaultOutputTokens) &&
+      config.defaultOutputTokens >= 1 &&
+      config.defaultOutputTokens <= DYNAMIC_ROUTING_LIMITS.maxDefaultOutputTokens
+    )
+  ) {
+    throw new Error(`defaultOutputTokens must be between 1 and ${DYNAMIC_ROUTING_LIMITS.maxDefaultOutputTokens}`);
   }
 }
 
@@ -314,6 +410,44 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
  * `validateDynamicConfig`. Call this wherever `settings` is about to be
  * written, regardless of which public API reached it.
  */
+/**
+ * Every model a routing config points at must exist in the project and be an
+ * LLM, and the router may not name itself. Without this a typo in a target
+ * saves fine and surfaces only as a 404 on live traffic.
+ */
+export async function validateDynamicConfigReferences(
+  tenantDbName: string,
+  projectId: string,
+  config: IDynamicRoutingConfig,
+  selfKey?: string,
+): Promise<void> {
+  const keys = new Set(configModelKeys(config));
+  if (config.decider?.modelKey) keys.add(config.decider.modelKey);
+  const db = await getDatabase();
+  await db.switchToTenant(tenantDbName);
+  const missing: string[] = [];
+  for (const key of keys) {
+    if (selfKey && key === selfKey) {
+      throw new Error(`A Dynamic LLM cannot route to itself ("${key}")`);
+    }
+    const model = await db.findModelByKey(key, projectId);
+    if (!model) {
+      missing.push(key);
+    } else if (model.category !== 'llm') {
+      throw new Error(`"${key}" is not an LLM model and cannot be a routing target`);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(`Unknown model key${missing.length > 1 ? 's' : ''} in routing config: ${missing.join(', ')}`);
+  }
+}
+
+function settingsDynamicConfig(settings: Record<string, unknown> | undefined): IDynamicRoutingConfig | undefined {
+  if (!settings || typeof settings !== 'object') return undefined;
+  const dyn = (settings as { dynamic?: unknown }).dynamic;
+  return dyn === undefined ? undefined : (dyn as IDynamicRoutingConfig);
+}
+
 function validateSettingsDynamicConfig(settings: Record<string, unknown> | undefined): void {
   if (!settings || typeof settings !== 'object') return;
   const dyn = (settings as { dynamic?: unknown }).dynamic;
@@ -335,6 +469,7 @@ export async function createDynamicModel(
 
   const keyCandidate = payload.key || payload.name;
   const key = await generateUniqueKey(tenantDbName, projectId, keyCandidate);
+  await validateDynamicConfigReferences(tenantDbName, projectId, payload.dynamic, key);
 
   const newModel: Omit<IModel, '_id' | 'createdAt' | 'updatedAt'> = {
     tenantId,
@@ -416,9 +551,20 @@ export async function updateModel(
   // here, the single place every `updateModel` caller funnels through.
   if (updatePayload.settings !== undefined) {
     validateSettingsDynamicConfig(updatePayload.settings);
+    const updateDynamic = settingsDynamicConfig(updatePayload.settings);
+    if (updateDynamic) {
+      await validateDynamicConfigReferences(
+        tenantDbName,
+        projectId,
+        updateDynamic,
+        updatePayload.key ?? existing.key,
+      );
+    }
   }
 
-  return db.updateModel(modelId, updatePayload as Partial<IModel>);
+  const updated = await db.updateModel(modelId, updatePayload as Partial<IModel>);
+  await invalidateModelMetaCache(tenantDbName, projectId, [existing.key, updated?.key]);
+  return updated;
 }
 
 export async function deleteModel(
@@ -432,7 +578,34 @@ export async function deleteModel(
   if (!existing) {
     return false;
   }
-  return db.deleteModel(modelId);
+  const deleted = await db.deleteModel(modelId);
+  await invalidateModelMetaCache(tenantDbName, projectId, [existing.key]);
+  return deleted;
+}
+
+function modelMetaCacheKey(tenantDbName: string, projectId: string, key: string): string {
+  return `model-meta:${tenantDbName}:${projectId}:${key}`;
+}
+
+/**
+ * Drops the `getModelByKey` cache entries for a model so an edit (pricing,
+ * routing config, guardrail bindings, provider) or a delete takes effect on
+ * the next request instead of up to two minutes later. Best effort: the TTL
+ * still bounds staleness if the cache is unreachable.
+ */
+async function invalidateModelMetaCache(
+  tenantDbName: string,
+  projectId: string,
+  keys: Array<string | undefined>,
+): Promise<void> {
+  try {
+    const cache = await getCache();
+    await Promise.all(
+      [...new Set(keys.filter((k): k is string => Boolean(k)))].map((key) =>
+        cache.del(modelMetaCacheKey(tenantDbName, projectId, key)),
+      ),
+    );
+  } catch { /* best effort — the 120s TTL bounds staleness */ }
 }
 
 export async function getModelByKey(
@@ -440,7 +613,7 @@ export async function getModelByKey(
   key: string,
   projectId: string,
 ): Promise<IModel | null> {
-  const cacheKey = `model-meta:${tenantDbName}:${projectId}:${key}`;
+  const cacheKey = modelMetaCacheKey(tenantDbName, projectId, key);
   try {
     const cache = await getCache();
     const cached = await cache.get<IModel>(cacheKey);
