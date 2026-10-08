@@ -334,7 +334,7 @@ interface GuardrailChainOutcome {
  * it always has: a model pointing at a deleted guardrail is a misconfiguration,
  * and quietly running the rest of the chain would let it look enforced.
  */
-async function enforceModelGuardrailChain(params: {
+export async function enforceModelGuardrailChain(params: {
   tenantDbName: string;
   tenantId: string;
   projectId: string;

@@ -41,6 +41,7 @@ import {
   IconPhoto,
   IconScan,
   IconShieldCheck,
+  IconScale,
   IconServer,
   IconSettings,
   IconShield,
@@ -75,7 +76,7 @@ export interface SubNavItem {
 }
 
 /** Model categories surfaced as their own sub-nav entries under the Models service. */
-const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation'];
+const MODEL_TYPE_KEYS = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'];
 
 export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
   browser: [
@@ -511,6 +512,13 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       href: '/dashboard/models?type=moderation',
       icon: IconShieldCheck,
       matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'moderation',
+    },
+    {
+      id: 'decision',
+      label: 'Decision',
+      href: '/dashboard/models?type=decision',
+      icon: IconScale,
+      matcher: (p, s) => p === '/dashboard/models' && s.get('type') === 'decision',
     },
   ],
   files: [

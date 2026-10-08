@@ -14,6 +14,7 @@ import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { withInlineReasoningNormalization } from './wireNormalization';
 import { createOpenAiImageRuntime } from './openaiImageHelpers';
 import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
+import { createStructuredDecisionRuntime, DECISION_CAPABILITIES } from './structuredDecisionRuntime';
 import {
   createOpenAiSttRuntime,
   createOpenAiTtsRuntime,
@@ -351,13 +352,14 @@ function parseServiceAccountKey(raw?: string) {
 export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCredentials, OpenAiSettings> = {
   id: 'openai',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
   display: {
     label: 'OpenAI',
     description: 'Official OpenAI platform supporting GPT, embedding, audio (Whisper/TTS) and vision (VLM-OCR) models.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
+    ...DECISION_CAPABILITIES,
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
@@ -444,6 +446,8 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
           organization: settings.organization,
           modelId: config.modelId,
         }),
+      createDecisionRuntime: (config) =>
+        createStructuredDecisionRuntime(runtime, config, 'openai'),
       createModerationRuntime: (config) =>
         createOpenAiModerationRuntime({
           apiKey,
@@ -503,13 +507,14 @@ function azureAudioOverrides(
 export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCompatibleCredentials, OpenAiCompatibleSettings> = {
   id: 'openai-compatible',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
   display: {
     label: 'OpenAI-Compatible',
     description: 'Any API following the OpenAI REST schema (Mistral, Groq, Deepgram-OpenAI, ElevenLabs-OpenAI, …) including /v1/audio/* and VLM-based OCR.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+    'model.categories': ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
+    ...DECISION_CAPABILITIES,
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
@@ -598,6 +603,8 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           organization: settings.organization,
           modelId: config.modelId,
         }),
+      createDecisionRuntime: (config) =>
+        createStructuredDecisionRuntime(runtime, config, 'openai-compatible'),
       createModerationRuntime: (config) =>
         createOpenAiModerationRuntime({
           apiKey,
@@ -1015,13 +1022,14 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
 export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, AzureCredentials, AzureSettings> = {
   id: 'azure',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
   display: {
     label: 'Azure OpenAI',
     description: 'Microsoft Azure-hosted OpenAI models with deployment-based access, including Whisper/TTS deployments.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
+    ...DECISION_CAPABILITIES,
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'ocr.modes': ['vlm'],
@@ -1159,6 +1167,8 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           buildUrl: (path) =>
             `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}${path}?api-version=${encodeURIComponent(apiVersionFor(config.modelSettings))}`,
         }),
+      createDecisionRuntime: (config) =>
+        createStructuredDecisionRuntime(runtime, config, 'azure'),
       createModerationRuntime: (config) =>
         createOpenAiModerationRuntime({
           apiKey,

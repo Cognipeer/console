@@ -1176,6 +1176,15 @@ export const en = {
     },
   },
   modelWizard: {
+    decision: {
+      title: 'Decision mode',
+      description:
+        'Answers come from a structured-output call to this model, so it is priced like the underlying chat model. Native vendor decision endpoints are not available yet.',
+      acceptsImage: {
+        label: 'Accepts images',
+        description: 'Declare that the underlying model can read image inputs (decision.supports.image).',
+      },
+    },
     title: 'Register a new model',
     subtitle:
       'Connect provider credentials, configure pricing, and make this model available across your tenant.',

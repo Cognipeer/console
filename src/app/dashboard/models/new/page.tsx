@@ -45,7 +45,7 @@ interface ProviderField {
   options?: Array<{ label: string; value: string }>;
 }
 
-type WizardCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
+type WizardCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
 
 interface ProviderDefinition {
   id: string;

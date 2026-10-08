@@ -7,3 +7,4 @@ export * from './domains/audio';
 export * from './domains/ocr';
 export * from './domains/image';
 export * from './domains/moderation';
+export * from './domains/decision';

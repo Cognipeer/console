@@ -54,7 +54,7 @@ const CAPABILITY_KEYS = {
   multimodal: 'model.supports.multimodal',
 } as const;
 
-type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
+type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
 
 const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
   { value: 'llm', label: 'LLM' },
@@ -65,6 +65,7 @@ const ALL_CATEGORIES: ReadonlyArray<{ value: ModelCategory; label: string }> = [
   { value: 'ocr', label: 'OCR' },
   { value: 'image', label: 'Image Generation' },
   { value: 'moderation', label: 'Moderation' },
+  { value: 'decision', label: 'Decision' },
 ];
 
 /**
@@ -125,6 +126,9 @@ interface FormValues {
   ocr: {
     mode: OcrMode;
     prompt: string;
+  };
+  decision: {
+    supportsImage: boolean;
   };
 }
 
@@ -214,6 +218,9 @@ export default function CreateModelModal({
       ocr: {
         mode: 'vlm',
         prompt: '',
+      },
+      decision: {
+        supportsImage: false,
       },
     },
     validate: {
@@ -444,6 +451,11 @@ export default function CreateModelModal({
               : {}),
             ...(values.settings.allowUnknownPassthrough
               ? { allowUnknownPassthrough: true }
+              : {}),
+            // P1 decision models are always served by the structured-output emulator
+            // over the chat model named below; `native` is reserved for later phases.
+            ...(values.category === 'decision'
+              ? { decision: { mode: 'structured', supports: { image: values.decision.supportsImage } } }
               : {}),
             ...(values.category === 'ocr'
               ? {
@@ -804,6 +816,24 @@ export default function CreateModelModal({
               </FormField>
             </FormRow>
           )}
+        </FormSection>
+      )}
+
+      {formValues.category === 'decision' && (
+        <FormSection
+          number="3a"
+          title={tWizard('decision.title')}
+          description={tWizard('decision.description')}
+          done
+        >
+          <ToggleList>
+            <ToggleRow
+              label={tWizard('decision.acceptsImage.label')}
+              description={tWizard('decision.acceptsImage.description')}
+              checked={formValues.decision.supportsImage}
+              onChange={(v) => setFieldValue('decision.supportsImage', v)}
+            />
+          </ToggleList>
         </FormSection>
       )}
 

@@ -117,7 +117,7 @@ interface ModelDetailDto {
   provider?: string;
   providerKey?: string;
   providerDriver?: string;
-  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;

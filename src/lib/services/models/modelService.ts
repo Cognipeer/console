@@ -101,6 +101,7 @@ const ALLOWED_MODEL_CATEGORIES: ReadonlySet<ModelCategory> = new Set([
   'ocr',
   'image',
   'moderation',
+  'decision',
 ]);
 
 function ensureProviderSupportsCategory(

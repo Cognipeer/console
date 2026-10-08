@@ -12,6 +12,15 @@ export const tr: typeof en = {
   ...en,
   modelWizard: {
     ...en.modelWizard,
+    decision: {
+      title: 'Karar modu',
+      description:
+        'Yanıtlar bu modele yapılan yapılandırılmış çıktı çağrısından gelir; fiyatlandırma altta yatan sohbet modeliyle aynıdır. Satıcıya özgü yerel karar uç noktaları henüz kullanılamıyor.',
+      acceptsImage: {
+        label: 'Görselleri kabul eder',
+        description: 'Altta yatan modelin görsel girdileri okuyabildiğini bildirir (decision.supports.image).',
+      },
+    },
     fields: {
       ...en.modelWizard.fields,
       supportsToolCalls: {
