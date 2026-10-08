@@ -3,6 +3,7 @@ import type { SttRuntime, TtsRuntime } from './audio';
 import type { OcrRuntime } from './ocr';
 import type { ImageRuntime } from './image';
 import type { ModerationRuntime } from './moderation';
+import type { DecisionRuntime } from './decision';
 
 export type ModelRuntimeCategory = ModelCategory;
 
@@ -41,6 +42,7 @@ export interface ModelProviderRuntime {
   createOcrRuntime?(config: ModelRuntimeConfig): Promise<OcrRuntime> | OcrRuntime;
   createImageRuntime?(config: ModelRuntimeConfig): Promise<ImageRuntime> | ImageRuntime;
   createModerationRuntime?(config: ModelRuntimeConfig): Promise<ModerationRuntime> | ModerationRuntime;
+  createDecisionRuntime?(config: ModelRuntimeConfig): Promise<DecisionRuntime> | DecisionRuntime;
   getCapabilities?(): Record<string, unknown>;
 }
 
@@ -64,5 +66,11 @@ export interface ModelProviderCapabilityFlags {
   'image.sizes'?: string[];
   'image.formats.output'?: string[];
   'image.supports.edit'?: boolean;
+  // Decision (typed answers with probabilities)
+  'decision.question_types'?: Array<'choice' | 'boolean' | 'score'>;
+  'decision.supports.image'?: boolean;
+  'decision.max_context'?: number;
+  /** True when the driver reaches a vendor-native decision endpoint (reserved; P1 is structured only). */
+  'decision.native'?: boolean;
   [key: string]: unknown;
 }

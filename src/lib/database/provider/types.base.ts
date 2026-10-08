@@ -436,7 +436,8 @@ export type ModelCategory =
   | 'tts'
   | 'ocr'
   | 'image'
-  | 'moderation';
+  | 'moderation'
+  | 'decision';
 
 export type ModelProviderType =
   | 'openai'
@@ -693,6 +694,7 @@ export type ProviderDomain =
   | 'ocr'
   | 'image'
   | 'moderation'
+  | 'decision'
   | 'websearch'
   /** Telephony carriers (Twilio) for the enterprise realtime voice engine. */
   | 'telephony';

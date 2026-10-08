@@ -160,6 +160,7 @@ export const DOMAIN_LABELS: Record<ProviderDomain, string> = {
   tts: 'Text-to-Speech',
   image: 'Image Generation',
   moderation: 'Moderation',
+  decision: 'Decision',
   ocr: 'OCR',
   websearch: 'Web Search',
   telephony: 'Telephony',

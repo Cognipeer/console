@@ -31,6 +31,7 @@ import { clientMembersApiPlugin } from './plugins/client-members';
 import { clientUsersApiPlugin } from './plugins/client-users';
 import { clientBatchesApiPlugin } from './plugins/client-batches';
 import { clientModerationsApiPlugin } from './plugins/client-moderations';
+import { clientDecisionsApiPlugin } from './plugins/client-decisions';
 import { clientSpendApiPlugin } from './plugins/client-spend';
 import { clientConfigApiPlugin } from './plugins/client-config';
 import { clientFilesApiPlugin } from './plugins/client-files';
@@ -421,6 +422,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientUsersApiPlugin);
   await app.register(clientBatchesApiPlugin);
   await app.register(clientModerationsApiPlugin);
+  await app.register(clientDecisionsApiPlugin);
   await app.register(clientSpendApiPlugin);
   await app.register(clientAutomationsApiPlugin);
   await app.register(clientConfigApiPlugin);

@@ -84,7 +84,7 @@ interface ModelsDashboardOverview {
 interface ModelTopEntry {
   key: string;
   name: string;
-  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   callCount: number;
   totalTokens: number;
   totalCost: number;
@@ -148,7 +148,7 @@ interface ModelDto {
   provider?: string;
   providerKey: string;
   providerDriver: string;
-  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
+  category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
   supportsToolCalls?: boolean;
@@ -158,11 +158,11 @@ interface ModelDto {
   updatedAt?: string;
 }
 
-type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation';
+type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
 type CategoryFilter = 'all' | ModelCategory;
 type CapabilityFilter = 'all' | 'multimodal' | 'tools';
 
-const MODEL_TYPE_KEYS: ModelCategory[] = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation'];
+const MODEL_TYPE_KEYS: ModelCategory[] = ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'];
 
 /** Human-readable labels for each model category — kept in sync with the left sub-nav. */
 const TYPE_LABELS: Record<CategoryFilter, string> = {
@@ -175,6 +175,7 @@ const TYPE_LABELS: Record<CategoryFilter, string> = {
   ocr: 'OCR',
   image: 'Image Generation',
   moderation: 'Moderation',
+  decision: 'Decision',
 };
 
 export default function ModelsPage() {

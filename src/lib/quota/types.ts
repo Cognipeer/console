@@ -13,7 +13,8 @@ export type QuotaDomain =
   | 'tts'
   | 'ocr'
   | 'image'
-  | 'moderation';
+  | 'moderation'
+  | 'decision';
 
 // Human-readable labels for UI
 export const QUOTA_SCOPE_LABELS: Record<QuotaScope, string> = {
@@ -36,6 +37,7 @@ export const QUOTA_DOMAIN_LABELS: Record<QuotaDomain, string> = {
   ocr: 'OCR / Document AI',
   image: 'Image Generation',
   moderation: 'Moderation',
+  decision: 'Decision',
 };
 
 export interface QuotaRequestWindow {

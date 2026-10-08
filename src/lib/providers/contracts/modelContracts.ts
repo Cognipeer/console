@@ -14,6 +14,13 @@ import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { withInlineReasoningNormalization } from './wireNormalization';
 import { createOpenAiImageRuntime } from './openaiImageHelpers';
 import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
+import { DECISION_CAPABILITIES } from './structuredDecisionRuntime';
+import {
+  createAlibabaNativeDecisionRuntime,
+  createOpenAiNativeDecisionRuntime,
+  selectDecisionRuntime,
+} from './nativeDecisionRuntime';
+import { ALIBABA_REGIONS, isAlibabaRegion, isValidWorkspaceId } from './nativeDecisionHelpers';
 import {
   createOpenAiSttRuntime,
   createOpenAiTtsRuntime,
@@ -351,13 +358,16 @@ function parseServiceAccountKey(raw?: string) {
 export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCredentials, OpenAiSettings> = {
   id: 'openai',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
   display: {
     label: 'OpenAI',
     description: 'Official OpenAI platform supporting GPT, embedding, audio (Whisper/TTS) and vision (VLM-OCR) models.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
+    ...DECISION_CAPABILITIES,
+    // api.openai.com serves POST /v1/decisions; Azure and compatible endpoints do not.
+    'decision.native': true,
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
@@ -444,6 +454,14 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
           organization: settings.organization,
           modelId: config.modelId,
         }),
+      createDecisionRuntime: (config) =>
+        selectDecisionRuntime({
+          runtime,
+          config,
+          provider: 'openai',
+          native: (c) =>
+            createOpenAiNativeDecisionRuntime({ apiKey, organization: settings.organization, modelId: c.modelId }),
+        }),
       createModerationRuntime: (config) =>
         createOpenAiModerationRuntime({
           apiKey,
@@ -503,13 +521,14 @@ function azureAudioOverrides(
 export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProviderRuntime, OpenAiCompatibleCredentials, OpenAiCompatibleSettings> = {
   id: 'openai-compatible',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
   display: {
     label: 'OpenAI-Compatible',
     description: 'Any API following the OpenAI REST schema (Mistral, Groq, Deepgram-OpenAI, ElevenLabs-OpenAI, …) including /v1/audio/* and VLM-based OCR.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+    'model.categories': ['llm', 'embedding', 'rerank', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
+    ...DECISION_CAPABILITIES,
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'model.supports.reasoning': true,
@@ -598,6 +617,8 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           organization: settings.organization,
           modelId: config.modelId,
         }),
+      createDecisionRuntime: (config) =>
+        selectDecisionRuntime({ runtime, config, provider: 'openai-compatible' }),
       createModerationRuntime: (config) =>
         createOpenAiModerationRuntime({
           apiKey,
@@ -1015,13 +1036,14 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
 export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, AzureCredentials, AzureSettings> = {
   id: 'azure',
   version: '1.0.0',
-  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+  domains: ['model', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
   display: {
     label: 'Azure OpenAI',
     description: 'Microsoft Azure-hosted OpenAI models with deployment-based access, including Whisper/TTS deployments.',
   },
   capabilities: {
-    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation'],
+    'model.categories': ['llm', 'embedding', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision'],
+    ...DECISION_CAPABILITIES,
     'model.supports.tool_calls': true,
     'model.supports.streaming': true,
     'ocr.modes': ['vlm'],
@@ -1159,6 +1181,8 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           buildUrl: (path) =>
             `https://${instanceName}.openai.azure.com/openai/deployments/${deploymentFor(config.modelId)}${path}?api-version=${encodeURIComponent(apiVersionFor(config.modelSettings))}`,
         }),
+      createDecisionRuntime: (config) =>
+        selectDecisionRuntime({ runtime, config, provider: 'azure' }),
       createModerationRuntime: (config) =>
         createOpenAiModerationRuntime({
           apiKey,
@@ -1258,7 +1282,103 @@ export const VoyageAiModelProviderContract: ProviderContract<ModelProviderRuntim
   createRuntime: EMPTY_RERANK_RUNTIME,
 };
 
+interface AlibabaModelStudioCredentials {
+  apiKey: string;
+}
+
+interface AlibabaModelStudioSettings {
+  workspaceId?: string;
+  region?: string;
+}
+
+/**
+ * Alibaba Model Studio's decision model (`decision-model-preview`) over the
+ * workspace-scoped System One endpoint. It is a classifier, not a chat model, so
+ * the driver serves the `decision` category natively and nothing else.
+ */
+export const AlibabaModelStudioProviderContract: ProviderContract<ModelProviderRuntime, AlibabaModelStudioCredentials, AlibabaModelStudioSettings> = {
+  id: 'alibaba-modelstudio',
+  version: '1.0.0',
+  domains: ['model', 'decision'],
+  display: {
+    label: 'Alibaba Model Studio',
+    description: 'Alibaba Cloud Model Studio decision model (decision-model-preview): typed choice / yes-no / score answers with probabilities, text input only.',
+  },
+  capabilities: {
+    'model.categories': ['decision'],
+    'decision.question_types': ['choice', 'boolean', 'score'],
+    'decision.supports.image': false,
+    'decision.native': true,
+  },
+  form: {
+    sections: [
+      {
+        title: 'Credentials',
+        fields: [
+          {
+            name: 'apiKey',
+            label: 'API Key',
+            type: 'password',
+            required: true,
+            placeholder: 'sk-...',
+          },
+        ],
+      },
+      {
+        title: 'Workspace',
+        fields: [
+          {
+            name: 'workspaceId',
+            label: 'Workspace ID',
+            type: 'text',
+            required: true,
+            description: 'Your Model Studio workspace id (letters, digits and hyphens). It becomes part of the endpoint host.',
+            scope: 'settings',
+          },
+          {
+            name: 'region',
+            label: 'Region',
+            type: 'select',
+            required: true,
+            options: [
+              { label: 'Singapore', value: 'singapore' },
+              { label: 'China (Beijing)', value: 'beijing' },
+            ],
+            defaultValue: 'singapore',
+            scope: 'settings',
+          },
+        ],
+      },
+    ],
+  },
+  createRuntime: ({ credentials, settings }) => {
+    const apiKey = ensureValue(credentials.apiKey, 'Alibaba Model Studio API key is required.');
+    const workspaceId = settings.workspaceId?.trim();
+    const region = settings.region?.trim();
+    if (!isValidWorkspaceId(workspaceId)) {
+      throw new Error('Alibaba Model Studio workspace id must contain only letters, digits and hyphens.');
+    }
+    if (!isAlibabaRegion(region)) {
+      throw new Error(`Alibaba Model Studio region must be one of: ${Object.keys(ALIBABA_REGIONS).join(', ')}.`);
+    }
+
+    const runtime: ModelProviderRuntime = {
+      createDecisionRuntime: (config) =>
+        selectDecisionRuntime({
+          runtime,
+          config,
+          provider: 'alibaba-modelstudio',
+          structured: false,
+          native: (c) =>
+            createAlibabaNativeDecisionRuntime({ apiKey, workspaceId, region, modelId: c.modelId }),
+        }),
+    };
+    return runtime;
+  },
+};
+
 export const MODEL_PROVIDER_CONTRACTS = [
+  AlibabaModelStudioProviderContract,
   AnthropicModelProviderContract,
   OpenAiModelProviderContract,
   OpenAiCompatibleModelProviderContract,

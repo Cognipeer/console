@@ -173,6 +173,9 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // dialects over the Model Hub, same tier as chat/embeddings below.
   { prefix: '/api/client/v1/audio', service: 'models' },
   { prefix: '/api/client/v1/images', service: 'models' },
+  // Decisions (typed answers with probabilities) are served from a Model Hub
+  // model, so they sit in the same tier as chat/embeddings.
+  { prefix: '/api/client/v1/decisions', service: 'models' },
   { prefix: '/api/client/v1/automations', service: 'automations' },
   { prefix: '/api/client/v1/config', service: 'config' },
   { prefix: '/api/client/v1/files', service: 'files' },

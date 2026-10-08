@@ -13,6 +13,17 @@
       "aliases": ["gpt", "chatgpt", "gpt-4", "gpt-4o", "openai api", "whisper", "tts"]
     },
     {
+      "id": "alibaba-modelstudio",
+      "driver": "alibaba-modelstudio",
+      "name": "Alibaba Model Studio",
+      "tagline": "Decision model: typed choice / yes-no / score answers",
+      "description": "Alibaba Cloud Model Studio decision-model-preview over a workspace endpoint (Singapore or Beijing). Text only.",
+      "domains": ["model", "decision"],
+      "color": "#ff6a00",
+      "tags": ["managed", "decision"],
+      "aliases": ["alibaba", "aliyun", "bailian", "dashscope", "qwen", "decision model", "systemone"]
+    },
+    {
       "id": "anthropic",
       "driver": "openai-compatible",
       "name": "Anthropic",

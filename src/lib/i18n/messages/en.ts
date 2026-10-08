@@ -1176,6 +1176,20 @@ export const en = {
     },
   },
   modelWizard: {
+    decision: {
+      title: 'Decision mode',
+      description:
+        'Structured: answers come from a strict-schema call to a chat model and are priced like it. Native: the provider\'s own decision endpoint (input tokens only).',
+      mode: {
+        label: 'Backend',
+        structured: 'Structured (chat model)',
+        native: 'Native (vendor decision API)',
+      },
+      acceptsImage: {
+        label: 'Accepts images',
+        description: 'Declare that the underlying model can read image inputs (decision.supports.image).',
+      },
+    },
     title: 'Register a new model',
     subtitle:
       'Connect provider credentials, configure pricing, and make this model available across your tenant.',

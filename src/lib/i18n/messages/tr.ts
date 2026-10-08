@@ -12,6 +12,20 @@ export const tr: typeof en = {
   ...en,
   modelWizard: {
     ...en.modelWizard,
+    decision: {
+      title: 'Karar modu',
+      description:
+        'Yapılandırılmış: yanıtlar bir sohbet modeline yapılan katı şemalı çağrıdan gelir ve onunla aynı fiyatlanır. Yerel: sağlayıcının kendi karar uç noktası (yalnızca girdi token\'ları).',
+      mode: {
+        label: 'Arka uç',
+        structured: 'Yapılandırılmış (sohbet modeli)',
+        native: 'Yerel (satıcı karar API\'si)',
+      },
+      acceptsImage: {
+        label: 'Görselleri kabul eder',
+        description: 'Altta yatan modelin görsel girdileri okuyabildiğini bildirir (decision.supports.image).',
+      },
+    },
     fields: {
       ...en.modelWizard.fields,
       supportsToolCalls: {
