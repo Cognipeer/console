@@ -171,7 +171,11 @@ export const clientDecisionsApiPlugin: FastifyPluginAsync = async (app) => {
         ? { status: 502, error: { message: error.message, type: 'server_error' } }
         : normalizeInferenceError(error);
 
-      if (modelKey && normalized.status >= 500) {
+      // Same convention as the other model routes (chat, images): a failed call
+      // writes an `error` usage row. Validation and guardrail blocks returned
+      // above, before any model call; moderations is the exception in the repo
+      // (it logs success only), so chat/images are the template here.
+      if (modelKey) {
         try {
           const model = await getModelByKey(auth.tenantDbName, modelKey, auth.projectId);
           if (model) {

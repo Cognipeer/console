@@ -77,27 +77,104 @@ function ensureDecisionModel(model: IModel) {
   }
 }
 
+/** Parallel guardrail evaluations per request. */
+export const GUARDRAIL_CONCURRENCY = 4;
+
+export interface TextSegment {
+  text: string;
+  apply: (next: string) => void;
+}
+
 /**
- * Runs `transform` over every piece of caller-supplied free text, in a fixed
- * order (input parts, then each question's instructions), and returns a copy of
- * the request with the transformed text. Redactions land in the copy, so the
- * backend only ever sees the post-guardrail text.
+ * Every piece of caller-supplied free text the model will read, in a FIXED
+ * order: input text parts, then per question (declaration order) its
+ * instructions, each choice description, and each score level label. Returns a
+ * copy of the request plus setters into that copy, so redactions land in the
+ * copy and the caller's object is never mutated.
+ *
+ * Choice keys and question ids are identifiers (schema property names and the
+ * answer's keys), not prose, and are not scanned.
  */
-async function mapRequestText(
-  request: ParsedDecisionRequest,
-  transform: (text: string) => Promise<string>,
-): Promise<ParsedDecisionRequest> {
-  const input: DecisionInputPart[] = [];
-  for (const part of request.input) {
-    input.push(part.type === 'text' ? { type: 'text', text: await transform(part.text) } : part);
+export function collectSegments(request: ParsedDecisionRequest): {
+  copy: ParsedDecisionRequest;
+  segments: TextSegment[];
+} {
+  const segments: TextSegment[] = [];
+  const input: DecisionInputPart[] = request.input.map((part) => ({ ...part }));
+  for (const part of input) {
+    if (part.type === 'text') {
+      segments.push({ text: part.text, apply: (next) => { part.text = next; } });
+    }
   }
   const questions: Record<string, DecisionQuestion> = {};
-  for (const [id, question] of Object.entries(request.questions)) {
-    questions[id] = question.instructions
-      ? { ...question, instructions: await transform(question.instructions) }
-      : question;
+  for (const [id, original] of Object.entries(request.questions)) {
+    const question = (
+      original.type === 'choice'
+        ? { ...original, choices: { ...original.choices } }
+        : original.type === 'score'
+          ? { ...original, levels: [...original.levels] }
+          : { ...original }
+    ) as DecisionQuestion;
+    questions[id] = question;
+    if (question.instructions) {
+      segments.push({ text: question.instructions, apply: (next) => { question.instructions = next; } });
+    }
+    if (question.type === 'choice') {
+      for (const key of Object.keys(question.choices)) {
+        segments.push({ text: question.choices[key], apply: (next) => { question.choices[key] = next; } });
+      }
+    } else if (question.type === 'score') {
+      question.levels.forEach((level, index) => {
+        segments.push({ text: level, apply: (next) => { question.levels[index] = next; } });
+      });
+    }
   }
-  return { ...request, input, questions };
+  return { copy: { ...request, input, questions }, segments };
+}
+
+/**
+ * Runs `transform` over the non-blank segments with bounded concurrency and
+ * applies the results in place.
+ *
+ * Why per segment and not one joined call: a guardrail may rewrite the text
+ * (redact / mask / tokenize) and no delimiter is guaranteed to survive a
+ * rewrite, so a joined call cannot be split back safely; it would also let one
+ * segment's content change how another is judged. Per segment keeps each
+ * redaction exactly attributable. Round-trips are cut by skipping blank
+ * segments and running up to GUARDRAIL_CONCURRENCY at once.
+ *
+ * Once any segment fails (a block) no new segment starts, and the failure of the
+ * EARLIEST segment in the fixed order is thrown, so the message the caller reads
+ * does not depend on which evaluation finished first.
+ */
+export async function mapSegmentsBounded(
+  segments: TextSegment[],
+  transform: (text: string) => Promise<string>,
+  concurrency = GUARDRAIL_CONCURRENCY,
+): Promise<void> {
+  const work = segments.filter((segment) => segment.text.trim().length > 0);
+  const errors = new Map<number, unknown>();
+  let next = 0;
+  let failed = false;
+
+  const worker = async () => {
+    while (!failed) {
+      const index = next;
+      next += 1;
+      if (index >= work.length) return;
+      try {
+        work[index].apply(await transform(work[index].text));
+      } catch (error) {
+        failed = true;
+        errors.set(index, error);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, worker));
+
+  if (errors.size > 0) {
+    throw errors.get(Math.min(...errors.keys()));
+  }
 }
 
 function loggableRequest(request: ParsedDecisionRequest) {
@@ -143,7 +220,8 @@ export async function handleDecisionRequest(params: {
   let request = params.request;
   const guardrailKeys = resolveBindings(model, 'input.pre');
   if (guardrailKeys.length > 0) {
-    request = await mapRequestText(request, async (text) => {
+    const { copy, segments } = collectSegments(request);
+    await mapSegmentsBounded(segments, async (text) => {
       const outcome = await enforceModelGuardrailChain({
         tenantDbName,
         tenantId: model.tenantId,
@@ -156,6 +234,7 @@ export async function handleDecisionRequest(params: {
       });
       return outcome.redactedText ?? text;
     });
+    request = copy;
   }
 
   const { runtime } = await buildModelRuntime(tenantDbName, model.tenantId, model.providerKey, projectId);

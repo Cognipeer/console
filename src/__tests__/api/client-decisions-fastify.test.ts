@@ -61,6 +61,7 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { checkRateLimit, settleUsageBudget } from '@/lib/quota/quotaGuard';
+import { mapSegmentsBounded } from '@/lib/services/models/decisionService';
 import { createStructuredDecisionRuntime } from '@/lib/providers/contracts/structuredDecisionRuntime';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 import { clientDecisionsApiPlugin } from '@/server/api/plugins/client-decisions';
@@ -217,7 +218,11 @@ describe('POST /client/v1/decisions', () => {
       expect(checked).toEqual([
         'My email is jane@example.com and my parcel is late.',
         'Call me at 555-0100',
+        'glad',
+        'angry',
         'Is it time critical?',
+        'minor',
+        'major',
       ]);
       for (const [args] of mockFn(enforceModelGuardrailChain).mock.calls) {
         expect(args).toMatchObject({ guardrailKeys: ['pii-guard'], phase: 'input', projectId: 'proj-1' });
@@ -363,13 +368,128 @@ describe('POST /client/v1/decisions', () => {
     });
   });
 
-  it('returns 502 when the model does not produce valid JSON', async () => {
+  it('returns 502 on unparseable output WITHOUT retrying, and logs an error row', async () => {
     invoke.mockResolvedValue({ content: 'definitely not json' });
     const response = await post(BODY);
     expect(response.statusCode).toBe(502);
+    expect(invoke).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(logModelUsage).toHaveBeenCalledWith(
       'tenant_acme', expect.anything(), expect.objectContaining({ status: 'error', route: 'decisions' }),
     ));
+  });
+
+  it('still retries a transient upstream error (503) and then succeeds', async () => {
+    invoke
+      .mockRejectedValueOnce(Object.assign(new Error('upstream unavailable'), { status: 503 }))
+      .mockResolvedValue(CHAT_ANSWER);
+    const response = await post(BODY);
+    expect(response.statusCode).toBe(200);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs an error row for an upstream failure that exhausts retries', async () => {
+    invoke.mockRejectedValue(Object.assign(new Error('upstream down'), { status: 503 }));
+    const response = await post(BODY);
+    expect(response.statusCode).toBeGreaterThanOrEqual(500);
+    expect(invoke).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => expect(logModelUsage).toHaveBeenCalledWith(
+      'tenant_acme', expect.anything(), expect.objectContaining({ status: 'error' }),
+    ));
+  });
+
+  it('does not write an error row for a guardrail block', async () => {
+    mockFn(enforceModelGuardrailChain).mockRejectedValue(new GuardrailBlockError('blocked', 'pii-guard', 'block', []));
+    await post(BODY);
+    expect(logModelUsage).not.toHaveBeenCalled();
+  });
+
+  describe('guardrail coverage of choice descriptions and level labels', () => {
+    it('blocks (before the backend) when a choice description trips the guardrail', async () => {
+      mockFn(enforceModelGuardrailChain).mockImplementation(async ({ text }: { text: string }) => {
+        if (text === 'angry') throw new GuardrailBlockError('blocked: angry', 'pii-guard', 'block', []);
+        return { redactedText: undefined, results: [] };
+      });
+      const response = await post(BODY);
+      expect(response.statusCode).toBe(400);
+      expect(parseJsonBody<any>(response.body).error.type).toBe('guardrail_block');
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it('blocks when a score level label trips the guardrail', async () => {
+      mockFn(enforceModelGuardrailChain).mockImplementation(async ({ text }: { text: string }) => {
+        if (text === 'major') throw new GuardrailBlockError('blocked: major', 'pii-guard', 'block', []);
+        return { redactedText: undefined, results: [] };
+      });
+      expect((await post(BODY)).statusCode).toBe(400);
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it("throws the EARLIEST segment's block when several block", async () => {
+      mockFn(enforceModelGuardrailChain).mockImplementation(async ({ text }: { text: string }) => {
+        if (text === 'major') throw new GuardrailBlockError('late block', 'g2', 'block', []);
+        if (text === 'glad') {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          throw new GuardrailBlockError('early block', 'g1', 'block', []);
+        }
+        return { redactedText: undefined, results: [] };
+      });
+      const response = await post(BODY);
+      expect(parseJsonBody<any>(response.body).error.message).toBe('early block');
+    });
+
+    it('sends redacted choice descriptions and level labels, leaving the keys alone', async () => {
+      mockFn(enforceModelGuardrailChain).mockImplementation(async ({ text }: { text: string }) => ({
+        redactedText: text === 'glad' ? '[R1]' : text === 'minor' ? '[R2]' : undefined,
+        results: [],
+      }));
+      await post(BODY);
+      const sent = JSON.stringify(invoke.mock.calls[0]);
+      expect(sent).toContain('[R1]');
+      expect(sent).toContain('[R2]');
+      expect(sent).not.toContain('glad');
+      expect(sent).toContain('happy');
+    });
+
+    it('skips blank segments', async () => {
+      await post({ ...BODY, questions: { q: { type: 'choice', instructions: '   ', choices: { a: '', b: 'text' } } } });
+      expect(mockFn(enforceModelGuardrailChain).mock.calls.map(([args]) => args.text)).toEqual([
+        BODY.input,
+        'text',
+      ]);
+    });
+  });
+
+  describe('mapSegmentsBounded', () => {
+    it('never runs more than 4 at once and applies every result', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const applied: string[] = [];
+      const segments = Array.from({ length: 12 }, (_, i) => ({
+        text: `t${i}`,
+        apply: (next: string) => { applied[i] = next; },
+      }));
+      await mapSegmentsBounded(segments, async (text) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight -= 1;
+        return text.toUpperCase();
+      });
+      expect(peak).toBe(4);
+      expect(applied).toEqual(segments.map((s) => s.text.toUpperCase()));
+    });
+
+    it('stops starting new segments after a failure', async () => {
+      const seen: string[] = [];
+      const segments = Array.from({ length: 20 }, (_, i) => ({ text: `t${i}`, apply: () => {} }));
+      await expect(mapSegmentsBounded(segments, async (text) => {
+        seen.push(text);
+        if (text === 't1') throw new Error('boom');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return text;
+      })).rejects.toThrow('boom');
+      expect(seen.length).toBeLessThan(20);
+    });
   });
 
   it('returns 429 and never calls the model when a quota denies the request', async () => {

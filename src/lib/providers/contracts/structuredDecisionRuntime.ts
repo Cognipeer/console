@@ -39,6 +39,15 @@ export const DECISION_CAPABILITIES = {
 
 /** The upstream answered, but not with a usable document — maps to HTTP 502. */
 export class DecisionBackendError extends Error {
+  /**
+   * Makes `withResilience` treat this as NON-retryable (422 is in its
+   * non-retryable set): the call already succeeded and cost tokens, and asking
+   * again at temperature 0 mostly buys the same unparseable answer three times
+   * over. The only repair is the in-runtime JSON recovery; the HTTP response is
+   * still 502 (see the plugin). Transient 429/5xx/network errors are untouched.
+   */
+  readonly status = 422;
+
   constructor(message: string) {
     super(message);
     this.name = 'DecisionBackendError';
