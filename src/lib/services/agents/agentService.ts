@@ -78,7 +78,12 @@ import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/servi
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
-import { getToolByKey, executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
+import { executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
+import {
+    resolveAgentBindingMcpServer,
+    resolveAgentBindingTool,
+    resolveAgentKnowledgeModule,
+} from './bindingResolution';
 import { resolveBrowser, createBrowserSession, buildBrowserAgentTools, closeBrowserSession } from '@/lib/services/browser';
 import { buildWebSearchAgentTools } from '@/lib/services/webSearch';
 import { recordTracingSessionCreated } from '@/lib/services/agentTracing';
@@ -979,15 +984,22 @@ function warnUnservableExternalBindings(config: GuardrailBindingSource, agentKey
 async function buildKnowledgeTools(
     tenantDbName: string,
     tenantId: string,
+    projectId: string,
     ragModuleKey: string,
     guard: AgentToolGuard,
 ): Promise<{ tools: AgentSdkToolInterface[]; toolDefinitions: TraceToolDefinition[] }> {
     const { createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
 
-    // Tenant-wide lookup: the user explicitly bound this module to the agent.
-    const knowledgeModule = await getRagModule(tenantDbName, ragModuleKey);
-    const filterableFields = knowledgeModule?.filterableFields ?? [];
+    const knowledgeModule = await resolveAgentKnowledgeModule(tenantDbName, ragModuleKey, projectId);
+    if (!knowledgeModule) {
+        logger.warn('Skipping knowledge engine not visible to the agent\'s project', { key: ragModuleKey, projectId });
+        return { tools: [], toolDefinitions: [] };
+    }
+    // Every later read re-resolves the module by key; pinning the scope it was
+    // found in keeps those reads on this same row ('' = tenant-wide only).
+    const moduleScope = knowledgeModule.projectId ? String(knowledgeModule.projectId) : '';
+    const filterableFields = knowledgeModule.filterableFields ?? [];
 
     const searchTool = createTool({
         name: 'knowledge_search',
@@ -1002,7 +1014,7 @@ async function buildKnowledgeTools(
         func: guard.protect(
             { name: agentToolPolicyName('knowledge', 'search'), requestedName: 'knowledge_search' },
             async (args: { query: string; filter?: Record<string, unknown> }) => {
-                const result = await queryRag(tenantDbName, tenantId, undefined, {
+                const result = await queryRag(tenantDbName, tenantId, moduleScope, {
                     ragModuleKey,
                     query: args.query,
                     topK: 5,
@@ -1027,6 +1039,7 @@ async function buildKnowledgeTools(
     async function resolveOwnedDocument(documentId: string) {
         const document = await getRagDocument(tenantDbName, documentId);
         if (!document || document.ragModuleKey !== ragModuleKey) return undefined;
+        if (moduleScope && document.projectId && String(document.projectId) !== moduleScope) return undefined;
         return document;
     }
 
@@ -1044,7 +1057,7 @@ async function buildKnowledgeTools(
             async (args: { documentId: string }) => {
                 const document = await resolveOwnedDocument(args.documentId);
                 if (!document) return 'Document not found in this knowledge base.';
-                const result = await getRagDocumentFullText(tenantDbName, tenantId, undefined, document);
+                const result = await getRagDocumentFullText(tenantDbName, tenantId, moduleScope, document);
                 if (!result) return 'Source text is not available for this document; it may need to be re-ingested.';
                 const notice = result.truncated
                     ? `\n\n[Truncated at ${result.text.length} of ${result.totalChars} characters `
@@ -1072,7 +1085,7 @@ async function buildKnowledgeTools(
             async (args: { documentId: string; offset?: number; limit?: number }) => {
                 const document = await resolveOwnedDocument(args.documentId);
                 if (!document) return 'Document not found in this knowledge base.';
-                const result = await getRagDocumentTextLines(tenantDbName, tenantId, undefined, document, {
+                const result = await getRagDocumentTextLines(tenantDbName, tenantId, moduleScope, document, {
                     offset: args.offset,
                     limit: args.limit,
                 });
@@ -1449,6 +1462,7 @@ async function buildAgentSubagents(
             const knowledge = await buildKnowledgeTools(
                 input.tenantDbName,
                 input.tenantId,
+                input.projectId,
                 knowledgeEngineKey,
                 input.guard,
             );
@@ -1610,7 +1624,7 @@ export async function buildBoundTools(
     for (const binding of bindings) {
         if (binding.source === 'tool') {
             // ── Unified tool system ──────────────────────────────
-            const toolRecord = await getToolByKey(tenantDbName, binding.sourceKey);
+            const toolRecord = await resolveAgentBindingTool(tenantDbName, binding.sourceKey, projectId);
             if (!toolRecord || toolRecord.status !== 'active') {
                 logger.warn('Skipping inactive/missing tool', { key: binding.sourceKey });
                 continue;
@@ -1695,7 +1709,7 @@ export async function buildBoundTools(
             }
         } else if (binding.source === 'mcp') {
             // ── Legacy MCP server bindings ───────────────────────
-            const server = await getMcpServerByKey(tenantDbName, binding.sourceKey);
+            const server = await resolveAgentBindingMcpServer(tenantDbName, binding.sourceKey, projectId);
             if (!server || server.status !== 'active') {
                 logger.warn('Skipping inactive/missing MCP server', { key: binding.sourceKey });
                 continue;
@@ -3097,7 +3111,7 @@ async function buildLocalAgentRun(input: {
     const toolDefinitions: TraceToolDefinition[] = [];
     if (config.knowledgeEngineKey) {
         const knowledgeTools = await buildKnowledgeTools(
-            tenantDbName, tenantId, config.knowledgeEngineKey, toolGuard,
+            tenantDbName, tenantId, projectId, config.knowledgeEngineKey, toolGuard,
         );
         tools.push(...knowledgeTools.tools);
         toolDefinitions.push(...knowledgeTools.toolDefinitions);

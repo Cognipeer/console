@@ -66,10 +66,13 @@ export function ToolMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       return { ...doc, _id: doc._id?.toString() } as unknown as ITool;
     }
 
-    async findToolByKey(key: string, projectId?: string): Promise<ITool | null> {
+    async findToolByKey(key: string, projectId?: string | null): Promise<ITool | null> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { key };
-      if (projectId) filter.projectId = projectId;
+      // `null` = the tenant-wide row only (matches a stored null and a missing
+      // field); a string = that project's row; `undefined`/'' = no clause.
+      if (projectId === null) filter.projectId = null;
+      else if (projectId) filter.projectId = projectId;
       const doc = await db
         .collection(COLLECTIONS.tools)
         .findOne(filter);

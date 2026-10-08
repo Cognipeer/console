@@ -387,7 +387,7 @@ export async function getTool(
 export async function getToolByKey(
   tenantDbName: string,
   key: string,
-  projectId?: string,
+  projectId?: string | null,
 ): Promise<ITool | null> {
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);

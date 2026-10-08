@@ -83,6 +83,7 @@ import {
   applyConfigGuardrailBindings,
   connectedConfigForUpdate,
   normalizeA2aUpdate,
+  pickAgentUpdateFields,
   prepareNewAgentConfig,
   publishValidatedAgent,
   redactAgent,
@@ -421,7 +422,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       normalizeA2aUpdate(body, existing);
 
-      const agent = await updateAgentRecord(session.tenantDbName, agentId, body, session.userId);
+      const agent = await updateAgentRecord(session.tenantDbName, agentId, pickAgentUpdateFields(body), session.userId);
 
       if (!agent) {
         return reply.code(404).send({ error: 'Agent not found' });

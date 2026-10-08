@@ -43,6 +43,7 @@ import {
 import {
   connectedConfigForUpdate,
   normalizeA2aUpdate,
+  pickAgentUpdateFields,
   prepareNewAgentConfig,
   publishValidatedAgent,
   redactAgent,
@@ -508,7 +509,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       const agent = await updateAgentRecord(
         ctx.tenantDbName,
         String(existing._id),
-        body,
+        pickAgentUpdateFields(body),
         ctx.tokenRecord.userId,
       );
       if (!agent) {
