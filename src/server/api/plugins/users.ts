@@ -172,9 +172,9 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Disable / enable share one handler: the guards (self, owner, tenant) and the
   // audit trail live in setUserStatus, so the route only gates on role.
-  const registerStatusRoute = (action: 'disable' | 'enable') => {
+  const statusRouteHandler = (action: 'disable' | 'enable') => {
     const status = action === 'disable' ? 'disabled' : 'active';
-    app.post(`/users/:id/${action}`, withApiRequestContext(async (request, reply) => {
+    return withApiRequestContext(async (request, reply) => {
       try {
         const { id } = request.params as { id: string };
         const session = requireSessionContext(request);
@@ -222,10 +222,11 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         logger.error(`${action} user error`, { error });
         return reply.code(500).send({ error: 'Internal server error' });
       }
-    }));
+    });
   };
-  registerStatusRoute('disable');
-  registerStatusRoute('enable');
+  // Literal paths (not a template) so the endpoint auth-coverage gate can see them.
+  app.post('/users/:id/disable', statusRouteHandler('disable'));
+  app.post('/users/:id/enable', statusRouteHandler('enable'));
 
   app.patch('/users/:id/permissions', withApiRequestContext(async (request, reply) => {
     try {
