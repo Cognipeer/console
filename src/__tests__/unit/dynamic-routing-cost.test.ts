@@ -19,6 +19,7 @@ import {
   segmentKey,
   selectPoolCandidate,
   type PoolCandidateEstimate,
+  pickDecisionLabel,
 } from '@/lib/services/models/dynamicRouting';
 import { summarizeRoutedUsage } from '@/lib/services/models/routingAnalytics';
 import { validateDynamicConfig } from '@/lib/services/models/modelService';
@@ -308,6 +309,79 @@ describe('validateDynamicConfig · pools, guards, rollout', () => {
     );
     expect(() => validateDynamicConfig({ ...base, guards: { maxCostPerRequestUsd: -1 } })).toThrow(/non-negative/);
     expect(() => validateDynamicConfig({ ...base, canaryPercent: 120 })).toThrow(/canaryPercent/);
+  });
+});
+
+describe('validateDynamicConfig · decision deciders and signals', () => {
+  const rule = (signal: string) => ({
+    label: 'r',
+    targetModelKey: 'big',
+    conditions: [{ signal, operator: 'gt', value: 1 }],
+  });
+  const base = (extra: object = {}) =>
+    ({ strategy: 'rule-based', defaultModelKey: 'small', rules: [rule('messageCount')], ...extra }) as unknown as IDynamicRoutingConfig;
+
+  it('rejects the removed estimatedCostUsd signal with a pointer to pools/guards', () => {
+    expect(() => validateDynamicConfig(base({ rules: [rule('estimatedCostUsd')] }))).toThrow(/estimatedCostUsd.*removed/);
+  });
+
+  it('rejects an unknown signal', () => {
+    expect(() => validateDynamicConfig(base({ rules: [rule('nope')] }))).toThrow(/unknown signal "nope"/);
+  });
+
+  it('complexityScore needs a complexity config with 2+ levels', () => {
+    expect(() => validateDynamicConfig(base({ rules: [rule('complexityScore')] }))).toThrow(/needs a complexity decision model/);
+    expect(() =>
+      validateDynamicConfig(base({ rules: [rule('complexityScore')], complexity: { modelKey: 'j', levels: ['only'] } })),
+    ).toThrow(/between 2 and 255/);
+    expect(() =>
+      validateDynamicConfig(base({ rules: [rule('complexityScore')], complexity: { modelKey: 'j', levels: ['lo', 'hi'] } })),
+    ).not.toThrow();
+  });
+
+  it('validates the decider confidence floor and fallback target', () => {
+    const decider = (extra: object) =>
+      ({
+        strategy: 'model-based',
+        defaultModelKey: 'small',
+        decider: { modelKey: 'j', labels: [{ label: 'a', description: '', targetModelKey: 'big' }], ...extra },
+      }) as unknown as IDynamicRoutingConfig;
+    expect(() => validateDynamicConfig(decider({ minConfidence: 1.5 }))).toThrow(/between 0 and 1/);
+    expect(() => validateDynamicConfig(decider({ minConfidence: 0.7, belowConfidence: { modelKey: 'big' } }))).not.toThrow();
+    expect(() => validateDynamicConfig(decider({ minConfidence: 0.7, belowConfidence: { pool: [] } }))).toThrow(/at least one candidate/);
+  });
+});
+
+describe('pickDecisionLabel', () => {
+  const decider = {
+    modelKey: 'j',
+    labels: [
+      { label: 'hard', description: '', targetModelKey: 'big' },
+      { label: 'easy', description: '', targetModelKey: 'small' },
+    ],
+  };
+  const choice = (c: string, probabilities: Record<string, number>, extra: object = {}) =>
+    ({ type: 'choice', choice: c, probabilities, ...extra }) as never;
+
+  it('resolves the label and reports probability and margin', () => {
+    const pick = pickDecisionLabel(choice('hard', { hard: 0.7, easy: 0.3 }), decider);
+    expect(pick.label?.label).toBe('hard');
+    expect(pick.probability).toBeCloseTo(0.7);
+    expect(pick.margin).toBeCloseTo(0.4);
+    expect(pick.belowThreshold).toBe(false);
+  });
+
+  it('applies minConfidence to confidence when reported, else to probability', () => {
+    const floor = { ...decider, minConfidence: 0.8 };
+    expect(pickDecisionLabel(choice('hard', { hard: 0.9, easy: 0.1 }, { confidence: 0.5 }), floor).belowThreshold).toBe(true);
+    expect(pickDecisionLabel(choice('hard', { hard: 0.9, easy: 0.1 }), floor).belowThreshold).toBe(false);
+    expect(pickDecisionLabel(choice('hard', { hard: 0.6, easy: 0.4 }), floor).belowThreshold).toBe(true);
+  });
+
+  it('returns no label for an unknown choice or a refusal', () => {
+    expect(pickDecisionLabel(choice('weird', { weird: 1 }), decider).label).toBeNull();
+    expect(pickDecisionLabel({ type: 'refusal' } as never, decider).label).toBeNull();
+    expect(pickDecisionLabel(undefined, decider).label).toBeNull();
   });
 });
 

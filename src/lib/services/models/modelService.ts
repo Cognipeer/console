@@ -12,7 +12,7 @@ import {
   ModelCategory,
 } from '@/lib/database';
 import { providerRegistry } from '@/lib/providers';
-import { configModelKeys } from './dynamicRouting';
+import { KNOWN_RULE_SIGNALS, configModelKeys } from './dynamicRouting';
 import {
   createProviderConfig,
   getProviderConfigByKey,
@@ -362,6 +362,18 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
       if (!Array.isArray(rule.conditions) || rule.conditions.length === 0) {
         throw new Error(`rule "${rule.label || '(unnamed)'}" needs at least one condition`);
       }
+      for (const condition of rule.conditions) {
+        if (!KNOWN_RULE_SIGNALS.has(condition.signal)) {
+          throw new Error(
+            (condition.signal as string) === 'estimatedCostUsd'
+              ? `rule "${rule.label || '(unnamed)'}": the estimatedCostUsd signal was removed — route by cost with a pool policy or guards instead`
+              : `rule "${rule.label || '(unnamed)'}": unknown signal "${condition.signal}"`,
+          );
+        }
+        if (condition.signal === 'complexityScore' && !config.complexity) {
+          throw new Error(`rule "${rule.label || '(unnamed)'}" uses complexityScore, which needs a complexity decision model`);
+        }
+      }
       if (rule.conditions.length > DYNAMIC_ROUTING_LIMITS.maxConditionsPerRule) {
         throw new Error(
           `rule "${rule.label || '(unnamed)'}" supports at most ` +
@@ -380,6 +392,25 @@ export function validateDynamicConfig(config: IDynamicRoutingConfig | undefined)
     for (const label of config.decider.labels) {
       if (!label.label) throw new Error('every decider label needs a label name');
       validateTarget(label, `decider label "${label.label}"`);
+    }
+    const minConfidence = config.decider.minConfidence;
+    if (minConfidence !== undefined && !(isFiniteNonNegative(minConfidence) && minConfidence <= 1)) {
+      throw new Error('decider.minConfidence must be between 0 and 1');
+    }
+    if (config.decider.belowConfidence !== undefined) {
+      validateTarget({ target: config.decider.belowConfidence }, 'decider.belowConfidence');
+    }
+  }
+  if (config.complexity !== undefined) {
+    const { modelKey, levels } = config.complexity;
+    if (!modelKey) throw new Error('complexity.modelKey is required');
+    if (
+      !Array.isArray(levels) ||
+      levels.length < 2 ||
+      levels.length > 255 ||
+      levels.some((level) => typeof level !== 'string' || !level.trim())
+    ) {
+      throw new Error('complexity.levels needs between 2 and 255 non-empty level names');
     }
   }
   validateGuards(config.guards);
@@ -421,9 +452,10 @@ export async function validateDynamicConfigReferences(
   projectId: string,
   config: IDynamicRoutingConfig,
   selfKey?: string,
+  /** The config being replaced — a chat decider it already used stays allowed. */
+  previous?: IDynamicRoutingConfig,
 ): Promise<void> {
   const keys = new Set(configModelKeys(config));
-  if (config.decider?.modelKey) keys.add(config.decider.modelKey);
   const db = await getDatabase();
   await db.switchToTenant(tenantDbName);
   const missing: string[] = [];
@@ -436,6 +468,29 @@ export async function validateDynamicConfigReferences(
       missing.push(key);
     } else if (model.category !== 'llm') {
       throw new Error(`"${key}" is not an LLM model and cannot be a routing target`);
+    }
+  }
+  // Deciders and the complexity scorer are decision models. A chat (`llm`)
+  // decider is the pre-decision-model form: allowed only while it is the very
+  // decider the config already had.
+  const roles: Array<{ key?: string; what: string; allowLegacyLlm: boolean }> = [
+    {
+      key: config.decider?.modelKey,
+      what: 'decider',
+      allowLegacyLlm: Boolean(previous?.decider && previous.decider.modelKey === config.decider?.modelKey),
+    },
+    { key: config.complexity?.modelKey, what: 'complexity scorer', allowLegacyLlm: false },
+  ];
+  for (const { key, what, allowLegacyLlm } of roles) {
+    if (!key) continue;
+    if (selfKey && key === selfKey) throw new Error(`A Dynamic LLM cannot route to itself ("${key}")`);
+    const model = await db.findModelByKey(key, projectId);
+    if (!model) {
+      missing.push(key);
+    } else if (model.category === 'decision') {
+      continue;
+    } else if (!(allowLegacyLlm && model.category === 'llm')) {
+      throw new Error(`"${key}" is not a decision model and cannot be the ${what}`);
     }
   }
   if (missing.length > 0) {
@@ -559,6 +614,7 @@ export async function updateModel(
         projectId,
         updateDynamic,
         updatePayload.key ?? existing.key,
+        settingsDynamicConfig(existing.settings),
       );
     }
   }

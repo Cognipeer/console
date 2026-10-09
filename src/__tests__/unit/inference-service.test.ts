@@ -5,10 +5,15 @@ import {
   handleEmbeddingRequest,
   OutputTokenLimitError,
 } from '@/lib/services/models/inferenceService';
+import { handleDecisionRequest } from '@/lib/services/models/decisionService';
 
 // ---- mocks ----
 vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: vi.fn(),
+}));
+
+vi.mock('@/lib/services/models/decisionService', () => ({
+  handleDecisionRequest: vi.fn(),
 }));
 
 vi.mock('@/lib/services/models/runtimeService', () => ({
@@ -2173,28 +2178,176 @@ describe('handleChatCompletion · Dynamic LLM', () => {
     expect(result.routing?.guard).toBe('budget');
   });
 
-  it('estimatedCostUsd rule signal is computed (it used to never match)', async () => {
+  const decisionOutcome = (answers: Record<string, unknown>) => ({
+    result: { answers, backend: { kind: 'structured', provider: 'openai' } },
+    cost: { totalCost: 0.0001 },
+    usage: { inputTokens: 10, outputTokens: 5 },
+    latencyMs: 5,
+    requestId: 'dec-1',
+  });
+
+  it('complexityScore is scored by the decision model and drives a rule', async () => {
     const router = makeRouter({
       strategy: 'rule-based',
-      defaultModelKey: 'big',
+      defaultModelKey: 'small',
+      complexity: { modelKey: 'scorer', levels: ['easy', 'medium', 'hard'] },
       rules: [
         {
-          label: 'expensive',
-          targetModelKey: 'small',
-          conditions: [{ signal: 'estimatedCostUsd', operator: 'gt', value: 0.001 }],
+          label: 'hard',
+          targetModelKey: 'big',
+          conditions: [{ signal: 'complexityScore', operator: 'gte', value: 1.5 }],
         },
       ],
     });
-    wireAll({ router, big: priced('big', 10, 30), small: priced('small', 0.1, 0.4) });
+    wireAll({
+      router,
+      big: priced('big', 10, 30),
+      small: priced('small', 0.1, 0.4),
+      scorer: makeLlmModel({ _id: 'scorer-id', key: 'scorer', category: 'decision' }),
+    });
+    (handleDecisionRequest as ReturnType<typeof vi.fn>).mockResolvedValue(
+      decisionOutcome({ complexity: { type: 'score', score: 1.8, probabilities: {} } }),
+    );
+    const onUsageSettled = vi.fn();
 
     const result = await handleChatCompletion({
       ...BASE_PARAMS,
       modelKey: 'router',
-      body: { messages: [{ role: 'user', content: 'z'.repeat(4000) }], max_tokens: 500 },
+      body: { messages: [{ role: 'user', content: 'prove fermat' }] },
+      onUsageSettled,
     });
 
     expect(result.routing?.decision).toBe('rule');
-    expect(result.routing?.chosenModelKey).toBe('small');
+    expect(result.routing?.chosenModelKey).toBe('big');
+    expect(onUsageSettled).toHaveBeenCalledTimes(2); // scorer + child
+    expect(handleDecisionRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        routing: expect.objectContaining({ role: 'decider', chosenModelKey: 'scorer' }),
+      }),
+    );
+  });
+
+  it('complexityScore is not scored when no rule references it', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'small',
+      complexity: { modelKey: 'scorer', levels: ['easy', 'hard'] },
+      rules: [{ label: 'tools', targetModelKey: 'big', conditions: [{ signal: 'hasTools', operator: 'isTrue' }] }],
+    });
+    wireAll({ router, big: priced('big', 10, 30), small: priced('small', 0.1, 0.4) });
+
+    await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    expect(handleDecisionRequest).not.toHaveBeenCalled();
+  });
+
+  describe('decision-model decider', () => {
+    const deciderRouter = (decider: object) =>
+      makeRouter({
+        strategy: 'model-based',
+        defaultModelKey: 'small',
+        decider: {
+          modelKey: 'decider',
+          labels: [
+            { label: 'hard', description: 'hard', targetModelKey: 'big' },
+            { label: 'easy', description: 'easy', targetModelKey: 'small' },
+          ],
+          ...decider,
+        },
+      });
+    const wire = (router: object) =>
+      wireAll({
+        router,
+        big: priced('big', 10, 30),
+        small: priced('small', 0.1, 0.4),
+        decider: makeLlmModel({ _id: 'decider-id', key: 'decider', category: 'decision' }),
+      });
+    const answer = (choice: string, hard: number, extra: object = {}) =>
+      decisionOutcome({
+        route: { type: 'choice', choice, probabilities: { hard, easy: 1 - hard }, ...extra },
+      });
+
+    it('routes by the winning label, bills the call and records probability + margin', async () => {
+      wire(deciderRouter({}));
+      (handleDecisionRequest as ReturnType<typeof vi.fn>).mockResolvedValue(answer('hard', 0.9));
+      const onUsageSettled = vi.fn();
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        modelKey: 'router',
+        body: { messages: [{ role: 'user', content: 'prove fermat' }] },
+        onUsageSettled,
+      });
+
+      expect(result.routing?.chosenModelKey).toBe('big');
+      expect(result.routing?.decision).toBe('model');
+      expect(result.routing?.deciderProbability).toBeCloseTo(0.9);
+      expect(result.routing?.deciderMargin).toBeCloseTo(0.8);
+      expect(onUsageSettled).toHaveBeenCalledTimes(2); // decision + child
+      // No chat call goes to the decider model.
+      expect(handleDecisionRequest).toHaveBeenCalledTimes(1);
+    });
+
+    it('below minConfidence it uses the default target', async () => {
+      wire(deciderRouter({ minConfidence: 0.8 }));
+      (handleDecisionRequest as ReturnType<typeof vi.fn>).mockResolvedValue(answer('hard', 0.6));
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        modelKey: 'router',
+        body: { messages: [{ role: 'user', content: 'maybe hard' }] },
+      });
+
+      expect(result.routing?.chosenModelKey).toBe('small');
+      expect(result.routing?.reason).toContain('below minConfidence');
+    });
+
+    it('below minConfidence it uses belowConfidence when set', async () => {
+      wire(deciderRouter({ minConfidence: 0.8, belowConfidence: { modelKey: 'big' } }));
+      (handleDecisionRequest as ReturnType<typeof vi.fn>).mockResolvedValue(answer('easy', 0.4));
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        modelKey: 'router',
+        body: { messages: [{ role: 'user', content: 'unsure' }] },
+      });
+
+      expect(result.routing?.chosenModelKey).toBe('big');
+    });
+
+    it('prefers the reported confidence over the label probability', async () => {
+      wire(deciderRouter({ minConfidence: 0.8 }));
+      (handleDecisionRequest as ReturnType<typeof vi.fn>).mockResolvedValue(
+        answer('hard', 0.95, { confidence: 0.5, confidence_source: 'native' }),
+      );
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        modelKey: 'router',
+        body: { messages: [{ role: 'user', content: 'x' }] },
+      });
+
+      expect(result.routing?.chosenModelKey).toBe('small');
+      expect(result.routing?.deciderConfidence).toBe(0.5);
+    });
+
+    it('a failing decision call falls back to the default', async () => {
+      wire(deciderRouter({}));
+      (handleDecisionRequest as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('boom'));
+
+      const result = await handleChatCompletion({
+        ...BASE_PARAMS,
+        modelKey: 'router',
+        body: { messages: [{ role: 'user', content: 'x' }] },
+      });
+
+      expect(result.routing?.chosenModelKey).toBe('small');
+      expect(result.routing?.reason).toContain('Decider failed');
+    });
   });
 
   it('model-based: the decider call is billed to the caller and attributed to the router', async () => {

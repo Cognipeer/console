@@ -59,9 +59,13 @@ export { OutputTokenLimitError } from './openaiErrors';
 
 import { calculateCost, logModelUsage, TokenUsage, UsageCostResult } from './usageLogger';
 import {
+  COMPLEXITY_QUESTION_ID,
+  DECIDER_QUESTION_ID,
   MAX_ROUTING_DEPTH,
   applyCostGuards,
+  buildComplexityQuestion,
   buildDeciderMessages,
+  buildDeciderQuestion,
   candidateIneligibility,
   deriveConversationId,
   estimateRequestCostUsd,
@@ -71,6 +75,7 @@ import {
   isInCanary,
   normalizeTarget,
   parseDeciderLabel,
+  pickDecisionLabel,
   predictOutputTokens,
   primaryModelKey,
   publicSignals,
@@ -78,7 +83,10 @@ import {
   segmentKey,
   selectPoolCandidate,
   type PoolCandidateEstimate,
+  type RoutingSignals,
 } from './dynamicRouting';
+import type { DecisionQuestion } from '@/lib/providers';
+import type { ParsedDecisionRequest } from '@/lib/providers/contracts/decisionHelpers';
 import {
   getConversationCostUsd,
   getConversationState,
@@ -1291,6 +1299,20 @@ export interface ChatCompletionOutcome {
   streamHeaders?: Record<string, string>;
 }
 
+/** A decision request over the latest user message, for router-side decider / scoring calls. */
+function decisionRequestFor(
+  modelKey: string,
+  signals: RoutingSignals,
+  questions: Record<string, DecisionQuestion>,
+): ParsedDecisionRequest {
+  return {
+    model: modelKey,
+    input: [{ type: 'text', text: signals.lastUserText || '(empty request)' }],
+    questions,
+    includeRationale: false,
+  };
+}
+
 // ── Dynamic LLM resolution ────────────────────────────────────────────────
 // Resolves a Dynamic LLM router to a concrete child model and invokes it via
 // `handleChatCompletion` (recursively, depth-guarded). The decision runs in
@@ -1383,15 +1405,37 @@ async function resolveDynamicCompletion(args: {
   // Lazy rule signals — computed only when a rule references them.
   if (config.strategy === 'rule-based') {
     const rules = config.rules ?? [];
-    if (rulesReferenceSignal(rules, 'estimatedCostUsd')) {
-      const defaultModel = await loadModel(config.defaultModelKey);
-      if (defaultModel?.pricing) {
-        const profile = (await getModelProfiles(tenantDbName, projectId, [defaultModel.key])).get(defaultModel.key);
-        const output = predictOutputTokens('simple', signals.inputTokensEst, { modelAvgOutputTokens: profile?.avgOutputTokens }, {
-          maxOutputTokens: signals.maxOutputTokens,
-          defaultOutputTokens,
+    if (rulesReferenceSignal(rules, 'complexityScore') && config.complexity) {
+      try {
+        const { handleDecisionRequest } = await import('./decisionService');
+        const outcome = await handleDecisionRequest({
+          tenantDbName,
+          projectId,
+          request: decisionRequestFor(config.complexity.modelKey, signals, {
+            [COMPLEXITY_QUESTION_ID]: buildComplexityQuestion(config.complexity),
+          }),
+          routing: {
+            role: 'decider',
+            routerKey: router.key,
+            routerModelDbId: router._id ? String(router._id) : undefined,
+            strategy: config.strategy,
+            decision: 'rule',
+            chosenModelKey: config.complexity.modelKey,
+            reason: 'Complexity scoring',
+            conversationId,
+          },
         });
-        signals.estimatedCostUsd = estimateRequestCostUsd(defaultModel.pricing, signals.inputTokensEst, output);
+        // The scoring is part of what this request costs the caller.
+        onUsageSettled?.(outcome.cost);
+        const answer = outcome.result.answers[COMPLEXITY_QUESTION_ID];
+        if (answer?.type === 'score') signals.complexityScore = answer.score;
+      } catch (error) {
+        // A missing signal never matches a condition, so the rules that depend
+        // on it fall through to the default — same as an unreachable decider.
+        logger.warn('Complexity scoring failed; rules on complexityScore will not match', {
+          router: router.key,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
     if (rulesReferenceSignal(rules, 'conversationCostUsd')) {
@@ -1422,6 +1466,9 @@ async function resolveDynamicCompletion(args: {
   let deciderLabel: string | undefined;
   let deciderModelKey: string | undefined;
   let deciderLatencyMs: number | undefined;
+  let deciderProbability: number | undefined;
+  let deciderConfidence: number | undefined;
+  let deciderMargin: number | undefined;
   let reason = 'No rule matched; used default';
 
   const attribution = (role: 'router' | 'child' | 'decider'): IModelUsageRouting => ({
@@ -1445,35 +1492,71 @@ async function resolveDynamicCompletion(args: {
       reason = `Matched rule "${rule.label}"`;
     }
   } else if (config.strategy === 'model-based' && config.decider) {
-    deciderModelKey = config.decider.modelKey;
+    const decider = config.decider;
+    deciderModelKey = decider.modelKey;
     const deciderStart = Date.now();
     try {
-      const deciderResult = (await handleChatCompletion({
-        tenantDbName,
-        tenantId,
-        modelKey: config.decider.modelKey,
-        projectId,
-        body: {
-          messages: buildDeciderMessages(config.decider, signals),
-          temperature: 1,
-          max_tokens: 256,
-        },
-        _routingDepth: depth + 1,
+      const deciderModel = await loadModel(decider.modelKey);
+      if (deciderModel?.category === 'decision') {
+        const { handleDecisionRequest } = await import('./decisionService');
+        const outcome = await handleDecisionRequest({
+          tenantDbName,
+          projectId,
+          request: decisionRequestFor(decider.modelKey, signals, {
+            [DECIDER_QUESTION_ID]: buildDeciderQuestion(decider),
+          }),
+          routing: { ...attribution('decider'), chosenModelKey: decider.modelKey },
+        });
+        deciderLatencyMs = Date.now() - deciderStart;
         // The classification is part of what this request costs the caller.
-        onUsageSettled,
-        _routedBy: { routing: { ...attribution('decider'), chosenModelKey: config.decider.modelKey } },
-      })) as { response?: unknown };
-      deciderLatencyMs = Date.now() - deciderStart;
-      const text = extractAssistantText(deciderResult.response);
-      const label = parseDeciderLabel(text, config.decider.labels);
-      if (label) {
-        target = normalizeTarget(label);
-        route = `label:${label.label}`;
-        decision = 'model';
-        deciderLabel = label.label;
-        reason = `Decider "${config.decider.modelKey}" classified as "${label.label}"`;
+        onUsageSettled?.(outcome.cost);
+        const pick = pickDecisionLabel(outcome.result.answers[DECIDER_QUESTION_ID], decider);
+        deciderProbability = pick.probability;
+        deciderConfidence = pick.confidence;
+        deciderMargin = pick.margin;
+        if (pick.label && pick.belowThreshold) {
+          if (decider.belowConfidence) target = normalizeTarget({ target: decider.belowConfidence });
+          route = `label:${pick.label.label}:low-confidence`;
+          decision = 'model';
+          deciderLabel = pick.label.label;
+          reason = `Decider "${decider.modelKey}" chose "${pick.label.label}" below minConfidence ${decider.minConfidence}; used ${decider.belowConfidence ? 'the fallback target' : 'default'}`;
+        } else if (pick.label) {
+          target = normalizeTarget(pick.label);
+          route = `label:${pick.label.label}`;
+          decision = 'model';
+          deciderLabel = pick.label.label;
+          reason = `Decider "${decider.modelKey}" classified as "${pick.label.label}"`;
+        } else {
+          reason = `Decider "${decider.modelKey}" gave no usable answer; used default`;
+        }
       } else {
-        reason = `Decider returned an unrecognized label "${text.slice(0, 40)}"; used default`;
+        // Legacy chat decider (configs saved before decision models existed).
+        const deciderResult = (await handleChatCompletion({
+          tenantDbName,
+          tenantId,
+          modelKey: decider.modelKey,
+          projectId,
+          body: {
+            messages: buildDeciderMessages(decider, signals),
+            temperature: 1,
+            max_tokens: 256,
+          },
+          _routingDepth: depth + 1,
+          onUsageSettled,
+          _routedBy: { routing: { ...attribution('decider'), chosenModelKey: decider.modelKey } },
+        })) as { response?: unknown };
+        deciderLatencyMs = Date.now() - deciderStart;
+        const text = extractAssistantText(deciderResult.response);
+        const label = parseDeciderLabel(text, decider.labels);
+        if (label) {
+          target = normalizeTarget(label);
+          route = `label:${label.label}`;
+          decision = 'model';
+          deciderLabel = label.label;
+          reason = `Decider "${decider.modelKey}" classified as "${label.label}"`;
+        } else {
+          reason = `Decider returned an unrecognized label "${text.slice(0, 40)}"; used default`;
+        }
       }
     } catch (error) {
       deciderLatencyMs = Date.now() - deciderStart;
@@ -1671,6 +1754,9 @@ async function resolveDynamicCompletion(args: {
     deciderLabel,
     deciderModelKey,
     deciderLatencyMs,
+    deciderProbability,
+    deciderConfidence,
+    deciderMargin,
     reason: reasonValue,
     ...(role === 'router' ? { signals: publicSignals(signals) } : {}),
     ...(proposed.policy ? { policy: proposed.policy } : {}),
