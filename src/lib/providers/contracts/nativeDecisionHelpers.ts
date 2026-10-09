@@ -1,7 +1,8 @@
 /**
  * Pure request builders and response normalizers for the NATIVE decision
- * backends: OpenAI `POST /v1/decisions` and Alibaba Model Studio
- * `POST /compatible-mode/v1/systemone` ("System One").
+ * backends: OpenAI `POST /v1/decisions`, Alibaba Model Studio
+ * `POST /compatible-mode/v1/systemone` ("System One") and TypeSafe Jev
+ * `POST /v1/systemone` (the same System One wire format).
  *
  * Wire formats are taken from the vendors' published docs (OpenAI Decisions
  * reference/guide, Alibaba Model Studio "Decision Model API"), not from live
@@ -245,11 +246,11 @@ function systemOneQuestion(question: DecisionQuestion): Json {
   }
 }
 
-export function buildSystemOneBody(modelId: string, request: DecisionRequest): Json {
+export function buildSystemOneBody(modelId: string, request: DecisionRequest, vendor = 'Alibaba'): Json {
   const imageIndex = request.input.findIndex((part) => part.type === 'image');
   if (imageIndex >= 0) {
     throw new DecisionRequestError(
-      'The Alibaba decision model accepts text input only; image parts are not supported',
+      `The ${vendor} decision model accepts text input only; image parts are not supported`,
       { param: `input[${imageIndex}]` },
     );
   }
@@ -283,25 +284,30 @@ function stringMap(raw: unknown): Record<string, string> {
   return out;
 }
 
-function normalizeSystemOneAnswer(id: string, question: DecisionQuestion, raw: unknown): DecisionAnswer {
-  if (!isObject(raw)) throw malformed('Alibaba', `answer "${id}" is not an object`);
+function normalizeSystemOneAnswer(
+  id: string,
+  question: DecisionQuestion,
+  raw: unknown,
+  vendor: string,
+): DecisionAnswer {
+  if (!isObject(raw)) throw malformed(vendor, `answer "${id}" is not an object`);
   if (raw.type === 'refusal') return { type: 'refusal' };
 
   const expected = question.type === 'boolean' ? 'noul' : question.type;
   if (raw.type !== expected) {
-    throw malformed('Alibaba', `answer "${id}" has type ${String(raw.type)}, expected ${expected}`);
+    throw malformed(vendor, `answer "${id}" has type ${String(raw.type)}, expected ${expected}`);
   }
 
   if (question.type === 'boolean') {
     const probability = num(raw.noul);
-    if (probability === undefined) throw malformed('Alibaba', `noul "${id}" has no probability`);
+    if (probability === undefined) throw malformed(vendor, `noul "${id}" has no probability`);
     return { type: 'boolean', probability };
   }
 
   if (question.type === 'choice') {
     const choice = raw.choice;
     if (typeof choice !== 'string' || !(choice in question.choices)) {
-      throw malformed('Alibaba', `choice "${id}" answered a value that was not offered`);
+      throw malformed(vendor, `choice "${id}" answered a value that was not offered`);
     }
     return {
       type: 'choice',
@@ -312,7 +318,7 @@ function normalizeSystemOneAnswer(id: string, question: DecisionQuestion, raw: u
   }
 
   const score = num(raw.score);
-  if (score === undefined) throw malformed('Alibaba', `score "${id}" has no score`);
+  if (score === undefined) throw malformed(vendor, `score "${id}" has no score`);
   const legend = stringMap(raw.legend);
   return {
     type: 'score',
@@ -323,24 +329,29 @@ function normalizeSystemOneAnswer(id: string, question: DecisionQuestion, raw: u
   };
 }
 
-export function normalizeSystemOneResponse(raw: unknown, request: DecisionRequest): NativeDecisionOutput {
+export function normalizeSystemOneResponse(
+  raw: unknown,
+  request: DecisionRequest,
+  vendor = 'Alibaba',
+): NativeDecisionOutput {
   if (!isObject(raw) || !isObject(raw.answers)) {
-    throw malformed('Alibaba', 'no `answers` object');
+    throw malformed(vendor, 'no `answers` object');
   }
   const answers: Record<string, DecisionAnswer> = {};
   for (const [id, question] of Object.entries(request.questions)) {
-    if (!(id in raw.answers)) throw malformed('Alibaba', `no answer for question "${id}"`);
-    answers[id] = normalizeSystemOneAnswer(id, question, raw.answers[id]);
+    if (!(id in raw.answers)) throw malformed(vendor, `no answer for question "${id}"`);
+    answers[id] = normalizeSystemOneAnswer(id, question, raw.answers[id], vendor);
   }
 
   const inputTokens = isObject(raw.usage) ? num(raw.usage.input_tokens) : undefined;
+  const outputTokens = isObject(raw.usage) ? num(raw.usage.output_tokens) : undefined;
   const upstream = {
     ...(typeof raw.request_id === 'string' ? { request_id: raw.request_id } : {}),
     ...(num(raw.latency_ms) !== undefined ? { latency_ms: num(raw.latency_ms) } : {}),
   };
   return {
     answers,
-    ...(inputTokens !== undefined ? { usage: { inputTokens, outputTokens: 0 } } : {}),
+    ...(inputTokens !== undefined ? { usage: { inputTokens, outputTokens: outputTokens ?? 0 } } : {}),
     ...(Object.keys(upstream).length > 0 ? { upstream } : {}),
   };
 }

@@ -7,6 +7,7 @@ vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: vi.fn() }));
 import { safeFetch } from '@/lib/security/outboundFetch';
 import {
   createAlibabaNativeDecisionRuntime,
+  createTypeSafeNativeDecisionRuntime,
   createOpenAiNativeDecisionRuntime,
   selectDecisionRuntime,
 } from '@/lib/providers/contracts/nativeDecisionRuntime';
@@ -15,6 +16,7 @@ import { DecisionRequestError } from '@/lib/providers/contracts/decisionHelpers'
 import { UpstreamRequestError, InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 import {
   AlibabaModelStudioProviderContract,
+  TypeSafeModelProviderContract,
   OpenAiModelProviderContract,
   AzureModelProviderContract,
 } from '@/lib/providers/contracts/modelContracts';
@@ -210,6 +212,84 @@ describe('Alibaba provider contract', () => {
       credentials: { apiKey: 'k' }, settings: { workspaceId: 'ws', region: 'singapore' },
     } as never);
     const config = { modelId: 'decision-model-preview', category: 'decision' as const };
+    expect(() => runtime.createDecisionRuntime!({ ...config, modelSettings: { decision: { mode: 'structured' } } }))
+      .toThrowError(InvalidRequestError);
+    expect(() => runtime.createDecisionRuntime!({ ...config, modelSettings: { decision: { mode: 'native' } } })).not.toThrow();
+  });
+});
+
+describe('TypeSafe (Jev) native runtime', () => {
+  const runtime = () => createTypeSafeNativeDecisionRuntime({ apiKey: 'ts-key', modelId: 'jev-latest' });
+
+  const JEV_OK = {
+    model: 'jev-1.13.0',
+    answers: {
+      department: { type: 'choice', choice: 'billing', confidence: 0.88, probabilities: { billing: 0.94, technical: 0.06 } },
+      urgent: { type: 'noul', noul: 0.99 },
+      severity: { type: 'score', score: 1.1, confidence: 0.91, legend: { 0: 'Cosmetic', 1: 'Workaround available', 2: 'Fully blocked' }, probabilities: { 0: 0.1, 1: 0.7, 2: 0.2 } },
+    },
+    usage: { input_tokens: 296, output_tokens: 20 },
+  };
+
+  it('POSTs to api.typesafe.ai/v1/systemone with Bearer auth and the System One body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(JEV_OK));
+    const result = await runtime().decide(REQUEST);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.typesafe.ai/v1/systemone');
+    expect(init.headers.Authorization).toBe('Bearer ts-key');
+    const sent = JSON.parse(init.body);
+    expect(sent.model).toBe('jev-latest');
+    expect(sent.state).toBe('I was charged twice.');
+    expect(sent.questions.urgent.type).toBe('noul');
+    expect(sent.questions.department.criteria).toEqual({ billing: 'money', technical: 'bugs' });
+    expect(sent.questions.severity.criteria).toEqual(['Cosmetic', 'Workaround available', 'Fully blocked']);
+
+    expect(result.backend).toEqual({ kind: 'native', provider: 'typesafe' });
+    expect(result.usage).toEqual({ inputTokens: 296, outputTokens: 20 });
+    expect(result.answers.urgent).toEqual({ type: 'boolean', probability: 0.99 });
+  });
+
+  it('rejects images without calling the vendor, naming TypeSafe', async () => {
+    const error = await runtime().decide({
+      input: [{ type: 'image', data_url: 'data:image/png;base64,AAAA' }],
+      questions: { q: { type: 'boolean' } },
+    }).catch((e) => e);
+    expect(error).toBeInstanceOf(DecisionRequestError);
+    expect(String(error.message)).toContain('TypeSafe');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 422, 429, 529])('keeps an upstream %i as an UpstreamRequestError', async (status) => {
+    fetchMock.mockResolvedValue(new Response('{"message":"x"}', { status }));
+    const error = await runtime().decide(REQUEST).catch((e) => e);
+    expect(error).toBeInstanceOf(UpstreamRequestError);
+  });
+
+  it('names TypeSafe in a malformed-body error', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ answers: { department: { type: 'choice' } } }));
+    const error = await runtime().decide(REQUEST).catch((e) => e);
+    expect(error).toBeInstanceOf(DecisionBackendError);
+    expect(String(error.message)).toContain('TypeSafe');
+  });
+});
+
+describe('TypeSafe provider contract', () => {
+  it('declares a native-only decision driver with an API key and no image support', () => {
+    const fields = TypeSafeModelProviderContract.form.sections.flatMap((s) => s.fields);
+    expect(fields.map((f) => f.name)).toEqual(['apiKey']);
+    expect(TypeSafeModelProviderContract.capabilities?.['model.categories']).toEqual(['decision']);
+    expect(TypeSafeModelProviderContract.capabilities?.['decision.native']).toBe(true);
+    expect(TypeSafeModelProviderContract.capabilities?.['decision.supports.image']).toBe(false);
+  });
+
+  it('requires an API key', async () => {
+    await expect(async () => TypeSafeModelProviderContract.createRuntime({ credentials: {}, settings: {} } as never)).rejects.toThrow();
+  });
+
+  it('serves native only: structured mode is a clear 400', async () => {
+    const runtime = await TypeSafeModelProviderContract.createRuntime({ credentials: { apiKey: 'k' }, settings: {} } as never);
+    const config = { modelId: 'jev-latest', category: 'decision' as const };
     expect(() => runtime.createDecisionRuntime!({ ...config, modelSettings: { decision: { mode: 'structured' } } }))
       .toThrowError(InvalidRequestError);
     expect(() => runtime.createDecisionRuntime!({ ...config, modelSettings: { decision: { mode: 'native' } } })).not.toThrow();
