@@ -9,6 +9,7 @@
 import { sendEmail } from '@/lib/email/mailer';
 import { getTenantDatabase } from '@/lib/database';
 import type { IAlertEvent, IAlertChannel } from '@/lib/database';
+import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import type { AlertContext, DispatchResult, IAlertDispatcher } from './types';
 
 /** Human-readable labels for metric names */
@@ -71,6 +72,10 @@ export class EmailAlertChannel implements IAlertDispatcher {
       recipients = await this.getDefaultRecipients(ctx.tenantDbName);
     }
 
+    // A disabled account must not keep receiving operational mail, whether it
+    // was listed explicitly or picked up by the owner/admin fallback.
+    recipients = await this.withoutDisabledUsers(ctx.tenantDbName, recipients);
+
     if (recipients.length === 0) {
       return [
         { type: 'email', target: '(none)', success: false, error: 'No recipients available' },
@@ -112,13 +117,33 @@ export class EmailAlertChannel implements IAlertDispatcher {
     return results;
   }
 
+  /**
+   * Drop recipients that belong to a disabled user. Best effort: if the user
+   * list can't be read the recipients are kept, since failing to notify is
+   * worse than one stray mail to an account disabled moments ago.
+   */
+  private async withoutDisabledUsers(tenantDbName: string, recipients: string[]): Promise<string[]> {
+    if (recipients.length === 0) return recipients;
+    try {
+      const db = await getTenantDatabase(tenantDbName);
+      const users = await db.listUsers();
+      const disabled = new Set(
+        users.filter(isUserDisabled).map((u) => (u.email ?? '').trim().toLowerCase()).filter(Boolean),
+      );
+      if (disabled.size === 0) return recipients;
+      return recipients.filter((r) => !disabled.has(r.trim().toLowerCase()));
+    } catch {
+      return recipients;
+    }
+  }
+
   /** Fetch owner + admin emails from the tenant DB as fallback recipients */
   private async getDefaultRecipients(tenantDbName: string): Promise<string[]> {
     try {
       const db = await getTenantDatabase(tenantDbName);
       const users = await db.listUsers();
       return users
-        .filter((u) => u.role === 'owner' || u.role === 'admin')
+        .filter((u) => (u.role === 'owner' || u.role === 'admin') && !isUserDisabled(u))
         .map((u) => u.email);
     } catch {
       return [];

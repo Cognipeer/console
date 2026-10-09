@@ -15,6 +15,7 @@ import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/s
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
 import { applyCorsHeaders } from './cors';
+import { rejectInactiveSessionAccount } from './fastify-utils';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
@@ -374,6 +375,17 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
 
     request.apiSession = payload;
     request.apiContextHeaders = sessionHeaders;
+
+    // Stateless JWTs outlive the account: re-check the user row (briefly
+    // cached) before ANY cookie-authenticated route runs, so disabling or
+    // deleting a user takes effect even on paths with no RBAC service.
+    if (await rejectInactiveSessionAccount(reply, {
+      tenantDbName: sessionHeaders['x-tenant-db-name'],
+      tenantId: payload.tenantId,
+      userId: payload.userId,
+    })) {
+      return reply;
+    }
 
     // ── Enterprise license guard (runtime gate, layer 2) ───────────────────
     // No-op in the community edition (enterprise routes don't exist). In the

@@ -25,6 +25,7 @@ import {
 } from '@/lib/services/projects/projectService';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { tryExternalAuthenticate } from '@/enterprise/external-auth';
+import { isUserDisabled, isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import {
   clearSessionCookies,
   getClientIp,
@@ -132,6 +133,13 @@ export async function issueSessionForAuthenticatedUser(
       reply,
     );
     return reply.code(429).send({ error: 'Too many sign-in attempts. Please try again later.' });
+  }
+
+  // Last line of defense for every authenticator (local, LDAP, SSO): a
+  // disabled account never gets a session, whatever vouched for it. Same
+  // generic failure as a wrong password — no account enumeration.
+  if (isUserDisabled(authenticatedUser)) {
+    return reply.code(401).send({ error: 'Invalid email or password' });
   }
 
   return withTenantScope(db, authenticatedTenant.dbName, async () => {
@@ -289,7 +297,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
             // login-disabled ("Programmatic User") account never
             // authenticates, even when an external authenticator (LDAP/SSO)
             // vouches for it.
-            if (external.user.canLogin === false) {
+            if (isUserLoginBlocked(external.user)) {
               return null;
             }
 
@@ -308,7 +316,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
           // via password, regardless of whether the password would match.
           // Same generic failure as any other auth rejection — never leak
           // that the account exists but can't log in.
-          if (candidateUser.canLogin === false) {
+          if (isUserLoginBlocked(candidateUser)) {
             return null;
           }
 
@@ -354,7 +362,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
                 // Login-disabled ("Programmatic User") accounts never
                 // authenticate via password — same generic failure as
                 // "not found" or "wrong password".
-                if (!foundUser || foundUser.canLogin === false) {
+                if (!foundUser || isUserLoginBlocked(foundUser)) {
                   return null;
                 }
 
@@ -408,7 +416,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
                   // Login-disabled ("Programmatic User") accounts never
                   // authenticate via password — same generic failure as
                   // "not found" or "wrong password".
-                  if (!foundUser || foundUser.canLogin === false) {
+                  if (!foundUser || isUserLoginBlocked(foundUser)) {
                     return null;
                   }
 
@@ -813,7 +821,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         // reset: treat it exactly like an unknown email — same generic 200, no
         // token minted, no mail sent — so the flow neither burns a reset token
         // nor lets a user-chosen password be planted on a no-login record.
-        if (!user || user.canLogin === false) {
+        if (!user || isUserLoginBlocked(user)) {
           return finishWithSuccess();
         }
 
@@ -933,10 +941,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         const user = await db.findUserById(payload.sub!);
         // Same generic answer as an invalid token for a login-disabled account:
         // a token minted before `canLogin` was turned off must not be able to
-        // set a password on a record that is never supposed to log in.
+        // set a password on a record that is never supposed to log in. A
+        // disabled account is rejected the same way.
         if (
           !user
-          || user.canLogin === false
+          || isUserLoginBlocked(user)
           || (isInvitation && (
             !user.invitedBy
             || user.inviteAcceptedAt

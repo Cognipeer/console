@@ -12,6 +12,7 @@ import { NextRequest } from 'next/server';
 
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
+  runWithTenantScope: vi.fn(),
 }));
 
 vi.mock('@/lib/services/projects/projectService', () => ({
@@ -24,7 +25,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
   }),
 }));
 
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { requireApiToken, ApiTokenAuthError } from '@/lib/services/apiTokenAuth';
 import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import {
@@ -52,6 +53,9 @@ describe('requireApiToken', () => {
     vi.clearAllMocks();
     mockDb = createMockDb();
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(mockDb);
+    (runWithTenantScope as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_dbName: string, fn: (db: unknown) => unknown) => fn(mockDb),
+    );
   });
 
   describe('authorization header validation', () => {
@@ -176,12 +180,22 @@ describe('requireApiToken', () => {
       expect(ctx.user).toMatchObject({ email: USER_ALICE.email });
     });
 
-    it('gracefully returns null user when findUserById throws', async () => {
+    it('fails closed with 503 when findUserById throws (owner state cannot be verified)', async () => {
       mockDb.findUserById.mockRejectedValue(new Error('DB error'));
       const req = buildRequest(`Bearer ${API_TOKEN_VALID.token}`);
-      const ctx = await requireApiToken(req);
 
-      expect(ctx.user).toBeNull();
+      await expect(requireApiToken(req)).rejects.toMatchObject({
+        name: 'ApiTokenAuthError',
+        status: 503,
+        message: 'Unable to verify API token owner',
+      });
+    });
+
+    it('rejects with 401 when the token owner no longer exists', async () => {
+      mockDb.findUserById.mockResolvedValue(null);
+      const req = buildRequest(`Bearer ${API_TOKEN_VALID.token}`);
+
+      await expect(requireApiToken(req)).rejects.toMatchObject({ status: 401 });
     });
   });
 

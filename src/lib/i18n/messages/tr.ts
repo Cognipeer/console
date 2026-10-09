@@ -104,14 +104,43 @@ export const tr: typeof en = {
       actions: {
         ...en.settings.userManagement.actions,
         copyInvitationLink: 'Davet bağlantısını kopyala',
+        disable: 'Devre dışı bırak',
+        enable: 'Etkinleştir',
+      },
+      status: {
+        ...en.settings.userManagement.status,
+        disabled: 'Devre dışı',
       },
       errors: {
         ...en.settings.userManagement.errors,
         copyInvitationLink: 'Davet bağlantısı kopyalanamadı',
+        disable: 'Kullanıcı devre dışı bırakılamadı',
+        enable: 'Kullanıcı etkinleştirilemedi',
       },
       messages: {
         ...en.settings.userManagement.messages,
         invitationLinkCopied: 'Davet bağlantısı panoya kopyalandı',
+        disableSuccess: 'Kullanıcı devre dışı bırakıldı',
+        enableSuccess: 'Kullanıcı etkinleştirildi',
+      },
+      disableModal: {
+        title: 'Kullanıcıyı devre dışı bırak',
+        description:
+          '{name} ({email}) oturumdan çıkarılacak ve API token\'ları dahil tüm erişimini kaybedecek. Hesabı daha sonra tekrar etkinleştirebilirsiniz.',
+        reasonLabel: 'Neden (isteğe bağlı)',
+        reasonPlaceholder: 'ör. Şirketten ayrıldı',
+        cancel: 'İptal',
+        confirm: 'Devre dışı bırak',
+      },
+      enableModal: {
+        title: 'Kullanıcıyı etkinleştir',
+        description: '{name} ({email}) için erişim geri verilsin mi?',
+        cancel: 'İptal',
+        confirm: 'Etkinleştir',
+      },
+      detail: {
+        disabledAt: 'Devre dışı bırakılma zamanı',
+        disabledReason: 'Neden',
       },
     },
   },

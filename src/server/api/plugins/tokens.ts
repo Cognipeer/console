@@ -2,10 +2,9 @@ import type { FastifyPluginAsync } from 'fastify';
 import { getDatabase } from '@/lib/database';
 import type { IUser } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { getCache } from '@/lib/core/cache';
-import { createLogger } from '@/lib/core/logger';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
-import { apiAuthCacheKey } from '@/lib/services/apiTokenAuth';
+import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
+import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import {
   getEffectiveServicePermission,
@@ -26,26 +25,6 @@ import {
 } from '../fastify-utils';
 
 const ALLOWED_ROLES = new Set(['owner', 'admin', 'project_admin', 'user']);
-const logger = createLogger('api:tokens');
-
-/**
- * Best-effort invalidation of the auth cache entry a deleted token may still
- * hold. Without this, `requireApiTokenFromHeader` kept accepting the token
- * on every replica for up to its own cache TTL after the delete already
- * succeeded -- deletion looked immediate in the UI but was not immediate in
- * effect. Never blocks the delete response on a cache failure: the token row
- * is already gone either way, and the cache entry expires on its own TTL as
- * a fallback.
- */
-async function invalidateApiTokenAuthCache(tokenHash: string | undefined): Promise<void> {
-  if (!tokenHash) return;
-  try {
-    const cache = await getCache();
-    await cache.del(apiAuthCacheKey(tokenHash));
-  } catch (error) {
-    logger.warn('Failed to invalidate api-auth cache on token delete', { error });
-  }
-}
 
 /**
  * Whether `actorRole` may act on (mint for, or list the tokens of) `target`.
@@ -222,6 +201,12 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         }
         if (!canActOnTokensOf(session.userRole, targetUser)) {
           return reply.code(403).send({ error: 'Forbidden' });
+        }
+        // A token minted for a disabled account would be dead on arrival
+        // (the auth path rejects its owner) and would silently outlive a
+        // later re-enable; make the admin enable the user first.
+        if (isUserDisabled(targetUser)) {
+          return reply.code(400).send({ error: 'User is disabled' });
         }
         ownerUserId = body.userId;
 

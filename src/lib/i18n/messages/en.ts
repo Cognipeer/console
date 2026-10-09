@@ -457,6 +457,8 @@ export const en = {
         invite: 'Invite User',
         addUser: 'Add User',
         copyInvitationLink: 'Copy invitation link',
+        disable: 'Disable',
+        enable: 'Enable',
       },
       table: {
         name: 'Name',
@@ -479,16 +481,40 @@ export const en = {
         active: 'Active',
         invitedAt: 'Invited at {date}',
         noLogin: 'No login',
+        disabled: 'Disabled',
       },
       errors: {
         fetch: 'Failed to fetch users',
         load: 'Failed to load users',
         delete: 'Failed to delete user',
         copyInvitationLink: 'Failed to copy invitation link',
+        disable: 'Failed to disable user',
+        enable: 'Failed to enable user',
       },
       messages: {
         deleteSuccess: 'User deleted successfully',
         invitationLinkCopied: 'Invitation link copied to clipboard',
+        disableSuccess: 'User disabled',
+        enableSuccess: 'User enabled',
+      },
+      disableModal: {
+        title: 'Disable User',
+        description:
+          '{name} ({email}) will be signed out and lose access, including API tokens. You can enable the account again later.',
+        reasonLabel: 'Reason (optional)',
+        reasonPlaceholder: 'e.g. Left the company',
+        cancel: 'Cancel',
+        confirm: 'Disable',
+      },
+      enableModal: {
+        title: 'Enable User',
+        description: 'Restore access for {name} ({email})?',
+        cancel: 'Cancel',
+        confirm: 'Enable',
+      },
+      detail: {
+        disabledAt: 'Disabled at',
+        disabledReason: 'Reason',
       },
       deleteModal: {
         title: 'Delete User',

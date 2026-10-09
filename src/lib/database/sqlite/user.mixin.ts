@@ -72,9 +72,11 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       db.prepare(`
         INSERT INTO ${TABLES.users}
         (id, email, emailLower, password, name, tenantId, role, projectIds, servicePermissions, licenseId, features,
-         invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, passwordChangedAt, authProvider, externalId, canLogin, createdAt, updatedAt)
+         invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, passwordChangedAt, authProvider, externalId, canLogin,
+         status, disabledAt, disabledBy, disabledReason, createdAt, updatedAt)
         VALUES (@id, @email, @emailLower, @password, @name, @tenantId, @role, @projectIds, @servicePermissions, @licenseId, @features,
-         @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @passwordChangedAt, @authProvider, @externalId, @canLogin, @createdAt, @updatedAt)
+         @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @passwordChangedAt, @authProvider, @externalId, @canLogin,
+         @status, @disabledAt, @disabledBy, @disabledReason, @createdAt, @updatedAt)
       `).run({
         id,
         email: trimmedEmail,
@@ -95,6 +97,10 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         authProvider: userData.authProvider ?? 'local',
         externalId: userData.externalId ?? null,
         canLogin: this.toBoolInt(canLogin),
+        status: userData.status ?? null,
+        disabledAt: userData.disabledAt?.toISOString() ?? null,
+        disabledBy: userData.disabledBy ?? null,
+        disabledReason: userData.disabledReason ?? null,
         createdAt: now,
         updatedAt: now,
       });
@@ -168,6 +174,11 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       if (data.authProvider !== undefined) { sets.push('authProvider = @authProvider'); params.authProvider = data.authProvider; }
       if (data.externalId !== undefined) { sets.push('externalId = @externalId'); params.externalId = data.externalId ?? null; }
       if (data.canLogin !== undefined) { sets.push('canLogin = @canLogin'); params.canLogin = this.toBoolInt(data.canLogin); }
+      // Lifecycle fields accept null to clear (re-enabling resets all four).
+      if (data.status !== undefined) { sets.push('status = @status'); params.status = data.status ?? null; }
+      if (data.disabledAt !== undefined) { sets.push('disabledAt = @disabledAt'); params.disabledAt = data.disabledAt?.toISOString() ?? null; }
+      if (data.disabledBy !== undefined) { sets.push('disabledBy = @disabledBy'); params.disabledBy = data.disabledBy ?? null; }
+      if (data.disabledReason !== undefined) { sets.push('disabledReason = @disabledReason'); params.disabledReason = data.disabledReason ?? null; }
 
       db.prepare(`UPDATE ${TABLES.users} SET ${sets.join(', ')} WHERE id = @id`).run(params);
 
@@ -255,6 +266,11 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         // Missing/undefined column (pre-migration rows before the column
         // default kicked in) is treated as true — back-compat default.
         canLogin: r.canLogin === undefined ? true : this.fromBoolInt(r.canLogin),
+        // NULL status (every pre-existing row) stays undefined = active.
+        status: (r.status as IUser['status'] | null) ?? undefined,
+        disabledAt: this.toDate(r.disabledAt),
+        disabledBy: (r.disabledBy as string | null) ?? undefined,
+        disabledReason: (r.disabledReason as string | null) ?? undefined,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

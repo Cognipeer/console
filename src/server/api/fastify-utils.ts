@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { getDatabase, type IUser } from '@/lib/database';
 import { isShuttingDown } from '@/lib/core/lifecycle';
+import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { patchRequestContext, runWithRequestContext } from '@/lib/core/requestContext';
 import {
@@ -9,6 +10,7 @@ import {
   getPermissionServiceForPath,
   type GroupTenantGrant,
 } from '@/lib/security/rbac';
+import { getUserAuthState, isUserDisabled } from '@/lib/services/users/userAuthState';
 import {
   ApiTokenAuthError,
   requireApiTokenFromHeader,
@@ -19,6 +21,8 @@ import {
   resolveProjectContext,
   type ProjectContext,
 } from '@/lib/services/projects/projectContext';
+
+const logger = createLogger('api:session-account-state');
 
 export interface ApiSessionContext {
   requestId: string;
@@ -185,7 +189,52 @@ async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {
   if (user.tenantId && String(user.tenantId) !== String(session.tenantId)) {
     throw new RbacAuthorizationError('Tenant mismatch', 403);
   }
+  // Defense-in-depth: the global session hook already rejects disabled
+  // accounts, but this is also the entry point for callers that bypass it
+  // (e.g. realtime cookie auth via resolveSessionRbacContext).
+  if (isUserDisabled(user)) {
+    throw new RbacAuthorizationError('Account is disabled', 401);
+  }
   return user;
+}
+
+/**
+ * Cookie sessions are stateless JWTs, so a disabled or deleted account is
+ * only caught by re-checking the user row (cached ~30s, invalidated on
+ * disable/delete). Runs for EVERY cookie-authenticated request, mapped to an
+ * RBAC service or not. Returns true when it sent a rejection; fail closed:
+ * if the state cannot be read the request is refused with a 503.
+ */
+export async function rejectInactiveSessionAccount(
+  reply: FastifyReply,
+  session: { tenantDbName: string; tenantId: string; userId: string },
+): Promise<boolean> {
+  let state: Awaited<ReturnType<typeof getUserAuthState>>;
+  try {
+    state = await getUserAuthState(session.tenantDbName, session.tenantId, session.userId);
+  } catch (error) {
+    logger.warn('Could not verify session account state; refusing the request', {
+      userId: session.userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    reply.code(503).send({
+      error: 'Service Unavailable',
+      message: 'Unable to verify session',
+    });
+    return true;
+  }
+
+  if (state === 'active') {
+    return false;
+  }
+
+  clearSessionCookies(reply);
+  reply.code(401).send(
+    state === 'disabled'
+      ? { error: 'Unauthorized', message: 'Account is disabled', code: 'account_disabled' }
+      : { error: 'Unauthorized', message: 'Account no longer exists', code: 'account_missing' },
+  );
+  return true;
 }
 
 /**

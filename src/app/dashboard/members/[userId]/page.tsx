@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { Badge, Button, Center, CopyButton, Group, Loader, Modal, Paper, SimpleGrid, Text } from '@mantine/core';
+import { Badge, Button, Center, CopyButton, Group, Loader, Modal, Paper, SimpleGrid, Stack, Text } from '@mantine/core';
 import { IconCheck, IconCopy, IconKey, IconMail, IconTrash, IconUser } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import DetailShell from '@/components/common/ui/DetailShell';
@@ -17,6 +17,10 @@ interface MemberDetail {
   email: string;
   role: 'owner' | 'admin' | 'project_admin' | 'user';
   canLogin?: boolean;
+  status?: 'active' | 'disabled';
+  disabledAt?: string | null;
+  disabledBy?: string | null;
+  disabledReason?: string | null;
   servicePermissions?: UserServicePermissions;
   createdAt: string;
   invitedBy?: string;
@@ -286,6 +290,9 @@ export default function MemberDetailPage() {
             {user.canLogin === false ? (
               <span className="ds-badge">{t('table.programmatic')}</span>
             ) : null}
+            {user.status === 'disabled' ? (
+              <Badge color="red" variant="light">{t('status.disabled')}</Badge>
+            ) : null}
           </>
         }
         meta={
@@ -312,9 +319,30 @@ export default function MemberDetailPage() {
           </Paper>
           <Paper withBorder p="md" radius="md">
             <Text size="xs" c="dimmed" tt="uppercase" fw={600}>Login status</Text>
-            <Badge size="lg" variant="light" color={user.canLogin === false ? 'gray' : 'green'} mt="xs">
-              {user.canLogin === false ? t('status.noLogin') : t('status.active')}
+            <Badge
+              size="lg"
+              variant="light"
+              color={user.status === 'disabled' ? 'red' : user.canLogin === false ? 'gray' : 'green'}
+              mt="xs"
+            >
+              {user.status === 'disabled'
+                ? t('status.disabled')
+                : user.canLogin === false ? t('status.noLogin') : t('status.active')}
             </Badge>
+            {user.status === 'disabled' ? (
+              <Stack gap={2} mt="xs">
+                {user.disabledAt ? (
+                  <Text size="xs" c="dimmed">
+                    {t('detail.disabledAt')}: {new Date(user.disabledAt).toLocaleString()}
+                  </Text>
+                ) : null}
+                {user.disabledReason ? (
+                  <Text size="xs" c="dimmed">
+                    {t('detail.disabledReason')}: {user.disabledReason}
+                  </Text>
+                ) : null}
+              </Stack>
+            ) : null}
           </Paper>
           <Paper withBorder p="md" radius="md">
             <Text size="xs" c="dimmed" tt="uppercase" fw={600}>{t('table.joined')}</Text>

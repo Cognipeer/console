@@ -3679,6 +3679,10 @@ export type AgentRunErrorReason =
   | 'canceled_by_caller'
   /** The agent was disabled/deleted, or the submitting API token revoked, before the worker started it. */
   | 'precondition_failed'
+  /** The user who started the run was disabled before the worker started it. */
+  | 'owner_disabled'
+  /** The owner's account state could not be read, so the run was refused (fail closed). */
+  | 'owner_unverifiable'
   | null;
 
 /** Durable delivery state for the optional callback webhook (§12.6). */

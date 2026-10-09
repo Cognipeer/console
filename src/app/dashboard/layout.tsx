@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 import { getConfig } from '@/lib/core/config';
 import { getDatabase } from '@/lib/database';
+import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { isSupportEntryPointEnabled } from '@/lib/services/support/supportHandoff';
 
@@ -33,7 +34,9 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
   await db.switchToTenant(tenantDbName);
   const user = await db.findUserById(userId);
 
-  if (!user) {
+  // A disabled account keeps a valid JWT until it expires; treat it exactly
+  // like a deleted one so it cannot render the dashboard shell.
+  if (!user || isUserDisabled(user)) {
     redirect('/login');
   }
 

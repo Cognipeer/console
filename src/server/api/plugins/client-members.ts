@@ -28,7 +28,8 @@ import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
-import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
+import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
+import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-members');
 
@@ -43,6 +44,9 @@ function serializeUser(user: IUser) {
   return {
     _id: user._id,
     createdAt: user.createdAt,
+    disabledAt: user.disabledAt ?? null,
+    disabledBy: user.disabledBy ?? null,
+    disabledReason: user.disabledReason ?? null,
     email: user.email,
     inviteAcceptedAt: user.inviteAcceptedAt,
     invitedAt: user.invitedAt,
@@ -51,6 +55,8 @@ function serializeUser(user: IUser) {
     projectIds: user.projectIds ?? [],
     role: user.role,
     servicePermissions: normalizeServicePermissions(user.servicePermissions),
+    // Missing status = active (legacy / on-prem rows have no such field).
+    status: user.status ?? 'active',
     updatedAt: user.updatedAt,
   };
 }
@@ -134,12 +140,62 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       if (target.role === 'owner') return reply.code(403).send({ error: 'Cannot delete the owner account' });
       const deleted = await db.deleteUser(id);
       if (!deleted) return reply.code(500).send({ error: 'Failed to delete user' });
+      // The row is gone, so its tokens would otherwise be orphaned. Never fails the delete.
+      await cleanupDeletedUser(auth.tenantDbName, id, auth.tenantId);
       return reply.code(200).send({ success: true });
     } catch (error) {
       logger.error('Client delete member error', { error });
       return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
     }
   }));
+
+  // Disable / enable share one handler: the guards (self, owner, tenant) and the
+  // audit trail live in setUserStatus, so the route only gates on role.
+  const registerStatusRoute = (action: 'disable' | 'enable') => {
+    const status = action === 'disable' ? 'disabled' : 'active';
+    app.post(`/client/v1/members/:id/${action}`, withClientApiRequestContext(async (request, reply, auth) => {
+      try {
+        if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
+        const { id } = request.params as { id: string };
+
+        // The body is optional (only `disable` reads a reason).
+        let reason: string | undefined;
+        if (action === 'disable' && request.body) {
+          const body = readJsonBody<{ reason?: unknown }>(request);
+          if (typeof body.reason === 'string') reason = body.reason;
+        }
+
+        const result = await setUserStatus({
+          actor: {
+            apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+            email: auth.user?.email,
+            role: auth.user?.role,
+            type: 'api_token',
+            userId: String(auth.tokenRecord.userId),
+          },
+          ipAddress: getClientIp(request),
+          reason,
+          requestId: request.apiRequestId,
+          status,
+          targetUserId: id,
+          tenantDbName: auth.tenantDbName,
+          tenantId: auth.tenantId,
+          userAgent: typeof request.headers['user-agent'] === 'string'
+            ? request.headers['user-agent']
+            : undefined,
+        });
+        if (!result.ok) return reply.code(result.httpStatus).send({ error: result.error });
+
+        return reply.code(200).send({ user: serializeUser(result.user) });
+      } catch (error) {
+        if (error instanceof SyntaxError) return reply.code(400).send({ error: 'Invalid request body' });
+        logger.error(`Client ${action} member error`, { error });
+        return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
+      }
+    }));
+  };
+  registerStatusRoute('disable');
+  registerStatusRoute('enable');
 
   app.post('/client/v1/members/invite', withClientApiRequestContext(async (request, reply, auth) => {
     try {

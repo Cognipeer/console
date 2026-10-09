@@ -12636,6 +12636,8 @@ components:
                 - max_duration_exceeded
                 - canceled_by_caller
                 - precondition_failed
+                - owner_disabled
+                - owner_unverifiable
             message:
               type: string
               nullable: true

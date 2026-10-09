@@ -22,6 +22,14 @@ const hoisted = vi.hoisted(() => ({
   executeAgentChatLocal: vi.fn(),
   getDatabase: vi.fn(),
   publish: vi.fn(),
+  getUserAuthState: vi.fn(),
+}));
+
+// The owner-state lookup resolves its own database via the barrel's internal
+// getDatabase (which the mock below cannot rebind), so stub it here; the
+// default is an active owner.
+vi.mock('@/lib/services/users/userAuthState', () => ({
+  getUserAuthState: hoisted.getUserAuthState,
 }));
 
 // Observe run/callback jobs instead of pushing them into a real queue whose
@@ -105,6 +113,7 @@ beforeEach(async () => {
     createdBy: 'user-1',
   }))._id);
   hoisted.publish.mockResolvedValue(undefined);
+  hoisted.getUserAuthState.mockResolvedValue('active');
   // Env knobs are clamped (max duration >= 10s, heartbeat >= 1s); tests that
   // need a short ceiling pass it through the run's own resolved limit.
   process.env.AGENT_BACKGROUND_MAX_DURATION_MS = '10000';
@@ -434,6 +443,54 @@ describe('worker hardening', () => {
     const finalStatus = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id));
     expect(finalStatus?.errorReason).toBe('precondition_failed');
     expect(finalStatus?.errorMessage).toMatch(/revoked/i);
+  });
+
+  it('a run whose owner was disabled after submit fails owner_disabled without invoking, and still fires the failure callback', async () => {
+    const run = await createRun('conv-disabled-owner');
+    hoisted.getUserAuthState.mockResolvedValue('disabled');
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    expect(hoisted.getUserAuthState).toHaveBeenCalledWith(dbName, tenantId, 'user-1');
+    expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+    const finalStatus = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id));
+    expect(finalStatus?.status).toBe('failed');
+    expect(finalStatus?.errorReason).toBe('owner_disabled');
+    expect(finalStatus?.errorMessage).toBe('Run owner is disabled');
+  });
+
+  it('a run whose owner has no user row (synthetic actor) is NOT blocked', async () => {
+    hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_synthetic'));
+    const run = await createRun('conv-synthetic-owner');
+    hoisted.getUserAuthState.mockResolvedValue('missing');
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
+    expect((await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id)))?.status).toBe('succeeded');
+  });
+
+  it('an unreadable owner state fails the run closed (owner_unverifiable) without invoking', async () => {
+    const run = await createRun('conv-unreadable-owner');
+    hoisted.getUserAuthState.mockRejectedValue(new Error('db blip'));
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    expect(hoisted.executeAgentChatLocal).not.toHaveBeenCalled();
+    const finalStatus = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id));
+    expect(finalStatus?.status).toBe('failed');
+    expect(finalStatus?.errorReason).toBe('owner_unverifiable');
+  });
+
+  it.each(['system:agent-scheduler', 'a2a-public'])('synthetic actor %s skips the owner lookup entirely', async (actor) => {
+    hoisted.executeAgentChatLocal.mockResolvedValue(fakeResponse('resp_actor'));
+    hoisted.getUserAuthState.mockRejectedValue(new Error('would throw on a non-ObjectId'));
+    const run = await createRun(`conv-${actor}`, { userId: actor });
+
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+
+    expect(hoisted.getUserAuthState).not.toHaveBeenCalled();
+    expect(hoisted.executeAgentChatLocal).toHaveBeenCalledTimes(1);
   });
 
   it('a run whose API token has expired fails precondition_failed; a live token lets it run', async () => {
