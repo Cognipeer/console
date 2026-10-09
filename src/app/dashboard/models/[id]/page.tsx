@@ -203,6 +203,9 @@ interface RoutingInfoDto {
   deciderLabel?: string;
   deciderModelKey?: string;
   deciderLatencyMs?: number;
+  deciderProbability?: number;
+  deciderConfidence?: number;
+  deciderMargin?: number;
   reason: string;
   signals?: Record<string, unknown>;
   childRequestId?: string;
@@ -1197,6 +1200,28 @@ export default function ModelDetailPage() {
                   ) : null}
                 </Text>
               ) : null}
+              {selectedLog.routing && selectedLog.routing.deciderLatencyMs !== undefined ? (() => {
+                const routing = selectedLog.routing;
+                // The router row's latency is decider + child; a child row's is the child alone.
+                const isRouterRow = routing.role !== 'child' && routing.role !== 'decider';
+                const share = isRouterRow
+                  ? deciderLatencyShare(routing.deciderLatencyMs, selectedLog.latencyMs)
+                  : null;
+                const answer = describeDeciderAnswer(routing);
+                return (
+                  <Text size="sm" c="dimmed">
+                    <strong>Decider:</strong>{' '}
+                    {routing.deciderModelKey ? <code>{routing.deciderModelKey}</code> : null}
+                    {routing.deciderLabel ? <> chose <code>{routing.deciderLabel}</code></> : null}
+                    {answer ? ` (${answer})` : ''}
+                    {' — '}
+                    {Math.round(routing.deciderLatencyMs ?? 0)} ms before the routed call
+                    {share !== null && selectedLog.latencyMs
+                      ? `, ${share}% of this request's ${Math.round(selectedLog.latencyMs)} ms`
+                      : ''}
+                  </Text>
+                );
+              })() : null}
             </Stack>
           );
 
@@ -2220,6 +2245,25 @@ function describeTarget(spec: { target?: IDynamicRoutingTarget; targetModelKey?:
   return spec.target?.modelKey ?? spec.targetModelKey ?? '—';
 }
 
+/**
+ * Share of a router row's end-to-end latency spent in the decider. The decider
+ * runs before the child call, so on the router row (latency = decider + child)
+ * the ratio is meaningful; on a child row it is not, so callers pass the router row only.
+ */
+function deciderLatencyShare(deciderMs: number | undefined, totalMs: number | undefined): number | null {
+  if (deciderMs === undefined || !totalMs || totalMs <= 0) return null;
+  return Math.min(100, Math.round((deciderMs / totalMs) * 100));
+}
+
+/** Probability, confidence and margin of the decider's winning answer, for tooltips. */
+function describeDeciderAnswer(routing: RoutingInfoDto): string {
+  const parts: string[] = [];
+  if (routing.deciderProbability !== undefined) parts.push(`p ${routing.deciderProbability.toFixed(2)}`);
+  if (routing.deciderConfidence !== undefined) parts.push(`confidence ${routing.deciderConfidence.toFixed(2)}`);
+  if (routing.deciderMargin !== undefined) parts.push(`margin ${routing.deciderMargin.toFixed(2)}`);
+  return parts.join(' · ');
+}
+
 function RoutingTab({
   modelId,
   config,
@@ -2233,6 +2277,8 @@ function RoutingTab({
 }) {
   const decisions = logs.filter((l) => l.routing);
   const guards = config.guards;
+  // Rule-based routers without a complexity scorer never call a decider; keep their table as it was.
+  const hasDecider = decisions.some((l) => l.routing?.deciderLatencyMs !== undefined);
 
   return (
     <>
@@ -2265,6 +2311,7 @@ function RoutingTab({
                   <th>Routed to</th>
                   <th>Decision</th>
                   <th>Reason</th>
+                  {hasDecider ? <th style={{ textAlign: 'right' }}>Decider</th> : null}
                   <th style={{ textAlign: 'right' }}>Latency</th>
                 </tr>
               </thead>
@@ -2311,6 +2358,24 @@ function RoutingTab({
                         {l.routing?.reason}
                       </span>
                     </td>
+                    {hasDecider ? (
+                      <td
+                        className="ds-mono"
+                        style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}
+                        title={l.routing ? describeDeciderAnswer(l.routing) || undefined : undefined}
+                      >
+                        {l.routing?.deciderLatencyMs !== undefined ? (
+                          <>
+                            {Math.round(l.routing.deciderLatencyMs)}ms
+                            {deciderLatencyShare(l.routing.deciderLatencyMs, l.latencyMs) !== null ? (
+                              <span className="ds-faint"> · {deciderLatencyShare(l.routing.deciderLatencyMs, l.latencyMs)}%</span>
+                            ) : null}
+                          </>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                    ) : null}
                     <td
                       className="ds-mono"
                       style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums' }}

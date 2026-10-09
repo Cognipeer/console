@@ -17,6 +17,17 @@ export interface RoutingAnalyticsTotals {
   costUsd: number;
   deciderCostUsd: number;
   deciderCalls: number;
+  /** Mean latency of the decider / complexity-scoring calls (they run before the child call). */
+  avgDeciderLatencyMs: number | null;
+  /**
+   * Decider time carried by a routed request: the per-call mean × the share of requests that had a
+   * decider call. A request makes at most one (a decider or a complexity scorer, never both), and a
+   * decider call whose request failed before the routed call has no child row — counting it against
+   * the routed requests would inflate the figure, so the ratio is capped at 1.
+   */
+  avgDeciderPerRequestMs: number | null;
+  /** End-to-end mean per routed request: child latency + the decider time each request carried. */
+  avgTotalLatencyMs: number | null;
   /** The same child usage priced at the baseline model. */
   baselineCostUsd: number;
   /** baseline − (child + decider). Negative means the router costs more. */
@@ -118,6 +129,9 @@ export function summarizeRoutedUsage(
     costUsd: 0,
     deciderCostUsd: 0,
     deciderCalls: 0,
+    avgDeciderLatencyMs: null,
+    avgDeciderPerRequestMs: null,
+    avgTotalLatencyMs: null,
     baselineCostUsd: 0,
     savingsUsd: 0,
     savingsPct: null,
@@ -138,6 +152,8 @@ export function summarizeRoutedUsage(
   const daily = new Map<string, { day: string; requests: number; costUsd: number; baselineCostUsd: number }>();
   let latencySum = 0;
   let latencyN = 0;
+  let deciderLatencySum = 0;
+  let deciderLatencyN = 0;
   let estimateAbsError = 0;
   let estimateActual = 0;
 
@@ -150,6 +166,10 @@ export function summarizeRoutedUsage(
       totals.deciderCalls += 1;
       totals.deciderCostUsd += cost;
       totals.costUsd += cost;
+      if (typeof log.latencyMs === 'number') {
+        deciderLatencySum += log.latencyMs;
+        deciderLatencyN += 1;
+      }
       continue;
     }
     if (routing.role !== 'child') continue;
@@ -264,6 +284,17 @@ export function summarizeRoutedUsage(
   totals.savingsPct =
     totals.baselineCostUsd > 0 ? (totals.savingsUsd / totals.baselineCostUsd) * 100 : null;
   totals.avgLatencyMs = latencyN > 0 ? latencySum / latencyN : null;
+  totals.avgDeciderLatencyMs = deciderLatencyN > 0 ? deciderLatencySum / deciderLatencyN : null;
+  // The router row (decider + child) is not part of the routed rows, so the end-to-end mean is
+  // rebuilt from the two halves: the decider runs once before each child call it belongs to.
+  totals.avgDeciderPerRequestMs =
+    totals.requests > 0
+      ? (totals.avgDeciderLatencyMs ?? 0) * Math.min(1, totals.deciderCalls / totals.requests)
+      : null;
+  totals.avgTotalLatencyMs =
+    totals.avgLatencyMs !== null && totals.avgDeciderPerRequestMs !== null
+      ? totals.avgLatencyMs + totals.avgDeciderPerRequestMs
+      : null;
   totals.costEstimateErrorPct = estimateActual > 0 ? (estimateAbsError / estimateActual) * 100 : null;
   for (const key of ['costUsd', 'deciderCostUsd', 'baselineCostUsd', 'savingsUsd'] as const) {
     totals[key] = round(totals[key]);

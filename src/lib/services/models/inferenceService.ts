@@ -1402,10 +1402,16 @@ async function resolveDynamicCompletion(args: {
       return spent === undefined ? undefined : (spent / budget.limitUsd) * 100;
     })());
 
+  // Decider / complexity-scorer attribution recorded on the router row (the scorer is the
+  // decider of a rule-based router, so its latency belongs here too).
+  let deciderModelKey: string | undefined;
+  let deciderLatencyMs: number | undefined;
+
   // Lazy rule signals — computed only when a rule references them.
   if (config.strategy === 'rule-based') {
     const rules = config.rules ?? [];
     if (rulesReferenceSignal(rules, 'complexityScore') && config.complexity) {
+      const scoringStart = Date.now();
       try {
         const { handleDecisionRequest } = await import('./decisionService');
         const outcome = await handleDecisionRequest({
@@ -1436,6 +1442,10 @@ async function resolveDynamicCompletion(args: {
           router: router.key,
           error: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        // A failed scoring still delayed the request, so its time is recorded either way.
+        deciderLatencyMs = Date.now() - scoringStart;
+        deciderModelKey = config.complexity.modelKey;
       }
     }
     if (rulesReferenceSignal(rules, 'conversationCostUsd')) {
@@ -1464,8 +1474,6 @@ async function resolveDynamicCompletion(args: {
   let decision: IModelUsageRouting['decision'] = 'default';
   let matchedRuleLabel: string | undefined;
   let deciderLabel: string | undefined;
-  let deciderModelKey: string | undefined;
-  let deciderLatencyMs: number | undefined;
   let deciderProbability: number | undefined;
   let deciderConfidence: number | undefined;
   let deciderMargin: number | undefined;
