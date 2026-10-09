@@ -1,11 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Group, Text, Modal, CopyButton } from '@mantine/core';
+import { Button, Text, CopyButton } from '@mantine/core';
 import { IconKey, IconTrash, IconCopy, IconCheck } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import CreateTokenModal from './CreateTokenModal';
 import { useTranslations } from '@/lib/i18n';
+import { useConfirm } from '@/components/common/confirm';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
 interface ApiToken {
@@ -23,13 +24,12 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [loading, setLoading] = useState(true);
   const [createModalOpened, setCreateModalOpened] = useState(false);
-  const [deleteModalOpened, setDeleteModalOpened] = useState(false);
-  const [tokenToDelete, setTokenToDelete] = useState<ApiToken | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [query, setQuery] = useState('');
   const t = useTranslations('settings.tokenManagement');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
+  const { confirmAction } = useConfirm();
 
   const listUrl = projectId
     ? `/api/projects/${encodeURIComponent(projectId)}/tokens`
@@ -79,37 +79,27 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     );
   }, [tokens, query]);
 
-  const handleDeleteToken = (token: ApiToken) => {
-    setTokenToDelete(token);
-    setDeleteModalOpened(true);
-  };
-
-  const confirmDelete = async () => {
-    if (!tokenToDelete) return;
-
-    try {
-      const response = await fetch(deleteUrl(tokenToDelete._id), { method: 'DELETE' });
-
-      if (!response.ok) {
-        throw new Error(t('errors.delete'));
-      }
-
-      notifications.show({
-        title: tCommon('success'),
-        message: t('messages.deleteSuccess'),
-        color: 'green',
-      });
-
-      fetchTokens();
-      setDeleteModalOpened(false);
-      setTokenToDelete(null);
-    } catch {
-      notifications.show({
-        title: tNotifications('errorTitle'),
-        message: t('errors.delete'),
-        color: 'red',
-      });
-    }
+  const confirmDelete = async (token: ApiToken) => {
+    const done = await confirmAction({
+      title: t('deleteModal.title'),
+      message: t('deleteModal.description', {
+        label: token.label ?? '',
+      }),
+      tone: 'danger',
+      confirmLabel: t('deleteModal.confirm'),
+      cancelLabel: t('deleteModal.cancel'),
+      action: async () => {
+        const response = await fetch(deleteUrl(token._id), { method: 'DELETE' });
+        if (!response.ok) throw new Error(t('errors.delete'));
+      },
+    });
+    if (!done) return;
+    notifications.show({
+      title: tCommon('success'),
+      message: t('messages.deleteSuccess'),
+      color: 'green',
+    });
+    fetchTokens();
   };
 
   const maskToken = (token: string) => {
@@ -233,7 +223,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
                   label: t('actions.delete'),
                   icon: <IconTrash size={14} />,
                   color: 'red',
-                  onClick: () => handleDeleteToken(token),
+                  onClick: () => void confirmDelete(token),
                 },
               ]
         }
@@ -245,36 +235,6 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
         onSuccess={fetchTokens}
         createUrl={listUrl}
       />
-
-      <Modal
-        opened={deleteModalOpened}
-        onClose={() => {
-          setDeleteModalOpened(false);
-          setTokenToDelete(null);
-        }}
-        title={t('deleteModal.title')}
-        size="md"
-      >
-        <Text size="sm" mb="md">
-          {t('deleteModal.description', {
-            label: tokenToDelete?.label ?? '',
-          })}
-        </Text>
-        <Group justify="flex-end" gap="sm">
-          <Button
-            variant="default"
-            onClick={() => {
-              setDeleteModalOpened(false);
-              setTokenToDelete(null);
-            }}
-          >
-            {t('deleteModal.cancel')}
-          </Button>
-          <Button color="red" onClick={confirmDelete}>
-            {t('deleteModal.confirm')}
-          </Button>
-        </Group>
-      </Modal>
     </>
   );
 }

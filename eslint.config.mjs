@@ -76,6 +76,16 @@ const eslintConfig = [
       'react/react-in-jsx-scope': 'off',
     },
   },
+  {
+    // Native browser dialogs are banned in app code: use useConfirm /
+    // useDeleteResource (src/components/common/confirm). A local binding named
+    // `confirm` (e.g. `const { confirm } = useConfirm()`) shadows the global and
+    // is not flagged.
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
+      'no-alert': 'error',
+    },
+  },
 ];
 
 export default eslintConfig;

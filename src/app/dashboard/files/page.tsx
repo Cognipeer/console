@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconBan, IconCheck, IconFolder, IconPlus, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
@@ -33,13 +35,14 @@ function formatDate(value?: Date | string | null) {
 }
 
 export default function FilesDashboardPage() {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
   const queryClient = useQueryClient();
   const [dashboardData, setDashboardData] = useState<FilesDashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
   const [createOpen, setCreateOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<FileBucketView | null>(null);
   const [query, setQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -90,16 +93,20 @@ export default function FilesDashboardPage() {
       queryClient.setQueryData<FileBucketView[]>(['file-buckets'], (current = []) =>
         current.filter((item) => item.key !== bucket.key),
       );
-      setDeleteTarget(null);
-    },
-    onError: (error) => {
-      notifications.show({
-        color: 'red',
-        title: 'Unable to delete bucket',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
     },
   });
+
+  const confirmDeleteBucket = (bucket: FileBucketView) =>
+    deleteResource({
+      noun: tSafe('nouns.fileBucket'),
+      name: bucket.name,
+      type: 'file-bucket',
+      id: bucket.id,
+      extraWarning: tSafe('fileBucketExtra'),
+      action: async () => {
+        await deleteBucket.mutateAsync(bucket);
+      },
+    });
 
   const toggleBucketStatus = useMutation({
     mutationFn: async (bucket: FileBucketView) => {
@@ -334,35 +341,10 @@ export default function FilesDashboardPage() {
             icon: <IconTrash size={14} />,
             color: 'red',
             disabled: deleteBucket.isPending,
-            onClick: () => setDeleteTarget(b),
+            onClick: () => void confirmDeleteBucket(b),
           },
         ]}
       />
-
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete bucket"
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          Delete bucket <strong>{deleteTarget?.name}</strong>? Files within the
-          bucket must be removed first.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button
-            color="red"
-            loading={deleteBucket.isPending}
-            onClick={() => deleteTarget && deleteBucket.mutate(deleteTarget)}
-          >
-            Delete
-          </Button>
-        </Group>
-      </Modal>
 
       <CreateFileBucketModal
         opened={createOpen}

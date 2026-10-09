@@ -30,6 +30,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreateConfigItemModal from '@/components/config/CreateConfigItemModal';
@@ -84,6 +85,8 @@ function formatDate(value?: string | Date) {
 
 export default function ConfigGroupDetailPage() {
   const t = useTranslations('config');
+  const tSafe = useTranslations('common.confirm.dataSafety');
+  const deleteResource = useDeleteResource();
   const router = useRouter();
   const params = useParams<{ groupId: string }>();
   const groupId = params.groupId;
@@ -206,63 +209,66 @@ export default function ConfigGroupDetailPage() {
   };
 
   const handleDeleteGroup = async () => {
-    if (!groupId || !confirm(t('confirmDeleteGroup'))) return;
-    setDeletingId(groupId);
-    try {
-      const res = await fetch(`/api/config/groups/${groupId}`, {
-        method: 'DELETE',
-      });
+    if (!groupId) return;
+    await deleteResource({
+      noun: tSafe('nouns.configGroup'),
+      name: group?.name,
+      type: 'config-group',
+      id: group?._id,
+      extraWarning: tSafe('configGroupExtra'),
+      action: async () => {
+        setDeletingId(groupId);
+        try {
+          const res = await fetch(`/api/config/groups/${groupId}`, {
+            method: 'DELETE',
+          });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || t('deleteError'));
-      }
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || t('deleteError'));
+          }
 
-      notifications.show({
-        title: t('groupDeleted'),
-        message: t('groupDeletedMessage'),
-        color: 'teal',
-      });
-      router.push('/dashboard/config');
-    } catch (error) {
-      notifications.show({
-        title: t('error'),
-        message: error instanceof Error ? error.message : t('deleteError'),
-        color: 'red',
-      });
-    } finally {
-      setDeletingId(null);
-    }
+          notifications.show({
+            title: t('groupDeleted'),
+            message: t('groupDeletedMessage'),
+            color: 'teal',
+          });
+          router.push('/dashboard/config');
+        } finally {
+          setDeletingId(null);
+        }
+      },
+    });
   };
 
   const handleDeleteItem = async (itemId: string) => {
-    if (!confirm(t('confirmDelete'))) return;
-    setDeletingId(itemId);
-    try {
-      const res = await fetch(`/api/config/items/${itemId}`, {
-        method: 'DELETE',
-      });
+    const item = group?.items.find((i) => i._id === itemId);
+    await deleteResource({
+      noun: tSafe('nouns.configItem'),
+      name: item?.name ?? item?.key,
+      action: async () => {
+        setDeletingId(itemId);
+        try {
+          const res = await fetch(`/api/config/items/${itemId}`, {
+            method: 'DELETE',
+          });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || t('deleteError'));
-      }
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || t('deleteError'));
+          }
 
-      notifications.show({
-        title: t('itemDeleted'),
-        message: t('itemDeletedMessage'),
-        color: 'teal',
-      });
-      handleRefresh();
-    } catch (error) {
-      notifications.show({
-        title: t('error'),
-        message: error instanceof Error ? error.message : t('deleteError'),
-        color: 'red',
-      });
-    } finally {
-      setDeletingId(null);
-    }
+          notifications.show({
+            title: t('itemDeleted'),
+            message: t('itemDeletedMessage'),
+            color: 'teal',
+          });
+          handleRefresh();
+        } finally {
+          setDeletingId(null);
+        }
+      },
+    });
   };
 
   if (loading) {
@@ -559,6 +565,12 @@ export default function ConfigGroupDetailPage() {
           handleRefresh();
         }}
       />
+
+      {group ? (
+        <Paper withBorder radius="md" p="md" mt="md">
+          <ResourceUsageSection type="config-group" id={group._id} />
+        </Paper>
+      ) : null}
 
       <EditConfigItemModal
         opened={editingItem !== null}

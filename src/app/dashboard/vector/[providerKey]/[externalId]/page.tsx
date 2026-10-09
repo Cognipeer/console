@@ -29,6 +29,8 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { ResourceUsageSection, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconActivity,
   IconArrowLeft,
@@ -191,6 +193,8 @@ function UsageCodeBlock({ title, code }: UsageCodeBlockProps) {
 export default function VectorIndexDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const { openDocs } = useDocsDrawer();
   const providerKeyParam = params.providerKey;
   const indexKeyParam = params.externalId;
@@ -312,31 +316,29 @@ export default function VectorIndexDetailPage() {
 
   const handleDelete = async () => {
     if (!provider || !index) return;
-    const confirmed = window.confirm(`Delete index "${index.name}"? This cannot be undone.`);
-    if (!confirmed) return;
-    try {
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(index.key)}?providerKey=${encodeURIComponent(provider.key)}`,
-        { method: 'DELETE' },
-      );
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to delete index');
-      }
-      notifications.show({
-        color: 'green',
-        title: 'Vector index deleted',
-        message: `${index.name} has been removed.`,
-      });
-      router.push('/dashboard/vector');
-    } catch (error) {
-      console.error(error);
-      notifications.show({
-        color: 'red',
-        title: 'Unable to delete index',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    }
+    await deleteResource({
+      noun: tSafe('nouns.vectorIndex'),
+      name: index.name,
+      type: 'vector-index',
+      id: index._id ? String(index._id) : undefined,
+      extraWarning: tSafe('vectorIndexExtra'),
+      action: async () => {
+        const response = await fetch(
+          `/api/vector/indexes/${encodeURIComponent(index.key)}?providerKey=${encodeURIComponent(provider.key)}`,
+          { method: 'DELETE' },
+        );
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error ?? 'Failed to delete index');
+        }
+        notifications.show({
+          color: 'green',
+          title: 'Vector index deleted',
+          message: `${index.name} has been removed.`,
+        });
+        router.push('/dashboard/vector');
+      },
+    });
   };
 
   const handleUpdateIndex = async (values: { name: string; description?: string }) => {
@@ -459,34 +461,29 @@ export default function VectorIndexDetailPage() {
 
   const handleDeleteItem = async (itemId: string) => {
     if (!provider || !index) return;
-    const confirmed = window.confirm(`Remove vector item "${itemId}"? This cannot be undone.`);
-    if (!confirmed) return;
-    try {
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(index.key)}/vectors?providerKey=${encodeURIComponent(provider.key)}`,
-        {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: [itemId] }),
-        },
-      );
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to delete vector item');
-      }
-      notifications.show({
-        color: 'green',
-        title: 'Vector item removed',
-        message: `${itemId} has been deleted.`,
-      });
-    } catch (error) {
-      console.error(error);
-      notifications.show({
-        color: 'red',
-        title: 'Unable to delete item',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    }
+    await deleteResource({
+      noun: tSafe('nouns.vectorItem'),
+      name: itemId,
+      action: async () => {
+        const response = await fetch(
+          `/api/vector/indexes/${encodeURIComponent(index.key)}/vectors?providerKey=${encodeURIComponent(provider.key)}`,
+          {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: [itemId] }),
+          },
+        );
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error ?? 'Failed to delete vector item');
+        }
+        notifications.show({
+          color: 'green',
+          title: 'Vector item removed',
+          message: `${itemId} has been deleted.`,
+        });
+      },
+    });
   };
 
   if (loading) {
@@ -922,6 +919,11 @@ export default function VectorIndexDetailPage() {
                 )}
               </Stack>
             )}
+            {index?._id ? (
+              <Paper withBorder radius="lg" p="lg">
+                <ResourceUsageSection type="vector-index" id={String(index._id)} />
+              </Paper>
+            ) : null}
           </Stack>
         </Tabs.Panel>
 

@@ -30,6 +30,8 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useConfirm } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconAlertTriangle,
   IconCookie,
@@ -53,6 +55,8 @@ function daysUntil(value: unknown): number | null {
 }
 
 export default function BrowserProfilePanel({ browser, onUpdated }: Props) {
+  const { confirmAction } = useConfirm();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const fileInput = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
@@ -103,23 +107,23 @@ export default function BrowserProfilePanel({ browser, onUpdated }: Props) {
     if (res.ok) onUpdated((await res.json()).browser);
   }
 
-  async function clearProfile() {
-    try {
-      const res = await fetch(`/api/browser/browsers/${browser.id}/profile`, { method: 'DELETE' });
-      if (!res.ok) throw new Error(await res.text());
-      notifications.show({
-        color: 'teal',
-        title: 'Profile removed',
-        message: 'New sessions will start signed out.',
-      });
-      await refresh();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  function clearProfile() {
+    return confirmAction({
+      title: tSafe('clearProfile.title'),
+      message: tSafe('clearProfile.message'),
+      confirmLabel: tSafe('clearProfile.confirm'),
+      tone: 'danger',
+      action: async () => {
+        const res = await fetch(`/api/browser/browsers/${browser.id}/profile`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text());
+        notifications.show({
+          color: 'teal',
+          title: 'Profile removed',
+          message: 'New sessions will start signed out.',
+        });
+        await refresh();
+      },
+    });
   }
 
   async function saveConfig() {
@@ -228,7 +232,7 @@ export default function BrowserProfilePanel({ browser, onUpdated }: Props) {
             </Button>
             {profile ? (
               <Tooltip label="New sessions will start signed out">
-                <Button size="xs" variant="subtle" color="red" leftSection={<IconTrash size={14} />} onClick={clearProfile}>
+                <Button size="xs" variant="subtle" color="red" leftSection={<IconTrash size={14} />} onClick={() => void clearProfile()}>
                   Remove
                 </Button>
               </Tooltip>

@@ -36,6 +36,9 @@ export interface ResourceUsagePanelProps {
   usedBy?: ResourceEdgeView[];
   onOpen?(ref: ResourceRefView): void;
   compact?: boolean;
+  /** Embedders that only care about one direction (delete dialogs list "Used by" only). */
+  hideUses?: boolean;
+  hideUsedBy?: boolean;
 }
 
 const STATUS_CLASS: Record<EdgeStatus, string> = {
@@ -63,12 +66,12 @@ function useLabel() {
 }
 
 /** Self-contained "Uses" / "Used by" lists for one resource (embeddable in service pages). */
-export default function ResourceUsagePanel({ uses, usedBy, onOpen, compact }: ResourceUsagePanelProps) {
+export default function ResourceUsagePanel({ uses, usedBy, onOpen, compact, hideUses, hideUsedBy }: ResourceUsagePanelProps) {
   const { t } = useLabel();
   return (
     <Stack gap={compact ? 'xs' : 'md'}>
-      <Section title={t('usage.uses')} edges={uses ?? []} onOpen={onOpen} compact={compact} />
-      <Section title={t('usage.usedBy')} edges={usedBy ?? []} onOpen={onOpen} compact={compact} />
+      {hideUses ? null : <Section title={t('usage.uses')} edges={uses ?? []} onOpen={onOpen} compact={compact} />}
+      {hideUsedBy ? null : <Section title={t('usage.usedBy')} edges={usedBy ?? []} onOpen={onOpen} compact={compact} />}
     </Stack>
   );
 }

@@ -46,6 +46,7 @@ import {
   IconArrowsLeftRight,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { ResourceUsageSection } from '@/components/common/confirm';
 import EmptyState from '@/components/common/EmptyState';
 import GuardrailBindingList, {
   bindingRowsFromLegacySlots,
@@ -1007,6 +1008,9 @@ export default function AgentDetailPage() {
               if (alias.top === 'deploy') setDeployTab(alias.sub);
             }}
           />
+          <Paper withBorder radius="md" p="md" mt="md">
+            <ResourceUsageSection type="agent" id={String(agent._id)} showUses />
+          </Paper>
         </Tabs.Panel>
 
         {/* ── Sessions ────────────────────────────────────────── */}

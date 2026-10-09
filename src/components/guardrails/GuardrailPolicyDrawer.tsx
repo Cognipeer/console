@@ -5,7 +5,7 @@
  *
  * ── WHY A DRAWER AND NOT A `FormShell` ──────────────────────────────────────
  * The repo rule is that every create/edit screen is a full-screen `FormShell`
- * overlay and a small `Modal` is only for a confirm. This is a DELIBERATE
+ * overlay and only a confirmation (`useConfirm`) is a small dialog. This is a DELIBERATE
  * divergence, asked for directly: the policies live on cards, and clicking a
  * card should open that card rather than replace the page it sits on. Losing
  * the list is what makes the existing full-screen editor feel like a detour
@@ -79,6 +79,8 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useConfirm } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   Alert,
   Badge,
@@ -87,7 +89,6 @@ import {
   Divider,
   Drawer,
   Group,
-  Modal,
   ScrollArea,
   Select,
   Stack,
@@ -1148,14 +1149,14 @@ export default function GuardrailPolicyDrawer({
   isNew,
   readOnly,
 }: GuardrailPolicyDrawerProps) {
+  const { confirm } = useConfirm();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [draft, setDraft] = useState<GuardrailPolicy>(policy);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     if (opened) {
       setDraft(policy);
-      setConfirmDiscard(false);
       // Shut for a newly opened policy: the four basic questions are the whole
       // form until somebody asks for more. The effect below re-opens it if this
       // policy has something outstanding in there.
@@ -1277,7 +1278,15 @@ export default function GuardrailPolicyDrawer({
 
   const requestClose = () => {
     if (dirty && !readOnly) {
-      setConfirmDiscard(true);
+      void confirm({
+        title: tSafe('discardChanges.title'),
+        message: tSafe('discardChanges.message'),
+        confirmLabel: tSafe('discardChanges.confirm'),
+        cancelLabel: tSafe('discardChanges.cancel'),
+        tone: 'warning',
+      }).then((discard) => {
+        if (discard) onClose();
+      });
       return;
     }
     onClose();
@@ -1792,37 +1801,6 @@ export default function GuardrailPolicyDrawer({
           </Group>
         </Stack>
       </Drawer>
-
-      {/* A small Modal is what the repo rule reserves for a confirm, so this one
-          is in the rule rather than another divergence from it. */}
-      <Modal
-        opened={confirmDiscard}
-        onClose={() => setConfirmDiscard(false)}
-        title="Discard your changes?"
-        centered
-        size="sm"
-      >
-        <Stack gap="sm">
-          <Text size="sm">
-            This policy has edits that have not been applied. Closing now throws them away.
-          </Text>
-          <Group justify="flex-end" gap="xs">
-            <Button size="sm" variant="subtle" onClick={() => setConfirmDiscard(false)}>
-              Keep editing
-            </Button>
-            <Button
-              size="sm"
-              color="red"
-              onClick={() => {
-                setConfirmDiscard(false);
-                onClose();
-              }}
-            >
-              Discard
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
     </>
   );
 }

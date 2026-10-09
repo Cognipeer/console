@@ -8,6 +8,7 @@ import { notifications } from '@mantine/notifications';
 import AddUserModal from './AddUserModal';
 import ImportUsersModal from './ImportUsersModal';
 import { useTranslations } from '@/lib/i18n';
+import { useConfirm } from '@/components/common/confirm';
 import type { PermissionService, ServicePermissionLevel, UserServicePermissions } from '@/lib/security/rbac';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
@@ -45,9 +46,7 @@ export default function UserManagement() {
   const [loading, setLoading] = useState(true);
   const [inviteModalOpened, setInviteModalOpened] = useState(false);
   const [importModalOpened, setImportModalOpened] = useState(false);
-  const [deleteModalOpened, setDeleteModalOpened] = useState(false);
   const [permissionsModalOpened, setPermissionsModalOpened] = useState(false);
-  const [userToDelete, setUserToDelete] = useState<User | null>(null);
   const [userToEditPermissions, setUserToEditPermissions] = useState<User | null>(null);
   const [permissionDraft, setPermissionDraft] = useState<UserServicePermissions>({});
   const [savingPermissions, setSavingPermissions] = useState(false);
@@ -61,6 +60,7 @@ export default function UserManagement() {
   const t = useTranslations('settings.userManagement');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
+  const { confirmAction } = useConfirm();
 
   const fetchUsers = useCallback(async () => {
     setLoading(true);
@@ -109,11 +109,6 @@ export default function UserManagement() {
         .some((value) => String(value).toLowerCase().includes(q)),
     );
   }, [users, query]);
-
-  const handleDeleteUser = (user: User) => {
-    setUserToDelete(user);
-    setDeleteModalOpened(true);
-  };
 
   const handleEditPermissions = (user: User) => {
     setUserToEditPermissions(user);
@@ -228,34 +223,28 @@ export default function UserManagement() {
     }
   };
 
-  const confirmDelete = async () => {
-    if (!userToDelete) return;
-
-    try {
-      const response = await fetch(`/api/users/${userToDelete._id}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok) {
-        throw new Error(t('errors.delete'));
-      }
-
-      notifications.show({
-        title: tCommon('success'),
-        message: t('messages.deleteSuccess'),
-        color: 'green',
-      });
-
-      fetchUsers();
-      setDeleteModalOpened(false);
-      setUserToDelete(null);
-    } catch {
-      notifications.show({
-        title: tNotifications('errorTitle'),
-        message: t('errors.delete'),
-        color: 'red',
-      });
-    }
+  const confirmDelete = async (user: User) => {
+    const done = await confirmAction({
+      title: t('deleteModal.title'),
+      message: t('deleteModal.description', {
+        name: user.name ?? '',
+        email: user.email ?? '',
+      }),
+      tone: 'danger',
+      confirmLabel: t('deleteModal.confirm'),
+      cancelLabel: t('deleteModal.cancel'),
+      action: async () => {
+        const response = await fetch(`/api/users/${user._id}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error(t('errors.delete'));
+      },
+    });
+    if (!done) return;
+    notifications.show({
+      title: tCommon('success'),
+      message: t('messages.deleteSuccess'),
+      color: 'green',
+    });
+    fetchUsers();
   };
 
   const getRoleBadgeColor = (role: string) => {
@@ -438,7 +427,7 @@ export default function UserManagement() {
                   label: 'Delete',
                   icon: <IconTrash size={14} />,
                   color: 'red',
-                  onClick: () => handleDeleteUser(user),
+                  onClick: () => void confirmDelete(user),
                 },
               ]
         }
@@ -581,37 +570,6 @@ export default function UserManagement() {
             </Button>
           </Group>
         </Stack>
-      </Modal>
-
-      <Modal
-        opened={deleteModalOpened}
-        onClose={() => {
-          setDeleteModalOpened(false);
-          setUserToDelete(null);
-        }}
-        title={t('deleteModal.title')}
-        size="md"
-      >
-        <Text size="sm" mb="md">
-          {t('deleteModal.description', {
-            name: userToDelete?.name ?? '',
-            email: userToDelete?.email ?? '',
-          })}
-        </Text>
-        <Group justify="flex-end" gap="sm">
-          <Button
-            variant="default"
-            onClick={() => {
-              setDeleteModalOpened(false);
-              setUserToDelete(null);
-            }}
-          >
-            {t('deleteModal.cancel')}
-          </Button>
-          <Button color="red" onClick={confirmDelete}>
-            {t('deleteModal.confirm')}
-          </Button>
-        </Group>
       </Modal>
     </>
   );

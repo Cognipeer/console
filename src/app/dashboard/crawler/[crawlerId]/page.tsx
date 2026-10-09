@@ -19,6 +19,8 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { ResourceUsageSection, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconAlertTriangle,
   IconClock,
@@ -100,6 +102,8 @@ type TabId = 'overview' | 'urls' | 'plan' | 'http' | 'integration' | 'schedule' 
 export default function CrawlerDetailPage() {
   const params = useParams<{ crawlerId: string }>();
   const crawlerId = params.crawlerId;
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
 
   const [crawler, setCrawler] = useState<CrawlerView | null>(null);
   const [jobs, setJobs] = useState<CrawlJobView[]>([]);
@@ -585,25 +589,23 @@ export default function CrawlerDetailPage() {
     }
   }
 
-  async function removeUrl(url: string) {
-    try {
-      const res = await fetch(`/api/crawler/crawlers/${crawlerId}/urls`, {
-        method: 'DELETE',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ urls: [url] }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || 'Failed to remove');
-      }
-      await loadCrawler();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  function removeUrl(url: string) {
+    return deleteResource({
+      noun: tSafe('nouns.crawlerUrl'),
+      name: url,
+      action: async () => {
+        const res = await fetch(`/api/crawler/crawlers/${crawlerId}/urls`, {
+          method: 'DELETE',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ urls: [url] }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(text || 'Failed to remove');
+        }
+        await loadCrawler();
+      },
+    });
   }
 
   async function runAll() {
@@ -1457,6 +1459,12 @@ Content-Type: application/json
           setJobResults([]);
         }}
       />
+
+      {crawler ? (
+        <DetailCard>
+          <ResourceUsageSection type="crawler" id={crawler.id} />
+        </DetailCard>
+      ) : null}
     </DetailShell>
   );
 }

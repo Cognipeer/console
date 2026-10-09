@@ -15,26 +15,31 @@
 import { runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { buildCrn } from './crn';
-import { EMPTY_GRAPH, buildResourceGraph, type ResourceGraph } from './graph';
+import { EMPTY_GRAPH, MAX_USED_BY, buildResourceGraph, type ResourceGraph } from './graph';
 import { HEALTH_ISSUE_KINDS } from './health';
-import { matchesProjectFilter, projectDisplayOfRecord } from './projectDisplay';
+import { isDisplayVisible, matchesProjectFilter, projectDisplayOfRecord } from './projectDisplay';
 import { getResourceTypeDefinition, listResourceTypeDefinitions } from './registry';
 import { ensureCommunityResourceTypesRegistered } from './providers';
 import type {
   GetResourceHealthInput,
   GetResourceInput,
+  GetResourceUsageInput,
   HealthIssue,
   ListResourcesInput,
   ListResourcesResult,
+  ProjectDisplay,
   ResourceDetail,
+  ResourceEdgeView,
   ResourceEdgeInput,
   ResourceHealthResult,
   ResourceListItem,
   ResourceProviderContext,
   ResourceProviderError,
+  ResourceRefView,
   ResourceRecord,
   ResourceTruncation,
   ResourceTypeDefinition,
+  ResourceUsage,
 } from './types';
 
 const logger = createLogger('resources');
@@ -445,6 +450,34 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
   };
 }
 
+/**
+ * Finds a record in the (cached) snapshot. The snapshot can be up to 30s old:
+ * a just-created id gets ONE forced rebuild (still rate-limited by
+ * MIN_REFRESH_INTERVAL_MS and de-duplicated with a build already running), then
+ * it is a miss.
+ */
+async function findInSnapshot(
+  input: { tenantDbName: string; tenantId: string; type: string; id: string },
+  options: { allowForcedRefresh?: boolean } = {},
+): Promise<{ snapshot: Snapshot; record: ResourceRecord } | null> {
+  const find = (snap: Snapshot) => snap.records.find((r) => r.type === input.type && r.id === input.id) ?? null;
+  let snapshot = await getSnapshot(input, false);
+  let record = find(snapshot);
+  if (!record && options.allowForcedRefresh !== false) {
+    const fresh = await getSnapshot(input, true);
+    if (fresh !== snapshot) {
+      snapshot = fresh;
+      record = find(fresh);
+    }
+  }
+  if (!record) return null;
+  if (record.tenantId && String(record.tenantId) !== input.tenantId) {
+    logger.warn('Dropped resource claiming another tenant', { type: record.type, id: record.id });
+    return null;
+  }
+  return { snapshot, record };
+}
+
 export async function getResource(input: GetResourceInput): Promise<ResourceDetail | null> {
   ensureCommunityResourceTypesRegistered();
   const def = getResourceTypeDefinition(input.type);
@@ -452,25 +485,9 @@ export async function getResource(input: GetResourceInput): Promise<ResourceDeta
 
   // The detail carries the reference graph, which only exists for the whole
   // tenant: serve it from the snapshot, never from a per-type read.
-  const find = (snap: Snapshot) => snap.records.find((r) => r.type === input.type && r.id === input.id) ?? null;
-  let snapshot = await getSnapshot(input, false);
-  let record = find(snapshot);
-  if (!record) {
-    // The snapshot can be up to 30s old: a just-created id gets ONE forced
-    // rebuild (still rate-limited by MIN_REFRESH_INTERVAL_MS and de-duplicated
-    // with a build already running), then it is a 404.
-    const fresh = await getSnapshot(input, true);
-    if (fresh !== snapshot) {
-      snapshot = fresh;
-      record = find(fresh);
-    }
-  }
-
-  if (!record) return null;
-  if (record.tenantId && String(record.tenantId) !== input.tenantId) {
-    logger.warn('Dropped resource claiming another tenant', { type: record.type, id: record.id });
-    return null;
-  }
+  const found = await findInSnapshot(input);
+  if (!found) return null;
+  const { snapshot, record } = found;
 
   const projectNames = new Map(snapshot.projects.map((p) => [p.id, p.name]));
   const item = toListItem(record, input.tenantId, snapshot, projectNames, snapshot.graph);
@@ -485,6 +502,145 @@ export async function getResource(input: GetResourceInput): Promise<ResourceDeta
     usedBy: usedBy.edges,
     usedByTruncated: usedBy.truncated,
     issues: snapshot.graph.issuesOf(record.type, record.id),
+  };
+}
+
+function omitCandidates(edge: ResourceEdgeView): ResourceEdgeView {
+  const copy = { ...edge };
+  delete copy.candidates;
+  return copy;
+}
+
+/** Ids are UUIDs (SQLite) or 24-hex ObjectIds (MongoDB); anything else cannot be a just-created resource. */
+const PLAUSIBLE_ID = /^(?:[0-9a-f]{24}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/**
+ * Narrows a display to the projects the caller can see. A multi-project row is
+ * visible when ANY of its projects is, but the names and ids of the others are
+ * not the caller's to know. Indices of ids and names stay aligned.
+ */
+function sanitizeDisplay(display: ProjectDisplay, visible: ReadonlySet<string> | null): ProjectDisplay {
+  if (visible === null || display.kind !== 'multi-project') return display;
+  const keep: number[] = [];
+  display.projectIds.forEach((id, i) => {
+    if (visible.has(id)) keep.push(i);
+  });
+  if (keep.length === display.projectIds.length) return display;
+  if (keep.length === 1) {
+    const i = keep[0];
+    return { kind: 'project', projectId: display.projectIds[i], projectName: display.projectNames[i] ?? null };
+  }
+  return {
+    kind: 'multi-project',
+    projectIds: keep.map((i) => display.projectIds[i]),
+    projectNames: keep.map((i) => display.projectNames[i]),
+  };
+}
+
+/** Applies sanitizeDisplay to a ref, repairing projectId / projectName / crn when they pointed at a hidden project. */
+function sanitizeRef(ref: ResourceRefView, visible: ReadonlySet<string> | null, tenantId: string): ResourceRefView {
+  if (visible === null || !ref.projectDisplay) return ref;
+  const projectDisplay = sanitizeDisplay(ref.projectDisplay, visible);
+  if (projectDisplay === ref.projectDisplay) return ref;
+  let projectId = ref.projectId;
+  let projectName = ref.projectName;
+  if (projectDisplay.kind === 'project') {
+    projectId = projectDisplay.projectId;
+    projectName = projectDisplay.projectName;
+  } else if (projectDisplay.kind === 'multi-project') {
+    projectId = projectDisplay.projectIds[0] ?? null;
+    projectName = projectDisplay.projectNames[0] ?? null;
+  }
+  const crn = ref.id ? buildCrn({ tenantId, projectId, type: ref.type, id: ref.id }) : ref.crn;
+  return { ...ref, projectId, projectName, projectDisplay, crn };
+}
+
+/**
+ * Who uses a resource and who it uses, as the CALLER may see it. Rows outside
+ * `visibleProjectIds`, or of a type the caller may not read (`canViewType`),
+ * are never listed — only counted (hiddenUsedByCount / hiddenByType) — and the
+ * resource itself must be visible, else null (404).
+ */
+export async function getResourceUsage(input: GetResourceUsageInput): Promise<ResourceUsage | null> {
+  ensureCommunityResourceTypesRegistered();
+  if (!getResourceTypeDefinition(input.type)) return null;
+  const visible = input.visibleProjectIds;
+  // Probing ids must not let a non-admin trigger tenant-wide rebuilds: only an
+  // id that could really have been created moments ago earns the forced rebuild.
+  const found = await findInSnapshot(input, {
+    allowForcedRefresh: visible === null || PLAUSIBLE_ID.test(input.id),
+  });
+  if (!found) return null;
+  const { snapshot, record } = found;
+  const canViewType = input.canViewType ?? (() => true);
+
+  const projectNames = new Map(snapshot.projects.map((p) => [p.id, p.name]));
+  const self = toListItem(record, input.tenantId, snapshot, projectNames, snapshot.graph);
+  if (!isDisplayVisible(self.projectDisplay, visible)) return null;
+  const selfRef = sanitizeRef(
+    {
+      type: self.type, id: self.id, key: self.key, name: self.name,
+      projectId: self.projectId, projectName: self.projectName,
+      projectDisplay: self.projectDisplay, crn: self.crn,
+    },
+    visible,
+    input.tenantId,
+  );
+
+  const summary = { error: 0, warning: 0 };
+  const hiddenByType: Record<string, number> = {};
+  let hiddenUsedByCount = 0;
+  const visibleUsedBy: ResourceUsage['usedBy'] = [];
+  for (const entry of snapshot.graph.usedByEntriesOf(record.type, record.id)) {
+    if (entry.impact) summary[entry.impact] += 1;
+    if (
+      isDisplayVisible(projectDisplayOfRecord(entry.referrer, projectNames), visible)
+      && canViewType(entry.referrer.type)
+    ) {
+      visibleUsedBy.push({
+        ...entry.view,
+        other: sanitizeRef(entry.view.other, visible, input.tenantId),
+        impact: entry.impact,
+      });
+    } else {
+      hiddenUsedByCount += 1;
+      hiddenByType[entry.referrer.type] = (hiddenByType[entry.referrer.type] ?? 0) + 1;
+    }
+  }
+
+  // Outgoing edges: a resolved target in a project the caller cannot access (or
+  // of a type they may not read) is dropped, and so are such copies among the
+  // candidates of a cross-project / ambiguous edge (they would disclose another
+  // project's names). When NO candidate is left the edge is reported as a plain
+  // missing reference, so it cannot reveal that a copy exists out of sight.
+  const refVisible = (ref: ResourceRefView) =>
+    canViewType(ref.type) && (!ref.projectDisplay || isDisplayVisible(ref.projectDisplay, visible));
+  const uses: ResourceUsage['uses'] = [];
+  for (const edge of snapshot.graph.usesOf(record.type, record.id)) {
+    if (edge.other.projectDisplay && !refVisible(edge.other)) continue;
+    const other = sanitizeRef(edge.other, visible, input.tenantId);
+    if (!edge.candidates) {
+      uses.push({ ...edge, other });
+      continue;
+    }
+    const candidates = edge.candidates
+      .filter(refVisible)
+      .map((c) => sanitizeRef(c, visible, input.tenantId));
+    if (candidates.length > 0) {
+      uses.push({ ...edge, other, candidates });
+    } else {
+      uses.push({ ...omitCandidates(edge), other, status: 'missing' });
+    }
+  }
+
+  return {
+    resource: selfRef,
+    uses,
+    usedBy: visibleUsedBy.slice(0, MAX_USED_BY),
+    hiddenUsedByCount,
+    hiddenByType,
+    summary,
+    usedByTruncated: visibleUsedBy.length > MAX_USED_BY,
   };
 }
 

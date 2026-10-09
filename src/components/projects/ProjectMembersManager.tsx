@@ -14,6 +14,8 @@ import {
 } from '@mantine/core';
 import { IconShieldCheck, IconTrash, IconUserPlus } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
+import { useConfirm } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   RBAC_SERVICE_DEFINITIONS,
   type ServicePermissionLevel,
@@ -157,6 +159,8 @@ export default function ProjectMembersManager(
     readOnly?: boolean;
   },
 ) {
+  const { confirmAction } = useConfirm();
+  const tq = useTranslations('common.confirm.qos');
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [capabilities, setCapabilities] = useState<MemberCapabilities>(DEFAULT_CAPABILITIES);
   const [loading, setLoading] = useState(true);
@@ -310,27 +314,28 @@ export default function ProjectMembersManager(
   const handleRemove = async (member: ProjectMember) => {
     if (submitting) return;
 
-    setSubmitting(true);
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/members`, {
-        body: JSON.stringify({ userId: member.userId }),
-        headers: { 'content-type': 'application/json' },
-        method: 'DELETE',
-      });
-      const body = await res.json().catch(() => null);
+    const done = await confirmAction({
+      title: tq('removeTitle', { noun: tq('nouns.user') }),
+      message: tq('removeProjectMember', { name: member.name || member.email || member.userId }),
+      tone: 'warning',
+      confirmLabel: tq('remove'),
+      action: async () => {
+        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/members`, {
+          body: JSON.stringify({ userId: member.userId }),
+          headers: { 'content-type': 'application/json' },
+          method: 'DELETE',
+        });
+        const body = await res.json().catch(() => null);
 
-      if (!res.ok) {
-        throw new Error(body?.error || 'Failed to remove user');
-      }
+        if (!res.ok) {
+          throw new Error(body?.error || 'Failed to remove user');
+        }
+      },
+    });
+    if (!done) return;
 
-      notifications.show({ title: 'Project members', message: 'User removed', color: 'green' });
-      await fetchMembers();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to remove user';
-      notifications.show({ title: 'Project members', message, color: 'red' });
-    } finally {
-      setSubmitting(false);
-    }
+    notifications.show({ title: 'Project members', message: 'User removed', color: 'green' });
+    await fetchMembers();
   };
 
   const handleRoleChange = async (member: ProjectMember, role: ProjectRole) => {

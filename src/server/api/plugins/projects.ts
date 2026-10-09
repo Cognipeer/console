@@ -15,6 +15,7 @@ import {
 import type { ProjectRole } from '@/lib/database/provider/types.base';
 import type { UserServicePermissions } from '@/lib/security/rbac';
 import { mergeServicePermissions } from '@/lib/security/rbac';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import {
   readJsonBody,
   requireSessionContext,
@@ -29,34 +30,6 @@ function canManageProjects(userRole: string): boolean {
 
 function getLegacyProjectIds(projectIds?: string[]): string[] {
   return (projectIds ?? []).map(String).filter(Boolean);
-}
-
-async function collectAccessibleProjectIds(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  userId: string,
-  legacyProjectIds?: string[],
-): Promise<string[]> {
-  const projectIds = new Set(getLegacyProjectIds(legacyProjectIds));
-  const memberships = await db.listUserProjectsByUser(userId);
-
-  for (const membership of memberships) {
-    if (membership.projectId) {
-      projectIds.add(String(membership.projectId));
-    }
-  }
-
-  // Projects inherited through group membership.
-  const groupMemberships = await db.listGroupMembersByUser(userId);
-  for (const groupMembership of groupMemberships) {
-    const groupProjects = await db.listGroupProjectsByGroup(String(groupMembership.groupId));
-    for (const groupProject of groupProjects) {
-      if (groupProject.projectId) {
-        projectIds.add(String(groupProject.projectId));
-      }
-    }
-  }
-
-  return Array.from(projectIds);
 }
 
 /**

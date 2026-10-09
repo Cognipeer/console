@@ -4,6 +4,10 @@
  * The tenant ALWAYS comes from the session. RBAC is applied by
  * withApiRequestContext via the `/api/resources` prefix → `resources` service
  * (adminService: owner/admin by default, anyone else only with an explicit grant).
+ *
+ * `/api/resource-usage/:type/:id` is the exception: it is gated by the service
+ * that owns `:type` (see usageAccess.ts) and answers only with what the caller's
+ * projects may see.
  */
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
@@ -13,10 +17,14 @@ import {
   ResourceQueryError,
   getResource,
   getResourceHealth,
+  getResourceUsage,
   listResources,
 } from '@/lib/resources/service';
+import { canReadResourceType, canReadResourceUsage, registerResourceUsageAccess } from '@/lib/resources/usageAccess';
+import { runWithTenantScope } from '@/lib/database';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import type { HealthIssueKind, HealthSeverity } from '@/lib/resources/types';
-import { requireSessionContext, withApiRequestContext } from '../fastify-utils';
+import { requireSessionContext, resolveSessionRbacContext, withApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:resources');
 
@@ -35,6 +43,9 @@ function parseIntParam(value: unknown, min: number): number | undefined | null {
 }
 
 export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
+  // Before the first request: the per-type RBAC resolver for the usage route.
+  registerResourceUsageAccess();
+
   app.get('/resources', withApiRequestContext(async (request, reply) => {
     try {
       const session = requireSessionContext(request);
@@ -114,6 +125,50 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Get resource error', { error });
       return reply.code(500).send({ error: 'Failed to load resource' });
+    }
+  }));
+
+  // Delete / rename impact of ONE resource for the caller. Gated by the type's
+  // own service (resolver above), so a tools:read user can see tool usage.
+  app.get('/resource-usage/:type/:id', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const { type, id } = request.params as { type: string; id: string };
+      // The route gate already checked this, but it works on the request path;
+      // authorise again here from the decoded params so the decision can never
+      // depend on how the URL happened to be spelled.
+      const { user, groupGrants } = await resolveSessionRbacContext(session);
+      if (!canReadResourceUsage(user, groupGrants, type)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      // Tenant owner/admin see everything; everyone else only the projects they
+      // belong to directly or through a group (same source as GET /api/projects).
+      let visibleProjectIds: ReadonlySet<string> | null = null;
+      if (user.role !== 'owner' && user.role !== 'admin') {
+        const ids = await runWithTenantScope(session.tenantDbName, (db) =>
+          collectAccessibleProjectIds(db, String(user._id), user.projectIds),
+        );
+        visibleProjectIds = new Set(ids);
+      }
+
+      const usage = await getResourceUsage({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        type,
+        id,
+        visibleProjectIds,
+        // Referrers of a type the caller may not read are counted, never listed.
+        // Tenant owner / admin keep seeing everything.
+        canViewType: visibleProjectIds === null
+          ? undefined
+          : (referrerType) => canReadResourceType(user, groupGrants, referrerType),
+      });
+      if (!usage) return reply.code(404).send({ error: 'Resource not found' });
+      return reply.code(200).send(usage);
+    } catch (error) {
+      logger.error('Get resource usage error', { error });
+      return reply.code(500).send({ error: 'Failed to load resource usage' });
     }
   }));
 };

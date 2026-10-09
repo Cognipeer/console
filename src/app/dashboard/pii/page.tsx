@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconEdit,
@@ -19,6 +19,7 @@ import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import CreatePiiPolicyModal from '@/components/pii/CreatePiiPolicyModal';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 
 interface PiiPolicyView {
   id: string;
@@ -46,6 +47,8 @@ const ACTION_BADGE: Record<string, string> = {
 export default function PiiPoliciesPage() {
   const router = useRouter();
   const t = useTranslations('pii');
+  const tSafe = useTranslations('common.confirm.dataSafety');
+  const deleteResource = useDeleteResource();
   const tAct = useTranslations('pii.actions');
   const tLang = useTranslations('pii.languages');
 
@@ -53,8 +56,6 @@ export default function PiiPoliciesPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<PiiPolicyView | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const [enabledFilter, setEnabledFilter] = useState('all');
 
@@ -106,29 +107,23 @@ export default function PiiPoliciesPage() {
     }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/pii/policies/${deleteTarget.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({
-        title: t('notifications.deleted'),
-        message: deleteTarget.name,
-        color: 'red',
-      });
-      setDeleteTarget(null);
-      await loadPolicies();
-    } catch (err) {
-      notifications.show({
-        title: t('notifications.saveError'),
-        message: err instanceof Error ? err.message : '',
-        color: 'red',
-      });
-    } finally {
-      setDeleting(false);
-    }
-  };
+  const confirmDelete = (target: PiiPolicyView) =>
+    deleteResource({
+      noun: tSafe('nouns.piiPolicy'),
+      name: target.name,
+      type: 'pii-policy',
+      id: target.id,
+      action: async () => {
+        const res = await fetch(`/api/pii/policies/${target.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete');
+        notifications.show({
+          title: t('notifications.deleted'),
+          message: target.name,
+          color: 'red',
+        });
+        await loadPolicies();
+      },
+    });
 
   const filtered = useMemo(() => policies.filter((p) => {
     if (enabledFilter === 'enabled' && !p.enabled) return false;
@@ -302,30 +297,10 @@ export default function PiiPoliciesPage() {
             label: t('detail.actions.delete'),
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(p),
+            onClick: () => void confirmDelete(p),
           },
         ]}
       />
-
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title={t('deleteModal.title')}
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          {t('deleteModal.body', { name: deleteTarget?.name ?? '' })}
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>
-            {t('deleteModal.cancel')}
-          </Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>
-            {t('deleteModal.confirm')}
-          </Button>
-        </Group>
-      </Modal>
 
       <CreatePiiPolicyModal
         opened={createOpen}

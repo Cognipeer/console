@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Stack } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconEdit,
@@ -16,6 +16,8 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import StatTile from '@/components/common/ui/StatTile';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
 import type { ProviderDescriptor } from '@/lib/providers/types';
 import type { ProviderConfigView } from '@/lib/services/providers/providerService';
@@ -31,6 +33,8 @@ function hasAiAnswer(p: ProviderConfigView): boolean {
 
 export default function WebSearchListPage() {
   const router = useRouter();
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const [instances, setInstances] = useState<ProviderConfigView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -40,7 +44,6 @@ export default function WebSearchListPage() {
   const [driversLoading, setDriversLoading] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [editingInstance, setEditingInstance] = useState<ProviderConfigView | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ProviderConfigView | null>(null);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -112,27 +115,27 @@ export default function WebSearchListPage() {
     );
   }, [instances, query]);
 
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    try {
-      const res = await fetch(
-        `/api/providers/${encodeURIComponent(String(deleteTarget._id))}`,
-        { method: 'DELETE' },
-      );
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to delete');
-      }
-      notifications.show({ color: 'teal', title: 'Deleted', message: 'Instance removed' });
-      setDeleteTarget(null);
-      await load();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  async function confirmDelete(target: ProviderConfigView) {
+    const deleted = await deleteResource({
+      noun: tConfirm('nouns.websearchInstance'),
+      name: target.label,
+      type: 'provider',
+      id: String(target._id),
+      extraWarning: tConfirm('extras.websearchKeyFails'),
+      action: async () => {
+        const res = await fetch(
+          `/api/providers/${encodeURIComponent(String(target._id))}`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error || 'Failed to delete');
+        }
+      },
+    });
+    if (!deleted) return;
+    notifications.show({ color: 'teal', title: 'Deleted', message: 'Instance removed' });
+    await load();
   }
 
   const columns: DataGridColumn<ProviderConfigView>[] = [
@@ -257,7 +260,7 @@ export default function WebSearchListPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(p),
+            onClick: () => void confirmDelete(p),
           },
         ]}
       />
@@ -335,27 +338,6 @@ export default function WebSearchListPage() {
           await load();
         }}
       />
-
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete instance"
-        centered
-        size="sm"
-      >
-        <Stack gap="md">
-          <span>
-            Delete <strong>{deleteTarget?.label}</strong>? API calls using key{' '}
-            <code>{deleteTarget?.key}</code> will start failing.
-          </span>
-          <Group justify="flex-end">
-            <Button variant="subtle" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button color="red" onClick={confirmDelete}>Delete</Button>
-          </Group>
-        </Stack>
-      </Modal>
     </PageContainer>
   );
 }

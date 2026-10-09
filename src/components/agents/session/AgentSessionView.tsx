@@ -19,6 +19,8 @@
  * actually happened, not just the last answer.
  */
 
+import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -136,6 +138,8 @@ const STOP_LABELS: Record<NonNullable<ChatMessage['stopReason']>, string> = {
 
 export default function AgentSessionView({ agentId, sessionId }: AgentSessionViewProps) {
     const router = useRouter();
+    const tConfirm = useTranslations('common.confirm');
+    const deleteResource = useDeleteResource();
     const searchParams = useSearchParams();
 
     const [agent, setAgent] = useState<AgentSummary | null>(null);
@@ -384,8 +388,18 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const deleteSession = async () => {
         setDeleting(true);
         try {
-            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { method: 'DELETE' });
-            if (!res.ok) throw new Error('Failed to delete session');
+            const deleted = await deleteResource({
+                noun: tConfirm('nouns.agentSession'),
+                extraWarning: tConfirm('extras.agentSessionData'),
+                action: async () => {
+                    const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { method: 'DELETE' });
+                    if (!res.ok) throw new Error('Failed to delete session');
+                },
+            });
+            if (!deleted) {
+                setDeleting(false);
+                return;
+            }
             router.push(`/dashboard/agents/${agentId}?tab=sessions`);
         } catch (err) {
             notifications.show({

@@ -20,6 +20,8 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconCloudDownload,
   IconFileCheck,
@@ -96,6 +98,8 @@ async function fileToDataUrl(file: File): Promise<string> {
 }
 
 export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const queryClient = useQueryClient();
   const bucketKey = bucket?.key ?? null;
@@ -242,19 +246,6 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
       });
       await queryClient.invalidateQueries({ queryKey: ['file-objects', result.bucketKey] });
     },
-    onError: (error) => {
-      const message =
-        error instanceof ApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : 'Unexpected error';
-      notifications.show({
-        color: 'red',
-        title: 'Failed to delete file',
-        message,
-      });
-    },
   });
 
   const handleSubmit = async (values: UploadFormValues) => {
@@ -282,16 +273,13 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
       return;
     }
 
-    const confirmed = window.confirm(`Delete file "${record.name}"? This cannot be undone.`);
-    if (!confirmed) {
-      return;
-    }
-
-    try {
-      await deleteMutation.mutateAsync({ bucketKey, record });
-    } catch (error) {
-      console.error(error);
-    }
+    await deleteResource({
+      noun: tSafe('nouns.fileObject'),
+      name: record.name,
+      action: async () => {
+        await deleteMutation.mutateAsync({ bucketKey, record });
+      },
+    });
   };
 
   const triggerDownload = async (record: FileRecordView, variant: 'original' | 'markdown') => {

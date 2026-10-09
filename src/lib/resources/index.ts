@@ -4,6 +4,7 @@ export * from './registry';
 export * from './mapping';
 export {
   listResources,
+  getResourceUsage,
   getResource,
   getResourceHealth,
   clearResourceCache,
@@ -20,3 +21,4 @@ export * from './references';
 export { HEALTH_ISSUE_KINDS } from './health';
 export { MAX_USED_BY } from './graph';
 export { ensureCommunityResourceTypesRegistered } from './providers';
+export { registerResourceUsageAccess, resolveResourceUsageService, RESOURCE_USAGE_PATH_PREFIX } from './usageAccess';

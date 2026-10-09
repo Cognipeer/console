@@ -33,6 +33,8 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import {
   IconArrowLeft,
@@ -302,6 +304,9 @@ function InlineLoadError({ message, onRetry }: InlineLoadErrorProps) {
 export default function RagModuleDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const { confirm } = useConfirm();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const moduleKey = Array.isArray(params.key) ? params.key[0] : params.key;
 
   /* state */
@@ -523,15 +528,19 @@ export default function RagModuleDetailPage() {
 
   const handleDelete = async () => {
     if (!mod) return;
-    if (!window.confirm(`Delete Knowledge Engine module "${mod.name}"? This cannot be undone.`)) return;
-    try {
-      const res = await fetch(`/api/rag/modules/${encodeURIComponent(mod.key)}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete module');
-      notifications.show({ color: 'green', title: 'Deleted', message: `${mod.name} removed.` });
-      router.push('/dashboard/rag');
-    } catch (error) {
-      notifications.show({ color: 'red', title: 'Error', message: String(error) });
-    }
+    await deleteResource({
+      noun: tSafe('nouns.ragModule'),
+      name: mod.name,
+      type: 'rag-module',
+      id: mod._id,
+      extraWarning: tSafe('ragModuleExtra'),
+      action: async () => {
+        const res = await fetch(`/api/rag/modules/${encodeURIComponent(mod.key)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete module');
+        notifications.show({ color: 'green', title: 'Deleted', message: `${mod.name} removed.` });
+        router.push('/dashboard/rag');
+      },
+    });
   };
 
   const chunkOverrideErrors = chunkFieldErrors(chunkOverride);
@@ -613,19 +622,21 @@ export default function RagModuleDetailPage() {
   };
 
   const handleDeleteDocument = async (doc: RagDocumentView) => {
-    if (!window.confirm(`Delete document "${doc.fileName}"? This will remove all associated chunks.`)) return;
-    try {
-      const res = await fetch(
-        `/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents/${encodeURIComponent(doc._id)}`,
-        { method: 'DELETE' },
-      );
-      if (!res.ok) throw new Error('Failed to delete document');
-      notifications.show({ color: 'green', title: 'Document deleted', message: `${doc.fileName} removed.` });
-      await loadDocuments();
-      await loadModule('refresh');
-    } catch (error) {
-      notifications.show({ color: 'red', title: 'Error', message: String(error) });
-    }
+    await deleteResource({
+      noun: tSafe('nouns.ragDocument'),
+      name: doc.fileName,
+      extraWarning: tSafe('ragDocumentExtra'),
+      action: async () => {
+        const res = await fetch(
+          `/api/rag/modules/${encodeURIComponent(moduleKey!)}/documents/${encodeURIComponent(doc._id)}`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok) throw new Error('Failed to delete document');
+        notifications.show({ color: 'green', title: 'Document deleted', message: `${doc.fileName} removed.` });
+        await loadDocuments();
+        await loadModule('refresh');
+      },
+    });
   };
 
   const [reingestingDocId, setReingestingDocId] = useState<string | null>(null);
@@ -637,12 +648,24 @@ export default function RagModuleDetailPage() {
    */
   const handleReindexAll = async () => {
     if (!moduleKey || documents.length === 0) return;
-    if (!window.confirm(`Re-index all ${documents.length} document(s)? Every chunk is rebuilt in the background; queries keep answering from the current vectors until it finishes.`)) return;
+    const ok = await confirm({
+      title: tSafe('reindexAll.title'),
+      message: tSafe('reindexAll.message', { count: documents.length }),
+      confirmLabel: tSafe('reindexAll.confirm'),
+      tone: 'warning',
+    });
+    if (!ok) return;
     await reindex.start();
   };
 
   const handleReingestDocument = async (doc: RagDocumentView) => {
-    if (!window.confirm(`Re-ingest "${doc.fileName}"? Existing chunks will be deleted and re-processed.`)) return;
+    const ok = await confirm({
+      title: tSafe('reingest.title'),
+      message: tSafe('reingest.message', { name: doc.fileName }),
+      confirmLabel: tSafe('reingest.confirm'),
+      tone: 'warning',
+    });
+    if (!ok) return;
     setReingestingDocId(doc._id);
     try {
       const res = await fetch(
@@ -1164,6 +1187,9 @@ export default function RagModuleDetailPage() {
                   <Text size="sm">{formatDate(mod.lastReindexAt)}</Text>
                 </Stack>
               </SimpleGrid>
+            </Paper>
+            <Paper withBorder radius="lg" p="lg">
+              <ResourceUsageSection type="rag-module" id={mod._id} />
             </Paper>
           </Stack>
         </Tabs.Panel>

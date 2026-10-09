@@ -316,3 +316,56 @@ export interface GetResourceInput {
   type: string;
   id: string;
 }
+
+// ── Usage (delete / rename impact) ───────────────────────────────────────────
+
+/** An incoming reference as served by the usage endpoint. */
+export interface ResourceUsageEdgeView extends ResourceEdgeView {
+  /**
+   * What deleting (or renaming the key of) the target does to this referrer:
+   * 'error' = it fails or loses a safety control at run time, 'warning' = it
+   * runs with reduced capability, null = already unresolved or ambiguous, so a
+   * delete changes nothing for it. Only on `usedBy` edges.
+   */
+  impact?: HealthSeverity | null;
+}
+
+export interface ResourceUsageSummary {
+  /** Referrers that would FAIL if the resource were deleted. Counts hidden referrers too. */
+  error: number;
+  /** Referrers that would lose a capability. Counts hidden referrers too. */
+  warning: number;
+}
+
+/** GET /api/resource-usage/:type/:id */
+export interface ResourceUsage {
+  resource: ResourceRefView;
+  /** Outgoing references; visibility-filtered. */
+  uses: ResourceEdgeView[];
+  /** Incoming references the caller may see, capped at MAX_USED_BY. */
+  usedBy: ResourceUsageEdgeView[];
+  /** Referrers in projects the caller cannot access (not listed). */
+  hiddenUsedByCount: number;
+  /** hiddenUsedByCount per referrer resource type. */
+  hiddenByType: Record<string, number>;
+  summary: ResourceUsageSummary;
+  usedByTruncated: boolean;
+}
+
+export interface GetResourceUsageInput {
+  tenantDbName: string;
+  tenantId: string;
+  type: string;
+  id: string;
+  /**
+   * Projects the caller may see. null = everything (tenant owner / admin).
+   * Tenant-wide and tenant-level rows are always visible.
+   */
+  visibleProjectIds: ReadonlySet<string> | null;
+  /**
+   * Whether the caller may read resources of a type (their permission on the
+   * service that owns it). Referrers / targets of other types fail closed:
+   * they are counted, not listed. Omitted = every type is visible.
+   */
+  canViewType?: (type: string) => boolean;
+}

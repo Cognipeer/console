@@ -6,6 +6,8 @@ import { IconPlus, IconTrash } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { useConfirm } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 
 type Provider = {
   _id: string;
@@ -44,6 +46,8 @@ function statusVariant(status: string) {
 }
 
 export default function ProjectProvidersManager({ projectId }: { projectId: string }) {
+  const { confirmAction } = useConfirm();
+  const tq = useTranslations('common.confirm.qos');
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const [tenantScope, setTenantScope] = useState(false);
@@ -94,40 +98,40 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
     [rows, projectId],
   );
 
+  /** PATCHes the provider's project list; throws on failure. */
+  const patchAssignment = async (provider: Provider, assign: boolean) => {
+    const next = new Set((provider.projectIds ?? []).map(String));
+    if (provider.projectId) {
+      next.add(String(provider.projectId));
+    }
+    if (assign) {
+      next.add(String(projectId));
+    } else {
+      next.delete(String(projectId));
+    }
+
+    const res = await fetch(
+      `/api/providers/${encodeURIComponent(provider._id)}?scope=tenant`,
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ projectIds: Array.from(next) }),
+      },
+    );
+
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(body?.error || 'Failed to update assignment');
+    }
+  };
+
   const setAssignment = async (provider: Provider, assign: boolean) => {
     if (!tenantScope) return;
     if (submitting) return;
     setSubmitting(true);
     try {
-      const next = new Set((provider.projectIds ?? []).map(String));
-      if (provider.projectId) {
-        next.add(String(provider.projectId));
-      }
-      if (assign) {
-        next.add(String(projectId));
-      } else {
-        next.delete(String(projectId));
-      }
-
-      const res = await fetch(
-        `/api/providers/${encodeURIComponent(provider._id)}?scope=tenant`,
-        {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ projectIds: Array.from(next) }),
-        },
-      );
-
-      const body = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(body?.error || 'Failed to update assignment');
-      }
-
-      notifications.show({
-        title: 'Project providers',
-        message: assign ? 'Provider added' : 'Provider removed',
-        color: 'green',
-      });
+      await patchAssignment(provider, assign);
+      notifications.show({ title: 'Project providers', message: 'Provider added', color: 'green' });
       await fetchProviders();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to update assignment';
@@ -135,6 +139,22 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
     } finally {
       setSubmitting(false);
     }
+  };
+
+  // Providers are strictly project-scoped: models and agents of this project
+  // stop resolving a provider that is removed from it, so ask first.
+  const removeAssignment = async (provider: Provider) => {
+    if (!tenantScope || submitting) return;
+    const removed = await confirmAction({
+      title: tq('removeTitle', { noun: tq('nouns.provider') }),
+      message: tq('removeProjectProvider', { name: provider.label || provider.key }),
+      tone: 'warning',
+      confirmLabel: tq('remove'),
+      action: () => patchAssignment(provider, false),
+    });
+    if (!removed) return;
+    notifications.show({ title: 'Project providers', message: 'Provider removed', color: 'green' });
+    await fetchProviders();
   };
 
   const columns: DataGridColumn<Provider>[] = [
@@ -223,7 +243,7 @@ export default function ProjectProvidersManager({ projectId }: { projectId: stri
                   label: 'Remove',
                   icon: <IconTrash size={14} />,
                   color: 'red',
-                  onClick: () => void setAssignment(p, false),
+                  onClick: () => void removeAssignment(p),
                   disabled: submitting,
                 },
               ]

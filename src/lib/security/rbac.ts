@@ -248,6 +248,10 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/users', service: 'members' },
   { prefix: '/api/groups', service: 'members' },
   { prefix: '/api/resources', service: 'resources' },
+  // Default for the per-type resolver registered below: unknown or not yet
+  // resolvable -> admin-only. Without this entry the path would be unmapped,
+  // and an unmapped path is "not a gated surface".
+  { prefix: '/api/resource-usage', service: 'resources' },
   { prefix: '/api/license', service: 'license' },
   { prefix: '/api/providers', service: 'providers' },
   { prefix: '/api/config', service: 'config' },
@@ -338,10 +342,46 @@ export function getServiceDefinition(service: PermissionService): RbacServiceDef
     ?? RBAC_SERVICE_DEFINITIONS[0];
 }
 
+/**
+ * A prefix whose owning service depends on a path segment (e.g.
+ * `/api/resource-usage/:type/:id` is gated by the service that owns `:type`).
+ * The resolver lives with the module that knows the mapping, so rbac.ts never
+ * imports it (no cycles). Returning null falls through to ROUTE_PREFIXES.
+ */
+export type PathServiceResolver = (pathname: string) => PermissionService | null;
+
+const pathServiceResolvers = new Map<string, PathServiceResolver>();
+
+function normalizeResolverPrefix(prefix: string): string {
+  return prefix.length > 1 && prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+}
+
+/** Registers (or replaces) the resolver for a path prefix. Idempotent per prefix. */
+export function registerPathServiceResolver(prefix: string, resolver: PathServiceResolver): void {
+  pathServiceResolvers.set(normalizeResolverPrefix(prefix), resolver);
+}
+
+/** Test seam. */
+export function resetPathServiceResolversForTests(): void {
+  pathServiceResolvers.clear();
+}
+
 export function getPermissionServiceForPath(pathname: string): PermissionService | null {
   const normalized = pathname.endsWith('/') && pathname !== '/'
     ? pathname.slice(0, -1)
     : pathname;
+  for (const [prefix, resolver] of pathServiceResolvers) {
+    if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+      let resolved: PermissionService | null = null;
+      try {
+        resolved = resolver(normalized);
+      } catch {
+        // A throwing resolver must never open the gate: fall back to the static map.
+        resolved = null;
+      }
+      if (resolved) return resolved;
+    }
+  }
   const match = ROUTE_PREFIXES.find(({ prefix }) =>
     normalized === prefix || normalized.startsWith(`${prefix}/`),
   );

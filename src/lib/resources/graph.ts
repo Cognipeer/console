@@ -30,13 +30,34 @@ interface IncomingEntry {
   status: ResourceEdgeStatus;
 }
 
+/** One incoming reference with the referrer record (for visibility) and what a delete would do to it. */
+export interface UsedByEntry {
+  view: ResourceEdgeView;
+  referrer: ResourceRecord;
+  /**
+   * What deleting the target would do to this referrer: the edge kind's
+   * severity when the reference works today (ok / inactive), null when it
+   * already does not resolve here (cross-project) or the target is one of
+   * several candidates (ambiguous) — a delete changes nothing for those.
+   */
+  impact: HealthSeverity | null;
+}
+
 export interface ResourceGraph {
   /** Every issue of the tenant, errors first. */
   issues: readonly HealthIssue[];
   usesOf(type: string, id: string): ResourceEdgeView[];
   usedByOf(type: string, id: string): { edges: ResourceEdgeView[]; truncated: boolean };
+  /** Every incoming reference, uncapped and sorted like `usedByOf`. */
+  usedByEntriesOf(type: string, id: string): UsedByEntry[];
   issuesOf(type: string, id: string): HealthIssue[];
   issueSummaryOf(type: string, id: string): { count: number; severity: HealthSeverity | null };
+}
+
+function sortIncoming(entries: IncomingEntry[]): IncomingEntry[] {
+  return entries
+    .slice()
+    .sort((a, b) => a.resolved.from.name.localeCompare(b.resolved.from.name) || a.resolved.edge.field.localeCompare(b.resolved.edge.field));
 }
 
 const recordKey = (type: string, id: string) => `${type}\u0000${id}`;
@@ -45,6 +66,7 @@ export const EMPTY_GRAPH: ResourceGraph = {
   issues: [],
   usesOf: () => [],
   usedByOf: () => ({ edges: [], truncated: false }),
+  usedByEntriesOf: () => [],
   issuesOf: () => [],
   issueSummaryOf: () => ({ count: 0, severity: null }),
 };
@@ -128,11 +150,14 @@ export function buildResourceGraph(input: {
   return {
     issues,
     usesOf: (type, id) => (outgoing.get(recordKey(type, id)) ?? []).map((r) => toOutgoingView(r, ctx)),
+    usedByEntriesOf: (type, id) =>
+      sortIncoming(incoming.get(recordKey(type, id)) ?? []).map((e) => ({
+        view: toIncomingView(e.resolved, ctx, e.status),
+        referrer: e.resolved.from,
+        impact: e.status === 'ok' || e.status === 'inactive' ? e.resolved.def.severity : null,
+      })),
     usedByOf: (type, id) => {
-      const entries = incoming.get(recordKey(type, id)) ?? [];
-      const sorted = entries
-        .slice()
-        .sort((a, b) => a.resolved.from.name.localeCompare(b.resolved.from.name) || a.resolved.edge.field.localeCompare(b.resolved.edge.field));
+      const sorted = sortIncoming(incoming.get(recordKey(type, id)) ?? []);
       return {
         edges: sorted.slice(0, MAX_USED_BY).map((e) => toIncomingView(e.resolved, ctx, e.status)),
         truncated: sorted.length > MAX_USED_BY,

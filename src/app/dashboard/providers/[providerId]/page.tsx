@@ -27,6 +27,8 @@ import DetailShell, {
   DetailCard,
   DetailTwoCol,
 } from '@/components/common/ui/DetailShell';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import ProviderConfigModal from '@/components/providers/ProviderConfigModal';
 import {
@@ -75,6 +77,8 @@ function formatDate(input?: string | Date | null) {
 export default function ProviderDetailPage() {
   const params = useParams<{ providerId: string }>();
   const router = useRouter();
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const providerId = params?.providerId;
 
   const [provider, setProvider] = useState<ProviderRecord | null>(null);
@@ -148,20 +152,25 @@ export default function ProviderDetailPage() {
 
   const handleDelete = async () => {
     if (!provider) return;
-    const ok = window.confirm(
-      `Delete provider "${provider.label}"? This cannot be undone.`,
-    );
-    if (!ok) return;
     setDeleting(true);
     try {
-      const res = await fetch(
-        `/api/providers/${encodeURIComponent(String(provider._id))}?scope=tenant`,
-        { method: 'DELETE' },
-      );
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to delete provider');
-      }
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.provider'),
+        name: provider.label,
+        type: 'provider',
+        id: String(provider._id),
+        action: async () => {
+          const res = await fetch(
+            `/api/providers/${encodeURIComponent(String(provider._id))}?scope=tenant`,
+            { method: 'DELETE' },
+          );
+          if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body?.error || 'Failed to delete provider');
+          }
+        },
+      });
+      if (!deleted) return;
       notifications.show({
         color: 'teal',
         title: 'Provider deleted',
@@ -317,6 +326,9 @@ export default function ProviderDetailPage() {
     >
       <DetailTwoCol narrowAside>
         <Stack gap="md">
+          <DetailCard>
+            <ResourceUsageSection type="provider" id={String(provider._id)} />
+          </DetailCard>
           <DetailCard
             title="Overview"
             description={

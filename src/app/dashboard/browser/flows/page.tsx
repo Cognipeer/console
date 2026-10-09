@@ -13,6 +13,8 @@ import { useRouter } from 'next/navigation';
 import { Button, Select, Textarea, TextInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconPlayerPlay,
   IconPlus,
@@ -44,6 +46,8 @@ const RUN_STATUS_VARIANT: Record<string, 'active' | 'paused' | 'error'> = {
 
 export default function BrowserFlowsPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [flows, setFlows] = useState<BrowserFlowView[]>([]);
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
@@ -53,7 +57,6 @@ export default function BrowserFlowsPage() {
   const [query, setQuery] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<BrowserFlowView | null>(null);
 
   const form = useForm<CreateForm>({
     initialValues: { name: '', description: '', browserId: '', sessionId: '' },
@@ -180,21 +183,20 @@ export default function BrowserFlowsPage() {
     }
   }
 
-  async function confirmDelete() {
-    if (!deleteTarget) return;
-    try {
-      const res = await fetch(`/api/browser/flows/${deleteTarget.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error(await res.text());
-      notifications.show({ color: 'teal', title: 'Deleted', message: 'Flow removed' });
-      setDeleteTarget(null);
-      await load();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  function confirmDelete(target: BrowserFlowView) {
+    return deleteResource({
+      noun: tSafe('nouns.browserFlow'),
+      name: target.name,
+      type: 'browser-flow',
+      id: target.id,
+      extraWarning: tSafe('browserFlowExtra', { steps: target.steps.length }),
+      action: async () => {
+        const res = await fetch(`/api/browser/flows/${target.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text());
+        notifications.show({ color: 'teal', title: 'Deleted', message: 'Flow removed' });
+        await load();
+      },
+    });
   }
 
   const columns: DataGridColumn<BrowserFlowView>[] = [
@@ -312,7 +314,7 @@ export default function BrowserFlowsPage() {
             icon: <IconTrash size={14} />,
             label: 'Delete',
             color: 'red',
-            onClick: () => setDeleteTarget(flow),
+            onClick: () => void confirmDelete(flow),
           },
         ]}
         empty={{
@@ -410,20 +412,6 @@ export default function BrowserFlowsPage() {
         </FormSection>
       </FormShell>
 
-      <FormShell
-        open={Boolean(deleteTarget)}
-        onClose={() => setDeleteTarget(null)}
-        title={`Delete ${deleteTarget?.name ?? 'flow'}?`}
-        subtitle="The flow and its entire run history are removed. This cannot be undone."
-        primaryAction={{ label: 'Delete', color: 'red', onClick: confirmDelete }}
-        secondaryAction={{ label: 'Cancel', onClick: () => setDeleteTarget(null) }}
-      >
-        <FormSection title="Confirm">
-          <p className="ds-muted" style={{ fontSize: 13 }}>
-            {deleteTarget?.steps.length ?? 0} step(s) will be deleted along with every recorded run.
-          </p>
-        </FormSection>
-      </FormShell>
     </PageContainer>
   );
 }

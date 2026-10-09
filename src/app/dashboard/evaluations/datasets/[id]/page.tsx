@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Alert, Button, Group, Loader, Modal, Paper, Progress, Stack, Text } from '@mantine/core';
+import { Alert, Button, Group, Loader, Paper, Progress, Stack, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import { IconArrowLeft, IconCopy, IconPencil, IconPlus, IconTags, IconTrash } from '@tabler/icons-react';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
@@ -37,6 +39,8 @@ function Row({ label, value, mono }: { label: string; value: React.ReactNode; mo
 
 export default function EvaluationDatasetDetailPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tq = useTranslations('common.confirm.qos');
   const params = useParams<{ id: string }>();
   const id = params?.id;
   const [dataset, setDataset] = useState<EvalDatasetView | null>(null);
@@ -44,8 +48,6 @@ export default function EvaluationDatasetDetailPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
 
   // Items are paginated server-side — datasets can hold thousands of items.
   const [items, setItems] = useState<EvalDatasetItemView[]>([]);
@@ -61,8 +63,6 @@ export default function EvaluationDatasetDetailPage() {
   const [itemEditorOpen, setItemEditorOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<EvalDatasetItemView | null>(null);
   const [savingItem, setSavingItem] = useState(false);
-  const [itemToDelete, setItemToDelete] = useState<EvalDatasetItemView | null>(null);
-  const [deletingItem, setDeletingItem] = useState(false);
 
   // AI labeling: definitions to run, the distribution panel, the active segment
   // filter, the in-flight run, and the per-item human review modal.
@@ -287,16 +287,19 @@ export default function EvaluationDatasetDetailPage() {
 
   const onDelete = async () => {
     if (!dataset) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/evaluation/datasets/${dataset.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Deleted', message: `"${dataset.name}" was deleted`, color: 'red' });
-      router.push('/dashboard/evaluations/datasets');
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-      setDeleting(false);
-    }
+    const done = await deleteResource({
+      noun: tq('nouns.evaluationDataset'),
+      name: dataset.name,
+      type: 'evaluation-dataset',
+      id: dataset.id,
+      action: async () => {
+        const res = await fetch(`/api/evaluation/datasets/${dataset.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(tq('deleteFailed'));
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Deleted', message: `"${dataset.name}" was deleted`, color: 'red' });
+    router.push('/dashboard/evaluations/datasets');
   };
 
   const onSaveItem = async (item: EvalDatasetItemView) => {
@@ -335,26 +338,25 @@ export default function EvaluationDatasetDetailPage() {
     }
   };
 
-  const onDeleteItem = async () => {
-    if (!itemToDelete || !dataset) return;
-    setDeletingItem(true);
-    try {
-      const res = await fetch(
-        `/api/evaluation/datasets/${dataset.id}/items/${encodeURIComponent(itemToDelete.id)}`,
-        { method: 'DELETE' },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error((data as { error?: string }).error || 'Failed to delete item');
-      }
-      notifications.show({ title: 'Item deleted', message: `"${itemToDelete.id}" was removed`, color: 'red' });
-      setItemToDelete(null);
-      await refresh();
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete item', color: 'red' });
-    } finally {
-      setDeletingItem(false);
-    }
+  const onDeleteItem = async (item: EvalDatasetItemView) => {
+    if (!dataset) return;
+    const done = await deleteResource({
+      noun: tq('nouns.datasetItem'),
+      name: item.id,
+      action: async () => {
+        const res = await fetch(
+          `/api/evaluation/datasets/${dataset.id}/items/${encodeURIComponent(item.id)}`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error((data as { error?: string }).error || tq('deleteFailed'));
+        }
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Item deleted', message: `"${item.id}" was removed`, color: 'red' });
+    await refresh();
   };
 
   const openItem = (it: EvalDatasetItemView) => {
@@ -487,7 +489,7 @@ export default function EvaluationDatasetDetailPage() {
               Clone
             </Button>
             <Button size="sm" variant="default" leftSection={<IconPencil size={14} />} onClick={() => setEditOpen(true)}>Edit</Button>
-            <Button size="sm" color="red" variant="light" leftSection={<IconTrash size={14} />} onClick={() => setDeleteOpen(true)}>Delete</Button>
+            <Button size="sm" color="red" variant="light" leftSection={<IconTrash size={14} />} onClick={() => void onDelete()}>Delete</Button>
           </Group>
         }
       />
@@ -596,7 +598,7 @@ export default function EvaluationDatasetDetailPage() {
           { id: 'open', label: 'Open', icon: <IconPencil size={14} />, onClick: () => openItem(it) },
           { id: 'labels', label: 'Edit labels', icon: <IconTags size={14} />, onClick: () => setLabelingItem(it) },
           { divider: true },
-          { id: 'delete', label: 'Delete', color: 'red', icon: <IconTrash size={14} />, onClick: () => setItemToDelete(it) },
+          { id: 'delete', label: 'Delete', color: 'red', icon: <IconTrash size={14} />, onClick: () => void onDeleteItem(it) },
         ]}
         toolbarRight={
           <Button size="xs" variant="light" leftSection={<IconPlus size={14} />} onClick={openNewItem}>
@@ -649,14 +651,6 @@ export default function EvaluationDatasetDetailPage() {
         onCreated={(d) => { setDataset(d); setEditOpen(false); void loadItems(); }}
       />
 
-      <Modal opened={deleteOpen} onClose={() => setDeleteOpen(false)} title="Delete dataset" centered size="sm">
-        <Text size="sm" mb="lg">Delete <strong>{dataset.name}</strong>? This cannot be undone.</Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteOpen(false)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={() => void onDelete()}>Delete</Button>
-        </Group>
-      </Modal>
-
       <DatasetItemEditor
         opened={itemEditorOpen}
         item={editingItem}
@@ -671,15 +665,10 @@ export default function EvaluationDatasetDetailPage() {
         onSave={(item) => void onSaveItem(item)}
       />
 
-      <Modal opened={itemToDelete !== null} onClose={() => setItemToDelete(null)} title="Delete item" centered size="sm">
-        <Text size="sm" mb="lg">
-          Delete item <span className="ds-mono">{itemToDelete?.id}</span>? This cannot be undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setItemToDelete(null)}>Cancel</Button>
-          <Button color="red" loading={deletingItem} onClick={() => void onDeleteItem()}>Delete</Button>
-        </Group>
-      </Modal>
+
+      <div style={{ marginTop: 16 }}>
+        <ResourceUsageSection type="evaluation-dataset" id={dataset.id} />
+      </div>
     </PageContainer>
   );
 }

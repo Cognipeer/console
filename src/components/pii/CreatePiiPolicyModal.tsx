@@ -33,6 +33,7 @@ interface Props {
 export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Props) {
   const t = useTranslations('pii');
   const tAct = useTranslations('pii.actions');
+  const tConfirm = useTranslations('common.confirm');
   const tEngine = useTranslations('pii.engines');
 
   const [name, setName] = useState('');
@@ -152,7 +153,7 @@ export default function CreatePiiPolicyModal({ opened, onClose, onCreated }: Pro
         onClick: submit,
       }}
       secondaryAction={{
-        label: t('deleteModal.cancel'),
+        label: tConfirm('cancel'),
         onClick: onClose,
       }}
     >

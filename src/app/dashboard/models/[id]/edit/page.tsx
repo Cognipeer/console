@@ -36,6 +36,7 @@ import {
   IconShield,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 import {
@@ -180,6 +181,8 @@ export default function EditModelPage() {
   const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelEdit');
   const tWizard = useTranslations('modelWizard');
+  const tNouns = useTranslations('common.confirm.nouns');
+  const confirmKeyChange = useConfirmKeyChange();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -440,7 +443,7 @@ export default function EditModelPage() {
   }, [params?.id]);
 
   const handleSubmit = async (values: FormValues) => {
-    if (!model) return;
+    if (!model || saving) return;
 
     const validation = form.validate();
     if (validation.hasErrors) {
@@ -473,7 +476,24 @@ export default function EditModelPage() {
       return;
     }
 
+    // Agents, replica pools and routing bind models by key: warn before a rename breaks them.
+    // Busy from the usage lookup on: the button shows progress and a second
+    // click cannot queue a second rename dialog.
     setSaving(true);
+    let proceed = false;
+    try {
+      proceed = await confirmKeyChange({
+        type: 'model',
+        id: String(model._id),
+        noun: tNouns('model'),
+        originalKey: model.key,
+        nextKey: values.key,
+      });
+    } finally {
+      if (!proceed) setSaving(false);
+    }
+    if (!proceed) return;
+
     try {
       const response = await fetch(`/api/models/${model._id}`, {
         method: 'PUT',

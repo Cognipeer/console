@@ -10,6 +10,7 @@ import {
   getPermissionServiceForPath,
   type GroupTenantGrant,
 } from '@/lib/security/rbac';
+import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { getUserAuthState, isUserDisabled } from '@/lib/services/users/userAuthState';
 import {
   ApiTokenAuthError,
@@ -168,7 +169,7 @@ export function requireSessionContext(
 }
 
 function getRequestPathname(request: FastifyRequest): string {
-  return new URL(request.raw.url || '/', 'http://localhost').pathname;
+  return canonicalizeRequestPathname(request.raw.url);
 }
 
 async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {

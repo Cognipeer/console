@@ -37,6 +37,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
 
 interface MemoryStoreDetail {
   _id: string;
@@ -188,6 +189,9 @@ export default function MemoryStoreDetailPage() {
   const params = useParams();
   const router = useRouter();
   const t = useTranslations('memory');
+  const tSafe = useTranslations('common.confirm.dataSafety');
+  const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
   const storeKey = params.storeKey as string;
 
   const [store, setStore] = useState<MemoryStoreDetail | null>(null);
@@ -372,75 +376,68 @@ export default function MemoryStoreDetailPage() {
   };
 
   const handleDeleteStore = async () => {
-    if (!window.confirm(t('deleteStoreConfirm'))) {
-      return;
-    }
+    await deleteResource({
+      noun: tSafe('nouns.memoryStore'),
+      name: store?.name ?? String(storeKey),
+      type: 'memory-store',
+      id: store?._id,
+      extraWarning: tSafe('memoryStoreExtra'),
+      action: async () => {
+        setDeletingStore(true);
+        try {
+          const res = await fetch(`/api/memory/stores/${storeKey}`, {
+            method: 'DELETE',
+          });
 
-    setDeletingStore(true);
+          if (!res.ok) {
+            throw new Error(t('deleteError'));
+          }
 
-    try {
-      const res = await fetch(`/api/memory/stores/${storeKey}`, {
-        method: 'DELETE',
-      });
-
-      if (!res.ok) {
-        throw new Error(t('deleteError'));
-      }
-
-      notifications.show({
-        color: 'teal',
-        message: t('storeDeletedMessage'),
-        title: t('storeDeleted'),
-      });
-      router.push('/dashboard/memory');
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        message: error instanceof Error ? error.message : t('deleteError'),
-        title: t('error'),
-      });
-    } finally {
-      setDeletingStore(false);
-    }
+          notifications.show({
+            color: 'teal',
+            message: t('storeDeletedMessage'),
+            title: t('storeDeleted'),
+          });
+          router.push('/dashboard/memory');
+        } finally {
+          setDeletingStore(false);
+        }
+      },
+    });
   };
 
   const handleDeleteMemory = async (memoryId: string) => {
-    if (!window.confirm(t('delete'))) {
-      return;
-    }
+    await deleteResource({
+      noun: tSafe('nouns.memoryItem'),
+      name: memoryId,
+      action: async () => {
+        setDeletingMemoryId(memoryId);
+        try {
+          const res = await fetch(`/api/memory/stores/${storeKey}/memories/${memoryId}`, {
+            method: 'DELETE',
+          });
 
-    setDeletingMemoryId(memoryId);
+          if (!res.ok) {
+            const error = await res.json().catch(() => null);
+            throw new Error(error?.error || t('addMemoryError'));
+          }
 
-    try {
-      const res = await fetch(`/api/memory/stores/${storeKey}/memories/${memoryId}`, {
-        method: 'DELETE',
-      });
+          notifications.show({
+            color: 'teal',
+            message: t('memoryDeletedMessage'),
+            title: t('memoryDeleted'),
+          });
 
-      if (!res.ok) {
-        const error = await res.json().catch(() => null);
-        throw new Error(error?.error || t('addMemoryError'));
-      }
-
-      notifications.show({
-        color: 'teal',
-        message: t('memoryDeletedMessage'),
-        title: t('memoryDeleted'),
-      });
-
-      if (memories.length === 1 && page > 1) {
-        setPage((currentPage) => currentPage - 1);
-      } else {
-        await Promise.all([loadStore(), loadMemories()]);
-      }
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        message: error instanceof Error ? error.message : t('addMemoryError'),
-        title: t('error'),
-      });
-    } finally {
-      setDeletingMemoryId(null);
-    }
+          if (memories.length === 1 && page > 1) {
+            setPage((currentPage) => currentPage - 1);
+          } else {
+            await Promise.all([loadStore(), loadMemories()]);
+          }
+        } finally {
+          setDeletingMemoryId(null);
+        }
+      },
+    });
   };
 
   const handleClearContext = async () => {
@@ -448,44 +445,41 @@ export default function MemoryStoreDetailPage() {
       return;
     }
 
-    if (!window.confirm(t('clearContextConfirm'))) {
-      return;
-    }
+    await confirmAction({
+      title: tSafe('clearContext.title'),
+      message: t('clearContextConfirm'),
+      confirmLabel: tSafe('clearContext.confirm'),
+      tone: 'danger',
+      action: async () => {
+        setClearingContext(true);
+        try {
+          const params = new URLSearchParams();
+          appendFilterParams(params, filter);
 
-    setClearingContext(true);
+          const res = await fetch(`/api/memory/stores/${storeKey}/memories?${params.toString()}`, {
+            method: 'DELETE',
+          });
 
-    try {
-      const params = new URLSearchParams();
-      appendFilterParams(params, filter);
+          if (!res.ok) {
+            const error = await res.json().catch(() => null);
+            throw new Error(error?.error || t('clearContextError'));
+          }
 
-      const res = await fetch(`/api/memory/stores/${storeKey}/memories?${params.toString()}`, {
-        method: 'DELETE',
-      });
+          setSearchResults(null);
+          setRecallResult(null);
+          setPage(1);
+          await Promise.all([loadStore(), loadMemories()]);
 
-      if (!res.ok) {
-        const error = await res.json().catch(() => null);
-        throw new Error(error?.error || t('clearContextError'));
-      }
-
-      setSearchResults(null);
-      setRecallResult(null);
-      setPage(1);
-      await Promise.all([loadStore(), loadMemories()]);
-
-      notifications.show({
-        color: 'teal',
-        message: t('clearContextSuccessMessage'),
-        title: t('clearContextSuccess'),
-      });
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        message: error instanceof Error ? error.message : t('clearContextError'),
-        title: t('error'),
-      });
-    } finally {
-      setClearingContext(false);
-    }
+          notifications.show({
+            color: 'teal',
+            message: t('clearContextSuccessMessage'),
+            title: t('clearContextSuccess'),
+          });
+        } finally {
+          setClearingContext(false);
+        }
+      },
+    });
   };
 
   if (loadingStore && !store) {
@@ -986,6 +980,11 @@ export default function MemoryStoreDetailPage() {
           </Paper>
         </Tabs.Panel>
       </Tabs>
+      {store ? (
+        <Paper withBorder radius="lg" p="lg" mt="md">
+          <ResourceUsageSection type="memory-store" id={store._id} />
+        </Paper>
+      ) : null}
       </DetailShell>
 
       <AddMemoryItemModal

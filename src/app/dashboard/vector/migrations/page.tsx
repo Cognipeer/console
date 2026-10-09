@@ -19,6 +19,8 @@ import {
   Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconArrowRight,
   IconDatabaseExport,
@@ -70,6 +72,8 @@ function migrationProgressValue(m: IVectorMigration): number {
 }
 
 export default function VectorMigrationsPage() {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
   const [migrations, setMigrations] = useState<IVectorMigration[]>([]);
   const [loading, setLoading] = useState(true);
@@ -182,20 +186,20 @@ export default function VectorMigrationsPage() {
     }
   };
 
-  const handleDelete = async (m: IVectorMigration) => {
-    if (!window.confirm(`Delete migration "${m.name}"? This cannot be undone.`)) return;
-    try {
-      const res = await fetch(`/api/vector/migrations/${encodeURIComponent(m.key)}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to delete');
-      }
-      notifications.show({ color: 'green', title: 'Migration deleted', message: m.name });
-      setMigrations((prev) => prev.filter((item) => item.key !== m.key));
-    } catch (err) {
-      notifications.show({ color: 'red', title: 'Unable to delete migration', message: err instanceof Error ? err.message : 'Unexpected error' });
-    }
-  };
+  const handleDelete = (m: IVectorMigration) =>
+    deleteResource({
+      noun: tSafe('nouns.vectorMigration'),
+      name: m.name,
+      action: async () => {
+        const res = await fetch(`/api/vector/migrations/${encodeURIComponent(m.key)}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(err.error ?? 'Failed to delete');
+        }
+        notifications.show({ color: 'green', title: 'Migration deleted', message: m.name });
+        setMigrations((prev) => prev.filter((item) => item.key !== m.key));
+      },
+    });
 
   const counts = useMemo(() => ({
     total: migrations.length,

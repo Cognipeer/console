@@ -34,6 +34,7 @@ import DetailShell from '@/components/common/ui/DetailShell';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import {
   buildDashboardDateSearchParams,
   defaultDashboardDateFilter,
@@ -98,14 +99,14 @@ export default function InferenceServerDetailPage() {
   const { serverKey } = useParams<{ serverKey: string }>();
   const router = useRouter();
   const t = useTranslations('inferenceMonitoring');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
 
   const [server, setServer] = useState<InferenceServer | null>(null);
   const [metrics, setMetrics] = useState<MetricsRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [polling, setPolling] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [editOpened, editHandlers] = useDisclosure(false);
-  const [deleteOpened, deleteHandlers] = useDisclosure(false);
   const [saving, setSaving] = useState(false);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
@@ -229,16 +230,24 @@ export default function InferenceServerDetailPage() {
   };
 
   const handleDelete = async () => {
-    setDeleting(true);
     try {
-      const res = await fetch(
-        `/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}`,
-        { method: 'DELETE' },
-      );
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Failed to delete');
-      }
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.inferenceServer'),
+        name: server?.name ?? serverKey,
+        type: server?._id ? 'inference-server' : undefined,
+        id: server?._id ? String(server._id) : undefined,
+        action: async () => {
+          const res = await fetch(
+            `/api/inference-monitoring/servers/${encodeURIComponent(serverKey)}`,
+            { method: 'DELETE' },
+          );
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || 'Failed to delete');
+          }
+        },
+      });
+      if (!deleted) return;
       notifications.show({ title: 'Success', message: t('serverDeleted'), color: 'teal' });
       router.push('/dashboard/inference-monitoring');
     } catch (err) {
@@ -247,9 +256,6 @@ export default function InferenceServerDetailPage() {
         message: err instanceof Error ? err.message : 'Failed to delete',
         color: 'red',
       });
-    } finally {
-      setDeleting(false);
-      deleteHandlers.close();
     }
   };
 
@@ -304,7 +310,7 @@ export default function InferenceServerDetailPage() {
         size="sm"
         color="red"
         leftSection={<IconTrash size={14} stroke={1.7} />}
-        onClick={deleteHandlers.open}
+        onClick={() => void handleDelete()}
       >
         {t('deleteServer')}
       </Button>
@@ -584,6 +590,12 @@ export default function InferenceServerDetailPage() {
         )}
       </Paper>
 
+      {server ? (
+        <Paper withBorder radius="lg" p="lg" mt="md">
+          <ResourceUsageSection type="inference-server" id={String(server._id)} />
+        </Paper>
+      ) : null}
+
       {/* Edit Modal */}
       <Modal opened={editOpened} onClose={editHandlers.close} title={t('editServer')} size="md">
         <form onSubmit={editForm.onSubmit(handleEdit)}>
@@ -618,18 +630,6 @@ export default function InferenceServerDetailPage() {
         </form>
       </Modal>
 
-      {/* Delete Confirmation Modal */}
-      <Modal opened={deleteOpened} onClose={deleteHandlers.close} title={t('deleteServer')} size="sm">
-        <Stack gap="md">
-          <Text size="sm">{t('deleteConfirm')}</Text>
-          <Group justify="flex-end">
-            <Button variant="light" onClick={deleteHandlers.close}>Cancel</Button>
-            <Button color="red" onClick={handleDelete} loading={deleting}>
-              {t('deleteServer')}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
     </DetailShell>
   );
 }

@@ -12,6 +12,7 @@ import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/lice
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
+import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
 import { applyCorsHeaders } from './cors';
@@ -147,7 +148,7 @@ function isSelfAuthApiPath(pathname: string): boolean {
 }
 
 function getPathname(url: string | undefined): string {
-  return new URL(url || '/', 'http://localhost').pathname;
+  return canonicalizeRequestPathname(url);
 }
 
 function isPublicApiPath(pathname: string): boolean {

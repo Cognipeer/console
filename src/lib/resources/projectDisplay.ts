@@ -67,3 +67,25 @@ export function matchesProjectFilter(display: ProjectDisplay, projectId: string)
   if (display.kind === 'multi-project') return display.projectIds.includes(projectId);
   return false;
 }
+
+/**
+ * Visibility of a row to a caller who can access `visibleProjectIds` (null =
+ * everything). Tenant-wide ('all-projects') and tenant-level rows are visible to
+ * everyone; a project / multi-project row needs one accessible project; an
+ * 'unassigned' row belongs to no project and is admin-only.
+ */
+export function isDisplayVisible(display: ProjectDisplay, visibleProjectIds: ReadonlySet<string> | null): boolean {
+  if (visibleProjectIds === null) return true;
+  switch (display.kind) {
+    case 'all-projects':
+    case 'tenant-level':
+      return true;
+    case 'project':
+      return visibleProjectIds.has(display.projectId);
+    case 'multi-project':
+      return display.projectIds.some((id) => visibleProjectIds.has(id));
+    case 'unassigned':
+    default:
+      return false;
+  }
+}

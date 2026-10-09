@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Group, Modal, Select, Stack, Text, TextInput, Textarea } from '@mantine/core';
 import { IconFolders, IconPlus, IconShieldCheck, IconTrash, IconUsers } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
+import { useConfirm, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import type { PermissionService, ServicePermissionLevel, UserServicePermissions } from '@/lib/security/rbac';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
@@ -59,6 +61,9 @@ const TENANT_ROLE_OPTIONS = [
 ];
 
 export default function GroupManagement() {
+  const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
+  const tq = useTranslations('common.confirm.qos');
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -87,8 +92,6 @@ export default function GroupManagement() {
   const [projectOptions, setProjectOptions] = useState<ProjectOption[]>([]);
   const [projectToAdd, setProjectToAdd] = useState<string | null>(null);
   const [projectRoleToAdd, setProjectRoleToAdd] = useState<'member' | 'project_admin'>('member');
-
-  const [deleteTarget, setDeleteTarget] = useState<GroupRow | null>(null);
 
   const notifyError = (message: string) =>
     notifications.show({ title: 'Error', message, color: 'red' });
@@ -186,18 +189,20 @@ export default function GroupManagement() {
     }
   };
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    try {
-      const res = await fetch(`/api/groups/${encodeURIComponent(deleteTarget._id)}`, { method: 'DELETE' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || 'Failed to delete group');
-      notifyOk('Group deleted');
-      setDeleteTarget(null);
-      await fetchGroups();
-    } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Failed to delete group');
-    }
+  const confirmDelete = async (group: GroupRow) => {
+    const done = await deleteResource({
+      noun: tq('nouns.group'),
+      name: group.name,
+      extraWarning: tq('groupMembersLoseAccess'),
+      action: async () => {
+        const res = await fetch(`/api/groups/${encodeURIComponent(group._id)}`, { method: 'DELETE' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error || 'Failed to delete group');
+      },
+    });
+    if (!done) return;
+    notifyOk('Group deleted');
+    await fetchGroups();
   };
 
   // ── Members ──────────────────────────────────────────────────────────────────
@@ -237,20 +242,25 @@ export default function GroupManagement() {
     }
   };
 
-  const removeMember = async (userId: string) => {
+  const removeMember = async (userId: string, displayName: string) => {
     if (!membersGroup) return;
-    try {
-      const res = await fetch(
-        `/api/groups/${encodeURIComponent(membersGroup._id)}/members/${encodeURIComponent(userId)}`,
-        { method: 'DELETE' },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || 'Failed to remove member');
-      await openMembers(membersGroup);
-      await fetchGroups();
-    } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Failed to remove member');
-    }
+    const group = membersGroup;
+    await confirmAction({
+      title: tq('removeTitle', { noun: tq('nouns.user') }),
+      message: tq('removeMember', { name: displayName }),
+      tone: 'warning',
+      confirmLabel: tq('remove'),
+      action: async () => {
+        const res = await fetch(
+          `/api/groups/${encodeURIComponent(group._id)}/members/${encodeURIComponent(userId)}`,
+          { method: 'DELETE' },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error || 'Failed to remove member');
+        await openMembers(group);
+        await fetchGroups();
+      },
+    });
   };
 
   // ── Projects ─────────────────────────────────────────────────────────────────
@@ -293,18 +303,23 @@ export default function GroupManagement() {
 
   const removeProject = async (projectId: string) => {
     if (!projectsGroup) return;
-    try {
-      const res = await fetch(
-        `/api/groups/${encodeURIComponent(projectsGroup._id)}/projects/${encodeURIComponent(projectId)}`,
-        { method: 'DELETE' },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || 'Failed to remove assignment');
-      await openProjects(projectsGroup);
-      await fetchGroups();
-    } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Failed to remove assignment');
-    }
+    const group = projectsGroup;
+    await confirmAction({
+      title: tq('removeTitle', { noun: tq('nouns.project') }),
+      message: tq('removeProject', { name: projectName(projectId) }),
+      tone: 'warning',
+      confirmLabel: tq('remove'),
+      action: async () => {
+        const res = await fetch(
+          `/api/groups/${encodeURIComponent(group._id)}/projects/${encodeURIComponent(projectId)}`,
+          { method: 'DELETE' },
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error || 'Failed to remove assignment');
+        await openProjects(group);
+        await fetchGroups();
+      },
+    });
   };
 
   const projectName = (id: string) => projectOptions.find((p) => p._id === id)?.name ?? id;
@@ -385,7 +400,7 @@ export default function GroupManagement() {
           { id: 'edit', label: 'Edit grants', icon: <IconShieldCheck size={14} />, onClick: () => openEdit(g) },
           ...(g.source === 'ldap'
             ? []
-            : [{ id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red' as const, onClick: () => setDeleteTarget(g) }]),
+            : [{ id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red' as const, onClick: () => void confirmDelete(g) }]),
         ]}
       />
 
@@ -493,7 +508,7 @@ export default function GroupManagement() {
                       <td><Badge variant="light" color={m.source === 'ldap' ? 'indigo' : 'gray'}>{m.source === 'ldap' ? 'LDAP' : 'Local'}</Badge></td>
                       <td>
                         {m.source === 'ldap' || membersGroup?.source === 'ldap' ? null : (
-                          <Button size="compact-xs" color="red" variant="subtle" onClick={() => void removeMember(m.userId)}>Remove</Button>
+                          <Button size="compact-xs" color="red" variant="subtle" onClick={() => void removeMember(m.userId, m.name ?? m.userId)}>Remove</Button>
                         )}
                       </td>
                     </tr>
@@ -545,17 +560,6 @@ export default function GroupManagement() {
             </table>
           </div>
         </Stack>
-      </Modal>
-
-      {/* Delete */}
-      <Modal opened={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Delete group" size="md">
-        <Text size="sm" mb="md">
-          Delete group <strong>{deleteTarget?.name}</strong>? Members lose any access this group granted. This cannot be undone.
-        </Text>
-        <Group justify="flex-end" gap="sm">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-          <Button color="red" onClick={confirmDelete}>Delete</Button>
-        </Group>
       </Modal>
     </>
   );

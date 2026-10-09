@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Group, Modal, Stack, Text, TextInput, Textarea } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import { IconEdit, IconPlus, IconStar, IconTrash } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 
@@ -16,6 +18,8 @@ type Project = {
 };
 
 export default function ProjectsManagement() {
+  const deleteResource = useDeleteResource();
+  const tq = useTranslations('common.confirm.qos');
   const router = useRouter();
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(undefined);
@@ -23,13 +27,11 @@ export default function ProjectsManagement() {
   const [sessionRole, setSessionRole] = useState<string | undefined>(undefined);
   const [createOpened, setCreateOpened] = useState(false);
   const [editOpened, setEditOpened] = useState(false);
-  const [deleteOpened, setDeleteOpened] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [name, setName] = useState('');
   const [key, setKey] = useState('');
   const [description, setDescription] = useState('');
   const [editingProject, setEditingProject] = useState<Project | null>(null);
-  const [deletingProject, setDeletingProject] = useState<Project | null>(null);
   const [query, setQuery] = useState('');
   const isTenantAdmin = sessionRole === 'owner' || sessionRole === 'admin';
 
@@ -172,33 +174,23 @@ export default function ProjectsManagement() {
     }
   };
 
-  const openDeleteModal = (project: Project) => {
-    setDeletingProject(project);
-    setDeleteOpened(true);
-  };
-
-  const handleDelete = async () => {
-    if (submitting || !deletingProject) return;
-    setSubmitting(true);
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(String(deletingProject._id))}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.error || 'Failed to delete project');
-      }
-
-      notifications.show({ title: 'Projects', message: 'Project deleted', color: 'green' });
-      setDeleteOpened(false);
-      setDeletingProject(null);
-      await fetchProjects();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to delete project';
-      notifications.show({ title: 'Projects', message, color: 'red' });
-    } finally {
-      setSubmitting(false);
-    }
+  const handleDelete = async (project: Project) => {
+    const done = await deleteResource({
+      noun: tq('nouns.project'),
+      name: project.name,
+      action: async () => {
+        const res = await fetch(`/api/projects/${encodeURIComponent(String(project._id))}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error || 'Failed to delete project');
+        }
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Projects', message: 'Project deleted', color: 'green' });
+    await fetchProjects();
   };
 
   const columns: DataGridColumn<Project>[] = [
@@ -309,7 +301,7 @@ export default function ProjectsManagement() {
                   label: 'Delete',
                   icon: <IconTrash size={14} />,
                   color: 'red' as const,
-                  onClick: () => openDeleteModal(project),
+                  onClick: () => void handleDelete(project),
                 },
               ]
             : []),
@@ -403,39 +395,6 @@ export default function ProjectsManagement() {
         </Stack>
       </Modal>
 
-      {/* Delete confirmation modal */}
-      <Modal
-        opened={deleteOpened}
-        onClose={() => {
-          if (submitting) return;
-          setDeleteOpened(false);
-          setDeletingProject(null);
-        }}
-        title="Delete project"
-        size="sm"
-      >
-        <Stack gap="sm">
-          <Text size="sm">
-            Are you sure you want to delete{' '}
-            <Text span fw={600}>{deletingProject?.name}</Text>? This action cannot be undone.
-          </Text>
-          <Group justify="flex-end">
-            <Button
-              variant="default"
-              onClick={() => {
-                if (submitting) return;
-                setDeleteOpened(false);
-                setDeletingProject(null);
-              }}
-            >
-              Cancel
-            </Button>
-            <Button color="red" onClick={handleDelete} loading={submitting}>
-              Delete
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
     </>
   );
 }

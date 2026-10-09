@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconArrowsSort,
   IconPlus,
@@ -53,12 +55,12 @@ function formatLatency(ms?: number) {
 
 export default function RerankerDashboardPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [rerankers, setRerankers] = useState<RerankerView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<RerankerView | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
@@ -85,34 +87,29 @@ export default function RerankerDashboardPage() {
     void load();
   }, [load]);
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/reranker/${encodeURIComponent(deleteTarget.key)}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error ?? 'Failed to delete reranker');
-      }
-      notifications.show({
-        color: 'green',
-        title: 'Reranker deleted',
-        message: `${deleteTarget.name} has been removed.`,
-      });
-      setRerankers((prev) => prev.filter((r) => r.key !== deleteTarget.key));
-      setDeleteTarget(null);
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        title: 'Unable to delete',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setDeleting(false);
-    }
-  };
+  const confirmDelete = (target: RerankerView) =>
+    deleteResource({
+      noun: tSafe('nouns.reranker'),
+      name: target.name,
+      type: 'reranker',
+      id: target._id,
+      extraWarning: tSafe('rerankerExtra'),
+      action: async () => {
+        const res = await fetch(`/api/reranker/${encodeURIComponent(target.key)}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(err.error ?? 'Failed to delete reranker');
+        }
+        notifications.show({
+          color: 'green',
+          title: 'Reranker deleted',
+          message: `${target.name} has been removed.`,
+        });
+        setRerankers((prev) => prev.filter((r) => r.key !== target.key));
+      },
+    });
 
   const handleCreated = (reranker: Record<string, unknown>) => {
     setCreateOpen(false);
@@ -300,7 +297,7 @@ export default function RerankerDashboardPage() {
             label: 'Delete',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(r),
+            onClick: () => void confirmDelete(r),
           },
         ]}
       />
@@ -311,32 +308,6 @@ export default function RerankerDashboardPage() {
         onCreated={handleCreated}
       />
 
-      <Modal
-        opened={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete reranker"
-        size="sm"
-      >
-        <Text size="sm">
-          Delete <strong>{deleteTarget?.name}</strong>? Any Knowledge Engine modules pointing to this
-          reranker will silently skip reranking and return vector-ranked results.
-        </Text>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'flex-end',
-            gap: 8,
-            marginTop: 16,
-          }}
-        >
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>
-            Delete
-          </Button>
-        </div>
-      </Modal>
     </PageContainer>
   );
 }

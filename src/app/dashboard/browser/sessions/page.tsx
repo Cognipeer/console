@@ -14,6 +14,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Badge, Button, Group, Select, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useConfirm, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconArrowsSplit,
   IconCamera,
@@ -72,6 +74,9 @@ function formatDuration(session: BrowserSessionView): string {
 }
 
 export default function BrowserSessionsPage() {
+  const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
   const [browsers, setBrowsers] = useState<BrowserView[]>([]);
@@ -160,36 +165,34 @@ export default function BrowserSessionsPage() {
       || (s.agentKey ?? '').toLowerCase().includes(needle));
   }, [sessions, query]);
 
-  async function closeSession(session: BrowserSessionView) {
-    try {
-      const res = await fetch(`/api/browser/sessions/${encodeURIComponent(session.sessionKey)}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) throw new Error(await res.text());
-      notifications.show({ color: 'teal', title: 'Closed', message: session.sessionKey });
-      await load();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  function closeSession(session: BrowserSessionView) {
+    return confirmAction({
+      title: tSafe('closeSession.title'),
+      message: tSafe('closeSession.message'),
+      confirmLabel: tSafe('closeSession.confirm'),
+      tone: 'warning',
+      action: async () => {
+        const res = await fetch(`/api/browser/sessions/${encodeURIComponent(session.sessionKey)}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) throw new Error(await res.text());
+        notifications.show({ color: 'teal', title: 'Closed', message: session.sessionKey });
+        await load();
+      },
+    });
   }
 
-  async function deleteSession(session: BrowserSessionView) {
-    try {
-      const res = await fetch(`/api/browser/sessions/by-id/${session.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error(await res.text());
-      notifications.show({ color: 'teal', title: 'Deleted', message: session.sessionKey });
-      await load();
-    } catch (err) {
-      notifications.show({
-        color: 'red',
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed',
-      });
-    }
+  function deleteSession(session: BrowserSessionView) {
+    return deleteResource({
+      noun: tSafe('nouns.browserSession'),
+      name: session.name || session.sessionKey,
+      action: async () => {
+        const res = await fetch(`/api/browser/sessions/by-id/${session.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text());
+        notifications.show({ color: 'teal', title: 'Deleted', message: session.sessionKey });
+        await load();
+      },
+    });
   }
 
   async function recordAsFlow() {

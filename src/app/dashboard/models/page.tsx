@@ -47,6 +47,7 @@ import { ModelUsageSkeleton } from '@/components/models/ModelSkeletons';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
@@ -199,6 +200,8 @@ export default function ModelsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const t = useTranslations('models');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const tNav = useTranslations('navigation');
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
@@ -394,15 +397,22 @@ export default function ModelsPage() {
   });
 
   const handleDeleteModel = async (model: ModelDto) => {
-    const confirmed = window.confirm(t('actions.deleteConfirm'));
-    if (!confirmed) return;
-    setDeletingModelId(model._id);
     try {
-      const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
-        throw new Error(error.error ?? 'Failed to delete model');
-      }
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.model'),
+        name: model.name,
+        type: 'model',
+        id: model._id,
+        action: async () => {
+          setDeletingModelId(model._id);
+          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
+            throw new Error(error.error ?? 'Failed to delete model');
+          }
+        },
+      });
+      if (!deleted) return;
       setModels((current) => current.filter((m) => m._id !== model._id));
       void loadDashboard();
       notifications.show({
