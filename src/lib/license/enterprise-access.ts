@@ -149,12 +149,21 @@ export interface EnterpriseDenial {
   } & ({ requiresEnterprise: true } | { requiresOnPrem: true });
 }
 
+/**
+ * A '/api/foo/' prefix also covers the bare collection path '/api/foo'
+ * (list/create routes): matching on the trailing slash alone left those
+ * enterprise routes ungated for non-enterprise tenants.
+ */
+function matchesRulePrefix(pathname: string, prefix: string): boolean {
+  return pathname.startsWith(prefix) || (prefix.endsWith('/') && pathname === prefix.slice(0, -1));
+}
+
 function getEnterpriseRuleForPath(pathname: string): EnterpriseApiRule | null {
   for (const rule of ENTERPRISE_API_RULES) {
     if (rule.exemptPrefixes?.some((p) => pathname.startsWith(p))) {
       continue;
     }
-    if (rule.prefixes.some((p) => pathname.startsWith(p))) {
+    if (rule.prefixes.some((p) => matchesRulePrefix(pathname, p))) {
       return rule;
     }
   }

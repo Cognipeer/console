@@ -30,6 +30,10 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/sandbox/runners')).toBe('sandbox');
     expect(getEnterpriseModuleForPath('/api/cluster/overview')).toBe('cluster');
     expect(getEnterpriseModuleForPath('/api/prompt-optimizer/runs')).toBe('prompt-optimizer');
+    // Bare collection path (list/create) must be gated too, not only '/…/' sub-paths.
+    expect(getEnterpriseModuleForPath('/api/prompt-optimizer')).toBe('prompt-optimizer');
+    expect(getEnterpriseModuleForPath('/api/gpu-fleet')).toBe('gpu-fleet');
+    expect(getEnterpriseModuleForPath('/api/prompt-optimizerx')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/reports/dashboard')).toBe('reports');
   });
 

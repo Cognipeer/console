@@ -256,6 +256,9 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/tokens', service: 'tokens' },
   { prefix: '/api/models', service: 'models' },
   { prefix: '/api/prompts', service: 'prompts' },
+  // Enterprise prompt optimizer: optimizes prompts against datasets; it was
+  // unmapped (no authorization at all).
+  { prefix: '/api/prompt-optimizer', service: 'prompts' },
   { prefix: '/api/vector', service: 'vector' },
   { prefix: '/api/memory', service: 'memory' },
   { prefix: '/api/files', service: 'files' },

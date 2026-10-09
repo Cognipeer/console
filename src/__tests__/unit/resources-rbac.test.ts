@@ -52,6 +52,13 @@ describe('resources RBAC service', () => {
   });
 });
 
+describe('/api/prompt-optimizer RBAC mapping (previously unmapped = no authorization)', () => {
+  it('maps the prompt optimizer routes to the prompts service', () => {
+    expect(getPermissionServiceForPath('/api/prompt-optimizer')).toBe('prompts');
+    expect(getPermissionServiceForPath('/api/prompt-optimizer/opt-1/run')).toBe('prompts');
+  });
+});
+
 describe('/api/skills RBAC mapping (previously unmapped = no authorization)', () => {
   it('maps the skills list and item routes to the agents service', () => {
     expect(getPermissionServiceForPath('/api/skills')).toBe('agents');
