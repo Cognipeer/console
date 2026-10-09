@@ -20,7 +20,7 @@ vi.mock('@/lib/database', () => ({
   },
 }));
 
-import { clearResourceCache, listResources } from '@/lib/resources/service';
+import { clearResourceCache, getResource, getResourceHealth, listResources } from '@/lib/resources/service';
 
 describeForEachProvider('Resource registry listResources', (getDb) => {
   let dbName: string;
@@ -62,11 +62,21 @@ describeForEachProvider('Resource registry listResources', (getDb) => {
     const by = String(user._id);
     await db.createAgent({
       tenantId, projectId: projectA, key: `agent-a-${slug}`, name: 'Agent A', status: 'active',
-      config: { modelKey: 'm1', connection: { apiKeyEnc: 'NEVER-EXPOSE' } } as never, createdBy: by,
+      config: {
+        modelKey: 'm1',
+        connection: { apiKeyEnc: 'NEVER-EXPOSE' },
+        // own-project row + tenant-wide fallback
+        toolBindings: [
+          { source: 'tool', sourceKey: 'tool-project', toolNames: ['a'] },
+          { source: 'tool', sourceKey: 'tool-wide', toolNames: ['a'] },
+        ],
+      } as never, createdBy: by,
     });
     await db.createAgent({
       tenantId, projectId: projectB, key: `agent-b-${slug}`, name: 'Agent B', status: 'draft',
-      config: { modelKey: 'm1' } as never, createdBy: by,
+      // 'tool-project' only exists in project A: the runtime would never reach it from B
+      config: { modelKey: 'm1', toolBindings: [{ source: 'tool', sourceKey: 'tool-project', toolNames: ['a'] }] } as never,
+      createdBy: by,
     });
     await db.createTool({
       tenantId, projectId: projectA, key: 'tool-project', name: 'Project tool', type: 'openapi', status: 'active',
@@ -143,6 +153,42 @@ describeForEachProvider('Resource registry listResources', (getDb) => {
 
     const inB = await listResources({ tenantDbName: dbName, tenantId, projectId: projectB });
     expect(inB.items.map((i) => i.name).sort()).toEqual(['Agent B', 'Prompt 1']);
+  });
+
+  it('resolves agent -> tool bindings the same way on both backends (project row, tenant-wide fallback, cross-project)', async () => {
+    const list = await listResources({ tenantDbName: dbName, tenantId, type: 'agent' });
+    const idOf = (name: string) => list.items.find((i) => i.name === name)!.id;
+    const toolId = (await listResources({ tenantDbName: dbName, tenantId, type: 'tool' })).items;
+    const projectToolId = toolId.find((t) => t.key === 'tool-project')!.id;
+    const wideToolId = toolId.find((t) => t.key === 'tool-wide')!.id;
+
+    const a = (await getResource({ tenantDbName: dbName, tenantId, type: 'agent', id: idOf('Agent A') }))!;
+    const toolUses = (r: typeof a) => r.uses.filter((u) => u.kind === 'agent.tool');
+    expect(toolUses(a).map((u) => [u.other.key, u.status, u.other.id])).toEqual([
+      ['tool-project', 'ok', projectToolId],
+      // the seeded tenant-wide tool is disabled: found through the fallback, but the runtime skips it
+      ['tool-wide', 'inactive', wideToolId],
+    ]);
+    expect(toolUses(a)[1].other.projectId).toBeNull();
+
+    const b = (await getResource({ tenantDbName: dbName, tenantId, type: 'agent', id: idOf('Agent B') }))!;
+    expect(toolUses(b)).toHaveLength(1);
+    expect(toolUses(b)[0]).toMatchObject({ status: 'cross-project', severity: 'warning', other: { id: null, key: 'tool-project' } });
+    expect(toolUses(b)[0].candidates!.map((c) => c.id)).toEqual([projectToolId]);
+    expect(b.issues.some((i) => i.kind === 'cross-project-reference' && i.edgeKind === 'agent.tool')).toBe(true);
+
+    const tool = (await getResource({ tenantDbName: dbName, tenantId, type: 'tool', id: projectToolId }))!;
+    expect(tool.usedBy.map((e) => [e.other.name, e.status]).sort()).toEqual([
+      ['Agent A', 'ok'],
+      ['Agent B', 'cross-project'],
+    ]);
+    const wide = (await getResource({ tenantDbName: dbName, tenantId, type: 'tool', id: wideToolId }))!;
+    expect(wide.usedBy.map((e) => [e.other.name, e.status])).toEqual([['Agent A', 'inactive']]);
+
+    const health = await getResourceHealth({ tenantDbName: dbName, tenantId, kind: 'cross-project-reference' });
+    expect(health.issues.map((i) => i.resource.id)).toEqual([idOf('Agent B')]);
+    expect(JSON.stringify([a, b, tool, health])).not.toContain('NEVER-EXPOSE');
+    expect(JSON.stringify([a, b, tool, health])).not.toContain('"edges"');
   });
 
   it('exposes none of the secret fields it was seeded with', async () => {

@@ -9,14 +9,24 @@ import {
   Group,
   Loader,
   Stack,
+  Switch,
   Table,
+  Tabs,
   Text,
   Tooltip,
   ActionIcon,
 } from '@mantine/core';
-import { IconAlertTriangle, IconCheck, IconCopy, IconExternalLink } from '@tabler/icons-react';
+import { IconAlertCircle, IconAlertTriangle, IconCheck, IconCopy, IconExternalLink } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
+import { tryTranslate } from './i18nLookup';
+import ResourceUsagePanel, { type ResourceEdgeView, type ResourceRefView } from './ResourceUsagePanel';
+import ResourceHealthPanel, {
+  explainIssue,
+  SeverityBadge,
+  type HealthIssue,
+  type HealthSummary,
+} from './ResourceHealthPanel';
 
 type StatusTone = 'ok' | 'off' | 'warn' | 'neutral';
 
@@ -36,9 +46,14 @@ interface ResourceListItem {
   createdByLabel: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  issueCount?: number;
+  issueSeverity?: 'error' | 'warning' | null;
 }
 
 interface ResourceDetail extends ResourceListItem {
+  uses?: ResourceEdgeView[];
+  usedBy?: ResourceEdgeView[];
+  issues?: HealthIssue[];
   updatedBy: string | null;
   updatedByLabel: string | null;
   attributes: Array<{ key: string; value: string | number | boolean | null }>;
@@ -113,6 +128,10 @@ export default function ResourceExplorer() {
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [tab, setTab] = useState<string>('resources');
+  const [onlyIssues, setOnlyIssues] = useState(false);
+  const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
+  const [healthReload, setHealthReload] = useState(0);
 
   const [data, setData] = useState<ListResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -122,6 +141,8 @@ export default function ResourceExplorer() {
   const [detailState, setDetailState] = useState<'loading' | 'done' | 'failed'>('loading');
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState(false);
+  // True while the drawer shows a bare reference (no list row behind it).
+  const [selectedIsStub, setSelectedIsStub] = useState(false);
 
   const requestSeq = useRef(0);
   const detailSeq = useRef(0);
@@ -150,6 +171,7 @@ export default function ResourceExplorer() {
       if (projectId) params.set('projectId', projectId);
       if (q.trim()) params.set('q', q.trim());
       if (status) params.set('status', status);
+      if (onlyIssues) params.set('health', 'issues');
       params.set('limit', String(pageSize));
       params.set('offset', String((page - 1) * pageSize));
       if (refresh) params.set('refresh', '1');
@@ -167,15 +189,32 @@ export default function ResourceExplorer() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [type, projectId, q, status, page, pageSize, t]);
+  }, [type, projectId, q, status, onlyIssues, page, pageSize, t]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  const loadSummary = useCallback(async () => {
+    try {
+      const res = await fetch('/api/resources/health', { cache: 'no-store' });
+      if (!res.ok) return;
+      const body = (await res.json()) as { summary: HealthSummary };
+      setHealthSummary(body.summary);
+    } catch {
+      // The header badge is a convenience; the lists work without it.
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSummary();
+  }, [loadSummary]);
+
   const handleRefresh = () => {
     pendingRefresh.current = true;
     void load();
+    void loadSummary();
+    setHealthReload((n) => n + 1);
   };
 
   const typeInfo = useMemo(() => {
@@ -186,8 +225,7 @@ export default function ResourceExplorer() {
 
   const typeLabel = useCallback(
     (value: string) => {
-      const label = t(`types.${value}`);
-      return label === `types.${value}` ? value : label;
+      return tryTranslate(t, `types.${value}`) ?? value;
     },
     [t],
   );
@@ -219,7 +257,19 @@ export default function ResourceExplorer() {
       label: t('colName'),
       render: (row) => (
         <div>
-          <div style={{ fontWeight: 500 }}>{row.name}</div>
+          <div style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+            {row.issueCount && row.issueSeverity ? (
+              <Tooltip label={t('issueCount', { count: row.issueCount })} withArrow>
+                <IconAlertCircle
+                  size={15}
+                  aria-label={t('issueCount', { count: row.issueCount })}
+                  color={row.issueSeverity === 'error' ? 'var(--mantine-color-red-6)' : 'var(--mantine-color-yellow-7)'}
+                  style={{ flexShrink: 0 }}
+                />
+              </Tooltip>
+            ) : null}
+            {row.name}
+          </div>
           {row.key ? (
             <div
               style={{
@@ -263,9 +313,35 @@ export default function ResourceExplorer() {
     },
   ];
 
-  const openRow = async (row: ResourceListItem) => {
+  // Open the drawer for a bare reference (health issue / usage panel). The list
+  // row isn't at hand, so a minimal stub stands in until the detail arrives.
+  const openRef = (ref: ResourceRefView) => {
+    if (!ref.id) return;
+    void openRow(
+      {
+      crn: ref.crn ?? '',
+      type: ref.type,
+      id: ref.id,
+      key: ref.key,
+      name: ref.name ?? ref.key ?? ref.id,
+      description: null,
+      projectId: ref.projectId,
+      projectName: ref.projectName,
+      status: null,
+      statusTone: 'neutral',
+      createdBy: null,
+      createdByLabel: null,
+      createdAt: null,
+      updatedAt: null,
+      },
+      true,
+    );
+  };
+
+  const openRow = async (row: ResourceListItem, stub = false) => {
     const seq = ++detailSeq.current;
     setSelected(row);
+    setSelectedIsStub(stub);
     setDetail(null);
     setDetailState('loading');
     setOpenError(false);
@@ -324,6 +400,8 @@ export default function ResourceExplorer() {
   };
 
   const view = detail ?? (selected as ResourceDetail | null);
+  // A bare reference whose detail failed has no status/dates to show: hide the empty rows.
+  const showStubFields = !(selectedIsStub && !detail && detailState === 'failed');
 
   const filterProjects = [
     { value: ALL, label: t('allProjects') },
@@ -386,6 +464,35 @@ export default function ResourceExplorer() {
         </Alert>
       ) : null}
 
+      <Tabs value={tab} onChange={(v) => setTab(v ?? 'resources')} keepMounted={false}>
+        <Group justify="space-between" align="center" mb="sm">
+          <Tabs.List>
+            <Tabs.Tab value="resources">{t('tabResources')}</Tabs.Tab>
+            <Tabs.Tab value="health">{t('tabHealth')}</Tabs.Tab>
+          </Tabs.List>
+          {healthSummary && (healthSummary.error > 0 || healthSummary.warning > 0) ? (
+            <span className={`ds-badge ${healthSummary.error > 0 ? 'ds-badge-err' : 'ds-badge-warn'}`}>
+              <span className="ds-badge-dot" />
+              {t('healthSummary', { errors: healthSummary.error, warnings: healthSummary.warning })}
+            </span>
+          ) : healthSummary ? (
+            <span className="ds-badge ds-badge-ok">
+              <span className="ds-badge-dot" />
+              {t('healthClean')}
+            </span>
+          ) : null}
+        </Group>
+
+        <Tabs.Panel value="health">
+          <ResourceHealthPanel
+            types={data?.types ?? []}
+            reloadToken={healthReload}
+            onOpen={openRef}
+            onSummary={setHealthSummary}
+          />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="resources">
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <nav style={{ width: 230, flexShrink: 0 }} aria-label={t('title')}>
           <button type="button" style={navItem(type === ALL)} onClick={() => selectType(ALL)}>
@@ -453,6 +560,17 @@ export default function ResourceExplorer() {
                 width: 150,
               },
             ]}
+            toolbarRight={
+              <Switch
+                size="xs"
+                checked={onlyIssues}
+                onChange={(e) => {
+                  setOnlyIssues(e.currentTarget.checked);
+                  setPage(1);
+                }}
+                label={t('onlyIssues')}
+              />
+            }
             onRefresh={handleRefresh}
             refreshing={loading}
             empty={{ title: t('emptyTitle'), description: t('emptyDescription') }}
@@ -480,6 +598,8 @@ export default function ResourceExplorer() {
           />
         </div>
       </div>
+        </Tabs.Panel>
+      </Tabs>
 
       <Drawer
         opened={Boolean(selected)}
@@ -503,6 +623,7 @@ export default function ResourceExplorer() {
                 <Row label={t('fieldType')}>{typeLabel(view.type)}</Row>
                 {view.key ? <Row label={t('fieldKey')} mono>{view.key}</Row> : null}
                 <Row label={t('fieldId')} mono>{view.id}</Row>
+                {view.crn ? (
                 <Row label={t('fieldCrn')} mono>
                   <Group gap={6} wrap="nowrap">
                     <span style={{ wordBreak: 'break-all' }}>{view.crn}</span>
@@ -517,7 +638,9 @@ export default function ResourceExplorer() {
                     </CopyButton>
                   </Group>
                 </Row>
+                ) : null}
                 <Row label={t('fieldProject')}>{projectName(view)}</Row>
+                {showStubFields ? (<>
                 <Row label={t('fieldStatus')}>
                   {view.status ? (
                     <span className={`ds-badge ${TONE_CLASS[view.statusTone] ?? ''}`}>
@@ -536,6 +659,7 @@ export default function ResourceExplorer() {
                   {formatDate(view.updatedAt)}
                   {detail?.updatedByLabel ? ` · ${t('by', { name: detail.updatedByLabel })}` : ''}
                 </Row>
+                </>) : null}
               </Table.Tbody>
             </Table>
 
@@ -562,6 +686,41 @@ export default function ResourceExplorer() {
                 )
               )}
             </div>
+
+            {detail?.issues && detail.issues.length > 0 ? (
+              <div>
+                <Text fw={600} size="sm" mb={4}>{t('drawerIssues')}</Text>
+                <Stack gap={6}>
+                  {detail.issues.map((issue) => (
+                    <div
+                      key={issue.id}
+                      style={{
+                        border: '1px solid var(--ds-border, rgba(128,128,128,0.25))',
+                        borderRadius: 8,
+                        padding: '8px 10px',
+                      }}
+                    >
+                      <Group gap={8} wrap="nowrap" align="flex-start">
+                        <SeverityBadge severity={issue.severity} />
+                        <div>
+                          <Text size="sm" fw={500}>{t(`health.kind.${issue.kind}`)}</Text>
+                          <Text size="xs" c="dimmed">{explainIssue(t, issue)}</Text>
+                          {issue.targetKey ? (
+                            <Text size="xs" c="dimmed" style={{ fontFamily: 'var(--ds-font-mono, monospace)' }}>
+                              {issue.targetKey}
+                            </Text>
+                          ) : null}
+                        </div>
+                      </Group>
+                    </div>
+                  ))}
+                </Stack>
+              </div>
+            ) : null}
+
+            {detail ? (
+              <ResourceUsagePanel uses={detail.uses} usedBy={detail.usedBy} onOpen={openRef} />
+            ) : null}
 
             {openError ? (
               <Alert color="orange" icon={<IconAlertTriangle size={16} />}>

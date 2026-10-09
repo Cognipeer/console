@@ -12,8 +12,10 @@ import {
   MAX_LIMIT,
   ResourceQueryError,
   getResource,
+  getResourceHealth,
   listResources,
 } from '@/lib/resources/service';
+import type { HealthIssueKind, HealthSeverity } from '@/lib/resources/types';
 import { requireSessionContext, withApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:resources');
@@ -43,6 +45,11 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
       if (limit === null) return reply.code(400).send({ error: 'limit must be a positive integer' });
       if (offset === null) return reply.code(400).send({ error: 'offset must be a non-negative integer' });
 
+      const healthRaw = firstString(query.health);
+      if (healthRaw !== undefined && healthRaw !== 'issues') {
+        return reply.code(400).send({ error: 'health must be "issues"' });
+      }
+
       const refreshRaw = firstString(query.refresh);
       const result = await listResources({
         tenantDbName: session.tenantDbName,
@@ -51,6 +58,7 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
         projectId: firstString(query.projectId),
         q: firstString(query.q),
         status: firstString(query.status),
+        health: healthRaw === 'issues' ? 'issues' : undefined,
         limit: Math.min(limit ?? DEFAULT_LIMIT, MAX_LIMIT),
         offset: offset ?? 0,
         refresh: refreshRaw === '1' || refreshRaw === 'true',
@@ -62,6 +70,32 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
       }
       logger.error('List resources error', { error });
       return reply.code(500).send({ error: 'Failed to list resources' });
+    }
+  }));
+
+  // Registered next to the list route; `health` is one path segment so it can
+  // never collide with `/resources/:type/:id`.
+  app.get('/resources/health', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const query = (request.query ?? {}) as Record<string, unknown>;
+      const refreshRaw = firstString(query.refresh);
+      const result = await getResourceHealth({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        severity: firstString(query.severity) as HealthSeverity | undefined,
+        kind: firstString(query.kind) as HealthIssueKind | undefined,
+        type: firstString(query.type),
+        projectId: firstString(query.projectId),
+        refresh: refreshRaw === '1' || refreshRaw === 'true',
+      });
+      return reply.code(200).send(result);
+    } catch (error) {
+      if (error instanceof ResourceQueryError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      logger.error('Resource health error', { error });
+      return reply.code(500).send({ error: 'Failed to load resource health' });
     }
   }));
 

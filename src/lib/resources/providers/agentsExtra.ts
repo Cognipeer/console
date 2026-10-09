@@ -18,7 +18,9 @@
  * deployments, memory config, browser storageStateEnc + sessionConfig, flow
  * steps/inputs/outputs.
  */
+import { toGuardrailMode } from '@/lib/services/guardrail/hooks/contract';
 import { buildAttributes, normalizeProjectId, str, toIso, toneForStatus } from '../mapping';
+import { createEdgeCollector } from '../references';
 import type { ResourceRecord, ResourceTypeDefinition } from '../types';
 
 type Doc = Record<string, any>;
@@ -48,12 +50,43 @@ function base(
   };
 }
 
+/** Outgoing references of an MCP server: its guardrail and (composite) member servers, by id. */
+export function extractMcpEdges(s: Doc) {
+  const edges = createEdgeCollector('mcp-server');
+  const guardrail = (s.guardrail ?? null) as Doc | null;
+  // Mode 'off'/'disabled' evaluates nothing, so a stale key there is not a broken safety control.
+  if (guardrail && toGuardrailMode(guardrail.mode, true) !== 'disabled') {
+    edges.add('mcp.guardrail', guardrail.guardrailKey, 'guardrail.guardrailKey');
+  }
+  // Members live in a JSON blob and are referenced by server id (the one durable reference).
+  const members = (s.metadata as Doc | null | undefined)?.composite?.members;
+  if (s.sourceType === 'composite' && Array.isArray(members)) {
+    const seen = new Set<unknown>();
+    members.forEach((m: Doc | null, i: number) => {
+      if (!m || typeof m !== 'object' || seen.has(m.serverId)) return;
+      seen.add(m.serverId);
+      edges.add('mcp.compositeMember', m.serverId, `metadata.composite.members[${i}].serverId`);
+    });
+  }
+  return edges.done();
+}
+
+/** Outgoing references of a memory store: embedding model and its vector index (qualified by provider). */
+export function extractMemoryStoreEdges(m: Doc) {
+  const edges = createEdgeCollector('memory-store');
+  edges.add('memory.embeddingModel', m.embeddingModelKey, 'embeddingModelKey');
+  edges.add('memory.vectorIndex', m.vectorIndexKey, 'vectorIndexKey', { qualifier: m.vectorProviderKey });
+  return edges.done();
+}
+
 export function mapMcpServer(s: Doc): ResourceRecord {
-  return base('mcp-server', s, s.name, str(s.status), buildAttributes({
+  const record = base('mcp-server', s, s.name, str(s.status), buildAttributes({
     sourceType: str(s.sourceType),
     toolCount: Array.isArray(s.tools) ? s.tools.length : undefined,
     totalRequests: typeof s.totalRequests === 'number' ? s.totalRequests : undefined,
   }));
+  const edges = extractMcpEdges(s);
+  return edges ? { ...record, edges } : record;
 }
 
 export function mapSkill(s: Doc): ResourceRecord {
@@ -72,12 +105,14 @@ export function mapPrompt(p: Doc): ResourceRecord {
 }
 
 export function mapMemoryStore(m: Doc): ResourceRecord {
-  return base('memory-store', m, m.name, str(m.status), buildAttributes({
+  const record = base('memory-store', m, m.name, str(m.status), buildAttributes({
     memoryCount: typeof m.memoryCount === 'number' ? m.memoryCount : undefined,
     vectorProviderKey: str(m.vectorProviderKey),
     vectorIndexKey: str(m.vectorIndexKey),
     embeddingModelKey: str(m.embeddingModelKey),
   }));
+  const edges = extractMemoryStoreEdges(m);
+  return edges ? { ...record, edges } : record;
 }
 
 export function mapBrowser(b: Doc): ResourceRecord {

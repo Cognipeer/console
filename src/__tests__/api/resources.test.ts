@@ -234,4 +234,175 @@ describe('resources API', () => {
       expect(b.statusCode).toBe(404);
     });
   });
+  describe('references, health and issues', () => {
+    const T = (id: string, key: string, projectId: string | undefined, extra: Record<string, unknown> = {}) => ({
+      _id: id, tenantId: 'tenant-1', key, name: `Tool ${id}`, type: 'openapi', status: 'active', actions: [],
+      ...(projectId ? { projectId } : {}), upstreamAuth: { token: 'TOOL-SECRET' }, mcpEndpoint: 'https://secret.example/mcp?token=URL-SECRET', ...extra,
+    });
+    const A = (id: string, projectId: string, bindings: Array<Record<string, unknown>>, extra: Record<string, unknown> = {}) => ({
+      _id: id, tenantId: 'tenant-1', projectId, key: id, name: `Agent ${id}`, status: 'active',
+      config: { modelKey: 'gpt', toolBindings: bindings, connection: { apiKeyEnc: 'SUPER-SECRET-ENC' } }, ...extra,
+    });
+    const bind = (sourceKey: string) => ({ source: 'tool', sourceKey, toolNames: ['x'] });
+
+    beforeEach(() => {
+      db.listProjects.mockResolvedValue([
+        { _id: 'proj-1', name: 'Corporate', tenantId: 'tenant-1' },
+        { _id: 'proj-2', name: 'Retail', tenantId: 'tenant-1' },
+      ] as never);
+      db.listTools.mockResolvedValue([
+        T('tool-retail', 'retail-crm', 'proj-2'),
+        T('dup-a', 'dup', 'proj-1'),
+        T('dup-b', 'dup', 'proj-1'),
+        T('tool-wide', 'shared', undefined),
+        T('mcp-tool', 'github', 'proj-1', { type: 'mcp', mcpTransport: 'sse' }),
+      ] as never);
+      db.listMcpServers.mockResolvedValue([
+        { _id: 'srv-1', tenantId: 'tenant-1', projectId: 'proj-1', key: 'github', name: 'GitHub MCP', status: 'active', sourceType: 'openapi', tools: [] },
+      ] as never);
+      db.listModels.mockResolvedValue([
+        { _id: 'model-1', tenantId: 'tenant-1', projectId: 'proj-1', key: 'gpt', name: 'GPT', category: 'llm', providerKey: 'prov' },
+      ] as never);
+      db.listProviders.mockResolvedValue([
+        { _id: 'prov-1', tenantId: 'tenant-1', key: 'prov', label: 'Provider', type: 'model', driver: 'openai', status: 'active', projectIds: ['proj-1'] },
+      ] as never);
+      db.listAgents.mockResolvedValue([
+        A('agent-corp', 'proj-1', [bind('retail-crm'), bind('shared'), bind('ghost'), bind('dup')]),
+        A('agent-clean', 'proj-1', [bind('shared')]),
+      ] as never);
+    });
+
+    const get = async (url: string, headers = adminHeaders) =>
+      app.inject({ method: 'GET', url, headers });
+
+    it('detail carries uses / usedBy / issues for the referrer', async () => {
+      const res = await get('/api/resources/agent/agent-corp');
+      expect(res.statusCode).toBe(200);
+      const { resource } = parseJsonBody<{ resource: Record<string, any> }>(res.body);
+      const byField = Object.fromEntries(resource.uses.map((u: any) => [u.field, u]));
+      expect(byField['config.modelKey']).toMatchObject({ kind: 'agent.model', status: 'ok', severity: null, other: { id: 'model-1' } });
+      expect(byField['config.toolBindings[0].sourceKey']).toMatchObject({
+        kind: 'agent.tool', status: 'cross-project', severity: 'warning',
+        other: { type: 'tool', id: null, key: 'retail-crm' },
+        candidates: [{ id: 'tool-retail', projectName: 'Retail' }],
+      });
+      // own project has no 'shared', so the tenant-wide row serves it
+      expect(byField['config.toolBindings[1].sourceKey']).toMatchObject({ status: 'ok', other: { id: 'tool-wide', projectId: null } });
+      expect(byField['config.toolBindings[2].sourceKey']).toMatchObject({ status: 'missing', other: { key: 'ghost', name: null } });
+      expect(byField['config.toolBindings[3].sourceKey']).toMatchObject({ status: 'ambiguous' });
+      expect(byField['config.toolBindings[3].sourceKey'].candidates).toHaveLength(2);
+      expect(resource.issues.map((i: any) => i.kind).sort()).toEqual([
+        'ambiguous-reference', 'broken-reference', 'cross-project-reference',
+      ]);
+      expect(resource).toMatchObject({ issueCount: 3, issueSeverity: 'warning', usedByTruncated: false });
+    });
+
+    it('detail of the target shows who uses it, including the cross-project attempt', async () => {
+      const wide = parseJsonBody<{ resource: any }>((await get('/api/resources/tool/tool-wide')).body).resource;
+      expect(wide.usedBy.map((e: any) => [e.other.id, e.status]).sort()).toEqual([['agent-clean', 'ok'], ['agent-corp', 'ok']]);
+      const retail = parseJsonBody<{ resource: any }>((await get('/api/resources/tool/tool-retail')).body).resource;
+      expect(retail.usedBy).toHaveLength(1);
+      expect(retail.usedBy[0]).toMatchObject({ direction: 'in', status: 'cross-project', other: { id: 'agent-corp' } });
+    });
+
+    it('the four seeded problems show up as issues', async () => {
+      const res = await get('/api/resources/health');
+      expect(res.statusCode).toBe(200);
+      const body = parseJsonBody<Record<string, any>>(res.body);
+      const kinds = new Set(body.issues.map((i: any) => i.kind));
+      expect(kinds).toEqual(new Set([
+        'broken-reference', 'cross-project-reference', 'ambiguous-reference', 'duplicate-key', 'mcp-dual-registration',
+      ]));
+      expect(body.summary).toMatchObject({ error: 0, warning: 7 });
+      expect(body.summary.byKind).toMatchObject({ 'duplicate-key': 2, 'mcp-dual-registration': 2, 'broken-reference': 1 });
+      expect(body.truncated).toBe(false);
+      expect(typeof body.generatedAt).toBe('string');
+    });
+
+    it('health filters: severity, kind, type, projectId, and 400 on junk', async () => {
+      const q = async (qs: string) => parseJsonBody<any>((await get(`/api/resources/health?${qs}`)).body);
+      expect((await q('severity=error')).issues).toEqual([]);
+      expect((await q('kind=duplicate-key')).issues.map((i: any) => i.resource.id).sort()).toEqual(['dup-a', 'dup-b']);
+      // summary describes the scope; kind/severity only narrow the list
+      expect((await q('kind=duplicate-key')).summary.warning).toBe(7);
+      expect((await q('type=agent')).issues.every((i: any) => i.resource.type === 'agent')).toBe(true);
+      expect((await q('projectId=proj-2')).issues).toEqual([]);
+      expect((await q('projectId=tenant')).issues).toEqual([]);
+      for (const bad of ['severity=fatal', 'kind=nope', 'type=nope']) {
+        expect((await get(`/api/resources/health?${bad}`)).statusCode, bad).toBe(400);
+      }
+    });
+
+    it('health sorts errors first and caps at 1000', async () => {
+      db.listAgents.mockResolvedValue([
+        A('agent-corp', 'proj-1', [bind('ghost')], { config: { modelKey: 'no-such-model', toolBindings: [bind('ghost')] } }),
+      ] as never);
+      const body = parseJsonBody<any>((await get('/api/resources/health')).body);
+      expect(body.issues[0]).toMatchObject({ severity: 'error', kind: 'broken-reference', edgeKind: 'agent.model', targetKey: 'no-such-model' });
+
+      const many = Array.from({ length: 1100 }, (_, i) => T(`bulk-${i}`, 'same', 'proj-1'));
+      db.listTools.mockResolvedValue(many as never);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(Date.now() + 40_000);
+        const capped = parseJsonBody<any>((await get('/api/resources/health?refresh=1')).body);
+        expect(capped.issues).toHaveLength(1000);
+        expect(capped.truncated).toBe(true);
+        expect(capped.summary.byKind['duplicate-key']).toBe(1100);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('list rows carry issueCount / issueSeverity and health=issues keeps only those', async () => {
+      const all = parseJsonBody<any>((await get('/api/resources?limit=200')).body);
+      const row = (id: string) => all.items.find((i: any) => i.id === id);
+      expect(row('agent-corp')).toMatchObject({ issueCount: 3, issueSeverity: 'warning' });
+      expect(row('agent-clean')).toMatchObject({ issueCount: 0, issueSeverity: null });
+      expect(row('dup-a')).toMatchObject({ issueCount: 1, issueSeverity: 'warning' });
+
+      const only = parseJsonBody<any>((await get('/api/resources?health=issues&limit=200')).body);
+      expect(only.items.map((i: any) => i.id).sort()).toEqual(['agent-corp', 'dup-a', 'dup-b', 'mcp-tool', 'srv-1']);
+      expect(only.total).toBe(5);
+      // facets respect the filter like every other one
+      expect(only.counts).toMatchObject({ agent: 1, tool: 3, 'mcp-server': 1, model: 0 });
+      expect((await get('/api/resources?health=all')).statusCode).toBe(400);
+    });
+
+    it('a missing target counts an error for the referrer and flips the severity', async () => {
+      db.listModels.mockResolvedValue([] as never);
+      const all = parseJsonBody<any>((await get('/api/resources?type=agent')).body);
+      expect(all.items.find((i: any) => i.id === 'agent-clean')).toMatchObject({ issueCount: 1, issueSeverity: 'error' });
+    });
+
+    it('detail 404 forces at most one rebuild (rate-limited), then stays 404', async () => {
+      await get('/api/resources');
+      expect(db.listAgents).toHaveBeenCalledTimes(1);
+      expect((await get('/api/resources/agent/nope')).statusCode).toBe(404);
+      expect((await get('/api/resources/agent/nope')).statusCode).toBe(404);
+      expect(db.listAgents).toHaveBeenCalledTimes(1);
+    });
+
+    it('never exposes the internal edges array nor any secret/URL, on any endpoint', async () => {
+      const urls = [
+        '/api/resources?limit=200',
+        '/api/resources?health=issues',
+        '/api/resources/health',
+        '/api/resources/agent/agent-corp',
+        '/api/resources/tool/tool-wide',
+        '/api/resources/tool/mcp-tool',
+        '/api/resources/mcp-server/srv-1',
+      ];
+      for (const url of urls) {
+        const res = await get(url);
+        expect(res.statusCode, url).toBe(200);
+        expect(res.body, url).not.toMatch(/"edges"|SUPER-SECRET|TOOL-SECRET|URL-SECRET|secret\.example|upstreamAuth|mcpEndpoint|"toType"|"by":/);
+      }
+    });
+
+    it('health is gated like the rest of the resources API', async () => {
+      expect((await get('/api/resources/health', userHeaders)).statusCode).toBe(403);
+      expect((await get('/api/resources/health', grantedHeaders)).statusCode).toBe(200);
+    });
+  });
 });

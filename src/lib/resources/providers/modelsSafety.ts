@@ -20,7 +20,8 @@ import {
   toIso,
   toneForStatus,
 } from '../mapping';
-import type { ResourceRecord, ResourceTypeDefinition } from '../types';
+import { createEdgeCollector } from '../references';
+import type { ResourceEdgeInput, ResourceRecord, ResourceTypeDefinition } from '../types';
 
 type Doc = Record<string, any>;
 
@@ -95,9 +96,74 @@ export function mapInferenceServer(s: Doc): ResourceRecord {
   });
 }
 
+const asDocs = (value: unknown): Doc[] =>
+  Array.isArray(value) ? value.filter((v): v is Doc => !!v && typeof v === 'object') : [];
+
+/**
+ * Keys a guardrail points at. A policy list authored in the hook plane
+ * (`hooks.policies`) wins; a row without one is a legacy preset whose hooks are
+ * derived from the `policy` blob, so that blob is read instead. Only enabled
+ * policies are read (a disabled one never runs). Detectors that call no model
+ * (lexicon / pattern) have no model edge. `tool_access` policies hold name
+ * patterns, not keys, so they are skipped.
+ */
+export function extractGuardrailEdges(g: Doc): ResourceEdgeInput[] | undefined {
+  const edges = createEdgeCollector('guardrail');
+  const policies = g.hooks && Array.isArray(g.hooks.policies) ? asDocs(g.hooks.policies) : null;
+  const modelOf = (p: Doc, base: string, noModelDetector?: string) => {
+    if (noModelDetector && p.detector === noModelDetector) return;
+    edges.add('guardrail.model', p.modelKey, `${base}.modelKey`);
+  };
+  const lists = (keys: unknown, field: string) => {
+    if (Array.isArray(keys)) keys.forEach((k, i) => edges.add('guardrail.wordList', k, `${field}[${i}]`));
+  };
+  if (policies) {
+    policies.forEach((p, i) => {
+      if (p.enabled === false) return;
+      const base = `hooks.policies[${i}]`;
+      switch (p.family) {
+        case 'pii':
+          edges.add('guardrail.piiPolicy', p.piiPolicyKey, `${base}.piiPolicyKey`);
+          break;
+        case 'moderation':
+          modelOf(p, base, 'lexicon');
+          if (p.lexiconCustomLists && typeof p.lexiconCustomLists === 'object') {
+            for (const [category, keys] of Object.entries(p.lexiconCustomLists as Doc)) {
+              lists(keys, `${base}.lexiconCustomLists.${category}`);
+            }
+          }
+          break;
+        case 'prompt_shield':
+          modelOf(p, base, 'pattern');
+          break;
+        case 'custom':
+          modelOf(p, base);
+          break;
+        case 'word_filter':
+          lists(p.customListKeys, `${base}.customListKeys`);
+          break;
+        default:
+          break;
+      }
+    });
+  } else {
+    const legacy = (g.policy ?? {}) as Doc;
+    if (g.type === 'custom') edges.add('guardrail.model', g.modelKey, 'modelKey');
+    if (legacy.moderation?.enabled && legacy.moderation.detector !== 'lexicon') {
+      edges.add('guardrail.model', legacy.moderation.modelKey, 'policy.moderation.modelKey');
+    }
+    if (legacy.promptShield?.enabled && legacy.promptShield.detector !== 'pattern') {
+      edges.add('guardrail.model', legacy.promptShield.modelKey, 'policy.promptShield.modelKey');
+    }
+    if (legacy.wordFilter?.enabled) lists(legacy.wordFilter.customListKeys, 'policy.wordFilter.customListKeys');
+  }
+  return edges.done();
+}
+
 /** customPrompt, policy, hooks and metadata are config bodies: not surfaced. */
 export function mapGuardrail(g: Doc): ResourceRecord {
   return baseRecord('guardrail', g, {
+    edges: extractGuardrailEdges(g),
     name: str(g.name) ?? String(g._id ?? g.id),
     status: statusFromEnabled(g.enabled),
     attributes: buildAttributes({

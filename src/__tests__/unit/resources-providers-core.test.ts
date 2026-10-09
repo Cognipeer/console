@@ -6,7 +6,14 @@ import {
   toIso,
   toneForStatus,
 } from '@/lib/resources/mapping';
-import { coreResourceTypes, mapAgent, mapModel, mapTool } from '@/lib/resources/providers/core';
+import {
+  coreResourceTypes,
+  extractAgentEdges,
+  extractModelEdges,
+  mapAgent,
+  mapModel,
+  mapTool,
+} from '@/lib/resources/providers/core';
 import type { DatabaseProvider } from '@/lib/database';
 import type { ResourceProviderContext } from '@/lib/resources/types';
 
@@ -131,5 +138,173 @@ describe('core type definitions', () => {
     expect(db.listAgents).toHaveBeenCalledWith();
     expect(db.listTools).toHaveBeenCalledWith();
     expect(db.listModels).toHaveBeenCalledWith();
+  });
+});
+
+describe('agent edge extraction', () => {
+  const pick = (edges: ReturnType<typeof extractAgentEdges>) =>
+    (edges ?? []).map((e) => `${e.kind}=${e.target}@${e.field}`);
+
+  it('reads keys exactly where the runtime reads them', () => {
+    const edges = extractAgentEdges({
+      config: {
+        modelKey: 'gpt',
+        promptKey: 'sys',
+        knowledgeEngineKey: 'kb',
+        guardrails: [{ key: 'g1' }, { key: 'g2', hooks: ['input.pre'] }, { key: 'parked', hooks: [] }],
+        // authoritative `guardrails`: the legacy slots are ignored
+        inputGuardrailKey: 'legacy-in',
+        outputGuardrailKey: 'legacy-out',
+        toolBindings: [
+          { source: 'tool', sourceKey: 'crm', toolNames: ['a'] },
+          { source: 'mcp', sourceKey: 'jira', toolNames: ['b'] },
+          { source: 'system', sourceKey: 'browser_use', toolNames: [], config: { browserId: 'br-1' } },
+          { source: 'system', sourceKey: 'web_search', toolNames: [], config: { providerKey: 'tavily' } },
+          { source: 'system', sourceKey: 'web_search', toolNames: [], config: {} },
+        ],
+        memory: { enabled: true, memoryStoreKey: 'mem' },
+        skills: ['s1', '', 's2'],
+        subagents: [
+          { kind: 'ref', name: 'r', agentKey: 'other', modelKey: 'ignored-for-ref', toolBindings: [{ source: 'tool', sourceKey: 'ignored' }] },
+          {
+            kind: 'inline', name: 'i', modelKey: 'small', knowledgeEngineKey: 'kb2',
+            toolBindings: [{ source: 'tool', sourceKey: 'st' }, { source: 'mcp', sourceKey: 'sm' }],
+          },
+          { kind: 'inline', name: 'off', enabled: false, modelKey: 'unused' },
+        ],
+      },
+    });
+    expect(pick(edges)).toEqual([
+      'agent.model=gpt@config.modelKey',
+      'agent.prompt=sys@config.promptKey',
+      'agent.knowledge=kb@config.knowledgeEngineKey',
+      'agent.guardrail=g1@config.guardrails[0].key',
+      'agent.guardrail=g2@config.guardrails[1].key',
+      'agent.tool=crm@config.toolBindings[0].sourceKey',
+      'agent.mcp=jira@config.toolBindings[1].sourceKey',
+      'agent.browser=br-1@config.toolBindings[2].config.browserId',
+      'agent.webSearchProvider=tavily@config.toolBindings[3].config.providerKey',
+      'agent.memory=mem@config.memory.memoryStoreKey',
+      'agent.skill=s1@config.skills[0]',
+      'agent.skill=s2@config.skills[2]',
+      'agent.subagent=other@config.subagents[0].agentKey',
+      // a ref entry's own modelKey overrides the target's (buildAgentSubagents)
+      'agent.subagentModel=ignored-for-ref@config.subagents[0].modelKey',
+      'agent.subagentModel=small@config.subagents[1].modelKey',
+      'agent.subagentKnowledge=kb2@config.subagents[1].knowledgeEngineKey',
+      'agent.subagentTool=st@config.subagents[1].toolBindings[0].sourceKey',
+      'agent.subagentMcp=sm@config.subagents[1].toolBindings[1].sourceKey',
+    ]);
+    expect(edges!.find((e) => e.kind === 'agent.browser')).toMatchObject({ toType: 'browser', by: 'id' });
+  });
+
+  it('falls back to the legacy guardrail slots only when `guardrails` is absent', () => {
+    expect(pick(extractAgentEdges({ config: { inputGuardrailKey: 'in', outputGuardrailKey: 'out' } }))).toEqual([
+      'agent.guardrail=in@config.inputGuardrailKey',
+      'agent.guardrail=out@config.outputGuardrailKey',
+    ]);
+    expect(extractAgentEdges({ config: { guardrails: [], inputGuardrailKey: 'in' } })).toBeUndefined();
+  });
+
+  it('ignores the prompt key when an inline system prompt wins, and disabled memory', () => {
+    expect(extractAgentEdges({ config: { systemPrompt: 'hi', promptKey: 'p', memory: { enabled: false, memoryStoreKey: 'm' } } })).toBeUndefined();
+  });
+
+  it('tolerates empty and junk configs and dedupes', () => {
+    expect(extractAgentEdges({})).toBeUndefined();
+    expect(extractAgentEdges({ config: { toolBindings: 'x', subagents: [null, 3], skills: 'a', guardrails: [null] } })).toBeUndefined();
+    const dup = extractAgentEdges({ config: { modelKey: 'm', toolBindings: [{ source: 'tool', sourceKey: 'a' }, { source: 'tool', sourceKey: 'a' }] } });
+    expect(dup).toHaveLength(3);
+  });
+
+  it('carries edges on the mapped record but never in attributes, and no secret', () => {
+    const r = mapAgent({
+      _id: 'a1', projectId: 'p1', key: 'k', name: 'A', config: { modelKey: 'gpt', connection: { apiKeyEnc: SECRET } },
+    });
+    expect(r.edges).toEqual([{ kind: 'agent.model', toType: 'model', by: 'key', target: 'gpt', field: 'config.modelKey' }]);
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+    expect(mapAgent({ _id: 'a2', name: 'x', config: {} }).edges).toBeUndefined();
+  });
+});
+
+describe('model edge extraction', () => {
+  const pick = (edges: ReturnType<typeof extractModelEdges>) =>
+    (edges ?? []).map((e) => `${e.kind}=${e.target}${e.qualifier ? `#${e.qualifier}` : ''}@${e.field}`);
+
+  it('provider, enabled replicas, guardrails and the semantic cache', () => {
+    const edges = extractModelEdges({
+      providerKey: 'openai',
+      replicas: [{ providerKey: 'azure' }, { providerKey: 'off', enabled: false }, { providerKey: '' }, { providerKey: 'bedrock', enabled: true }],
+      guardrails: [{ key: 'g' }],
+      semanticCache: { enabled: true, embeddingModelKey: 'emb', vectorProviderKey: 'qdrant', vectorIndexKey: 'cache' },
+    });
+    expect(pick(edges)).toEqual([
+      'model.provider=openai@providerKey',
+      'model.replicaProvider=azure@replicas[0].providerKey',
+      'model.replicaProvider=bedrock@replicas[3].providerKey',
+      'model.guardrail=g@guardrails[0].key',
+      'model.semanticCacheModel=emb@semanticCache.embeddingModelKey',
+      'model.semanticCacheIndex=cache#qdrant@semanticCache.vectorIndexKey',
+    ]);
+  });
+
+  it('a chat model with an enabled replica does not use its top-level provider; other categories do', () => {
+    const replicas = [{ providerKey: 'azure' }];
+    expect(pick(extractModelEdges({ category: 'llm', providerKey: 'stale', replicas })))
+      .toEqual(['model.replicaProvider=azure@replicas[0].providerKey']);
+    // all replicas disabled: the pool falls back to providerKey
+    expect(pick(extractModelEdges({ category: 'llm', providerKey: 'p', replicas: [{ providerKey: 'azure', enabled: false }] })))
+      .toEqual(['model.provider=p@providerKey']);
+    // embedding/tts/... call providerKey directly
+    expect(pick(extractModelEdges({ category: 'embedding', providerKey: 'p', replicas })))
+      .toEqual(['model.provider=p@providerKey', 'model.replicaProvider=azure@replicas[0].providerKey']);
+  });
+
+  it('legacy guardrail slots and a disabled semantic cache', () => {
+    const edges = extractModelEdges({
+      providerKey: 'p', inputGuardrailKey: 'in', semanticCache: { enabled: false, embeddingModelKey: 'emb' },
+    });
+    expect(pick(edges)).toEqual(['model.provider=p@providerKey', 'model.guardrail=in@inputGuardrailKey']);
+  });
+
+  it('a Dynamic LLM model has no provider row; every routing target is a model edge', () => {
+    const edges = extractModelEdges({
+      providerKey: 'dynamic',
+      settings: {
+        dynamic: {
+          strategy: 'model-based',
+          defaultModelKey: 'd',
+          fallbackModelKey: 'fb',
+          baselineModelKey: 'base',
+          defaultTarget: { pool: [{ modelKey: 'pa' }, { modelKey: 'pb' }] },
+          rules: [{ label: 'r', targetModelKey: 'rt' }, { label: 'r2', target: { modelKey: 'rt2' } }],
+          decider: { modelKey: 'clf', labels: [{ label: 'l', targetModelKey: 'lt' }, { label: 'l2', target: { pool: [{ modelKey: 'lp' }] } }] },
+          guards: { economyModelKey: 'eco' },
+        },
+      },
+    });
+    expect(pick(edges)).toEqual([
+      'model.dynamicModel=d@settings.dynamic.defaultModelKey',
+      'model.dynamicModel=fb@settings.dynamic.fallbackModelKey',
+      'model.dynamicModel=base@settings.dynamic.baselineModelKey',
+      'model.dynamicModel=pa@settings.dynamic.defaultTarget.pool[0].modelKey',
+      'model.dynamicModel=pb@settings.dynamic.defaultTarget.pool[1].modelKey',
+      'model.dynamicModel=rt@settings.dynamic.rules[0].targetModelKey',
+      'model.dynamicModel=rt2@settings.dynamic.rules[1].target.modelKey',
+      'model.dynamicModel=clf@settings.dynamic.decider.modelKey',
+      'model.dynamicModel=lt@settings.dynamic.decider.labels[0].targetModelKey',
+      'model.dynamicModel=lp@settings.dynamic.decider.labels[1].target.pool[0].modelKey',
+      'model.dynamicModel=eco@settings.dynamic.guards.economyModelKey',
+    ]);
+    expect(edges!.some((e) => e.kind === 'model.provider')).toBe(false);
+  });
+
+  it('never copies settings / credentials into the edges', () => {
+    const r = mapModel({ _id: 'm', key: 'k', name: 'M', providerKey: 'prov', settings: { apiKey: SECRET }, replicas: [{ providerKey: 'x', settings: { apiKey: SECRET } }] });
+    expect(JSON.stringify(r.edges)).not.toContain(SECRET);
+  });
+
+  it('tools carry no edges', () => {
+    expect(mapTool({ _id: 't', key: 'k', name: 'T', type: 'mcp' }).edges).toBeUndefined();
   });
 });

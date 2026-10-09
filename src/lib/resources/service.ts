@@ -8,18 +8,26 @@
  *  - nothing is silently capped (truncated[]);
  *  - a record that claims a different tenant is dropped (defence in depth: the
  *    DB handle is the real boundary);
- *  - only MAPPED records are cached, never raw documents.
+ *  - only MAPPED records are cached, never raw documents;
+ *  - the reference graph (uses / used by / health) is built ONCE per snapshot and
+ *    cached with it; the internal `edges` of a record are dropped right after.
  */
 import { runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { buildCrn } from './crn';
+import { EMPTY_GRAPH, buildResourceGraph, type ResourceGraph } from './graph';
+import { HEALTH_ISSUE_KINDS } from './health';
 import { getResourceTypeDefinition, listResourceTypeDefinitions } from './registry';
 import { ensureCommunityResourceTypesRegistered } from './providers';
 import type {
+  GetResourceHealthInput,
   GetResourceInput,
+  HealthIssue,
   ListResourcesInput,
   ListResourcesResult,
   ResourceDetail,
+  ResourceEdgeInput,
+  ResourceHealthResult,
   ResourceListItem,
   ResourceProviderContext,
   ResourceProviderError,
@@ -59,7 +67,11 @@ interface Directory {
 
 interface Snapshot extends Directory {
   tenantId: string;
+  /** Mapped records WITHOUT their internal `edges` (those live in `graph`). */
   records: ResourceRecord[];
+  graph: ResourceGraph;
+  /** The reference analysis threw: issues/uses/usedBy are empty because nothing was checked. */
+  graphFailed: boolean;
   errors: ResourceProviderError[];
   truncated: ResourceTruncation[];
   generatedAt: string;
@@ -74,7 +86,6 @@ const inflight = new Map<string, Promise<Snapshot>>();
 export function clearResourceCache(): void {
   cache.clear();
   inflight.clear();
-  detailInflight.clear();
 }
 
 function cacheGet(tenantDbName: string, tenantId: string): Snapshot | null {
@@ -118,6 +129,12 @@ function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T>
   return Promise.race([work, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+function stripEdges(r: ResourceRecord): ResourceRecord {
+  if (!r.edges) return r;
+  const { edges: _edges, ...rest } = r;
+  return rest;
 }
 
 function sortKey(r: ResourceRecord): number {
@@ -227,10 +244,40 @@ async function buildSnapshot(input: { tenantDbName: string; tenantId: string }):
       if (result.error) errors.push(result.error);
       if (result.truncated) truncated.push(result.truncated);
     }
+    // Strip first and hand the edges over separately, so the cached snapshot (and
+    // everything the graph keeps pointing at) only ever holds edge-free records.
+    const edgesOf = new Map<ResourceRecord, readonly ResourceEdgeInput[]>();
+    const stripped = records.map((r) => {
+      const clean = stripEdges(r);
+      if (r.edges?.length) edgesOf.set(clean, r.edges);
+      return clean;
+    });
+    let graph = EMPTY_GRAPH;
+    let graphFailed = false;
+    try {
+      graph = buildResourceGraph({
+        tenantId: input.tenantId,
+        records: stripped,
+        edgesOf,
+        projects: directory.projects,
+        incompleteTypes: new Set([...errors.map((e) => e.type), ...truncated.map((t) => t.type)]),
+      });
+    } catch (error) {
+      // A bug in the graph must not take the whole inventory down with it.
+      logger.error('Resource reference graph failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Not a clean bill of health: surface it so "no issues" cannot mean "not checked".
+      graphFailed = true;
+      errors.push({ type: 'references', message: 'Failed to analyse resource references' });
+    }
     const now = Date.now();
     return {
       tenantId: input.tenantId,
-      records,
+      // Edges are INTERNAL: they were consumed by the graph above and are never cached or served.
+      records: stripped,
+      graph,
+      graphFailed,
       errors,
       truncated,
       ...directory,
@@ -269,7 +316,9 @@ function toListItem(
   tenantId: string,
   directory: Directory,
   projectNames: Map<string, string>,
+  graph: ResourceGraph,
 ): ResourceListItem {
+  const health = graph.issueSummaryOf(r.type, r.id);
   return {
     crn: buildCrn({ tenantId, projectId: r.projectId, type: r.type, id: r.id }),
     type: r.type,
@@ -285,6 +334,8 @@ function toListItem(
     createdByLabel: r.createdBy ? directory.userLabels.get(r.createdBy) ?? null : null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    issueCount: health.count,
+    issueSeverity: health.severity,
   };
 }
 
@@ -312,6 +363,9 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
   if (input.type && !getResourceTypeDefinition(input.type)) {
     throw new ResourceQueryError(`Unknown resource type "${input.type}"`);
   }
+  if (input.health !== undefined && input.health !== 'issues') {
+    throw new ResourceQueryError('health must be "issues"');
+  }
   const limit = Math.min(Math.max(Math.trunc(input.limit ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const offset = Math.max(Math.trunc(input.offset ?? 0) || 0, 0);
 
@@ -326,6 +380,7 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
         return false;
       }
     }
+    if (input.health === 'issues' && snapshot.graph.issueSummaryOf(r.type, r.id).count === 0) return false;
     return !needle || matchesQuery(r, needle);
   });
 
@@ -349,7 +404,7 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
   const page = filtered.slice(offset, offset + limit);
 
   return {
-    items: page.map((r) => toListItem(r, input.tenantId, snapshot, projectNames)),
+    items: page.map((r) => toListItem(r, input.tenantId, snapshot, projectNames, snapshot.graph)),
     total: filtered.length,
     counts,
     types: typeInfos(),
@@ -361,62 +416,89 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
   };
 }
 
-const detailInflight = new Map<string, Promise<{ found: ResourceRecord | null; directory: Directory | null }>>();
-
-/** Concurrent identical detail loads share one provider read + one directory read. */
-function loadSingle(
-  def: ResourceTypeDefinition,
-  input: GetResourceInput,
-): Promise<{ found: ResourceRecord | null; directory: Directory | null }> {
-  const key = `${input.tenantDbName}\u0000${input.type}\u0000${input.id}`;
-  const pending = detailInflight.get(key);
-  if (pending) return pending;
-  const work = runWithTenantScope(input.tenantDbName, async (db) => {
-    const ctx: ResourceProviderContext = { db, tenantId: input.tenantId, tenantDbName: input.tenantDbName };
-    const found = await withTimeout(
-      def.get ? def.get(ctx, input.id) : def.list(ctx).then((rows) => rows.find((r) => r.id === input.id) ?? null),
-      PROVIDER_TIMEOUT_MS,
-      `Resource type ${def.type}`,
-    );
-    // Unknown ids stop here: no users read for a 404.
-    return { found, directory: found ? await loadDirectory(ctx) : null };
-  }).finally(() => {
-    if (detailInflight.get(key) === work) detailInflight.delete(key);
-  });
-  detailInflight.set(key, work);
-  return work;
-}
-
 export async function getResource(input: GetResourceInput): Promise<ResourceDetail | null> {
   ensureCommunityResourceTypesRegistered();
   const def = getResourceTypeDefinition(input.type);
   if (!def) return null;
 
-  const cached = cacheGet(input.tenantDbName, input.tenantId);
-  let record: ResourceRecord | null = cached?.records.find((r) => r.type === input.type && r.id === input.id) ?? null;
-  let directory: Directory | null = cached;
-
+  // The detail carries the reference graph, which only exists for the whole
+  // tenant: serve it from the snapshot, never from a per-type read.
+  const find = (snap: Snapshot) => snap.records.find((r) => r.type === input.type && r.id === input.id) ?? null;
+  let snapshot = await getSnapshot(input, false);
+  let record = find(snapshot);
   if (!record) {
-    // A cache miss for the id is not a 404: the snapshot can be up to 30s old and
-    // is capped per type, so ask the provider for just this type (never a fan-out).
-    const loaded = await loadSingle(def, input);
-    record = loaded.found ? clipRecord(loaded.found) : null;
-    directory = directory ?? loaded.directory;
+    // The snapshot can be up to 30s old: a just-created id gets ONE forced
+    // rebuild (still rate-limited by MIN_REFRESH_INTERVAL_MS and de-duplicated
+    // with a build already running), then it is a 404.
+    const fresh = await getSnapshot(input, true);
+    if (fresh !== snapshot) {
+      snapshot = fresh;
+      record = find(fresh);
+    }
   }
 
-  if (!record || !directory) return null;
+  if (!record) return null;
   if (record.tenantId && String(record.tenantId) !== input.tenantId) {
     logger.warn('Dropped resource claiming another tenant', { type: record.type, id: record.id });
     return null;
   }
 
-  const projectNames = new Map(directory.projects.map((p) => [p.id, p.name]));
-  const item = toListItem(record, input.tenantId, directory, projectNames);
+  const projectNames = new Map(snapshot.projects.map((p) => [p.id, p.name]));
+  const item = toListItem(record, input.tenantId, snapshot, projectNames, snapshot.graph);
+  const usedBy = snapshot.graph.usedByOf(record.type, record.id);
   return {
     ...item,
     updatedBy: record.updatedBy,
-    updatedByLabel: record.updatedBy ? directory.userLabels.get(record.updatedBy) ?? null : null,
+    updatedByLabel: record.updatedBy ? snapshot.userLabels.get(record.updatedBy) ?? null : null,
     attributes: record.attributes,
     detailUrl: def.detailUrl?.(record) ?? null,
+    uses: snapshot.graph.usesOf(record.type, record.id),
+    usedBy: usedBy.edges,
+    usedByTruncated: usedBy.truncated,
+    issues: snapshot.graph.issuesOf(record.type, record.id),
+  };
+}
+
+export const MAX_HEALTH_ISSUES = 1000;
+
+/** Tenant-wide health: every issue of the snapshot, filtered and capped. */
+export async function getResourceHealth(input: GetResourceHealthInput): Promise<ResourceHealthResult> {
+  ensureCommunityResourceTypesRegistered();
+  if (input.type && !getResourceTypeDefinition(input.type)) {
+    throw new ResourceQueryError(`Unknown resource type "${input.type}"`);
+  }
+  if (input.severity && input.severity !== 'error' && input.severity !== 'warning') {
+    throw new ResourceQueryError('severity must be "error" or "warning"');
+  }
+  if (input.kind && !HEALTH_ISSUE_KINDS.includes(input.kind)) {
+    throw new ResourceQueryError(`Unknown health issue kind "${input.kind}"`);
+  }
+  const snapshot = await getSnapshot(input, input.refresh === true);
+
+  // Scope filters first (the summary describes this scope), then severity/kind
+  // narrow the list only, so the UI's kind/severity facets do not collapse.
+  const inScope: HealthIssue[] = snapshot.graph.issues.filter((issue) => {
+    if (input.type && issue.resource.type !== input.type) return false;
+    if (input.projectId) {
+      return input.projectId === 'tenant'
+        ? issue.resource.projectId === null
+        : issue.resource.projectId === input.projectId;
+    }
+    return true;
+  });
+  const summary = { error: 0, warning: 0, byKind: {} as Record<string, number> };
+  for (const issue of inScope) {
+    summary[issue.severity] += 1;
+    summary.byKind[issue.kind] = (summary.byKind[issue.kind] ?? 0) + 1;
+  }
+  const filtered = inScope.filter(
+    (issue) => (!input.severity || issue.severity === input.severity) && (!input.kind || issue.kind === input.kind),
+  );
+  return {
+    summary,
+    issues: filtered.slice(0, MAX_HEALTH_ISSUES),
+    truncated: filtered.length > MAX_HEALTH_ISSUES,
+    ...(snapshot.graphFailed ? { graphUnavailable: true } : {}),
+    generatedAt: snapshot.generatedAt,
   };
 }

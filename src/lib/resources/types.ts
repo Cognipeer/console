@@ -62,6 +62,30 @@ export interface ResourceRecord {
   tenantId?: string | null;
   /** SAFE extra display facts (kind, driver, counts...) — whitelist only. */
   attributes: ResourceAttribute[];
+  /**
+   * INTERNAL, outgoing references to other resources (keys/ids only, never a
+   * secret). The service folds them into the reference graph while building a
+   * snapshot and then drops them: they are never cached on the record, never
+   * serialised, and no API mapper may copy them.
+   */
+  edges?: ResourceEdgeInput[];
+}
+
+/**
+ * One outgoing reference, as a provider extracts it from the raw document.
+ * `kind` must be registered in references.ts (EDGE_KINDS); `toType`/`by` are
+ * filled from that registration by the edge collector.
+ */
+export interface ResourceEdgeInput {
+  kind: string;
+  toType: string;
+  by: 'key' | 'id';
+  /** The referenced key (or id). Never empty. */
+  target: string;
+  /** Where in the referrer's document the reference lives, e.g. `config.modelKey`. */
+  field: string;
+  /** For composite targets only: a vector index is addressed by providerKey + indexKey, the providerKey being the qualifier. */
+  qualifier?: string;
 }
 
 export interface ResourceProviderContext {
@@ -80,7 +104,10 @@ export interface ResourceTypeDefinition {
   edition: 'community' | 'enterprise';
   /** ALL rows of the tenant: every project plus tenant-wide rows. */
   list(ctx: ResourceProviderContext): Promise<ResourceRecord[]>;
-  /** Default: find in `list()`. */
+  /**
+   * Unused by the service since R2: a detail is served from the full snapshot
+   * (the reference graph needs the whole tenant), never from a per-type read.
+   */
   get?(ctx: ResourceProviderContext, id: string): Promise<ResourceRecord | null>;
   /**
    * Dashboard route of the resource's own page, verified to exist under
@@ -106,6 +133,9 @@ export interface ResourceListItem {
   createdByLabel: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Health issues this resource is the subject of (broken references, duplicate key...). */
+  issueCount: number;
+  issueSeverity: HealthSeverity | null;
 }
 
 export interface ResourceDetail extends ResourceListItem {
@@ -113,6 +143,85 @@ export interface ResourceDetail extends ResourceListItem {
   updatedByLabel: string | null;
   attributes: ResourceAttribute[];
   detailUrl: string | null;
+  /** Outgoing references, in the order they appear in the document. */
+  uses: ResourceEdgeView[];
+  /** Incoming references (who points at this resource), capped; see `usedByTruncated`. */
+  usedBy: ResourceEdgeView[];
+  usedByTruncated: boolean;
+  issues: HealthIssue[];
+}
+
+// ── Reference graph + health (API shapes) ────────────────────────────────────
+
+export type HealthSeverity = 'error' | 'warning';
+
+export type ResourceEdgeStatus = 'ok' | 'missing' | 'cross-project' | 'inactive' | 'ambiguous';
+
+/** A resource pointer. For a target that does not exist only `type` + `key` (or `id`) are set. */
+export interface ResourceRefView {
+  type: string;
+  id: string | null;
+  key: string | null;
+  name: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  crn: string | null;
+}
+
+export interface ResourceEdgeView {
+  kind: string;
+  field: string;
+  direction: 'out' | 'in';
+  status: ResourceEdgeStatus;
+  /** null when the edge is ok. */
+  severity: HealthSeverity | null;
+  /** 'out': the target; 'in': the referrer. A missing/ambiguous/cross-project target is a bare type + key. */
+  other: ResourceRefView;
+  /** Ambiguous matches or the other-project copies of a cross-project target (max 10). */
+  candidates?: ResourceRefView[];
+}
+
+export type HealthIssueKind =
+  | 'broken-reference'
+  | 'cross-project-reference'
+  | 'inactive-reference'
+  | 'ambiguous-reference'
+  | 'duplicate-key'
+  | 'mcp-dual-registration';
+
+export interface HealthIssue {
+  /** Stable hash of kind + resource + target, so a UI can keep selection across refreshes. */
+  id: string;
+  kind: HealthIssueKind;
+  severity: HealthSeverity;
+  resource: ResourceRefView;
+  related?: ResourceRefView[];
+  edgeKind?: string;
+  field?: string;
+  targetType?: string;
+  targetKey?: string;
+}
+
+export interface ResourceHealthResult {
+  /** Scope filters (type/projectId) applied; severity/kind filters NOT, so facets stay stable. */
+  summary: { error: number; warning: number; byKind: Record<string, number> };
+  /** Max 1000, errors first, then by resource name. */
+  issues: HealthIssue[];
+  truncated: boolean;
+  /** Present (true) when the reference analysis failed: an empty `issues` then means "not checked". */
+  graphUnavailable?: boolean;
+  generatedAt: string;
+}
+
+export interface GetResourceHealthInput {
+  tenantDbName: string;
+  tenantId: string;
+  severity?: HealthSeverity;
+  kind?: HealthIssueKind;
+  type?: string;
+  /** A project id, or 'tenant' for tenant-wide resources only. */
+  projectId?: string;
+  refresh?: boolean;
 }
 
 export interface ResourceTypeInfo {
@@ -141,6 +250,8 @@ export interface ListResourcesInput {
   projectId?: string;
   q?: string;
   status?: string;
+  /** 'issues' = only resources that are the subject of a health issue. */
+  health?: 'issues';
   /** Default 50, max 200. */
   limit?: number;
   offset?: number;

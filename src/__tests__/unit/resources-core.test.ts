@@ -34,6 +34,7 @@ import {
   SOFT_CAP_PER_TYPE,
   clearResourceCache,
   getResource,
+  getResourceHealth,
   listResources,
 } from '@/lib/resources/service';
 import type { ResourceRecord, ResourceTypeDefinition } from '@/lib/resources/types';
@@ -398,13 +399,24 @@ describe('resource service', () => {
       expect(await getResource({ ...base, type: 'unknown', id: '1' })).toBeNull();
     });
 
-    it('falls through to the provider when a warm cache does not hold the id', async () => {
+    it('forces ONE rebuild when a warm snapshot does not hold the id, then 404s', async () => {
       const rows = [rec({ type: 'x', id: '1' })];
-      registerResourceTypes([def('x', async () => rows)]);
+      const list = vi.fn(async () => rows);
+      registerResourceTypes([def('x', list)]);
       await listResources(base); // warm cache without id "2"
       rows.push(rec({ type: 'x', id: '2' })); // created after the snapshot
+
+      // Inside the minimum refresh interval the rebuild is rate-limited: still a miss.
+      expect(await getResource({ ...base, type: 'x', id: '2' })).toBeNull();
+      expect(list).toHaveBeenCalledTimes(1);
+
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.now() + MIN_REFRESH_INTERVAL_MS + 1);
       expect((await getResource({ ...base, type: 'x', id: '2' }))?.id).toBe('2');
+      expect(list).toHaveBeenCalledTimes(2);
+      // An unknown id costs exactly one rebuild, not one per probe.
       expect(await getResource({ ...base, type: 'x', id: 'nope' })).toBeNull();
+      expect(list).toHaveBeenCalledTimes(2);
     });
 
     it('shares one provider read between concurrent identical detail requests and skips users for a 404', async () => {
@@ -418,13 +430,78 @@ describe('resource service', () => {
       expect(h.db.listUsers).not.toHaveBeenCalled();
     });
 
-    it('prefers a type-specific get() when the cache is cold', async () => {
+    it('serves the detail from the snapshot and never calls a per-type get()', async () => {
       const get = vi.fn(async () => rec({ type: 'x', id: '9' }));
-      const list = vi.fn(async () => []);
+      const list = vi.fn(async () => [rec({ type: 'x', id: '9' })]);
       registerResourceTypes([def('x', list, { get })]);
       expect((await getResource({ ...base, type: 'x', id: '9' }))?.id).toBe('9');
-      expect(get).toHaveBeenCalledTimes(1);
-      expect(list).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(list).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('reference graph', () => {
+    const refEdge = (target: string) => ({ kind: 'agent.tool', toType: 'tool', by: 'key' as const, target, field: 'f' });
+    const register = () => registerResourceTypes([
+      def('agent', async () => [rec({ type: 'agent', id: 'a', key: 'a', projectId: 'p1', edges: [refEdge('crm'), refEdge('ghost')] })]),
+      def('tool', async () => [rec({ type: 'tool', id: 't', key: 'crm', projectId: 'p1', status: 'active', statusTone: 'ok' })]),
+    ]);
+
+    it('builds uses / used-by / issues once per snapshot and never serves the edges', async () => {
+      register();
+      const agent = (await getResource({ ...base, type: 'agent', id: 'a' }))!;
+      expect(agent.uses.map((u) => u.status)).toEqual(['ok', 'missing']);
+      expect(agent).toMatchObject({ issueCount: 1, issueSeverity: 'warning' });
+      const tool = (await getResource({ ...base, type: 'tool', id: 't' }))!;
+      expect(tool.usedBy.map((e) => e.other.id)).toEqual(['a']);
+      const list = await listResources({ ...base, health: 'issues' });
+      expect(list.items.map((i) => i.id)).toEqual(['a']);
+      expect(JSON.stringify([agent, tool, list])).not.toContain('"edges"');
+    });
+
+    it('health: scope filters shape the summary, kind/severity only the list; junk is rejected', async () => {
+      register();
+      const all = await getResourceHealth(base);
+      expect(all.summary).toEqual({ error: 0, warning: 1, byKind: { 'broken-reference': 1 } });
+      expect((await getResourceHealth({ ...base, severity: 'error' })).issues).toEqual([]);
+      expect((await getResourceHealth({ ...base, severity: 'error' })).summary.warning).toBe(1);
+      expect((await getResourceHealth({ ...base, projectId: 'p2' })).summary.warning).toBe(0);
+      expect((await getResourceHealth({ ...base, projectId: 'p1', type: 'agent' })).issues).toHaveLength(1);
+      await expect(getResourceHealth({ ...base, type: 'nope' })).rejects.toBeInstanceOf(ResourceQueryError);
+      await expect(getResourceHealth({ ...base, kind: 'nope' as never })).rejects.toBeInstanceOf(ResourceQueryError);
+      await expect(getResourceHealth({ ...base, severity: 'fatal' as never })).rejects.toBeInstanceOf(ResourceQueryError);
+      await expect(listResources({ ...base, health: 'all' as never })).rejects.toBeInstanceOf(ResourceQueryError);
+    });
+
+    it('a graph failure is reported, never shown as a clean bill of health', async () => {
+      const poisoned = { get kind(): string { throw new Error('boom'); }, toType: 'tool', by: 'key' as const, target: 'x', field: 'f' };
+      registerResourceTypes([def('agent', async () => [rec({ type: 'agent', id: 'a', key: 'a', projectId: 'p1', edges: [poisoned] })])]);
+      const list = await listResources(base);
+      expect(list.items).toHaveLength(1);
+      expect(list.errors).toContainEqual({ type: 'references', message: expect.any(String) });
+      const health = await getResourceHealth(base);
+      expect(health.graphUnavailable).toBe(true);
+      expect(health.issues).toEqual([]);
+    });
+
+    it('a healthy graph does not carry the graphUnavailable flag', async () => {
+      register();
+      expect('graphUnavailable' in (await getResourceHealth(base))).toBe(false);
+    });
+
+    it('a failing provider leaves the rest of the graph intact (edges to its type go missing)', async () => {
+      registerResourceTypes([
+        def('agent', async () => [rec({ type: 'agent', id: 'a', key: 'a', projectId: 'p1', edges: [refEdge('crm')] })]),
+        def('tool', async () => { throw new Error('boom'); }),
+      ]);
+      const res = await listResources(base);
+      expect(res.errors).toEqual([{ type: 'tool', message: expect.any(String) }]);
+      expect(res.items).toHaveLength(1);
+      // "not found" in a type that failed to load is not a finding
+      expect(res.items[0]).toMatchObject({ issueCount: 0, issueSeverity: null });
+      const detail = (await getResource({ ...base, type: 'agent', id: 'a' }))!;
+      expect(detail.uses[0].status).toBe('missing');
+      expect(detail.issues).toEqual([]);
     });
   });
 });

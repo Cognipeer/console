@@ -16,6 +16,7 @@
  * reranker config bodies (prompt templates).
  */
 import { buildAttributes, normalizeProjectId, str, toIso, toneForStatus } from '../mapping';
+import { createEdgeCollector } from '../references';
 import type { ResourceRecord, ResourceTypeDefinition } from '../types';
 
 type Doc = Record<string, any>;
@@ -46,8 +47,29 @@ function base(
 
 const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
 
+export function extractRagModuleEdges(m: Doc) {
+  const edges = createEdgeCollector('rag-module');
+  edges.add('rag.embeddingModel', m.embeddingModelKey, 'embeddingModelKey');
+  edges.add('rag.vectorIndex', m.vectorIndexKey, 'vectorIndexKey', { qualifier: m.vectorProviderKey });
+  edges.add('rag.reranker', m.rerankerKey, 'rerankerKey');
+  edges.add('rag.fileBucket', m.fileBucketKey, 'fileBucketKey');
+  return edges.done();
+}
+
+export function extractRerankerEdges(r: Doc) {
+  const edges = createEdgeCollector('reranker');
+  edges.add('reranker.model', (r.config as Doc | null | undefined)?.modelKey, 'config.modelKey');
+  return edges.done();
+}
+
+export function extractCrawlerEdges(c: Doc) {
+  const edges = createEdgeCollector('crawler');
+  edges.add('crawler.ragModule', (c.rag as Doc | null | undefined)?.ragModuleKey, 'rag.ragModuleKey');
+  return edges.done();
+}
+
 export function mapRagModule(m: Doc): ResourceRecord {
-  return base('rag-module', m, str(m.status), buildAttributes({
+  const record = base('rag-module', m, str(m.status), buildAttributes({
     embeddingModelKey: str(m.embeddingModelKey),
     vectorProviderKey: str(m.vectorProviderKey),
     vectorIndexKey: str(m.vectorIndexKey),
@@ -55,6 +77,8 @@ export function mapRagModule(m: Doc): ResourceRecord {
     totalDocuments: num(m.totalDocuments),
     totalChunks: num(m.totalChunks),
   }));
+  const edges = extractRagModuleEdges(m);
+  return edges ? { ...record, edges } : record;
 }
 
 export function mapVectorIndex(v: Doc): ResourceRecord {
@@ -75,7 +99,7 @@ export function mapFileBucket(b: Doc): ResourceRecord {
 export function mapCrawler(c: Doc): ResourceRecord {
   const schedule = (c.schedule ?? null) as Doc | null;
   const rag = (c.rag ?? null) as Doc | null;
-  return base('crawler', c, str(c.status), buildAttributes({
+  const record = base('crawler', c, str(c.status), buildAttributes({
     engine: str(c.engine),
     seedCount: Array.isArray(c.seeds) ? c.seeds.length : undefined,
     maxPages: num(c.maxPages),
@@ -83,16 +107,20 @@ export function mapCrawler(c: Doc): ResourceRecord {
     scheduled: schedule && typeof schedule.enabled === 'boolean' ? schedule.enabled : undefined,
     ragModuleKey: rag ? str(rag.ragModuleKey) : undefined,
   }));
+  const edges = extractCrawlerEdges(c);
+  return edges ? { ...record, edges } : record;
 }
 
 export function mapReranker(r: Doc): ResourceRecord {
   const config = (r.config ?? {}) as Doc;
-  return base('reranker', r, str(r.status), buildAttributes({
+  const record = base('reranker', r, str(r.status), buildAttributes({
     strategy: str(r.strategy),
     modelKey: str(config.modelKey),
     totalRuns: num(r.totalRuns),
     avgLatencyMs: num(r.avgLatencyMs),
   }));
+  const edges = extractRerankerEdges(r);
+  return edges ? { ...record, edges } : record;
 }
 
 const enc = encodeURIComponent;

@@ -7,6 +7,7 @@
  *   - listConfigGroups():       projectId filter only when truthy -> whole tenant
  */
 import { buildAttributes, statusFromEnabled, str } from '../mapping';
+import { createEdgeCollector } from '../references';
 import type { ResourceRecord, ResourceTypeDefinition } from '../types';
 import { baseRecord } from './modelsSafety';
 
@@ -15,7 +16,14 @@ type Doc = Record<string, any>;
 /** channels (recipient emails / webhook targets) and the condition body are not surfaced. */
 export function mapAlertRule(r: Doc): ResourceRecord {
   const scope = (r.scope ?? {}) as Record<string, unknown>;
+  const e = createEdgeCollector('alert-rule');
+  e.add('alert.model', scope.modelKey, 'scope.modelKey');
+  e.add('alert.guardrail', scope.guardrailKey, 'scope.guardrailKey');
+  e.add('alert.ragModule', scope.ragModuleKey, 'scope.ragModuleKey');
+  e.add('alert.mcpServer', scope.mcpServerKey, 'scope.mcpServerKey');
+  e.add('alert.inferenceServer', scope.serverKey, 'scope.serverKey');
   return baseRecord('alert-rule', r, {
+    edges: e.done(),
     name: str(r.name) ?? String(r._id ?? r.id),
     // Rules have no key; identified by id only.
     key: null,
