@@ -2225,6 +2225,41 @@ describe('handleChatCompletion · Dynamic LLM', () => {
         routing: expect.objectContaining({ role: 'decider', chosenModelKey: 'scorer' }),
       }),
     );
+    // The scoring delayed the request before the child call, so the router row carries its time.
+    expect(result.routing?.deciderModelKey).toBe('scorer');
+    expect(typeof result.routing?.deciderLatencyMs).toBe('number');
+  });
+
+  it('records the scorer latency even when the scoring fails', async () => {
+    const router = makeRouter({
+      strategy: 'rule-based',
+      defaultModelKey: 'small',
+      complexity: { modelKey: 'scorer', levels: ['easy', 'hard'] },
+      rules: [
+        {
+          label: 'hard',
+          targetModelKey: 'big',
+          conditions: [{ signal: 'complexityScore', operator: 'gte', value: 1 }],
+        },
+      ],
+    });
+    wireAll({
+      router,
+      big: priced('big', 10, 30),
+      small: priced('small', 0.1, 0.4),
+      scorer: makeLlmModel({ _id: 'scorer-id', key: 'scorer', category: 'decision' }),
+    });
+    (handleDecisionRequest as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('scorer down'));
+
+    const result = await handleChatCompletion({
+      ...BASE_PARAMS,
+      modelKey: 'router',
+      body: { messages: [{ role: 'user', content: 'prove fermat' }] },
+    });
+
+    expect(result.routing?.decision).toBe('default');
+    expect(result.routing?.deciderModelKey).toBe('scorer');
+    expect(typeof result.routing?.deciderLatencyMs).toBe('number');
   });
 
   it('complexityScore is not scored when no rule references it', async () => {
@@ -2236,13 +2271,14 @@ describe('handleChatCompletion · Dynamic LLM', () => {
     });
     wireAll({ router, big: priced('big', 10, 30), small: priced('small', 0.1, 0.4) });
 
-    await handleChatCompletion({
+    const result = await handleChatCompletion({
       ...BASE_PARAMS,
       modelKey: 'router',
       body: { messages: [{ role: 'user', content: 'hi' }] },
     });
 
     expect(handleDecisionRequest).not.toHaveBeenCalled();
+    expect(result.routing?.deciderLatencyMs).toBeUndefined();
   });
 
   describe('decision-model decider', () => {

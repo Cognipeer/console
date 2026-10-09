@@ -3,11 +3,13 @@ import { SegmentedControl, Text } from '@mantine/core';
 import { AreaChart } from '@mantine/charts';
 import {
   IconAlertTriangle,
+  IconClockHour4,
   IconCoin,
   IconPigMoney,
   IconRoute,
   IconScale,
   IconShieldCheck,
+  IconStopwatch,
 } from '@tabler/icons-react';
 import StatTile from '@/components/common/ui/StatTile';
 import type { RoutingAnalytics } from '@/lib/services/models/routingAnalytics';
@@ -31,6 +33,17 @@ function pct(value: number | null | undefined, digits = 1): string {
 
 function share(part: number, whole: number): string {
   return whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : '—';
+}
+
+function duration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return '—';
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+/** Decider time as a share of end-to-end time: the decider runs before the child call, so they add up. */
+function deciderShare(perRequest: number | null, total: number | null): string | undefined {
+  if (perRequest === null || total === null || total <= 0) return undefined;
+  return `${((perRequest / total) * 100).toFixed(0)}% of request time`;
 }
 
 /**
@@ -127,6 +140,24 @@ export default function RoutingAnalyticsPanel({ modelId }: { modelId: string }) 
               value={share(totals.fallbacks, totals.requests)}
               delta={`${totals.guardTrips} guard trips`}
             />
+            <StatTile
+              label="Total latency"
+              icon={<IconStopwatch size={14} stroke={1.7} />}
+              value={duration(totals.avgTotalLatencyMs)}
+              delta={
+                totals.deciderCalls > 0
+                  ? `${duration(totals.avgLatencyMs)} model + ${duration(totals.avgDeciderPerRequestMs)} decider`
+                  : undefined
+              }
+            />
+            {totals.deciderCalls > 0 ? (
+              <StatTile
+                label="Decider latency"
+                icon={<IconClockHour4 size={14} stroke={1.7} />}
+                value={duration(totals.avgDeciderLatencyMs)}
+                delta={deciderShare(totals.avgDeciderPerRequestMs, totals.avgTotalLatencyMs)}
+              />
+            ) : null}
           </div>
 
           {data && data.daily.length > 1 ? (

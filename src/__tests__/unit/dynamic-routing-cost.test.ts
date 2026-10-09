@@ -465,4 +465,75 @@ describe('summarizeRoutedUsage', () => {
     );
     expect(summary.totals.requests).toBe(0);
   });
+
+  it('averages decider latency separately from child latency', () => {
+    const summary = summarizeRoutedUsage(
+      [
+        row({ latencyMs: 4000, routing: routing() }),
+        row({ latencyMs: 2000, routing: routing() }),
+        row({ modelKey: 'decider', latencyMs: 1000, routing: routing({ role: 'decider' }) }),
+        row({ modelKey: 'decider', latencyMs: 2000, routing: routing({ role: 'decider' }) }),
+        // A decider row without a measured latency counts as a call, not as 0 ms.
+        row({ modelKey: 'decider', routing: routing({ role: 'decider' }) }),
+      ],
+      { from: new Date('2026-10-01'), to: new Date('2026-10-02') },
+    );
+
+    expect(summary.totals.deciderCalls).toBe(3);
+    expect(summary.totals.avgDeciderLatencyMs).toBeCloseTo(1500);
+    expect(summary.totals.avgLatencyMs).toBeCloseTo(3000);
+    // 3 decider calls for 2 routed requests: capped at one call per request, so the per-call mean.
+    expect(summary.totals.avgDeciderPerRequestMs).toBeCloseTo(1500);
+    expect(summary.totals.avgTotalLatencyMs).toBeCloseTo(4500);
+  });
+
+  it('does not inflate decider time with decider calls whose request has no routed row', () => {
+    const decider = (latencyMs: number) =>
+      row({ modelKey: 'decider', latencyMs, routing: routing({ role: 'decider' }) });
+    // 3 routed requests but 5 decider calls: two requests failed before reaching the child.
+    const summary = summarizeRoutedUsage(
+      [
+        row({ latencyMs: 6000, routing: routing() }),
+        row({ latencyMs: 6000, routing: routing() }),
+        row({ latencyMs: 6000, routing: routing() }),
+        decider(2000), decider(2000), decider(2000), decider(2000), decider(2000),
+      ],
+      { from: new Date('2026-10-01'), to: new Date('2026-10-02') },
+    );
+    expect(summary.totals.avgDeciderLatencyMs).toBeCloseTo(2000);
+    expect(summary.totals.avgDeciderPerRequestMs).toBeCloseTo(2000); // not 5 × 2000 ÷ 3
+    expect(summary.totals.avgTotalLatencyMs).toBeCloseTo(8000);
+  });
+
+  it('scales decider time down when only some requests had a decider call', () => {
+    const summary = summarizeRoutedUsage(
+      [
+        ...[0, 1, 2, 3].map(() => row({ latencyMs: 1000, routing: routing() })),
+        row({ modelKey: 'decider', latencyMs: 1000, routing: routing({ role: 'decider' }) }),
+        row({ modelKey: 'decider', latencyMs: 1000, routing: routing({ role: 'decider' }) }),
+      ],
+      { from: new Date('2026-10-01'), to: new Date('2026-10-02') },
+    );
+    // 2 calls over 4 requests: half the requests carried 1000 ms of decider time.
+    expect(summary.totals.avgDeciderPerRequestMs).toBeCloseTo(500);
+    expect(summary.totals.avgTotalLatencyMs).toBeCloseTo(1500);
+  });
+
+  it('leaves decider latency unset when the router has no decider', () => {
+    const summary = summarizeRoutedUsage(
+      [row({ latencyMs: 1000, routing: routing() })],
+      { from: new Date('2026-10-01'), to: new Date('2026-10-02') },
+    );
+    expect(summary.totals.deciderCalls).toBe(0);
+    expect(summary.totals.avgDeciderLatencyMs).toBeNull();
+    // No decider: nothing is added in front of the child call.
+    expect(summary.totals.avgDeciderPerRequestMs).toBe(0);
+    expect(summary.totals.avgTotalLatencyMs).toBeCloseTo(1000);
+  });
+
+  it('has no end-to-end latency without routed requests', () => {
+    const summary = summarizeRoutedUsage([], { from: new Date('2026-10-01'), to: new Date('2026-10-02') });
+    expect(summary.totals.avgDeciderPerRequestMs).toBeNull();
+    expect(summary.totals.avgTotalLatencyMs).toBeNull();
+  });
 });
