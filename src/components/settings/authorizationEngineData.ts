@@ -9,7 +9,7 @@
  * silently rendering zeros.
  */
 
-export type Mode = 'legacy' | 'shadow';
+export type Mode = 'legacy' | 'shadow' | 'enforce';
 export type Category = 'parity-mismatch' | 'token-groups' | 'project-narrowing' | 'unmapped-path';
 
 export const CATEGORIES: Category[] = ['parity-mismatch', 'token-groups', 'project-narrowing', 'unmapped-path'];
@@ -100,8 +100,40 @@ export function emptyCategories(): Record<Category, CategoryTotals> {
   return out;
 }
 
+function toMode(v: unknown): Mode {
+  return v === 'shadow' || v === 'enforce' ? v : 'legacy';
+}
+
 export function parseMode(raw: unknown): Mode {
-  return asRecord(raw).mode === 'shadow' ? 'shadow' : 'legacy';
+  return toMode(asRecord(raw).mode);
+}
+
+export interface ModeInfo {
+  /** Stored mode. */
+  mode: Mode;
+  /** Mode actually applied; 'legacy' while the operator kill switch overrides enforce. */
+  effectiveMode: Mode;
+  enforceKillSwitch: boolean;
+  /** Name the admin types to confirm enforce mode (company name, else slug, else tenant id). */
+  tenantName: string | null;
+  tenantSlug: string | null;
+  tenantId: string | null;
+  undeclaredCount: number;
+}
+
+export function parseModeInfo(raw: unknown): ModeInfo {
+  const r = asRecord(raw);
+  const mode = toMode(r.mode);
+  const tenant = asRecord(r.tenant);
+  return {
+    mode,
+    effectiveMode: r.effectiveMode === undefined ? mode : toMode(r.effectiveMode),
+    enforceKillSwitch: asRecord(r.killSwitches).enforce === true,
+    tenantName: str(tenant.name) ?? null,
+    tenantSlug: str(tenant.slug) ?? null,
+    tenantId: str(tenant.id) ?? null,
+    undeclaredCount: num(asRecord(r.undeclaredRoutes).count),
+  };
 }
 
 export function parseSummary(raw: unknown): Summary {

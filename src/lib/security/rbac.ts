@@ -596,24 +596,30 @@ export function resolveCurrentServicePermission(
   return current;
 }
 
-export function authorizeServiceRequest(
+export type ServiceAuthorizationResult =
+  | { allowed: true; service: PermissionService; required: ServicePermissionLevel }
+  | {
+      allowed: false;
+      service: PermissionService;
+      required: ServicePermissionLevel;
+      current: ServicePermissionLevel;
+    };
+
+/**
+ * The service-level decision for an ALREADY RESOLVED service (the route's owner
+ * is known: from the path map or from an explicit route declaration). `level`
+ * overrides the method-derived required level (route declaration
+ * `{ kind: 'service', level }`).
+ */
+export function authorizeService(
   user: RbacUserLike,
   method: string,
-  pathname: string,
+  service: PermissionService,
   groupGrants: GroupTenantGrant[] = [],
   tokenScope?: UserServicePermissions | null,
-): { allowed: true; service: PermissionService | null; required?: ServicePermissionLevel } | {
-  allowed: false;
-  service: PermissionService;
-  required: ServicePermissionLevel;
-  current: ServicePermissionLevel;
-} {
-  const service = getPermissionServiceForPath(pathname);
-  if (!service) {
-    return { allowed: true, service: null };
-  }
-
-  const required = getRequiredPermissionLevel(method, service);
+  level?: ServicePermissionLevel,
+): ServiceAuthorizationResult {
+  const required = level ?? getRequiredPermissionLevel(method, service);
   let current = getEffectiveServicePermissionWithGroups(user, groupGrants, service);
   // Least-privilege API-token scope: when the token carries its own
   // servicePermissions allowlist, cap the effective level at that scope (a
@@ -633,4 +639,23 @@ export function authorizeServiceRequest(
     required,
     service,
   };
+}
+
+export function authorizeServiceRequest(
+  user: RbacUserLike,
+  method: string,
+  pathname: string,
+  groupGrants: GroupTenantGrant[] = [],
+  tokenScope?: UserServicePermissions | null,
+): { allowed: true; service: PermissionService | null; required?: ServicePermissionLevel } | {
+  allowed: false;
+  service: PermissionService;
+  required: ServicePermissionLevel;
+  current: ServicePermissionLevel;
+} {
+  const service = getPermissionServiceForPath(pathname);
+  if (!service) {
+    return { allowed: true, service: null };
+  }
+  return authorizeService(user, method, service, groupGrants, tokenScope);
 }

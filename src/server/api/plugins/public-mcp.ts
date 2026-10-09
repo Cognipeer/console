@@ -35,9 +35,14 @@ import {
   removeSseSession,
   sendSseResponse,
 } from '@/lib/services/mcp/sseSessionManager';
+import { authz } from '@/lib/iam/routeAuthz';
 import { readJsonBody } from '../fastify-utils';
 
 const logger = createLogger('api:public-mcp');
+
+const PUBLIC_SLUG_AUTHZ = authz.self(
+  'unauthenticated by design: addressed by tenant id + random endpoint slug; the handler 404s unless the MCP server is active with accessMode public',
+);
 
 const JSONRPC_VERSION = '2.0';
 const MCP_PROTOCOL_VERSION = '2025-03-26';
@@ -234,7 +239,7 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
 }
 
 export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
-  app.post('/public/mcp/:tenantId/:endpointSlug/message', async (request, reply) => {
+  app.post('/public/mcp/:tenantId/:endpointSlug/message', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
     try {
       return await handlePublicMessage(request, reply);
     } catch (error) {
@@ -246,7 +251,7 @@ export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
   // Streamable HTTP transport: accept JSON-RPC POSTs on the advertised `/sse`
   // URL so streamable-HTTP-first MCP clients connect without a failed attempt +
   // SSE fallback (mirrors the client gateway).
-  app.post('/public/mcp/:tenantId/:endpointSlug/sse', async (request, reply) => {
+  app.post('/public/mcp/:tenantId/:endpointSlug/sse', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
     try {
       return await handlePublicMessage(request, reply);
     } catch (error) {
@@ -255,7 +260,7 @@ export const publicMcpApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get('/public/mcp/:tenantId/:endpointSlug/sse', async (request, reply) => {
+  app.get('/public/mcp/:tenantId/:endpointSlug/sse', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
     try {
       const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };
       const resolved = await resolvePublicServer(tenantId, endpointSlug);

@@ -134,8 +134,8 @@ describeForEachProvider('Shadow mode', (getDb) => {
       expect((await getAuthzMode(tenant)).mode).toBe('legacy');
     });
 
-    it('rejects modes that are not selectable (enforce arrives in C4)', async () => {
-      await expect(setAuthzMode(tenant, 'enforce' as never, 'a')).rejects.toThrow(/Unsupported/);
+    it('accepts enforce and rejects modes that do not exist', async () => {
+      expect((await setAuthzMode(tenant, 'enforce', 'a')).mode).toBe('enforce');
       await expect(setAuthzMode(tenant, 'nonsense' as never, 'a')).rejects.toThrow(/Unsupported/);
     });
 
@@ -205,13 +205,20 @@ describeForEachProvider('Shadow mode', (getDb) => {
       await evaluateGateObservation(observation({ user, method: 'GET', path: '/api/agents/abc', projectId: pid }));
       expect((await byCategory('project-narrowing')).map((e) => e.method)).toEqual(['POST']);
 
-      // no active project, a different project, or no membership -> nothing to narrow with
+      // No membership in any project -> nothing to narrow with.
       await resetShadowEntries(tenant);
-      await evaluateGateObservation(observation({ user, method: 'POST', path: '/api/agents/abc', projectId: null }));
-      await evaluateGateObservation(observation({ user, method: 'POST', path: '/api/agents/abc', projectId: 'some-other-project' }));
       const stranger = await mkUser('user');
       await evaluateGateObservation(observation({ user: stranger, method: 'POST', path: '/api/agents/abc', projectId: pid }));
       expect(await entries()).toHaveLength(0);
+
+      // No cookie, or a project the user cannot access: the handler runs in the
+      // user's first accessible project (resolveProjectContext), so that
+      // project's setting narrows. A forged cookie cannot pick the project.
+      await evaluateGateObservation(observation({ user, method: 'POST', path: '/api/agents/abc', projectId: null }));
+      await evaluateGateObservation(observation({ user, method: 'POST', path: '/api/agents/abc', projectId: 'some-other-project' }));
+      const fallback = await byCategory('project-narrowing');
+      expect(fallback).toHaveLength(1);
+      expect(fallback[0]).toMatchObject({ method: 'POST', legacyAllowed: true, targetAllowed: false, count: 2 });
     });
 
     it('project-narrowing: owners and admins bypass; plain members with default permissions are not narrowed', async () => {

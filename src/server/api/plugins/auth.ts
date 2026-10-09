@@ -24,6 +24,9 @@ import {
   ensureDefaultProject,
 } from '@/lib/services/projects/projectService';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
+import { authz } from '@/lib/iam/routeAuthz';
+import { resolveEnforcement } from '@/lib/iam/shadow/mode';
+import { collectAccessibleProjectIds as collectGroupAwareProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { tryExternalAuthenticate } from '@/enterprise/external-auth';
 import { isUserDisabled, isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import {
@@ -52,7 +55,11 @@ type RegisterBody = {
   password?: string;
 };
 
-async function collectAccessibleProjectIds(
+/**
+ * Projects a user can open, as the LEGACY session logic sees them: legacy
+ * `projectIds` plus direct UserProject memberships (groups are not consulted).
+ */
+async function collectDirectProjectIds(
   db: Awaited<ReturnType<typeof getDatabase>>,
   userId: string,
   legacyProjectIds?: string[],
@@ -67,6 +74,23 @@ async function collectAccessibleProjectIds(
   }
 
   return Array.from(projectIds);
+}
+
+/**
+ * Same question, tenant-aware: tenants in authorization-engine `enforce` mode
+ * use the shared group-aware helper (projects inherited through groups count),
+ * every other tenant keeps the legacy answer.
+ */
+async function collectAccessibleProjectIds(
+  tenantDbName: string,
+  db: Awaited<ReturnType<typeof getDatabase>>,
+  userId: string,
+  legacyProjectIds?: string[],
+): Promise<string[]> {
+  if (await resolveEnforcement(tenantDbName)) {
+    return collectGroupAwareProjectIds(db, userId, legacyProjectIds);
+  }
+  return collectDirectProjectIds(db, userId, legacyProjectIds);
 }
 
 function sendRateLimitHeaders(
@@ -166,6 +190,7 @@ export async function issueSessionForAuthenticatedUser(
 
     if (authenticatedUser.role === 'user' || authenticatedUser.role === 'project_admin') {
       const allowed = await collectAccessibleProjectIds(
+        authenticatedTenant.dbName,
         db,
         userIdStr,
         authenticatedUser.projectIds,
@@ -239,7 +264,7 @@ export async function issueSessionForAuthenticatedUser(
 }
 
 export const authApiPlugin: FastifyPluginAsync = async (app) => {
-  app.post('/auth/login', async (request, reply) => {
+  app.post('/auth/login', { config: authz.public() }, async (request, reply) => {
     try {
       const clientIp = getClientIp(request);
       const rl = checkRateLimit(`login:${clientIp}`, LOGIN_RATE_LIMIT);
@@ -479,11 +504,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Public: tells the signup UI which registration mode is active so it can
   // show the access-code field (beta) or a "registration disabled" notice.
-  app.get('/auth/register/options', async (_request, reply) => {
+  app.get('/auth/register/options', { config: authz.public() }, async (_request, reply) => {
     return reply.send({ mode: getConfig().registration.mode });
   });
 
-  app.post('/auth/register', async (request, reply) => {
+  app.post('/auth/register', { config: authz.public() }, async (request, reply) => {
     // Set once a beta access code is claimed, so a failure later in the
     // handler can put the code back instead of burning it.
     let claimedAccessCode: string | null = null;
@@ -666,12 +691,13 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.post('/auth/logout', async (_request, reply) => {
+  // Any signed-in session may end it (the global hook already requires a valid cookie).
+  app.post('/auth/logout', { config: authz.authenticated() }, async (_request, reply) => {
     clearSessionCookies(reply);
     return reply.code(200).send({ message: 'Logged out successfully' });
   });
 
-  app.get('/auth/session', withApiRequestContext(async (request, reply) => {
+  app.get('/auth/session', { config: authz.authenticated() }, withApiRequestContext(async (request, reply) => {
     try {
       const session = getSessionContext(request);
       if (!session) {
@@ -688,6 +714,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const accessibleProjectIds = await collectAccessibleProjectIds(
+        session.tenantDbName,
         db,
         session.userId,
         user.projectIds,
@@ -707,7 +734,8 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/auth/change-password', withApiRequestContext(async (request, reply) => {
+  // Own password only; the handler re-checks the current password.
+  app.post('/auth/change-password', { config: authz.authenticated() }, withApiRequestContext(async (request, reply) => {
     try {
       const session = getSessionContext(request);
       if (!session) {
@@ -767,7 +795,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/auth/forgot-password', async (request, reply) => {
+  app.post('/auth/forgot-password', { config: authz.public() }, async (request, reply) => {
     // Constant-time response: always wait at least this long before responding,
     // regardless of whether the email/tenant exists. Mitigates user enumeration via timing.
     const MIN_RESPONSE_MS = 250;
@@ -871,7 +899,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.post('/auth/reset-password', async (request, reply) => {
+  app.post('/auth/reset-password', { config: authz.public() }, async (request, reply) => {
     try {
       const clientIp = getClientIp(request);
       const rl = checkRateLimit(

@@ -307,13 +307,14 @@ describe('/api/iam RBAC and validation', () => {
     for (const name of ['owner', 'admin']) {
       expect((await setMode('legacy', users[name])).body).toMatchObject({ mode: 'legacy', updatedBy: String(users[name]._id) });
       const got = (await call('GET', '/api/iam/mode', users[name])).body;
-      expect(got).toMatchObject({ mode: 'legacy', availableModes: ['legacy', 'shadow'], comingModes: ['enforce'] });
+      expect(got).toMatchObject({ mode: 'legacy', availableModes: ['legacy', 'shadow', 'enforce'], comingModes: [] });
       expect((await setMode('shadow', users[name])).body.mode).toBe('shadow');
     }
   });
 
-  it('validates the mode: enforce is not available yet, junk is rejected', async () => {
-    expect(await setMode('enforce')).toMatchObject({ status: 400, body: { code: 'mode_unavailable' } });
+  it('validates the mode: enforce is refused while the operator kill switch is on, junk is rejected', async () => {
+    // The test setup runs with IAM_ENFORCE_DISABLED=1 (see __tests__/setup.ts).
+    expect(await setMode('enforce')).toMatchObject({ status: 409, body: { code: 'enforce_disabled' } });
     expect(await setMode('turbo')).toMatchObject({ status: 400, body: { code: 'invalid_mode' } });
     expect((await call('PUT', '/api/iam/mode', users.owner, { body: {} })).status).toBe(400);
     expect((await call('GET', '/api/iam/shadow/summary?category=nope', users.owner)).status).toBe(400);

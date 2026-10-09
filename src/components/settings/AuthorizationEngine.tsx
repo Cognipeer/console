@@ -7,12 +7,14 @@ import {
   Button,
   Group,
   Loader,
+  Modal,
   Paper,
   SegmentedControl,
   SimpleGrid,
   Stack,
   Table,
   Text,
+  TextInput,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconRefresh, IconTrash } from '@tabler/icons-react';
@@ -22,13 +24,14 @@ import {
   ApiError,
   CATEGORIES,
   CATEGORY_I18N,
-  parseMode,
+  parseModeInfo,
   parseStats,
   parseSummary,
   readJson,
   type Category,
   type EngineStats,
   type Mode,
+  type ModeInfo,
   type Summary,
 } from './authorizationEngineData';
 
@@ -52,13 +55,16 @@ function formatTime(v?: string): string {
   return Number.isNaN(d.getTime()) ? v : d.toLocaleString();
 }
 
-const KNOWN_ERROR_CODES = ['engine_unavailable', 'mode_unavailable', 'invalid_mode'] as const;
+const KNOWN_ERROR_CODES = ['engine_unavailable', 'mode_unavailable', 'invalid_mode', 'enforce_disabled'] as const;
 
 export default function AuthorizationEngine() {
   const t = useTranslations('iam');
   const confirm = useConfirm();
 
-  const [mode, setMode] = useState<Mode | null>(null);
+  const [modeInfo, setModeInfo] = useState<ModeInfo | null>(null);
+  const mode: Mode | null = modeInfo?.mode ?? null;
+  const [enforceOpen, setEnforceOpen] = useState(false);
+  const [typedName, setTypedName] = useState('');
   const [savingMode, setSavingMode] = useState(false);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [stats, setStats] = useState<EngineStats | null>(null);
@@ -72,7 +78,7 @@ export default function AuthorizationEngine() {
     setLoading(true);
     setError(null);
     try {
-      setMode(parseMode(await readJson('/api/iam/mode')));
+      setModeInfo(parseModeInfo(await readJson('/api/iam/mode')));
       const [s, st] = await Promise.allSettled([
         readJson('/api/iam/shadow/summary'),
         readJson('/api/iam/engine/stats'),
@@ -115,6 +121,11 @@ export default function AuthorizationEngine() {
   const changeMode = useCallback(
     async (next: Mode) => {
       if (next === mode) return;
+      if (next === 'enforce') {
+        setTypedName('');
+        setEnforceOpen(true);
+        return;
+      }
       setSavingMode(true);
       try {
         // Not optimistic: the control follows what the server confirms.
@@ -123,7 +134,9 @@ export default function AuthorizationEngine() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mode: next }),
         });
-        setMode(parseMode(data));
+        setModeInfo(parseModeInfo(data));
+        setEnforceOpen(false);
+        setTypedName('');
         notifications.show({ color: 'green', message: t('modeSaved') });
         void load();
       } catch (err) {
@@ -135,6 +148,27 @@ export default function AuthorizationEngine() {
     },
     [describeError, load, mode, t],
   );
+
+  const applyEnforce = useCallback(async () => {
+    setSavingMode(true);
+    try {
+      const data = await readJson('/api/iam/mode', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'enforce' }),
+      });
+      setModeInfo(parseModeInfo(data));
+      setEnforceOpen(false);
+      setTypedName('');
+      notifications.show({ color: 'green', message: t('modeSaved') });
+      void load();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) setReadOnly(true);
+      notifications.show({ color: 'red', title: t('modeFailed'), message: describeError(err) });
+    } finally {
+      setSavingMode(false);
+    }
+  }, [describeError, load, t]);
 
   const resetShadow = useCallback(async () => {
     const ok = await confirm.confirm({
@@ -161,6 +195,9 @@ export default function AuthorizationEngine() {
 
   const mismatches = summary?.categories['parity-mismatch'].events ?? 0;
   const totalEvents = summary?.totalEvents ?? 0;
+  const effective: Mode = modeInfo?.effectiveMode ?? 'legacy';
+  const tenantName = modeInfo?.tenantName ?? modeInfo?.tenantSlug ?? modeInfo?.tenantId ?? '';
+  const nameMatches = tenantName !== '' && typedName.trim() === tenantName;
 
   if (loading && mode === null) {
     return (
@@ -187,6 +224,92 @@ export default function AuthorizationEngine() {
 
   return (
     <Stack gap="lg">
+      <Modal
+        opened={enforceOpen}
+        onClose={() => setEnforceOpen(false)}
+        title={t('enforce.title')}
+        size="lg"
+        centered
+      >
+        <Stack gap="md">
+          <Text size="sm">{t('enforce.intro')}</Text>
+          {modeInfo?.enforceKillSwitch ? <Alert color="orange">{t('banner.killSwitch')}</Alert> : null}
+          {(modeInfo?.undeclaredCount ?? 0) > 0 ? (
+            <Alert color="orange" icon={<IconAlertTriangle size={16} />}>
+              {t('banner.undeclared', { count: modeInfo?.undeclaredCount ?? 0 })}
+            </Alert>
+          ) : null}
+          {mode === 'legacy' || totalEvents === 0 ? (
+            <Alert color="yellow">{t('enforce.noShadowData')}</Alert>
+          ) : null}
+          <Text size="sm" fw={600}>
+            {t('enforce.impact')}
+          </Text>
+          <Table verticalSpacing="xs">
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>{t('topRoutes.category')}</Table.Th>
+                <Table.Th ta="right">{t('enforce.wouldDenyCol')}</Table.Th>
+                <Table.Th ta="right">{t('enforce.wouldAllowCol')}</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {CATEGORIES.map((c) => (
+                <Table.Tr key={c}>
+                  <Table.Td>{categoryLabel(c)}</Table.Td>
+                  <Table.Td ta="right">{(summary?.categories[c].wouldDeny ?? 0).toLocaleString()}</Table.Td>
+                  <Table.Td ta="right">{(summary?.categories[c].wouldAllow ?? 0).toLocaleString()}</Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+          {summary && summary.topRoutes.length > 0 ? (
+            <Stack gap={4}>
+              <Text size="sm" fw={600}>
+                {t('topRoutes.title')}
+              </Text>
+              {summary.topRoutes.slice(0, 5).map((row, i) => (
+                <Group key={`${row.method}:${row.route}:${i}`} justify="space-between" wrap="nowrap">
+                  <Text size="xs" ff="monospace" truncate>
+                    {row.method} {row.route}
+                  </Text>
+                  <Group gap={6} wrap="nowrap">
+                    <Verdict allowed={row.legacyAllowed} allowLabel={t('allowed')} denyLabel={t('denied')} />
+                    <Text size="xs">→</Text>
+                    <Verdict allowed={row.targetAllowed} allowLabel={t('allowed')} denyLabel={t('denied')} />
+                    <Text size="xs" c="dimmed">
+                      ×{row.count.toLocaleString()}
+                    </Text>
+                  </Group>
+                </Group>
+              ))}
+            </Stack>
+          ) : null}
+          <Text size="sm">{t('enforce.rollback')}</Text>
+          <TextInput
+            label={t('enforce.typeName', { name: tenantName })}
+            value={typedName}
+            onChange={(e) => setTypedName(e.currentTarget.value)}
+            placeholder={tenantName}
+            autoComplete="off"
+            data-autofocus
+          />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={() => setEnforceOpen(false)}>
+              {t('enforce.cancel')}
+            </Button>
+            <Button
+              color="red"
+              disabled={!nameMatches || modeInfo?.enforceKillSwitch === true}
+              loading={savingMode}
+              onClick={() => void applyEnforce()}
+            >
+              {t('enforce.confirm')}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
       {/* Mode */}
       <Paper withBorder p="md" radius="md">
         <Stack gap="sm">
@@ -204,16 +327,34 @@ export default function AuthorizationEngine() {
               data={[
                 { value: 'legacy', label: t('mode.legacy') },
                 { value: 'shadow', label: t('mode.shadow') },
+                { value: 'enforce', label: t('mode.enforce') },
               ]}
             />
           </Group>
           <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="sm">
             <ModeNote active={mode === 'legacy'} title={t('mode.legacy')} text={t('mode.legacyHelp')} />
             <ModeNote active={mode === 'shadow'} title={t('mode.shadow')} text={t('mode.shadowHelp')} />
-            <ModeNote active={false} muted title={t('mode.enforce')} text={t('mode.enforceHelp')} />
+            <ModeNote active={mode === 'enforce'} title={t('mode.enforce')} text={t('mode.enforceHelp')} />
           </SimpleGrid>
         </Stack>
       </Paper>
+
+      <Alert
+        color={effective === 'enforce' ? 'red' : effective === 'shadow' ? 'blue' : 'gray'}
+        title={t('banner.title', { mode: t(`mode.${effective}`) })}
+      >
+        {t(`banner.${effective}`)}
+      </Alert>
+      {mode === 'enforce' && modeInfo?.enforceKillSwitch ? (
+        <Alert color="orange" icon={<IconAlertTriangle size={16} />}>
+          {t('banner.killSwitch')}
+        </Alert>
+      ) : null}
+      {(modeInfo?.undeclaredCount ?? 0) > 0 ? (
+        <Alert color="orange" icon={<IconAlertTriangle size={16} />}>
+          {t('banner.undeclared', { count: modeInfo?.undeclaredCount ?? 0 })}
+        </Alert>
+      ) : null}
 
       {mismatches > 0 ? (
         <Alert color="red" icon={<IconAlertTriangle size={16} />} title={t('mismatchAlertTitle')}>
@@ -266,7 +407,7 @@ export default function AuthorizationEngine() {
         <>
           {mode === 'legacy' && totalEvents === 0 ? <Alert color="gray">{t('report.legacyEmpty')}</Alert> : null}
           {mode === 'legacy' && totalEvents > 0 ? <Alert color="gray">{t('report.paused')}</Alert> : null}
-          {mode === 'shadow' && totalEvents === 0 ? <Alert color="blue">{t('report.collecting')}</Alert> : null}
+          {(mode === 'shadow' || mode === 'enforce') && totalEvents === 0 ? <Alert color="blue">{t('report.collecting')}</Alert> : null}
           {summary.dropped.keys > 0 || summary.dropped.events > 0 ? (
             <Alert color="orange" icon={<IconAlertTriangle size={16} />}>
               {t('report.dropped', {

@@ -12,10 +12,10 @@
  *              policies are not parity bugs and are only counted.
  *  2. T1       API tokens ignore the owner's GROUP grants today. If they were
  *              included, would the decision change?  (`token-groups`)
- *  3. T2       the legacy gate ignores the active project. Candidate rule:
- *              effective = min(tenant level, project level) using
- *              getEffectiveProjectPermission on the user's merged project
- *              membership. Would it change the decision?  (`project-narrowing`)
+ *  3. T2       the legacy gate ignores the active project. Rule (projectNarrowing.ts,
+ *              the same code enforce mode runs): effective = min(tenant level,
+ *              the explicit project-level setting of the user's merged project
+ *              membership). Would it change the decision?  (`project-narrowing`)
  *              Owners and admins bypass project checks (as in
  *              resolveEffectivePermission) and are never narrowed.
  *  4. T3       unmapped paths are handled in observer.ts (no engine involved).
@@ -25,26 +25,15 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
-import {
-  getEffectiveProjectPermission,
-  getEffectiveServicePermissionWithGroups,
-  minPermission,
-  type PermissionService,
-} from '@/lib/security/rbac';
 import { authorizeGate, customPolicyIdsOf, type AuthorizeResult } from '../engine';
-import { levelSets, type IamPrincipal } from '../entities';
-import { getPrincipalContext, resolveTokenPrincipal, resolveUserPrincipal } from '../principalCache';
+import { type IamPrincipal } from '../entities';
+import { narrowedLevelSets, resolveNarrowingMembership } from '../projectNarrowing';
+import { resolveTokenPrincipal, resolveUserPrincipal } from '../principalCache';
 import { recordShadowEvent } from './aggregate';
 import { bumpTenantMetric, shadowMetrics } from './metrics';
-import { resolveProjectMembershipCached } from './projectMembership';
 import type { GateObservation, ShadowCategory } from './types';
 
 const logger = createLogger('iam:shadow');
-
-const ownerOrAdmin = (role: string) => role === 'owner' || role === 'admin';
-
-/** active_project_id comes from a client cookie: only look up plausible ids. */
-const PROJECT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function record(
   o: GateObservation,
@@ -105,6 +94,7 @@ async function checkParity(o: GateObservation, principal: IamPrincipal): Promise
     principal,
     service: o.legacy.service,
     method: o.method,
+    level: o.legacy.level,
   });
   if (result.allowed === o.legacy.allowed) return;
 
@@ -146,43 +136,36 @@ async function checkTokenGroups(o: GateObservation): Promise<void> {
     principal: target,
     service: o.legacy.service,
     method: o.method,
+    level: o.legacy.level,
   });
   if (result.allowed !== o.legacy.allowed) record(o, 'token-groups', result.allowed);
 }
 
 async function checkProjectNarrowing(o: GateObservation, base: IamPrincipal): Promise<void> {
-  if (!o.activeProjectId || !PROJECT_ID_RE.test(o.activeProjectId)) return;
-  // Tenant owners/admins bypass project checks, including users who are admin
-  // only through a group's tenantRole (session path; tokens ignore groups).
-  if (ownerOrAdmin(o.role)) return;
-  if (o.subject === 'session' && o.groupGrants.some((g) => g.tenantRole && ownerOrAdmin(g.tenantRole))) return;
-  const ctx = await getPrincipalContext({ tenantDbName: o.tenantDbName, tenantId: o.tenantId, userId: o.userId, user: o.user });
-  const membership = await resolveProjectMembershipCached({
-    tenantDbName: o.tenantDbName,
-    userId: o.userId,
-    userRole: o.role,
-    projectId: o.activeProjectId,
-    legacyProjectIds: o.user.projectIds,
-    groupIds: ctx.groupIds,
-  });
-  if (!membership) return; // no project role/permissions there: nothing to narrow with
-
   // Tenant level exactly as the legacy gate computed it (sessions: with groups, tokens: without).
   const tenantGrants = o.subject === 'session' ? o.groupGrants : [];
+  const narrowing = await resolveNarrowingMembership({
+    tenantDbName: o.tenantDbName,
+    tenantId: o.tenantId,
+    userId: o.userId,
+    role: o.role,
+    user: o.user,
+    groupGrants: tenantGrants,
+    requestedProjectId: o.activeProjectId,
+    exactProject: o.subject === 'token',
+  });
+  if (!narrowing) return; // privileged, no project, or no membership there: nothing to narrow with
+
   const narrowed: IamPrincipal = {
     ...base,
-    sets: levelSets((service: PermissionService) =>
-      minPermission(
-        getEffectiveServicePermissionWithGroups(o.user, tenantGrants, service),
-        getEffectiveProjectPermission(membership, service),
-      ),
-    ),
+    sets: narrowedLevelSets(o.user, tenantGrants, narrowing.membership),
   };
   const result = await authorizeGate({
     tenant: o.tenantDbName,
     principal: narrowed,
     service: o.legacy.service,
     method: o.method,
+    level: o.legacy.level,
   });
   if (result.allowed !== o.legacy.allowed) record(o, 'project-narrowing', result.allowed);
 }

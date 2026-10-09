@@ -35,6 +35,16 @@ declare module 'fastify' {
      * is not recorded in the security audit trail as a denied user request.
      */
     upstreamStatusForwarded?: boolean;
+    /**
+     * Set when enforce mode refused this request (iam/enforce.ts), so the audit
+     * row can carry the decisionId the caller was shown.
+     */
+    iamDenial?: {
+      code: 'forbidden' | 'route_not_declared';
+      decisionId?: string;
+      service?: string;
+      required?: string;
+    };
   }
 }
 

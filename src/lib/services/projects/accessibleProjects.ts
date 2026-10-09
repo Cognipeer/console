@@ -1,4 +1,5 @@
 import type { DatabaseProvider } from '@/lib/database';
+import { mergeServicePermissions, type UserServicePermissions } from '@/lib/security/rbac';
 
 function getLegacyProjectIds(projectIds?: string[]): string[] {
   return (projectIds ?? []).map(String).filter(Boolean);
@@ -37,4 +38,28 @@ export async function collectAccessibleProjectIds(
   }
 
   return Array.from(projectIds);
+}
+
+/**
+ * The caller's membership in ONE project, as a role plus merged service
+ * overrides, built from the project assignments of the user's groups only.
+ * Used by the enforce-mode project resolution for a user whose access to the
+ * project comes through a group (no direct UserProject / legacy `projectIds`
+ * entry). Null when no group of the user is assigned to the project.
+ */
+export async function findGroupProjectMembership(
+  db: Pick<DatabaseProvider, 'listGroupMembersByUser' | 'listGroupProjectsByProject'>,
+  userId: string,
+  projectId: string,
+): Promise<{ role: 'project_admin' | 'member'; servicePermissions: UserServicePermissions } | null> {
+  const memberships = await db.listGroupMembersByUser(userId);
+  if (memberships.length === 0) return null;
+  const groupIds = new Set(memberships.map((m) => String(m.groupId)));
+  const assignments = (await db.listGroupProjectsByProject(projectId))
+    .filter((gp) => groupIds.has(String(gp.groupId)));
+  if (assignments.length === 0) return null;
+  return {
+    role: assignments.some((gp) => gp.role === 'project_admin') ? 'project_admin' : 'member',
+    servicePermissions: mergeServicePermissions(assignments.map((gp) => gp.servicePermissions)),
+  };
 }

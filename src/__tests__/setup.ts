@@ -16,6 +16,12 @@ process.env.MAIN_DB_NAME = 'test_console_main';
 // Required by src/lib/license/* and JWT helpers
 process.env.JWT_SECRET = 'test-jwt-secret-must-be-at-least-32-chars!!';
 
+// Authorization engine: enforce mode needs a tenant-mode lookup in the database
+// on the request path. Most suites mock the database layer (or have none), so
+// enforcement is switched off globally here; the suites that exercise enforce
+// mode delete this variable in a beforeAll and restore it in afterAll.
+process.env.IAM_ENFORCE_DISABLED = process.env.IAM_ENFORCE_DISABLED ?? '1';
+
 // Silence noisy console output in tests unless DEBUG=1
 if (!process.env.DEBUG) {
   globalThis.console.debug = () => {};

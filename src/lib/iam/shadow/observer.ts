@@ -9,14 +9,15 @@
  *  - IAM_SHADOW_DISABLED=1 (kill switch) behaves exactly like `legacy`;
  *  - IAM_SHADOW_SAMPLE_RATE (0..1, default 1) samples gate evaluations, and the
  *    rate drops to a quarter while the queue is more than half full;
- *  - in `shadow` mode the work is queued (bounded, droppable) and the heavy
+ *  - in `shadow` mode (and in `enforce`, where it is the legacy-vs-engine audit
+ *    trail) the work is queued (bounded, droppable) and the heavy
  *    evaluation module — Cedar, entity builders — is imported on first use, so
  *    a legacy-mode process never loads the WASM engine for this.
  */
 
 import { createLogger } from '@/lib/core/logger';
 import { recordShadowEvent } from './aggregate';
-import { peekAuthzMode } from './mode';
+import { peekAuthzMode, recordsShadow } from './mode';
 import { MAX_QUEUE, getShadowQueueDepth, submitShadowJob } from './queue';
 import type { GateObservation, UnmappedObservation } from './types';
 
@@ -47,7 +48,7 @@ function shouldSample(): boolean {
 /** A mapped request whose legacy decision has just been computed. */
 export function observeGateDecision(tenantDbName: string, build: () => GateObservation): void {
   try {
-    if (peekAuthzMode(tenantDbName) !== 'shadow') return;
+    if (!recordsShadow(peekAuthzMode(tenantDbName))) return;
     if (!shouldSample()) return;
     const observation = build();
     submitShadowJob(async () => {
@@ -59,10 +60,14 @@ export function observeGateDecision(tenantDbName: string, build: () => GateObser
   }
 }
 
-/** An authenticated request to a path that no permission service covers (T3). */
+/**
+ * An authenticated request to a route that is neither declared nor mapped to a
+ * permission service ("undeclared"): enforce mode refuses it (403
+ * route_not_declared), so this is where the report shows what that would hit.
+ */
 export function observeUnmappedPath(tenantDbName: string, build: () => UnmappedObservation): void {
   try {
-    if (peekAuthzMode(tenantDbName) !== 'shadow') return;
+    if (!recordsShadow(peekAuthzMode(tenantDbName))) return;
     const o = build();
     recordShadowEvent(tenantDbName, {
       category: 'unmapped-path',

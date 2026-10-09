@@ -81,7 +81,7 @@ export interface GateObservation extends ObservationBase {
   tokenScope?: UserServicePermissions | null;
   /** active_project_id cookie (sessions) or the token's projectId. */
   activeProjectId?: string | null;
-  legacy: { allowed: boolean; service: string; required?: string };
+  legacy: { allowed: boolean; service: string; required?: string; level?: 'read' | 'write' | 'admin' };
 }
 
 /** An authenticated request to a path no permission service covers. */

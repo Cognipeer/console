@@ -7,8 +7,12 @@
  * `read`, every mutation needs `admin`. The gate runs in withApiRequestContext,
  * exactly like every other dashboard route.
  *
- *   GET  /api/iam/mode                    current mode of this tenant
- *   PUT  /api/iam/mode        {mode}      'legacy' | 'shadow' ('enforce' arrives in C4)
+ *   GET  /api/iam/mode                    current mode of this tenant (+ kill switches, tenant name, undeclared routes)
+ *   PUT  /api/iam/mode        {mode}      'legacy' | 'shadow' | 'enforce'
+ *                                         (enforce: engine self-test first; 409 when the
+ *                                         operator kill switch IAM_ENFORCE_DISABLED is set).
+ *                                         The tenant OWNER can always call this (owner safety),
+ *                                         even when custom policies or the engine would deny.
  *   GET  /api/iam/shadow/summary          per-category totals, per-service, top routes + samples
  *   GET  /api/iam/shadow/entries          every stored aggregate (filter + paginate)
  *   POST /api/iam/shadow/reset            clear the tenant's shadow data
@@ -34,6 +38,10 @@ import {
   type ShadowCategory,
 } from '@/lib/iam/shadow';
 import { getIamEngineStats } from '@/lib/iam/engine';
+import { getEnforceStats, getTenantEnforceStats } from '@/lib/iam/enforce';
+import { getModeLookupStats, isEnforceKillSwitchOn, isShadowKillSwitchOn, recordsShadow } from '@/lib/iam/shadow/mode';
+import { listUndeclaredRoutes } from '@/lib/iam/routeRegistry';
+import { getDatabase } from '@/lib/database';
 import {
   requireSessionContext,
   safeReadJsonBody,
@@ -42,13 +50,43 @@ import {
 
 const logger = createLogger('api:iam');
 
-function modePayload(info: AuthzModeInfo) {
+/**
+ * `name` is what the admin types to confirm enforce mode: the company name, else
+ * the slug, else the tenant id, so it is never empty (a confirmation the admin
+ * can never satisfy would lock the switch).
+ */
+async function tenantInfo(tenantId: string): Promise<{ id: string; name: string; slug: string | null }> {
+  try {
+    const db = await getDatabase();
+    const tenant = await db.findTenantById(tenantId);
+    const companyName = typeof tenant?.companyName === 'string' ? tenant.companyName.trim() : '';
+    const slug = typeof tenant?.slug === 'string' && tenant.slug ? tenant.slug : null;
+    return { id: tenantId, name: companyName || slug || tenantId, slug };
+  } catch {
+    return { id: tenantId, name: tenantId, slug: null };
+  }
+}
+
+async function modePayload(info: AuthzModeInfo, tenantId: string) {
+  const undeclared = listUndeclaredRoutes();
   return {
     mode: info.mode,
     updatedAt: info.updatedAt,
     updatedBy: info.updatedBy,
     availableModes: [...AUTHZ_MODES],
     comingModes: [...COMING_AUTHZ_MODES],
+    /**
+     * The mode that is ACTUALLY applied: an operator kill switch forces legacy
+     * decisions (enforce) or stops the recording (shadow) whatever is stored.
+     */
+    effectiveMode: info.mode === 'enforce' && isEnforceKillSwitchOn() ? 'legacy' : info.mode,
+    killSwitches: { enforce: isEnforceKillSwitchOn(), shadow: isShadowKillSwitchOn() },
+    tenant: await tenantInfo(tenantId),
+    /** Routes enforce mode would refuse with 403 route_not_declared (empty in a healthy build). */
+    undeclaredRoutes: {
+      count: undeclared.length,
+      sample: undeclared.slice(0, 25).map((r) => ({ method: r.method, url: r.url })),
+    },
   };
 }
 
@@ -81,7 +119,7 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/iam/mode', withApiRequestContext(async (request, reply) => {
     const session = requireSessionContext(request);
     try {
-      return reply.send(modePayload(await getAuthzMode(session.tenantDbName)));
+      return reply.send(await modePayload(await getAuthzMode(session.tenantDbName), session.tenantId));
     } catch (error) {
       logger.error('Failed to read authorization mode', { error: error instanceof Error ? error.message : String(error) });
       return reply.code(500).send({ error: 'Failed to read authorization mode' });
@@ -103,7 +141,13 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
     }
 
     try {
-      if (body.mode === 'shadow') {
+      if (body.mode === 'enforce' && isEnforceKillSwitchOn()) {
+        return reply.code(409).send({
+          error: 'Enforcement is disabled by the operator on this server (IAM_ENFORCE_DISABLED)',
+          code: 'enforce_disabled',
+        });
+      }
+      if (body.mode === 'shadow' || body.mode === 'enforce') {
         // Do not switch on an engine that cannot evaluate: surface it now.
         const check = await engineSelfTest(session.tenantDbName);
         if (!check.ok) {
@@ -117,7 +161,7 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const info = await setAuthzMode(session.tenantDbName, body.mode, session.userId);
       logger.info('Authorization mode changed', { tenantDbName: session.tenantDbName, mode: info.mode, by: session.userId });
-      return reply.send(modePayload(info));
+      return reply.send(await modePayload(info, session.tenantId));
     } catch (error) {
       logger.error('Failed to change authorization mode', { error: error instanceof Error ? error.message : String(error) });
       return reply.code(500).send({ error: 'Failed to change authorization mode' });
@@ -147,7 +191,7 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
       const tenantStats = getTenantShadowStats(session.tenantDbName);
       return reply.send({
         mode: modeInfo.mode,
-        collecting: modeInfo.mode === 'shadow',
+        collecting: recordsShadow(modeInfo.mode),
         generatedAt: new Date().toISOString(),
         ...summary,
         dropped: { keys: tenantStats.droppedKeys, events: tenantStats.droppedEvents },
@@ -212,7 +256,10 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
           /** Process-wide (single-organisation deployment: all traffic is this tenant's). */
           engine: getIamEngineStats(),
           shadow: getShadowStats(),
+          enforce: getEnforceStats(),
           tenant,
+          tenantEnforce: getTenantEnforceStats(session.tenantDbName),
+          modeLookup: getModeLookupStats(),
         });
       }
       // Multi-tenant: only this workspace's counters, same shape as above.
@@ -235,6 +282,7 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
           droppedEvents: tenant.droppedEvents,
           droppedKeys: tenant.droppedKeys,
         },
+        enforce: getTenantEnforceStats(session.tenantDbName),
         tenant,
       });
     } catch (error) {

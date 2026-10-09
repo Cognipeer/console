@@ -42,6 +42,7 @@ import {
 } from './cedar';
 import {
   gateActionId as gateActionIdFor,
+  serviceActionId,
   indexCatalog,
   type ActionDefinition,
 } from './actions';
@@ -102,6 +103,12 @@ export interface AuthorizeResult {
   reasons: string[];
   /** Evaluation problems (a policy that errored, a failed load...). Non-empty on a deny does NOT mean the deny is only an error. */
   errors: string[];
+  /**
+   * True when NO decision could be made (engine/WASM unavailable, policy store
+   * unreadable, request could not be built). `allowed` is false then, but the
+   * deny is not a verdict: enforce mode falls back to the legacy decision.
+   */
+  failed?: boolean;
   obligations: Record<string, unknown>;
   durationUs: number;
   /**
@@ -427,7 +434,7 @@ function mergeObligations(set: LoadedSet, reasons: string[]): Record<string, unk
 function failure(errors: string[], started: number): AuthorizeResult {
   const durationUs = Math.round((performance.now() - started) * 1000);
   recordDecision(false, true, durationUs);
-  return { allowed: false, reasons: [], errors, obligations: {}, durationUs };
+  return { allowed: false, reasons: [], errors, obligations: {}, durationUs, failed: true };
 }
 
 export async function authorize(input: AuthorizeInput): Promise<AuthorizeResult> {
@@ -500,6 +507,11 @@ export interface AuthorizeGateInput {
   service: string;
   /** HTTP method of the request. */
   method: string;
+  /**
+   * Required level of the route when it is not the method-derived one (route
+   * declaration `{ kind: 'service', level }`). Action `<service>.<level>`.
+   */
+  level?: 'read' | 'write' | 'admin';
   context?: Record<string, string>;
 }
 
@@ -513,7 +525,7 @@ export async function authorizeGate(input: AuthorizeGateInput): Promise<Authoriz
   let action: string;
   try {
     // Throws for a malformed method/service; that must become a deny, not a throw.
-    action = gateActionIdFor(input.service, input.method);
+    action = input.level ? serviceActionId(input.service, input.level) : gateActionIdFor(input.service, input.method);
   } catch (error) {
     return failure([error instanceof Error ? error.message : String(error)], started);
   }

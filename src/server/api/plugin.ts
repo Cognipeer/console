@@ -11,7 +11,9 @@ import { resolveLiveLicenseForTenant } from '@/lib/license/tenantLicense';
 import { checkEnterpriseApiAccess, getEnterpriseModuleForPath } from '@/lib/license/enterprise-access';
 import { TokenManager, type JWTPayload } from '@/lib/license/token-manager';
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
-import { getPermissionServiceForPath, getRequiredPermissionLevel } from '@/lib/security/rbac';
+import { getRequiredPermissionLevel } from '@/lib/security/rbac';
+import { serviceForRequest } from '@/lib/iam/routeAuthz';
+import { recordRegisteredRoute } from '@/lib/iam/routeRegistry';
 import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
@@ -144,7 +146,8 @@ const CLIENT_API_PREFIXES = ['/api/client/', '/api/models/v1/', '/api/metrics', 
  */
 const SELF_AUTH_API_PREFIXES = ['/api/gpu/agent/', '/api/sandbox/agent/'];
 
-function isSelfAuthApiPath(pathname: string): boolean {
+/** Exported for the route-declaration CI guard. */
+export function isSelfAuthApiPath(pathname: string): boolean {
   return SELF_AUTH_API_PREFIXES.some((path) => pathname.startsWith(path));
 }
 
@@ -152,14 +155,16 @@ function getPathname(url: string | undefined): string {
   return canonicalizeRequestPathname(url);
 }
 
-function isPublicApiPath(pathname: string): boolean {
+/** Exported for the route-declaration CI guard: a `public` route must be covered by this. */
+export function isPublicApiPath(pathname: string): boolean {
   if (PUBLIC_API_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))) {
     return true;
   }
   return PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
-function isClientApiPath(pathname: string): boolean {
+/** Exported for the route-declaration CI guard. */
+export function isClientApiPath(pathname: string): boolean {
   return CLIENT_API_PREFIXES.some((path) => pathname.startsWith(path));
 }
 
@@ -240,9 +245,16 @@ function getClientIp(request: FastifyRequest): string {
   return getHeaderString(request, 'x-real-ip') ?? request.ip ?? 'unknown';
 }
 
-function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
+/** The API audit trail writer (the onResponse hook of fastifyApiPlugin); exported for the gate tests. */
+export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
   const pathname = getPathname(request.raw.url);
-  const service = getPermissionServiceForPath(pathname);
+  // The service of the matched route: an explicit `config.authz` service
+  // declaration, else the path map.
+  const denial = request.iamDenial;
+  // An enforce-mode refusal is always audited, also when no service is involved
+  // (an undeclared route): it is a security event of the authorization engine.
+  const service = serviceForRequest(request.routeOptions?.config, pathname)
+    ?? (denial ? 'iam' : null);
   if (!service || pathname.startsWith('/api/audit')) {
     return;
   }
@@ -262,7 +274,7 @@ function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
 
   const actorUser = request.rbacUser ?? apiToken?.user ?? null;
   const method = request.method.toUpperCase();
-  const action = getRequiredPermissionLevel(method, service);
+  const action = denial?.code === 'route_not_declared' ? 'security' : getRequiredPermissionLevel(method, service);
   const apiTokenId = apiToken?.tokenRecord?._id
     ? String(apiToken.tokenRecord._id)
     : undefined;
@@ -288,11 +300,28 @@ function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
       service,
       statusCode,
       userAgent: getHeaderString(request, 'user-agent'),
+      ...(denial
+        ? {
+            metadata: {
+              iamEnforce: true,
+              code: denial.code,
+              ...(denial.decisionId ? { decisionId: denial.decisionId } : {}),
+              ...(denial.service ? { deniedService: denial.service } : {}),
+              ...(denial.required ? { required: denial.required } : {}),
+            },
+          }
+        : {}),
     },
   ));
 }
 
 export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
+  // Remember how every route is authorized (diagnostics for the authorization
+  // settings: "would enforce mode refuse any route as undeclared?").
+  app.addHook('onRoute', (route) => {
+    recordRegisteredRoute(route.method, route.url, route.config);
+  });
+
   app.addHook('onRequest', async (request, reply) => {
     const pathname = getPathname(request.raw.url);
     const requestId =

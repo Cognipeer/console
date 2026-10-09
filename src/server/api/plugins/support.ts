@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
+import { authz } from '@/lib/iam/routeAuthz';
 import {
   createSupportHandoff,
   isSupportEntryPointEnabled,
@@ -20,7 +21,7 @@ function parseLocale(value: unknown): SupportLocale {
 }
 
 export const supportApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/support/status', withApiRequestContext(async (request, reply) => {
+  app.get('/support/status', { config: authz.authenticated() }, withApiRequestContext(async (request, reply) => {
     try {
       requireSessionContext(request);
       return reply.code(200).send({ enabled: isSupportEntryPointEnabled() });
@@ -29,7 +30,7 @@ export const supportApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/support/handoff', withApiRequestContext(async (request, reply) => {
+  app.post('/support/handoff', { config: authz.authenticated() }, withApiRequestContext(async (request, reply) => {
     let session;
     try {
       session = requireSessionContext(request);
