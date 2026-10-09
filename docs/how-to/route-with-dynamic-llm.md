@@ -101,7 +101,7 @@ These are the signals, exactly as the form lists them:
 | **Estimated input tokens** | number | Total characters of the text content across **all** messages, divided by 4 and rounded up. No tokenizer is involved. Image parts and tool definitions contribute nothing. |
 | **Message count** | number | Number of entries in `messages`, all roles included. |
 | **Last user message length** | number | Character count of the most recent `user` message. |
-| **Estimated cost in USD (at default model pricing)** | number | Estimated input tokens priced at the **default model's** input rate, plus the expected output at its output rate. Expected output is `max_completion_tokens` / `max_tokens` when the caller set one, else the default model's average output over the last 14 days, else **Assumed output tokens** (512). |
+| **Complexity score (decision model)** | number | The expected level index from the router's optional **Complexity scoring** (a `decision` model rating the latest user message on your levels, lowest first). Computed only when a rule references it; unset — so never matching — if no scorer is configured or the call fails. |
 | **Conversation spend so far (USD)** | number | What this conversation has already spent through the router (child and decider calls), over a rolling 24 hours. See [Conversations](#conversations). |
 | **Budget used (% of Cost guards budget)** | number | Share of the **Cost guards** budget spent in its window. Unset when no budget is configured. |
 | **Predicted output tokens (from history)** | number | Estimated input tokens × the predicted output/input ratio, capped by `max_tokens`. Unset until the router has history. |
@@ -133,31 +133,42 @@ estimate exactly `0`, so `> 0.01` never fires and `< 0.05` always does.
 
 ### 4b. Decider (model-based)
 
+The decider is a **decision model** (category `decision`, created under Models → Decision). It is asked
+one closed question — which of your labels fits the latest user message — and answers with a
+probability per label, so there is no free text to parse and the router can threshold on confidence.
+A decision model can sit on top of any chat model that enforces a JSON schema (OpenAI, Azure,
+OpenAI-compatible), or be a native decision backend.
+
 | Field | Notes |
 |---|---|
-| **Decider model** | Required. Any LLM model in the project. It is called once per request, at temperature 1 with a 256-token cap. |
-| **Prompt override** | Optional. Replaces the built-in classification system prompt in full. |
-| **Label** | Required per card. The exact string the decider is expected to return. |
+| **Decider model** | Required. A `decision`-category model in the project. Called once per request; billed to the decider model and counted against the caller's budget. |
+| **Instructions override** | Optional. Replaces the built-in routing instructions. Unlike the legacy prompt, the labels are always supplied as the question's choices — you do not repeat them. |
+| **Minimum confidence** | Optional, 0–1. When the winning label's `confidence` (or, if the backend reports none, its probability) is below it, the request is **not** sent to the label's target. |
+| **Low-confidence target** | Optional, shown once a minimum is set. Where those requests go; defaults to the router's default target. |
+| **Label** | Required per card. Becomes a choice key of the question. |
 | **Route to** | Required per card. The model — or pool — that label routes to. |
-| **Description** | Free text that "Helps the decider tell labels apart" — it is injected into the built-in prompt next to the label. |
+| **Description** | Describes the choice to the decider. |
 
-**Add label** adds cards; two are present by default.
-
-The built-in prompt sends the decider a system message listing every `"label": description` pair and
-instructing it to answer with the label alone, plus one user message containing the latest user
-message text (or `(empty request)` when there is none). The answer is matched back to a label
-case-insensitively: an exact match first, then a substring match, so `Category: simple` still resolves
-to `simple`.
-
-::: danger A prompt override replaces the label list too
-The override is used instead of the whole built-in system prompt, not merged with it. If you supply
-one, you must list your labels in it yourself. Leave it blank unless you have a concrete reason —
-an override that omits the labels leaves the decider with no vocabulary, so every answer fails to
-match and every request lands on the default model.
-:::
+The router row records the winning label's probability, the backend's confidence (when reported) and
+the margin to the runner-up (`deciderProbability`, `deciderConfidence`, `deciderMargin`). Input
+guardrails bound to the decision model run over the message before the decider sees it.
 
 The decider sees the latest user message and nothing else. Not the system prompt, not earlier turns,
 not tools, not images. Route on those with rules instead.
+
+::: warning Legacy chat deciders
+Routers saved before decision models existed may name an `llm` model as the decider. That form keeps
+working (the model is asked to answer with a label and the text is matched back) and stays editable,
+but a chat model can no longer be newly attached as a decider — saving fails with "is not a decision
+model". Switch to a decision model to get probabilities and `minConfidence`.
+:::
+
+### Complexity scoring (rule-based)
+
+Under the rules, **Complexity scoring** attaches a decision model and an ordered list of levels
+(e.g. `trivial, easy, hard, expert`). The `complexityScore` signal is the expected level index, so
+`complexityScore ≥ 2` means "probably hard or above". It makes one decision call, only for requests
+where a rule references the signal.
 
 Press **Create Dynamic LLM**. The router appears in the model list with a teal `dynamic` badge in the
 **Type** column instead of a category badge.
@@ -388,7 +399,8 @@ Body — model-based:
     "strategy": "model-based",
     "defaultModelKey": "gpt-4o-mini",
     "decider": {
-      "modelKey": "gpt-4o-mini",
+      "modelKey": "intent-judge",
+      "minConfidence": 0.7,
       "labels": [
         { "label": "simple", "description": "Small talk, short factual questions", "targetModelKey": "gpt-4o-mini" },
         { "label": "complex", "description": "Multi-step reasoning, code, analysis", "targetModelKey": "gpt-4o" }
@@ -407,9 +419,12 @@ Config fields:
 | `fallbackModelKey` | no | Model key. |
 | `defaultTarget` | no | A pool (`{ "pool": [...], "policy": ... }`) used instead of `defaultModelKey` when nothing matches. |
 | `rules[]` | rule-based | At least one, at most 10. Each needs `targetModelKey` or `target`, and 1–5 conditions. `matchType` defaults to `all`. |
-| `decider.modelKey` | model-based | Required. |
+| `decider.modelKey` | model-based | Required. A `decision`-category model key (an `llm` key is accepted only if the router already used it). |
 | `decider.labels[]` | model-based | At least one; each needs `label` and `targetModelKey` or `target`. |
-| `decider.promptOverride` | no | Replaces the whole classification prompt. |
+| `decider.promptOverride` | no | Replaces the default routing instructions (the labels are always sent as the question's choices). |
+| `decider.minConfidence` | no | 0–1. Winning label below it → `decider.belowConfidence` (or the default target). |
+| `decider.belowConfidence` | no | A target (`{ "modelKey": … }` or a pool) for low-confidence answers. |
+| `complexity` | no | `{ "modelKey": "<decision model>", "levels": ["trivial", …], "instructions": "…" }` — 2–255 levels. Backs the `complexityScore` rule signal. |
 | `…target` | no | `{ "modelKey": "…" }`, or `{ "pool": [{ "modelKey": "…", "tier": 1 }, …], "policy": "best-under-cap" \| "cheapest" \| "token-profile" }` (1–10 candidates, tier 0–100). |
 | `guards` | no | `maxCostPerRequestUsd`, `conversationBudgetUsd`, `budget: { windowHours, limitUsd, downgradeAtPct, onExceeded: "cheapest" \| "reject" }`, `economyModelKey`, `sticky`, `switchMarginPct`. |
 | `baselineModelKey` | no | Defaults to `defaultModelKey`. |

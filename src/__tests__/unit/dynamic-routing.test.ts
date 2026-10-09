@@ -106,14 +106,14 @@ describe('evaluateCondition', () => {
     expect(evaluateCondition({ signal: 'keyword', operator: 'matches', value: '(' }, s)).toBe(false);
   });
 
-  it('estimatedCostUsd matches only when the signal was computed', () => {
+  it('complexityScore matches only when the signal was computed', () => {
     const s = baseSignals();
-    // Not computed → cost conditions never match.
-    expect(evaluateCondition({ signal: 'estimatedCostUsd', operator: 'gt', value: 0 }, s)).toBe(false);
-    s.estimatedCostUsd = 0.02;
-    expect(evaluateCondition({ signal: 'estimatedCostUsd', operator: 'gt', value: 0.01 }, s)).toBe(true);
-    expect(evaluateCondition({ signal: 'estimatedCostUsd', operator: 'lte', value: 0.01 }, s)).toBe(false);
-    expect(publicSignals(s)).toHaveProperty('estimatedCostUsd', 0.02);
+    // Not computed → score conditions never match.
+    expect(evaluateCondition({ signal: 'complexityScore', operator: 'gt', value: 0 }, s)).toBe(false);
+    s.complexityScore = 2.4;
+    expect(evaluateCondition({ signal: 'complexityScore', operator: 'gt', value: 2 }, s)).toBe(true);
+    expect(evaluateCondition({ signal: 'complexityScore', operator: 'lte', value: 2 }, s)).toBe(false);
+    expect(publicSignals(s)).toHaveProperty('complexityScore', 2.4);
   });
 });
 
@@ -137,12 +137,12 @@ describe('rulesReferenceSignal', () => {
       {
         label: 'cheap',
         targetModelKey: 'mini',
-        conditions: [{ signal: 'estimatedCostUsd', operator: 'gt', value: 0.05 }],
+        conditions: [{ signal: 'complexityScore', operator: 'gt', value: 5 }],
       },
     ];
-    expect(rulesReferenceSignal(rules, 'estimatedCostUsd')).toBe(true);
+    expect(rulesReferenceSignal(rules, 'complexityScore')).toBe(true);
     expect(rulesReferenceSignal(rules, 'hasImages')).toBe(false);
-    expect(rulesReferenceSignal(undefined, 'estimatedCostUsd')).toBe(false);
+    expect(rulesReferenceSignal(undefined, 'complexityScore')).toBe(false);
   });
 });
 

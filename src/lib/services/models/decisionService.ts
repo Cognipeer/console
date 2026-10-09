@@ -15,7 +15,7 @@ import crypto from 'crypto';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
-import type { IModel } from '@/lib/database';
+import type { IModel, IModelUsageRouting } from '@/lib/database';
 import type {
   DecisionInputPart,
   DecisionQuestion,
@@ -190,6 +190,8 @@ export async function handleDecisionRequest(params: {
   request: ParsedDecisionRequest;
   requestId?: string;
   signal?: AbortSignal;
+  /** Set when a Dynamic LLM router asked: attributes the usage row to the router. */
+  routing?: IModelUsageRouting;
 }): Promise<DecisionOutcome> {
   const { tenantDbName, projectId } = params;
   const requestId = params.requestId || crypto.randomUUID();
@@ -261,6 +263,7 @@ export async function handleDecisionRequest(params: {
       requestId,
       route: 'decisions',
       status: 'success',
+      ...(params.routing ? { routing: params.routing } : {}),
       providerRequest: loggableRequest(request),
       providerResponse: { answers: result.answers, backend: result.backend, ...(result.upstream ? { upstream: result.upstream } : {}) },
       latencyMs,

@@ -135,7 +135,7 @@ const SIGNALS: ReadonlyArray<{ value: DynamicRoutingSignal; label: string; kind:
   { value: 'inputTokensEst', label: 'Estimated input tokens', kind: 'number' },
   { value: 'messageCount', label: 'Message count', kind: 'number' },
   { value: 'lastUserLength', label: 'Last user message length', kind: 'number' },
-  { value: 'estimatedCostUsd', label: 'Estimated cost in USD (at default model pricing)', kind: 'number' },
+  { value: 'complexityScore', label: 'Complexity score (decision model, 0 = lowest level)', kind: 'number' },
   { value: 'conversationCostUsd', label: 'Conversation spend so far (USD)', kind: 'number' },
   { value: 'budgetUsedPct', label: 'Budget used (% of Cost guards budget)', kind: 'number' },
   { value: 'predictedOutputTokens', label: 'Predicted output tokens (from history)', kind: 'number' },
@@ -186,6 +186,8 @@ type Props = {
   onClose: () => void;
   /** LLM models available as routing targets (routers themselves excluded). */
   candidates: CandidateModel[];
+  /** Decision models — the only valid deciders / complexity scorers. */
+  decisionCandidates: CandidateModel[];
   /** When set, the modal edits this Dynamic LLM instead of creating one. */
   editModel?: DynamicModelInit | null;
   onSaved: () => void;
@@ -195,6 +197,7 @@ export default function CreateDynamicModelModal({
   opened,
   onClose,
   candidates,
+  decisionCandidates,
   editModel,
   onSaved,
 }: Props) {
@@ -208,6 +211,13 @@ export default function CreateDynamicModelModal({
   const [rules, setRules] = useState<RuleDraft[]>([newRule()]);
   const [deciderModelKey, setDeciderModelKey] = useState('');
   const [promptOverride, setPromptOverride] = useState('');
+  const [minConfidence, setMinConfidence] = useState<number | ''>('');
+  const [useBelowConfidence, setUseBelowConfidence] = useState(false);
+  const [belowConfidence, setBelowConfidence] = useState<TargetDraft>(newTarget());
+  // Complexity scoring (rule-based): a decision model behind the complexityScore signal.
+  const [complexityModelKey, setComplexityModelKey] = useState<string | null>(null);
+  const [complexityLevels, setComplexityLevels] = useState('');
+  const [complexityInstructions, setComplexityInstructions] = useState('');
   const [labels, setLabels] = useState<LabelDraft[]>([newLabel(), newLabel()]);
   // Default pool (optional): replaces the default model when nothing matches.
   const [useDefaultPool, setUseDefaultPool] = useState(false);
@@ -264,6 +274,12 @@ export default function CreateDynamicModelModal({
       );
       setDeciderModelKey(d.decider?.modelKey ?? '');
       setPromptOverride(d.decider?.promptOverride ?? '');
+      setMinConfidence(d.decider?.minConfidence ?? '');
+      setUseBelowConfidence(Boolean(d.decider?.belowConfidence));
+      setBelowConfidence(d.decider?.belowConfidence ? targetFromConfig({ target: d.decider.belowConfidence }) : newTarget());
+      setComplexityModelKey(d.complexity?.modelKey ?? null);
+      setComplexityLevels((d.complexity?.levels ?? []).join(', '));
+      setComplexityInstructions(d.complexity?.instructions ?? '');
       setLabels(
         d.decider?.labels && d.decider.labels.length > 0
           ? d.decider.labels.map((l) => ({
@@ -299,6 +315,12 @@ export default function CreateDynamicModelModal({
       setRules([newRule()]);
       setDeciderModelKey('');
       setPromptOverride('');
+      setMinConfidence('');
+      setUseBelowConfidence(false);
+      setBelowConfidence(newTarget());
+      setComplexityModelKey(null);
+      setComplexityLevels('');
+      setComplexityInstructions('');
       setLabels([newLabel(), newLabel()]);
       setUseDefaultPool(false);
       setDefaultPool({ ...newTarget(), kind: 'pool' });
@@ -323,6 +345,19 @@ export default function CreateDynamicModelModal({
     [candidates],
   );
 
+  // A chat (llm) decider saved before decision models existed stays selectable
+  // so the config can still be edited; new ones can only be decision models.
+  const deciderOptions = useMemo(() => {
+    const options = decisionCandidates.map((m) => ({ value: m.key, label: `${m.name} · ${m.key}` }));
+    const legacy = candidates.find((m) => m.key === deciderModelKey);
+    return legacy && !options.some((o) => o.value === legacy.key)
+      ? [...options, { value: legacy.key, label: `${legacy.name} · ${legacy.key} (legacy chat decider)` }]
+      : options;
+  }, [decisionCandidates, candidates, deciderModelKey]);
+  const complexityLevelList = complexityLevels.split(',').map((l) => l.trim()).filter(Boolean);
+  const validComplexity =
+    !complexityModelKey || (complexityLevelList.length >= 2 && complexityLevelList.length <= 255);
+
   const validIdentity = Boolean(name.trim());
   const validDefault = Boolean(defaultModelKey);
   const validStrategy =
@@ -334,7 +369,7 @@ export default function CreateDynamicModelModal({
       : Boolean(deciderModelKey) && labels.filter((l) => l.label && isTargetValid(l.target)).length > 0;
   const validDefaultPool = !useDefaultPool || isTargetValid(defaultPool);
 
-  const canSubmit = validIdentity && validDefault && validDefaultPool && validStrategy && !submitting;
+  const canSubmit = validIdentity && validDefault && validDefaultPool && validStrategy && validComplexity && !submitting;
 
   const checklist = [
     { id: 1, label: 'Name set', done: validIdentity },
@@ -394,10 +429,21 @@ export default function CreateDynamicModelModal({
             value: coerceValue(c),
           })),
         }));
+      if (complexityModelKey && validComplexity) {
+        base.complexity = {
+          modelKey: complexityModelKey,
+          levels: complexityLevelList,
+          ...(complexityInstructions.trim() ? { instructions: complexityInstructions.trim() } : {}),
+        };
+      }
     } else {
       base.decider = {
         modelKey: deciderModelKey,
         ...(promptOverride.trim() ? { promptOverride: promptOverride.trim() } : {}),
+        ...(minConfidence !== '' ? { minConfidence: Number(minConfidence) } : {}),
+        ...(useBelowConfidence && isTargetValid(belowConfidence)
+          ? { belowConfidence: targetToConfig(belowConfidence).target ?? { modelKey: belowConfidence.modelKey } }
+          : {}),
         labels: labels
           .filter((l) => l.label && isTargetValid(l.target))
           .map((l) => ({
@@ -755,6 +801,39 @@ export default function CreateDynamicModelModal({
               Add rule
             </Button>
           </div>
+          <div className="ds-card ds-card-pad-sm" style={{ background: 'var(--ds-surface-1)', marginTop: 8 }}>
+            <span className="ds-eyebrow">Complexity scoring (optional)</span>
+            <FormRow cols={1}>
+              <FormField
+                label="Scoring decision model"
+                optional
+                hint="Scores each request on the levels below; rules can then use the complexityScore signal. Only runs when a rule references it."
+              >
+                <Select
+                  placeholder="None"
+                  data={decisionCandidates.map((m) => ({ value: m.key, label: `${m.name} · ${m.key}` }))}
+                  value={complexityModelKey}
+                  onChange={setComplexityModelKey}
+                  clearable
+                  searchable
+                />
+              </FormField>
+            </FormRow>
+            {complexityModelKey ? (
+              <>
+                <FormRow cols={1}>
+                  <FormField label="Levels" required hint="Comma-separated, lowest first (e.g. trivial, easy, hard, expert). complexityScore is the expected level index.">
+                    <TextInput placeholder="trivial, easy, hard, expert" value={complexityLevels} onChange={(e) => setComplexityLevels(e.currentTarget.value)} />
+                  </FormField>
+                </FormRow>
+                <FormRow cols={1}>
+                  <FormField label="Instructions override" optional>
+                    <TextInput placeholder="Leave blank for the built-in scoring instructions." value={complexityInstructions} onChange={(e) => setComplexityInstructions(e.currentTarget.value)} />
+                  </FormField>
+                </FormRow>
+              </>
+            ) : null}
+          </div>
         </FormSection>
       ) : (
         <FormSection
@@ -764,10 +843,14 @@ export default function CreateDynamicModelModal({
           done={validStrategy}
         >
           <FormRow cols={1}>
-            <FormField label="Decider model" required>
+            <FormField
+              label="Decider model"
+              required
+              hint="A decision-category model answers with a probability per label. Create one under Models → Decision."
+            >
               <Select
-                placeholder="Select classifier model"
-                data={modelOptions}
+                placeholder="Select a decision model"
+                data={deciderOptions}
                 value={deciderModelKey || null}
                 onChange={(v) => setDeciderModelKey(v ?? '')}
                 searchable
@@ -775,16 +858,36 @@ export default function CreateDynamicModelModal({
             </FormField>
           </FormRow>
           <FormRow cols={1}>
-            <FormField label="Prompt override" optional hint="Override the default classification system prompt.">
+            <FormField label="Instructions override" optional hint="Override the default routing instructions given to the decider.">
               <Textarea
                 autosize
                 minRows={2}
-                placeholder="Leave blank to use the built-in classifier prompt."
+                placeholder="Leave blank to use the built-in routing instructions."
                 value={promptOverride}
                 onChange={(e) => setPromptOverride(e.currentTarget.value)}
               />
             </FormField>
           </FormRow>
+
+          <FormRow cols={1}>
+            <FormField label="Minimum confidence" optional hint="0-1. Below it, the request goes to the fallback target instead of the winning label.">
+              <NumberInput min={0} max={1} step={0.05} decimalScale={2} placeholder="no floor" value={minConfidence} onChange={(v) => setMinConfidence(v === '' ? '' : Number(v))} />
+            </FormField>
+          </FormRow>
+          {minConfidence !== '' ? (
+            <>
+              <Switch
+                size="xs"
+                label="Send low-confidence requests to a specific target (otherwise the default)"
+                checked={useBelowConfidence}
+                onChange={(e) => setUseBelowConfidence(e.currentTarget.checked)}
+                style={{ marginBottom: 8 }}
+              />
+              {useBelowConfidence ? (
+                <TargetEditor value={belowConfidence} onChange={setBelowConfidence} modelOptions={modelOptions} />
+              ) : null}
+            </>
+          ) : null}
 
           <div className="ds-col ds-gap-sm" style={{ marginTop: 4 }}>
             {labels.map((label, li) => (

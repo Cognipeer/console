@@ -504,11 +504,11 @@ export type DynamicRoutingSignal =
   | 'hasTools' // request supplies tools / tool_choice
   | 'hasResponseFormat' // request requests a structured response_format
   | 'hasImages' // any message carries image content (multimodal)
-  | 'estimatedCostUsd' // estimated request cost priced at the default model (input est. + predicted/capped output)
   | 'conversationCostUsd' // realized spend of this conversation through this router so far
   | 'budgetUsedPct' // share of guards.budget.limitUsd spent in its window (0-100+)
   | 'predictedOutputTokens' // output tokens predicted from this router's history
   | 'ioRatio' // predicted output / input token ratio
+  | 'complexityScore' // expected level index from `config.complexity` (a decision model scoring the request)
   | 'keyword'; // regex / substring match on the latest user message
 
 export type DynamicRoutingOperator =
@@ -598,11 +598,39 @@ export interface IDynamicDeciderLabel {
 }
 
 export interface IDynamicDeciderConfig {
-  /** Model key of the classifier that decides the route. */
+  /**
+   * Model key of the classifier that decides the route. New configs must name a
+   * `decision`-category model: it is asked one `choice` question (the labels)
+   * and answers with a probability per label. An `llm`-category decider is the
+   * legacy chat-and-parse form — still honored for configs saved before
+   * decision models existed, but it cannot be newly attached.
+   */
   modelKey: string;
-  /** Optional override of the default classification system prompt. */
+  /** Overrides the default instructions (decision question text / legacy system prompt). */
   promptOverride?: string;
   labels: IDynamicDeciderLabel[];
+  /**
+   * Decision deciders only: when the winning label's confidence (or, if the
+   * backend reports none, its probability) is below this (0-1), the request
+   * goes to `belowConfidence` instead of the label's target.
+   */
+  minConfidence?: number;
+  /** Where a below-threshold answer goes. Defaults to the router's default target. */
+  belowConfidence?: IDynamicRoutingTarget;
+}
+
+/**
+ * A `decision` model that scores every request on ordered levels. Its expected
+ * level index becomes the `complexityScore` rule signal (rule-based only,
+ * computed only when a rule references it).
+ */
+export interface IDynamicComplexityConfig {
+  /** A `decision`-category model. */
+  modelKey: string;
+  /** Ordered levels, lowest first (2-255). */
+  levels: string[];
+  /** Overrides the default scoring instructions. */
+  instructions?: string;
 }
 
 export interface IDynamicRoutingConfig {
@@ -621,6 +649,8 @@ export interface IDynamicRoutingConfig {
   rules?: IDynamicRoutingRule[];
   /** model-based strategy: decider model + label→model mapping. */
   decider?: IDynamicDeciderConfig;
+  /** rule-based strategy: backs the `complexityScore` signal. */
+  complexity?: IDynamicComplexityConfig;
   guards?: IDynamicRoutingGuards;
   /** Reference model for "what would this have cost" savings. Defaults to defaultModelKey. */
   baselineModelKey?: string;
@@ -660,6 +690,10 @@ export interface IModelUsageRouting {
   deciderLabel?: string;
   deciderModelKey?: string;
   deciderLatencyMs?: number;
+  /** Decision deciders: probability / confidence of the winning label, and the gap to the runner-up. */
+  deciderProbability?: number;
+  deciderConfidence?: number;
+  deciderMargin?: number;
   reason: string;
   signals?: Record<string, unknown>;
   childRequestId?: string;

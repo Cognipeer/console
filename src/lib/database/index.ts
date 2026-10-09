@@ -198,6 +198,7 @@ export type {
   IDynamicRoutingRule,
   IDynamicDeciderLabel,
   IDynamicDeciderConfig,
+  IDynamicComplexityConfig,
   IDynamicRoutingConfig,
   IDynamicRoutingTarget,
   IDynamicRoutingGuards,

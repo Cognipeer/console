@@ -353,6 +353,12 @@ export default function ModelsPage() {
     [models],
   );
 
+  // Deciders and the complexity scorer must be decision models.
+  const decisionCandidates = useMemo<CandidateModel[]>(
+    () => models.filter((m) => m.category === 'decision').map((m) => ({ key: m.key, name: m.name })),
+    [models],
+  );
+
   const openDynamicEdit = (m: ModelDto) => {
     const dynamic = dynamicConfigOf(m);
     if (!dynamic) return;
@@ -883,6 +889,7 @@ export default function ModelsPage() {
         opened={dynamicModalOpen}
         onClose={closeDynamicModal}
         candidates={dynamicCandidates}
+        decisionCandidates={decisionCandidates}
         editModel={dynamicEdit}
         onSaved={() => {
           void loadModels();
