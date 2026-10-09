@@ -3,12 +3,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Badge, Button, Center, CopyButton, Group, Loader, Paper, SimpleGrid, Stack, Text } from '@mantine/core';
-import { IconCheck, IconCopy, IconKey, IconMail, IconTrash, IconUser } from '@tabler/icons-react';
+import { IconAdjustments, IconCheck, IconCopy, IconKey, IconMail, IconTrash, IconUser } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import DetailShell from '@/components/common/ui/DetailShell';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import CreateTokenModal from '@/components/settings/CreateTokenModal';
-import { useTranslations } from '@/lib/i18n';
+import TokenDetailModal from '@/components/iam/tokens/TokenDetailModal';
+import TokenStatusBadges from '@/components/iam/tokens/TokenStatusBadges';
+import { isTokenExpired, type ApiTokenRow } from '@/components/iam/tokens/tokenModel';
+import { formatRelative } from '@/components/iam/timeFormat';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import { useConfirm } from '@/components/common/confirm';
 import type { UserServicePermissions } from '@/lib/security/rbac';
 
@@ -29,16 +33,7 @@ interface MemberDetail {
   inviteAcceptedAt?: string;
 }
 
-interface ApiToken {
-  _id: string;
-  label: string;
-  token?: string;
-  tokenPrefix?: string;
-  userId?: string;
-  canDelete?: boolean;
-  lastUsed?: string;
-  createdAt: string;
-}
+type ApiToken = ApiTokenRow;
 
 const ROLE_BADGE_COLOR: Record<string, string> = {
   owner: 'blue',
@@ -53,6 +48,8 @@ export default function MemberDetailPage() {
 
   const t = useTranslations('settings.userManagement');
   const tTokens = useTranslations('settings.tokenManagement');
+  const tIam = useTranslations('iamTokens');
+  const locale = useLocale();
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
   const { confirmAction } = useConfirm();
@@ -67,6 +64,7 @@ export default function MemberDetailPage() {
   const [query, setQuery] = useState('');
 
   const [createModalOpened, setCreateModalOpened] = useState(false);
+  const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
 
   const fetchUser = useCallback(async () => {
     setUserLoading(true);
@@ -181,6 +179,11 @@ export default function MemberDetailPage() {
       ),
     },
     {
+      key: 'status',
+      label: tIam('table.status'),
+      render: (token) => <TokenStatusBadges token={token} />,
+    },
+    {
       key: 'createdAt',
       label: tTokens('table.created'),
       width: 140,
@@ -197,6 +200,19 @@ export default function MemberDetailPage() {
       render: (token) => (
         <span className="ds-faint" style={{ fontSize: 12 }}>
           {token.lastUsed ? new Date(token.lastUsed).toLocaleDateString() : tTokens('table.never')}
+        </span>
+      ),
+    },
+    {
+      key: 'expiresAt',
+      label: tIam('table.expires'),
+      width: 160,
+      render: (token) => (
+        <span
+          className="ds-faint"
+          style={{ fontSize: 12, color: isTokenExpired(token) ? 'var(--ds-err)' : undefined }}
+        >
+          {token.expiresAt ? formatRelative(token.expiresAt, locale) : tIam('table.noExpiry')}
         </span>
       ),
     },
@@ -374,7 +390,7 @@ export default function MemberDetailPage() {
             search={{
               value: query,
               onChange: setQuery,
-              placeholder: 'Search tokens',
+              placeholder: tIam('table.searchPlaceholder'),
             }}
             onRefresh={() => void fetchTokens()}
             refreshing={tokensLoading}
@@ -396,20 +412,27 @@ export default function MemberDetailPage() {
                 onClick: () => setCreateModalOpened(true),
               },
             }}
-            footerLeft={`Showing ${filteredTokens.length} of ${tokens.length} tokens`}
-            rowActions={(token) =>
-              token.canDelete === false
+            footerLeft={tIam('table.showing', { shown: filteredTokens.length, total: tokens.length })}
+            onRowClick={(token) => setSelectedTokenId(String(token._id))}
+            rowActions={(token) => [
+              {
+                id: 'details',
+                label: tIam('table.details'),
+                icon: <IconAdjustments size={14} />,
+                onClick: () => setSelectedTokenId(String(token._id)),
+              },
+              ...(token.canDelete === false
                 ? []
                 : [
                     {
                       id: 'delete',
                       label: tTokens('actions.delete'),
                       icon: <IconTrash size={14} />,
-                      color: 'red',
+                      color: 'red' as const,
                       onClick: () => void confirmDelete(token),
                     },
-                  ]
-            }
+                  ]),
+            ]}
           />
         )}
       </DetailShell>
@@ -420,6 +443,17 @@ export default function MemberDetailPage() {
         onSuccess={fetchTokens}
         createUrl="/api/tokens"
         extraBody={{ userId: user._id }}
+      />
+
+      <TokenDetailModal
+        token={tokens.find((token) => String(token._id) === selectedTokenId) ?? null}
+        onClose={() => setSelectedTokenId(null)}
+        onSaved={(saved) =>
+          setTokens((current) =>
+            current.map((token) => (String(token._id) === String(saved._id) ? { ...token, ...saved } : token)),
+          )
+        }
+        updateUrl={(id) => `/api/tokens/${encodeURIComponent(id)}`}
       />
     </>
   );

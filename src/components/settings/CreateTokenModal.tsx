@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   TextInput,
   Alert,
@@ -26,7 +26,20 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
-import { useTranslations } from '@/lib/i18n';
+import ExpiryField from '@/components/iam/tokens/ExpiryField';
+import IpAllowlistField from '@/components/iam/tokens/IpAllowlistField';
+import { readJsonObject, tokenErrorMessage } from '@/components/iam/tokens/tokenErrors';
+import {
+  defaultExpiryChoice,
+  expiryPayload,
+  expiryPreview,
+  expiryProblem,
+  parseAllowlistText,
+  type ExpiryChoice,
+} from '@/components/iam/tokens/tokenModel';
+import { useTokenPolicy } from '@/components/iam/tokens/useTokenPolicy';
+import { formatDateTime } from '@/components/iam/timeFormat';
+import { useLocale, useTranslations } from '@/lib/i18n';
 
 interface CreateTokenModalProps {
   opened: boolean;
@@ -37,6 +50,12 @@ interface CreateTokenModalProps {
   extraBody?: Record<string, unknown>;
 }
 
+interface CreatedInfo {
+  token: string;
+  expiresAt: string | null;
+  allowedIpRanges: string[] | null;
+}
+
 export default function CreateTokenModal({
   opened,
   onClose,
@@ -44,12 +63,14 @@ export default function CreateTokenModal({
   createUrl = '/api/tokens',
   extraBody,
 }: CreateTokenModalProps) {
-  const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [created, setCreated] = useState<CreatedInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const t = useTranslations('settings.tokenManagement.createModal');
+  const tIam = useTranslations('iamTokens');
   const tValidation = useTranslations('validation');
   const tCommon = useTranslations('common');
   const tNotifications = useTranslations('notifications');
+  const locale = useLocale();
 
   const form = useForm({
     initialValues: {
@@ -61,14 +82,42 @@ export default function CreateTokenModal({
     },
   });
 
+  // The tenant's rules (maximum lifetime, required expiry) shape the expiry
+  // choices; the server applies them again on submit.
+  const { policy, ready: policyReady } = useTokenPolicy(opened);
+  const [expiry, setExpiry] = useState<ExpiryChoice>({ kind: 'none' });
+  const [ipText, setIpText] = useState('');
+  const touched = useRef(false);
+
+  useEffect(() => {
+    if (!opened) {
+      touched.current = false;
+      return;
+    }
+    // Seed the choice once the rules are known, unless the user already picked one.
+    if (policyReady && !touched.current) {
+      setExpiry(defaultExpiryChoice({ mode: 'create', policy }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, policyReady]);
+
   const labelValue = form.values.label;
   const validLabel = labelValue.length >= 3;
+  const ctx = useMemo(() => ({ policy }), [policy]);
+  const expiryError = expiryProblem(expiry, ctx);
+  const allowlist = useMemo(() => parseAllowlistText(ipText, policy.maxIpRanges), [ipText, policy.maxIpRanges]);
+  const ipValid = allowlist.issues.length === 0 && !allowlist.tooMany;
+  const ready = validLabel && !expiryError && ipValid;
 
-  const checklist = [{ id: 1, label: t('form.label'), done: validLabel }];
+  const checklist = [
+    { id: 1, label: t('form.label'), done: validLabel },
+    { id: 2, label: tIam('form.check.expiry'), done: !expiryError },
+    { id: 3, label: tIam('form.check.network'), done: ipValid },
+  ];
 
   const handleSubmit = async () => {
     const validation = form.validate();
-    if (validation.hasErrors) return;
+    if (validation.hasErrors || !ready) return;
 
     setLoading(true);
     try {
@@ -77,16 +126,25 @@ export default function CreateTokenModal({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ ...form.values, ...extraBody }),
+        body: JSON.stringify({
+          ...form.values,
+          ...expiryPayload(expiry, 'create'),
+          ...(allowlist.ranges.length > 0 ? { allowedIpRanges: allowlist.ranges } : {}),
+          ...extraBody,
+        }),
       });
 
-      const data = await response.json();
+      const data = await readJsonObject(response);
 
       if (!response.ok) {
-        throw new Error(data.error || t('errors.create'));
+        throw new Error(tokenErrorMessage(data, tIam, t('errors.create')));
       }
 
-      setCreatedToken(data.token);
+      setCreated({
+        token: String(data.token ?? ''),
+        expiresAt: typeof data.expiresAt === 'string' ? data.expiresAt : null,
+        allowedIpRanges: Array.isArray(data.allowedIpRanges) ? (data.allowedIpRanges as string[]) : null,
+      });
       notifications.show({
         title: tCommon('success'),
         message: t('messages.createSuccess'),
@@ -104,8 +162,11 @@ export default function CreateTokenModal({
   };
 
   const handleClose = () => {
-    const hadToken = Boolean(createdToken);
-    setCreatedToken(null);
+    const hadToken = Boolean(created);
+    setCreated(null);
+    setExpiry({ kind: 'none' });
+    setIpText('');
+    touched.current = false;
     form.reset();
     onClose();
     if (hadToken) {
@@ -113,7 +174,12 @@ export default function CreateTokenModal({
     }
   };
 
-  if (createdToken) {
+  const networkSummary = (ranges: string[] | null) =>
+    ranges && ranges.length > 0
+      ? tIam(ranges.length === 1 ? 'network.countOne' : 'network.countMany', { count: ranges.length })
+      : tIam('detail.summary.anyAddress');
+
+  if (created) {
     const successSummary = (
       <>
         <SummaryGroup title={t('titles.newToken')}>
@@ -122,8 +188,13 @@ export default function CreateTokenModal({
             value={labelValue || <span className="ds-faint">—</span>}
           />
           <SummaryKV
-            label="Status"
-            value={<span className="ds-badge ds-badge-ok">Created</span>}
+            label={tIam('detail.summary.expires')}
+            value={created.expiresAt ? formatDateTime(created.expiresAt, locale) : tIam('detail.summary.noExpiry')}
+          />
+          <SummaryKV label={tIam('detail.summary.network')} value={networkSummary(created.allowedIpRanges)} />
+          <SummaryKV
+            label={tIam('detail.summary.status')}
+            value={<span className="ds-badge ds-badge-ok">{tIam('create.created')}</span>}
           />
         </SummaryGroup>
       </>
@@ -144,7 +215,7 @@ export default function CreateTokenModal({
           onClick: handleClose,
         }}
         secondaryAction={{
-          label: 'Close',
+          label: tIam('detail.close'),
           onClick: handleClose,
         }}
       >
@@ -179,9 +250,9 @@ export default function CreateTokenModal({
                     border: '1px solid var(--ds-border, #e0e0e0)',
                   }}
                 >
-                  {createdToken}
+                  {created.token}
                 </Text>
-                <CopyButton value={createdToken}>
+                <CopyButton value={created.token}>
                   {({ copied, copy }) => (
                     <Tooltip
                       label={copied ? t('copy.copied') : t('copy.copyToClipboard')}
@@ -206,7 +277,7 @@ export default function CreateTokenModal({
           </FormRow>
         </FormSection>
 
-        <FormSection number={3} title="Usage" done>
+        <FormSection number={3} title={tIam('create.usage')} done>
           <Alert icon={<IconAlertCircle size={16} />} color="blue">
             {t('usage.instructions')}
             <Text
@@ -227,6 +298,7 @@ export default function CreateTokenModal({
     );
   }
 
+  const preview = expiryPreview(expiry);
   const summary = (
     <>
       <SummaryGroup title={t('titles.createToken')}>
@@ -234,8 +306,19 @@ export default function CreateTokenModal({
           label={t('form.label')}
           value={labelValue || <span className="ds-faint">—</span>}
         />
+        <SummaryKV
+          label={tIam('detail.summary.expires')}
+          value={
+            expiry.kind === 'none'
+              ? tIam('detail.summary.noExpiry')
+              : preview
+                ? formatDateTime(preview.toISOString(), locale)
+                : <span className="ds-faint">—</span>
+          }
+        />
+        <SummaryKV label={tIam('detail.summary.network')} value={networkSummary(allowlist.ranges)} />
       </SummaryGroup>
-      <SummaryGroup title="Pre-flight">
+      <SummaryGroup title={tIam('detail.summary.preflight')}>
         <Checklist items={checklist} />
       </SummaryGroup>
     </>
@@ -247,13 +330,13 @@ export default function CreateTokenModal({
       onClose={handleClose}
       icon={<IconKey size={16} />}
       title={t('titles.createToken')}
-      subtitle="Generate a programmatic API token for SDK and HTTP integrations."
+      subtitle={tIam('create.subtitle')}
       summary={summary}
-      footerStatus={`${checklist.filter((c) => c.done).length} of ${checklist.length} ready`}
+      footerStatus={tIam('create.ready', { done: checklist.filter((c) => c.done).length, total: checklist.length })}
       primaryAction={{
         label: t('form.submit'),
         loading: loading,
-        disabled: !validLabel,
+        disabled: !ready,
         onClick: () => {
           void handleSubmit();
         },
@@ -274,6 +357,32 @@ export default function CreateTokenModal({
             />
           </FormField>
         </FormRow>
+      </FormSection>
+
+      <FormSection
+        number={2}
+        title={tIam('expiry.title')}
+        description={tIam('expiry.description')}
+        done={!expiryError}
+      >
+        <ExpiryField
+          mode="create"
+          policy={policy}
+          value={expiry}
+          onChange={(next) => {
+            touched.current = true;
+            setExpiry(next);
+          }}
+        />
+      </FormSection>
+
+      <FormSection
+        number={3}
+        title={tIam('network.title')}
+        description={tIam('network.description')}
+        done={ipValid}
+      >
+        <IpAllowlistField text={ipText} onChange={setIpText} policy={policy} />
       </FormSection>
     </FormShell>
   );

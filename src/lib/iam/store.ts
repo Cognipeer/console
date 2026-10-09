@@ -11,15 +11,38 @@
  * Writes validate the Cedar text against the generated schema FIRST and refuse
  * anything with parse errors or validation errors (Cedar's `validate` answers
  * "success" even when it found validation errors, so the check is explicit).
- * There is no HTTP API on top of this yet.
+ *
+ * `spec` (A4): a policy written in the visual editor keeps its structured form
+ * next to the Cedar it compiles to (`null` = raw Cedar). Cedar is what is
+ * evaluated; the spec only lets the editor re-open it. A policy saved with a
+ * spec must have EXACTLY the Cedar that spec compiles to, otherwise the editor
+ * would show something the engine does not run. HTTP API: plugins/iam.ts.
  */
 
 import { randomBytes } from 'node:crypto';
 import { runWithTenantScope } from '@/lib/database';
-import { policyAnnotations, splitPolicyText, type CedarMessage } from './cedar';
+import type { CedarMessage } from './cedar';
 import { invalidateTenantPolicies } from './events';
-import { MANAGED_ANNOTATION } from './managedPolicies';
-import { validateAgainstSchema } from './schemaState';
+import { compileSpecToCedar, type PolicySpec } from './policySpec';
+import {
+  MAX_POLICIES_PER_TENANT,
+  MAX_STATEMENTS_PER_TENANT,
+  MAX_TENANT_POLICY_BYTES,
+  validateCustomPolicyText,
+  type PolicyValidation,
+} from './policyText';
+import { splitPolicyText } from './cedar';
+
+// Kept importable from here (the original home of the validation).
+export {
+  MAX_POLICIES_PER_TENANT,
+  MAX_POLICY_TEXT_BYTES,
+  MAX_STATEMENTS_PER_POLICY,
+  MAX_STATEMENTS_PER_TENANT,
+  MAX_TENANT_POLICY_BYTES,
+  validateCustomPolicyText,
+  type PolicyValidation,
+} from './policyText';
 
 export type IamPolicyMode = 'enforce' | 'monitor';
 
@@ -32,6 +55,8 @@ export interface IIamPolicy {
   description?: string;
   /** Cedar policy text: one or more `permit`/`forbid` statements (no templates). */
   cedar: string;
+  /** The structured form the visual editor wrote (`cedar` is its compilation); null = raw Cedar. */
+  spec: PolicySpec | null;
   /** `monitor` policies are evaluated but never change a decision. */
   mode: IamPolicyMode;
   enabled: boolean;
@@ -43,7 +68,7 @@ export interface IIamPolicy {
   updatedAt: Date;
 }
 
-export type IamPolicyErrorCode = 'validation' | 'conflict' | 'not_found' | 'invalid_input';
+export type IamPolicyErrorCode = 'validation' | 'conflict' | 'not_found' | 'invalid_input' | 'limit_reached';
 
 export class IamPolicyError extends Error {
   readonly code: IamPolicyErrorCode;
@@ -61,8 +86,6 @@ const META = 'iam_meta' as const;
 const VERSION_DOC = 'policy_version';
 const VERSION_FIELD = 'value';
 
-export const MAX_POLICY_TEXT_BYTES = 64 * 1024;
-export const MAX_STATEMENTS_PER_POLICY = 50;
 const POLICY_ID_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
 // ── Cedar id mapping ─────────────────────────────────────────────────────
@@ -82,49 +105,6 @@ export function policyIdFromCedarId(cedarId: string): string | null {
   return hash === -1 ? rest : rest.slice(0, hash);
 }
 
-// ── validation ───────────────────────────────────────────────────────────
-
-export interface PolicyValidation {
-  valid: boolean;
-  errors: CedarMessage[];
-  warnings: CedarMessage[];
-  /** The parsed statements (empty when the text does not parse). */
-  statements: string[];
-}
-
-/** Validate Cedar text as a custom policy against the generated schema. Pure: touches no store. */
-export function validateCustomPolicyText(cedar: unknown): PolicyValidation {
-  const fail = (message: string): PolicyValidation => ({
-    valid: false,
-    errors: [{ message }],
-    warnings: [],
-    statements: [],
-  });
-  if (typeof cedar !== 'string' || cedar.trim() === '') return fail('Policy text is empty');
-  if (Buffer.byteLength(cedar, 'utf8') > MAX_POLICY_TEXT_BYTES) {
-    return fail(`Policy text exceeds ${MAX_POLICY_TEXT_BYTES} bytes`);
-  }
-  const parts = splitPolicyText(cedar);
-  if (!parts.ok) return { valid: false, errors: parts.errors, warnings: [], statements: [] };
-  if (parts.templates.length > 0) return fail('Policy templates are not supported');
-  if (parts.policies.length === 0) return fail('Policy text contains no permit/forbid statement');
-  if (parts.policies.length > MAX_STATEMENTS_PER_POLICY) {
-    return fail(`A policy may contain at most ${MAX_STATEMENTS_PER_POLICY} statements`);
-  }
-  for (const statement of parts.policies) {
-    const annotations = policyAnnotations(statement);
-    if (annotations && MANAGED_ANNOTATION in annotations) {
-      return fail(`The @${MANAGED_ANNOTATION} annotation is reserved for built-in policies`);
-    }
-  }
-  const record: Record<string, string> = {};
-  parts.policies.forEach((statement, i) => {
-    record[`candidate#${i}`] = statement;
-  });
-  const result = validateAgainstSchema(record);
-  return { valid: result.valid, errors: result.errors, warnings: result.warnings, statements: parts.policies };
-}
-
 // ── mapping ──────────────────────────────────────────────────────────────
 
 function toDoc(policy: IIamPolicy): Record<string, unknown> {
@@ -134,6 +114,7 @@ function toDoc(policy: IIamPolicy): Record<string, unknown> {
     name: policy.name,
     description: policy.description ?? null,
     cedar: policy.cedar,
+    spec: policy.spec ?? null,
     mode: policy.mode,
     enabled: policy.enabled,
     service: policy.service ?? null,
@@ -152,6 +133,8 @@ function fromDoc(data: Record<string, unknown>): IIamPolicy {
     name: String(data.name ?? policyId),
     description: typeof data.description === 'string' ? data.description : undefined,
     cedar: String(data.cedar ?? ''),
+    // Old rows have no `spec`; anything that is not an object reads as raw Cedar.
+    spec: data.spec && typeof data.spec === 'object' && !Array.isArray(data.spec) ? (data.spec as PolicySpec) : null,
     mode: data.mode === 'monitor' ? 'monitor' : 'enforce',
     enabled: data.enabled !== false,
     service: typeof data.service === 'string' ? data.service : undefined,
@@ -212,9 +195,25 @@ export interface CreatePolicyInput {
   name: string;
   description?: string;
   cedar: string;
+  /** The spec `cedar` was compiled from (visual editor); omit for raw Cedar. */
+  spec?: PolicySpec | null;
   mode?: IamPolicyMode;
   enabled?: boolean;
   service?: string;
+}
+
+/** A spec and the Cedar stored with it must agree; the compiler is pure, so this is a cheap integrity check. */
+function assertSpecMatches(spec: PolicySpec | null | undefined, cedar: string): void {
+  if (!spec) return;
+  let expected: string;
+  try {
+    expected = compileSpecToCedar(spec);
+  } catch (error) {
+    throw new IamPolicyError('invalid_input', `The policy spec cannot be compiled: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (expected !== cedar) {
+    throw new IamPolicyError('invalid_input', 'The stored Cedar does not match the policy spec it claims to come from');
+  }
 }
 
 function assertValid(cedar: string): PolicyValidation {
@@ -227,6 +226,76 @@ function assertValid(cedar: string): PolicyValidation {
     );
   }
   return validation;
+}
+
+// ── tenant-wide bounds ───────────────────────────────────────────────────
+
+const statementCountCache = new Map<string, number>();
+
+/** How many statements a stored policy text holds (0 when it does not parse). Memoised: a write re-reads every policy. */
+function statementCountOf(cedar: string): number {
+  const hit = statementCountCache.get(cedar);
+  if (hit !== undefined) return hit;
+  const parts = splitPolicyText(cedar);
+  const count = parts.ok ? parts.policies.length : 0;
+  if (cedar.length <= 8 * 1024) {
+    if (statementCountCache.size >= 1_000) statementCountCache.clear();
+    statementCountCache.set(cedar, count);
+  }
+  return count;
+}
+
+interface PolicyTotals { policies: number; statements: number; bytes: number }
+
+function totalsOf(policies: readonly IIamPolicy[]): PolicyTotals {
+  let statements = 0;
+  let bytes = 0;
+  for (const p of policies) {
+    statements += statementCountOf(p.cedar);
+    bytes += Buffer.byteLength(p.cedar, 'utf8');
+  }
+  return { policies: policies.length, statements, bytes };
+}
+
+/**
+ * Refuse a write that would push the tenant's policy set past the aggregate
+ * caps (MAX_POLICIES_PER_TENANT, MAX_STATEMENTS_PER_TENANT,
+ * MAX_TENANT_POLICY_BYTES). Disabled and monitor policies count: they are
+ * parsed, evaluated (monitor) and listed all the same. A write that does not
+ * grow the set (an edit that shrinks a policy, in a tenant that is already over
+ * a cap) is always allowed, so nobody is locked out of cleaning up.
+ */
+async function assertWithinTenantBounds(
+  tenantDbName: string,
+  policyId: string,
+  next: { cedar: string; statements: number },
+  creating: boolean,
+): Promise<void> {
+  const all = await listPolicies(tenantDbName);
+  const current = all.find((p) => p.policyId === policyId);
+  // Updating a policy that is not there: the write itself answers "not found".
+  if (!creating && !current) return;
+  const others = totalsOf(all.filter((p) => p.policyId !== policyId));
+  const before: PolicyTotals = current
+    ? { policies: others.policies + 1, statements: others.statements + statementCountOf(current.cedar), bytes: others.bytes + Buffer.byteLength(current.cedar, 'utf8') }
+    : { ...others };
+  const after: PolicyTotals = {
+    policies: others.policies + 1,
+    statements: others.statements + next.statements,
+    bytes: others.bytes + Buffer.byteLength(next.cedar, 'utf8'),
+  };
+  const limit = (what: string): never => {
+    throw new IamPolicyError('limit_reached', what);
+  };
+  if (!current && after.policies > MAX_POLICIES_PER_TENANT) {
+    limit(`A workspace can have at most ${MAX_POLICIES_PER_TENANT} custom policies`);
+  }
+  if (after.statements > MAX_STATEMENTS_PER_TENANT && after.statements > before.statements) {
+    limit(`A workspace can hold at most ${MAX_STATEMENTS_PER_TENANT} policy statements in total (this change would make ${after.statements}). Remove or merge policies first.`);
+  }
+  if (after.bytes > MAX_TENANT_POLICY_BYTES && after.bytes > before.bytes) {
+    limit(`A workspace's policies can total at most ${Math.floor(MAX_TENANT_POLICY_BYTES / 1024)} KB of Cedar (this change would make ${Math.ceil(after.bytes / 1024)} KB). Remove or shorten policies first.`);
+  }
 }
 
 export async function createPolicy(
@@ -243,7 +312,9 @@ export async function createPolicy(
   if (input.mode && input.mode !== 'enforce' && input.mode !== 'monitor') {
     throw new IamPolicyError('invalid_input', 'mode must be "enforce" or "monitor"');
   }
-  assertValid(input.cedar);
+  const validation = assertValid(input.cedar);
+  assertSpecMatches(input.spec, input.cedar);
+  await assertWithinTenantBounds(tenantDbName, policyId, { cedar: input.cedar, statements: validation.statements.length }, true);
 
   const now = new Date();
   const policy: IIamPolicy = {
@@ -252,6 +323,7 @@ export async function createPolicy(
     name,
     description: input.description,
     cedar: input.cedar,
+    spec: input.spec ?? null,
     mode: input.mode ?? 'enforce',
     enabled: input.enabled ?? true,
     service: input.service,
@@ -275,6 +347,11 @@ export interface UpdatePolicyInput {
   name?: string;
   description?: string | null;
   cedar?: string;
+  /**
+   * The spec the new `cedar` was compiled from. Replacing the Cedar WITHOUT a
+   * spec makes the policy raw (the editor can no longer show it as a form).
+   */
+  spec?: PolicySpec | null;
   mode?: IamPolicyMode;
   enabled?: boolean;
   service?: string | null;
@@ -286,7 +363,13 @@ export async function updatePolicy(
   patch: UpdatePolicyInput,
   actor: string,
 ): Promise<IIamPolicy> {
-  if (patch.cedar !== undefined) assertValid(patch.cedar);
+  if (patch.cedar !== undefined) {
+    const validation = assertValid(patch.cedar);
+    assertSpecMatches(patch.spec, patch.cedar);
+    await assertWithinTenantBounds(tenantDbName, policyId, { cedar: patch.cedar, statements: validation.statements.length }, false);
+  } else if (patch.spec !== undefined && patch.spec !== null) {
+    throw new IamPolicyError('invalid_input', 'A spec can only be replaced together with its Cedar');
+  }
   if (patch.mode !== undefined && patch.mode !== 'enforce' && patch.mode !== 'monitor') {
     throw new IamPolicyError('invalid_input', 'mode must be "enforce" or "monitor"');
   }
@@ -303,6 +386,8 @@ export async function updatePolicy(
       name: patch.name?.trim() ?? current.name,
       description: patch.description === undefined ? current.description : (patch.description ?? undefined),
       cedar: patch.cedar ?? current.cedar,
+      // New Cedar without a spec = raw; otherwise keep (or replace) the spec.
+      spec: patch.cedar !== undefined ? (patch.spec ?? null) : current.spec,
       mode: patch.mode ?? current.mode,
       enabled: patch.enabled ?? current.enabled,
       service: patch.service === undefined ? current.service : (patch.service ?? undefined),

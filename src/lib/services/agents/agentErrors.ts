@@ -16,6 +16,44 @@
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
 
+export const AGENT_QUOTA_EXCEEDED_CODE = 'agent_quota_exceeded';
+
+/**
+ * A caller is over an agent-run limit (quota domain `agent`, see agentQuota.ts).
+ * `classifyAgentRunError` answers it like every other quota refusal: HTTP 429
+ * with an error of type `rate_limit_error` — here with the code
+ * `agent_quota_exceeded`.
+ */
+export class AgentQuotaExceededError extends Error {
+    readonly code = AGENT_QUOTA_EXCEEDED_CODE;
+
+    constructor(message: string) {
+        super(message);
+        this.name = 'AgentQuotaExceededError';
+    }
+}
+
+/**
+ * Logs a failed agent run at the level it deserves. A refusal by a usage limit is
+ * policy working as configured — and repeats on every request for as long as a
+ * person stays over it — so it is an info line without a stack; anything else
+ * is an error.
+ */
+export function logAgentRunFailure(
+    logger: {
+        info: (message: string, meta?: Record<string, unknown>) => unknown;
+        error: (message: string, meta?: Record<string, unknown>) => unknown;
+    },
+    message: string,
+    error: unknown,
+): void {
+    if (error instanceof AgentQuotaExceededError) {
+        logger.info(`${message}: usage limit reached`, { code: error.code, reason: error.message });
+        return;
+    }
+    logger.error(message, { error });
+}
+
 export interface AgentRunErrorBody {
     message: string;
     /**
@@ -76,6 +114,15 @@ export function classifyAgentRunError(
     },
 ): ClassifiedAgentRunError {
     const message = error instanceof Error ? error.message : String(error ?? '');
+
+    // The caller is over a quota policy: the same answer the model, vector and
+    // file endpoints give (429, `rate_limit_error`), so a client handles one shape.
+    if (error instanceof AgentQuotaExceededError) {
+        return {
+            status: 429,
+            error: { message: error.message, type: 'rate_limit_error', code: error.code },
+        };
+    }
 
     // Another turn (sync or background) already holds this conversation.
     if (error instanceof AgentRunConflictError) {

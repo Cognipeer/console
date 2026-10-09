@@ -5,6 +5,13 @@ import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import {
+  loadTokenPolicyForDisplay,
+  prepareTokenCreate,
+  presentAllowedIpRanges,
+  presentApiToken,
+  tokenExceedsPolicy,
+} from '@/lib/services/apiTokens/tokenPolicy';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import {
   DEFAULT_PROJECT_KEY,
@@ -21,6 +28,7 @@ import {
   requireSessionContext,
   withApiRequestContext,
 } from '../fastify-utils';
+import { auditTokenRestrictionChange, editApiTokenForSession, readBodyObject, tokenEditHints } from './tokens';
 
 const logger = createLogger('api:projects');
 
@@ -775,15 +783,12 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      const tokens = existingTokens.map((token) => ({
-        _id: token._id,
-        canDelete: true,
-        createdAt: token.createdAt,
-        label: token.label,
-        lastUsed: token.lastUsed,
-        tokenPrefix: token.tokenPrefix,
-        userId: token.userId,
-      }));
+      const policy = await loadTokenPolicyForDisplay(session.tenantDbName);
+      const now = new Date();
+      // Edit rights are "never upward" (PUT decides exactly); the list only hints for the buttons.
+      const canEdit = await tokenEditHints(db, session, existingTokens);
+      const tokens = existingTokens.map((token) =>
+        presentApiToken(token, { policy, now, canDelete: true, canEdit: canEdit(token) }));
 
       return reply.code(200).send({ tokens });
     } catch (error) {
@@ -831,6 +836,12 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // Same expiry / IP allowlist preparation as every other mint endpoint.
+      const prepared = await prepareTokenCreate({ body, tenantDbName: session.tenantDbName });
+      if (!prepared.ok) {
+        return reply.code(prepared.status).send(prepared.body);
+      }
+
       const token = createApiTokenSecret();
       const apiToken = await db.createApiToken({
         label: body.label.trim(),
@@ -839,6 +850,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         tokenHash: hashApiToken(token),
         tokenPrefix: getApiTokenPrefix(token),
         userId: session.userId,
+        ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
+        ...(prepared.allowedIpRanges ? { allowedIpRanges: prepared.allowedIpRanges } : {}),
       });
 
       return reply.code(201).send({
@@ -846,9 +859,43 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         label: apiToken.label,
         message: 'API token created successfully',
         token,
+        expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
+        allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        lastUsedAt: null,
+        exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),
       });
     } catch (error) {
       logger.error('Create project token error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  // Edit label / expiry / IP allowlist of a project token. Same rules and the
+  // same implementation as PUT /tokens/:id.
+  app.put('/projects/:projectId/tokens/:id', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!canManageProjects(session.userRole)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      const { id, projectId } = request.params as { id: string; projectId: string };
+      const access = await assertProjectAccess({ projectId, session });
+      if (!access.ok) {
+        return reply.code(access.status).send({ error: access.error });
+      }
+
+      const body = readBodyObject(request);
+      if (!body) {
+        return reply.code(400).send({ error: 'The request body must be a JSON object', code: 'invalid_body' });
+      }
+
+      const db = await getDatabase();
+      const result = await editApiTokenForSession({ db, session, projectId, tokenId: id, body });
+      auditTokenRestrictionChange(request, session, result.change);
+      return reply.code(result.status).send(result.body);
+    } catch (error) {
+      logger.error('Update project token error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));

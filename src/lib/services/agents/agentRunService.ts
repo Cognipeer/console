@@ -34,6 +34,8 @@ import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
 import { classifyAgentRunError } from './agentErrors';
+import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
+import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { openAgentCallbackSecret } from './agentSandboxSecrets';
 import {
   executeAgentChat,
@@ -600,6 +602,20 @@ export async function createBackgroundAgentRun(
     if (existing) return resolveIdempotencyClash();
   }
 
+  // Agent-run quota (domain `agent`). Counted HERE, once, for the whole
+  // background run: the worker executes `executeAgentChatLocal`, which does not
+  // count again, and a caller over its limit gets the 429 now rather than a run
+  // that fails later. After the idempotency lookup so a replay is never newly
+  // refused. Throws `AgentQuotaExceededError` (classified as a 429).
+  await enforceAgentRunQuota({
+    tenantDbName: input.tenantDbName,
+    tenantId: input.tenantId,
+    projectId: input.projectId,
+    agentKey: input.agentKey,
+    userId: input.userId,
+    tokenId: input.apiTokenId,
+  });
+
   const expiresAt = new Date(Date.now() + cfg.agent.runRetentionDays * 86_400_000);
 
   let run: IAgentRun;
@@ -896,10 +912,21 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
 
     try {
       const request = buildRequestFromRun(claimed, cancellationCell);
+      // The tokens the turn's model calls spend are tallied as they happen, so a run that
+      // fails, times out or is cancelled is still charged for them (runUsage.ts).
+      const usage = createRunUsageSink();
+      const quotaCaller = {
+        tenantDbName: claimed.tenantDbName,
+        tenantId: claimed.tenantId,
+        projectId: claimed.projectId,
+        agentKey: claimed.agentKey,
+        userId: claimed.userId,
+        tokenId: claimed.apiTokenId,
+      };
       // Attribution: usage recorded by the turn reads the request context,
       // which a queue worker otherwise has none of. A rejection settles as a
       // value, so the race can finalize it instead of throwing past the timers.
-      const invokePromise = runWithRequestContext(
+      const invokePromise = runWithUsageSink(usage, () => runWithRequestContext(
         {
           tenantId: claimed.tenantId,
           projectId: claimed.projectId,
@@ -909,7 +936,7 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
           source: 'api',
         },
         () => executeAgentChatLocal(request),
-      ).then(
+      )).then(
         (response) => ({ ok: true as const, response }),
         (error: unknown) => ({ ok: false as const, error }),
       );
@@ -918,11 +945,15 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
       stopAllTimers();
 
       if (raced === CANCEL_SENTINEL || (cancellationCell.cancelled && raced !== TIMEOUT_SENTINEL)) {
+        // Cancelled by the caller: the run may still be finishing in the background, but
+        // what its model calls spent so far counts.
+        settleAgentRun(quotaCaller, usage);
         await finalize('canceled', { errorReason: 'canceled_by_caller' });
         return;
       }
 
       if (raced === TIMEOUT_SENTINEL) {
+        settleAgentRun(quotaCaller, usage);
         cancellationCell.cancelled = true;
         const minutes = Math.round(maxDurationMs / 60_000);
         await finalize('failed', {
@@ -933,6 +964,7 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
       }
 
       if (!raced.ok) {
+        settleAgentRun(quotaCaller, usage);
         logger.warn('Background agent turn failed', {
           runId,
           error: raced.error instanceof Error ? raced.error.message : String(raced.error),
@@ -941,6 +973,8 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
         await finalize('failed', { errorReason: 'agent_error', errorMessage: message }, { errorReason: 'agent_error', message });
         return;
       }
+
+      settleAgentRun(quotaCaller, usage, raced.response.usage?.total_tokens);
 
       const { _conversation_messages: _omitted, ...responseWithoutTranscript } = raced.response;
       const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}` };

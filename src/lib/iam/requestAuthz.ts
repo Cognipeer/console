@@ -38,8 +38,13 @@ export interface ServiceAuthzPrincipal {
   groupGrants?: GroupTenantGrant[];
   tokenId?: string;
   tokenScope?: UserServicePermissions | null;
-  /** Cookie `active_project_id` (session) or the token's project: the project the request runs in. */
+  /** The project the route path names, else cookie `active_project_id` (session) or the token's project: the project the request runs in. */
   projectId?: string | null;
+  /** `projectId` came from the route path: the request acts on that project. */
+  projectFromPath?: boolean;
+  /** Caller address (`request.ip`, trust-proxy aware) and request path: policy context `ip` / `path`. */
+  ip?: string | null;
+  path?: string;
 }
 
 export interface ServiceAuthzOptions {
@@ -96,9 +101,12 @@ export async function authorizeServiceAccess(
     tokenId: principal.tokenId,
     tokenScope: principal.tokenScope,
     requestedProjectId: principal.projectId ?? null,
+    projectFromPath: principal.projectFromPath,
     service,
     level: options.level,
     legacyAllowed: legacy.allowed,
+    ip: principal.ip,
+    path: principal.path,
   });
   return verdict.allowed
     ? { allowed: true, service, required: legacy.required, enforced: verdict.source === 'engine' }

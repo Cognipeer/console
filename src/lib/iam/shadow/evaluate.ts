@@ -27,10 +27,13 @@
 import { createLogger } from '@/lib/core/logger';
 import { authorizeGate, customPolicyIdsOf, type AuthorizeResult } from '../engine';
 import { type IamPrincipal } from '../entities';
-import { narrowedLevelSets, resolveNarrowingMembership } from '../projectNarrowing';
+import { narrowedLevelSets, projectDenySets, resolveNarrowingMembership } from '../projectNarrowing';
 import { resolveTokenPrincipal, resolveUserPrincipal } from '../principalCache';
+import type { IamRequestContext } from '../context';
 import { recordShadowEvent } from './aggregate';
 import { bumpTenantMetric, shadowMetrics } from './metrics';
+import { resolveEnforcement } from './mode';
+import { recordPolicyMonitor } from './policyMonitor';
 import type { GateObservation, ShadowCategory } from './types';
 
 const logger = createLogger('iam:shadow');
@@ -57,6 +60,17 @@ function record(
       detail,
     },
   });
+}
+
+/** The request context a policy can condition on, as the enforce gate builds it for the same request. */
+function gateContext(o: GateObservation, projectId?: string | null): IamRequestContext {
+  return {
+    projectId: projectId ?? o.activeProjectId ?? undefined,
+    channel: o.subject === 'session' ? 'dashboard' : 'api',
+    ip: o.ip,
+    method: o.method,
+    path: o.pathname,
+  };
 }
 
 function describeResult(result: AuthorizeResult): string {
@@ -95,7 +109,24 @@ async function checkParity(o: GateObservation, principal: IamPrincipal): Promise
     service: o.legacy.service,
     method: o.method,
     level: o.legacy.level,
+    context: gateContext(o),
   });
+
+  // Monitor-mode policies that would change the decision. Enforce tenants record
+  // them from the real decision (enforce.ts), so only count them here when this
+  // evaluation is all the engine does for the tenant.
+  if (result.monitor?.differs && !(await resolveEnforcement(o.tenantDbName))) {
+    recordPolicyMonitor(o.tenantDbName, result, {
+      service: o.legacy.service,
+      method: o.method,
+      route: o.route,
+      requestId: o.requestId,
+      userId: o.userId,
+      tokenId: o.tokenId,
+      role: o.role,
+    });
+  }
+
   if (result.allowed === o.legacy.allowed) return;
 
   if (customPolicyIdsOf(result.reasons).length > 0 && result.errors.length === 0) {
@@ -137,6 +168,7 @@ async function checkTokenGroups(o: GateObservation): Promise<void> {
     service: o.legacy.service,
     method: o.method,
     level: o.legacy.level,
+    context: gateContext(o),
   });
   if (result.allowed !== o.legacy.allowed) record(o, 'token-groups', result.allowed);
 }
@@ -152,13 +184,14 @@ async function checkProjectNarrowing(o: GateObservation, base: IamPrincipal): Pr
     user: o.user,
     groupGrants: tenantGrants,
     requestedProjectId: o.activeProjectId,
-    exactProject: o.subject === 'token',
+    exactProject: o.subject === 'token' || o.projectFromPath === true,
   });
   if (!narrowing) return; // privileged, no project, or no membership there: nothing to narrow with
 
   const narrowed: IamPrincipal = {
     ...base,
     sets: narrowedLevelSets(o.user, tenantGrants, narrowing.membership),
+    projDeny: projectDenySets(narrowing.membership),
   };
   const result = await authorizeGate({
     tenant: o.tenantDbName,
@@ -166,6 +199,7 @@ async function checkProjectNarrowing(o: GateObservation, base: IamPrincipal): Pr
     service: o.legacy.service,
     method: o.method,
     level: o.legacy.level,
+    context: gateContext(o, narrowing.projectId),
   });
   if (result.allowed !== o.legacy.allowed) record(o, 'project-narrowing', result.allowed);
 }

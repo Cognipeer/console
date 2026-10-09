@@ -35,7 +35,8 @@ import {
 import { onIamInvalidation, type IamInvalidation } from '@/lib/iam/events';
 import { describeForEachProvider } from './db-parity.helper';
 
-const FORBID_DELETE = 'forbid(principal, action == Action::"agent.delete", resource is Agent);';
+// (a deny rule the request gates can match: a whole-service action on a Service)
+const FORBID_DELETE = 'forbid(principal, action == Action::"agents.write", resource is Service);';
 
 describeForEachProvider('IAM document store (raw)', (getDb) => {
   let tenant: string;
@@ -150,7 +151,7 @@ describeForEachProvider('Custom policy store', (getDb) => {
     expect(got!.createdAt).toBeInstanceOf(Date);
     expect(got!.updatedAt).toBeInstanceOf(Date);
 
-    const second = await createPolicy(tenant, { name: 'Monitor one', cedar: 'forbid(principal, action == Action::"tool.delete", resource is Tool);', mode: 'monitor', enabled: false, service: 'tools' }, 'u2');
+    const second = await createPolicy(tenant, { name: 'Monitor one', cedar: 'forbid(principal, action == Action::"tools.write", resource is Service);', mode: 'monitor', enabled: false, service: 'tools' }, 'u2');
     expect(second.policyId).toMatch(/^p-[0-9a-f]{12}$/);
     expect(await getPolicyVersion(tenant)).toBe(2);
 

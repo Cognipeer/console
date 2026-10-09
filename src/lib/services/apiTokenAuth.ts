@@ -5,19 +5,44 @@ import { fireAndForget } from '@/lib/core/asyncTask';
 import type { ITenant, IUser, IApiToken } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { hasIpRestriction, isIpAllowed, TOKEN_IP_NOT_ALLOWED } from '@/lib/services/apiTokens/ipAllowlist';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 
 const logger = createLogger('api-token-auth');
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 
+/** Who was refused, when a refusal is worth auditing. Never serialized into a response. */
+export interface ApiTokenDenialContext {
+  tenantId: string;
+  tenantDbName: string;
+  tokenId?: string;
+  userId?: string;
+  projectId?: string;
+  clientIp?: string;
+}
+
 export class ApiTokenAuthError extends Error {
   status: number;
+  /** Machine-readable reason for refusals that have one (`ip_not_allowed`); plain 401s carry none. */
+  code?: string;
+  denial?: ApiTokenDenialContext;
 
-  constructor(message: string, status = 401) {
+  constructor(message: string, status = 401, code?: string, denial?: ApiTokenDenialContext) {
     super(message);
     this.name = 'ApiTokenAuthError';
     this.status = status;
+    this.code = code;
+    this.denial = denial;
   }
+}
+
+export interface ApiTokenAuthOptions {
+  /**
+   * The caller's address as the server resolved it (Fastify's `request.ip`,
+   * which honours `TRUSTED_PROXIES`). Required for a token that carries an IP
+   * allowlist: without it such a token is refused, never waved through.
+   */
+  clientIp?: string | null;
 }
 
 export interface ApiTokenContext {
@@ -35,6 +60,8 @@ export interface ApiTokenRequestLike {
   headers: {
     get(name: string): string | null;
   };
+  /** The caller's address (Fastify's `request.ip`); needed to honour a token's IP allowlist. */
+  ip?: string | null;
 }
 
 /**
@@ -65,6 +92,7 @@ export async function invalidateApiTokenAuthCache(tokenHash: string | undefined)
 
 export async function requireApiTokenFromHeader(
   authHeader: string | null | undefined,
+  options: ApiTokenAuthOptions = {},
 ): Promise<ApiTokenContext> {
   const normalizedHeader = authHeader ?? null;
 
@@ -122,6 +150,28 @@ export async function requireApiTokenFromHeader(
     if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
       throw new ApiTokenAuthError('API token has expired');
     }
+  }
+
+  // Network allowlist. Checked on EVERY request (the record may come from the
+  // auth cache, which a token edit invalidates), in every authorization mode,
+  // and before anything with side effects (tenant binding, default-project
+  // creation, the last-used stamp), so a refused call leaves no trace on the
+  // token. A token without a list is unrestricted; one with a list and no
+  // usable client address is refused.
+  if (hasIpRestriction(tokenRecord.allowedIpRanges) && !isIpAllowed(options.clientIp, tokenRecord.allowedIpRanges)) {
+    throw new ApiTokenAuthError(
+      'API token is not allowed from this IP address',
+      403,
+      TOKEN_IP_NOT_ALLOWED,
+      {
+        tenantId: String(tokenRecord.tenantId),
+        tenantDbName: tenant.dbName,
+        tokenId: tokenRecord._id ? String(tokenRecord._id) : undefined,
+        userId: tokenRecord.userId ? String(tokenRecord.userId) : undefined,
+        projectId: tokenRecord.projectId ? String(tokenRecord.projectId) : undefined,
+        clientIp: options.clientIp ?? undefined,
+      },
+    );
   }
 
   const effectiveLicense = LicenseManager.getEffectiveLicenseForTenant(tenant);
@@ -186,5 +236,5 @@ export async function requireApiTokenFromHeader(
 export async function requireApiToken(
   request: ApiTokenRequestLike,
 ): Promise<ApiTokenContext> {
-  return requireApiTokenFromHeader(request.headers.get('authorization'));
+  return requireApiTokenFromHeader(request.headers.get('authorization'), { clientIp: request.ip });
 }

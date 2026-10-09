@@ -54,6 +54,7 @@ import { ClusterMixin } from './mongodb/cluster.mixin';
 import { BetaAccessCodeMixin } from './mongodb/beta-access-code.mixin';
 import { IamInvalidationMixin } from './iam-invalidation.mixin';
 import { IamDocsMixin } from './mongodb/iam-docs.mixin';
+import { IamDirectoryMixin } from './mongodb/iam-directory.mixin';
 import { applyEnterpriseMongoDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -95,7 +96,7 @@ const ClusterBase = ClusterMixin(PricingBase);
 const SignupBase = BetaAccessCodeMixin(ClusterBase);
 
 // Group 8 – IAM document store (tenant-scoped, lazily created collections/tables)
-const IamBase = IamDocsMixin(SignupBase);
+const IamBase = IamDirectoryMixin(IamDocsMixin(SignupBase));
 
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the

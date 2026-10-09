@@ -44,6 +44,13 @@ declare module 'fastify' {
       decisionId?: string;
       service?: string;
       required?: string;
+      /** Engine denials: the gate action, the project context and the deciding policies (audit only). */
+      action?: string;
+      projectId?: string | null;
+      reasons?: string[];
+      policyIds?: string[];
+      /** The address the engine evaluated (getAuthzClientIp), so a replay of the decision uses the same one. */
+      ip?: string;
     };
   }
 }

@@ -2,39 +2,35 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Text, CopyButton } from '@mantine/core';
-import { IconKey, IconTrash, IconCopy, IconCheck } from '@tabler/icons-react';
+import { IconKey, IconTrash, IconCopy, IconCheck, IconAdjustments } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import CreateTokenModal from './CreateTokenModal';
-import { useTranslations } from '@/lib/i18n';
+import { useTranslations, useLocale } from '@/lib/i18n';
 import { useConfirm } from '@/components/common/confirm';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
-
-interface ApiToken {
-  _id: string;
-  label: string;
-  token?: string;
-  tokenPrefix?: string;
-  userId?: string;
-  canDelete?: boolean;
-  lastUsed?: string;
-  createdAt: string;
-}
+import TokenDetailModal from '@/components/iam/tokens/TokenDetailModal';
+import TokenStatusBadges from '@/components/iam/tokens/TokenStatusBadges';
+import { isTokenExpired, type ApiTokenRow } from '@/components/iam/tokens/tokenModel';
+import { formatRelative } from '@/components/iam/timeFormat';
 
 export default function TokenManagement({ projectId }: { projectId?: string }) {
-  const [tokens, setTokens] = useState<ApiToken[]>([]);
+  const [tokens, setTokens] = useState<ApiTokenRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [createModalOpened, setCreateModalOpened] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [query, setQuery] = useState('');
   const t = useTranslations('settings.tokenManagement');
+  const tIam = useTranslations('iamTokens');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
+  const locale = useLocale();
   const { confirmAction } = useConfirm();
 
   const listUrl = projectId
     ? `/api/projects/${encodeURIComponent(projectId)}/tokens`
     : '/api/tokens';
-  const deleteUrl = (id: string) =>
+  const itemUrl = (id: string) =>
     projectId
       ? `/api/projects/${encodeURIComponent(projectId)}/tokens/${encodeURIComponent(id)}`
       : `/api/tokens/${encodeURIComponent(id)}`;
@@ -79,7 +75,12 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     );
   }, [tokens, query]);
 
-  const confirmDelete = async (token: ApiToken) => {
+  const selected = useMemo(
+    () => tokens.find((token) => String(token._id) === selectedId) ?? null,
+    [tokens, selectedId],
+  );
+
+  const confirmDelete = async (token: ApiTokenRow) => {
     const done = await confirmAction({
       title: t('deleteModal.title'),
       message: t('deleteModal.description', {
@@ -89,7 +90,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       confirmLabel: t('deleteModal.confirm'),
       cancelLabel: t('deleteModal.cancel'),
       action: async () => {
-        const response = await fetch(deleteUrl(token._id), { method: 'DELETE' });
+        const response = await fetch(itemUrl(token._id), { method: 'DELETE' });
         if (!response.ok) throw new Error(t('errors.delete'));
       },
     });
@@ -117,7 +118,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     );
   }
 
-  const columns: DataGridColumn<ApiToken>[] = [
+  const columns: DataGridColumn<ApiTokenRow>[] = [
     {
       key: 'label',
       label: t('table.label'),
@@ -135,6 +136,11 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       ),
     },
     {
+      key: 'status',
+      label: tIam('table.status'),
+      render: (token) => <TokenStatusBadges token={token} />,
+    },
+    {
       key: 'createdAt',
       label: t('table.created'),
       width: 140,
@@ -148,9 +154,25 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
       key: 'lastUsed',
       label: t('table.lastUsed'),
       width: 160,
+      render: (token) => {
+        const used = token.lastUsedAt ?? token.lastUsed;
+        return (
+          <span className="ds-faint" style={{ fontSize: 12 }}>
+            {used ? new Date(used).toLocaleDateString() : t('table.never')}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'expiresAt',
+      label: tIam('table.expires'),
+      width: 160,
       render: (token) => (
-        <span className="ds-faint" style={{ fontSize: 12 }}>
-          {token.lastUsed ? new Date(token.lastUsed).toLocaleDateString() : t('table.never')}
+        <span
+          className="ds-faint"
+          style={{ fontSize: 12, color: isTokenExpired(token) ? 'var(--ds-err)' : undefined }}
+        >
+          {token.expiresAt ? formatRelative(token.expiresAt, locale) : tIam('table.noExpiry')}
         </span>
       ),
     },
@@ -183,15 +205,16 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
 
   return (
     <>
-      <DataGrid<ApiToken>
+      <DataGrid<ApiTokenRow>
         records={filtered}
         loading={loading}
         rowKey={(t) => String(t._id)}
         columns={columns}
+        onRowClick={(token) => setSelectedId(String(token._id))}
         search={{
           value: query,
           onChange: setQuery,
-          placeholder: 'Search tokens',
+          placeholder: tIam('table.searchPlaceholder'),
         }}
         onRefresh={() => void fetchTokens()}
         refreshing={loading}
@@ -213,20 +236,26 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
             onClick: () => setCreateModalOpened(true),
           },
         }}
-        footerLeft={`Showing ${filtered.length} of ${tokens.length} tokens`}
-        rowActions={(token) =>
-          token.canDelete === false
+        footerLeft={tIam('table.showing', { shown: filtered.length, total: tokens.length })}
+        rowActions={(token) => [
+          {
+            id: 'details',
+            label: tIam('table.details'),
+            icon: <IconAdjustments size={14} />,
+            onClick: () => setSelectedId(String(token._id)),
+          },
+          ...(token.canDelete === false
             ? []
             : [
                 {
                   id: 'delete',
                   label: t('actions.delete'),
                   icon: <IconTrash size={14} />,
-                  color: 'red',
+                  color: 'red' as const,
                   onClick: () => void confirmDelete(token),
                 },
-              ]
-        }
+              ]),
+        ]}
       />
 
       <CreateTokenModal
@@ -234,6 +263,17 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
         onClose={() => setCreateModalOpened(false)}
         onSuccess={fetchTokens}
         createUrl={listUrl}
+      />
+
+      <TokenDetailModal
+        token={selected}
+        onClose={() => setSelectedId(null)}
+        onSaved={(saved) =>
+          setTokens((current) =>
+            current.map((token) => (String(token._id) === String(saved._id) ? { ...token, ...saved } : token)),
+          )
+        }
+        updateUrl={itemUrl}
       />
     </>
   );

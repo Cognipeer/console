@@ -16,14 +16,15 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       db.prepare(`
         INSERT INTO ${TABLES.quotaPolicies}
-        (id, tenantId, projectId, scope, scopeId, domain, priority, enabled, label, description, limits, createdBy, updatedBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @scope, @scopeId, @domain, @priority, @enabled, @label, @description, @limits, @createdBy, @updatedBy, @createdAt, @updatedAt)
+        (id, tenantId, projectId, scope, scopeId, groupMode, domain, priority, enabled, label, description, limits, createdBy, updatedBy, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @scope, @scopeId, @groupMode, @domain, @priority, @enabled, @label, @description, @limits, @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
         tenantId: policy.tenantId,
         projectId: policy.projectId ?? null,
         scope: policy.scope,
         scopeId: policy.scopeId ?? null,
+        groupMode: policy.groupMode ?? null,
         domain: policy.domain,
         priority: policy.priority ?? 100,
         enabled: this.toBoolInt(policy.enabled ?? true),
@@ -49,6 +50,16 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return rows.map((r) => this.mapQuotaRow(r));
     }
 
+    async listTenantWideQuotaPolicies(tenantId: string): Promise<IQuotaPolicy[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.quotaPolicies}
+         WHERE tenantId = @tenantId AND (projectId IS NULL OR projectId = '')
+         ORDER BY priority ASC, createdAt DESC`,
+      ).all({ tenantId }) as SqliteRow[];
+      return rows.map((r) => this.mapQuotaRow(r));
+    }
+
     async updateQuotaPolicy(
       id: string, tenantId: string, data: Partial<IQuotaPolicy>, projectId?: string,
     ): Promise<IQuotaPolicy | null> {
@@ -60,6 +71,10 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.limits !== undefined) { sets.push('limits = @limits'); params.limits = this.toJson(data.limits); }
       if (data.scope !== undefined) { sets.push('scope = @scope'); params.scope = data.scope; }
       if (data.scopeId !== undefined) { sets.push('scopeId = @scopeId'); params.scopeId = data.scopeId ?? null; }
+      if (data.groupMode !== undefined) { sets.push('groupMode = @groupMode'); params.groupMode = data.groupMode ?? null; }
+      // Moving a policy to another project (or to none = tenant-wide). Named
+      // apart from `@projectId`, which is the WHERE filter below.
+      if (data.projectId !== undefined) { sets.push('projectId = @nextProjectId'); params.nextProjectId = data.projectId || null; }
       if (data.domain !== undefined) { sets.push('domain = @domain'); params.domain = data.domain; }
       if (data.priority !== undefined) { sets.push('priority = @priority'); params.priority = data.priority; }
       if (data.enabled !== undefined) { sets.push('enabled = @enabled'); params.enabled = this.toBoolInt(data.enabled); }
@@ -91,6 +106,8 @@ export function QuotaMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         projectId: r.projectId as string | undefined,
         scope: r.scope as IQuotaPolicy['scope'],
         scopeId: r.scopeId as string | undefined,
+        // NULL on every row written before group scope existed -> undefined.
+        groupMode: (r.groupMode ?? undefined) as IQuotaPolicy['groupMode'],
         domain: r.domain as IQuotaPolicy['domain'],
         priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : 100,
         enabled: r.enabled === undefined || r.enabled === null ? true : this.fromBoolInt(r.enabled),

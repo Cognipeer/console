@@ -9,6 +9,7 @@
  *   Project  in [Tenant]
  *   Group    in [Group]
  *   User     in [Group] { role, readSvcs, writeSvcs, adminSvcs: Set<String>,
+ *                         projDenyRead, projDenyWrite, projDenyAdmin: Set<String>,
  *                         projects, adminProjects: Set<Project> }
  *   ApiToken { owner: User, scoped: Bool, capRead/capWrite/capAdmin: Set<String>, project?: Project }
  *   Service  { service, adminService }            // service-level checks (HTTP gate)
@@ -19,6 +20,15 @@
  * real rbac.ts functions in entities.ts) is >= read / >= write / == admin.
  * They are upward-closed, which is what lets six small managed policies express
  * the whole legacy decision.
+ *
+ * `projDenyRead/Write/Admin` are the services the ACTIVE project's explicit
+ * settings deny at that level (project narrowing, see projectNarrowing.ts). The
+ * level sets above already reflect the narrowing; these exist so the managed
+ * boundary forbids can stop a CUSTOM permit from granting what the project
+ * narrows away. Empty when the request has no narrowing project.
+ *
+ * Request context (all optional): projectId, channel, ip (ipaddr), now
+ * (datetime), method, path.
  */
 
 import {
@@ -44,11 +54,23 @@ const record = (attributes: Record<string, TypeJson>): TypeJson => ({
 /**
  * Optional request context attributes a policy may reference. Always optional:
  * a call supplies only what it knows (`context has channel` guards the rest).
+ * `ip` is a Cedar `ipaddr` and `now` a Cedar `datetime` (context.ts builds them).
  */
-export const IAM_CONTEXT_ATTRS = ['projectId', 'channel', 'ip', 'method', 'path'] as const;
+export const IAM_CONTEXT_ATTRS = ['projectId', 'channel', 'ip', 'now', 'method', 'path'] as const;
+
+const IAM_CONTEXT_EXTENSION_TYPES: Readonly<Record<string, string>> = { ip: 'ipaddr', now: 'datetime' };
+
+const extension = (name: string): TypeJson => ({ type: 'Extension', name });
 
 const contextType = (): TypeJson =>
-  record(Object.fromEntries(IAM_CONTEXT_ATTRS.map((name) => [name, attr(str(), false)])));
+  record(
+    Object.fromEntries(
+      IAM_CONTEXT_ATTRS.map((name) => [
+        name,
+        attr(IAM_CONTEXT_EXTENSION_TYPES[name] ? extension(IAM_CONTEXT_EXTENSION_TYPES[name]) : str(), false),
+      ]),
+    ),
+  );
 
 export interface BuiltSchema {
   schema: CedarSchemaJson;
@@ -74,6 +96,9 @@ export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): 
       readSvcs: attr(setOf(str())),
       writeSvcs: attr(setOf(str())),
       adminSvcs: attr(setOf(str())),
+      projDenyRead: attr(setOf(str())),
+      projDenyWrite: attr(setOf(str())),
+      projDenyAdmin: attr(setOf(str())),
       projects: attr(setOf(entity('Project'))),
       adminProjects: attr(setOf(entity('Project'))),
     }),

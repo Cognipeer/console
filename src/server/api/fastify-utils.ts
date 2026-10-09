@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
+import { trustsEveryHop } from '@/lib/security/trustedProxy';
 import { getDatabase, type IUser } from '@/lib/database';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import { createLogger } from '@/lib/core/logger';
@@ -131,6 +132,32 @@ export function safeReadJsonBody<T = Record<string, any>>(request: FastifyReques
  * $proxy_add_x_forwarded_for`) and list the proxy in `TRUSTED_PROXIES`.
  */
 export function getClientIp(request: FastifyRequest): string {
+  return request.ip || 'unknown';
+}
+
+export { trustsEveryHop };
+
+/**
+ * The caller's address for AUTHORIZATION decisions: a token's IP allowlist and a
+ * policy's `ip` condition. Unlike `getClientIp` (audit, rate limiting) this never
+ * takes a header at face value:
+ *
+ *  - With trusted proxies configured it is `request.ip`: Fastify walks the
+ *    forwarded-for chain from the right and stops at the first hop that is not
+ *    one of them, so what the caller wrote to the left of the proxy is ignored.
+ *  - With none configured Fastify trusts every hop, which makes `request.ip`
+ *    the leftmost forwarded-for entry - a value the caller chooses, even behind
+ *    a proxy that appends to the header. The only address nobody can forge is
+ *    then the connection's own peer, so that is the one rules are checked
+ *    against. (Behind a reverse proxy every caller then looks like the proxy
+ *    until `TRUSTED_PROXIES` names it - the IAM settings and the token form say
+ *    so. A rule that cannot be evaluated safely errs on the side of not matching
+ *    a spoofed address, never of matching it.)
+ */
+export function getAuthzClientIp(request: FastifyRequest): string {
+  if (trustsEveryHop()) {
+    return request.raw?.socket?.remoteAddress || request.socket?.remoteAddress || 'unknown';
+  }
   return request.ip || 'unknown';
 }
 
@@ -316,6 +343,8 @@ export async function authorizeServiceForRequest(
       tokenId: tokenContext.tokenRecord._id ? String(tokenContext.tokenRecord._id) : undefined,
       tokenScope: tokenContext.tokenRecord.servicePermissions,
       projectId: tokenContext.projectId ? String(tokenContext.projectId) : null,
+      ip: getAuthzClientIp(request),
+      path: getRequestPathname(request),
     }, service, common);
   }
 
@@ -328,8 +357,28 @@ export async function authorizeServiceForRequest(
     userId: String(rbac.user._id),
     user: rbac.user,
     groupGrants: rbac.groupGrants,
-    projectId: request.cookies?.active_project_id || null,
+    projectId: sessionProject(request).projectId,
+    projectFromPath: sessionProject(request).fromPath,
+    ip: getAuthzClientIp(request),
+    path: getRequestPathname(request),
   }, service, common);
+}
+
+/**
+ * The project a route is ABOUT when its path names one (`/projects/:projectId/...`).
+ * Policies that name a project must see that project, not whichever one the
+ * caller's `active_project_id` cookie happens to hold - the cookie is chosen by
+ * the caller and a request about project A can carry a cookie for project B.
+ */
+function routeProjectId(request: FastifyRequest): string | null {
+  const id = (request.params as Record<string, unknown> | undefined)?.projectId;
+  return typeof id === 'string' && id.length > 0 && id.length <= 128 ? id : null;
+}
+
+/** The project a SESSION request runs in as far as the policy engine is concerned: the path's, else the cookie's. */
+function sessionProject(request: FastifyRequest): { projectId: string | null; fromPath: boolean } {
+  const fromPath = routeProjectId(request);
+  return { projectId: fromPath ?? (request.cookies?.active_project_id || null), fromPath: fromPath !== null };
 }
 
 function routeLabel(request: FastifyRequest, pathname: string): string {
@@ -453,7 +502,9 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
     role: typeof user.role === 'string' ? user.role : '',
     user: { role: user.role, servicePermissions: user.servicePermissions, projectIds: user.projectIds },
     groupGrants,
-    activeProjectId: request.cookies?.active_project_id || null,
+    activeProjectId: sessionProject(request).projectId,
+    projectFromPath: sessionProject(request).fromPath,
+    ip: getAuthzClientIp(request),
     legacy: { allowed: decision.allowed, service: decision.service, required: decision.required, level: target.level },
   }));
 
@@ -469,14 +520,27 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
       userId: String(user._id),
       user,
       groupGrants,
-      requestedProjectId: request.cookies?.active_project_id || null,
+      requestedProjectId: sessionProject(request).projectId,
+      projectFromPath: sessionProject(request).fromPath,
       service: decision.service,
       level: target.level,
       legacyAllowed: decision.allowed,
+      ip: getAuthzClientIp(request),
+      path: pathname,
     });
     if (!verdict.allowed) {
       const body = forbiddenBody(verdict);
-      request.iamDenial = { code: 'forbidden', decisionId: verdict.decisionId, service: verdict.service, required: verdict.required };
+      request.iamDenial = {
+        code: 'forbidden',
+        decisionId: verdict.decisionId,
+        service: verdict.service,
+        required: verdict.required,
+        action: verdict.action,
+        projectId: verdict.projectId,
+        reasons: verdict.reasons,
+        policyIds: verdict.policyIds,
+        ip: getAuthzClientIp(request),
+      };
       throw new RbacAuthorizationError(String(body.message), 403, body);
     }
     return;
@@ -563,6 +627,7 @@ async function enforceApiTokenRbac(
     tokenScope: context.tokenRecord.servicePermissions,
     // The project the handler will run in (the token's own, else the default one).
     activeProjectId: context.projectId ? String(context.projectId) : null,
+    ip: getAuthzClientIp(request),
     legacy: { allowed: decision.allowed, service: decision.service, required: decision.required, level: target.level },
   }));
 
@@ -584,10 +649,22 @@ async function enforceApiTokenRbac(
       service: decision.service,
       level: target.level,
       legacyAllowed: decision.allowed,
+      ip: getAuthzClientIp(request),
+      path: pathname,
     });
     if (!verdict.allowed) {
       const body = forbiddenBody(verdict);
-      request.iamDenial = { code: 'forbidden', decisionId: verdict.decisionId, service: verdict.service, required: verdict.required };
+      request.iamDenial = {
+        code: 'forbidden',
+        decisionId: verdict.decisionId,
+        service: verdict.service,
+        required: verdict.required,
+        action: verdict.action,
+        projectId: verdict.projectId,
+        reasons: verdict.reasons,
+        policyIds: verdict.policyIds,
+        ip: getAuthzClientIp(request),
+      };
       throw new RbacAuthorizationError(String(body.message), 403, body);
     }
     return;
@@ -721,7 +798,35 @@ export function withApiRequestContext<
 export async function requireApiTokenContext(
   request: FastifyRequest,
 ): Promise<ApiTokenContext> {
-  return requireApiTokenFromHeader(getHeaderValue(request, 'authorization'));
+  try {
+    return await requireApiTokenFromHeader(getHeaderValue(request, 'authorization'), {
+      // The token's IP allowlist is matched against the address the server can
+      // vouch for (getAuthzClientIp: the connection peer, or the forwarded address
+      // only through the configured trusted proxies), never against a header the
+      // caller can set.
+      clientIp: getAuthzClientIp(request),
+    });
+  } catch (error) {
+    if (error instanceof ApiTokenAuthError && error.code === 'ip_not_allowed' && error.denial) {
+      const { denial } = error;
+      // Authentication refused the call before any tenant context existed, so the
+      // response-time audit hook would write nothing; record the refusal itself.
+      void import('@/lib/services/apiTokens/ipDenialAudit')
+        .then(({ recordTokenIpDenial }) => recordTokenIpDenial({
+          ...denial,
+          requestId: request.apiRequestId,
+          method: request.method,
+          path: getRequestPathname(request),
+          userAgent: getHeaderValue(request, 'user-agent') ?? undefined,
+        }))
+        .catch((auditError: unknown) => {
+          logger.warn('Could not audit a token IP refusal', {
+            error: auditError instanceof Error ? auditError.message : String(auditError),
+          });
+        });
+    }
+    throw error;
+  }
 }
 
 export async function getApiTokenContextForRequest(
@@ -741,7 +846,7 @@ export function sendApiTokenError(
   error: unknown,
 ) {
   if (error instanceof ApiTokenAuthError) {
-    return reply.code(error.status).send({ error: error.message });
+    return reply.code(error.status).send(error.code ? { error: error.message, code: error.code } : { error: error.message });
   }
 
   return null;
@@ -792,6 +897,19 @@ function sendClientApiError(
   style: ClientApiErrorStyle,
 ) {
   if (error instanceof ApiTokenAuthError) {
+    // A refusal that carries a code (`ip_not_allowed`) is "authenticated but not
+    // permitted from here": a 403 permission error in every dialect, with the
+    // code visible, so a client can tell it apart from a bad or expired token.
+    if (error.code) {
+      if (style === 'anthropic') {
+        return reply.code(error.status).send(anthropicErrorEnvelope(error.message, 'permission_error'));
+      }
+      if (style === 'openai') {
+        const body = openAiErrorBody(error.message, 'permission_error');
+        return reply.code(error.status).send({ error: { ...body.error, code: error.code } });
+      }
+      return reply.code(error.status).send({ error: error.message, code: error.code });
+    }
     if (style === 'anthropic') {
       return reply.code(401).send(anthropicErrorEnvelope(error.message, 'authentication_error'));
     }

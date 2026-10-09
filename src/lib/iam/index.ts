@@ -14,6 +14,21 @@ export { buildSchema, IAM_CONTEXT_ATTRS } from './schema';
 export * from './groupGrants';
 export * from './principalCache';
 export * from './store';
+export * from './context';
+export * from './settings';
+export {
+  compileSpec,
+  compileSpecToCedar,
+  parsePolicySpec,
+  verifySpecReferences,
+  type CompileOutcome,
+  type PolicyEffect,
+  type PolicyIssue,
+  type PolicySpec,
+  type PolicySpecConditions,
+  type PolicySpecPrincipals,
+  type PolicySpecResources,
+} from './policySpec';
 export {
   authorize,
   authorizeGate,

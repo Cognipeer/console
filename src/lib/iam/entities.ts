@@ -60,6 +60,17 @@ export function userLevelSets(user: RbacUserLike, groupGrants: GroupTenantGrant[
   return levelSets((service) => getEffectiveServicePermissionWithGroups(user, groupGrants, service));
 }
 
+/**
+ * Services the active project's explicit settings deny at each level (project
+ * narrowing). Exposed to policy as `projDenyRead/Write/Admin` so the managed
+ * boundary forbids can stop a custom permit from exceeding the narrowing.
+ */
+export interface ProjectDenySets {
+  read: string[];
+  write: string[];
+  admin: string[];
+}
+
 export interface TokenCaps {
   scoped: boolean;
   capRead: string[];
@@ -96,6 +107,10 @@ export interface IamPrincipal {
   projects: string[];
   /** Project ids where the user is a project admin (owner/admin: every project). */
   adminProjects: string[];
+  /** Project narrowing as deny sets (target semantics only; absent = nothing narrows). */
+  projDeny?: ProjectDenySets;
+  /** The project the request runs in (context.projectId); absent when unknown. */
+  contextProjectId?: string | null;
   token?: TokenCaps & { id: string; projectId?: string | null };
 }
 
@@ -150,6 +165,9 @@ function userEntity(p: IamPrincipal): CedarEntity {
       readSvcs: p.sets.readSvcs,
       writeSvcs: p.sets.writeSvcs,
       adminSvcs: p.sets.adminSvcs,
+      projDenyRead: p.projDeny?.read ?? [],
+      projDenyWrite: p.projDeny?.write ?? [],
+      projDenyAdmin: p.projDeny?.admin ?? [],
       projects: p.projects.map(projectUid),
       adminProjects: p.adminProjects.map(projectUid),
     },

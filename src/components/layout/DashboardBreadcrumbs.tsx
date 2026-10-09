@@ -19,6 +19,7 @@ import { BREADCRUMB_RESOLVERS } from './breadcrumbResolvers';
  */
 const SEGMENT_KEYS: Record<string, string> = {
   dashboard: 'dashboard',
+  iam: 'iam',
   overview: 'overview',
   tracing: 'tracing',
   models: 'models',

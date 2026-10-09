@@ -1,0 +1,214 @@
+/* Policy editor: action matrix, Cedar viewer, summary lines. Colors come from the design-system tokens so light/dark both work. */
+
+.matrix {
+  border: 1px solid var(--ds-border-soft);
+  border-radius: var(--ds-r-md);
+  background: var(--ds-surface-raised);
+  overflow: hidden;
+}
+
+.matrixScroll {
+  max-height: 420px;
+  overflow-y: auto;
+  /* the form scrolls too: do not hand the wheel to it at the end of the list */
+  overscroll-behavior: contain;
+}
+
+.category {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 12px;
+  background: var(--ds-surface-1);
+  border-bottom: 1px solid var(--ds-border-soft);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ds-text-faint);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row:hover {
+  background: var(--ds-surface-1);
+}
+
+.rowAll {
+  background: var(--ds-surface-1);
+}
+
+.rowName {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ds-text);
+}
+
+.rowName small {
+  display: block;
+  font-size: 11px;
+  color: var(--ds-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 11px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ds-text);
+  background: var(--ds-surface-raised);
+  border: 1px solid var(--ds-border-soft);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all var(--ds-m-fast);
+}
+
+.chip:hover:not(:disabled) {
+  border-color: var(--ds-border-hover);
+}
+
+.chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.chipOn {
+  background: var(--ds-accent-soft);
+  border-color: var(--ds-accent);
+  color: var(--ds-accent);
+  font-weight: 500;
+}
+
+.advancedGroup {
+  border-bottom: 1px solid var(--ds-border-soft);
+  padding: 8px 12px 10px;
+}
+
+.advancedGroup:last-child {
+  border-bottom: none;
+}
+
+.advancedTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ds-text);
+  margin-bottom: 6px;
+}
+
+.advancedGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px 14px;
+}
+
+.advancedItem code {
+  margin-left: 4px;
+  font-size: 10.5px;
+  color: var(--ds-text-muted);
+}
+
+.selectedBox {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+/* Cedar viewer (uses the shared .ds-code-block surface) */
+.cedar {
+  padding: 12px 0;
+  max-height: 320px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.cedarLine {
+  display: flex;
+  gap: 10px;
+  padding: 0 12px;
+  /* keep the indentation, wrap what does not fit (ids make for long lines) */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cedarLine > span:last-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cedarLineNum {
+  flex: 0 0 24px;
+  text-align: right;
+  color: rgba(255, 255, 255, 0.28);
+  user-select: none;
+}
+
+.cedarLineErr {
+  background: rgba(255, 90, 90, 0.18);
+  box-shadow: inset 2px 0 0 #ff6b6b;
+}
+
+.errorList {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ds-err);
+}
+
+.errorList li span {
+  color: var(--ds-text-muted);
+  font-family: var(--font-mono);
+  margin-right: 6px;
+}
+
+.rawEditor textarea {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.flipUp {
+  color: var(--ds-ok);
+}
+
+.flipDown {
+  color: var(--ds-err);
+}
+
+@media (max-width: 560px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chips {
+    justify-content: flex-start;
+  }
+}

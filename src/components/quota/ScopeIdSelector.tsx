@@ -1,130 +1,116 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Select, TextInput, Loader } from '@mantine/core';
-import type { QuotaScope } from '@/lib/quota/types';
+import { Select, TextInput } from '@mantine/core';
+import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
 import { useTranslations } from '@/lib/i18n';
+import { PrincipalSelect } from './PrincipalSelect';
+import type { PickerOption } from './pickerSources';
 
 interface ScopeIdSelectorProps {
   scope: QuotaScope;
+  /** Needed to tell an agent-narrowed limit (resource scope in the agent domain) from any other resource. */
+  domain?: QuotaDomain;
   value?: string;
-  onChange: (value: string | undefined) => void;
+  /** The saved name of `value`, shown until the picker has loaded anything. */
+  valueLabel?: string;
+  onChange: (value: string | undefined, option?: PickerOption) => void;
+  /** The name of the chosen user / group / token / agent, as the picker knows it. */
+  onLabelChange?: (label: string | undefined) => void;
   resourceType?: 'model' | 'vectorIndex' | 'provider';
   resourceOptions?: { value: string; label: string }[];
   disabled?: boolean;
 }
 
-interface UserOption {
-  value: string;
-  label: string;
-}
-
-interface TokenOption {
-  value: string;
-  label: string;
-}
-
+/**
+ * The "who / what does this limit point at" field. Users, groups, API tokens and
+ * agents are found by searching (the tenant may have tens of thousands of
+ * users), everything else is a plain list or text.
+ */
 export function ScopeIdSelector({
   scope,
+  domain,
   value,
+  valueLabel,
   onChange,
+  onLabelChange,
   resourceOptions = [],
   disabled = false,
 }: ScopeIdSelectorProps) {
   const t = useTranslations('settings.quotaSection.form');
-  
-  const [users, setUsers] = useState<UserOption[]>([]);
-  const [tokens, setTokens] = useState<TokenOption[]>([]);
-  const [loadingUsers, setLoadingUsers] = useState(false);
-  const [loadingTokens, setLoadingTokens] = useState(false);
 
-  // Fetch users when scope is 'user'
-  useEffect(() => {
-    if (scope === 'user') {
-      setLoadingUsers(true);
-      fetch('/api/users')
-        .then((res) => res.json())
-        .then((data) => {
-          const userOptions = (data.users || []).map((u: { _id: string; name: string; email: string }) => ({
-            value: u._id,
-            label: `${u.name} (${u.email})`,
-          }));
-          setUsers(userOptions);
-        })
-        .catch(() => setUsers([]))
-        .finally(() => setLoadingUsers(false));
-    }
-  }, [scope]);
-
-  // Fetch tokens when scope is 'token'
-  useEffect(() => {
-    if (scope === 'token') {
-      setLoadingTokens(true);
-      fetch('/api/tokens')
-        .then((res) => res.json())
-        .then((data) => {
-          const tokenOptions = (data.tokens || []).map((tok: { _id: string; label: string }) => ({
-            value: tok._id,
-            label: tok.label,
-          }));
-          setTokens(tokenOptions);
-        })
-        .catch(() => setTokens([]))
-        .finally(() => setLoadingTokens(false));
-    }
-  }, [scope]);
+  // The editor wraps this field in its own labelled FormField, so the controls
+  // below carry no label or description of their own.
 
   // Tenant scope doesn't need a selector
   if (scope === 'tenant') {
     return null;
   }
 
-  // User scope - dropdown with users
   if (scope === 'user') {
     return (
-      <Select
-        label={t('scopeId')}
+      <PrincipalSelect
+        type="user"
         placeholder={t('selectUser')}
-        description={t('scopeIdDescription')}
-        data={users}
-        value={value || null}
-        onChange={(v) => onChange(v || undefined)}
-        searchable
-        clearable
-        disabled={disabled}
-        rightSection={loadingUsers ? <Loader size="xs" /> : undefined}
         nothingFoundMessage={t('noUsersFound')}
+        value={value}
+        valueLabel={valueLabel}
+        onChange={onChange}
+        onLabelChange={onLabelChange}
+        disabled={disabled}
       />
     );
   }
 
-  // Token scope - dropdown with tokens
+  if (scope === 'group') {
+    return (
+      <PrincipalSelect
+        type="group"
+        placeholder={t('selectGroup')}
+        nothingFoundMessage={t('noGroupsFound')}
+        value={value}
+        valueLabel={valueLabel}
+        onChange={onChange}
+        onLabelChange={onLabelChange}
+        disabled={disabled}
+      />
+    );
+  }
+
   if (scope === 'token') {
     return (
-      <Select
-        label={t('scopeId')}
+      <PrincipalSelect
+        type="token"
         placeholder={t('selectToken')}
-        description={t('scopeIdDescription')}
-        data={tokens}
-        value={value || null}
-        onChange={(v) => onChange(v || undefined)}
-        searchable
-        clearable
-        disabled={disabled}
-        rightSection={loadingTokens ? <Loader size="xs" /> : undefined}
         nothingFoundMessage={t('noTokensFound')}
+        value={value}
+        valueLabel={valueLabel}
+        onChange={onChange}
+        onLabelChange={onLabelChange}
+        disabled={disabled}
       />
     );
   }
 
-  // Resource scope - dropdown with provided resources
   if (scope === 'resource') {
+    // In the agent domain a resource limit is a limit on ONE AGENT.
+    if (domain === 'agent') {
+      return (
+        <PrincipalSelect
+          type="agent"
+          placeholder={t('selectAgent')}
+          nothingFoundMessage={t('noAgentsFound')}
+          value={value}
+          valueLabel={valueLabel}
+          onChange={onChange}
+          onLabelChange={onLabelChange}
+          disabled={disabled}
+        />
+      );
+    }
     if (resourceOptions.length > 0) {
       return (
         <Select
-          label={t('scopeId')}
           placeholder={t('selectResource')}
-          description={t('scopeIdDescription')}
           data={resourceOptions}
           value={value || null}
           onChange={(v) => onChange(v || undefined)}
@@ -138,9 +124,7 @@ export function ScopeIdSelector({
     // Fallback to text input if no options provided
     return (
       <TextInput
-        label={t('scopeId')}
         placeholder={t('scopeIdPlaceholder')}
-        description={t('scopeIdDescription')}
         value={value || ''}
         onChange={(e) => onChange(e.currentTarget.value || undefined)}
         disabled={disabled}
@@ -152,9 +136,7 @@ export function ScopeIdSelector({
   if (scope === 'provider') {
     return (
       <TextInput
-        label={t('scopeId')}
         placeholder={t('scopeIdPlaceholder')}
-        description={t('scopeIdDescription')}
         value={value || ''}
         onChange={(e) => onChange(e.currentTarget.value || undefined)}
         disabled={disabled}

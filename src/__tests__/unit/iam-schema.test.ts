@@ -107,7 +107,7 @@ describe('generated schema', () => {
       expect.arrayContaining(['Tenant', 'Project', 'Group', 'User', 'ApiToken', 'Service', 'Agent', 'Portal']),
     );
     expect(Object.keys(ns.entityTypes.User.shape.attributes).sort()).toEqual(
-      ['adminProjects', 'adminSvcs', 'projects', 'readSvcs', 'role', 'writeSvcs'],
+      ['adminProjects', 'adminSvcs', 'projDenyAdmin', 'projDenyRead', 'projDenyWrite', 'projects', 'readSvcs', 'role', 'writeSvcs'],
     );
     expect(ns.entityTypes.User.memberOfTypes).toEqual(['Group']);
     expect(ns.entityTypes.Project.memberOfTypes).toEqual(['Tenant']);
@@ -155,13 +155,50 @@ describe('custom policy validation', () => {
 
   it('accepts several statements and rejects any invalid one', () => {
     const ok = validateCustomPolicyText(
-      'forbid(principal, action == Action::"agent.delete", resource is Agent);\nforbid(principal, action == Action::"tool.delete", resource is Tool);',
+      'forbid(principal, action == Action::"models.write", resource is Service);\nforbid(principal, action == Action::"tools.write", resource);',
     );
     expect(ok.valid).toBe(true);
     expect(ok.statements).toHaveLength(2);
     expect(
-      validateCustomPolicyText('forbid(principal, action == Action::"agent.delete", resource is Agent);\nforbid(principal, action == Action::"nope.nope", resource);').valid,
+      validateCustomPolicyText('forbid(principal, action == Action::"models.write", resource is Service);\nforbid(principal, action == Action::"nope.nope", resource);').valid,
     ).toBe(false);
+  });
+
+  it('refuses a forbid the request gates can never match, and only warns about such a permit', () => {
+    // The gates ask about whole services (`<service>.read|write|admin` on `Service::"x"`): a deny rule
+    // limited to one resource, or to resource-level actions, would look like protection and be none.
+    const onlyResourceActions = validateCustomPolicyText('forbid(principal, action == Action::"agent.delete", resource);');
+    expect(onlyResourceActions.valid).toBe(false);
+    expect(onlyResourceActions.errors[0].message).toMatch(/individual resources/);
+    const manyResourceActions = validateCustomPolicyText('forbid(principal, action in [Action::"agent.delete", Action::"tool.delete"], resource);');
+    expect(manyResourceActions.valid).toBe(false);
+    const onResource = validateCustomPolicyText('forbid(principal, action, resource == Agent::"a1");');
+    expect(onResource.valid).toBe(false);
+    expect(onResource.errors[0].message).toMatch(/whole services/);
+    const onProjectScope = validateCustomPolicyText('forbid(principal, action, resource in Project::"p1");');
+    expect(onProjectScope.valid).toBe(false);
+    const isAgent = validateCustomPolicyText('forbid(principal, action, resource is Agent);');
+    expect(isAgent.valid).toBe(false);
+
+    // Reachable forms stay valid: a level group, a service action, a Service resource, a `when` on a project.
+    for (const text of [
+      'forbid(principal, action in Action::"Write", resource);',
+      'forbid(principal, action in [Action::"agent.delete", Action::"Write"], resource);',
+      'forbid(principal, action == Action::"models.write", resource is Service);',
+      'forbid(principal, action, resource) when { resource in [Project::"p1"] || (resource is Service && context has projectId && context.projectId == "p1") };',
+    ]) {
+      expect(validateCustomPolicyText(text).valid, text).toBe(true);
+    }
+
+    // A permit with the same shape is harmless: saved, with a warning.
+    const permit = validateCustomPolicyText('permit(principal, action == Action::"agent.invoke", resource == Agent::"a1");');
+    expect(permit.valid).toBe(true);
+    expect(permit.warnings.some((w) => /never grant/.test(w.message))).toBe(true);
+
+    // The statement number is named when a policy has several.
+    const several = validateCustomPolicyText('forbid(principal, action == Action::"models.write", resource);\nforbid(principal, action == Action::"agent.delete", resource);');
+    expect(several.valid).toBe(false);
+    expect(several.errors[0].message).toMatch(/statement 2/);
   });
 
   it('rejects unknown attributes, unknown entity types, wrong types and parse errors', () => {

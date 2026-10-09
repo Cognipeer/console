@@ -33,11 +33,13 @@ import {
   type ServicePermissionLevel,
   type UserServicePermissions,
 } from '@/lib/security/rbac';
-import { authorizeGate, type AuthorizeResult } from './engine';
+import { gateActionId, serviceActionId } from './actions';
+import { authorizeGate, customPolicyIdsOf, type AuthorizeResult } from './engine';
 import { tokenPrincipal, userLevelSets, userPrincipal, type IamPrincipal } from './entities';
 import type { RouteAuthzLevel } from './routeAuthz';
-import { narrowedLevelSets, resolveNarrowingMembership } from './projectNarrowing';
+import { getDefaultProjectId, narrowedLevelSets, projectDenySets, resolveNarrowingMembership, type NarrowingResult } from './projectNarrowing';
 import { getPrincipalContext } from './principalCache';
+import { recordPolicyMonitor } from './shadow/policyMonitor';
 
 const logger = createLogger('iam:enforce');
 
@@ -57,12 +59,28 @@ export interface EnforceGateInput {
   groupGrants: GroupTenantGrant[];
   tokenId?: string;
   tokenScope?: UserServicePermissions | null;
-  /** Cookie `active_project_id` (session) or the token's resolved project. */
+  /** The project the route path names, else cookie `active_project_id` (session) or the token's resolved project. */
   requestedProjectId?: string | null;
+  /**
+   * `requestedProjectId` came from the route path (`/projects/:projectId/...`): the
+   * request acts ON that project, so it is the policy context and the only project
+   * whose narrowing applies - never a cookie-chosen or fallback project.
+   */
+  projectFromPath?: boolean;
   service: PermissionService;
   level?: RouteAuthzLevel;
   /** The legacy decision for the same request (fallback + owner safety). */
   legacyAllowed: boolean;
+  /** Caller address as the server's trust-proxy setting resolves it (`request.ip`); policy context `ip`. */
+  ip?: string | null;
+  /** Canonical request path (no query string); policy context `path`. */
+  path?: string;
+  /**
+   * Evaluate outside any project: no project narrowing and no default-project
+   * fallback. Only the Authorization center sets it ("what can this person do in
+   * the workspace itself, before a project limits it?"); the gates never do.
+   */
+  skipProjectNarrowing?: boolean;
 }
 
 export type EnforceDecision =
@@ -73,6 +91,15 @@ export type EnforceDecision =
       service: PermissionService;
       required: ServicePermissionLevel;
       decisionId: string;
+      /**
+       * Engine denials only - for the audit row, never for the caller: the gate
+       * action that was evaluated, the project context, and what decided it (Cedar
+       * ids and the custom policies among them; empty = default deny).
+       */
+      action?: string;
+      projectId?: string | null;
+      reasons?: string[];
+      policyIds?: string[];
     };
 
 // ── metrics ──────────────────────────────────────────────────────────────
@@ -204,6 +231,13 @@ export function forbiddenBody(denial: Extract<EnforceDecision, { allowed: false 
 
 /** The target-semantics principal of this request (groups, project narrowing, token cap). */
 export async function buildEnforcePrincipal(input: EnforceGateInput): Promise<IamPrincipal> {
+  return (await buildEnforcePrincipalWithNarrowing(input)).principal;
+}
+
+/** Like buildEnforcePrincipal, plus the project membership that narrowed it (null when nothing did). */
+export async function buildEnforcePrincipalWithNarrowing(
+  input: EnforceGateInput,
+): Promise<{ principal: IamPrincipal; narrowing: NarrowingResult | null }> {
   const ctx = await getPrincipalContext({
     tenantDbName: input.tenantDbName,
     tenantId: input.tenantId,
@@ -215,16 +249,18 @@ export async function buildEnforcePrincipal(input: EnforceGateInput): Promise<Ia
   // tokens use the owner's grants from the principal context (decision 1).
   const grants = input.subject === 'session' ? input.groupGrants : ctx.groupGrants;
 
-  const narrowing = await resolveNarrowingMembership({
-    tenantDbName: input.tenantDbName,
-    tenantId: input.tenantId,
-    userId: input.userId,
-    role: typeof input.user.role === 'string' ? input.user.role : '',
-    user: input.user,
-    groupGrants: grants,
-    requestedProjectId: input.requestedProjectId,
-    exactProject: input.subject === 'token',
-  });
+  const narrowing = input.skipProjectNarrowing
+    ? null
+    : await resolveNarrowingMembership({
+      tenantDbName: input.tenantDbName,
+      tenantId: input.tenantId,
+      userId: input.userId,
+      role: typeof input.user.role === 'string' ? input.user.role : '',
+      user: input.user,
+      groupGrants: grants,
+      requestedProjectId: input.requestedProjectId,
+      exactProject: input.subject === 'token' || input.projectFromPath === true,
+    });
 
   const owner: IamPrincipal = {
     ...userPrincipal({
@@ -238,16 +274,27 @@ export async function buildEnforcePrincipal(input: EnforceGateInput): Promise<Ia
     sets: narrowing
       ? narrowedLevelSets(input.user, grants, narrowing.membership)
       : userLevelSets(input.user, grants),
+    // The narrowing also as deny sets, so a custom permit cannot exceed it (boundary forbids).
+    ...(narrowing ? { projDeny: projectDenySets(narrowing.membership) } : {}),
+    // The project the handler will run in: what `context.projectId` means to a policy.
+    contextProjectId: narrowing?.projectId ?? input.requestedProjectId ?? null,
   };
-  if (input.subject === 'token') {
-    return tokenPrincipal({
-      tokenId: input.tokenId ?? 'unknown',
-      owner,
-      scope: input.tokenScope,
-      projectId: narrowing?.projectId ?? input.requestedProjectId ?? null,
-    });
+  if (!input.skipProjectNarrowing && !owner.contextProjectId && (input.user.role === 'owner' || input.user.role === 'admin')) {
+    // Owners and admins without an active project run in the default one (resolveProjectContext).
+    owner.contextProjectId = await getDefaultProjectId(input.tenantDbName, input.tenantId);
   }
-  return owner;
+  if (input.subject === 'token') {
+    return {
+      narrowing,
+      principal: tokenPrincipal({
+        tokenId: input.tokenId ?? 'unknown',
+        owner,
+        scope: input.tokenScope,
+        projectId: narrowing?.projectId ?? input.requestedProjectId ?? null,
+      }),
+    };
+  }
+  return { principal: owner, narrowing };
 }
 
 /**
@@ -266,8 +313,10 @@ export async function decideEnforced(input: EnforceGateInput): Promise<EnforceDe
   const fromLegacy = (source: EnforceSource): EnforceDecision =>
     input.legacyAllowed ? { allowed: true, source } : deny(source);
 
-  // The owner must always be able to switch the mode back.
-  if (input.service === 'iam' && input.user.role === 'owner') {
+  // The owner must always be able to switch the mode back. That is a promise
+  // about the owner's own signed-in session: an API token that happens to belong
+  // to the owner is an ordinary principal here, so a policy can still restrict it.
+  if (input.subject === 'session' && input.service === 'iam' && input.user.role === 'owner') {
     bump(input.tenantDbName, 'ownerSafety');
     return fromLegacy('owner-safety');
   }
@@ -289,6 +338,13 @@ export async function decideEnforced(input: EnforceGateInput): Promise<EnforceDe
       service: input.service,
       method: input.method,
       level: input.level,
+      context: {
+        projectId: principal.contextProjectId,
+        channel: input.subject === 'session' ? 'dashboard' : 'api',
+        ip: input.ip,
+        method: input.method,
+        path: input.path,
+      },
     });
   } catch (error) {
     recordFallback(input.tenantDbName, 'evaluation_error', error instanceof Error ? error.message : String(error), context);
@@ -300,6 +356,17 @@ export async function decideEnforced(input: EnforceGateInput): Promise<EnforceDe
     return fromLegacy('legacy-fallback');
   }
 
+  // A monitor-mode policy that would have changed this decision: count it (per policy / route / direction).
+  recordPolicyMonitor(input.tenantDbName, result, {
+    service: input.service,
+    method: input.method,
+    route: input.route,
+    requestId: input.requestId,
+    userId: input.userId,
+    tokenId: input.tokenId,
+    role: typeof input.user.role === 'string' ? input.user.role : '',
+  });
+
   bump(input.tenantDbName, 'engineDecisions');
   if (result.allowed) {
     bump(input.tenantDbName, 'engineAllows');
@@ -307,7 +374,13 @@ export async function decideEnforced(input: EnforceGateInput): Promise<EnforceDe
   }
 
   bump(input.tenantDbName, 'engineDenies');
-  const denial = deny('engine') as Extract<EnforceDecision, { allowed: false }>;
+  const denial = {
+    ...(deny('engine') as Extract<EnforceDecision, { allowed: false }>),
+    action: input.level ? serviceActionId(input.service, input.level) : gateActionId(input.service, input.method),
+    projectId: principal.contextProjectId ?? null,
+    reasons: result.reasons.slice(0, 10),
+    policyIds: customPolicyIdsOf(result.reasons).slice(0, 10),
+  };
   logger.info('IAM enforce: request denied', {
     tenantDbName: input.tenantDbName,
     decisionId: denial.decisionId,

@@ -30,7 +30,7 @@ import {
   validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { classifyAgentRunError, logAgentRunFailure } from '@/lib/services/agents/agentErrors';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -334,7 +334,7 @@ function createResponsesHandler(usePublished: boolean) {
         });
         return sendAgentGuardrailBlock(reply, error);
       }
-      logger.error('Client agent responses error', { error });
+      logAgentRunFailure(logger, 'Client agent responses error', error);
       // Which failure it was — a provider rejecting its key, a model that no
       // longer exists, a rate limit — instead of one opaque 500 for all.
       const classified = classifyAgentRunError(error);

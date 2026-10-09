@@ -37,7 +37,9 @@ import {
   validateAgentConfig,
   type AgentConfigIssue,
 } from '@/lib/services/agents/agentConfigValidation';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { classifyAgentRunError, logAgentRunFailure } from '@/lib/services/agents/agentErrors';
+import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from '@/lib/services/agents/agentQuota';
+import { createRunUsageSink, runWithUsageSink } from '@/lib/services/agents/runUsage';
 import {
   AgentManifestError,
   applyAgentManifest,
@@ -1175,6 +1177,30 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     const turn = await prepareDashboardTurn(request, reply);
     if (!turn) return reply;
 
+    // Agent-run quota (domain `agent`). This route runs the playground runtime
+    // directly (below), bypassing the `executePlaygroundChat` wrapper that
+    // counts every other caller, so it counts here — before the stream opens,
+    // which lets an exhausted caller get a real 429 instead of an error event.
+    const quotaCaller: AgentRunCaller = {
+      tenantDbName: turn.run.tenantDbName,
+      tenantId: turn.run.tenantId,
+      projectId: turn.run.projectId,
+      agentKey: turn.run.agentKey,
+      userId: turn.run.runtimeContext?.userId,
+      tokenId: turn.run.runtimeContext?.tokenId,
+    };
+    try {
+      await enforceAgentRunQuota(quotaCaller);
+    } catch (error) {
+      await turn.reservation?.release();
+      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      return reply.code(classified.status).send({
+        error: classified.error.message,
+        type: classified.error.type,
+        code: classified.error.code,
+      });
+    }
+
     applyStreamHeaders(reply);
     reply.raw.flushHeaders?.();
 
@@ -1189,18 +1215,22 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       }
     };
 
+    // A run that fails or is aborted late has still spent its tokens (see runUsage.ts).
+    const usage = createRunUsageSink();
     try {
-      const result = await executePlaygroundChatLocal({
+      const result = await runWithUsageSink(usage, () => executePlaygroundChatLocal({
         ...turn.run,
         onToolEvent: (event) => send('tool', event),
         onTextChunk: (text) => send('text', { text }),
         // The agent summarized its context mid-run: shown in the transcript
         // as it happens, not only once the turn is over.
         onCompaction: (compaction) => send('summary', compaction),
-      });
+      }));
 
+      settleAgentRun(quotaCaller, usage, result.usage?.totalTokens);
       send('result', result);
     } catch (error) {
+      settleAgentRun(quotaCaller, usage);
       // The status line is long gone by now, so the error travels as an
       // event. A client that only listened for `result` would otherwise hang
       // until the socket closed and call it a network fault.
@@ -1211,7 +1241,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         });
         send('error', { error: error.message, type: 'guardrail_block' });
       } else {
-        logger.error('Agent playground stream error', { error });
+        logAgentRunFailure(logger, 'Agent playground stream error', error);
         const classified = classifyAgentRunError(error, { exposeInternal: true });
         send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
@@ -1258,7 +1288,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           hook: error.hook,
         });
       } else {
-        logger.error('Agent playground chat error', { error });
+        logAgentRunFailure(logger, 'Agent playground chat error', error);
       }
       const classified = classifyAgentRunError(error, { exposeInternal: true });
       return sendAgentGuardrailBlock(reply, error)

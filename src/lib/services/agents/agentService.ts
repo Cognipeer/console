@@ -105,6 +105,8 @@ import { withAssembledStream } from './assembledStream';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from './agentQuota';
+import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
 import {
@@ -2906,33 +2908,75 @@ export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
     };
 }
 
+/**
+ * Who a run is for, as the agent-run quota (domain `agent`) sees it. The
+ * runtime context carries the identity the server stamped on the request — the
+ * dashboard user, a portal user, an API token and its owner — so a run entry
+ * point that has no `userId` field of its own is still attributed.
+ */
+function agentRunCallerOf(request: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    userId?: string;
+    runtimeContext?: AgentRuntimeContext;
+}): AgentRunCaller {
+    return {
+        tenantDbName: request.tenantDbName,
+        tenantId: request.tenantId,
+        projectId: request.projectId,
+        agentKey: request.agentKey,
+        userId: request.userId || request.runtimeContext?.userId,
+        tokenId: request.runtimeContext?.tokenId,
+    };
+}
+
 export async function executeAgentChat(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    // Agent-run quota: refuse before any work, count the tokens after. This is
+    // the one place every sync entry point passes (see agentQuota.ts); the
+    // queue consumer and background worker call the Local variant instead, so
+    // a run is never counted twice.
+    const caller = agentRunCallerOf(request);
+    await enforceAgentRunQuota(caller);
+
     // The callback and the signal cannot be serialized over the queue —
     // stripped from the payload, kept on the local fast path, and bridged by
     // the cluster stream relay when the run is routed.
     const payload = { ...request };
     delete payload.onTextChunk;
     delete payload.signal;
-    return routeInstanceCall(
-        {
-            entityType: 'agent',
-            entityId: agentEntityId(request.tenantId, request.agentKey),
-            jobName: 'chat',
-        },
-        payload as unknown as QueuePayload,
-        () => executeAgentChatLocal(request),
-        {
-            relay: agentRelayOptions(request),
-            // A routed turn with a ceiling waits exactly as long as the ceiling
-            // allows and is never retried: the queue default (60s, 3 attempts)
-            // cut long turns off early and could re-run a turn's tool calls.
-            ...(request.cancellationCell?.deadlineAt !== undefined
-                ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
-                : {}),
-        },
-    );
+    // What the run's model calls spend is tallied as they happen, so a run that fails or
+    // is aborted late is still charged (see runUsage.ts).
+    const usage = createRunUsageSink();
+    let response: AgentChatResponse;
+    try {
+        response = await runWithUsageSink(usage, () => routeInstanceCall(
+            {
+                entityType: 'agent',
+                entityId: agentEntityId(request.tenantId, request.agentKey),
+                jobName: 'chat',
+            },
+            payload as unknown as QueuePayload,
+            () => executeAgentChatLocal(request),
+            {
+                relay: agentRelayOptions(request),
+                // A routed turn with a ceiling waits exactly as long as the ceiling
+                // allows and is never retried: the queue default (60s, 3 attempts)
+                // cut long turns off early and could re-run a turn's tool calls.
+                ...(request.cancellationCell?.deadlineAt !== undefined
+                    ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
+                    : {}),
+            },
+        ));
+    } catch (error) {
+        settleAgentRun(caller, usage);
+        throw error;
+    }
+    settleAgentRun(caller, usage, response.usage?.total_tokens);
+    return response;
 }
 
 /**
@@ -3651,6 +3695,12 @@ export async function executeAgentChatLocal(
 export async function executePlaygroundChat(
     request: AgentPlaygroundChatRequest,
 ): Promise<AgentPlaygroundChatResult> {
+    // Agent-run quota (domain `agent`): this is the entry the dashboard chat,
+    // portals and realtime voice share; the caller is the one the server
+    // stamped into the runtime context. See agentQuota.ts.
+    const caller = agentRunCallerOf(request);
+    await enforceAgentRunQuota(caller);
+
     // Callbacks and the signal can't serialize over the queue — kept out of
     // the payload (the local fast path still receives the full request) and
     // bridged by the cluster stream relay when the run is routed.
@@ -3659,16 +3709,25 @@ export async function executePlaygroundChat(
     delete payload.onTextChunk;
     delete payload.onCompaction;
     delete payload.signal;
-    return routeInstanceCall(
-        {
-            entityType: 'agent',
-            entityId: agentEntityId(request.tenantId, request.agentKey),
-            jobName: 'playground',
-        },
-        payload as unknown as QueuePayload,
-        () => executePlaygroundChatLocal(request),
-        { relay: agentRelayOptions(request) },
-    );
+    const usage = createRunUsageSink();
+    let result: AgentPlaygroundChatResult;
+    try {
+        result = await runWithUsageSink(usage, () => routeInstanceCall(
+            {
+                entityType: 'agent',
+                entityId: agentEntityId(request.tenantId, request.agentKey),
+                jobName: 'playground',
+            },
+            payload as unknown as QueuePayload,
+            () => executePlaygroundChatLocal(request),
+            { relay: agentRelayOptions(request) },
+        ));
+    } catch (error) {
+        settleAgentRun(caller, usage);
+        throw error;
+    }
+    settleAgentRun(caller, usage, result.usage?.totalTokens);
+    return result;
 }
 
 

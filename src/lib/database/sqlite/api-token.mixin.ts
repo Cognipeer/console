@@ -15,8 +15,8 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const now = this.now();
 
       db.prepare(`
-        INSERT INTO ${TABLES.apiTokens} (id, userId, tenantId, projectId, label, tokenHash, tokenPrefix, servicePermissions, createdBy, lastUsed, createdAt, expiresAt)
-        VALUES (@id, @userId, @tenantId, @projectId, @label, @tokenHash, @tokenPrefix, @servicePermissions, @createdBy, @lastUsed, @createdAt, @expiresAt)
+        INSERT INTO ${TABLES.apiTokens} (id, userId, tenantId, projectId, label, tokenHash, tokenPrefix, servicePermissions, createdBy, lastUsed, createdAt, expiresAt, allowedIpRanges)
+        VALUES (@id, @userId, @tenantId, @projectId, @label, @tokenHash, @tokenPrefix, @servicePermissions, @createdBy, @lastUsed, @createdAt, @expiresAt, @allowedIpRanges)
       `).run({
         id,
         userId: tokenData.userId,
@@ -32,6 +32,10 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         lastUsed: tokenData.lastUsed?.toISOString() ?? null,
         createdAt: now,
         expiresAt: tokenData.expiresAt?.toISOString() ?? null,
+        // JSON array of CIDR strings; NULL = unrestricted (every pre-existing row).
+        allowedIpRanges: tokenData.allowedIpRanges?.length
+          ? JSON.stringify(tokenData.allowedIpRanges)
+          : null,
       });
 
       return { ...tokenData, _id: id, createdAt: new Date(now) };
@@ -63,6 +67,43 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const row = db.prepare(`SELECT * FROM ${TABLES.apiTokens} WHERE tokenHash = @tokenHash`)
         .get({ tokenHash }) as SqliteRow | undefined;
       return row ? this.mapTokenRow(row) : null;
+    }
+
+    async findApiTokenById(id: string, tenantId: string): Promise<IApiToken | null> {
+      const db = this.getMainDb();
+      const row = db.prepare(`SELECT * FROM ${TABLES.apiTokens} WHERE id = @id AND tenantId = @tenantId`)
+        .get({ id, tenantId }) as SqliteRow | undefined;
+      return row ? this.mapTokenRow(row) : null;
+    }
+
+    async updateApiToken(
+      id: string,
+      tenantId: string,
+      data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null },
+    ): Promise<IApiToken | null> {
+      const db = this.getMainDb();
+      // Column names are fixed literals; only values are bound.
+      const sets: string[] = [];
+      const params: Record<string, unknown> = { id, tenantId };
+      if (data.label !== undefined) {
+        sets.push('label = @label');
+        params.label = data.label;
+      }
+      if (data.expiresAt !== undefined) {
+        sets.push('expiresAt = @expiresAt');
+        params.expiresAt = data.expiresAt ? data.expiresAt.toISOString() : null;
+      }
+      if (data.allowedIpRanges !== undefined) {
+        sets.push('allowedIpRanges = @allowedIpRanges');
+        params.allowedIpRanges = data.allowedIpRanges?.length ? JSON.stringify(data.allowedIpRanges) : null;
+      }
+      if (sets.length > 0) {
+        const result = db
+          .prepare(`UPDATE ${TABLES.apiTokens} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId`)
+          .run(params);
+        if (result.changes === 0) return null;
+      }
+      return this.findApiTokenById(id, tenantId);
     }
 
     async deleteApiToken(id: string, userId: string): Promise<boolean> {
@@ -109,7 +150,26 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         lastUsed: this.toDate(r.lastUsed),
         createdAt: this.toDate(r.createdAt),
         expiresAt: this.toDate(r.expiresAt),
+        allowedIpRanges: this.parseAllowedIpRanges(r.allowedIpRanges),
       };
+    }
+
+    /**
+     * The stored allowlist. NULL / empty = unrestricted. A value that is not a
+     * JSON array of strings is NOT read as unrestricted: it comes back as a
+     * list whose entries cannot match anything, so a damaged restriction
+     * denies instead of silently unlocking the token.
+     */
+    protected parseAllowedIpRanges(raw: unknown): string[] | null {
+      if (raw === null || raw === undefined || raw === '') return null;
+      if (typeof raw !== 'string') return [String(raw)];
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.length === 0 ? null : parsed.map((item) => String(item));
+        return [String(parsed)];
+      } catch {
+        return [raw];
+      }
     }
   };
 }

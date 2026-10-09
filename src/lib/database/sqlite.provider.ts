@@ -54,6 +54,7 @@ import { ClusterMixin } from './sqlite/cluster.mixin';
 import { BetaAccessCodeMixin } from './sqlite/beta-access-code.mixin';
 import { IamInvalidationMixin } from './iam-invalidation.mixin';
 import { IamDocsMixin } from './sqlite/iam-docs.mixin';
+import { IamDirectoryMixin } from './sqlite/iam-directory.mixin';
 import { applyEnterpriseSqliteDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -95,7 +96,7 @@ const ClusterBase = ClusterMixin(PricingBase);
 const SignupBase = BetaAccessCodeMixin(ClusterBase);
 
 // Group 8 – IAM document store (tenant-scoped, lazily created collections/tables)
-const IamBase = IamDocsMixin(SignupBase);
+const IamBase = IamDirectoryMixin(IamDocsMixin(SignupBase));
 
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the

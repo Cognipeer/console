@@ -18,7 +18,7 @@ import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
 import { applyCorsHeaders } from './cors';
-import { rejectInactiveSessionAccount } from './fastify-utils';
+import { getClientIp, rejectInactiveSessionAccount } from './fastify-utils';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
@@ -239,12 +239,6 @@ function getHeaderString(request: FastifyRequest, name: string): string | undefi
   return undefined;
 }
 
-function getClientIp(request: FastifyRequest): string {
-  const forwarded = getHeaderString(request, 'x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0]?.trim() || 'unknown';
-  return getHeaderString(request, 'x-real-ip') ?? request.ip ?? 'unknown';
-}
-
 /** The API audit trail writer (the onResponse hook of fastifyApiPlugin); exported for the gate tests. */
 export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
   const pathname = getPathname(request.raw.url);
@@ -261,6 +255,10 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
 
   const statusCode = reply.statusCode;
   if (!shouldAuditRequest(request, statusCode)) {
+    return;
+  }
+  // Read-only POSTs (compute only) are not administrative events; refusals still are.
+  if (request.routeOptions?.config?.skipAuditOnSuccess === true && statusCode < 400) {
     return;
   }
 
@@ -308,6 +306,12 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
               ...(denial.decisionId ? { decisionId: denial.decisionId } : {}),
               ...(denial.service ? { deniedService: denial.service } : {}),
               ...(denial.required ? { required: denial.required } : {}),
+              ...(denial.action ? { action: denial.action } : {}),
+              ...(denial.projectId ? { contextProjectId: denial.projectId } : {}),
+              // The address the policy engine evaluated (the one a replay must use), not the audit IP.
+              ...(denial.ip ? { contextIp: denial.ip } : {}),
+              ...(denial.reasons?.length ? { reasons: denial.reasons } : {}),
+              ...(denial.policyIds?.length ? { policyIds: denial.policyIds } : {}),
             },
           }
         : {}),

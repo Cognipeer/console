@@ -34,7 +34,7 @@ import {
   type RbacUserLike,
   type ServicePermissionLevel,
 } from '@/lib/security/rbac';
-import { levelSets, type LevelSets } from './entities';
+import { SERVICE_IDS, levelSets, type LevelSets, type ProjectDenySets } from './entities';
 import { getPrincipalContext } from './principalCache';
 import { resolveProjectMembershipCached } from './shadow/projectMembership';
 
@@ -53,6 +53,25 @@ export function narrowLevel(
   if (!membership) return tenantLevel;
   const explicit = normalizeServicePermissions(membership.servicePermissions)[service];
   return explicit ? minPermission(tenantLevel, explicit) : tenantLevel;
+}
+
+/**
+ * The services an (optional) project membership denies at each level: those with
+ * an EXPLICIT project setting below that level. A service the project says
+ * nothing about is never denied here, exactly like `narrowLevel`.
+ */
+export function projectDenySets(membership: RbacProjectLike | null | undefined): ProjectDenySets {
+  const deny: ProjectDenySets = { read: [], write: [], admin: [] };
+  if (!membership) return deny;
+  const explicit = normalizeServicePermissions(membership.servicePermissions);
+  for (const service of SERVICE_IDS) {
+    const level = explicit[service];
+    if (!level) continue;
+    if (level === 'none') deny.read.push(service);
+    if (level === 'none' || level === 'read') deny.write.push(service);
+    if (level !== 'admin') deny.admin.push(service);
+  }
+  return deny;
 }
 
 /** The principal's level sets with the project narrowing applied. */
@@ -98,6 +117,19 @@ async function lookupDefaultProjectId(tenantDbName: string, tenantId: string): P
   }
   defaultProjectCache.set(tenantDbName, { id, expiresAt: Date.now() + DEFAULT_PROJECT_TTL_MS });
   return id;
+}
+
+/**
+ * The tenant's default project (cached 60 s), or null. Owners and admins run in
+ * it when they have no active project - which is what a policy that names a
+ * project has to see as `context.projectId`.
+ */
+export async function getDefaultProjectId(tenantDbName: string, tenantId: string): Promise<string | null> {
+  try {
+    return await lookupDefaultProjectId(tenantDbName, tenantId);
+  } catch {
+    return null;
+  }
 }
 
 export function resetProjectNarrowingCachesForTests(): void {

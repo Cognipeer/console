@@ -1662,3 +1662,70 @@ export interface IIamDoc {
   data: Record<string, unknown>;
   updatedAt: Date;
 }
+
+// ── IAM directory queries (read-only, paged server-side) ──────────────────
+// What the Authorization center needs to browse ~20K employees without loading
+// them all: searchable, offset-paged listings of users, groups, API tokens and
+// audit events. `hasMore` is computed by reading one row past the page. Rows are
+// returned in the usual domain shapes, except that a user's `password` is blanked.
+
+export interface IamPageRequest {
+  /** 1..200. */
+  limit: number;
+  offset?: number;
+}
+
+export interface IamPage<T> {
+  items: T[];
+  hasMore: boolean;
+}
+
+export interface IamUserQuery extends IamPageRequest {
+  tenantId: string;
+  /** Case-insensitive substring of name or email. */
+  q?: string;
+  roles?: string[];
+  /** 'active' includes accounts that never had a status. */
+  status?: 'active' | 'disabled';
+  /** Restrict to these ids (at most 500). */
+  ids?: string[];
+}
+
+export interface IamGroupQuery extends IamPageRequest {
+  tenantId: string;
+  q?: string;
+  ids?: string[];
+}
+
+export interface IamTokenQuery extends IamPageRequest {
+  tenantId: string;
+  /** Case-insensitive substring of the label or the visible prefix. */
+  q?: string;
+  userId?: string;
+  projectId?: string;
+  ids?: string[];
+}
+
+export interface IamAuditQuery extends IamPageRequest {
+  tenantId: string;
+  from?: Date;
+  to?: Date;
+  service?: string;
+  outcome?: 'success' | 'failure' | 'denied';
+  actorUserId?: string;
+  /** actorUserId IN (...) - at most 5000 (a group's members). */
+  actorUserIds?: string[];
+  apiTokenId?: string;
+  /** resourceType IN (...) */
+  resourceTypes?: string[];
+  /**
+   * Also match rows with one of these events, whatever `service` / `resourceTypes`
+   * say: the filter becomes (service AND resourceType IN ...) OR event IN (...).
+   * Every other filter (tenant, dates, outcome, actor) still applies to both sides.
+   */
+  alsoEvents?: string[];
+  /** MongoDB only: stop the server-side scan after this many milliseconds (SQLite ignores it). */
+  maxTimeMs?: number;
+  /** Exact match on one top-level metadata key (`key` is [A-Za-z_][A-Za-z0-9_]*). */
+  metadata?: { key: string; value: string | number | boolean };
+}

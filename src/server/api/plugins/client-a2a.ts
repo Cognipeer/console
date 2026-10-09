@@ -20,7 +20,7 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
  * `tasks/get` can rebuild it without a separate task collection.
  */
 
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { classifyAgentRunError, logAgentRunFailure } from '@/lib/services/agents/agentErrors';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
@@ -333,7 +333,7 @@ export async function handleA2aRpc(
 
     return reply.code(200).send(jsonRpcError(rpcId, -32601, `Method not found: ${method}`));
   } catch (error) {
-    logger.error('A2A request error', { error });
+    logAgentRunFailure(logger, 'A2A request error', error);
     const classified = classifyAgentRunError(error);
     return reply.code(200).send(jsonRpcError(rpcId, -32603, classified.error.message, {
       type: classified.error.type,

@@ -19,6 +19,7 @@
 import { createLogger } from '@/lib/core/logger';
 import type { IModel } from '@/lib/database';
 import { logModelUsage, type TokenUsage } from '@/lib/services/models/usageLogger';
+import { addRunUsage } from './runUsage';
 
 const logger = createLogger('agent-model-usage');
 
@@ -97,6 +98,8 @@ function record(
     outcome: { status: 'success' | 'error' | 'cancelled'; message?: unknown; error?: unknown; startedAt: number; streamed: boolean },
 ) {
     const usage = extractTokenUsage(outcome.message) ?? {};
+    // The run in progress (if any) is charged for what this call spent, however the run ends.
+    addRunUsage(usage.totalTokens);
     const toolCalls = countToolCalls(outcome.message);
     const finishReason = finishReasonOf(outcome.message);
     void logModelUsage(ctx.tenantDbName, ctx.model, {

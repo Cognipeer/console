@@ -129,6 +129,22 @@ export const TABLES = {
   llmPools: 'llm_pools',
 } as const;
 
+// ── Search functions ─────────────────────────────────────────────────
+
+/**
+ * Functions the directory searches call. SQLite's own `LIKE` folds the case of
+ * ASCII letters only, so searching "şule" or "özlem" never found "Şule" or
+ * "Özlem", while MongoDB's case-insensitive `$regex` (Unicode aware) did.
+ * `iam_fold(x) LIKE iam_fold(pattern)` lower-cases with the JavaScript Unicode
+ * mapping on both sides, which makes the two backends answer the same. Accents
+ * are NOT stripped (neither backend does): "sule" does not find "Şule" on either.
+ * Deterministic, so SQLite may cache it within a statement.
+ */
+function registerSearchFunctions(db: Database.Database): void {
+  db.function('iam_fold', { deterministic: true }, (value: unknown) =>
+    value === null || value === undefined ? null : String(value).toLowerCase());
+}
+
 // ── Base class ───────────────────────────────────────────────────────
 
 export class SQLiteProviderBase {
@@ -157,6 +173,7 @@ export class SQLiteProviderBase {
     this.mainDb = new Database(mainPath);
     this.mainDb.pragma('journal_mode = WAL');
     this.mainDb.pragma('foreign_keys = ON');
+    registerSearchFunctions(this.mainDb);
     this.mainDb.exec(MAIN_SCHEMA_SQL);
     this.applyMainMigrations(this.mainDb);
 
@@ -195,6 +212,7 @@ export class SQLiteProviderBase {
     const db = new Database(tenantPath);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
+    registerSearchFunctions(db);
     db.exec(TENANT_SCHEMA_SQL);
     this.applyTenantMigrations(db);
     this.applyTenantIndexes(db);
@@ -303,6 +321,9 @@ export class SQLiteProviderBase {
     // Session user that minted the token — differs from `userId` when an
     // admin mints on behalf of another (e.g. login-disabled) user.
     this.ensureTableColumn(db, TABLES.apiTokens, 'createdBy', 'createdBy TEXT');
+    // Optional per-token network allowlist (JSON array of CIDR strings). Legacy
+    // rows read as NULL = unrestricted, so nothing changes for existing tokens.
+    this.ensureTableColumn(db, TABLES.apiTokens, 'allowedIpRanges', 'allowedIpRanges TEXT');
   }
 
   private applyTenantMigrations(db: Database.Database): void {
@@ -1014,6 +1035,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.users, 'disabledAt', 'disabledAt TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledBy', 'disabledBy TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledReason', 'disabledReason TEXT');
+    // Quota group scope: 'perMember' | 'shared'. Nullable with no default — a
+    // NULL is read back as `undefined`, which the guard treats as perMember, and
+    // only `scope = 'group'` rows carry it, so existing rows need no backfill.
+    this.ensureTableColumn(db, TABLES.quotaPolicies, 'groupMode', 'groupMode TEXT');
     // PII v2 (NLP/dictionary/NER layers): opt-in detection config living
     // alongside categories/customPatterns. Absent/null on old rows, which
     // `mapPiiPolicyRow` reads back as `undefined` — the detector's default

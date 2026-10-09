@@ -4,7 +4,7 @@
  * Dependency-free so the request gate can touch it without loading the engine.
  */
 
-import type { ShadowCategory } from './types';
+import type { ShadowEventCategory } from './types';
 
 export interface ShadowMetrics {
   /** Gate observations accepted into the queue. */
@@ -20,7 +20,7 @@ export interface ShadowMetrics {
   /** Disagreements explained by the tenant's own custom policies (not parity bugs). */
   customPolicyDiffs: number;
   /** Events recorded per category since process start. */
-  events: Record<ShadowCategory, number>;
+  events: Record<ShadowEventCategory, number>;
   /** Events discarded because a key/tenant cap was hit. */
   droppedEvents: number;
   /** Distinct keys refused because the per-tenant key cap was reached. */
@@ -37,7 +37,7 @@ export const shadowMetrics: ShadowMetrics = {
   evaluationFailures: 0,
   parityMismatches: 0,
   customPolicyDiffs: 0,
-  events: { 'parity-mismatch': 0, 'token-groups': 0, 'project-narrowing': 0, 'unmapped-path': 0 },
+  events: { 'parity-mismatch': 0, 'token-groups': 0, 'project-narrowing': 0, 'unmapped-path': 0, 'policy-monitor': 0 },
   droppedEvents: 0,
   droppedKeys: 0,
   flushes: 0,
@@ -103,7 +103,7 @@ export function resetShadowMetricsForTests(): void {
   shadowMetrics.evaluationFailures = 0;
   shadowMetrics.parityMismatches = 0;
   shadowMetrics.customPolicyDiffs = 0;
-  shadowMetrics.events = { 'parity-mismatch': 0, 'token-groups': 0, 'project-narrowing': 0, 'unmapped-path': 0 };
+  shadowMetrics.events = { 'parity-mismatch': 0, 'token-groups': 0, 'project-narrowing': 0, 'unmapped-path': 0, 'policy-monitor': 0 };
   shadowMetrics.droppedEvents = 0;
   shadowMetrics.droppedKeys = 0;
   shadowMetrics.flushes = 0;

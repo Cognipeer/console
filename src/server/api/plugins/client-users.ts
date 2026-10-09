@@ -34,6 +34,12 @@ import {
 import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { resolveChildAllowlist } from '@/lib/services/apiTokens/ipAllowlist';
+import {
+  prepareTokenCreate,
+  presentAllowedIpRanges,
+  tokenExceedsPolicy,
+} from '@/lib/services/apiTokens/tokenPolicy';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
@@ -166,7 +172,13 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
       if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
 
       const { id } = request.params as { id: string };
-      const body = readJsonBody<{ label?: string; servicePermissions?: unknown }>(request);
+      const body = readJsonBody<{
+        label?: string;
+        servicePermissions?: unknown;
+        expiresAt?: unknown;
+        expiresInDays?: unknown;
+        allowedIpRanges?: unknown;
+      }>(request);
       if (!body.label || body.label.length < 3) {
         return reply.code(400).send({ error: 'Label must be at least 3 characters' });
       }
@@ -222,6 +234,25 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(429).send({ error: quotaCheck.reason || 'API token quota exceeded' });
       }
 
+      // Expiry + IP allowlist against the tenant token policy (same preparation
+      // as the dashboard mint routes).
+      const prepared = await prepareTokenCreate({ body, tenantDbName: auth.tenantDbName });
+      if (!prepared.ok) {
+        return reply.code(prepared.status).send(prepared.body);
+      }
+
+      // Network scope never goes upward either: a token confined to some ranges
+      // cannot mint one that works from anywhere. It inherits the caller's
+      // ranges unless it asks for a subset.
+      const allowlist = resolveChildAllowlist(auth.tokenRecord.allowedIpRanges, prepared.allowedIpRanges);
+      if (!allowlist.ok) {
+        return reply.code(403).send({
+          error: 'allowedIpRanges must stay inside the ranges of the token that creates it',
+          code: 'ip_ranges_exceed_minter',
+          details: allowlist.offending,
+        });
+      }
+
       const token = createApiTokenSecret();
       const apiToken = await db.createApiToken({
         label: body.label,
@@ -232,6 +263,8 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         userId: id,
         createdBy: String(auth.tokenRecord.userId),
         servicePermissions,
+        ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
+        ...(allowlist.ranges ? { allowedIpRanges: allowlist.ranges } : {}),
       });
 
       return reply.code(201).send({
@@ -241,6 +274,10 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         servicePermissions: apiToken.servicePermissions ?? null,
         token,
         userId: apiToken.userId,
+        expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
+        allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        lastUsedAt: null,
+        exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),
       });
     } catch (error) {
       logger.error('Client mint user token error', { error });

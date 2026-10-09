@@ -1,7 +1,7 @@
 import { getPendingShadowEventCount } from './aggregate';
 import { getTenantShadowMetrics, shadowMetrics, type TenantShadowMetrics } from './metrics';
 import { getShadowQueueDepth } from './queue';
-import type { ShadowCategory } from './types';
+import type { ShadowEventCategory } from './types';
 
 export interface ShadowStats {
   /** Observations accepted into the evaluation queue since process start. */
@@ -17,7 +17,7 @@ export interface ShadowStats {
   /** Disagreements caused by tenant custom policies (not bugs). */
   customPolicyDiffs: number;
   /** Events recorded per category since process start. */
-  events: Record<ShadowCategory, number>;
+  events: Record<ShadowEventCategory, number>;
   droppedEvents: number;
   droppedKeys: number;
   flushes: number;

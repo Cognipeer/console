@@ -30,10 +30,30 @@ import {
 } from '@/lib/iam/engine';
 import { tokenPrincipal, userPrincipal, type IamPrincipal } from '@/lib/iam/entities';
 import { createPolicy, deletePolicy, updatePolicy } from '@/lib/iam/store';
+import { invalidateTenantPolicies } from '@/lib/iam/events';
 import { createIamTestDb, type IamTestDb } from '../helpers/iamTestDb';
 
 let env: IamTestDb;
 const tenant = () => env.tenantDbName;
+
+/**
+ * These tests exercise how the ENGINE evaluates policies about one resource
+ * (`agent.delete` on an agent). The store refuses to save such a forbid - the
+ * request gates do not check individual resources yet, so it would never block
+ * anything - so they put the policy in the way another node's write would arrive:
+ * straight into the policy collection, then announce it.
+ */
+async function putPolicy(policyId: string, cedar: string, mode: 'enforce' | 'monitor' = 'enforce'): Promise<void> {
+  const now = new Date().toISOString();
+  await env.db.runWithTenant(tenant(), async () => {
+    await env.db.iamDocPut('iam_policies', policyId, {
+      _id: policyId, policyId, name: policyId, cedar, spec: null, mode, enabled: true,
+      createdBy: 'tester', updatedBy: 'tester', createdAt: now, updatedAt: now,
+    });
+    await env.db.iamDocIncrement('iam_meta', 'policy_version', 'value', 1);
+  });
+  invalidateTenantPolicies(tenant());
+}
 
 const agentRes = { kind: 'resource', type: 'agent', id: 'a1', service: 'agents', projectId: 'p1' } as const;
 const member = (extra: Partial<Parameters<typeof userPrincipal>[0]> = {}): IamPrincipal =>
@@ -58,7 +78,7 @@ describe('custom policies on top of the managed set', () => {
     const input = { tenant: tenant(), principal, action: 'agent.delete', resource: agentRes };
     expect((await authorize(input)).allowed).toBe(true);
 
-    await createPolicy(tenant(), { policyId: 'no-agent-delete', name: 'No agent delete', cedar: 'forbid(principal, action == Action::"agent.delete", resource is Agent);' }, 'tester');
+    await putPolicy('no-agent-delete', 'forbid(principal, action == Action::"agent.delete", resource is Agent);');
     const denied = await authorize(input);
     expect(denied.allowed).toBe(false);
     expect(denied.reasons).toEqual(['custom:no-agent-delete']);
@@ -114,8 +134,8 @@ describe('custom policies on top of the managed set', () => {
 
   it('matches on group membership, project containment and token attributes', async () => {
     await createPolicy(tenant(), { policyId: 'grp', name: 'grp', cedar: 'permit(principal in Group::"g-ml", action == Action::"agent.invoke", resource is Agent);' }, 't');
-    await createPolicy(tenant(), { policyId: 'proj', name: 'proj', cedar: 'forbid(principal, action == Action::"agent.delete", resource in Project::"p-frozen");' }, 't');
-    await createPolicy(tenant(), { policyId: 'tok', name: 'tok', cedar: 'forbid(principal is ApiToken, action == Action::"agent.update", resource) when { principal has project && principal.project == Project::"p-ci" };' }, 't');
+    await putPolicy('proj', 'forbid(principal, action == Action::"agent.delete", resource in Project::"p-frozen");');
+    await putPolicy('tok', 'forbid(principal is ApiToken, action == Action::"agent.update", resource) when { principal has project && principal.project == Project::"p-ci" };');
 
     const none = member({ user: { role: 'user', servicePermissions: { agents: 'none' } } });
     expect((await authorize({ tenant: tenant(), principal: none, action: 'agent.invoke', resource: agentRes })).allowed).toBe(false);
@@ -137,7 +157,7 @@ describe('custom policies on top of the managed set', () => {
   });
 
   it('uses request context', async () => {
-    await createPolicy(tenant(), { policyId: 'sms', name: 'sms', cedar: 'forbid(principal, action == Action::"agent.invoke", resource is Agent) when { context has channel && context.channel == "sms" };' }, 't');
+    await putPolicy('sms', 'forbid(principal, action == Action::"agent.invoke", resource is Agent) when { context has channel && context.channel == "sms" };');
     const base = { tenant: tenant(), principal: member(), action: 'agent.invoke', resource: agentRes };
     expect((await authorize({ ...base, context: { channel: 'sms' } })).allowed).toBe(false);
     expect((await authorize({ ...base, context: { channel: 'web' } })).allowed).toBe(true);
@@ -146,7 +166,7 @@ describe('custom policies on top of the managed set', () => {
   });
 
   it('keeps tenants apart', async () => {
-    await createPolicy(tenant(), { policyId: 'only-here', name: 'x', cedar: 'forbid(principal, action == Action::"agent.get", resource is Agent);' }, 't');
+    await putPolicy('only-here', 'forbid(principal, action == Action::"agent.get", resource is Agent);');
     const here = await authorize({ tenant: tenant(), principal: member(), action: 'agent.get', resource: agentRes });
     const there = await authorize({ tenant: 'tenant_other_engine', principal: member(), action: 'agent.get', resource: agentRes });
     expect(here.allowed).toBe(false);
@@ -178,7 +198,7 @@ describe('custom policies on top of the managed set', () => {
 
 describe('monitor mode', () => {
   it('reports what an enabled monitor policy WOULD do without changing the decision', async () => {
-    await createPolicy(tenant(), { policyId: 'would-block', name: 'wb', mode: 'monitor', cedar: 'forbid(principal, action == Action::"agent.delete", resource is Agent);' }, 't');
+    await putPolicy('would-block', 'forbid(principal, action == Action::"agent.delete", resource is Agent);', 'monitor');
     const res = await authorize({ tenant: tenant(), principal: member(), action: 'agent.delete', resource: agentRes });
     expect(res.allowed).toBe(true);
     expect(res.monitor).toMatchObject({ allowed: false, differs: true });

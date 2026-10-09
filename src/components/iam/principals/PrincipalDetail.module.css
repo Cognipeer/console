@@ -1,0 +1,93 @@
+.permList {
+  border: 1px solid var(--ds-border-soft);
+  border-radius: var(--ds-r-sm);
+  overflow: hidden;
+}
+
+.permHead,
+.permRow {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.1fr) 88px minmax(0, 2.4fr);
+  gap: 4px 12px;
+  align-items: start;
+  padding: 8px 12px;
+}
+
+.permHead {
+  align-items: center;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ds-text-muted);
+  background: var(--ds-surface-1);
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.permRow {
+  border-bottom: 1px solid var(--ds-border-soft);
+  transition: background var(--ds-m-fast);
+}
+
+.permRow:last-child {
+  border-bottom: 0;
+}
+
+.permRow:hover {
+  background: var(--ds-surface-1);
+}
+
+.sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.listRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ds-border-soft);
+}
+
+.listRow:last-child {
+  border-bottom: 0;
+}
+
+.listRowButton {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  transition: background var(--ds-m-fast);
+}
+
+.listRowButton:hover,
+.listRowButton:focus-visible {
+  background: var(--ds-surface-1);
+}
+
+.bordered {
+  border: 1px solid var(--ds-border-soft);
+  border-radius: var(--ds-r-sm);
+  overflow: hidden;
+}
+
+@media (max-width: 36em) {
+  .permHead {
+    display: none;
+  }
+
+  .permRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .permRow .sources {
+    grid-column: 1 / -1;
+  }
+}

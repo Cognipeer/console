@@ -36,6 +36,16 @@ export function getCedar(): Cedar {
   return cedar;
 }
 
+/** Can the WASM module be loaded here at all (loads it on first use)? */
+export function cedarAvailable(): boolean {
+  try {
+    getCedar();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** True once the WASM module has been loaded in this process. */
 export function isCedarLoaded(): boolean {
   return cedar !== null;
@@ -51,6 +61,14 @@ export interface CedarMessage {
   help?: string | null;
   code?: string | null;
   policyId?: string;
+  /** Character offsets of the first source location, relative to the text the error is about (a statement for validation errors). */
+  start?: number;
+  end?: number;
+}
+
+function firstLocation(entry: CedarTypes.DetailedError): { start?: number; end?: number } {
+  const loc = entry.sourceLocations?.[0];
+  return loc && typeof loc.start === 'number' ? { start: loc.start, end: loc.end } : {};
 }
 
 function messages(errors: Array<CedarTypes.DetailedError | CedarTypes.ValidationError> | undefined): CedarMessage[] {
@@ -61,10 +79,11 @@ function messages(errors: Array<CedarTypes.DetailedError | CedarTypes.Validation
         message: entry.error.message,
         help: entry.error.help,
         code: entry.error.code,
+        ...firstLocation(entry.error),
       };
     }
     const detailed = entry as CedarTypes.DetailedError;
-    return { message: detailed.message, help: detailed.help, code: detailed.code };
+    return { message: detailed.message, help: detailed.help, code: detailed.code, ...firstLocation(detailed) };
   });
 }
 

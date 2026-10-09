@@ -64,6 +64,12 @@ declare module 'fastify' {
   interface FastifyContextConfig {
     /** How this route is authorized (see src/lib/iam/routeAuthz.ts). */
     authz?: RouteAuthz;
+    /**
+     * A POST that only computes (compile / preview / simulate in the Authorization
+     * center): a successful call is not an administrative event, so the audit hook
+     * skips it. Refusals and errors are still audited.
+     */
+    skipAuditOnSuccess?: boolean;
   }
 }
 

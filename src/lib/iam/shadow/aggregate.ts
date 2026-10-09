@@ -26,8 +26,9 @@ import { runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { bumpTenantMetric, shadowMetrics } from './metrics';
 import {
+  POLICY_MONITOR_CATEGORY,
   SHADOW_CATEGORIES,
-  isShadowCategory,
+  isShadowEventCategory,
   type ShadowCategory,
   type ShadowEntry,
   type ShadowEvent,
@@ -87,7 +88,11 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let flushChain: Promise<void> = Promise.resolve();
 
 function tuple(e: Omit<ShadowEvent, 'sample'>): string {
-  return [e.category, e.service, e.method, e.route, e.legacyAllowed ? '1' : '0', e.targetAllowed ? '1' : '0'].join('|');
+  const parts = [e.category, e.service, e.method, e.route, e.legacyAllowed ? '1' : '0', e.targetAllowed ? '1' : '0'];
+  // Only policy-monitor events carry a policy; leaving it out for the others keeps
+  // every pre-existing aggregate id exactly as it was.
+  if (e.policyId) parts.push(e.policyId);
+  return parts.join('|');
 }
 
 export function shadowDocId(e: Omit<ShadowEvent, 'sample'>): string {
@@ -198,7 +203,7 @@ function mergeSamples(existing: ShadowSample[], added: ShadowSample[]): ShadowSa
 }
 
 function fromDoc(id: string, data: Record<string, unknown>): ShadowEntry | null {
-  if (!isShadowCategory(data.category)) return null;
+  if (!isShadowEventCategory(data.category)) return null;
   return {
     id,
     category: data.category,
@@ -207,6 +212,7 @@ function fromDoc(id: string, data: Record<string, unknown>): ShadowEntry | null 
     route: String(data.route ?? ''),
     legacyAllowed: data.legacyAllowed === true,
     targetAllowed: data.targetAllowed === true,
+    ...(typeof data.policyId === 'string' && data.policyId ? { policyId: data.policyId } : {}),
     count: typeof data.count === 'number' ? data.count : 0,
     firstSeen: String(data.firstSeen ?? ''),
     lastSeen: String(data.lastSeen ?? ''),
@@ -242,6 +248,7 @@ async function writeBatch(tenantDbName: string, batch: Map<string, PendingAgg>):
         route: agg.event.route,
         legacyAllowed: agg.event.legacyAllowed,
         targetAllowed: agg.event.targetAllowed,
+        ...(agg.event.policyId ? { policyId: agg.event.policyId } : {}),
         count: (prev?.count ?? 0) + agg.count,
         firstSeen: prev?.firstSeen || agg.firstSeen,
         lastSeen: agg.lastSeen,
@@ -341,8 +348,13 @@ export function resetShadowBufferForTests(): void {
 
 // ── reading ──────────────────────────────────────────────────────────────
 
-export async function listShadowEntries(tenantDbName: string): Promise<ShadowEntry[]> {
-  await flushBounded(tenantDbName);
+/**
+ * Stored aggregates of the tenant. Pending events are flushed first (bounded
+ * wait) unless `flush: false` - for callers with their own time budget that can
+ * live with "a few seconds old".
+ */
+export async function listShadowEntries(tenantDbName: string, options: { flush?: boolean } = {}): Promise<ShadowEntry[]> {
+  if (options.flush !== false) await flushBounded(tenantDbName);
   const docs = await runWithTenantScope(tenantDbName, (db) =>
     db.iamDocList(COLLECTION, { idPrefix: ID_PREFIX, limit: MAX_KEYS_PER_TENANT + 1 }),
   );
@@ -368,6 +380,73 @@ export async function resetShadowEntries(tenantDbName: string): Promise<number> 
     new Promise<void>((resolve) => setTimeout(resolve, readFlushWaitMs).unref?.()),
   ]);
   return runWithTenantScope(tenantDbName, (db) => db.iamDocClear(COLLECTION));
+}
+
+/**
+ * Forget the `policy-monitor` findings of ONE policy (its text, mode or
+ * enablement changed, so the old counts no longer describe it). Pending events
+ * are dropped too; returns the number of stored aggregates removed.
+ */
+export async function clearPolicyMonitorStats(tenantDbName: string, policyId: string): Promise<number> {
+  const state = tenants.get(tenantDbName);
+  if (state) {
+    for (const [key, agg] of [...state.pending]) {
+      if (agg.event.category === POLICY_MONITOR_CATEGORY && agg.event.policyId === policyId) {
+        state.pending.delete(key);
+        state.pendingEvents = Math.max(0, state.pendingEvents - agg.count);
+        totalPendingEvents = Math.max(0, totalPendingEvents - agg.count);
+      }
+    }
+    release(tenantDbName, state);
+  }
+  // Serialise behind any in-flight flush (bounded) so a late write cannot resurrect rows.
+  await Promise.race([
+    flushChain.catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, readFlushWaitMs).unref?.()),
+  ]);
+  return runWithTenantScope(tenantDbName, async (db) => {
+    const docs = await db.iamDocList(COLLECTION, { idPrefix: ID_PREFIX, limit: MAX_KEYS_PER_TENANT + 1 });
+    let removed = 0;
+    for (const doc of docs) {
+      if (doc.data.category !== POLICY_MONITOR_CATEGORY || doc.data.policyId !== policyId) continue;
+      if (await db.iamDocDelete(COLLECTION, doc.id)) removed++;
+      getStored(tenantDbName)?.delete(doc.id);
+    }
+    return removed;
+  });
+}
+
+export interface PolicyMonitorTotals {
+  /** Requests the policy would newly ALLOW (denied today). */
+  wouldAllow: number;
+  /** Requests the policy would newly DENY (allowed today). */
+  wouldDeny: number;
+  /** First time a difference was recorded since the last reset of this policy. */
+  since: string | null;
+  lastSeen: string | null;
+}
+
+/** Fold `policy-monitor` aggregates into per-policy totals. */
+export function foldPolicyMonitorEntries(entries: ShadowEntry[]): Map<string, PolicyMonitorTotals> {
+  const out = new Map<string, PolicyMonitorTotals>();
+  for (const e of entries) {
+    if (e.category !== POLICY_MONITOR_CATEGORY || !e.policyId) continue;
+    let t = out.get(e.policyId);
+    if (!t) {
+      t = { wouldAllow: 0, wouldDeny: 0, since: null, lastSeen: null };
+      out.set(e.policyId, t);
+    }
+    if (e.legacyAllowed && !e.targetAllowed) t.wouldDeny += e.count;
+    if (!e.legacyAllowed && e.targetAllowed) t.wouldAllow += e.count;
+    if (e.firstSeen && (t.since === null || e.firstSeen < t.since)) t.since = e.firstSeen;
+    if (e.lastSeen && (t.lastSeen === null || e.lastSeen > t.lastSeen)) t.lastSeen = e.lastSeen;
+  }
+  return out;
+}
+
+/** Per-policy `policy-monitor` totals of a tenant (pending events are flushed first, bounded). */
+export async function getPolicyMonitorTotals(tenantDbName: string): Promise<Map<string, PolicyMonitorTotals>> {
+  return foldPolicyMonitorEntries(await listShadowEntries(tenantDbName));
 }
 
 // ── reports ──────────────────────────────────────────────────────────────
@@ -415,9 +494,16 @@ function maxIso(a: string | null, b: string): string {
 }
 
 export function summarizeShadowEntries(
-  entries: ShadowEntry[],
-  options: { category?: ShadowCategory; service?: string; limit?: number; sampleLimit?: number } = {},
+  allEntries: ShadowEntry[],
+  options: { category?: ShadowCategory | typeof POLICY_MONITOR_CATEGORY; service?: string; limit?: number; sampleLimit?: number } = {},
 ): ShadowSummary {
+  // The totals are about the engine vs the current rules. A monitor policy's own
+  // counts are reported per policy (policyMonitorStats) and are only listed here
+  // when asked for by name.
+  const entries = allEntries.filter((e): e is ShadowEntry & { category: ShadowCategory } => e.category !== POLICY_MONITOR_CATEGORY);
+  const topSource = options.category === POLICY_MONITOR_CATEGORY
+    ? allEntries.filter((e) => e.category === POLICY_MONITOR_CATEGORY)
+    : entries;
   const sampleLimit = Math.max(0, Math.min(options.sampleLimit ?? 5, MAX_SAMPLES));
   const limit = Math.max(1, Math.min(options.limit ?? 25, 200));
 
@@ -454,7 +540,7 @@ export function summarizeShadowEntries(
     if (entry.lastSeen) lastSeen = maxIso(lastSeen, entry.lastSeen);
   }
 
-  const top = entries
+  const top = topSource
     .filter((e) => (!options.category || e.category === options.category) && (!options.service || e.service === options.service))
     .sort((a, b) => b.count - a.count || (a.lastSeen < b.lastSeen ? 1 : -1))
     .slice(0, limit)

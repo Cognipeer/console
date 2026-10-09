@@ -21,6 +21,14 @@
  * most every VERSION_CHECK_MS (5 s) on the hot path, and a local policy write
  * triggers an immediate reload through events.ts.
  *
+ * Boundaries: the managed set also carries the boundary forbids (managedPolicies.ts),
+ * so no custom permit can exceed an API token's scope or the project narrowing.
+ * Actions outside the catalog are denied before evaluation for the same reason:
+ * a permissive custom policy must not be able to open what no boundary governs.
+ *
+ * Context: the request context (context.ts) is turned into Cedar values per
+ * decision, never cached with the policy set; `now` is filled in when absent.
+ *
  * Obligations: policy annotations other than the reserved ones (`managed`,
  * `id`, `description`) of the permits that DETERMINED an allow are returned as
  * `obligations` (e.g. `@guardrail("pii-strict")`, `@limits("{\"rpm\":10}")`).
@@ -53,11 +61,12 @@ import {
   type IamPrincipal,
   type IamResource,
 } from './entities';
+import { buildCedarContext, type IamRequestContext } from './context';
 import { onIamInvalidation } from './events';
-import { MANAGED_POLICIES } from './managedPolicies';
+import { ALL_MANAGED_POLICIES } from './managedPolicies';
 import { getPrincipalCacheStats } from './principalCache';
 import { ensureSchemaPreparsed, getIamSchema, PREPARSED_SCHEMA_NAME } from './schemaState';
-import { customCedarIds, getPolicyVersion, listPolicies, policyIdFromCedarId } from './store';
+import { customCedarIds, getPolicyVersion, listPolicies, policyIdFromCedarId, type IIamPolicy } from './store';
 
 const logger = createLogger('iam:engine');
 
@@ -93,8 +102,8 @@ export interface AuthorizeInput {
   /** Action id from the catalog (e.g. `agents.write`, `agent.get`). */
   action: string;
   resource: IamResource;
-  /** Optional request context (see IAM_CONTEXT_ATTRS). */
-  context?: Record<string, string>;
+  /** Optional request context (see context.ts / IAM_CONTEXT_ATTRS). */
+  context?: IamRequestContext;
 }
 
 export interface AuthorizeResult {
@@ -114,8 +123,10 @@ export interface AuthorizeResult {
   /**
    * Present when the tenant has enabled `monitor`-mode policies: what the
    * decision WOULD be with them applied. Never affects `allowed`.
+   * `policyIds` are the monitor-mode policies among the deciding ones, i.e. the
+   * policies that caused the difference when `differs` is true.
    */
-  monitor?: { allowed: boolean; reasons: string[]; differs: boolean };
+  monitor?: { allowed: boolean; reasons: string[]; differs: boolean; policyIds: string[] };
 }
 
 // ── metrics ──────────────────────────────────────────────────────────────
@@ -211,6 +222,8 @@ interface TenantState {
   version: number;
   enforce: LoadedSet;
   monitor: LoadedSet | null;
+  /** Store ids of the enabled monitor-mode policies. */
+  monitorPolicyIds: Set<string>;
   customEnforce: number;
   customMonitor: number;
   /** Cedar ids of custom statements that failed to load and were skipped. */
@@ -224,7 +237,7 @@ const managedSet: LoadedSet = { setId: MANAGED_SET_ID, obligations: new Map() };
 
 function ensureManagedSet(): string | null {
   if (managedLoaded) return null;
-  const res = preparsePolicySet(MANAGED_SET_ID, { ...MANAGED_POLICIES });
+  const res = preparsePolicySet(MANAGED_SET_ID, { ...ALL_MANAGED_POLICIES });
   if (!res.ok) return `managed policy set failed to load: ${res.errors.map((e) => e.message).join('; ')}`;
   managedLoaded = true;
   return null;
@@ -258,6 +271,32 @@ function normalizeTenant(tenant: IamTenantRef): string {
   return typeof tenant === 'string' ? tenant : tenant.tenantDbName;
 }
 
+/**
+ * Cedar records of a list of stored policies (`custom:<id>[#n]` -> statement)
+ * plus the obligations of each statement. A policy whose text no longer parses
+ * is skipped (and reported through `onSkip`), never fatal.
+ */
+export function buildPolicyRecord(
+  list: ReadonlyArray<Pick<IIamPolicy, 'policyId' | 'cedar'>>,
+  onSkip?: (cedarId: string) => void,
+): { record: Record<string, string>; obligations: Map<string, Record<string, unknown>> } {
+  const record: Record<string, string> = {};
+  const obligations = new Map<string, Record<string, unknown>>();
+  for (const policy of list) {
+    const parts = splitPolicyText(policy.cedar);
+    if (!parts.ok) {
+      onSkip?.(`custom:${policy.policyId}`);
+      continue;
+    }
+    customCedarIds(policy.policyId, parts.policies.length).forEach((id, i) => {
+      record[id] = parts.policies[i];
+      const ob = obligationsOf(parts.policies[i]);
+      if (ob) obligations.set(id, ob);
+    });
+  }
+  return { record, obligations };
+}
+
 async function buildTenantState(tenantDbName: string): Promise<TenantState> {
   const loadError = ensureManagedSet();
   if (loadError) throw new Error(loadError);
@@ -268,23 +307,7 @@ async function buildTenantState(tenantDbName: string): Promise<TenantState> {
   const monitor = policies.filter((p) => p.mode === 'monitor');
 
   const skipped: string[] = [];
-  const toRecord = (list: typeof policies) => {
-    const record: Record<string, string> = {};
-    const obligations = new Map<string, Record<string, unknown>>();
-    for (const policy of list) {
-      const parts = splitPolicyText(policy.cedar);
-      if (!parts.ok) {
-        skipped.push(`custom:${policy.policyId}`);
-        continue;
-      }
-      customCedarIds(policy.policyId, parts.policies.length).forEach((id, i) => {
-        record[id] = parts.policies[i];
-        const ob = obligationsOf(parts.policies[i]);
-        if (ob) obligations.set(id, ob);
-      });
-    }
-    return { record, obligations };
-  };
+  const toRecord = (list: IIamPolicy[]) => buildPolicyRecord(list, (id) => skipped.push(id));
 
   const enforceBuilt = toRecord(enforce);
   const monitorBuilt = toRecord(monitor);
@@ -292,7 +315,7 @@ async function buildTenantState(tenantDbName: string): Promise<TenantState> {
   let enforceSet: LoadedSet = managedSet;
   if (Object.keys(enforceBuilt.record).length > 0) {
     const setId = `tenant:${tenantDbName}:enforce`;
-    const res = preparsePolicySet(setId, { ...MANAGED_POLICIES, ...enforceBuilt.record });
+    const res = preparsePolicySet(setId, { ...ALL_MANAGED_POLICIES, ...enforceBuilt.record });
     if (!res.ok) throw new Error(`tenant policy set failed to load: ${res.errors.map((e) => e.message).join('; ')}`);
     enforceSet = { setId, obligations: enforceBuilt.obligations };
   }
@@ -301,7 +324,7 @@ async function buildTenantState(tenantDbName: string): Promise<TenantState> {
   if (Object.keys(monitorBuilt.record).length > 0) {
     const setId = `tenant:${tenantDbName}:monitor`;
     const res = preparsePolicySet(setId, {
-      ...MANAGED_POLICIES,
+      ...ALL_MANAGED_POLICIES,
       ...enforceBuilt.record,
       ...monitorBuilt.record,
     });
@@ -317,6 +340,7 @@ async function buildTenantState(tenantDbName: string): Promise<TenantState> {
     version,
     enforce: enforceSet,
     monitor: monitorSet,
+    monitorPolicyIds: new Set(monitor.map((p) => p.policyId)),
     customEnforce: Object.keys(enforceBuilt.record).length,
     customMonitor: Object.keys(monitorBuilt.record).length,
     skipped,
@@ -437,6 +461,38 @@ function failure(errors: string[], started: number): AuthorizeResult {
   return { allowed: false, reasons: [], errors, obligations: {}, durationUs, failed: true };
 }
 
+/**
+ * Everything a Cedar request needs except the policy set: principal, action,
+ * resource, entities and the context. Shared by `authorize` and the preview /
+ * simulation code, which evaluate the SAME request against other policy sets.
+ * Throws for malformed input (callers turn that into a deny).
+ */
+export function buildAuthorizeCall(
+  input: AuthorizeInput,
+  tenantDbName: string,
+): { call: Omit<CedarAuthorizeInput, 'policySetId'>; action: ActionDefinition | undefined } {
+  const action = lookupAction(input.action);
+  const principal = principalEntities(input.principal);
+  const resource = resourceEntities(input.resource, tenantDbName);
+  const entities = [
+    ...principal.entities,
+    ...resource.entities,
+    ...actionEntities(input.action, action?.level ?? null),
+  ];
+  return {
+    action,
+    call: {
+      principal: principal.uid,
+      action: { type: 'Action', id: input.action },
+      resource: resource.uid,
+      context: buildCedarContext(input.context),
+      entities,
+      schemaName: PREPARSED_SCHEMA_NAME,
+      validateRequest: config.validateRequests,
+    },
+  };
+}
+
 export async function authorize(input: AuthorizeInput): Promise<AuthorizeResult> {
   const started = performance.now();
   try {
@@ -448,25 +504,24 @@ export async function authorize(input: AuthorizeInput): Promise<AuthorizeResult>
       if (!schemaResult.ok) return failure(schemaResult.errors, started);
     }
 
-    const action = lookupAction(input.action);
-    const principal = principalEntities(input.principal);
-    const resource = resourceEntities(input.resource, tenantDbName);
-    const entities = [
-      ...principal.entities,
-      ...resource.entities,
-      ...actionEntities(input.action, action?.level ?? null),
-    ];
+    const { call: baseCall, action } = buildAuthorizeCall(input, tenantDbName);
+    if (!action) {
+      // Not a catalog action. The managed policies are written against the level
+      // groups, so nothing governs it - and a permissive custom policy must not
+      // be able to open it past the boundaries. A deny, not a failure: the
+      // engine did decide.
+      const durationUs = Math.round((performance.now() - started) * 1000);
+      recordDecision(false, false, durationUs);
+      return {
+        allowed: false,
+        reasons: [],
+        errors: [`unknown action "${String(input.action)}"`],
+        obligations: {},
+        durationUs,
+      };
+    }
 
-    const call: CedarAuthorizeInput = {
-      principal: principal.uid,
-      action: { type: 'Action', id: input.action },
-      resource: resource.uid,
-      context: input.context ?? {},
-      entities,
-      policySetId: state.enforce.setId,
-      schemaName: PREPARSED_SCHEMA_NAME,
-      validateRequest: config.validateRequests,
-    };
+    const call: CedarAuthorizeInput = { ...baseCall, policySetId: state.enforce.setId };
 
     const decision: CedarDecision = statefulIsAuthorized(call);
     if (!decision.ok) return failure(decision.errors, started);
@@ -486,6 +541,7 @@ export async function authorize(input: AuthorizeInput): Promise<AuthorizeResult>
           allowed: mon.allowed,
           reasons: mon.reasons,
           differs: mon.allowed !== decision.allowed,
+          policyIds: customPolicyIdsOf(mon.reasons).filter((id) => state.monitorPolicyIds.has(id)),
         };
       } else {
         result.errors.push(...mon.errors.map((e) => `monitor: ${e}`));
@@ -512,7 +568,7 @@ export interface AuthorizeGateInput {
    * declaration `{ kind: 'service', level }`). Action `<service>.<level>`.
    */
   level?: 'read' | 'write' | 'admin';
-  context?: Record<string, string>;
+  context?: IamRequestContext;
 }
 
 /**

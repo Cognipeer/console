@@ -96,6 +96,12 @@ import type {
   BetaAccessCodeStatus,
   IIamDoc,
   IamCollectionName,
+  IamPage,
+  IamPageRequest,
+  IamUserQuery,
+  IamGroupQuery,
+  IamTokenQuery,
+  IamAuditQuery,
   IExternalModelPricing,
   IExternalPricingVersion,
   IModelPricing,
@@ -279,6 +285,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     policy: Omit<IQuotaPolicy, '_id'>,
   ): Promise<IQuotaPolicy>;
   listQuotaPolicies(tenantId: string, projectId?: string): Promise<IQuotaPolicy[]>;
+  /**
+   * Policies that carry no project (`projectId` absent/null/empty). The quota
+   * guard asks for them separately because `listQuotaPolicies(tenant, project)`
+   * only ever returns that project's rows; see `isTenantWideKind` in
+   * lib/quota/types.ts for which of them the guard actually applies.
+   */
+  listTenantWideQuotaPolicies(tenantId: string): Promise<IQuotaPolicy[]>;
   updateQuotaPolicy(
     id: string,
     tenantId: string,
@@ -295,6 +308,18 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   listTenantApiTokens(tenantId: string): Promise<IApiToken[]>;
   listProjectApiTokens(tenantId: string, projectId: string): Promise<IApiToken[]>;
   findApiTokenByHash(tokenHash: string): Promise<IApiToken | null>;
+  /** One token by id inside a tenant. Null when it does not exist (a malformed id is "does not exist", not an error). */
+  findApiTokenById(id: string, tenantId: string): Promise<IApiToken | null>;
+  /**
+   * Edit the mutable fields of a token (label, expiry, IP allowlist). Only the
+   * keys present in `data` change; `expiresAt: null` / `allowedIpRanges: null`
+   * clear the field. Null when the token does not exist in the tenant.
+   */
+  updateApiToken(
+    id: string,
+    tenantId: string,
+    data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null },
+  ): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;
   deleteProjectApiToken(id: string, tenantId: string, projectId: string): Promise<boolean>;
@@ -1918,6 +1943,20 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * document / field at 0 first) and return the new value.
    */
   iamDocIncrement(collection: IamCollectionName, id: string, field: string, by?: number): Promise<number>;
+
+  // ── IAM directory queries (read-only, offset-paged; for the Authorization center) ──
+  /** Users of the tenant ordered by name; the returned `password` is always blank. */
+  iamListUsers(query: IamUserQuery): Promise<IamPage<IUser>>;
+  /** Groups of the tenant ordered by name. */
+  iamListGroups(query: IamGroupQuery): Promise<IamPage<IGroup>>;
+  /** Member count per group id (groups without members are 0). */
+  iamCountGroupMembers(groupIds: string[]): Promise<Record<string, number>>;
+  /** User ids that are members of the group, ordered by user id. */
+  iamListGroupMemberIds(groupId: string, page: IamPageRequest): Promise<IamPage<string>>;
+  /** API tokens of the tenant, newest first. Never contains a token secret or hash. */
+  iamListTokens(query: IamTokenQuery): Promise<IamPage<IApiToken>>;
+  /** Audit rows of the tenant, newest first. */
+  iamListAuditEvents(query: IamAuditQuery): Promise<IamPage<IAuditLog>>;
 
   // ── GPU fleet + Agent Runtime Sandbox (tenant-scoped) ──
   // EDITION SPLIT: these enterprise methods were moved to the overlay. In the enterprise

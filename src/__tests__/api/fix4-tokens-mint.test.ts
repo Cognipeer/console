@@ -11,7 +11,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => ({
+  getDatabase: vi.fn(),
+  // The tenant token policy is read from the IAM settings through this; no
+  // stored document means the defaults (no maximum lifetime, expiry optional).
+  runWithTenantScope: vi.fn(async (_dbName: string, fn: (db: unknown) => unknown) =>
+    fn({ iamDocGet: async () => null })),
+}));
 vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }),
 }));

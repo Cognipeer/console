@@ -1,0 +1,382 @@
+/**
+ * The audit tab of the Authorization center (`GET /api/iam/audit`):
+ *
+ *   denials   requests the policy engine refused in enforce mode (audit rows with
+ *             `metadata.iamEnforce`, each with the `decisionId` the caller saw)
+ *   changes   who changed policies, settings and the mode (audit.ts rows)
+ *   monitor   what monitor-mode policies WOULD have changed (the `policy-monitor`
+ *             shadow aggregates, one entry per policy x route x direction)
+ *
+ * Offset-paged. Principals are resolved to display labels in one batched read.
+ */
+
+import { RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
+import { runWithTenantScope, type IAuditLog } from '@/lib/database';
+import { gateActionId } from './actions';
+import { deniedActionOf, IAM_CHANGE_RESOURCE_TYPES } from './audit';
+import { resolvePrincipalLabels } from './labels';
+import { listPolicies } from './store';
+import type { IamTenant, PrincipalType } from './principals';
+import { listShadowEntries } from './shadow/aggregate';
+import { POLICY_MONITOR_CATEGORY } from './shadow/types';
+
+export type AuditKind = 'denials' | 'changes' | 'monitor';
+export const AUDIT_KINDS: readonly AuditKind[] = ['denials', 'changes', 'monitor'];
+
+export interface AuditFeedQuery {
+  kind: AuditKind;
+  from?: Date;
+  to?: Date;
+  principalType?: PrincipalType;
+  principalId?: string;
+  service?: string;
+  limit: number;
+  offset: number;
+}
+
+/** A feed page. `warnings` explain why it may be incomplete (rendered by the audit tab). */
+export interface AuditFeedPage {
+  items: AuditFeedItem[];
+  hasMore: boolean;
+  warnings?: AuditFeedWarning[];
+}
+
+/** `group_members_truncated`: a group filter looked at the first MAX_GROUP_FILTER members only. */
+export type AuditFeedWarning = 'group_members_truncated';
+
+/**
+ * The sentence of a row as data, so the audit tab can say it in the reader's
+ * language (`iamAudit.summaries.<key>`). `summary` is the same sentence in
+ * English, the fallback for a key a client does not know.
+ */
+export interface AuditFeedText {
+  key: string;
+  params: Record<string, string | number>;
+}
+
+export interface AuditFeedItem {
+  id: string;
+  at: string;
+  kind: AuditKind;
+  principal: { type: 'user' | 'token'; id: string; label: string } | null;
+  actor?: string;
+  service: string;
+  action: string;
+  route?: string;
+  method?: string;
+  code?: string;
+  decisionId?: string;
+  policyId?: string;
+  summary: string;
+  /** `summary` as data (see AuditFeedText). */
+  text?: AuditFeedText;
+}
+
+/** Edits of a token's expiry / IP allowlist are access-rule changes too (written by apiTokens/restrictionAudit.ts, service `tokens`). */
+export const TOKEN_RESTRICTIONS_EVENT = 'token.restrictions.updated';
+
+const ADMIN_SERVICES: ReadonlySet<string> = new Set(RBAC_SERVICE_DEFINITIONS.filter((d) => d.adminService).map((d) => d.id));
+/** Without a start date a feed looks at this long: the audit table can hold millions of rows. */
+export const DEFAULT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** Policy changes are rare and worth keeping in view longer than denials. */
+const CHANGES_DEFAULT_WINDOW_MS = 365 * 24 * 60 * 60 * 1000;
+/** Members of a filtered group that are looked at (the directory layer takes at most this many ids per query). */
+export const MAX_GROUP_FILTER = 5_000;
+/** A server-side scan of the audit collection is abandoned after this long (MongoDB; the table is unindexed for these filters). */
+const FEED_MAX_TIME_MS = 8_000;
+
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
+const iso = (d: Date | string | undefined): string => (d ? new Date(d).toISOString() : new Date(0).toISOString());
+
+// ── denials ──────────────────────────────────────────────────────────────
+
+/** Ids of a group's members, up to MAX_GROUP_FILTER; `truncated` when there are more. */
+async function groupMemberIds(
+  db: { iamListGroupMemberIds(groupId: string, page: { limit: number; offset?: number }): Promise<{ items: string[]; hasMore: boolean }> },
+  groupId: string,
+): Promise<{ ids: string[]; truncated: boolean }> {
+  const ids: string[] = [];
+  const PAGE = 200;
+  for (let offset = 0; ids.length < MAX_GROUP_FILTER; offset += PAGE) {
+    const page = await db.iamListGroupMemberIds(groupId, { limit: Math.min(PAGE, MAX_GROUP_FILTER - ids.length), offset });
+    ids.push(...page.items);
+    if (!page.hasMore) return { ids, truncated: false };
+  }
+  return { ids, truncated: true };
+}
+
+async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedPage> {
+  const policies = await listPolicies(tenant.tenantDbName);
+  const policyName = new Map(policies.map((p) => [p.policyId, p.name]));
+
+  const warnings: AuditFeedWarning[] = [];
+  const page = await runWithTenantScope(tenant.tenantDbName, async (db) => {
+    let actorUserIds: string[] | undefined;
+    if (q.principalType === 'group' && q.principalId) {
+      const members = await groupMemberIds(db, q.principalId);
+      actorUserIds = members.ids;
+      if (members.truncated) warnings.push('group_members_truncated');
+    }
+    return db.iamListAuditEvents({
+      tenantId: tenant.tenantId,
+      from: q.from ?? new Date(Date.now() - DEFAULT_WINDOW_MS),
+      to: q.to,
+      service: q.service,
+      outcome: 'denied',
+      metadata: { key: 'iamEnforce', value: true },
+      actorUserId: q.principalType === 'user' ? q.principalId : undefined,
+      actorUserIds,
+      apiTokenId: q.principalType === 'token' ? q.principalId : undefined,
+      limit: q.limit,
+      offset: q.offset,
+      maxTimeMs: FEED_MAX_TIME_MS,
+    });
+  });
+
+  const labels = await resolvePrincipalLabels(tenant, {
+    users: page.items.filter((r) => !r.apiTokenId).map((r) => r.actorUserId).filter((x): x is string => !!x),
+    tokens: page.items.map((r) => r.apiTokenId).filter((x): x is string => !!x),
+  });
+
+  const items = page.items.map((row): AuditFeedItem => {
+    const meta = row.metadata ?? {};
+    const code = str(meta.code);
+    const decisionId = str(meta.decisionId);
+    const policyIds = Array.isArray(meta.policyIds) ? meta.policyIds.filter((x): x is string => typeof x === 'string') : [];
+    const reasons = Array.isArray(meta.reasons) ? meta.reasons.filter((x): x is string => typeof x === 'string') : [];
+    const service = str(meta.deniedService) ?? row.service;
+    const required = str(meta.required);
+    const action = str(meta.action) ?? deniedActionOf(row, ADMIN_SERVICES) ?? 'security';
+    const who = row.apiTokenId
+      ? { type: 'token' as const, id: row.apiTokenId, label: labels.tokens.get(row.apiTokenId) ?? row.apiTokenId }
+      : row.actorUserId
+        ? { type: 'user' as const, id: row.actorUserId, label: labels.users.get(row.actorUserId) ?? row.actorEmail ?? row.actorUserId }
+        : null;
+
+    const route = `${row.method ?? ''} ${row.path ?? ''}`.replace(/\s+/g, ' ').trim();
+    let summary: string;
+    let text: AuditFeedText | undefined;
+    if (code === 'route_not_declared') {
+      summary = `Blocked: ${route} has no authorization declaration`;
+      text = { key: 'undeclared', params: { route } };
+    } else if (code === 'ip_not_allowed') {
+      const from = row.ipAddress ?? 'this address';
+      summary = `Blocked: ${who?.label ?? 'a token'} is not allowed from ${from} (IP allowlist)${row.path ? `: ${route}` : ''}`.replace(/\s+/g, ' ').trim();
+      text = { key: row.path ? 'ipNotAllowedAt' : 'ipNotAllowed', params: { who: who?.label ?? '', ip: from, route } };
+    } else {
+      const names = policyIds.map((id) => policyName.get(id) ?? id).join('", "');
+      const reason = policyIds.length > 0 ? 'policy'
+        : reasons.some((r) => r.startsWith('managed:boundary:token-cap')) ? 'tokenScope'
+          : reasons.some((r) => r.startsWith('managed:boundary:project')) ? 'project'
+            : 'noRule';
+      const why = reason === 'policy' ? ` by policy "${names}"`
+        : reason === 'tokenScope' ? ' by the token scope'
+          : reason === 'project' ? ' by the project permissions'
+            : ' because no rule allows it';
+      summary = `Denied ${route}: ${service}${required ? ` needs ${required}` : ''}${why}`.replace(/\s+/g, ' ').trim();
+      text = { key: `denied.${reason}`, params: { route, service, required: required ?? '', policies: names } };
+    }
+    return {
+      id: String(row._id),
+      at: iso(row.createdAt),
+      kind: 'denials',
+      principal: who,
+      service,
+      action,
+      route: row.path,
+      method: row.method,
+      ...(code ? { code } : {}),
+      ...(decisionId ? { decisionId } : {}),
+      ...(policyIds[0] ? { policyId: policyIds[0] } : {}),
+      summary,
+      ...(text ? { text } : {}),
+    };
+  });
+  return { items, hasMore: page.hasMore, ...(warnings.length > 0 ? { warnings } : {}) };
+}
+
+// ── changes ──────────────────────────────────────────────────────────────
+
+function describeChange(row: IAuditLog): { summary: string; text?: AuditFeedText } {
+  const m = row.metadata ?? {};
+  const name = str(m.name) ? `"${String(m.name)}"` : '';
+  const flags = [str(m.effect), str(m.mode), m.enabled === false ? 'disabled' : undefined].filter(Boolean).join(', ');
+  const policyParams = { name: str(m.name) ?? '', effect: str(m.effect) ?? '', mode: str(m.mode) ?? '', enabled: m.enabled === false ? 0 : 1 };
+  switch (row.event) {
+    case 'iam.policy.create': return { summary: `Created policy ${name}${flags ? ` (${flags})` : ''}`, text: { key: 'policy.created', params: policyParams } };
+    case 'iam.policy.update': return { summary: `Updated policy ${name}${flags ? ` (${flags})` : ''}`, text: { key: 'policy.updated', params: policyParams } };
+    case 'iam.policy.delete': return { summary: `Deleted policy ${name}`, text: { key: 'policy.deleted', params: policyParams } };
+    case 'iam.mode.change': {
+      const from = str(m.from) ?? 'unknown';
+      const to = str(m.to) ?? 'unknown';
+      return { summary: `Changed the authorization mode from ${from} to ${to}`, text: { key: 'mode.changed', params: { from, to } } };
+    }
+    case TOKEN_RESTRICTIONS_EVENT: {
+      const after = (m.after ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
+      const before = (m.before ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
+      const parts: string[] = [];
+      const expiryChanged = before.expiresAt !== after.expiresAt;
+      const ipChanged = (before.allowedIpRangeCount ?? 0) !== (after.allowedIpRangeCount ?? 0)
+        || JSON.stringify(before.allowedIpRanges) !== JSON.stringify(after.allowedIpRanges);
+      if (expiryChanged) parts.push(`expiry ${before.expiresAt ? before.expiresAt.slice(0, 10) : 'none'} -> ${after.expiresAt ? after.expiresAt.slice(0, 10) : 'none'}`);
+      if (ipChanged) parts.push(`IP allowlist ${before.allowedIpRangeCount ?? 0} -> ${after.allowedIpRangeCount ?? 0} ranges`);
+      const label = str(m.label) ?? String(row.resourceId ?? '');
+      return {
+        summary: `Changed the restrictions of token ${str(m.label) ? `"${String(m.label)}"` : String(row.resourceId ?? '')}${parts.length ? ` (${parts.join(', ')})` : ''}`,
+        text: {
+          key: 'token.restrictions',
+          params: {
+            label,
+            expiryChanged: expiryChanged ? 1 : 0,
+            expiryFrom: before.expiresAt ? before.expiresAt.slice(0, 10) : '',
+            expiryTo: after.expiresAt ? after.expiresAt.slice(0, 10) : '',
+            ipChanged: ipChanged ? 1 : 0,
+            ipFrom: before.allowedIpRangeCount ?? 0,
+            ipTo: after.allowedIpRangeCount ?? 0,
+          },
+        },
+      };
+    }
+    case 'iam.settings.update': {
+      const t = (m.tokens ?? {}) as { maxLifetimeDays?: number | null; requireExpiry?: boolean };
+      const parts: string[] = [];
+      if (t.maxLifetimeDays !== undefined) parts.push(`token max lifetime ${t.maxLifetimeDays === null ? 'unlimited' : `${t.maxLifetimeDays} days`}`);
+      if (t.requireExpiry !== undefined) parts.push(`token expiry ${t.requireExpiry ? 'required' : 'optional'}`);
+      return {
+        summary: `Changed IAM settings${parts.length ? `: ${parts.join(', ')}` : ''}`,
+        text: {
+          key: 'settings.updated',
+          params: {
+            lifetimeSet: t.maxLifetimeDays !== undefined ? 1 : 0,
+            lifetimeDays: t.maxLifetimeDays === null || t.maxLifetimeDays === undefined ? 0 : t.maxLifetimeDays,
+            expirySet: t.requireExpiry !== undefined ? 1 : 0,
+            expiryRequired: t.requireExpiry ? 1 : 0,
+          },
+        },
+      };
+    }
+    default: return { summary: row.event };
+  }
+}
+
+async function changes(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedPage> {
+  const page = await runWithTenantScope(tenant.tenantDbName, (db) => db.iamListAuditEvents({
+    tenantId: tenant.tenantId,
+    // Like the denials, bounded in time: an open-ended read of the audit table is a full scan.
+    from: q.from ?? new Date(Date.now() - CHANGES_DEFAULT_WINDOW_MS),
+    to: q.to,
+    service: 'iam',
+    outcome: 'success',
+    resourceTypes: [...IAM_CHANGE_RESOURCE_TYPES],
+    alsoEvents: [TOKEN_RESTRICTIONS_EVENT],
+    // for this segment the principal filter means "who made the change"
+    actorUserId: q.principalType === 'user' ? q.principalId : undefined,
+    limit: q.limit,
+    offset: q.offset,
+    maxTimeMs: FEED_MAX_TIME_MS,
+  }));
+  const items = page.items.map((row): AuditFeedItem => {
+    const policyId = row.resourceType === 'iam-policy' ? str(row.resourceId) : undefined;
+    return {
+      id: String(row._id),
+      at: iso(row.createdAt),
+      kind: 'changes',
+      principal: null,
+      actor: row.actorEmail ?? row.actorUserId,
+      service: row.event === TOKEN_RESTRICTIONS_EVENT ? 'tokens' : 'iam',
+      action: row.event,
+      route: row.path,
+      method: row.method,
+      ...(policyId ? { policyId } : {}),
+      ...describeChange(row),
+    };
+  });
+  return { items, hasMore: page.hasMore };
+}
+
+// ── monitor ──────────────────────────────────────────────────────────────
+
+async function monitor(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedPage> {
+  const [entries, policies] = await Promise.all([listShadowEntries(tenant.tenantDbName), listPolicies(tenant.tenantDbName)]);
+  const policyName = new Map(policies.map((p) => [p.policyId, p.name]));
+  const from = q.from?.toISOString();
+  const to = q.to?.toISOString();
+
+  let rows = entries.filter((e) => e.category === POLICY_MONITOR_CATEGORY);
+  if (q.service) rows = rows.filter((e) => e.service === q.service);
+  if (from) rows = rows.filter((e) => e.lastSeen >= from);
+  if (to) rows = rows.filter((e) => e.firstSeen <= to);
+  if (q.principalId && q.principalType) {
+    rows = rows.filter((e) => e.samples.some((s) => (q.principalType === 'token' ? s.tokenId === q.principalId : s.userId === q.principalId)));
+  }
+  rows.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : b.count - a.count));
+
+  const window = rows.slice(q.offset, q.offset + q.limit);
+  const labels = await resolvePrincipalLabels(tenant, {
+    users: window.map((e) => e.samples[e.samples.length - 1]?.userId).filter((x): x is string => !!x),
+    tokens: window.map((e) => e.samples[e.samples.length - 1]?.tokenId).filter((x): x is string => !!x),
+  });
+
+  const items = window.map((e): AuditFeedItem => {
+    const sample = e.samples[e.samples.length - 1];
+    const policyId = e.policyId ?? '';
+    const name = policyName.get(policyId) ?? policyId;
+    const would = e.targetAllowed ? 'allow' : 'deny';
+    let action = '';
+    try {
+      action = gateActionId(e.service, e.method);
+    } catch {
+      action = `${e.service}.${e.method.toLowerCase()}`;
+    }
+    return {
+      id: e.id,
+      at: iso(e.lastSeen),
+      kind: 'monitor',
+      principal: sample
+        ? sample.tokenId
+          ? { type: 'token', id: sample.tokenId, label: labels.tokens.get(sample.tokenId) ?? sample.tokenId }
+          : { type: 'user', id: sample.userId, label: labels.users.get(sample.userId) ?? sample.userId }
+        : null,
+      service: e.service,
+      action,
+      route: e.route,
+      method: e.method,
+      code: e.legacyAllowed && !e.targetAllowed ? 'would_deny' : 'would_allow',
+      ...(policyId ? { policyId } : {}),
+      summary: `Policy "${name}" would ${would} ${e.method} ${e.route} (${e.count} time${e.count === 1 ? '' : 's'} since ${iso(e.firstSeen).slice(0, 10)})`,
+      text: { key: 'monitor.would', params: { name, would, route: `${e.method} ${e.route}`, count: e.count, since: iso(e.firstSeen).slice(0, 10) } },
+    };
+  });
+  return { items, hasMore: rows.length > q.offset + q.limit };
+}
+
+export async function listAuditFeed(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedPage> {
+  if (q.kind === 'changes') return changes(tenant, q);
+  if (q.kind === 'monitor') return monitor(tenant, q);
+  return denials(tenant, q);
+}
+
+// ── CSV ──────────────────────────────────────────────────────────────────
+
+export const CSV_COLUMNS = [
+  'time', 'kind', 'principalType', 'principalId', 'principalLabel', 'actor', 'service', 'action',
+  'method', 'route', 'code', 'decisionId', 'policyId', 'summary',
+] as const;
+
+/** A CSV cell. Cells that a spreadsheet would run as a formula are prefixed with an apostrophe. */
+export function csvCell(value: unknown): string {
+  let text = value === undefined || value === null ? '' : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+export function auditItemsToCsv(items: AuditFeedItem[], header = true): string {
+  const lines: string[] = header ? [CSV_COLUMNS.join(',')] : [];
+  for (const i of items) {
+    lines.push([
+      i.at, i.kind, i.principal?.type, i.principal?.id, i.principal?.label, i.actor, i.service, i.action,
+      i.method, i.route, i.code, i.decisionId, i.policyId, i.summary,
+    ].map(csvCell).join(','));
+  }
+  return lines.join('\n') + (lines.length ? '\n' : '');
+}

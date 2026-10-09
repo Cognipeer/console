@@ -17,6 +17,10 @@
  *   GET  /api/iam/shadow/entries          every stored aggregate (filter + paginate)
  *   POST /api/iam/shadow/reset            clear the tenant's shadow data
  *   GET  /api/iam/engine/stats            engine + shadow-machinery counters (see statsScope below)
+ *
+ * The Authorization center's own endpoints (catalog, policies, simulate,
+ * principals, audit, settings) live in iam-policies.ts / iam-directory.ts and are
+ * registered from here, under the same prefix and the same RBAC service.
  */
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
@@ -42,11 +46,14 @@ import { getEnforceStats, getTenantEnforceStats } from '@/lib/iam/enforce';
 import { getModeLookupStats, isEnforceKillSwitchOn, isShadowKillSwitchOn, recordsShadow } from '@/lib/iam/shadow/mode';
 import { listUndeclaredRoutes } from '@/lib/iam/routeRegistry';
 import { getDatabase } from '@/lib/database';
+import { recordIamChange } from '@/lib/iam/audit';
 import {
   requireSessionContext,
   safeReadJsonBody,
   withApiRequestContext,
 } from '../fastify-utils';
+import { iamDirectoryApiPlugin } from './iam-directory';
+import { iamPoliciesApiPlugin } from './iam-policies';
 
 const logger = createLogger('api:iam');
 
@@ -126,7 +133,8 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.put('/iam/mode', withApiRequestContext(async (request, reply) => {
+  // A successful change writes its own, detailed audit row (recordIamChange); the generic request row would repeat it.
+  app.put('/iam/mode', { config: { skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
     const session = requireSessionContext(request);
     const body = safeReadJsonBody<{ mode?: unknown }>(request);
 
@@ -159,8 +167,27 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
           });
         }
       }
-      const info = await setAuthzMode(session.tenantDbName, body.mode, session.userId);
-      logger.info('Authorization mode changed', { tenantDbName: session.tenantDbName, mode: info.mode, by: session.userId });
+      const previous = await getAuthzMode(session.tenantDbName).catch(() => null);
+      // Choosing the mode that is already on changes nothing: no new "changed by / at" stamp and no row in the change
+      // history ("from shadow to shadow"). A failed read of the previous mode (null) still writes and records it.
+      const unchanged = previous !== null && previous.mode === body.mode;
+      const info = unchanged ? previous : await setAuthzMode(session.tenantDbName, body.mode, session.userId);
+      if (!unchanged) {
+        logger.info('Authorization mode changed', { tenantDbName: session.tenantDbName, mode: info.mode, by: session.userId });
+        await recordIamChange(request, {
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userId: session.userId,
+          userEmail: session.userEmail,
+          userRole: session.userRole,
+          requestId: session.requestId,
+        }, {
+          event: 'iam.mode.change',
+          resourceType: 'iam-mode',
+          resourceId: 'authz_mode',
+          metadata: { from: previous?.mode ?? null, to: info.mode },
+        });
+      }
       return reply.send(await modePayload(info, session.tenantId));
     } catch (error) {
       logger.error('Failed to change authorization mode', { error: error instanceof Error ? error.message : String(error) });
@@ -290,4 +317,8 @@ export const iamApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(500).send({ error: 'Failed to read engine stats' });
     }
   }));
+
+  // ── Authorization center ──────────────────────────────────────────────────
+  await app.register(iamPoliciesApiPlugin);
+  await app.register(iamDirectoryApiPlugin);
 };
