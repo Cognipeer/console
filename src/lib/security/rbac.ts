@@ -50,6 +50,7 @@ export type PermissionService =
   | 'cluster'
   | 'sso'
   | 'ldap'
+  | 'portals'
   | 'resources';
 
 /**
@@ -139,6 +140,11 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'ai-app-gateway', label: 'AI App Gateway', description: 'Coding-agent gateway instances: identity, observation, policy enforcement and session traces.', category: 'operate' },
   { id: 'sso', label: 'Single Sign-On', description: 'OIDC single sign-on connection, attribute mapping and JIT provisioning.', category: 'admin', adminService: true },
   { id: 'ldap', label: 'LDAP Directory', description: 'LDAP/Active Directory connection, group→role mapping and JIT provisioning.', category: 'admin', adminService: true },
+  // Admin surface of the portal feature (create/edit portals, choose agents and
+  // who may use them). adminService: configuring what employees can reach is a
+  // tenant-admin decision. End-user portal ACCESS is not an RBAC service — see
+  // the note on ROUTE_PREFIXES below.
+  { id: 'portals', label: 'Portals', description: 'Chat portals that expose selected agents to chosen people, with their access lists and usage statistics.', category: 'admin', adminService: true },
   // Read-only, tenant-wide inventory across ALL projects (and tenant-wide rows).
   // adminService on purpose: it deliberately ignores the active project, so it
   // must not default to anyone below owner/admin.
@@ -166,6 +172,11 @@ export function minPermission(
   return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
 }
 
+// NOTE (portals): only the ADMIN API '/api/portals' is mapped (service
+// 'portals', adminService). The END-USER runtime '/api/portal/:key/...' is
+// deliberately NOT mapped: portal users are ordinary tenant members without any
+// console service permission, so they are authorised by the session hook plus
+// the portal's own access list, which the handler enforces per request.
 const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/browser', service: 'browser' },
   { prefix: '/api/client/v1/crawler', service: 'crawler' },
@@ -313,6 +324,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // audit_logs. The gateway writes its own request records instead.
   { prefix: '/api/ai-app-gateway', service: 'ai-app-gateway' },
   { prefix: '/api/cluster', service: 'cluster' },
+  { prefix: '/api/portals', service: 'portals' },
 ];
 
 export function isPermissionService(value: unknown): value is PermissionService {

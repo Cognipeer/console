@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, PasswordInput } from '@mantine/core';
 import { useForm } from '@mantine/form';
@@ -8,10 +8,21 @@ import { notifications } from '@mantine/notifications';
 import { IconKey, IconShieldLock, IconCheck } from '@tabler/icons-react';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
+import { assignIfPortal, safeReturnTo } from '@/lib/security/returnTo';
+
+/** Read at use time (not via useSearchParams) so the page needs no Suspense boundary. */
+function readReturnTo(): string {
+  if (typeof window === 'undefined') return safeReturnTo(null);
+  return safeReturnTo(new URLSearchParams(window.location.search).get('returnTo'));
+}
 
 export default function ChangePasswordPage() {
   const router = useRouter();
   const t = useTranslations('changePassword');
+  const goToReturnTo = useCallback(() => {
+    const dest = readReturnTo();
+    if (!assignIfPortal(dest)) router.replace(dest);
+  }, [router]);
   const [loading, setLoading] = useState(false);
 
   const form = useForm({
@@ -38,12 +49,12 @@ export default function ChangePasswordPage() {
       }
       const data = (await res.json()) as { mustChangePassword?: boolean };
       if (!data.mustChangePassword) {
-        router.replace('/dashboard');
+        goToReturnTo();
       }
     };
 
     check();
-  }, [router]);
+  }, [router, goToReturnTo]);
 
   const submit = async (values: typeof form.values) => {
     setLoading(true);
@@ -68,7 +79,7 @@ export default function ChangePasswordPage() {
         color: 'green',
       });
 
-      router.replace('/dashboard');
+      goToReturnTo();
     } catch (error) {
       const message = error instanceof Error ? error.message : t('notifications.failed');
       notifications.show({ title: t('notifications.title'), message, color: 'red' });

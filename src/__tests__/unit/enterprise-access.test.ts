@@ -37,6 +37,17 @@ describe('getEnterpriseModuleForPath', () => {
     expect(getEnterpriseModuleForPath('/api/reports/dashboard')).toBe('reports');
   });
 
+  it('gates the portal admin API and the end-user runtime, bare collection path included', () => {
+    expect(getEnterpriseModuleForPath('/api/portals')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portals/abc123/stats')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portals/agent-options')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portal/branch-assistant/info')).toBe('portals');
+    expect(getEnterpriseModuleForPath('/api/portal/branch-assistant/agents')).toBe('portals');
+    // Near-misses stay ungated.
+    expect(getEnterpriseModuleForPath('/api/portalsx')).toBeNull();
+    expect(getEnterpriseModuleForPath('/api/portalish/foo')).toBeNull();
+  });
+
   it('does not gate community paths', () => {
     expect(getEnterpriseModuleForPath('/api/models')).toBeNull();
     expect(getEnterpriseModuleForPath('/api/rag/documents')).toBeNull();

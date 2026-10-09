@@ -138,6 +138,16 @@ export const ENTERPRISE_API_RULES: EnterpriseApiRule[] = [
     module: 'ai-app-gateway',
     prefixes: ['/api/ai-app-gateway/', '/api/client/v1/ai-app-gateway/', '/api/appgw/'],
   },
+  {
+    // Portals: curated chat pages that expose selected agents to end users.
+    // Gates the ADMIN CRUD (/api/portals) and the END-USER runtime
+    // (/api/portal/:key/...). The bare collection path '/api/portals' is
+    // covered by the trailing-slash rule (see matchesRulePrefix); the runtime
+    // prefix is singular ('/api/portal/'), so it needs its own entry. The
+    // runtime still re-checks the portal access list in-handler.
+    module: 'portals',
+    prefixes: ['/api/portals/', '/api/portal/'],
+  },
 ];
 
 export interface EnterpriseDenial {

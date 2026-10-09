@@ -22,6 +22,7 @@ import {
 import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
+import { assignIfPortal, buildChangePasswordPath, buildLoginPath, safeReturnTo } from '@/lib/security/returnTo';
 
 type SsoDiscovery =
   | { available: false }
@@ -55,6 +56,12 @@ function LoginPageContent() {
   const tValidation = useTranslations('validation');
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
+  // Where a successful sign-in lands (e.g. /p/<portal> for a shared portal
+  // link). Re-validated on every use; anything not a same-origin path is
+  // /dashboard.
+  const returnTo = safeReturnTo(searchParams.get('returnTo'));
+  const afterLoginPath = (mustChangePassword?: boolean) =>
+    mustChangePassword ? buildChangePasswordPath(returnTo) : returnTo;
 
   const form = useForm({
     initialValues: { email: '', password: '' },
@@ -76,7 +83,8 @@ function LoginPageContent() {
         });
         if (response.ok) {
           const data = (await response.json()) as { mustChangePassword?: boolean };
-          router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
+          const dest = data.mustChangePassword ? buildChangePasswordPath(returnTo) : returnTo;
+          if (!assignIfPortal(dest)) router.push(dest);
           return;
         }
       } catch {
@@ -86,7 +94,7 @@ function LoginPageContent() {
       }
     };
     void checkAuth();
-  }, [router]);
+  }, [router, returnTo]);
 
   useEffect(() => {
     const discover = async () => {
@@ -114,12 +122,14 @@ function LoginPageContent() {
       message: SSO_ERROR_MESSAGES[errorCode] ?? SSO_ERROR_MESSAGES.callback_failed,
       color: 'red',
     });
-    router.replace('/login');
+    // Keep the return trip: the person still has to sign in another way.
+    router.replace(buildLoginPath(searchParams.get('returnTo')));
   }, [searchParams, router, tNotifications]);
 
   const handleSsoButtonClick = () => {
     if (sso.available && sso.mode === 'direct') {
-      window.location.href = sso.startUrl;
+      const joiner = sso.startUrl.includes('?') ? '&' : '?';
+      window.location.href = `${sso.startUrl}${joiner}returnTo=${encodeURIComponent(returnTo)}`;
       return;
     }
     setSsoStep(true);
@@ -135,7 +145,7 @@ function LoginPageContent() {
       });
       return;
     }
-    window.location.href = `/api/auth/sso/start?email=${encodeURIComponent(email)}&next=${encodeURIComponent('/dashboard')}`;
+    window.location.href = `/api/auth/sso/start?email=${encodeURIComponent(email)}&returnTo=${encodeURIComponent(returnTo)}`;
   };
 
   const handleSubmit = async (values: typeof form.values) => {
@@ -163,7 +173,8 @@ function LoginPageContent() {
         message: tNotifications('loginSuccess'),
         color: 'teal',
       });
-      router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
+      const dest = afterLoginPath(data.mustChangePassword);
+      if (!assignIfPortal(dest)) router.push(dest);
     } catch {
       notifications.show({
         title: tNotifications('errorTitle'),

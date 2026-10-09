@@ -511,10 +511,10 @@ describe('reference graph', () => {
 // Edge kinds and type ids the enterprise overlay contributes; their labels live in the community messages.
 const ENTERPRISE_EDGE_KINDS = [
   'mcpHub.server', 'realtime.chatModel', 'realtime.sttModel', 'realtime.ttsModel', 'realtime.agent',
-  'appgw.model', 'appgw.guardrail', 'sandbox.volumeBucket',
+  'appgw.model', 'appgw.guardrail', 'sandbox.volumeBucket', 'portal.agent',
 ];
 const ENTERPRISE_TYPES = [
-  'sandbox-template', 'sandbox-volume', 'mcp-hub', 'gpu-host', 'gpu-pool', 'realtime-model', 'ai-app-gateway', 'prompt-optimizer',
+  'sandbox-template', 'sandbox-volume', 'mcp-hub', 'gpu-host', 'gpu-pool', 'realtime-model', 'ai-app-gateway', 'prompt-optimizer', 'portal',
 ];
 
 describe('i18n coverage of the registry', () => {

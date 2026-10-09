@@ -2487,9 +2487,10 @@ export async function checkAgentModel(
  * `console` sessions — the ones a person started from the dashboard to try the
  * agent — can be continued from the UI; the rest are real traffic (or a
  * run's own bookkeeping) and are shown read-only. Records written before this
- * existed carry no source.
+ * existed carry no source. `portal` is end-user traffic through an enterprise
+ * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
  */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'schedule' | 'evaluation' | 'redteam';
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'schedule' | 'evaluation' | 'redteam' | 'portal';
 
 export async function createConversation(
     tenantDbName: string,

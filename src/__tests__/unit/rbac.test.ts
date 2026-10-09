@@ -15,6 +15,25 @@ describe('RBAC service routing', () => {
   });
 });
 
+describe('RBAC portals', () => {
+  it('maps the portal ADMIN API to the admin-only portals service', () => {
+    expect(getPermissionServiceForPath('/api/portals')).toBe('portals');
+    expect(getPermissionServiceForPath('/api/portals/abc/stats')).toBe('portals');
+    expect(authorizeServiceRequest({ role: 'user' }, 'GET', '/api/portals').allowed).toBe(false);
+    expect(authorizeServiceRequest({ role: 'user' }, 'POST', '/api/portals').allowed).toBe(false);
+    expect(authorizeServiceRequest({ role: 'admin' }, 'POST', '/api/portals').allowed).toBe(true);
+    expect(authorizeServiceRequest({ role: 'owner' }, 'DELETE', '/api/portals/abc').allowed).toBe(true);
+  });
+
+  it('leaves the end-user runtime to the session hook and the portal access list', () => {
+    // Unmapped on purpose: a plain tenant member (no service grants) must reach it.
+    expect(getPermissionServiceForPath('/api/portal/branch-assistant/info')).toBeNull();
+    expect(
+      authorizeServiceRequest({ role: 'user' }, 'POST', '/api/portal/branch-assistant/conversations').allowed,
+    ).toBe(true);
+  });
+});
+
 describe('RBAC authorization', () => {
   it('allows owners to access admin services', () => {
     const decision = authorizeServiceRequest({ role: 'owner' }, 'DELETE', '/api/users/user-1');

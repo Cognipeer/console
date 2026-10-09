@@ -35,7 +35,7 @@ export interface AgentRuntimeContext {
   /** Stamped by the server from the authenticated caller — not client-writable. */
   userId?: string;
   tokenId?: string;
-  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground';
+  source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal';
 }
 
 /** Per-record passthrough policy (stored on the target record). */

@@ -221,6 +221,36 @@
       "popular": true
     },
     {
+      "id": "portals",
+      "href": "/dashboard/portals",
+      "icon": "IconMessageChatbot",
+      "category": "build",
+      "navLabelKey": "portals",
+      "navDescriptionKey": "portalsDescription",
+      "tags": [
+        "portal",
+        "chat",
+        "employees",
+        "agents",
+        "access"
+      ],
+      "searchKeywords": [
+        "portal",
+        "portals",
+        "portallar",
+        "chat page",
+        "employee assistant",
+        "agent portal",
+        "self service",
+        "share agents",
+        "\u00e7al\u0131\u015fan asistan\u0131"
+      ],
+      "tenantAdminOnly": true,
+      "badge": "new",
+      "requiresEnterprise": true,
+      "enterpriseModule": "portals"
+    },
+    {
       "id": "config",
       "href": "/dashboard/config",
       "icon": "IconLock",

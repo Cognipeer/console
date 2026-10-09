@@ -160,6 +160,7 @@ const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
     schedule: { label: 'Schedule', color: 'orange' },
     evaluation: { label: 'Evaluation', color: 'blue' },
     redteam: { label: 'Red team', color: 'red' },
+    portal: { label: 'Portal', color: 'pink' },
 };
 
 export function sessionSourceLabel(source: string | undefined): string {
