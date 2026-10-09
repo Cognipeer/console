@@ -16,6 +16,7 @@ import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
 import { applyCorsHeaders } from './cors';
 import { rejectInactiveSessionAccount } from './fastify-utils';
+import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
@@ -146,7 +147,9 @@ function isSelfAuthApiPath(pathname: string): boolean {
 }
 
 function getPathname(url: string | undefined): string {
-  return new URL(url || '/', 'http://localhost').pathname;
+  // The canonical form the router matches; the raw form lets /api/to%6Fls
+  // skip the licence guard and audit mapping (see requestPath.ts).
+  return canonicalizeRequestPathname(url);
 }
 
 function isPublicApiPath(pathname: string): boolean {
