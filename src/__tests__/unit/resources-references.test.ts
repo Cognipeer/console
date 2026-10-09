@@ -42,13 +42,16 @@ const agentIn = (projectId: string | null) => rec({ type: 'agent', id: 'a', key:
 const tool = (id: string, projectId: string | null, over: Partial<ResourceRecord> = {}) =>
   rec({ type: 'tool', id, key: 'crm', projectId, status: 'active', statusTone: 'ok', ...over });
 
+// Enterprise types a community referrer may point at: registered only by the overlay.
+const ENTERPRISE_TARGET_TYPES = new Set(['sandbox-template']);
+
 describe('edge kind registry', () => {
   const typeIds = new Set(communityResourceTypes.map((d) => d.type));
 
-  it('only references registered resource types', () => {
+  it('only references registered resource types (or an enterprise target type)', () => {
     for (const def of Object.values(EDGE_KINDS)) {
       expect(typeIds.has(def.fromType), `${def.kind} fromType`).toBe(true);
-      expect(typeIds.has(def.toType), `${def.kind} toType`).toBe(true);
+      expect(typeIds.has(def.toType) || ENTERPRISE_TARGET_TYPES.has(def.toType), `${def.kind} toType`).toBe(true);
     }
   });
 
@@ -59,6 +62,8 @@ describe('edge kind registry', () => {
       'guardrail.model', 'guardrail.wordList',
       // degraded policy + failMode 'open' = unscanned traffic (safety control lost)
       'guardrail.piiPolicy',
+      // resolveTemplateIdByKey throws "Sandbox template not found" on the first sandbox call
+      'agent.sandboxTemplate', 'mcp.sandboxTemplate',
     ];
     const warnings = [
       'agent.tool', 'agent.mcp', 'agent.knowledge', 'agent.subagent', 'agent.subagentModel', 'agent.subagentKnowledge',
@@ -503,6 +508,15 @@ describe('reference graph', () => {
   });
 });
 
+// Edge kinds and type ids the enterprise overlay contributes; their labels live in the community messages.
+const ENTERPRISE_EDGE_KINDS = [
+  'mcpHub.server', 'realtime.chatModel', 'realtime.sttModel', 'realtime.ttsModel', 'realtime.agent',
+  'appgw.model', 'appgw.guardrail', 'sandbox.volumeBucket',
+];
+const ENTERPRISE_TYPES = [
+  'sandbox-template', 'sandbox-volume', 'mcp-hub', 'gpu-host', 'gpu-pool', 'realtime-model', 'ai-app-gateway', 'prompt-optimizer',
+];
+
 describe('i18n coverage of the registry', () => {
   it('every edge kind has a label in en and tr (exact or family)', async () => {
     const { en } = await import('@/lib/i18n/messages/en');
@@ -514,8 +528,14 @@ describe('i18n coverage of the registry', () => {
       }
       // no label for a kind that is not registered
       for (const key of Object.keys(labels)) {
-        if (key.includes('.')) expect(EDGE_KINDS[key], `${name}:${key} is not a registered kind`).toBeDefined();
+        if (key.includes('.') && !ENTERPRISE_EDGE_KINDS.includes(key)) {
+          expect(EDGE_KINDS[key], `${name}:${key} is not a registered kind`).toBeDefined();
+        }
       }
+      for (const kind of ENTERPRISE_EDGE_KINDS) expect(labels[kind], `${name}:${kind}`).toBeTruthy();
+      const typeLabels = (messages as any).resources.types as Record<string, string>;
+      for (const type of ENTERPRISE_TYPES) expect(typeLabels[type], `${name}:types.${type}`).toBeTruthy();
+      expect((messages as any).resources.categories.infrastructure).toBeTruthy();
     }
   });
 });

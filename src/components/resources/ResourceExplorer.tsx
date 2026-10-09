@@ -20,6 +20,7 @@ import { IconAlertCircle, IconAlertTriangle, IconCheck, IconCopy, IconExternalLi
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
 import { tryTranslate } from './i18nLookup';
+import ProjectCell, { type ProjectDisplay } from './ProjectCell';
 import ResourceUsagePanel, { type ResourceEdgeView, type ResourceRefView } from './ResourceUsagePanel';
 import ResourceHealthPanel, {
   explainIssue,
@@ -40,6 +41,7 @@ interface ResourceListItem {
   description: string | null;
   projectId: string | null;
   projectName: string | null;
+  projectDisplay?: ProjectDisplay | null;
   status: string | null;
   statusTone: StatusTone;
   createdBy: string | null;
@@ -81,7 +83,7 @@ interface ListResponse {
   generatedAt: string;
 }
 
-const CATEGORY_ORDER = ['agents', 'knowledge', 'models', 'safety', 'quality', 'operations'];
+const CATEGORY_ORDER = ['agents', 'knowledge', 'models', 'safety', 'quality', 'operations', 'infrastructure'];
 const ALL = '';
 const TENANT = 'tenant';
 
@@ -249,7 +251,11 @@ export default function ResourceExplorer() {
   const counts = data?.counts ?? {};
   const totalAll = Object.values(counts).reduce((sum, n) => sum + n, 0);
 
-  const projectName = (row: ResourceListItem) => row.projectName ?? (row.projectId ? row.projectId : t('tenantWide'));
+  // Small badge on types that only exist in the enterprise edition.
+  const editionBadge = (typeName: string) =>
+    typeInfo.get(typeName)?.edition === 'enterprise' ? (
+      <span className="ds-badge ds-badge-info" style={{ marginLeft: 6, fontSize: 10.5 }}>{t('enterpriseBadge')}</span>
+    ) : null;
 
   const columns: DataGridColumn<ResourceListItem>[] = [
     {
@@ -287,9 +293,14 @@ export default function ResourceExplorer() {
     {
       key: 'type',
       label: t('colType'),
-      render: (row) => <span className="ds-badge">{typeLabel(row.type)}</span>,
+      render: (row) => (
+        <>
+          <span className="ds-badge">{typeLabel(row.type)}</span>
+          {editionBadge(row.type)}
+        </>
+      ),
     },
-    { key: 'project', label: t('colProject'), render: (row) => projectName(row) },
+    { key: 'project', label: t('colProject'), render: (row) => <ProjectCell display={row.projectDisplay} /> },
     {
       key: 'status',
       label: t('colStatus'),
@@ -327,6 +338,7 @@ export default function ResourceExplorer() {
       description: null,
       projectId: ref.projectId,
       projectName: ref.projectName,
+      projectDisplay: ref.projectDisplay,
       status: null,
       statusTone: 'neutral',
       createdBy: null,
@@ -405,7 +417,8 @@ export default function ResourceExplorer() {
 
   const filterProjects = [
     { value: ALL, label: t('allProjects') },
-    { value: TENANT, label: t('tenantWide') },
+    // Not "tenant-wide rows": it also covers types with no project concept and unassigned rows.
+    { value: TENANT, label: t('projectFilterNotBound') },
     ...(data?.projects ?? []).map((p) => ({ value: p.id, label: p.name })),
   ];
   const filterStatuses = [
@@ -517,7 +530,10 @@ export default function ResourceExplorer() {
                     style={navItem(type === info.type)}
                     onClick={() => selectType(info.type)}
                   >
-                    <span>{typeLabel(info.type)}</span>
+                    <span>
+                      {typeLabel(info.type)}
+                      {editionBadge(info.type)}
+                    </span>
                     <span className="ds-muted">{counts[info.type] ?? 0}</span>
                   </button>
                 ))}
@@ -547,7 +563,7 @@ export default function ResourceExplorer() {
                 },
                 options: filterProjects,
                 ariaLabel: t('projectFilter'),
-                width: 170,
+                width: 230,
               },
               {
                 value: status,
@@ -620,7 +636,7 @@ export default function ResourceExplorer() {
             </div>
             <Table withRowBorders={false} verticalSpacing={6}>
               <Table.Tbody>
-                <Row label={t('fieldType')}>{typeLabel(view.type)}</Row>
+                <Row label={t('fieldType')}>{typeLabel(view.type)}{editionBadge(view.type)}</Row>
                 {view.key ? <Row label={t('fieldKey')} mono>{view.key}</Row> : null}
                 <Row label={t('fieldId')} mono>{view.id}</Row>
                 {view.crn ? (
@@ -639,7 +655,7 @@ export default function ResourceExplorer() {
                   </Group>
                 </Row>
                 ) : null}
-                <Row label={t('fieldProject')}>{projectName(view)}</Row>
+                <Row label={t('fieldProject')}><ProjectCell display={view.projectDisplay} /></Row>
                 {showStubFields ? (<>
                 <Row label={t('fieldStatus')}>
                   {view.status ? (

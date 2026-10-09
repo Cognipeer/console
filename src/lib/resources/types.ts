@@ -15,7 +15,9 @@ export type ResourceCategory =
   | 'models'
   | 'safety'
   | 'quality'
-  | 'operations';
+  | 'operations'
+  // Sandbox, GPU fleet and other platform resources (enterprise types).
+  | 'infrastructure';
 
 /**
  * Where instances of a type may live:
@@ -24,6 +26,25 @@ export type ResourceCategory =
  *  - 'tenant'            rows are always tenant-wide
  */
 export type ResourceScope = 'project' | 'project-or-tenant' | 'tenant';
+
+/**
+ * How a resource relates to projects, computed on the server (the UI must not
+ * guess it from `projectId === null`, which means four different things).
+ *  - 'project'        belongs to exactly one project
+ *  - 'multi-project'  assigned to several projects (e.g. a provider)
+ *  - 'all-projects'   scope 'project-or-tenant' without a project: a tenant-wide
+ *                     row that every project can use
+ *  - 'tenant-level'   scope 'tenant': the type has no project concept at all
+ *                     (GPU host, inference server, sandbox volume...)
+ *  - 'unassigned'     scope 'project' without a project (provider assigned to
+ *                     none, legacy row): usable from no project
+ */
+export type ProjectDisplay =
+  | { kind: 'project'; projectId: string; projectName: string | null }
+  | { kind: 'multi-project'; projectIds: string[]; projectNames: string[] }
+  | { kind: 'all-projects' }
+  | { kind: 'tenant-level' }
+  | { kind: 'unassigned' };
 
 export type ResourceStatusTone = 'ok' | 'off' | 'warn' | 'neutral';
 
@@ -102,6 +123,14 @@ export interface ResourceTypeDefinition {
   category: ResourceCategory;
   scope: ResourceScope;
   edition: 'community' | 'enterprise';
+  /**
+   * Per-tenant entitlement. When it resolves false (or throws) the type is
+   * skipped for this tenant: no list() call, not in the type facets, and edges
+   * that point at it are dropped like those to a type of another edition. Used
+   * by enterprise types so a tenant without the license neither pays the reads
+   * nor sees modules it cannot use. Omitted = always available.
+   */
+  isAvailable?(ctx: ResourceProviderContext): Promise<boolean>;
   /** ALL rows of the tenant: every project plus tenant-wide rows. */
   list(ctx: ResourceProviderContext): Promise<ResourceRecord[]>;
   /**
@@ -127,6 +156,8 @@ export interface ResourceListItem {
   description: string | null;
   projectId: string | null;
   projectName: string | null;
+  /** Server-computed; render this instead of inferring from `projectId`. */
+  projectDisplay: ProjectDisplay;
   status: string | null;
   statusTone: ResourceStatusTone;
   createdBy: string | null;
@@ -165,6 +196,8 @@ export interface ResourceRefView {
   name: string | null;
   projectId: string | null;
   projectName: string | null;
+  /** null for a target that does not (uniquely) exist: there is no row to describe. */
+  projectDisplay: ProjectDisplay | null;
   crn: string | null;
 }
 
@@ -219,7 +252,7 @@ export interface GetResourceHealthInput {
   severity?: HealthSeverity;
   kind?: HealthIssueKind;
   type?: string;
-  /** A project id, or 'tenant' for tenant-wide resources only. */
+  /** A project id, or 'tenant' for resources not bound to a single project. */
   projectId?: string;
   refresh?: boolean;
 }
@@ -246,7 +279,10 @@ export interface ListResourcesInput {
   tenantDbName: string;
   tenantId: string;
   type?: string;
-  /** A project id, or 'tenant' for tenant-wide rows only. */
+  /**
+   * A project id, or 'tenant' for rows not bound to a single project
+   * (all-projects + tenant-level + unassigned).
+   */
   projectId?: string;
   q?: string;
   status?: string;

@@ -91,6 +91,12 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
     }
   });
 
+  // Enterprise target: dropped without the enterprise build (graph.knownTypes).
+  // Unlike memory, the sandbox is OFF unless enabled === true: buildAgentSandboxTools
+  // returns no tools for a missing flag, so a legacy/imported config never uses its template.
+  const sandbox = config.sandbox as Doc | undefined;
+  if (sandbox && sandbox.enabled === true) edges.add('agent.sandboxTemplate', sandbox.templateKey, 'config.sandbox.templateKey');
+
   const memory = config.memory as Doc | undefined;
   if (memory && memory.enabled !== false) edges.add('agent.memory', memory.memoryStoreKey, 'config.memory.memoryStoreKey');
 

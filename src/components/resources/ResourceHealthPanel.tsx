@@ -6,6 +6,7 @@ import { IconAlertTriangle } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import { useTranslations } from '@/lib/i18n';
 import { tryTranslate } from './i18nLookup';
+import ProjectCell from './ProjectCell';
 import { edgeKindLabel, type EdgeSeverity, type ResourceRefView } from './ResourceUsagePanel';
 
 // Mirrors the HealthIssue / GET /api/resources/health contract.
@@ -134,8 +135,7 @@ export default function ResourceHealthPanel({ types, reloadToken, onOpen, onSumm
         <div>
           <div style={{ fontWeight: 500 }}>{row.resource.name ?? row.resource.key ?? row.resource.id}</div>
           <div className="ds-muted" style={{ fontSize: 11.5 }}>
-            {typeLabel(row.resource.type)} ·{' '}
-            {row.resource.projectId ? (row.resource.projectName ?? row.resource.projectId) : t('tenantWide')}
+            {typeLabel(row.resource.type)} · <ProjectCell display={row.resource.projectDisplay} />
           </div>
         </div>
       ),
@@ -159,7 +159,13 @@ export default function ResourceHealthPanel({ types, reloadToken, onOpen, onSumm
                 <span key={`${r.id ?? r.key}:${i}`}>
                   {i > 0 ? ', ' : ''}
                   {r.name ?? r.key ?? r.id}
-                  {r.projectId ? ` (${r.projectName ?? r.projectId})` : ''}
+                  {r.projectDisplay ? (
+                    <>
+                      {' ('}
+                      <ProjectCell display={r.projectDisplay} />
+                      {')'}
+                    </>
+                  ) : null}
                 </span>
               ))}
               {row.related.length > 3 ? ` +${row.related.length - 3}` : ''}

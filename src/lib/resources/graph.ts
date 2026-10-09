@@ -4,6 +4,7 @@
  * with it; the views handed to the API are produced on demand.
  */
 import { computeHealthIssues } from './health';
+import { scopeOfType } from './projectDisplay';
 import {
   buildResolutionIndex,
   resolveEdge,
@@ -64,10 +65,18 @@ export function buildResourceGraph(input: {
    * provider error / truncation).
    */
   incompleteTypes?: ReadonlySet<string>;
+  /**
+   * Types registered in this build. An edge whose target type is not among them
+   * (an agent pointing at a sandbox template in a build without the enterprise
+   * edition) cannot be checked and is dropped, never reported as missing.
+   * Omitted: every edge is resolved.
+   */
+  knownTypes?: ReadonlySet<string>;
 }): ResourceGraph {
   const ctx: RefViewContext = {
     tenantId: input.tenantId,
     projectNames: new Map(input.projects.map((p) => [p.id, p.name])),
+    scopeOfType,
   };
   const index = buildResolutionIndex(input.records);
 
@@ -85,6 +94,7 @@ export function buildResourceGraph(input: {
     const recordEdges = input.edgesOf ? input.edgesOf.get(record) : record.edges;
     if (!recordEdges?.length) continue;
     for (const edge of recordEdges) {
+      if (input.knownTypes && !input.knownTypes.has(edge.toType)) continue;
       const r = resolveEdge(index, record, edge);
       if (!r) continue;
       resolved.push(r);

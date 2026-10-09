@@ -17,6 +17,7 @@ import { createLogger } from '@/lib/core/logger';
 import { buildCrn } from './crn';
 import { EMPTY_GRAPH, buildResourceGraph, type ResourceGraph } from './graph';
 import { HEALTH_ISSUE_KINDS } from './health';
+import { matchesProjectFilter, projectDisplayOfRecord } from './projectDisplay';
 import { getResourceTypeDefinition, listResourceTypeDefinitions } from './registry';
 import { ensureCommunityResourceTypesRegistered } from './providers';
 import type {
@@ -72,6 +73,8 @@ interface Snapshot extends Directory {
   graph: ResourceGraph;
   /** The reference analysis threw: issues/uses/usedBy are empty because nothing was checked. */
   graphFailed: boolean;
+  /** Types skipped for this tenant (`isAvailable` said no): hidden from facets and from edge checks. */
+  unavailableTypes: ReadonlySet<string>;
   errors: ResourceProviderError[];
   truncated: ResourceTruncation[];
   generatedAt: string;
@@ -201,6 +204,20 @@ async function loadType(
   }
 }
 
+/** A failing or slow entitlement check counts as "not entitled": never list on a guess. */
+async function isTypeAvailable(def: ResourceTypeDefinition, ctx: ResourceProviderContext): Promise<boolean> {
+  if (!def.isAvailable) return true;
+  try {
+    return (await withTimeout(def.isAvailable(ctx), PROVIDER_TIMEOUT_MS, `Availability of ${def.type}`)) === true;
+  } catch (error) {
+    logger.warn('Resource type availability check failed', {
+      type: def.type,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
 /** ONE projects read + ONE users read, shared by every row. */
 async function loadDirectory(ctx: ResourceProviderContext): Promise<Directory> {
   // Same bound as the providers: a hung projects/users read degrades to empty
@@ -231,7 +248,10 @@ async function buildSnapshot(input: { tenantDbName: string; tenantId: string }):
   ensureCommunityResourceTypesRegistered();
   return runWithTenantScope(input.tenantDbName, async (db) => {
     const ctx: ResourceProviderContext = { db, tenantId: input.tenantId, tenantDbName: input.tenantDbName };
-    const defs = listResourceTypeDefinitions();
+    const allDefs = listResourceTypeDefinitions();
+    const entitled = await Promise.all(allDefs.map((def) => isTypeAvailable(def, ctx)));
+    const defs = allDefs.filter((_, i) => entitled[i]);
+    const unavailableTypes = new Set(allDefs.filter((_, i) => !entitled[i]).map((d) => d.type));
     const [results, directory] = await Promise.all([
       Promise.all(defs.map((def) => loadType(def, ctx))),
       loadDirectory(ctx),
@@ -261,6 +281,10 @@ async function buildSnapshot(input: { tenantDbName: string; tenantId: string }):
         edgesOf,
         projects: directory.projects,
         incompleteTypes: new Set([...errors.map((e) => e.type), ...truncated.map((t) => t.type)]),
+        // An edge to a type this build (or this tenant's license) does not have
+        // (e.g. a sandbox template without the enterprise edition) is not
+        // checkable, hence not "missing".
+        knownTypes: new Set(defs.map((d) => d.type)),
       });
     } catch (error) {
       // A bug in the graph must not take the whole inventory down with it.
@@ -278,6 +302,7 @@ async function buildSnapshot(input: { tenantDbName: string; tenantId: string }):
       records: stripped,
       graph,
       graphFailed,
+      unavailableTypes,
       errors,
       truncated,
       ...directory,
@@ -328,6 +353,7 @@ function toListItem(
     description: r.description,
     projectId: r.projectId,
     projectName: r.projectId ? projectNames.get(r.projectId) ?? null : null,
+    projectDisplay: projectDisplayOfRecord(r, projectNames),
     status: r.status,
     statusTone: r.statusTone,
     createdBy: r.createdBy,
@@ -339,8 +365,12 @@ function toListItem(
   };
 }
 
-function typeInfos() {
-  return listResourceTypeDefinitions().map((d) => ({
+function availableDefinitions(snapshot: Snapshot): ResourceTypeDefinition[] {
+  return listResourceTypeDefinitions().filter((d) => !snapshot.unavailableTypes.has(d.type));
+}
+
+function typeInfos(snapshot: Snapshot) {
+  return availableDefinitions(snapshot).map((d) => ({
     type: d.type,
     service: d.service,
     category: d.category,
@@ -372,13 +402,12 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
   const snapshot = await getSnapshot(input, input.refresh === true);
 
   const needle = input.q?.trim().toLowerCase() || '';
+  const filterProjectNames = new Map(snapshot.projects.map((p) => [p.id, p.name]));
   const afterBase = snapshot.records.filter((r) => {
-    if (input.projectId) {
-      if (input.projectId === 'tenant') {
-        if (r.projectId !== null) return false;
-      } else if (r.projectId !== input.projectId && !r.projectIds?.includes(input.projectId)) {
-        return false;
-      }
+    // 'tenant' = not bound to a single project (all-projects, tenant-level, unassigned);
+    // a project id matches the row's project or any of its assignments.
+    if (input.projectId && !matchesProjectFilter(projectDisplayOfRecord(r, filterProjectNames), input.projectId)) {
+      return false;
     }
     if (input.health === 'issues' && snapshot.graph.issueSummaryOf(r.type, r.id).count === 0) return false;
     return !needle || matchesQuery(r, needle);
@@ -393,7 +422,7 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
   const afterStatus = input.status ? afterBase.filter((r) => r.status === input.status) : afterBase;
 
   const counts: Record<string, number> = {};
-  for (const def of listResourceTypeDefinitions()) counts[def.type] = 0;
+  for (const def of availableDefinitions(snapshot)) counts[def.type] = 0;
   for (const r of afterStatus) counts[r.type] = (counts[r.type] ?? 0) + 1;
 
   const filtered = (input.type ? afterStatus.filter((r) => r.type === input.type) : afterStatus)
@@ -407,7 +436,7 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
     items: page.map((r) => toListItem(r, input.tenantId, snapshot, projectNames, snapshot.graph)),
     total: filtered.length,
     counts,
-    types: typeInfos(),
+    types: typeInfos(snapshot),
     projects: snapshot.projects,
     statuses: [...statusSet].sort(),
     errors: snapshot.errors,
@@ -480,9 +509,10 @@ export async function getResourceHealth(input: GetResourceHealthInput): Promise<
   const inScope: HealthIssue[] = snapshot.graph.issues.filter((issue) => {
     if (input.type && issue.resource.type !== input.type) return false;
     if (input.projectId) {
-      return input.projectId === 'tenant'
-        ? issue.resource.projectId === null
-        : issue.resource.projectId === input.projectId;
+      // Same rule as the list filter, evaluated on the display the issue carries.
+      return issue.resource.projectDisplay
+        ? matchesProjectFilter(issue.resource.projectDisplay, input.projectId)
+        : false;
     }
     return true;
   });

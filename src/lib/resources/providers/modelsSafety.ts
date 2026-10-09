@@ -208,7 +208,10 @@ export const modelsSafetyResourceTypes: ResourceTypeDefinition[] = [
     type: 'provider',
     service: 'providers',
     category: 'models',
-    scope: 'project-or-tenant',
+    // Assignment-based (projectId and/or projectIds): findProviderByKey with a
+    // project only returns providers assigned to it, so a provider assigned to no
+    // project is unusable ('unassigned'), not tenant-wide.
+    scope: 'project',
     edition: 'community',
     list: async ({ db, tenantId }) => (await db.listProviders(tenantId)).map((p) => mapProvider(p as never)),
     detailUrl: (r) => `/dashboard/providers/${encodeURIComponent(r.id)}`,

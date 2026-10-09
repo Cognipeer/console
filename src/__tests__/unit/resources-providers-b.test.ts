@@ -16,7 +16,7 @@ import {
   mapRedTeamCustomProbe,
   qualityResourceTypes,
 } from '@/lib/resources/providers/quality';
-import { mapAlertRule, mapConfigGroup, operationsResourceTypes } from '@/lib/resources/providers/operations';
+import { mapAlertRule, mapConfigGroup, mapQuotaPolicy, operationsResourceTypes } from '@/lib/resources/providers/operations';
 import type { DatabaseProvider } from '@/lib/database';
 import type { ResourceProviderContext } from '@/lib/resources/types';
 
@@ -124,6 +124,33 @@ describe('operations mappers never expose secrets', () => {
   });
 });
 
+describe('quota policy', () => {
+  it('surfaces which limit families are set, never the numbers or free-form fields', () => {
+    const r = mapQuotaPolicy({
+      ...base, _id: 'q1', projectId: 'p1', label: 'Daily cap', domain: 'llm', scope: 'token', scopeId: 'tok1',
+      priority: 5, enabled: false, description: 'd',
+      limits: { rateLimit: { requests: { perMinute: 77777 } }, budget: { dailySpendLimit: 424242 }, metadata: SECRET },
+      metadata: { s: SECRET },
+    });
+    expect(JSON.stringify(r)).not.toContain(SECRET);
+    expect(JSON.stringify(r)).not.toContain('77777');
+    expect(JSON.stringify(r)).not.toContain('424242');
+    expect(r).toMatchObject({ key: null, name: 'Daily cap', projectId: 'p1', status: 'disabled', statusTone: 'off' });
+    expect(r.attributes).toEqual(expect.arrayContaining([
+      { key: 'scope', value: 'token' }, { key: 'scopeId', value: 'tok1' }, { key: 'domain', value: 'llm' },
+      { key: 'hasRateLimit', value: true }, { key: 'hasBudget', value: true },
+    ]));
+    expect(r.attributes.find((a) => a.key === 'hasResourceCaps')).toBeUndefined();
+  });
+
+  it('names an unlabelled policy after its domain and scope; no project means tenant-wide', () => {
+    const r = mapQuotaPolicy({ ...base, _id: 'q2', domain: 'global', scope: 'tenant', limits: {} });
+    expect(r.name).toBe('global · tenant');
+    expect(r.projectId).toBeNull();
+    expect(mapQuotaPolicy({ ...base, _id: 'q3' }).name).toBe('q3');
+  });
+});
+
 describe('type definitions', () => {
   const rows = (extra: object = {}) => [{ _id: 'x1', key: 'k', name: 'N', projectId: 'p1', ...extra }];
   const db = {
@@ -140,13 +167,14 @@ describe('type definitions', () => {
     listAnalysisDefinitions: vi.fn().mockResolvedValue(rows()),
     listAlertRules: vi.fn().mockResolvedValue(rows()),
     listConfigGroups: vi.fn().mockResolvedValue(rows()),
+    listQuotaPolicies: vi.fn().mockResolvedValue(rows({ label: 'Daily cap' })),
   };
   const ctx = { db: db as unknown as DatabaseProvider, tenantId: 'ten', tenantDbName: 'd' } satisfies ResourceProviderContext;
 
   it('registers every expected type id', () => {
     expect(modelsSafetyResourceTypes.map((d) => d.type)).toEqual(['provider', 'inference-server', 'guardrail', 'guardrail-word-list', 'pii-policy']);
     expect(qualityResourceTypes.map((d) => d.type)).toEqual(['evaluation-target', 'evaluation-dataset', 'evaluation-suite', 'redteam-campaign', 'redteam-custom-probe', 'analysis-definition']);
-    expect(operationsResourceTypes.map((d) => d.type)).toEqual(['alert-rule', 'config-group']);
+    expect(operationsResourceTypes.map((d) => d.type)).toEqual(['alert-rule', 'config-group', 'quota-policy']);
   });
 
   it('lists with no project filter and yields records of the declared type', async () => {
@@ -162,6 +190,7 @@ describe('type definitions', () => {
     expect(db.listEvaluationSuites).toHaveBeenCalledWith();
     expect(db.listProviders).toHaveBeenCalledWith('ten');
     expect(db.listAlertRules).toHaveBeenCalledWith('ten');
+    expect(db.listQuotaPolicies).toHaveBeenCalledWith('ten');
     expect(db.listInferenceServers).toHaveBeenCalledWith('ten');
   });
 

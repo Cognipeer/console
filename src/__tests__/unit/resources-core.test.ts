@@ -475,7 +475,11 @@ describe('resource service', () => {
 
     it('a graph failure is reported, never shown as a clean bill of health', async () => {
       const poisoned = { get kind(): string { throw new Error('boom'); }, toType: 'tool', by: 'key' as const, target: 'x', field: 'f' };
-      registerResourceTypes([def('agent', async () => [rec({ type: 'agent', id: 'a', key: 'a', projectId: 'p1', edges: [poisoned] })])]);
+      registerResourceTypes([
+        def('agent', async () => [rec({ type: 'agent', id: 'a', key: 'a', projectId: 'p1', edges: [poisoned] })]),
+        // The edge's target type must be registered, otherwise it is dropped before it can fail.
+        def('tool', async () => []),
+      ]);
       const list = await listResources(base);
       expect(list.items).toHaveLength(1);
       expect(list.errors).toContainEqual({ type: 'references', message: expect.any(String) });

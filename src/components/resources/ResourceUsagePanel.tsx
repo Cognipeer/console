@@ -3,6 +3,7 @@
 import { Group, Stack, Text, Tooltip } from '@mantine/core';
 import { useTranslations } from '@/lib/i18n';
 import { tryTranslate } from './i18nLookup';
+import ProjectCell, { projectDisplayLabel, type ProjectDisplay } from './ProjectCell';
 
 // Mirrors the ResourceEdgeView / ResourceRefView contract of GET /api/resources/:type/:id.
 export interface ResourceRefView {
@@ -12,6 +13,8 @@ export interface ResourceRefView {
   name: string | null;
   projectId: string | null;
   projectName: string | null;
+  /** null for a target that does not exist. */
+  projectDisplay: ProjectDisplay | null;
   crn: string | null;
 }
 
@@ -122,7 +125,6 @@ function EdgeRow({ edge, onOpen }: { edge: ResourceEdgeView; onOpen?: (ref: Reso
   const openable = Boolean(onOpen && other.id);
   const typeLabel = label(`types.${other.type}`, other.type);
   const title = other.name ?? other.key ?? other.id ?? '—';
-  const project = other.projectId ? (other.projectName ?? other.projectId) : t('tenantWide');
 
   return (
     <div
@@ -162,7 +164,7 @@ function EdgeRow({ edge, onOpen }: { edge: ResourceEdgeView; onOpen?: (ref: Reso
           <div className="ds-muted" style={{ fontSize: 12, marginTop: 2 }}>
             {edgeKindLabel(t, edge.kind)}
             {other.name && other.key ? <> · <span style={MONO}>{other.key}</span></> : null}
-            {edge.status !== 'missing' ? <> · {project}</> : null}
+            {edge.status !== 'missing' && other.projectDisplay ? <> · <ProjectCell display={other.projectDisplay} /></> : null}
           </div>
         </div>
         <Tooltip label={statusHelp(t, edge.status, edge.severity)} multiline w={260} withArrow>
@@ -179,7 +181,7 @@ function EdgeRow({ edge, onOpen }: { edge: ResourceEdgeView; onOpen?: (ref: Reso
           </span>
           <Group gap={6} mt={2}>
             {edge.candidates.slice(0, 10).map((c, i) => {
-              const text = `${c.name ?? c.key ?? c.id ?? '—'} · ${c.projectId ? (c.projectName ?? c.projectId) : t('tenantWide')}`;
+              const text = `${c.name ?? c.key ?? c.id ?? '—'} · ${projectDisplayLabel(t, c.projectDisplay)}`;
               return c.id && onOpen ? (
                 <button
                   key={`${c.id}:${i}`}

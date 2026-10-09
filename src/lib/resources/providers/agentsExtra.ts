@@ -50,13 +50,18 @@ function base(
   };
 }
 
-/** Outgoing references of an MCP server: its guardrail and (composite) member servers, by id. */
+/** Outgoing references of an MCP server: its guardrail, sandbox template and (composite) member servers. */
 export function extractMcpEdges(s: Doc) {
   const edges = createEdgeCollector('mcp-server');
   const guardrail = (s.guardrail ?? null) as Doc | null;
   // Mode 'off'/'disabled' evaluates nothing, so a stale key there is not a broken safety control.
   if (guardrail && toGuardrailMode(guardrail.mode, true) !== 'disabled') {
     edges.add('mcp.guardrail', guardrail.guardrailKey, 'guardrail.guardrailKey');
+  }
+  // Only a stdio server told to run in a sandbox has a template (enterprise target).
+  const stdio = (s.stdioConfig ?? null) as Doc | null;
+  if (stdio && stdio.executionMode === 'sandbox') {
+    edges.add('mcp.sandboxTemplate', (stdio.sandbox as Doc | undefined)?.templateKey, 'stdioConfig.sandbox.templateKey');
   }
   // Members live in a JSON blob and are referenced by server id (the one durable reference).
   const members = (s.metadata as Doc | null | undefined)?.composite?.members;
@@ -152,7 +157,9 @@ export const agentsExtraResourceTypes: ResourceTypeDefinition[] = [
     // '/api/skills' is mapped to the 'agents' service in rbac.ts.
     service: 'agents',
     category: 'agents',
-    scope: 'project-or-tenant',
+    // Every skill lookup (findSkillByKey/ById) filters on the caller's project; a
+    // row without one is never resolved, so there is no tenant-wide skill.
+    scope: 'project',
     edition: 'community',
     list: async ({ db }) => (await db.listSkills()).map((s) => mapSkill(s as never)),
     // Skills have no per-item page; the list page is where they are managed.

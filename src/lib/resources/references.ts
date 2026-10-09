@@ -14,6 +14,7 @@
  * type/key/id/field, never a secret.
  */
 import { buildCrn } from './crn';
+import { computeProjectDisplay } from './projectDisplay';
 import type {
   HealthSeverity,
   ResourceEdgeInput,
@@ -21,6 +22,7 @@ import type {
   ResourceEdgeView,
   ResourceRecord,
   ResourceRefView,
+  ResourceScope,
 } from './types';
 
 /**
@@ -72,7 +74,7 @@ export interface EdgeKindDefinition {
   targetAttribute?: { key: string; value: string };
 }
 
-interface KindOptions {
+export interface KindOptions {
   inactiveBreaks?: boolean;
   by?: 'key' | 'id';
   alsoByKey?: boolean;
@@ -82,17 +84,19 @@ interface KindOptions {
   targetAttribute?: { key: string; value: string };
 }
 
-const defs: EdgeKindDefinition[] = [];
-
-function kind(
+/**
+ * Builds one edge kind definition. Exported so enterprise contributions (the
+ * overlay) declare their kinds with the same defaults as the community ones.
+ */
+export function defineEdgeKind(
   name: string,
   fromType: string,
   toType: string,
   scope: EdgeScopeRule,
   severity: HealthSeverity,
   options: KindOptions = {},
-): void {
-  defs.push({
+): EdgeKindDefinition {
+  return {
     kind: name,
     fromType,
     toType,
@@ -105,7 +109,20 @@ function kind(
     ...(options.callerScoped ? { callerScoped: true } : {}),
     ...(options.requiresActive ? { requiresActive: true } : {}),
     ...(options.targetAttribute ? { targetAttribute: options.targetAttribute } : {}),
-  });
+  };
+}
+
+const defs: EdgeKindDefinition[] = [];
+
+function kind(
+  name: string,
+  fromType: string,
+  toType: string,
+  scope: EdgeScopeRule,
+  severity: HealthSeverity,
+  options: KindOptions = {},
+): void {
+  defs.push(defineEdgeKind(name, fromType, toType, scope, severity, options));
 }
 
 // ── agent ────────────────────────────────────────────────────────────────────
@@ -144,6 +161,13 @@ kind('agent.webSearchProvider', 'agent', 'provider', 'provider-assignment', 'war
   inactiveBreaks: true, requiresActive: true, targetAttribute: { key: 'type', value: 'websearch' },
 });
 
+// The sandbox template is an enterprise type: without the enterprise build the
+// target type is not registered and the edge is dropped, never reported missing.
+// resolveTemplateIdByKey throws 'Sandbox template "<key>" not found' on the first
+// sandbox tool call, and the agent save validation rejects an unknown key too.
+// Lookup is by key across the whole tenant, hence the 'tenant' scope.
+kind('agent.sandboxTemplate', 'agent', 'sandbox-template', 'tenant', 'error');
+
 // ── model ────────────────────────────────────────────────────────────────────
 // providerService throws when the provider is missing or not assigned to the project.
 kind('model.provider', 'model', 'provider', 'provider-assignment', 'error');
@@ -175,6 +199,9 @@ kind('crawler.ragModule', 'crawler', 'rag-module', 'strict-project', 'warning', 
 // An unknown guardrail key is a vacuous allow: the server is quietly unguarded.
 kind('mcp.guardrail', 'mcp-server', 'guardrail', 'project-then-tenant', 'error', { inactiveBreaks: true });
 // The only reference the product maintains by id (member delete prunes it).
+// A stdio MCP server that runs in a sandbox needs its template; enterprise type, see agent.sandboxTemplate.
+// sandboxMcpRunner resolves it with the same throwing resolveTemplateIdByKey.
+kind('mcp.sandboxTemplate', 'mcp-server', 'sandbox-template', 'tenant', 'error');
 kind('mcp.compositeMember', 'mcp-server', 'mcp-server', 'same-project-id', 'warning', {
   by: 'id', inactiveBreaks: true,
 });
@@ -224,12 +251,37 @@ if (Object.keys(EDGE_KINDS).length !== defs.length) {
   throw new Error('Duplicate resource edge kind in references.ts');
 }
 
+// Edge kinds contributed by an edition that is not part of this file (the
+// enterprise overlay). EDGE_KINDS stays the frozen community set; every lookup
+// goes through getEdgeKindDefinition so both are seen.
+const extraKinds = new Map<string, EdgeKindDefinition>();
+
+/**
+ * Adds edge kinds from outside this file. Idempotent per kind name: a kind that
+ * is already known (community or an earlier contribution) is left untouched.
+ * Returns the names that were actually added.
+ */
+export function registerEdgeKindDefinitions(extra: readonly EdgeKindDefinition[]): string[] {
+  const added: string[] = [];
+  for (const def of extra) {
+    if (EDGE_KINDS[def.kind] || extraKinds.has(def.kind)) continue;
+    extraKinds.set(def.kind, def);
+    added.push(def.kind);
+  }
+  return added;
+}
+
 export function getEdgeKindDefinition(kindName: string): EdgeKindDefinition | undefined {
-  return EDGE_KINDS[kindName];
+  return EDGE_KINDS[kindName] ?? extraKinds.get(kindName);
 }
 
 export function listEdgeKindDefinitions(): EdgeKindDefinition[] {
-  return [...defs];
+  return [...defs, ...extraKinds.values()];
+}
+
+/** Test seam: forgets every registered extra (enterprise) kind. */
+export function resetExtraEdgeKindsForTests(): void {
+  extraKinds.clear();
 }
 
 // ── extraction helper ────────────────────────────────────────────────────────
@@ -264,7 +316,7 @@ export function createEdgeCollector(fromType: string): EdgeCollector {
   const seen = new Set<string>();
   return {
     add(kindName, target, field, options) {
-      const def = EDGE_KINDS[kindName];
+      const def = getEdgeKindDefinition(kindName);
       if (!def) throw new Error(`Unknown resource edge kind "${kindName}"`);
       if (def.fromType !== fromType) {
         throw new Error(`Edge kind "${kindName}" belongs to "${def.fromType}", not "${fromType}"`);
@@ -367,7 +419,7 @@ export function resolveEdge(
   from: ResourceRecord,
   edge: ResourceEdgeInput,
 ): ResolvedEdge | null {
-  const def = EDGE_KINDS[edge.kind];
+  const def = getEdgeKindDefinition(edge.kind);
   if (!def) return null;
 
   let candidates: ResourceRecord[];
@@ -415,6 +467,8 @@ export const MAX_EDGE_CANDIDATES = 10;
 export interface RefViewContext {
   tenantId: string;
   projectNames: Map<string, string>;
+  /** Scope of a registered type, for the project display; unknown types count as the most lenient scope. */
+  scopeOfType?: (type: string) => ResourceScope | undefined;
 }
 
 export function toRefView(r: ResourceRecord, ctx: RefViewContext): ResourceRefView {
@@ -425,6 +479,14 @@ export function toRefView(r: ResourceRecord, ctx: RefViewContext): ResourceRefVi
     name: r.name,
     projectId: r.projectId,
     projectName: r.projectId ? ctx.projectNames.get(r.projectId) ?? null : null,
+    projectDisplay: computeProjectDisplay(
+      {
+        scope: ctx.scopeOfType?.(r.type) ?? 'project-or-tenant',
+        projectId: r.projectId,
+        projectIds: r.projectIds,
+      },
+      ctx.projectNames,
+    ),
     crn: buildCrn({ tenantId: ctx.tenantId, projectId: r.projectId, type: r.type, id: r.id }),
   };
 }
@@ -438,6 +500,7 @@ export function toBareRefView(edge: ResourceEdgeInput): ResourceRefView {
     name: null,
     projectId: null,
     projectName: null,
+    projectDisplay: null,
     crn: null,
   };
 }
