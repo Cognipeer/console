@@ -497,6 +497,8 @@ export type {
   InstanceAssignmentMode,
   IBetaAccessCode,
   BetaAccessCodeStatus,
+  IIamDoc,
+  IamCollectionName,
   IExternalModelPricing,
   IExternalPricingVersion,
   IGpuHost,

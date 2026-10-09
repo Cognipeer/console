@@ -94,6 +94,8 @@ import type {
   NodeStatus,
   IBetaAccessCode,
   BetaAccessCodeStatus,
+  IIamDoc,
+  IamCollectionName,
   IExternalModelPricing,
   IExternalPricingVersion,
   IModelPricing,
@@ -1900,6 +1902,22 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   consumeBetaAccessCode(code: string, usedBy: { email: string }): Promise<boolean>;
   /** Revert a used code back to active (rollback when registration fails after the claim). */
   releaseBetaAccessCode(code: string): Promise<boolean>;
+
+  // ── IAM document store (tenant-scoped; collections/tables created lazily) ──
+  /** One document by id, or null. */
+  iamDocGet(collection: IamCollectionName, id: string): Promise<IIamDoc | null>;
+  /** Insert-or-replace the whole document. */
+  iamDocPut(collection: IamCollectionName, id: string, data: Record<string, unknown>): Promise<IIamDoc>;
+  /** Documents of a collection ordered by id; optional id prefix and limit (default 1000). */
+  iamDocList(collection: IamCollectionName, options?: { idPrefix?: string; limit?: number }): Promise<IIamDoc[]>;
+  iamDocDelete(collection: IamCollectionName, id: string): Promise<boolean>;
+  /** Delete every document of the collection (current tenant only); returns the count. */
+  iamDocClear(collection: IamCollectionName): Promise<number>;
+  /**
+   * Atomically add `by` to the numeric `field` of the document (creating the
+   * document / field at 0 first) and return the new value.
+   */
+  iamDocIncrement(collection: IamCollectionName, id: string, field: string, by?: number): Promise<number>;
 
   // ── GPU fleet + Agent Runtime Sandbox (tenant-scoped) ──
   // EDITION SPLIT: these enterprise methods were moved to the overlay. In the enterprise

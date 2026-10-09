@@ -897,6 +897,18 @@
       "settings": true
     },
     {
+      "id": "iam",
+      "href": "/dashboard/iam",
+      "icon": "IconShield",
+      "category": "admin",
+      "navLabelKey": "iam",
+      "navDescriptionKey": "iamDescription",
+      "tags": ["iam", "authorization", "policy", "security"],
+      "searchKeywords": ["iam", "authorization", "policy", "cedar", "shadow", "yetki", "yetki motoru"],
+      "tenantAdminOnly": true,
+      "settings": true
+    },
+    {
       "id": "license",
       "href": "/dashboard/license",
       "icon": "IconCertificate",

@@ -85,6 +85,7 @@ import { memoryApiPlugin } from './plugins/memory';
 import { metricsApiPlugin } from './plugins/metrics';
 import { modelsApiPlugin } from './plugins/models';
 import { groupsApiPlugin } from './plugins/groups';
+import { iamApiPlugin } from './plugins/iam';
 import { promptsApiPlugin } from './plugins/prompts';
 import { skillsApiPlugin } from './plugins/skills';
 import { providersApiPlugin } from './plugins/providers';
@@ -498,6 +499,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(providersApiPlugin);
   await app.register(projectsApiPlugin);
   await app.register(groupsApiPlugin);
+  await app.register(iamApiPlugin);
   await app.register(resourcesApiPlugin);
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);

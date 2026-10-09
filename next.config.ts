@@ -26,6 +26,9 @@ const nextConfig: NextConfig = {
     // on every build. Marking it external skips webpack's bundling/analysis
     // entirely (Node's native `require` handles the dynamic path fine).
     'bullmq',
+    // Cedar policy engine (WASM). Server-only, loaded lazily by src/lib/iam via
+    // the CJS entry; never bundle the .wasm into a Next chunk.
+    '@cedar-policy/cedar-wasm',
     // Optional vector / database driver packages — loaded dynamically only
     // when the matching provider is configured. Marking them external keeps
     // Next.js from trying to bundle them at build time when they may not be

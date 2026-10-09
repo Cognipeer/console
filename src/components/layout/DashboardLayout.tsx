@@ -49,6 +49,7 @@ const SETTINGS_NAV_ORDER: string[] = [
   'resources',
   'tokens',
   'audit',
+  'iam',
   'license',
   'sso',
   'ldap',

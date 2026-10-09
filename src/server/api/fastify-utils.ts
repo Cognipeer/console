@@ -11,6 +11,9 @@ import {
   type GroupTenantGrant,
 } from '@/lib/security/rbac';
 import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
+import { loadGroupGrants } from '@/lib/iam/groupGrants';
+import { observeGateDecision, observeUnmappedPath } from '@/lib/iam/shadow/observer';
+import { canonicalRoute } from '@/lib/iam/shadow/routePattern';
 import { getUserAuthState, isUserDisabled } from '@/lib/services/users/userAuthState';
 import {
   ApiTokenAuthError,
@@ -250,22 +253,9 @@ async function loadGroupTenantGrants(
 ): Promise<GroupTenantGrant[]> {
   // Defensive: a provider without group support (or a partial test double) must
   // never break the authorization gate — treat a missing/empty result as "no
-  // group grants" rather than throwing.
-  const memberships = typeof db.listGroupMembersByUser === 'function'
-    ? await db.listGroupMembersByUser(userId)
-    : [];
-  if (!Array.isArray(memberships) || memberships.length === 0) return [];
-
-  const grants: GroupTenantGrant[] = [];
-  for (const membership of memberships) {
-    const group = await db.findGroupById(String(membership.groupId));
-    if (!group) continue;
-    const hasServiceGrant = group.servicePermissions && Object.keys(group.servicePermissions).length > 0;
-    if (group.tenantRole || hasServiceGrant) {
-      grants.push({ tenantRole: group.tenantRole, servicePermissions: group.servicePermissions });
-    }
-  }
-  return grants;
+  // group grants" rather than throwing. The loader keeps exactly that contract
+  // and the old per-membership point reads (bounded concurrency, same order).
+  return loadGroupGrants(db, userId);
 }
 
 /**
@@ -283,9 +273,26 @@ export async function resolveSessionRbacContext(
   return { user, groupGrants };
 }
 
+function routeLabel(request: FastifyRequest, pathname: string): string {
+  return canonicalRoute(request.routeOptions?.url, pathname);
+}
+
 async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionContext): Promise<void> {
   const pathname = getRequestPathname(request);
   if (!getPermissionServiceForPath(pathname)) {
+    // Shadow mode (C2) only: record that an authenticated caller reached an
+    // ungated path. Synchronous, never throws, no effect on the response.
+    observeUnmappedPath(session.tenantDbName, () => ({
+      subject: 'session',
+      tenantDbName: session.tenantDbName,
+      tenantId: session.tenantId,
+      requestId: request.apiRequestId ?? session.requestId,
+      method: request.method,
+      pathname,
+      route: routeLabel(request, pathname),
+      userId: session.userId,
+      role: session.userRole,
+    }));
     return;
   }
 
@@ -295,6 +302,26 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
   const db = await getDatabase();
   const groupGrants = await loadGroupTenantGrants(db, String(user._id));
   const decision = authorizeServiceRequest(user, request.method, pathname, groupGrants);
+  // Shadow mode (C2): evaluate the policy engine off the request path against
+  // the decision just computed. Fire-and-forget; see lib/iam/shadow/observer.
+  if (decision.service) {
+    const service = decision.service;
+    observeGateDecision(session.tenantDbName, () => ({
+      subject: 'session',
+      tenantDbName: session.tenantDbName,
+      tenantId: session.tenantId,
+      requestId: request.apiRequestId ?? session.requestId,
+      method: request.method,
+      pathname,
+      route: routeLabel(request, pathname),
+      userId: String(user._id),
+      role: typeof user.role === 'string' ? user.role : '',
+      user: { role: user.role, servicePermissions: user.servicePermissions, projectIds: user.projectIds },
+      groupGrants,
+      activeProjectId: request.cookies?.active_project_id || null,
+      legacy: { allowed: decision.allowed, service, required: decision.required },
+    }));
+  }
   if (!decision.allowed) {
     throw new RbacAuthorizationError(
       `Forbidden: ${decision.service} requires ${decision.required} permission`,
@@ -309,6 +336,18 @@ function enforceApiTokenRbac(
 ): void {
   const pathname = getRequestPathname(request);
   if (!getPermissionServiceForPath(pathname)) {
+    observeUnmappedPath(context.tenantDbName, () => ({
+      subject: 'token',
+      tenantDbName: context.tenantDbName,
+      tenantId: context.tenantId,
+      requestId: request.apiRequestId ?? 'unknown',
+      method: request.method,
+      pathname,
+      route: routeLabel(request, pathname),
+      userId: String(context.tokenRecord.userId ?? ''),
+      role: typeof context.user?.role === 'string' ? context.user.role : '',
+      tokenId: context.tokenRecord._id ? String(context.tokenRecord._id) : undefined,
+    }));
     return;
   }
 
@@ -327,6 +366,27 @@ function enforceApiTokenRbac(
     // Unscoped tokens (null) inherit the owner's permissions unchanged.
     context.tokenRecord.servicePermissions,
   );
+  if (decision.service) {
+    const service = decision.service;
+    const owner = context.user;
+    observeGateDecision(context.tenantDbName, () => ({
+      subject: 'token',
+      tenantDbName: context.tenantDbName,
+      tenantId: context.tenantId,
+      requestId: request.apiRequestId ?? 'unknown',
+      method: request.method,
+      pathname,
+      route: routeLabel(request, pathname),
+      userId: String(owner._id),
+      role: typeof owner.role === 'string' ? owner.role : '',
+      tokenId: context.tokenRecord._id ? String(context.tokenRecord._id) : undefined,
+      user: { role: owner.role, servicePermissions: owner.servicePermissions, projectIds: owner.projectIds },
+      groupGrants: [],
+      tokenScope: context.tokenRecord.servicePermissions,
+      activeProjectId: context.tokenRecord.projectId ? String(context.tokenRecord.projectId) : null,
+      legacy: { allowed: decision.allowed, service, required: decision.required },
+    }));
+  }
   if (!decision.allowed) {
     throw new RbacAuthorizationError(
       `Forbidden: ${decision.service} requires ${decision.required} permission`,

@@ -52,6 +52,8 @@ import { AuditMixin } from './mongodb/audit.mixin';
 import { UserProjectMixin } from './mongodb/user-project.mixin';
 import { ClusterMixin } from './mongodb/cluster.mixin';
 import { BetaAccessCodeMixin } from './mongodb/beta-access-code.mixin';
+import { IamInvalidationMixin } from './iam-invalidation.mixin';
+import { IamDocsMixin } from './mongodb/iam-docs.mixin';
 import { applyEnterpriseMongoDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -92,11 +94,18 @@ const ClusterBase = ClusterMixin(PricingBase);
 // Group 7 – Signup gating (main database; beta access codes)
 const SignupBase = BetaAccessCodeMixin(ClusterBase);
 
+// Group 8 – IAM document store (tenant-scoped, lazily created collections/tables)
+const IamBase = IamDocsMixin(SignupBase);
+
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the
 // overlay registry; no-op in the community edition. See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
-const FinalBase = applyEnterpriseMongoDbMixins(SignupBase);
+const FinalBase = applyEnterpriseMongoDbMixins(IamBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class MongoDBProvider extends FinalBase implements DatabaseProvider {}
+// Outermost: observes writes of every layer (core + enterprise overlay) so the
+// policy engine's principal cache drops stale slices (src/lib/iam).
+const ObservedBase = IamInvalidationMixin(FinalBase);
+
+export class MongoDBProvider extends ObservedBase implements DatabaseProvider {}

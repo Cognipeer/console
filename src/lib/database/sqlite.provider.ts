@@ -52,6 +52,8 @@ import { AuditMixin } from './sqlite/audit.mixin';
 import { UserProjectMixin } from './sqlite/user-project.mixin';
 import { ClusterMixin } from './sqlite/cluster.mixin';
 import { BetaAccessCodeMixin } from './sqlite/beta-access-code.mixin';
+import { IamInvalidationMixin } from './iam-invalidation.mixin';
+import { IamDocsMixin } from './sqlite/iam-docs.mixin';
 import { applyEnterpriseSqliteDbMixins } from '@/enterprise/registry';
 
 // ── Compose mixins in domain groups ──────────────────────────────────────
@@ -92,12 +94,19 @@ const ClusterBase = ClusterMixin(PricingBase);
 // Group 7 – Signup gating (main database; beta access codes)
 const SignupBase = BetaAccessCodeMixin(ClusterBase);
 
+// Group 8 – IAM document store (tenant-scoped, lazily created collections/tables)
+const IamBase = IamDocsMixin(SignupBase);
+
 // ── Enterprise overlay seam ───────────────────────────────────────────────
 // Enterprise DB mixins (sandbox runtime + gpu-fleet) are contributed by the
 // overlay registry; this is a no-op in the community edition.
 // See the cognipeer-console-ee repo (docs/licensing/MANIFEST.md).
-const FinalBase = applyEnterpriseSqliteDbMixins(SignupBase);
+const FinalBase = applyEnterpriseSqliteDbMixins(IamBase);
 
 // ── Final composed class ─────────────────────────────────────────────────
 
-export class SQLiteProvider extends FinalBase implements DatabaseProvider {}
+// Outermost: observes writes of every layer (core + enterprise overlay) so the
+// policy engine's principal cache drops stale slices (src/lib/iam).
+const ObservedBase = IamInvalidationMixin(FinalBase);
+
+export class SQLiteProvider extends ObservedBase implements DatabaseProvider {}
