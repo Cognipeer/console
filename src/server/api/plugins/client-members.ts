@@ -151,9 +151,9 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Disable / enable share one handler: the guards (self, owner, tenant) and the
   // audit trail live in setUserStatus, so the route only gates on role.
-  const registerStatusRoute = (action: 'disable' | 'enable') => {
+  const statusRouteHandler = (action: 'disable' | 'enable') => {
     const status = action === 'disable' ? 'disabled' : 'active';
-    app.post(`/client/v1/members/:id/${action}`, withClientApiRequestContext(async (request, reply, auth) => {
+    return withClientApiRequestContext(async (request, reply, auth) => {
       try {
         if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
         const { id } = request.params as { id: string };
@@ -192,10 +192,11 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         logger.error(`Client ${action} member error`, { error });
         return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
       }
-    }));
+    });
   };
-  registerStatusRoute('disable');
-  registerStatusRoute('enable');
+  // Literal paths (not a template) so the endpoint auth-coverage gate can see them.
+  app.post('/client/v1/members/:id/disable', statusRouteHandler('disable'));
+  app.post('/client/v1/members/:id/enable', statusRouteHandler('enable'));
 
   app.post('/client/v1/members/invite', withClientApiRequestContext(async (request, reply, auth) => {
     try {

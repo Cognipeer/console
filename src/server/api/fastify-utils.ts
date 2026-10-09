@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { getDatabase, type IUser } from '@/lib/database';
+import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
@@ -168,7 +169,10 @@ export function requireSessionContext(
 }
 
 function getRequestPathname(request: FastifyRequest): string {
-  return new URL(request.raw.url || '/', 'http://localhost').pathname;
+  // RBAC must map the path the router actually matched: Fastify decodes
+  // percent-escapes, so the raw '/api/to%6Fls' reaches the /api/tools handler
+  // while mapping to no service (= no authorization).
+  return canonicalizeRequestPathname(request.raw.url);
 }
 
 async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {
