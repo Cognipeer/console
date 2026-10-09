@@ -768,6 +768,27 @@
       "settings": true
     },
     {
+      "id": "resources",
+      "href": "/dashboard/resources",
+      "icon": "IconCube",
+      "category": "admin",
+      "navLabelKey": "resources",
+      "navDescriptionKey": "resourcesDescription",
+      "tags": [
+        "inventory",
+        "assets",
+        "crn"
+      ],
+      "searchKeywords": [
+        "resources",
+        "inventory",
+        "crn",
+        "kaynaklar"
+      ],
+      "tenantAdminOnly": true,
+      "settings": true
+    },
+    {
       "id": "projects",
       "href": "/dashboard/projects",
       "icon": "IconLayoutDashboard",

@@ -49,7 +49,8 @@ export type PermissionService =
   | 'ai-app-gateway'
   | 'cluster'
   | 'sso'
-  | 'ldap';
+  | 'ldap'
+  | 'resources';
 
 /**
  * Tenant-wide roles.
@@ -138,6 +139,10 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   { id: 'ai-app-gateway', label: 'AI App Gateway', description: 'Coding-agent gateway instances: identity, observation, policy enforcement and session traces.', category: 'operate' },
   { id: 'sso', label: 'Single Sign-On', description: 'OIDC single sign-on connection, attribute mapping and JIT provisioning.', category: 'admin', adminService: true },
   { id: 'ldap', label: 'LDAP Directory', description: 'LDAP/Active Directory connection, group→role mapping and JIT provisioning.', category: 'admin', adminService: true },
+  // Read-only, tenant-wide inventory across ALL projects (and tenant-wide rows).
+  // adminService on purpose: it deliberately ignores the active project, so it
+  // must not default to anyone below owner/admin.
+  { id: 'resources', label: 'Resource Registry', description: 'Read-only inventory of every resource in the tenant across all projects. A grant is tenant-wide and cross-service: it lists every resource type and project regardless of the grantee\'s other permissions.', category: 'admin', adminService: true },
 ];
 
 const SERVICE_IDS = new Set<PermissionService>(RBAC_SERVICE_DEFINITIONS.map((service) => service.id));
@@ -242,6 +247,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/audit', service: 'audit' },
   { prefix: '/api/users', service: 'members' },
   { prefix: '/api/groups', service: 'members' },
+  { prefix: '/api/resources', service: 'resources' },
   { prefix: '/api/license', service: 'license' },
   { prefix: '/api/providers', service: 'providers' },
   { prefix: '/api/config', service: 'config' },
@@ -257,6 +263,10 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/reranker', service: 'reranker' },
   { prefix: '/api/realtime', service: 'realtime' },
   { prefix: '/api/agents', service: 'agents' },
+  // Agent skill library (`/api/skills`, `/api/skills/:id`): skills are agent
+  // building blocks, so they ride the agents service. Previously unmapped,
+  // which `enforceSessionRbac` treats as "not a gated surface".
+  { prefix: '/api/skills', service: 'agents' },
   { prefix: '/api/tracing', service: 'tracing' },
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
   { prefix: '/api/guardrails', service: 'guardrails' },

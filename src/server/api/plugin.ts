@@ -88,6 +88,7 @@ import { promptsApiPlugin } from './plugins/prompts';
 import { skillsApiPlugin } from './plugins/skills';
 import { providersApiPlugin } from './plugins/providers';
 import { projectsApiPlugin } from './plugins/projects';
+import { resourcesApiPlugin } from './plugins/resources';
 import { quotaApiPlugin } from './plugins/quota';
 import { ragApiPlugin } from './plugins/rag';
 import { rerankerApiPlugin } from './plugins/reranker';
@@ -496,6 +497,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(providersApiPlugin);
   await app.register(projectsApiPlugin);
   await app.register(groupsApiPlugin);
+  await app.register(resourcesApiPlugin);
   await app.register(quotaApiPlugin);
   await app.register(ragApiPlugin);
   await app.register(rerankerApiPlugin);

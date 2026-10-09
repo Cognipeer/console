@@ -46,6 +46,7 @@ const SETTINGS_NAV_ORDER: string[] = [
   'projects',
   'providers',
   'members',
+  'resources',
   'tokens',
   'audit',
   'license',
