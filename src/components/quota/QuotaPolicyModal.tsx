@@ -24,6 +24,7 @@ import {
   type QuotaLimits,
   type QuotaRateLimit,
 } from '@/lib/quota/types';
+import { isSameTargetKind, quotaTargetSource } from '@/lib/quota/targets';
 import { tryTranslate } from '@/components/resources/i18nLookup';
 import { useTranslations } from '@/lib/i18n';
 import { ScopeIdSelector } from './ScopeIdSelector';
@@ -87,6 +88,10 @@ const fromFormValue = (
 const targetLabelOf = (policy: IQuotaPolicy): string | undefined =>
   (policy as { target?: { label?: string } }).target?.label;
 
+/** The Limits table found the saved person / group / token / agent gone. */
+const targetMissingOf = (policy: IQuotaPolicy): boolean =>
+  (policy as { target?: { missing?: boolean } }).target?.missing === true;
+
 const hasAnyValue = (obj?: object | null) =>
   !!obj &&
   Object.values(obj as Record<string, unknown>).some(
@@ -115,6 +120,8 @@ export function QuotaPolicyModal({
   const isEditing = !!policy;
   // The name behind the chosen target, for the summary (the form itself keeps the id).
   const [targetName, setTargetName] = useState<string | undefined>(undefined);
+  // The project was set by picking a model / index / bucket / provider that lives in exactly one.
+  const [projectFromPick, setProjectFromPick] = useState(false);
   const t = useTranslations('settings.quotaSection.form');
   const tScopes = useTranslations('settings.quotaSection.scopes');
   const tDomains = useTranslations('settings.quotaSection.domains');
@@ -143,6 +150,7 @@ export function QuotaPolicyModal({
   });
 
   useEffect(() => {
+    setProjectFromPick(false);
     if (policy) {
       const rl = policy.limits?.rateLimit;
       const normalizedLimits: QuotaLimits = {
@@ -246,8 +254,11 @@ export function QuotaPolicyModal({
   const projectRequired = showProjectField && !tenantWideKind;
   // An agent-narrowed limit lives in the project of the agent it names.
   const projectFromAgent = isAgentDomain && currentScope === 'resource';
-  // What the target is called depends on what it is: a group, a person, an agent...
-  const targetKind = projectFromAgent ? 'agent' : currentScope;
+  // The target an existing limit was saved with is gone (and still the one in the field).
+  const savedTargetGone = policy ? targetMissingOf(policy) && values.scopeId === (policy.scopeId ?? '') : false;
+  // What the target is called depends on what it is: a group, a person, an agent, a model, a vector index...
+  const targetSource = quotaTargetSource(currentDomain, currentScope);
+  const targetKind = projectFromAgent ? 'agent' : currentScope === 'resource' && targetSource ? targetSource.noun : currentScope;
   const targetLabel = tryTranslate(tl, `targetLabel.${targetKind}`, 'iamLimits.form') ?? t('scopeId');
   const targetHint = tryTranslate(tl, `targetHint.${targetKind}`, 'iamLimits.form') ?? t('scopeIdDescription');
   const projectLabel = values.projectId
@@ -520,10 +531,12 @@ export function QuotaPolicyModal({
               value={values.domain}
               onChange={(v) => {
                 const next = (v as QuotaDomain) || defaultDomain;
-                // A resource limit points at an agent in the agent domain and at a model, index
-                // or bucket elsewhere: the one chosen for the other kind does not carry over.
-                if (values.scope === 'resource' && (values.domain === 'agent') !== (next === 'agent')) {
+                // A resource limit points at an agent in the agent domain, at a model in the model
+                // domains, at an index for vector...: a target chosen for another kind of value does
+                // not carry over (a model key is not an index key, an embedding model is not a chat one).
+                if (!isSameTargetKind(values.scope, values.domain, next)) {
                   form.setFieldValue('scopeId', '');
+                  setProjectFromPick(false);
                 }
                 form.setFieldValue('domain', next);
               }}
@@ -541,6 +554,7 @@ export function QuotaPolicyModal({
                 if (v === values.scope) return;
                 // A user id is not a token id: a different kind of target starts empty.
                 form.setValues({ scope: v as QuotaScope, scopeId: '', groupMode: 'perMember' });
+                setProjectFromPick(false);
               }}
             />
           </FormField>
@@ -553,11 +567,17 @@ export function QuotaPolicyModal({
                 domain={values.domain}
                 value={values.scopeId}
                 valueLabel={policy ? targetLabelOf(policy) : undefined}
+                valueMissing={savedTargetGone}
+                projectId={values.projectId || undefined}
                 onLabelChange={setTargetName}
                 onChange={(v, option) => {
                   form.setFieldValue('scopeId', v || '');
-                  // An agent lives in one project; the limit follows it there.
-                  if (projectFromAgent && option?.projectId) form.setFieldValue('projectId', option.projectId);
+                  // An agent, a model, an index or a bucket lives in one project (a provider in one or
+                  // several); a limit on it only ever applies there, so the limit follows it.
+                  const follows = Boolean(option?.projectId)
+                    && (projectFromAgent || currentScope === 'resource' || currentScope === 'provider');
+                  if (follows && option?.projectId) form.setFieldValue('projectId', option.projectId);
+                  setProjectFromPick(follows && !projectFromAgent);
                 }}
                 resourceOptions={resourceOptions}
               />
@@ -587,9 +607,11 @@ export function QuotaPolicyModal({
               hint={
                 projectFromAgent
                   ? tl('projectFromAgent')
-                  : projectRequired
-                    ? tl('projectRequiredHint')
-                    : tl('projectOptionalHint')
+                  : projectFromPick
+                    ? tl('projectFromTarget')
+                    : projectRequired
+                      ? tl('projectRequiredHint')
+                      : tl('projectOptionalHint')
               }
             >
               <Select
@@ -600,7 +622,7 @@ export function QuotaPolicyModal({
                 value={values.projectId || (projectRequired || projectFromAgent ? null : ALL_PROJECTS)}
                 onChange={(v) => form.setFieldValue('projectId', !v || v === ALL_PROJECTS ? '' : v)}
                 placeholder={tl('projectPlaceholder')}
-                disabled={projectFromAgent}
+                disabled={projectFromAgent || projectFromPick}
                 allowDeselect={false}
                 searchable
               />

@@ -45,9 +45,8 @@ import {
 } from '@/lib/services/runtimeContext';
 import { mcpSandboxRunner } from '@/enterprise/registry';
 import { isEnterpriseLicenseType } from '@/lib/license/license-manager';
-import { resolveCurrentServicePermission } from '@/lib/security/rbac';
-import { type ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import {
+  authorizeServiceForRequest,
   getApiTokenContextForRequest,
   getClientIp,
   readJsonBody,
@@ -79,15 +78,16 @@ function auditContextFor(request: FastifyRequest, userId: string): McpAuditConte
  * 'mcp' permission on the token owner, capped by the token's own scope (an
  * unscoped token inherits the owner's permission unchanged; a token explicitly
  * scoped down to 'mcp: write' stays capped at 'write' even for an admin owner).
+ *
+ * Decided by `authorizeServiceForRequest`, so it follows the tenant's
+ * authorization mode exactly like the dashboard path: rbac.ts in legacy / shadow,
+ * the policy engine in enforce (custom forbid policies, the owner's group grants,
+ * the token's project narrowing, and the token scope as a cap). It reads the token
+ * from `request.apiTokenContext`, which `withClientApiRequestContext` has set by
+ * the time any authoring handler runs.
  */
-function hasStdioSubprocessPermission(ctx: ApiTokenContext): boolean {
-  if (!ctx.user) return false;
-  return resolveCurrentServicePermission(
-    ctx.user,
-    'mcp',
-    [],
-    ctx.tokenRecord.servicePermissions,
-  ) === 'admin';
+async function hasStdioSubprocessPermission(request: FastifyRequest): Promise<boolean> {
+  return (await authorizeServiceForRequest(request, 'mcp', { level: 'admin' })).allowed;
 }
 
 const STDIO_SUBPROCESS_FORBIDDEN_ERROR =
@@ -683,7 +683,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      if (stdioConfig?.executionMode === 'subprocess' && !hasStdioSubprocessPermission(ctx)) {
+      if (stdioConfig?.executionMode === 'subprocess' && !(await hasStdioSubprocessPermission(request))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 
@@ -789,7 +789,7 @@ export const clientMcpApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
-      if (nextStdioConfig?.executionMode === 'subprocess' && !hasStdioSubprocessPermission(ctx)) {
+      if (nextStdioConfig?.executionMode === 'subprocess' && !(await hasStdioSubprocessPermission(request))) {
         return reply.code(403).send({ error: STDIO_SUBPROCESS_FORBIDDEN_ERROR });
       }
 

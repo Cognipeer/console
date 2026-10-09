@@ -239,6 +239,16 @@ function getHeaderString(request: FastifyRequest, name: string): string | undefi
   return undefined;
 }
 
+/**
+ * Names an enforce-mode refusal's decision on its 403, whatever the error
+ * dialect or the layer (route gate or handler check) that refused (the onSend
+ * hook of fastifyApiPlugin); exported for the gate tests.
+ */
+export function stampDecisionHeader(request: FastifyRequest, reply: FastifyReply): void {
+  const decisionId = request.iamDenial?.decisionId ?? request.iamDecisionId;
+  if (decisionId && reply.statusCode === 403) reply.header('X-Decision-Id', decisionId);
+}
+
 /** The API audit trail writer (the onResponse hook of fastifyApiPlugin); exported for the gate tests. */
 export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): void {
   const pathname = getPathname(request.raw.url);
@@ -445,6 +455,11 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(enterpriseDenial.status).send(enterpriseDenial.body);
       }
     }
+  });
+
+  app.addHook('onSend', async (request, reply, payload) => {
+    stampDecisionHeader(request, reply);
+    return payload;
   });
 
   app.addHook('onResponse', async (request, reply) => {

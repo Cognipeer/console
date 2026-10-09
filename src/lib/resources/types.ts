@@ -317,6 +317,52 @@ export interface GetResourceInput {
   id: string;
 }
 
+// ── Picker search (type-ahead over a few types) ──────────────────────────────
+
+export interface SearchResourcesInput {
+  tenantDbName: string;
+  tenantId: string;
+  /** Registry types searched TOGETHER (1..SEARCH_MAX_TYPES). A type this tenant is not entitled to simply has no rows. */
+  types: readonly string[];
+  /** Matched against name, key, description and id, case-insensitively. Clipped to SEARCH_MAX_QUERY_LENGTH. */
+  q?: string;
+  /**
+   * Attribute filters: a record is kept when, for EVERY key, it carries an
+   * attribute of that name whose value is one of the listed values (exact,
+   * case-sensitive). E.g. `{ category: ['llm'] }` keeps the chat models,
+   * `{ type: ['vector', 'file'] }` the vector and file providers.
+   */
+  attributes?: Readonly<Record<string, readonly string[]>>;
+  /** Default SEARCH_DEFAULT_LIMIT, hard cap SEARCH_MAX_LIMIT. */
+  limit?: number;
+}
+
+/** One match: what a picker shows and stores, and nothing it should not (no audit columns, no graph data). */
+export interface ResourceSearchItem {
+  type: string;
+  id: string;
+  key: string | null;
+  name: string;
+  projectId: string | null;
+  projectName: string | null;
+  /** Server-computed, like the list's: render this instead of inferring from `projectId`. */
+  projectDisplay: ProjectDisplay;
+  status: string | null;
+  /** The same safe, whitelisted display facts the detail carries (category, driver, provider key...). */
+  attributes: ResourceAttribute[];
+}
+
+export interface SearchResourcesResult {
+  /** At most `limit` rows, best match first (exact key/name, then prefix, then contains), then most recently changed. */
+  items: ResourceSearchItem[];
+  /** Matches before the limit, so a picker can say "first 20 of 143". */
+  total: number;
+  /** Providers of the SEARCHED types that failed to load: an empty result may then be incomplete. */
+  errors: ResourceProviderError[];
+  /** Searched types whose rows were cut at the registry's per-type cap. */
+  truncated: ResourceTruncation[];
+}
+
 // ── Usage (delete / rename impact) ───────────────────────────────────────────
 
 /** An incoming reference as served by the usage endpoint. */

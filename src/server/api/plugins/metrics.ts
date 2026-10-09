@@ -20,11 +20,10 @@ export const metricsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/metrics', { config: authz.authenticated() }, withClientApiRequestContext(async (request, reply, auth) => {
     try {
       if (auth.tokenRecord.servicePermissions != null && await resolveEnforcement(auth.tenantDbName)) {
-        return reply.code(403).send({
-          error: 'Forbidden',
-          code: 'forbidden',
-          message: 'Forbidden: /metrics is tenant-wide and needs an API token without a service scope',
-        });
+        // Enforce-only refusal, so no legacy wording to match: `error` is the reason
+        // itself (what clients surface), like every other enforce-mode 403 body.
+        const reason = 'Forbidden: /metrics is tenant-wide and needs an API token without a service scope';
+        return reply.code(403).send({ error: reason, code: 'forbidden', message: reason });
       }
       const body = await collectPrometheusMetrics(auth.tenantDbName, auth.tenantId);
 

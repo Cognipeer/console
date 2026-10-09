@@ -83,5 +83,6 @@ export function applyCorsHeaders(
   reply.header('Access-Control-Allow-Headers', CORS_HEADERS);
   reply.header('Access-Control-Max-Age', String(cfg.cors.maxAge));
   reply.header('Access-Control-Allow-Credentials', 'true');
+  reply.header('Access-Control-Expose-Headers', 'X-Decision-Id');
   return true;
 }

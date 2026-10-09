@@ -5,6 +5,14 @@
  * withApiRequestContext via the `/api/resources` prefix → `resources` service
  * (adminService: owner/admin by default, anyone else only with an explicit grant).
  *
+ *   GET /resources                    paged inventory, facets, filters (limit <= 200)
+ *   GET /resources/search             type-ahead for pickers that store a key: several
+ *                                     types, a filter on the display attributes, best
+ *                                     match first, at most 50 rows (same gate, same data)
+ *   GET /resources/health             reference problems
+ *   GET /resources/:type/:id          one resource with its references
+ *   GET /resource-usage/:type/:id     delete / rename impact
+ *
  * `/api/resource-usage/:type/:id` is the exception: it is gated by the service
  * that owns `:type` (see usageAccess.ts) and answers only with what the caller's
  * projects may see.
@@ -15,10 +23,13 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
   ResourceQueryError,
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
   getResource,
   getResourceHealth,
   getResourceUsage,
   listResources,
+  searchResources,
 } from '@/lib/resources/service';
 import { buildReferrerTypeAccess, registerResourceUsageAccess, resourceTypeService } from '@/lib/resources/usageAccess';
 import { runWithTenantScope } from '@/lib/database';
@@ -40,6 +51,36 @@ function parseIntParam(value: unknown, min: number): number | undefined | null {
   if (!/^\d+$/.test(raw)) return null;
   const n = Number(raw);
   return Number.isSafeInteger(n) && n >= min ? n : null;
+}
+
+/** `a,b` and a repeated `x=a&x=b` both read as ['a', 'b']; blanks are dropped. */
+function listParam(value: unknown): string[] {
+  const parts = Array.isArray(value) ? value : [value];
+  return parts
+    .filter((part): part is string => typeof part === 'string')
+    .flatMap((part) => part.split(','))
+    .map((part) => part.trim())
+    .filter((part) => part !== '');
+}
+
+/**
+ * `attr=category:llm&attr=type:vector,file` -> `{ category: ['llm'], type: ['vector', 'file'] }`.
+ * null when an entry is not `name:value[,value]`.
+ */
+function parseAttributeParams(value: unknown): Record<string, string[]> | null {
+  // A Map, not an object literal: a name like `__proto__` must stay a (rejected) name, not rewire the object.
+  const byName = new Map<string, string[]>();
+  const entries = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  for (const entry of entries) {
+    if (typeof entry !== 'string') return null;
+    const colon = entry.indexOf(':');
+    if (colon <= 0) return null;
+    const name = entry.slice(0, colon).trim();
+    const values = listParam(entry.slice(colon + 1));
+    if (name === '' || values.length === 0) return null;
+    byName.set(name, [...(byName.get(name) ?? []), ...values]);
+  }
+  return Object.fromEntries(byName);
 }
 
 export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
@@ -81,6 +122,41 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
       }
       logger.error('List resources error', { error });
       return reply.code(500).send({ error: 'Failed to list resources' });
+    }
+  }));
+
+  // Type-ahead for pickers that store a key (a limit's target, a policy's
+  // resource): a few types at once, a filter on the safe display attributes,
+  // best match first, never more than SEARCH_MAX_LIMIT rows. Same registry
+  // snapshot, same tenant guard and the SAME gate as the list above (the
+  // `resources` service), so it shows exactly what the registry would.
+  app.get('/resources/search', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      const query = (request.query ?? {}) as Record<string, unknown>;
+
+      const limit = parseIntParam(query.limit, 1);
+      if (limit === null) return reply.code(400).send({ error: 'limit must be a positive integer' });
+      const types = listParam(query.types);
+      if (types.length === 0) return reply.code(400).send({ error: 'types is required' });
+      const attributes = parseAttributeParams(query.attr);
+      if (attributes === null) return reply.code(400).send({ error: 'attr must look like name:value[,value]' });
+
+      const result = await searchResources({
+        tenantDbName: session.tenantDbName,
+        tenantId: session.tenantId,
+        types,
+        q: firstString(query.q),
+        attributes,
+        limit: Math.min(limit ?? SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT),
+      });
+      return reply.code(200).send(result);
+    } catch (error) {
+      if (error instanceof ResourceQueryError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      logger.error('Search resources error', { error });
+      return reply.code(500).send({ error: 'Failed to search resources' });
     }
   }));
 

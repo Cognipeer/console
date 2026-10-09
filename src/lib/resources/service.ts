@@ -37,9 +37,12 @@ import type {
   ResourceProviderError,
   ResourceRefView,
   ResourceRecord,
+  ResourceSearchItem,
   ResourceTruncation,
   ResourceTypeDefinition,
   ResourceUsage,
+  SearchResourcesInput,
+  SearchResourcesResult,
 } from './types';
 
 const logger = createLogger('resources');
@@ -56,6 +59,18 @@ const MAX_NAME_LENGTH = 200;
 const MAX_DESCRIPTION_LENGTH = 500;
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 200;
+
+/**
+ * Picker search (`searchResources`). A type-ahead needs a screenful, never a
+ * page of the inventory, so its cap is far below the list's and is enforced here
+ * whatever the caller asks for.
+ */
+export const SEARCH_DEFAULT_LIMIT = 20;
+export const SEARCH_MAX_LIMIT = 50;
+export const SEARCH_MAX_TYPES = 8;
+export const SEARCH_MAX_QUERY_LENGTH = 100;
+export const SEARCH_MAX_ATTRIBUTE_KEYS = 4;
+export const SEARCH_MAX_ATTRIBUTE_VALUES = 10;
 
 /** Bad caller input (unknown type id). The API maps it to 400. */
 export class ResourceQueryError extends Error {
@@ -447,6 +462,113 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
     errors: snapshot.errors,
     truncated: snapshot.truncated,
     generatedAt: snapshot.generatedAt,
+  };
+}
+
+// ── Picker search ───────────────────────────────────────────────────────────
+
+const ATTRIBUTE_KEY = /^[A-Za-z][A-Za-z0-9]{0,39}$/;
+const MAX_ATTRIBUTE_VALUE_LENGTH = 100;
+
+/** Normalised attribute filters: validated, deduplicated, ready to test a record with. */
+function parseAttributeFilters(
+  attributes: SearchResourcesInput['attributes'],
+): Array<[string, ReadonlySet<string>]> {
+  const entries = Object.entries(attributes ?? {});
+  if (entries.length > SEARCH_MAX_ATTRIBUTE_KEYS) {
+    throw new ResourceQueryError(`At most ${SEARCH_MAX_ATTRIBUTE_KEYS} attribute filters are allowed`);
+  }
+  return entries.map(([key, values]) => {
+    if (!ATTRIBUTE_KEY.test(key)) throw new ResourceQueryError(`Invalid attribute name "${key.slice(0, 40)}"`);
+    if (values.length === 0 || values.length > SEARCH_MAX_ATTRIBUTE_VALUES) {
+      throw new ResourceQueryError(`Attribute "${key}" needs 1 to ${SEARCH_MAX_ATTRIBUTE_VALUES} values`);
+    }
+    for (const value of values) {
+      if (typeof value !== 'string' || value === '' || value.length > MAX_ATTRIBUTE_VALUE_LENGTH) {
+        throw new ResourceQueryError(`Attribute "${key}" has an invalid value`);
+      }
+    }
+    return [key, new Set(values)] as [string, ReadonlySet<string>];
+  });
+}
+
+function matchesAttributeFilters(r: ResourceRecord, filters: ReadonlyArray<[string, ReadonlySet<string>]>): boolean {
+  return filters.every(([key, values]) =>
+    r.attributes.some((a) => a.key === key && a.value !== null && values.has(String(a.value))),
+  );
+}
+
+/**
+ * How well a record answers a typed query, lower is better: the exact key or
+ * name first (what a person pasting a key expects at the top), then a prefix,
+ * then a substring, then a hit on the description or id only.
+ */
+function matchRank(r: ResourceRecord, query: string, needle: string): number {
+  if (r.key === query || r.name === query) return 0;
+  const key = r.key?.toLowerCase() ?? '';
+  const name = r.name.toLowerCase();
+  if (key === needle || name === needle) return 1;
+  if (key.startsWith(needle) || name.startsWith(needle)) return 2;
+  if (key.includes(needle) || name.includes(needle)) return 3;
+  return 4;
+}
+
+function toSearchItem(r: ResourceRecord, projectNames: Map<string, string>): ResourceSearchItem {
+  return {
+    type: r.type,
+    id: r.id,
+    key: r.key,
+    name: r.name,
+    projectId: r.projectId,
+    projectName: r.projectId ? projectNames.get(r.projectId) ?? null : null,
+    projectDisplay: projectDisplayOfRecord(r, projectNames),
+    status: r.status,
+    attributes: r.attributes,
+  };
+}
+
+/**
+ * Type-ahead over a few registry types at once, for the pickers that store a
+ * key (a limit's target, a policy's resource).
+ *
+ * Same snapshot, tenant guard and per-type isolation as `listResources`; what it
+ * adds is what a picker needs and the list cannot do: several types in one
+ * query, a filter on the safe display attributes (a model's category, a
+ * provider's type), best-match-first order, and a hard cap of SEARCH_MAX_LIMIT.
+ * The caller decides WHO may search (the route sits behind the registry's own
+ * RBAC gate); this decides nothing about the person.
+ */
+export async function searchResources(input: SearchResourcesInput): Promise<SearchResourcesResult> {
+  ensureCommunityResourceTypesRegistered();
+
+  const types = [...new Set(input.types)];
+  if (types.length === 0) throw new ResourceQueryError('At least one resource type is required');
+  if (types.length > SEARCH_MAX_TYPES) throw new ResourceQueryError(`At most ${SEARCH_MAX_TYPES} resource types can be searched together`);
+  for (const type of types) {
+    if (!getResourceTypeDefinition(type)) throw new ResourceQueryError(`Unknown resource type "${type}"`);
+  }
+  const filters = parseAttributeFilters(input.attributes);
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? SEARCH_DEFAULT_LIMIT) || SEARCH_DEFAULT_LIMIT, 1), SEARCH_MAX_LIMIT);
+
+  const snapshot = await getSnapshot(input, false);
+  const unavailable = snapshot.unavailableTypes;
+  const searched = new Set(types.filter((type) => !unavailable.has(type)));
+
+  const query = (input.q ?? '').trim().slice(0, SEARCH_MAX_QUERY_LENGTH);
+  const needle = query.toLowerCase();
+  const matches = snapshot.records.filter(
+    (r) => searched.has(r.type) && matchesAttributeFilters(r, filters) && (!needle || matchesQuery(r, needle)),
+  );
+  const ranked = matches
+    .map((record) => ({ record, rank: needle ? matchRank(record, query, needle) : 0 }))
+    .sort((a, b) => a.rank - b.rank || compareRecords(a.record, b.record));
+
+  const projectNames = new Map(snapshot.projects.map((p) => [p.id, p.name]));
+  return {
+    items: ranked.slice(0, limit).map(({ record }) => toSearchItem(record, projectNames)),
+    total: ranked.length,
+    errors: snapshot.errors.filter((e) => searched.has(e.type)),
+    truncated: snapshot.truncated.filter((t) => searched.has(t.type)),
   };
 }
 

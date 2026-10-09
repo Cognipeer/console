@@ -17,7 +17,12 @@ const FILES = [
   'components/iam/limits/LimitsTab.tsx',
   'components/quota/QuotaPolicyModal.tsx',
   'components/quota/ScopeIdSelector.tsx',
+  'components/quota/TargetSelect.tsx',
 ];
+
+/** Every kind of target the pickers name (QuotaTargetNoun) and every registry type one can show. */
+const TARGET_NOUNS = ['model', 'vectorIndex', 'fileBucket', 'agent', 'agentName', 'provider', 'resource'];
+const TARGET_TYPES = ['model', 'vector-index', 'file-bucket', 'agent', 'provider'];
 
 function lookup(locale: 'en' | 'tr', key: string): unknown {
   let node: unknown = messages[locale];
@@ -67,10 +72,19 @@ describe('quota / limits UI strings', () => {
       ...['requests', 'tokens', 'vectors', 'files', 'storage'].map((k) => `iamLimits.amounts.kind.${k}`),
       ...['perSecond', 'perMinute', 'perHour', 'perDay', 'perMonth'].map((w) => `iamLimits.amounts.window.${w}`),
       'iamLimits.form.globalAgentNote',
-      ...['group', 'user', 'token', 'resource', 'provider', 'agent'].flatMap((k) => [
+      ...['group', 'user', 'token', 'resource', 'provider', 'agent', 'model', 'vectorIndex', 'fileBucket', 'agentName'].flatMap((k) => [
         `iamLimits.form.targetLabel.${k}`,
         `iamLimits.form.targetHint.${k}`,
       ]),
+      'iamLimits.form.projectFromTarget',
+      // The search pickers build these from the kind of target (QuotaTargetNoun) and the registry type of a row.
+      ...TARGET_NOUNS.flatMap((noun) => [
+        `settings.quotaSection.target.placeholder.${noun}`,
+        `settings.quotaSection.target.empty.${noun}`,
+        `settings.quotaSection.target.kind.${noun}`,
+      ]),
+      ...TARGET_TYPES.map((type) => `settings.quotaSection.target.types.${type}`),
+      ...['user', 'group', 'token', 'agent'].map((kind) => `settings.quotaSection.target.gone.${kind}`),
       ...['tenant', 'group', 'user', 'token', 'resource', 'provider'].map((s) => `settings.quotaSection.scopes.${s}`),
       ...['global', 'llm', 'embedding', 'vector', 'file', 'tracing', 'stt', 'tts', 'ocr', 'image', 'moderation', 'decision', 'agent']
         .map((d) => `settings.quotaSection.domains.${d}`),
@@ -87,6 +101,35 @@ describe('quota / limits UI strings', () => {
     expect(shape(messages.tr.iamLimits).sort()).toEqual(shape(messages.en.iamLimits).sort());
   });
 
+  it('gives the target pickers the same strings, with the same placeholders, in both languages', () => {
+    const shape = (node: unknown, prefix = ''): string[] =>
+      node && typeof node === 'object'
+        ? Object.entries(node as Record<string, unknown>).flatMap(([k, v]) => shape(v, `${prefix}${k}.`))
+        : [prefix.slice(0, -1)];
+    const en = lookup('en', 'settings.quotaSection.target');
+    const tr = lookup('tr', 'settings.quotaSection.target');
+    expect(shape(tr).sort()).toEqual(shape(en).sort());
+
+    const tokens = (value: unknown) => [...String(value).matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
+    for (const key of shape(en)) {
+      expect(tokens(lookup('tr', `settings.quotaSection.target.${key}`)), key).toEqual(tokens(lookup('en', `settings.quotaSection.target.${key}`)));
+    }
+  });
+
+  it('translates the target picker strings instead of repeating the English', () => {
+    const leaves = (node: unknown, prefix = ''): Array<[string, string]> =>
+      node && typeof node === 'object'
+        ? Object.entries(node as Record<string, unknown>).flatMap(([k, v]) => leaves(v, `${prefix}${k}.`))
+        : [[prefix.slice(0, -1), String(node)]];
+    const en = new Map(leaves(lookup('en', 'settings.quotaSection.target')));
+    // Words that are the same in Turkish.
+    const sameOnPurpose = new Set(['types.model', 'kind.model']);
+    const untranslated = leaves(lookup('tr', 'settings.quotaSection.target'))
+      .filter(([key, value]) => value === en.get(key) && !sameOnPurpose.has(key))
+      .map(([key]) => key);
+    expect(untranslated).toEqual([]);
+  });
+
   it('translates the Turkish iamLimits strings instead of repeating the English', () => {
     const leaves = (node: unknown, prefix = ''): Array<[string, string]> =>
       node && typeof node === 'object'
@@ -94,7 +137,7 @@ describe('quota / limits UI strings', () => {
         : [[prefix.slice(0, -1), String(node)]];
     const en = new Map(leaves(messages.en.iamLimits));
     // A few words are the same in both languages (units, product names).
-    const sameOnPurpose = new Set(['columns.limit', 'amounts.kind.tokens']);
+    const sameOnPurpose = new Set(['columns.limit', 'amounts.kind.tokens', 'form.targetLabel.model']);
     const untranslated = leaves(messages.tr.iamLimits)
       .filter(([key, value]) => value === en.get(key) && !sameOnPurpose.has(key))
       .map(([key]) => key);

@@ -10,7 +10,14 @@
  *    slower on a huge tenant, but it keeps working.
  *  - agent                  `GET /api/resources?type=agent&q=` (the resource
  *    registry), which also says which project each agent lives in.
+ *  - resource / provider    `GET /api/resources/search?types=&attr=&q=&limit=`
+ *    (the same registry, a few types at once, bounded to 50 rows server-side):
+ *    a model, a vector index, a file bucket, a provider. WHICH types, which
+ *    filter and which field is stored depends on the service the limit is for
+ *    and is decided in `@/lib/quota/targets`; this file only builds the query
+ *    and reads the answer.
  */
+import type { QuotaTargetSource } from '@/lib/quota/targets';
 
 export type PickerType = 'user' | 'group' | 'token' | 'agent';
 
@@ -140,4 +147,182 @@ export async function resolvePickerOption(
   const principal = asRecord(body.principal);
   const label = str(principal.label);
   return label ? { value: id, label, description: str(principal.sublabel) } : undefined;
+}
+
+// ── resource / provider targets (the registry's search) ──────────────────────
+
+/** One row of the registry search, as the picker shows it and stores it. */
+export interface TargetOption extends PickerOption {
+  /**
+   * Unique in a result list: the registry ROW (type + id). `value` is not,
+   * because two rows can store the same value (an index key used in two projects).
+   */
+  id: string;
+  /** Registry type of the row, e.g. 'model'. */
+  type: string;
+  /** The row's key, also when what is stored is its name (tracing). */
+  key?: string;
+}
+
+export type FetchLike = (
+  url: string,
+  init?: { signal?: AbortSignal },
+) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
+
+const browserFetch: FetchLike = (url, init) => fetch(url, { cache: 'no-store', ...init });
+
+/** The server clips a query here too (`SEARCH_MAX_QUERY_LENGTH`); sending more only costs bytes. */
+const MAX_QUERY_LENGTH = 100;
+
+/**
+ * The query that asks the registry for `query` in `source`: one request, the
+ * types searched together, a filter on the display attributes (a model's
+ * category, a provider's type), best match first, at most `limit` rows.
+ */
+export function targetSearchUrl(source: QuotaTargetSource, query: string, limit = PICKER_LIMIT): string {
+  const params = new URLSearchParams({ types: source.types.join(','), limit: String(limit) });
+  const q = query.trim().slice(0, MAX_QUERY_LENGTH);
+  if (q) params.set('q', q);
+  for (const [name, values] of Object.entries(source.attributes ?? {})) params.append('attr', `${name}:${values.join(',')}`);
+  return `/api/resources/search?${params.toString()}`;
+}
+
+/** Facts worth a second line, per registry type (the rest of the row is in the detail page). */
+const SECONDARY_ATTRIBUTES: Record<string, readonly string[]> = {
+  model: ['category'],
+  'vector-index': ['providerKey'],
+  'file-bucket': ['providerKey'],
+  provider: ['driver', 'type'],
+};
+
+function attributeValue(item: Record<string, unknown>, name: string): string | undefined {
+  for (const raw of asArray(item.attributes)) {
+    const attribute = asRecord(raw);
+    if (attribute.key !== name) continue;
+    const value = attribute.value;
+    if (typeof value === 'string' || typeof value === 'number') return str(String(value));
+  }
+  return undefined;
+}
+
+/** Where the row lives, in words that need no translation: project names, nothing for "no project". */
+function projectFacts(item: Record<string, unknown>): { names: string[]; projectId?: string } {
+  const display = asRecord(item.projectDisplay);
+  if (display.kind === 'project') {
+    const projectId = str(display.projectId) ?? str(item.projectId);
+    const name = str(display.projectName) ?? str(item.projectName) ?? projectId;
+    return { names: name ? [name] : [], ...(projectId ? { projectId } : {}) };
+  }
+  if (display.kind === 'multi-project') {
+    return { names: asArray(display.projectNames).flatMap((n) => (str(n) ? [String(n)] : [])) };
+  }
+  return { names: [] };
+}
+
+function toTargetOption(source: QuotaTargetSource, raw: unknown): TargetOption | undefined {
+  const item = asRecord(raw);
+  const type = str(item.type);
+  const rowId = str(item.id);
+  const key = str(item.key);
+  const name = str(item.name);
+  // WHAT THE GUARD COMPARES: the key for models, indexes, buckets, providers and agent runs; the agent's NAME for tracing.
+  const value = source.valueField === 'name' ? name : key;
+  if (!type || !rowId || !value) return undefined;
+
+  const label = name ?? value;
+  const project = projectFacts(item);
+  // A fact the source already pins (every row is an 'llm' model) tells nothing.
+  const facts = (SECONDARY_ATTRIBUTES[type] ?? [])
+    .filter((attribute) => (source.attributes?.[attribute]?.length ?? 0) !== 1)
+    .map((attribute) => attributeValue(item, attribute));
+  const description = [key && key !== label ? key : undefined, ...facts, ...project.names].filter(Boolean).join(' · ');
+
+  return {
+    id: `${type}:${rowId}`,
+    type,
+    value,
+    label,
+    ...(key ? { key } : {}),
+    ...(description ? { description } : {}),
+    ...(project.projectId ? { projectId: project.projectId } : {}),
+  };
+}
+
+export type TargetSearchResult =
+  | {
+      status: 'ok';
+      options: TargetOption[];
+      total: number;
+      /**
+       * False when the registry says a searched type failed to load or was cut at
+       * its per-type cap: the answer may then be missing rows, so it can show what
+       * it found but can not prove that something does not exist.
+       */
+      complete: boolean;
+    }
+  /** The caller may not browse the registry (or it is not there): the picker falls back to typing the value. */
+  | { status: 'unavailable' }
+  | { status: 'failed' };
+
+/** Candidates for `query` in `source`, at most `PICKER_LIMIT`, best match first. */
+export async function searchTargetOptions(
+  source: QuotaTargetSource,
+  query: string,
+  fetcher: FetchLike = browserFetch,
+  signal?: AbortSignal,
+): Promise<TargetSearchResult> {
+  let response: Awaited<ReturnType<FetchLike>>;
+  try {
+    response = await fetcher(targetSearchUrl(source, query), { signal });
+  } catch {
+    return { status: 'failed' };
+  }
+  if (response.status === 401 || response.status === 403 || response.status === 404) return { status: 'unavailable' };
+  if (!response.ok) return { status: 'failed' };
+  let body: Record<string, unknown>;
+  try {
+    body = asRecord(await response.json());
+  } catch {
+    return { status: 'failed' };
+  }
+  const options = asArray(body.items).flatMap((raw): TargetOption[] => {
+    const option = toTargetOption(source, raw);
+    return option ? [option] : [];
+  });
+  return {
+    status: 'ok',
+    options,
+    total: typeof body.total === 'number' ? body.total : options.length,
+    complete: asArray(body.errors).length === 0 && asArray(body.truncated).length === 0,
+  };
+}
+
+export type TargetResolution =
+  | { status: 'found'; option: TargetOption }
+  /** The registry answered and has no such row: a deleted model, a typo, a key from another service. */
+  | { status: 'missing' }
+  | { status: 'unavailable' }
+  /** The registry could not say (it failed, or its answer is incomplete): not the same as "missing". */
+  | { status: 'failed' };
+
+/**
+ * Whether a STORED value (a saved limit, a deep link) is still a row of the
+ * registry, and which. The search puts an exact key (or name) first, so the
+ * value is on the first page whatever else matches it. When two rows store the
+ * same value (the same key in two projects), the one in `preferProjectId` wins.
+ */
+export async function resolveTargetOption(
+  source: QuotaTargetSource,
+  value: string,
+  fetcher: FetchLike = browserFetch,
+  signal?: AbortSignal,
+  preferProjectId?: string,
+): Promise<TargetResolution> {
+  const result = await searchTargetOptions(source, value, fetcher, signal);
+  if (result.status !== 'ok') return { status: result.status };
+  const matches = result.options.filter((option) => option.value === value);
+  const option = matches.find((o) => preferProjectId && o.projectId === preferProjectId) ?? matches[0];
+  if (option) return { status: 'found', option };
+  // Only a complete answer can say a value is not there.
+  return result.complete ? { status: 'missing' } : { status: 'failed' };
 }

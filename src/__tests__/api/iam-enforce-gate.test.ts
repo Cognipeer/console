@@ -8,7 +8,9 @@
  *   - project-level service permissions narrow (explicit settings only),
  *   - a failing engine falls back to the legacy decision (never fails open),
  *   - the tenant owner can always switch back, the operator kill switch wins,
- *   - project access through groups is fixed for enforce tenants only.
+ *   - project access through groups is fixed for enforce tenants only,
+ *   - a 403 keeps the legacy contract: `error` is the same reason sentence in both modes
+ *     (enforce only adds fields), and the OpenAI / Anthropic envelopes keep their own shape.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -71,7 +73,7 @@ import { getEnforceStats, resetEnforceStatsForTests } from '@/lib/iam/enforce';
 import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
 import { resetProjectNarrowingCachesForTests } from '@/lib/iam/projectNarrowing';
 import { authz } from '@/lib/iam/routeAuthz';
-import { enqueueAuditLog } from '@/server/api/plugin';
+import { enqueueAuditLog, stampDecisionHeader } from '@/server/api/plugin';
 import { createPolicy, deletePolicy } from '@/lib/iam/store';
 import { resetAuthzModeCacheForTests, resetShadowBufferForTests, getAuthzMode } from '@/lib/iam/shadow';
 import { resetProjectMembershipCacheForTests } from '@/lib/iam/shadow/projectMembership';
@@ -84,8 +86,10 @@ import {
   authorizeServiceForRequest,
   requireProjectContextForRequest,
   sendProjectContextError,
+  withAnthropicApiRequestContext,
   withApiRequestContext,
   withClientApiRequestContext,
+  withOpenAiApiRequestContext,
 } from '@/server/api/fastify-utils';
 import { createIamTestDb, type IamTestDb } from '../helpers/iamTestDb';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
@@ -172,6 +176,7 @@ beforeAll(async () => {
 
   app = await createFastifyApiTestApp(async (instance) => {
     // the audit trail writer, as in the real API plugin
+    instance.addHook('onSend', async (request, reply, payload) => { stampDecisionHeader(request, reply); return payload; });
     instance.addHook('onResponse', async (request, reply) => { enqueueAuditLog(request, reply); });
     const ok = withApiRequestContext(async (_req, reply) => reply.send({ ok: true }));
     // mapped through ROUTE_PREFIXES
@@ -203,10 +208,18 @@ beforeAll(async () => {
       return reply.send({ allowed: decision.allowed, enforced: decision.enforced, decisionId: decision.decisionId ?? null });
     };
     instance.get('/handler/check', { config: authz.authenticated() }, withApiRequestContext(handlerCheck));
+    // the same decision turned into a 403 by the handler
+    instance.get('/handler/refuse', { config: authz.authenticated() }, withApiRequestContext(async (request, reply) => {
+      const decision = await authorizeServiceForRequest(request, 'agents', { level: 'write' });
+      return decision.allowed ? reply.send({ ok: true }) : reply.code(403).send({ error: 'Forbidden' });
+    }));
     instance.get('/client/v1/handler/check', { config: authz.authenticated() }, withClientApiRequestContext(async (request, reply) => handlerCheck(request, reply)));
     // token (client) routes
     instance.get('/client/v1/agents/probe', withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     instance.post('/client/v1/agents/probe', withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
+    // the same service-mapped route in the OpenAI / Anthropic error dialects
+    instance.post('/client/v1/agents/openai-probe', withOpenAiApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
+    instance.post('/client/v1/agents/anthropic-probe', withAnthropicApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     instance.get('/client/v1/declared/authenticated', { config: authz.authenticated() }, withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     instance.get('/client/v1/undeclared/probe', withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     // the overview sections hidden by service (dashboard.ts), with recognisable numbers
@@ -234,7 +247,8 @@ afterAll(async () => {
   await env?.cleanup();
 });
 
-beforeEach(() => {
+/** Everything a test may have left behind: the failure hook, the kill switch, the engine and its caches, the counters. */
+function resetState() {
   hoisted.gate = null;
   delete process.env.IAM_ENFORCE_DISABLED;
   resetPrincipalCacheForTests();
@@ -244,7 +258,9 @@ beforeEach(() => {
   resetProjectNarrowingCachesForTests();
   resetEnforceStatsForTests();
   resetShadowMetricsForTests();
-});
+}
+
+beforeEach(resetState);
 
 const safeParse = (s: string) => { try { return parseJsonBody<any>(s); } catch { return s; } };
 
@@ -259,7 +275,7 @@ const call = async (method: string, url: string, user: IUser | null, opts: { tok
     headers,
     payload: opts.body === undefined ? undefined : JSON.stringify(opts.body),
   });
-  return { status: res.statusCode, body: res.body ? safeParse(res.body) : null };
+  return { status: res.statusCode, body: res.body ? safeParse(res.body) : null, headers: res.headers };
 };
 
 const setMode = (mode: string, user: IUser = users.owner) => call('PUT', '/api/iam/mode', user, { body: { mode } });
@@ -333,12 +349,14 @@ describe('enforce mode', () => {
   });
 
   it('refuses an undeclared route with 403 route_not_declared (session and token), and counts it', async () => {
+    // `error` carries the reason itself (what SDKs and the dashboard surface), `message` repeats it
+    const reason = 'Forbidden: this route has no authorization declaration';
     const session = await call('GET', '/api/undeclared/thing', users.admin);
     expect(session.status).toBe(403);
-    expect(session.body).toMatchObject({ error: 'Forbidden', code: 'route_not_declared' });
+    expect(session.body).toEqual({ error: reason, code: 'route_not_declared', message: reason });
     const token = await call('GET', '/api/client/v1/undeclared/probe', null, { token: 'tok-plain' });
     expect(token.status).toBe(403);
-    expect(token.body).toMatchObject({ error: 'Forbidden', code: 'route_not_declared' });
+    expect(token.body).toEqual({ error: reason, code: 'route_not_declared', message: reason });
     expect(getEnforceStats().undeclaredDenies).toBe(2);
   });
 
@@ -354,9 +372,18 @@ describe('enforce mode', () => {
     expect((await call('GET', '/api/declared/service', users.reader)).status).toBe(200);
     const denied = await call('POST', '/api/declared/service', users.reader);
     expect(denied.status).toBe(403);
-    expect(denied.body).toMatchObject({ error: 'Forbidden', code: 'forbidden', service: 'ldap', required: 'admin' });
+    // `error` is the reason legacy mode words the same way; the structured fields ride next to it
+    expect(denied.body).toEqual({
+      error: 'Forbidden: ldap requires admin permission',
+      code: 'forbidden',
+      message: 'Forbidden: ldap requires admin permission',
+      service: 'ldap',
+      required: 'admin',
+      decisionId: denied.body.decisionId,
+    });
     expect(typeof denied.body.decisionId).toBe('string');
     expect(denied.body.decisionId.length).toBeGreaterThan(8);
+    expect(denied.headers['x-decision-id']).toBe(denied.body.decisionId);
     // every denial gets its own id
     const again = await call('POST', '/api/declared/service', users.reader);
     expect(again.body.decisionId).not.toBe(denied.body.decisionId);
@@ -564,6 +591,11 @@ describe('enforce mode', () => {
         const denied = await call('GET', '/api/handler/check', users.plain);
         expect(denied.body).toMatchObject({ allowed: false, enforced: true });
         expect(typeof denied.body.decisionId).toBe('string');
+        // only a 403 carries the header; a handler that merely filters stays quiet
+        expect(denied.headers['x-decision-id']).toBeUndefined();
+        const refused = await call('GET', '/api/handler/refuse', users.plain);
+        expect(refused.status).toBe(403);
+        expect(refused.headers['x-decision-id']).toEqual(expect.any(String));
       } finally {
         await deletePolicy(env.tenantDbName, 'no-agents');
       }
@@ -630,7 +662,9 @@ describe('enforce mode', () => {
   it('/metrics is tenant-wide: a token with a service scope is refused, an unscoped one is not', async () => {
     const scoped = await call('GET', '/api/metrics', null, { token: 'tok-scoped' });
     expect(scoped.status).toBe(403);
-    expect(scoped.body).toMatchObject({ error: 'Forbidden', code: 'forbidden' });
+    // an enforce-only refusal (legacy admits a scoped token): `error` is the reason, not a bare "Forbidden"
+    const reason = 'Forbidden: /metrics is tenant-wide and needs an API token without a service scope';
+    expect(scoped.body).toEqual({ error: reason, code: 'forbidden', message: reason });
     expect((await call('GET', '/api/metrics', null, { token: 'tok-plain' })).status).toBe(200);
   });
 
@@ -653,5 +687,127 @@ describe('enforce mode', () => {
       delete process.env.IAM_ENFORCE_DISABLED;
     }
     expect((await call('GET', '/api/undeclared/thing', users.plain)).status).toBe(403);
+  });
+});
+
+describe('a 403 keeps the legacy contract when a tenant flips to enforce', () => {
+  // The status codes of the two modes were always the same; the bodies were not: legacy answered
+  // { error: 'Forbidden: agents requires write permission' }, enforce { error: 'Forbidden', message: <the reason>, ... },
+  // and SDKs and the dashboard surface `body.error`, so a tenant that flipped to enforce lost the reason.
+  interface Refusal { status: number; body: Record<string, any>; headers: Record<string, unknown> }
+  interface Case {
+    name: string;
+    reason: string;
+    service: string;
+    required: string;
+    run: () => Promise<Refusal>;
+  }
+
+  const cases: Case[] = [
+    {
+      name: 'session, route mapped by prefix',
+      reason: 'Forbidden: agents requires write permission',
+      service: 'agents',
+      required: 'write',
+      run: () => call('POST', '/api/agents/probe', users.reader),
+    },
+    {
+      name: 'session, explicit service declaration (admin service)',
+      reason: 'Forbidden: ldap requires admin permission',
+      service: 'ldap',
+      required: 'admin',
+      run: () => call('POST', '/api/declared/service', users.reader),
+    },
+    {
+      name: 'session, declared level override',
+      reason: 'Forbidden: agents requires admin permission',
+      service: 'agents',
+      required: 'admin',
+      run: () => call('GET', '/api/declared/level', users.plain),
+    },
+    {
+      name: 'token, the scope caps the owner',
+      reason: 'Forbidden: agents requires write permission',
+      service: 'agents',
+      required: 'write',
+      run: () => call('POST', '/api/client/v1/agents/probe', null, { token: 'tok-scoped' }),
+    },
+    {
+      name: 'token, an empty scope caps everything',
+      reason: 'Forbidden: agents requires read permission',
+      service: 'agents',
+      required: 'read',
+      run: () => call('GET', '/api/client/v1/agents/probe', null, { token: 'tok-admin-empty' }),
+    },
+  ];
+
+  const refusals: Record<'legacy' | 'enforce', Refusal[]> = { legacy: [], enforce: [] };
+  const pending: Refusal = { status: 0, body: {}, headers: {} };
+  const dialects: Record<'legacy' | 'enforce', { openai: Refusal; anthropic: Refusal }> = {
+    legacy: { openai: pending, anthropic: pending },
+    enforce: { openai: pending, anthropic: pending },
+  };
+
+  beforeAll(async () => {
+    // The same requests, once per mode, answered by the real gates.
+    for (const mode of ['legacy', 'enforce'] as const) {
+      resetState();
+      resetAuthzModeCacheForTests();
+      expect((await setMode(mode)).status).toBe(200);
+      for (const c of cases) refusals[mode].push(await c.run());
+      dialects[mode] = {
+        openai: await call('POST', '/api/client/v1/agents/openai-probe', null, { token: 'tok-scoped' }),
+        anthropic: await call('POST', '/api/client/v1/agents/anthropic-probe', null, { token: 'tok-scoped' }),
+      };
+    }
+  });
+
+  afterAll(async () => {
+    resetState();
+    resetAuthzModeCacheForTests();
+    await setMode('enforce');
+  });
+
+  it.each(cases.map((c, index) => [c.name, index] as const))('%s: the same `error` string in both modes', (_name, index) => {
+    const c = cases[index];
+    const legacy = refusals.legacy[index];
+    const enforce = refusals.enforce[index];
+    expect([legacy.status, enforce.status]).toEqual([403, 403]);
+    // legacy: the plain reason, as it always was
+    expect(legacy.body).toEqual({ error: c.reason });
+    // enforce: that very string in `error`, and the structured fields next to it
+    expect(enforce.body.error).toBe(legacy.body.error);
+    expect(enforce.body).toEqual({
+      error: c.reason,
+      code: 'forbidden',
+      message: c.reason,
+      service: c.service,
+      required: c.required,
+      decisionId: expect.any(String),
+    });
+  });
+
+  it('OpenAI- and Anthropic-style envelopes keep their own shape; the reason is error.message in both modes', () => {
+    const reason = 'Forbidden: agents requires write permission';
+    for (const mode of ['legacy', 'enforce'] as const) {
+      expect(dialects[mode].openai.status).toBe(403);
+      expect(dialects[mode].anthropic.status).toBe(403);
+    }
+    // legacy has no decision; enforce names it in the body and the X-Decision-Id header
+    expect(dialects.legacy.anthropic.body).toEqual({ type: 'error', error: { type: 'permission_error', message: reason } });
+    expect(dialects.legacy.openai.body).toEqual({ error: { message: reason, type: 'permission_error' } });
+    expect(dialects.legacy.openai.headers['x-decision-id']).toBeUndefined();
+    // OpenAI SDKs read error.message / error.code: enforce adds the code
+    expect(dialects.enforce.openai.body).toEqual({
+      error: { message: reason, type: 'permission_error', code: 'forbidden', decision_id: expect.any(String) },
+    });
+    expect(dialects.enforce.anthropic.body).toEqual({
+      type: 'error',
+      error: { type: 'permission_error', message: reason, decision_id: expect.any(String) },
+    });
+    for (const dialect of ['openai', 'anthropic'] as const) {
+      const { body, headers } = dialects.enforce[dialect];
+      expect(headers['x-decision-id']).toBe(body.error.decision_id);
+    }
   });
 });

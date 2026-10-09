@@ -52,6 +52,11 @@ declare module 'fastify' {
       /** The address the engine evaluated (getAuthzClientIp), so a replay of the decision uses the same one. */
       ip?: string;
     };
+    /**
+     * Decision id of an enforce-mode refusal made by a handler-level check
+     * (authorizeServiceForRequest). A 403 answer carries it as X-Decision-Id.
+     */
+    iamDecisionId?: string;
   }
 }
 

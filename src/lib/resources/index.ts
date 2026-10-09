@@ -4,6 +4,7 @@ export * from './registry';
 export * from './mapping';
 export {
   listResources,
+  searchResources,
   getResourceUsage,
   getResource,
   getResourceHealth,
@@ -16,6 +17,12 @@ export {
   DEFAULT_LIMIT,
   MAX_LIMIT,
   MAX_HEALTH_ISSUES,
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
+  SEARCH_MAX_TYPES,
+  SEARCH_MAX_QUERY_LENGTH,
+  SEARCH_MAX_ATTRIBUTE_KEYS,
+  SEARCH_MAX_ATTRIBUTE_VALUES,
 } from './service';
 export * from './references';
 export { HEALTH_ISSUE_KINDS } from './health';

@@ -15,6 +15,7 @@ import {
   type UserServicePermissions,
 } from '@/lib/security/rbac';
 import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
+import { serviceDenialReason } from '@/lib/iam/denialReason';
 import { loadGroupGrants } from '@/lib/iam/groupGrants';
 import { markGated, resolveRouteAuthz, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
 import { authorizeServiceAccess, type ServiceAuthzOptions, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
@@ -49,8 +50,10 @@ export interface ApiSessionContext {
 class RbacAuthorizationError extends Error {
   status: number;
   /**
-   * Structured denial (enforce mode): `{ error, code, ... }`. Session routes
-   * send it as is; the client-API error styles embed `code` in their envelope.
+   * Structured denial (enforce mode): `{ error, code, ... }`, where `error` is the
+   * same reason sentence legacy mode sends (`error.message` of this error). Session
+   * routes send it as is; the client-API error styles embed `code` in their
+   * envelope and keep `error.message` as the reason.
    */
   body?: Record<string, unknown>;
 
@@ -325,6 +328,17 @@ export async function authorizeServiceForRequest(
   service: PermissionService,
   options: ServiceAuthzOptions & { rbac?: { user: IUser; groupGrants: GroupTenantGrant[] } } = {},
 ): Promise<ServiceAuthzResult> {
+  const result = await decideServiceForRequest(request, service, options);
+  // A refusal the handler turns into a 403 names its decision (X-Decision-Id).
+  if (!result.allowed && result.decisionId) request.iamDecisionId = result.decisionId;
+  return result;
+}
+
+async function decideServiceForRequest(
+  request: FastifyRequest,
+  service: PermissionService,
+  options: ServiceAuthzOptions & { rbac?: { user: IUser; groupGrants: GroupTenantGrant[] } },
+): Promise<ServiceAuthzResult> {
   const requestId = request.apiRequestId ?? 'unknown';
   const route = routeLabel(request, getRequestPathname(request));
   const common = { requestId, route, ...options };
@@ -547,10 +561,7 @@ async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionCo
   }
 
   if (!decision.allowed) {
-    throw new RbacAuthorizationError(
-      `Forbidden: ${decision.service} requires ${decision.required} permission`,
-      403,
-    );
+    throw new RbacAuthorizationError(serviceDenialReason(decision.service, decision.required), 403);
   }
 }
 
@@ -671,10 +682,7 @@ async function enforceApiTokenRbac(
   }
 
   if (!decision.allowed) {
-    throw new RbacAuthorizationError(
-      `Forbidden: ${decision.service} requires ${decision.required} permission`,
-      403,
-    );
+    throw new RbacAuthorizationError(serviceDenialReason(decision.service, decision.required), 403);
   }
 }
 
@@ -922,12 +930,17 @@ function sendClientApiError(
 
   if (error instanceof RbacAuthorizationError) {
     const code = typeof error.body?.code === 'string' ? error.body.code : undefined;
+    // An enforce-mode refusal names its decision in every dialect, so an API
+    // caller can hand it to IAM center > Access check like a dashboard user can.
+    const decisionId = typeof error.body?.decisionId === 'string' ? error.body.decisionId : undefined;
+    const extra = decisionId ? { decision_id: decisionId } : {};
     if (style === 'anthropic') {
-      return reply.code(error.status).send(anthropicErrorEnvelope(error.message, 'permission_error'));
+      const envelope = anthropicErrorEnvelope(error.message, 'permission_error');
+      return reply.code(error.status).send({ ...envelope, error: { ...envelope.error, ...extra } });
     }
     if (style === 'openai') {
       const body = openAiErrorBody(error.message, 'permission_error');
-      return reply.code(error.status).send(code ? { error: { ...body.error, code } } : body);
+      return reply.code(error.status).send({ error: { ...body.error, ...(code ? { code } : {}), ...extra } });
     }
     return reply.code(error.status).send(error.body ?? { error: error.message });
   }

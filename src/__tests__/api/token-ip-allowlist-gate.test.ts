@@ -287,7 +287,8 @@ describe('independent of the authorization mode', () => {
       method: 'GET', url: '/api/client/v1/gated', remoteAddress: '198.51.100.7', headers,
     });
     expect(res.statusCode).toBe(403);
-    expect(res.json().code).toBe('ip_not_allowed');
+    // the same body in every mode, `error` being the reason itself (the legacy contract enforce 403s keep)
+    expect(res.json()).toEqual({ error: 'API token is not allowed from this IP address', code: 'ip_not_allowed' });
     expect(h.resolveEnforcement).not.toHaveBeenCalled();
     expect(h.db.findUserById).not.toHaveBeenCalled();
     expect(h.db.updateTokenLastUsedByHash).not.toHaveBeenCalled();

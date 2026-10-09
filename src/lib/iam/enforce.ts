@@ -4,11 +4,15 @@
  *  - API tokens include the owner's GROUP grants (the token scope stays a cap).
  *  - Project-level service permissions narrow: min(tenant level, project level)
  *    when the request has a project context (projectNarrowing.ts).
- *  - Undeclared routes are refused: 403 { error: 'Forbidden', code: 'route_not_declared' }.
+ *  - Undeclared routes are refused: 403 { error, code: 'route_not_declared', message }.
  *  - `public` / `self` routes skip this gate (the handler is responsible),
  *    `authenticated` routes admit any signed-in principal of the tenant.
- *  - An engine denial is 403 { error: 'Forbidden', code: 'forbidden', service,
+ *  - An engine denial is 403 { error, code: 'forbidden', message, service,
  *    required, decisionId }.
+ *  - In both, `error` is the human-readable reason, worded exactly as legacy mode
+ *    words it ('Forbidden: mcp requires write permission', see denialReason.ts):
+ *    flipping a tenant to enforce ADDS fields to the body, it never moves or
+ *    shortens the reason that clients surface from `body.error`.
  *
  * Never fails open beyond legacy: if the engine is unavailable or throws, the
  * LEGACY decision (the one rbac.ts already computed for the same request) is
@@ -34,6 +38,7 @@ import {
   type UserServicePermissions,
 } from '@/lib/security/rbac';
 import { gateActionId, serviceActionId } from './actions';
+import { serviceDenialReason } from './denialReason';
 import { authorizeGate, customPolicyIdsOf, type AuthorizeResult } from './engine';
 import { tokenPrincipal, userLevelSets, userPrincipal, type IamPrincipal } from './entities';
 import type { RouteAuthzLevel } from './routeAuthz';
@@ -210,19 +215,29 @@ export function recordUndeclaredDenial(tenantDbName: string, context: Record<str
   logger.warn('IAM enforce: route is not declared, request refused', { tenantDbName, ...context });
 }
 
-export function undeclaredRouteBody(): { error: 'Forbidden'; code: 'route_not_declared'; message: string } {
-  return {
-    error: 'Forbidden',
-    code: 'route_not_declared',
-    message: 'Forbidden: this route has no authorization declaration',
-  };
+/**
+ * The 403 body of an undeclared route. `error` carries the reason itself (there is
+ * no legacy wording to match: legacy mode never refuses an undeclared route), the
+ * same sentence as `message`.
+ */
+export function undeclaredRouteBody(): { error: string; code: 'route_not_declared'; message: string } {
+  const message = 'Forbidden: this route has no authorization declaration';
+  return { error: message, code: 'route_not_declared', message };
 }
 
+/**
+ * The 403 body of an engine denial. `error` is the sentence legacy mode answers
+ * with for the same denial (serviceDenialReason, shared with the legacy gate), so
+ * an SDK or the dashboard that shows `body.error` keeps showing the reason when a
+ * tenant flips to enforce; `message` repeats it, and `code`, `service`,
+ * `required` and `decisionId` are the additive structured part.
+ */
 export function forbiddenBody(denial: Extract<EnforceDecision, { allowed: false }>): Record<string, unknown> {
+  const message = serviceDenialReason(denial.service, denial.required);
   return {
-    error: 'Forbidden',
+    error: message,
     code: 'forbidden',
-    message: `Forbidden: ${denial.service} requires ${denial.required} permission`,
+    message,
     service: denial.service,
     required: denial.required,
     decisionId: denial.decisionId,

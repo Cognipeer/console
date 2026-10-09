@@ -216,6 +216,40 @@ A token that mints another token (`POST /api/client/v1/users/:id/tokens`) cannot
 widen its own network scope: the new token inherits the minting token's ranges
 unless it asks for a subset of them.
 
+### Permission denials
+
+A call that the permission gate refuses (the caller's level on the route's
+service is below what the route needs) is answered with `403`, and `error` is the
+human-readable reason in every authorization mode:
+
+```json
+{ "error": "Forbidden: mcp requires write permission" }
+```
+
+A tenant in **enforce** mode answers with that same `error` and adds structured
+fields next to it, so a client that only surfaces `body.error` (the SDKs and the
+dashboard do) shows the same reason before and after a tenant flips to enforce:
+
+```json
+{
+  "error": "Forbidden: mcp requires write permission",
+  "message": "Forbidden: mcp requires write permission",
+  "code": "forbidden",
+  "service": "mcp",
+  "required": "write",
+  "decisionId": "7c0f6b2e-5d1a-4c1e-9a53-0d9b8a1f2e44"
+}
+```
+
+`decisionId` identifies this refusal: `GET /api/iam/decisions/:decisionId`
+resolves it to the audit row and a ready-to-run access check (Authorization
+center, **Access check**). In enforce mode a route that carries no authorization
+declaration is refused with `code: "route_not_declared"`, and a token with a
+service scope is refused on the tenant-wide `/metrics` export; both put the reason
+in `error` as well. The OpenAI- and Anthropic-compatible routes keep their own
+error envelopes (the reason is `error.message`; OpenAI routes add `error.code` in
+enforce mode).
+
 ## License-Based Feature Control
 
 Features are controlled through a license system defined in `src/config/policies.json`:
