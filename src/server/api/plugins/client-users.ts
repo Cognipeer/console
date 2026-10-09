@@ -35,6 +35,7 @@ import { generateSecurePassword } from '@/lib/services/auth/passwordGenerator';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
+import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 import { canActOnTokensOf, clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
 
@@ -180,6 +181,10 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
       // (the minted token would authorise as the owner on every route).
       if (!canActOnTokensOf(auth.user.role, targetUser)) {
         return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      if (isUserDisabled(targetUser)) {
+        return reply.code(400).send({ error: 'User is disabled' });
       }
 
       // The target's profile is not a trustworthy ceiling on its own: this

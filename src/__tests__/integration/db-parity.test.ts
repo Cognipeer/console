@@ -163,6 +163,49 @@ describeForEachProvider('User + Project + UserProject', (getDb) => {
   });
 });
 
+describeForEachProvider('User lifecycle fields (disable / enable)', (getDb) => {
+  let dbName: string;
+  let tenantId: string;
+
+  beforeEach(async () => {
+    const slug = `life-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    dbName = `tenant_${slug}`;
+    const db = getDb();
+    const tenant = await db.createTenant({
+      companyName: 'Acme', slug, dbName, licenseType: 'FREE', ownerId: 'pending',
+    });
+    tenantId = String(tenant._id);
+    await db.switchToTenant(dbName);
+  });
+
+  it('a fresh user has no status (= active); disable persists and enable clears with null', async () => {
+    const db = getDb();
+    const user = await db.createUser({
+      tenantId, email: 'bob@example.com', name: 'Bob', password: '$2b$10$x', role: 'user', licenseId: 'FREE', features: [],
+    });
+    const id = String(user._id);
+    expect((await db.findUserById(id))?.status).toBeUndefined();
+
+    const disabledAt = new Date('2026-10-01T12:00:00.000Z');
+    await db.updateUser(id, { status: 'disabled', disabledAt, disabledBy: 'admin-1', disabledReason: 'left' });
+    const disabled = await db.findUserById(id);
+    expect(disabled).toMatchObject({ status: 'disabled', disabledBy: 'admin-1', disabledReason: 'left' });
+    expect(new Date(disabled!.disabledAt as Date).toISOString()).toBe(disabledAt.toISOString());
+
+    // Unrelated updates must not reset the lifecycle state.
+    await db.updateUser(id, { name: 'Bobby' });
+    expect((await db.findUserById(id))?.status).toBe('disabled');
+
+    await db.updateUser(id, { status: 'active', disabledAt: null, disabledBy: null, disabledReason: null });
+    const enabled = await db.findUserById(id);
+    expect(enabled?.status).toBe('active');
+    // SQLite reads cleared columns back as undefined, Mongo as null: both mean "unset".
+    expect(enabled?.disabledAt ?? undefined).toBeUndefined();
+    expect(enabled?.disabledBy ?? undefined).toBeUndefined();
+    expect(enabled?.disabledReason ?? undefined).toBeUndefined();
+  });
+});
+
 describeForEachProvider('Provider + Model CRUD + malformed-id safety', (getDb) => {
   let slug: string;
   let dbName: string;

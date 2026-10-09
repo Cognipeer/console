@@ -1,10 +1,11 @@
-import { getDatabase } from '@/lib/database';
+import { getDatabase, runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { fireAndForget } from '@/lib/core/asyncTask';
 import type { ITenant, IUser, IApiToken } from '@/lib/database';
 import { LicenseManager } from '@/lib/license/license-manager';
 import { hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { isUserDisabled } from '@/lib/services/users/userAuthState';
 
 const logger = createLogger('api-token-auth');
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
@@ -44,6 +45,22 @@ export interface ApiTokenRequestLike {
  */
 export function apiAuthCacheKey(tokenHash: string): string {
   return `api-auth:${tokenHash.substring(0, 16)}`;
+}
+
+/**
+ * Evict the auth-cache entry of one token (by its stored hash) so a delete or
+ * owner disable takes effect immediately on every replica instead of after the
+ * cache TTL. Best effort: the token row is the source of truth and the entry
+ * expires on its own TTL if the cache is unreachable, so this never throws.
+ */
+export async function invalidateApiTokenAuthCache(tokenHash: string | undefined): Promise<void> {
+  if (!tokenHash) return;
+  try {
+    const cache = await getCache();
+    await cache.del(apiAuthCacheKey(tokenHash));
+  } catch (error) {
+    logger.warn('Failed to invalidate api-auth cache', { error });
+  }
 }
 
 export async function requireApiTokenFromHeader(
@@ -113,13 +130,35 @@ export async function requireApiTokenFromHeader(
     licenseType: effectiveLicense.licenseType,
   };
 
+  await db.switchToTenant(tenant.dbName);
+
+  // The owner is loaded fresh on every request (never cached) so disabling or
+  // deleting the account cuts off its tokens immediately. It is resolved
+  // before anything with side effects (default-project creation, last-used
+  // stamp) and fails closed: an unreadable, missing, or disabled owner means
+  // no access.
+  let user: IUser | null;
+  try {
+    // Scoped lookup: this runs before the request-bound tenant context exists,
+    // and the process-global switchToTenant binding above can be overwritten by
+    // a concurrent request for another tenant (spurious 401s under load).
+    user = await runWithTenantScope(tenant.dbName, (d) => d.findUserById(tokenRecord.userId));
+  } catch (error) {
+    logger.warn('Unable to resolve user for API token', { error });
+    throw new ApiTokenAuthError('Unable to verify API token owner', 503);
+  }
+  if (!user) {
+    throw new ApiTokenAuthError('API token owner no longer exists', 401);
+  }
+  if (isUserDisabled(user)) {
+    throw new ApiTokenAuthError('API token owner is disabled', 401);
+  }
+
   // Non-critical last-used timestamp update — fire and forget
   fireAndForget('token-last-used', async () => {
     const bgDb = await getDatabase();
     await bgDb.updateTokenLastUsedByHash(tokenHash);
   });
-
-  await db.switchToTenant(tenant.dbName);
 
   const defaultProject = await ensureDefaultProject(
     tenant.dbName,
@@ -130,13 +169,6 @@ export async function requireApiTokenFromHeader(
   const projectId = tokenRecord.projectId || defaultProjectId;
   if (!projectId) {
     throw new ApiTokenAuthError('Token project context is missing', 400);
-  }
-
-  let user: IUser | null = null;
-  try {
-    user = await db.findUserById(tokenRecord.userId);
-  } catch (error) {
-    logger.warn('Unable to resolve user for API token', { error });
   }
 
   return {

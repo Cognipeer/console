@@ -5,6 +5,7 @@ import { getDatabase } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import {
   DEFAULT_PROJECT_KEY,
   ensureDefaultProject,
@@ -742,6 +743,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       const candidates = users
         .filter((user) => {
           if (user.role === 'owner' || user.role === 'admin') return false;
+          if (isUserDisabled(user)) return false;
           if (alreadyMemberIds.has(String(user._id))) return false;
           return !getLegacyProjectIds(user.projectIds).includes(String(projectId));
         })

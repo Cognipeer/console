@@ -145,6 +145,55 @@ describe('Tenant switching', () => {
     expect(groupIndexes.some((index) => index.name === 'idx_groups_externalId')).toBe(true);
   });
 
+  it('adds nullable lifecycle columns to a legacy users table and reads old rows as active', async () => {
+    const legacyTenantDbName = 'tenant_legacy_users';
+    const legacyTenantPath = path.join(tmpDir, `${legacyTenantDbName}.db`);
+    const legacyDb = new Database(legacyTenantPath);
+    legacyDb.exec(`
+      CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        emailLower TEXT NOT NULL,
+        password TEXT NOT NULL,
+        name TEXT NOT NULL,
+        tenantId TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user',
+        projectIds TEXT DEFAULT '[]',
+        servicePermissions TEXT DEFAULT '{}',
+        licenseId TEXT NOT NULL DEFAULT 'FREE',
+        features TEXT DEFAULT '[]',
+        invitedBy TEXT,
+        invitedAt TEXT,
+        inviteAcceptedAt TEXT,
+        mustChangePassword INTEGER DEFAULT 0,
+        passwordChangedAt TEXT,
+        authProvider TEXT NOT NULL DEFAULT 'local',
+        externalId TEXT,
+        canLogin INTEGER NOT NULL DEFAULT 1,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
+      INSERT INTO users (id, email, emailLower, password, name, tenantId, role, createdAt, updatedAt)
+      VALUES ('legacy-1', 'old@test.com', 'old@test.com', 'pw', 'Old', 't', 'user', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    `);
+    legacyDb.close();
+
+    await db.switchToTenant(legacyTenantDbName);
+
+    const migratedDb = new Database(legacyTenantPath, { readonly: true });
+    const columns = (migratedDb.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>).map((c) => c.name);
+    migratedDb.close();
+    expect(columns).toEqual(expect.arrayContaining(['status', 'disabledAt', 'disabledBy', 'disabledReason']));
+
+    const old = await db.findUserById('legacy-1');
+    expect(old).not.toBeNull();
+    expect(old?.status).toBeUndefined();
+    expect(old?.canLogin).toBe(true);
+
+    // Restore the shared tenant for the remaining suites.
+    await db.switchToTenant(TEST_DB_NAME);
+  });
+
   it('throws without connect', async () => {
     const db2 = new SQLiteProvider(tmpDir, 'other_main');
     await expect(db2.switchToTenant('some_db')).rejects.toThrow(
@@ -207,6 +256,69 @@ describe('User CRUD', () => {
 
     const found = await db.findUserById(userId);
     expect(found?.servicePermissions?.models).toBe('read');
+  });
+
+  it('leaves lifecycle fields undefined (= active) on a fresh row', async () => {
+    const found = await db.findUserById(userId);
+    expect(found?.status).toBeUndefined();
+    expect(found?.disabledAt).toBeUndefined();
+    expect(found?.disabledBy).toBeUndefined();
+    expect(found?.disabledReason).toBeUndefined();
+  });
+
+  it('round-trips disable then enable, clearing the lifecycle fields with null', async () => {
+    const target = await db.createUser({
+      email: 'lifecycle@test.com',
+      password: 'pw',
+      name: 'Lifecycle',
+      role: 'user',
+      tenantId,
+      licenseId: 'free',
+    });
+    const id = target._id as string;
+    const disabledAt = new Date('2026-10-01T12:00:00.000Z');
+
+    const disabled = await db.updateUser(id, {
+      status: 'disabled',
+      disabledAt,
+      disabledBy: userId,
+      disabledReason: 'left the company',
+    });
+    expect(disabled).toMatchObject({ status: 'disabled', disabledBy: userId, disabledReason: 'left the company' });
+    expect(disabled?.disabledAt?.toISOString()).toBe(disabledAt.toISOString());
+    expect((await db.findUserById(id))?.status).toBe('disabled');
+
+    // An unrelated update must not reset the lifecycle state.
+    const renamed = await db.updateUser(id, { name: 'Renamed', mustChangePassword: false });
+    expect(renamed).toMatchObject({ name: 'Renamed', status: 'disabled', disabledBy: userId });
+
+    const enabled = await db.updateUser(id, {
+      status: 'active',
+      disabledAt: null,
+      disabledBy: null,
+      disabledReason: null,
+    });
+    expect(enabled?.status).toBe('active');
+    expect(enabled?.disabledAt).toBeUndefined();
+    expect(enabled?.disabledBy).toBeUndefined();
+    expect(enabled?.disabledReason).toBeUndefined();
+  });
+
+  it('persists lifecycle fields passed to createUser', async () => {
+    const created = await db.createUser({
+      email: 'born-disabled@test.com',
+      password: 'pw',
+      name: 'Born Disabled',
+      role: 'user',
+      tenantId,
+      licenseId: 'free',
+      status: 'disabled',
+      disabledAt: new Date('2026-10-02T00:00:00.000Z'),
+      disabledBy: 'system:ldap-sync',
+      disabledReason: 'removed from directory',
+    });
+    const found = await db.findUserById(created._id as string);
+    expect(found).toMatchObject({ status: 'disabled', disabledBy: 'system:ldap-sync', disabledReason: 'removed from directory' });
   });
 
   it('returns null for non-existent email', async () => {

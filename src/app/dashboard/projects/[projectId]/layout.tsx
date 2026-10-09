@@ -1,6 +1,7 @@
 import { headers } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
 import { getDatabase } from '@/lib/database';
+import { getUserAuthState } from '@/lib/services/users/userAuthState';
 
 export default async function ProjectLayout({
   children,
@@ -17,6 +18,12 @@ export default async function ProjectLayout({
   const { projectId } = await params;
 
   if (!tenantDbName || !tenantId || !userId || !role) {
+    redirect('/login');
+  }
+
+  // Checked before the admin short-circuit below: admins can be disabled too.
+  // Cached lookup; a lookup failure throws (error page), never falls through.
+  if ((await getUserAuthState(tenantDbName, tenantId, userId)) === 'disabled') {
     redirect('/login');
   }
 

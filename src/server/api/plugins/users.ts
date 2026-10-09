@@ -22,7 +22,10 @@ import {
 } from '@/lib/services/users/csvImport';
 import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
+import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
+import { isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import {
+  getClientIp,
   readJsonBody,
   requireSessionContext,
   withApiRequestContext,
@@ -40,6 +43,9 @@ function serializeUser(user: IUser) {
     _id: user._id,
     canLogin: user.canLogin !== false,
     createdAt: user.createdAt,
+    disabledAt: user.disabledAt ?? null,
+    disabledBy: user.disabledBy ?? null,
+    disabledReason: user.disabledReason ?? null,
     email: user.email,
     inviteAcceptedAt: user.inviteAcceptedAt,
     invitedAt: user.invitedAt,
@@ -48,6 +54,8 @@ function serializeUser(user: IUser) {
     projectIds: user.projectIds ?? [],
     role: user.role,
     servicePermissions: normalizeServicePermissions(user.servicePermissions),
+    // Missing status = active (legacy / on-prem rows have no such field).
+    status: user.status ?? 'active',
     updatedAt: user.updatedAt,
   };
 }
@@ -149,6 +157,9 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(500).send({ error: 'Failed to delete user' });
       }
 
+      // The row is gone, so its tokens would otherwise be orphaned. Never fails the delete.
+      await cleanupDeletedUser(session.tenantDbName, id, session.tenantId);
+
       return reply.code(200).send({ message: 'User deleted successfully' });
     } catch (error) {
       if (error instanceof Error && error.message === 'Unauthorized') {
@@ -158,6 +169,63 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));
+
+  // Disable / enable share one handler: the guards (self, owner, tenant) and the
+  // audit trail live in setUserStatus, so the route only gates on role.
+  const registerStatusRoute = (action: 'disable' | 'enable') => {
+    const status = action === 'disable' ? 'disabled' : 'active';
+    app.post(`/users/:id/${action}`, withApiRequestContext(async (request, reply) => {
+      try {
+        const { id } = request.params as { id: string };
+        const session = requireSessionContext(request);
+        if (!isUserAdmin(session.userRole)) {
+          return reply.code(403).send({ error: `Only owners and admins can ${action} users` });
+        }
+
+        // The body is optional (only `disable` reads a reason).
+        let reason: string | undefined;
+        if (action === 'disable' && request.body) {
+          const body = readJsonBody<{ reason?: unknown }>(request);
+          if (typeof body.reason === 'string') reason = body.reason;
+        }
+
+        const result = await setUserStatus({
+          actor: {
+            email: session.userEmail,
+            role: session.userRole,
+            type: 'user',
+            userId: session.userId,
+          },
+          ipAddress: getClientIp(request),
+          reason,
+          requestId: session.requestId,
+          status,
+          targetUserId: id,
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          userAgent: typeof request.headers['user-agent'] === 'string'
+            ? request.headers['user-agent']
+            : undefined,
+        });
+        if (!result.ok) {
+          return reply.code(result.httpStatus).send({ error: result.error });
+        }
+
+        return reply.code(200).send({ user: serializeUser(result.user) });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'Unauthorized') {
+          return reply.code(401).send({ error: 'Unauthorized' });
+        }
+        if (error instanceof SyntaxError) {
+          return reply.code(400).send({ error: 'Invalid request body' });
+        }
+        logger.error(`${action} user error`, { error });
+        return reply.code(500).send({ error: 'Internal server error' });
+      }
+    }));
+  };
+  registerStatusRoute('disable');
+  registerStatusRoute('enable');
 
   app.patch('/users/:id/permissions', withApiRequestContext(async (request, reply) => {
     try {
@@ -549,7 +617,7 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
 
       await db.switchToTenant(session.tenantDbName);
       const user = await db.findUserById(id);
-      if (!user || user.canLogin === false || !user.invitedBy || user.inviteAcceptedAt) {
+      if (!user || isUserLoginBlocked(user) || !user.invitedBy || user.inviteAcceptedAt) {
         return reply.code(404).send({ error: 'Pending invitation not found' });
       }
 

@@ -314,6 +314,10 @@ export const TENANT_SCHEMA_SQL = `
     authProvider TEXT NOT NULL DEFAULT 'local',
     externalId TEXT,
     canLogin INTEGER NOT NULL DEFAULT 1,
+    status TEXT,
+    disabledAt TEXT,
+    disabledBy TEXT,
+    disabledReason TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );

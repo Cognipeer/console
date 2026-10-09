@@ -165,6 +165,18 @@ export interface IUser {
   /** Whether this user may authenticate at all. Missing/undefined is treated as `true` everywhere (back-compat for existing rows). `false` marks a "Programmatic User" with no login capability. */
   canLogin?: boolean;
   /**
+   * Account lifecycle state. Missing/undefined means `'active'` (every row
+   * written before this field existed, including all on-prem rows) — never
+   * write a migration that backfills it, and never treat a missing value as
+   * disabled. A disabled user keeps their row, role and memberships so the
+   * account can be re-enabled without re-provisioning.
+   */
+  status?: 'active' | 'disabled';
+  disabledAt?: Date | null;
+  /** Actor user id, or `system:<source>` when a directory sync disabled the account. */
+  disabledBy?: string | null;
+  disabledReason?: string | null;
+  /**
    * Timestamp of the last password change.
    * Used to invalidate password reset tokens issued before this moment,
    * making reset tokens effectively single-use.

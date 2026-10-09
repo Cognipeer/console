@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Badge, Button, Group, Modal, Select, Stack, Text, Tooltip } from '@mantine/core';
-import { IconCopy, IconExternalLink, IconMail, IconShieldCheck, IconTrash, IconUpload, IconUserPlus } from '@tabler/icons-react';
+import { Badge, Button, Group, Modal, Select, Stack, Text, TextInput, Tooltip } from '@mantine/core';
+import { IconCopy, IconExternalLink, IconMail, IconShieldCheck, IconTrash, IconUpload, IconUserCheck, IconUserOff, IconUserPlus } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import AddUserModal from './AddUserModal';
 import ImportUsersModal from './ImportUsersModal';
@@ -23,6 +23,11 @@ interface User {
   servicePermissions?: UserServicePermissions;
   /** Missing/undefined is treated as true (back-compat). `false` marks a "Programmatic User" with no login capability. */
   canLogin?: boolean;
+  /** Missing/undefined is treated as 'active' (legacy rows). */
+  status?: 'active' | 'disabled';
+  disabledAt?: string | null;
+  disabledBy?: string | null;
+  disabledReason?: string | null;
 }
 
 interface PermissionServiceOption {
@@ -46,6 +51,12 @@ export default function UserManagement() {
   const [userToEditPermissions, setUserToEditPermissions] = useState<User | null>(null);
   const [permissionDraft, setPermissionDraft] = useState<UserServicePermissions>({});
   const [savingPermissions, setSavingPermissions] = useState(false);
+  const [statusTarget, setStatusTarget] = useState<{ user: User; action: 'disable' | 'enable' } | null>(null);
+  const [statusReason, setStatusReason] = useState('');
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [sessionUserId, setSessionUserId] = useState<string | undefined>(undefined);
+  // Keeps the modal copy stable while Mantine fades it out after statusTarget clears.
+  const lastStatusTargetRef = useRef<{ user: User; action: 'disable' | 'enable' } | null>(null);
   const [query, setQuery] = useState('');
   const t = useTranslations('settings.userManagement');
   const tNotifications = useTranslations('notifications');
@@ -135,6 +146,52 @@ export default function UserManagement() {
         message: error instanceof Error ? error.message : t('errors.copyInvitationLink'),
         color: 'red',
       });
+    }
+  };
+
+  useEffect(() => {
+    // The server rejects self-targeting anyway; this only hides the dead-end action.
+    fetch('/api/auth/session', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { userId?: string } | null) => setSessionUserId(data?.userId))
+      .catch(() => setSessionUserId(undefined));
+  }, []);
+
+  const closeStatusModal = () => {
+    setStatusTarget(null);
+    setStatusReason('');
+  };
+
+  const confirmStatusChange = async () => {
+    if (!statusTarget) return;
+    const { user, action } = statusTarget;
+    setStatusSaving(true);
+    try {
+      const reason = statusReason.trim();
+      const response = await fetch(`/api/users/${encodeURIComponent(user._id)}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(action === 'disable' && reason ? { reason } : {}),
+      });
+      const data = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) {
+        throw new Error(data?.error || t(`errors.${action}`));
+      }
+      notifications.show({
+        title: tCommon('success'),
+        message: t(action === 'disable' ? 'messages.disableSuccess' : 'messages.enableSuccess'),
+        color: 'green',
+      });
+      closeStatusModal();
+      await fetchUsers();
+    } catch (error) {
+      notifications.show({
+        title: tNotifications('errorTitle'),
+        message: error instanceof Error ? error.message : t(`errors.${action}`),
+        color: 'red',
+      });
+    } finally {
+      setStatusSaving(false);
     }
   };
 
@@ -259,7 +316,13 @@ export default function UserManagement() {
       label: t('table.status'),
       width: 140,
       render: (user) =>
-        user.canLogin === false ? (
+        user.status === 'disabled' ? (
+          <Tooltip label={user.disabledReason || t('status.disabled')} disabled={!user.disabledReason}>
+            <Badge color="red" variant="light">
+              {t('status.disabled')}
+            </Badge>
+          </Tooltip>
+        ) : user.canLogin === false ? (
           <Badge color="gray" variant="light">
             {t('status.noLogin')}
           </Badge>
@@ -278,6 +341,9 @@ export default function UserManagement() {
         ),
     },
   ];
+
+  if (statusTarget) lastStatusTargetRef.current = statusTarget;
+  const statusView = statusTarget ?? lastStatusTargetRef.current;
 
   return (
     <>
@@ -354,6 +420,19 @@ export default function UserManagement() {
                   icon: <IconShieldCheck size={14} />,
                   onClick: () => handleEditPermissions(user),
                 },
+                ...(sessionUserId && user._id === sessionUserId ? [] : [user.status === 'disabled'
+                  ? {
+                      id: 'enable',
+                      label: t('actions.enable'),
+                      icon: <IconUserCheck size={14} />,
+                      onClick: () => setStatusTarget({ user, action: 'enable' }),
+                    }
+                  : {
+                      id: 'disable',
+                      label: t('actions.disable'),
+                      icon: <IconUserOff size={14} />,
+                      onClick: () => setStatusTarget({ user, action: 'disable' }),
+                    }]),
                 {
                   id: 'delete',
                   label: 'Delete',
@@ -458,6 +537,47 @@ export default function UserManagement() {
             </Button>
             <Button loading={savingPermissions} onClick={savePermissions}>
               Save permissions
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={statusTarget !== null}
+        onClose={() => {
+          if (!statusSaving) closeStatusModal();
+        }}
+        closeOnClickOutside={!statusSaving}
+        closeOnEscape={!statusSaving}
+        title={t(statusView?.action === 'enable' ? 'enableModal.title' : 'disableModal.title')}
+        size="md"
+      >
+        <Stack gap="sm">
+          <Text size="sm">
+            {t(statusView?.action === 'enable' ? 'enableModal.description' : 'disableModal.description', {
+              name: statusView?.user.name ?? '',
+              email: statusView?.user.email ?? '',
+            })}
+          </Text>
+          {statusView?.action === 'disable' ? (
+            <TextInput
+              label={t('disableModal.reasonLabel')}
+              placeholder={t('disableModal.reasonPlaceholder')}
+              maxLength={500}
+              value={statusReason}
+              onChange={(event) => setStatusReason(event.currentTarget.value)}
+            />
+          ) : null}
+          <Group justify="flex-end" gap="sm">
+            <Button variant="default" disabled={statusSaving} onClick={closeStatusModal}>
+              {t(statusView?.action === 'enable' ? 'enableModal.cancel' : 'disableModal.cancel')}
+            </Button>
+            <Button
+              color={statusView?.action === 'enable' ? 'teal' : 'red'}
+              loading={statusSaving}
+              onClick={() => void confirmStatusChange()}
+            >
+              {t(statusView?.action === 'enable' ? 'enableModal.confirm' : 'disableModal.confirm')}
             </Button>
           </Group>
         </Stack>

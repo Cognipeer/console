@@ -32,6 +32,7 @@ import { runWithRequestContext } from '@/lib/core/requestContext';
 import { assertPublicUrl, safeFetch } from '@/lib/security/outboundFetch';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
+import { getUserAuthState } from '@/lib/services/users/userAuthState';
 import { classifyAgentRunError } from './agentErrors';
 import { openAgentCallbackSecret } from './agentSandboxSecrets';
 import {
@@ -751,6 +752,11 @@ async function preconditionFailure(db: DatabaseProvider, run: IAgentRun): Promis
 
 const GENERIC_FAILURE_MESSAGE = 'The agent run failed. See the run trace for details.';
 
+/** Run owners that are not user rows (agentScheduler, public A2A). */
+function isSyntheticRunActor(userId: string): boolean {
+  return userId.startsWith('system:') || userId === 'a2a-public';
+}
+
 /** Client-facing text for a failed run: classified errors keep their message, anything else is generic. */
 function publicFailureMessage(error: unknown): string {
   const classified = classifyAgentRunError(error);
@@ -796,6 +802,33 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
     if (blocked) {
       await finalize('failed', { errorReason: 'precondition_failed', errorMessage: blocked }, { errorReason: 'precondition_failed', message: blocked });
       return;
+    }
+
+    // A run queued by a user who has since been disabled must not execute on
+    // that user's authority. Only 'disabled' blocks: 'missing' is expected for
+    // synthetic actors (schedule actor, public A2A user) that have no user row;
+    // those are skipped outright because a non-user id can make the lookup throw
+    // on some providers. For a real user id an unreadable state fails closed.
+    if (claimed.userId && !isSyntheticRunActor(claimed.userId)) {
+      let ownerState: Awaited<ReturnType<typeof getUserAuthState>> | null = null;
+      try {
+        ownerState = await getUserAuthState(tenantDbName, tenantId, claimed.userId);
+      } catch (error) {
+        logger.warn('Could not verify agent run owner state; failing the run', {
+          runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (ownerState === null) {
+        const message = 'Run owner could not be verified';
+        await finalize('failed', { errorReason: 'owner_unverifiable', errorMessage: message }, { errorReason: 'owner_unverifiable', message });
+        return;
+      }
+      if (ownerState === 'disabled') {
+        const message = 'Run owner is disabled';
+        await finalize('failed', { errorReason: 'owner_disabled', errorMessage: message }, { errorReason: 'owner_disabled', message });
+        return;
+      }
     }
 
     const maxDurationMs = claimed.maxDurationMs && claimed.maxDurationMs > 0

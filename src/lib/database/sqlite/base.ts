@@ -1007,6 +1007,13 @@ export class SQLiteProviderBase {
     // canLogin=false have no password login capability. Missing/undefined is
     // treated as true everywhere it's read, so existing rows default to 1.
     this.ensureTableColumn(db, TABLES.users, 'canLogin', 'canLogin INTEGER NOT NULL DEFAULT 1');
+    // User lifecycle (disable/enable). All nullable with no default: a NULL
+    // status is read back as `undefined`, which every caller treats as active,
+    // so existing rows need no backfill.
+    this.ensureTableColumn(db, TABLES.users, 'status', 'status TEXT');
+    this.ensureTableColumn(db, TABLES.users, 'disabledAt', 'disabledAt TEXT');
+    this.ensureTableColumn(db, TABLES.users, 'disabledBy', 'disabledBy TEXT');
+    this.ensureTableColumn(db, TABLES.users, 'disabledReason', 'disabledReason TEXT');
     // PII v2 (NLP/dictionary/NER layers): opt-in detection config living
     // alongside categories/customPatterns. Absent/null on old rows, which
     // `mapPiiPolicyRow` reads back as `undefined` — the detector's default

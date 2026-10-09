@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
   getTenantDatabase: vi.fn(),
+  runWithTenantScope: vi.fn(),
 }));
 
 vi.mock('@/lib/services/projects/projectService', () => ({
@@ -26,7 +27,7 @@ vi.mock('@/lib/services/projects/projectService', () => ({
   }),
 }));
 
-import { getDatabase, getTenantDatabase } from '@/lib/database';
+import { getDatabase, getTenantDatabase, runWithTenantScope } from '@/lib/database';
 import { createMockDb, TENANT_ACME, USER_ALICE, API_TOKEN_VALID } from '../helpers/db.mock';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -35,6 +36,9 @@ function setupMockDatabase(overrides = {}) {
   const db = createMockDb(overrides as never);
   (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   (getTenantDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
+  (runWithTenantScope as ReturnType<typeof vi.fn>).mockImplementation(
+    async (_dbName: string, fn: (d: unknown) => unknown) => fn(db),
+  );
   return db;
 }
 
@@ -67,10 +71,12 @@ describe('Tenant isolation — switchToTenant is always called', () => {
       // switchToTenant must be called with the correct tenant DB name
       expect(mockDb.switchToTenant).toHaveBeenCalledWith(TENANT_ACME.dbName);
 
-      // switchToTenant must happen before user lookup
-      const switchOrder = mockDb.switchToTenant.mock.invocationCallOrder[0];
+      // The owner lookup is pinned to the token's tenant via the scoped helper,
+      // not the process-global binding a concurrent request could overwrite.
+      expect(runWithTenantScope).toHaveBeenCalledWith(TENANT_ACME.dbName, expect.any(Function));
+      const scopeOrder = (runWithTenantScope as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
       const userLookupOrder = mockDb.findUserById.mock.invocationCallOrder[0];
-      expect(switchOrder).toBeLessThan(userLookupOrder);
+      expect(scopeOrder).toBeLessThan(userLookupOrder);
     });
   });
 

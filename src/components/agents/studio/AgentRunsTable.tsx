@@ -39,6 +39,8 @@ const ERROR_LABELS: Record<string, string> = {
     max_duration_exceeded: 'Max duration exceeded',
     canceled_by_caller: 'Canceled',
     precondition_failed: 'Agent or token no longer valid',
+    owner_disabled: 'Run owner disabled',
+    owner_unverifiable: 'Run owner could not be verified',
 };
 
 type Filter = 'all' | 'active' | 'failed';
