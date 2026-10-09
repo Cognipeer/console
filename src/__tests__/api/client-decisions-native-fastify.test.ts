@@ -58,6 +58,7 @@ import { settleUsageBudget, checkRateLimit } from '@/lib/quota/quotaGuard';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import {
   AlibabaModelStudioProviderContract,
+  TypeSafeModelProviderContract,
   OpenAiModelProviderContract,
 } from '@/lib/providers/contracts/modelContracts';
 import { clientDecisionsApiPlugin } from '@/server/api/plugins/client-decisions';
@@ -275,6 +276,49 @@ describe('POST /client/v1/decisions (native)', () => {
       const response = await post(BODY);
       expect(response.statusCode).toBe(400);
       expect(parseJsonBody<any>(response.body).error.message).toMatch(/Structured decision is not supported for provider alibaba-modelstudio/);
+    });
+  });
+
+  describe('TypeSafe (Jev) model', () => {
+    beforeEach(async () => {
+      const typesafe = await TypeSafeModelProviderContract.createRuntime({
+        credentials: { apiKey: 'ts-key' }, settings: {},
+      } as never);
+      fn(buildModelRuntime).mockResolvedValue({ runtime: typesafe, record: {} });
+      fn(getModelByKey).mockResolvedValue(model({
+        providerDriver: 'typesafe', modelId: 'jev-latest',
+        // Jev bills input tokens only: $0.042 per 1M.
+        pricing: { currency: 'USD', inputTokenPer1M: 0.042, outputTokenPer1M: 0 },
+      }));
+      fetchMock.mockResolvedValue(json({
+        model: 'jev-1.13.0',
+        answers: {
+          department: { type: 'choice', choice: 'billing', confidence: 0.9, probabilities: { billing: 0.9, technical: 0.1 } },
+          urgent: { type: 'noul', noul: 0.95 },
+        },
+        usage: { input_tokens: 296, output_tokens: 20 },
+      }));
+    });
+
+    it('serves Jev answers on the same console shape and calls api.typesafe.ai', async () => {
+      const response = await post(BODY);
+      expect(response.statusCode).toBe(200);
+      const body = parseJsonBody<any>(response.body);
+      expect(body.backend).toEqual({ kind: 'native', provider: 'typesafe' });
+      expect(body.usage).toEqual({ input_tokens: 296, output_tokens: 20 });
+      expect(body.answers.department).toMatchObject({ type: 'choice', choice: 'billing', confidence: 0.9, confidence_source: 'native' });
+      expect(body.answers.urgent).toEqual({ type: 'boolean', probability: 0.95 });
+      expect(fetchMock.mock.calls[0][0]).toBe('https://api.typesafe.ai/v1/systemone');
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer ts-key');
+    });
+
+    it('a structured-mode model on this driver is a clear 400', async () => {
+      fn(getModelByKey).mockResolvedValue(model({
+        providerDriver: 'typesafe', settings: { decision: { mode: 'structured' } },
+      }));
+      const response = await post(BODY);
+      expect(response.statusCode).toBe(400);
+      expect(parseJsonBody<any>(response.body).error.message).toMatch(/Structured decision is not supported for provider typesafe/);
     });
   });
 });
