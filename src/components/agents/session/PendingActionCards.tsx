@@ -14,6 +14,7 @@
 
 import { useState } from 'react';
 import {
+    Alert,
     Badge,
     Box,
     Button,
@@ -27,7 +28,7 @@ import {
     TextInput,
     Textarea,
 } from '@mantine/core';
-import { IconCheck, IconHandStop, IconHelp, IconX } from '@tabler/icons-react';
+import { IconCheck, IconHandStop, IconHelp, IconInfoCircle, IconX } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import {
     answerText,
@@ -42,6 +43,7 @@ import {
     pickOption,
     resolvedKind,
     typeAnswer,
+    type AnswerRestriction,
     type ApprovalResolveBody,
     type PendingActionView,
     type QuestionResolveBody,
@@ -366,13 +368,25 @@ export interface PendingActionListProps {
     /** The action being sent, if any. */
     resolvingId?: string | null;
     onResolve: (actionId: string, body: ResolveBody) => void;
+    /**
+     * Who the agent lets answer, when the viewer is not clearly one of them — a
+     * notice above the open requests. The cards stay usable: the server decides.
+     */
+    restriction?: AnswerRestriction | null;
 }
 
 /** The approvals and questions a paused turn is waiting on, open ones as cards and the rest as one-liners. */
-export default function PendingActionList({ actions, busy, resolvingId, onResolve }: PendingActionListProps) {
+export default function PendingActionList({ actions, busy, resolvingId, onResolve, restriction }: PendingActionListProps) {
+    const t = useTranslations('agents.hitl');
     if (actions.length === 0) return null;
+    const open = actions.some((action) => action.status === 'pending');
     return (
         <Stack gap="xs" mt="xs">
+            {open && restriction ? (
+                <Alert variant="light" color="gray" icon={<IconInfoCircle size={14} />} p="xs">
+                    <Text size="xs">{restriction === 'owner' ? t('answerRestrictedOwner') : t('answerRestrictedOwnerOrAdmin')}</Text>
+                </Alert>
+            ) : null}
             {actions.map((action) => {
                 if (action.status !== 'pending') return <SettledAction key={action.id} action={action} />;
                 return action.kind === 'user_question' ? (

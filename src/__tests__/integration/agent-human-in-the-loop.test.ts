@@ -21,6 +21,7 @@ const hoisted = vi.hoisted(() => ({
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
+  publishWebhook: vi.fn(),
   db: { current: null as unknown },
   sandboxTools: [] as unknown[],
   model: { current: null as unknown },
@@ -29,6 +30,8 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('@/lib/services/users/userAuthState', () => ({ getUserAuthState: hoisted.getUserAuthState }));
 vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: hoisted.publish })) }));
 vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.recordAuditLog }));
+// What the session log tells webhook subscribers (the subscriptions themselves are covered elsewhere).
+vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
 vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: hoisted.buildModelRuntime }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
@@ -235,6 +238,7 @@ beforeEach(async () => {
   hoisted.publish.mockResolvedValue(undefined);
   hoisted.getUserAuthState.mockResolvedValue('active');
   hoisted.recordAuditLog.mockResolvedValue(undefined);
+  hoisted.publishWebhook.mockResolvedValue(undefined);
   process.env.AGENT_BACKGROUND_MAX_DURATION_MS = '10000';
   process.env.AGENT_RUN_HEARTBEAT_INTERVAL_MS = '1000';
   reloadConfig();
@@ -1147,6 +1151,90 @@ describe('background runs', () => {
     expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.status).toBe('canceled');
     expect((await db.findAgentPendingActionById(String(action._id)))?.status).toBe('cancelled');
     expect((await storedConversation(id)).runtimeStatus).toBe('idle');
+  });
+
+  it('cancelling a paused run is written to the log and sent to the webhook subscribers, like a request cancelled by a new message', async () => {
+    const { requestAgentRunCancellation } = await import('@/lib/services/agents/agentRunService');
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const created = await createBackgroundAgentRun({
+      tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+      conversationId: id, userMessage: 'list files', userId: OWNER,
+    });
+    if (created.kind !== 'created') throw new Error(created.kind);
+    const runId = String(created.run._id);
+    await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+    const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
+    const before = (await events(id)).map((e) => e.type);
+    expect(before.at(-1)).toBe('session.status_idle'); // idle(requires_action): what a consumer last saw
+    hoisted.publishWebhook.mockClear();
+
+    await requestAgentRunCancellation(DB_NAME, tenantId, PROJECT_ID, runId);
+
+    const logged = await events(id);
+    const fresh = logged.slice(before.length);
+    expect(fresh.map((e) => e.type)).toEqual(['action.resolved', 'session.status_idle']);
+    expect(fresh[0].data).toMatchObject({ actionId: String(action._id), kind: 'tool_approval', cancelled: true, resolvedBy: 'system:run_cancelled' });
+    expect(fresh[1].data).toEqual({ stopReason: 'cancelled' });
+    expect(fresh.every((e) => e.runId === runId)).toBe(true);
+    // The seqs carry on from the log, and the session's stamp is the last one.
+    expect(fresh.map((e) => e.seq)).toEqual([before.length + 1, before.length + 2]);
+    expect(await storedConversation(id)).toMatchObject({
+      runtimeStatus: 'idle', stopReason: 'cancelled', pendingActionIds: [], lastEventSeq: logged.at(-1)!.seq,
+    });
+    expect(await db.findAgentPendingActionById(String(action._id))).toMatchObject({ status: 'cancelled', resolvedBy: 'system:run_cancelled' });
+    expect((await storedConversation(id)).messages[1].pendingActions?.[0].status).toBe('cancelled');
+    // ...and the subscribers: session.idled(cancelled), then the run's own agent_run.canceled.
+    const hooks = hoisted.publishWebhook.mock.calls.map((call) => call[0] as { type: string; data: Record<string, unknown> });
+    expect(hooks.map((h) => h.type)).toEqual(['session.idled', 'agent_run.canceled']);
+    expect(hooks[0].data).toMatchObject({ conversationId: id, stopReason: 'cancelled' });
+    // A late answer is refused for what it is.
+    const late = await resolve(id, String(action._id), { decision: 'allow' });
+    expect(late).toEqual({ kind: 'not_pending', status: 'cancelled' });
+  });
+
+  it('cancelling a stale paused run does not reset a session a newer message has already moved on', async () => {
+    const { requestAgentRunCancellation } = await import('@/lib/services/agents/agentRunService');
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const created = await createBackgroundAgentRun({
+      tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+      conversationId: id, userMessage: 'list files', userId: OWNER,
+    });
+    if (created.kind !== 'created') throw new Error(created.kind);
+    const runId = String(created.run._id);
+    await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+    // A newer turn is running on the conversation now.
+    await db.updateAgentConversationRuntime(id, { runtimeStatus: 'running' });
+    const eventsBefore = (await events(id)).length;
+
+    await requestAgentRunCancellation(DB_NAME, tenantId, PROJECT_ID, runId);
+
+    expect((await db.getAgentRunById(runId, tenantId, PROJECT_ID))?.status).toBe('canceled');
+    expect((await storedConversation(id)).runtimeStatus).toBe('running');
+    expect(await events(id)).toHaveLength(eventsBefore);
+  });
+});
+
+describe('who resolved it: the channel rides on the event', () => {
+  it('a portal resolution is told apart from a Studio one in the log and the audit entry', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const paused = await chat(id, 'go');
+    const portalUser: ResolveActor = { userId: OWNER, isAdmin: false, channel: 'portal' };
+
+    const outcome = await resolve(id, paused.required_action!.actions[0].id, { decision: 'allow' }, portalUser);
+
+    expect(outcome.kind).toBe('resumed');
+    const resolved = (await events(id)).find((e) => e.type === 'action.resolved');
+    expect(resolved?.data).toMatchObject({ resolvedBy: OWNER, channel: 'portal', decision: 'allow' });
+    await vi.waitFor(() => expect(hoisted.recordAuditLog).toHaveBeenCalledWith(
+      { tenantDbName: DB_NAME, tenantId },
+      expect.objectContaining({ metadata: expect.objectContaining({ channel: 'portal' }) }),
+    ));
   });
 });
 

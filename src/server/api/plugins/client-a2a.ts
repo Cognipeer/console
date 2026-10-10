@@ -15,13 +15,14 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
  *
  * State model: A2A `contextId` maps 1:1 onto the existing agent conversation
  * id (the same store the Responses API uses via `resp_<conversationId>`).
- * Tasks complete synchronously — `message/send` returns a terminal `completed`
- * task whose id encodes the conversation and assistant-message index, so
+ * A turn runs inside the `message/send` call, which returns a `completed` task
+ * (or an `input-required` one when the turn paused for an approval or an
+ * answer) whose id encodes the conversation and assistant-message index, so
  * `tasks/get` can rebuild it without a separate task collection.
  */
 
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
-import { toClientPendingAction } from '@/lib/services/agents/clientWire';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { toClientErrorBody, toClientPendingAction } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
@@ -373,19 +374,44 @@ export async function handleA2aRpc(
     }
 
     if (method === 'tasks/cancel') {
-      // Tasks complete synchronously — there is never anything to cancel.
+      // A turn runs inside the `message/send` call, so there is nothing to stop from here.
+      // A task that waits on a person (`input-required`) is ended by answering it instead:
+      // say so, and hand over the ids to answer.
+      const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
+      const parsed = requestedId ? parseTaskId(requestedId) : null;
+      const conversation = parsed ? await getConversationById(ctx.tenantDbName, parsed.conversationId) : null;
+      const message = parsed && conversationVisibleTo(conversation, agent, ctx)
+        ? conversation?.messages?.[parsed.messageIndex]
+        : undefined;
+      const waitingOn = message?.role === 'assistant'
+        ? (message.pendingActions ?? []).filter((action) => action.status === 'pending').map((action) => action.id)
+        : [];
+      if (waitingOn.length > 0) {
+        return reply.code(200).send(jsonRpcError(
+          rpcId,
+          ERR_UNSUPPORTED_OPERATION,
+          'This task is waiting for an approval or an answer and cannot be canceled over A2A. '
+            + 'Answer it through POST /agents/sessions/{contextId}/actions/{actionId}: deny the approval, '
+            + 'or answer the question with cancelled: true.',
+          { pending_action_ids: waitingOn },
+        ));
+      }
       return reply.code(200).send(
-        jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'Tasks complete synchronously and cannot be canceled'),
+        jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'Tasks cannot be canceled over A2A: a turn finishes inside the message/send call, and a finished task has nothing left to cancel'),
       );
     }
 
     return reply.code(200).send(jsonRpcError(rpcId, -32601, `Method not found: ${method}`));
   } catch (error) {
-    logger.error('A2A request error', { error });
-    const classified = classifyAgentRunError(error);
+    const classified = logAgentRouteError(logger, 'A2A request error', error);
+    // What the caller needs to act on it rides along, spelled as the rest of the client API does
+    // (`pending_action_ids` to answer, `spent_usd` / `max_cost_usd` of a spent budget).
+    const { message: _message, type: _type, code: _code, ...extra } = toClientErrorBody(classified.error);
+    void _message; void _type; void _code;
     return reply.code(200).send(jsonRpcError(rpcId, -32603, classified.error.message, {
       type: classified.error.type,
       ...(classified.error.code ? { code: classified.error.code } : {}),
+      ...extra,
     }));
   }
 }

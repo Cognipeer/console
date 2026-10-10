@@ -82,6 +82,8 @@ import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList'
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import { versionSelectData } from '../studio/StartSessionModal';
 import SessionSidePanel from './SessionSidePanel';
+import SessionStatusBadge from './SessionStatusBadge';
+import StopNotice from './StopNotice';
 import TurnTimeline, { DEFAULT_TIMELINE_ZOOM, TIMELINE_ZOOM_LEVELS } from './TurnTimeline';
 import LiveToolCalls, {
     appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
@@ -89,12 +91,16 @@ import LiveToolCalls, {
 import { consumeSse } from './consumeSse';
 import PendingActionList from './PendingActionCards';
 import {
+    answerRestriction,
     applyLocalResolution,
     cancelOpenActions,
     composerGate,
     openActionsOf,
+    type AnswerRestriction,
     type ResolveBody,
 } from './pendingActions';
+import { sessionStatusKind } from './sessionActivityUi';
+import { useViewer } from './useViewer';
 import { interpretSessionEvent } from './sessionFollow';
 import ContextCompactionCard from './ContextCompactionCard';
 import { BudgetBanner, BudgetMeter } from './SessionBudgetControls';
@@ -149,13 +155,6 @@ const FAILURE_HINTS: Record<string, string> = {
     agent_config_error: 'The agent’s configuration is broken — open Configure and fix the highlighted field.',
     rate_limit_error: 'The provider is rate limiting. Wait a moment and retry.',
     guardrail_block: 'A guardrail blocked this message.',
-    budget_reached: 'This session’s spend budget is used up. Raise or remove it above the message box.',
-};
-
-const STOP_LABELS: Record<NonNullable<ChatMessage['stopReason']>, string> = {
-    limit: 'Stopped by a run limit',
-    cancelled: 'Run cancelled',
-    paused: 'Run paused',
 };
 
 /**
@@ -241,6 +240,15 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [followDismissed, setFollowDismissed] = useState(false);
     const liveActive = sending || following;
     const openActions = useMemo(() => openActionsOf(messages), [messages]);
+    const status = sessionStatusKind({ live: liveActive, openActions: openActions.length, runtimeStatus: session?.runtimeStatus });
+    // Said above the open requests when the agent limits who may answer and the viewer is not clearly one of them.
+    const viewer = useViewer();
+    const restriction = answerRestriction({
+        approvers: agent?.config?.humanInTheLoop?.approvers,
+        viewerId: viewer.userId,
+        viewerRole: viewer.role,
+        ownerId: session?.createdBy,
+    });
     // The session's spend budget (absent for a session without one), and a change to it in flight.
     const budgetView = useMemo(() => sessionBudgetView(session, messages), [session, messages]);
     const [budgetBusy, setBudgetBusy] = useState(false);
@@ -248,6 +256,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [attached, setAttached] = useState<PendingAttachment[]>([]);
     const [uploadingNames, setUploadingNames] = useState<string[]>([]);
     const budgetBlocked = Boolean(budgetView?.exhausted);
+    // The banner under the transcript that raises the budget or removes it.
+    const budgetBannerShown = Boolean(budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly);
     // What the composer does while the agent waits for an approval or an answer.
     const gate = composerGate(openActions.length, agent?.config?.humanInTheLoop?.onUserMessageWhilePending);
 
@@ -824,23 +834,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             title={
                 <>
                     <span className="detail-title">{session?.title || 'Session'}</span>
-                    {liveActive ? (
-                        <Badge size="sm" variant="light" color="blue">{t('running')}</Badge>
-                    ) : openActions.length > 0 ? (
-                        <Tooltip label={t('waitingTooltip')} withArrow>
-                            <Badge size="sm" variant="light" color="orange" leftSection={<IconHandStop size={11} />}>
-                                {t('waitingBadge')}
-                            </Badge>
-                        </Tooltip>
-                    ) : session?.runtimeStatus === 'budget_paused' ? (
-                        <Tooltip label={tb('pausedTooltip')} withArrow>
-                            <Badge size="sm" variant="light" color="orange" leftSection={<IconCoin size={11} />}>
-                                {tb('pausedBadge')}
-                            </Badge>
-                        </Tooltip>
-                    ) : (
-                        <Badge size="sm" variant="light" color="gray">{t('idle')}</Badge>
-                    )}
+                    <SessionStatusBadge status={status} />
                     <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
                         {agent.name}
                     </Badge>
@@ -1032,6 +1026,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 busy={liveActive || Boolean(resolvingId)}
                                                                 resolvingId={resolvingId}
                                                                 onResolve={(actionId, body) => void resolveAction(actionId, body)}
+                                                                restriction={restriction}
+                                                                budgetBannerShown={budgetBannerShown}
                                                             />
                                                         ) : (
                                                             <>
@@ -1104,7 +1100,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             </ScrollArea>
                         )}
 
-                        {budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly ? (
+                        {budgetView && budgetBannerShown ? (
                             <Box px="sm" pt="sm">
                                 <BudgetBanner
                                     view={budgetView}
@@ -1197,7 +1193,11 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 {/* ── Inspector ──────────────────────────────────────── */}
                 <Paper withBorder radius="md" className={classes.inspectorPanel}>
                     <SessionSidePanel
+                        agentId={agentId}
                         sessionId={sessionId}
+                        status={status}
+                        stopReason={session?.stopReason}
+                        activityKey={`${session?.lastEventSeq ?? 0}:${session?.runtimeStatus ?? ''}:${messages.length}`}
                         createdAt={session?.createdAt}
                         updatedAt={session?.updatedAt}
                         agentName={agent.name}
@@ -1207,7 +1207,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         sessionContext={sessionContext}
                         agentConfig={agent.config}
                         messages={messages}
-                        running={liveActive}
                         onGoToTurn={goToTurn}
                     />
                 </Paper>
@@ -1263,37 +1262,11 @@ function TurnPills({ message }: { message: ChatMessage }) {
     );
 }
 
-/**
- * A run that ended without a final answer. Says why, and what the text below
- * it is — the agent's progress up to the stop, not its answer.
- */
-function StopNotice({ message }: { message: ChatMessage }) {
-    if (!message.stopReason) return null;
-    const hasText = Boolean(message.content?.trim());
-    return (
-        <Alert
-            variant="light"
-            color={message.stopReason === 'limit' ? 'orange' : 'gray'}
-            icon={<IconHandStop size={14} />}
-            mb="xs"
-            p="xs"
-        >
-            <Text size="xs" fw={600}>
-                {STOP_LABELS[message.stopReason]}
-                {message.stopDetail ? ` — ${message.stopDetail}` : ''}
-            </Text>
-            <Text size="xs" c="dimmed">
-                {hasText
-                    ? 'The text below is how far the agent got before it stopped, not a final answer.'
-                    : 'The agent stopped before writing an answer.'}
-                {message.stopReason === 'limit' ? ' Raise the limit in Configure → Advanced if this run needs more.' : ''}
-            </Text>
-        </Alert>
-    );
-}
-
 function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () => void }) {
-    const hint = message.errorType ? FAILURE_HINTS[message.errorType] : undefined;
+    const tb = useTranslations('agents.budget');
+    const hint = message.errorType === 'budget_reached'
+        ? tb('failedHint')
+        : message.errorType ? FAILURE_HINTS[message.errorType] : undefined;
     return (
         <Stack gap={6}>
             <Group gap={6}>
@@ -1322,11 +1295,15 @@ function AssistantTurn({
     busy,
     resolvingId,
     onResolve,
+    restriction,
+    budgetBannerShown,
 }: {
     message: ChatMessage;
     busy: boolean;
     resolvingId: string | null;
     onResolve: (actionId: string, body: ResolveBody) => void;
+    restriction: AnswerRestriction | null;
+    budgetBannerShown: boolean;
 }) {
     return (
         <Box className={classes.chatMarkdown}>
@@ -1345,7 +1322,7 @@ function AssistantTurn({
             ))}
             {/* A pause with cards says what it waits for on the cards themselves. */}
             {message.stopReason && !(message.stopReason === 'paused' && message.pendingActions?.length)
-                ? <StopNotice message={message} />
+                ? <StopNotice message={message} budgetBannerShown={budgetBannerShown} />
                 : null}
             <Markdown text={message.content} />
             {message.pendingActions?.length ? (
@@ -1354,6 +1331,7 @@ function AssistantTurn({
                     busy={busy}
                     resolvingId={resolvingId}
                     onResolve={onResolve}
+                    restriction={restriction}
                 />
             ) : null}
             {message.output !== undefined ? <StructuredOutputBlock output={message.output} /> : null}

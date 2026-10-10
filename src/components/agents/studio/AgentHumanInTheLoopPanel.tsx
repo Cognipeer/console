@@ -130,7 +130,7 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig }
                                             <Table.Tr>
                                                 <Table.Th>{t('toolColumn')}</Table.Th>
                                                 <Table.Th w={150}>{t('sourceColumn')}</Table.Th>
-                                                <Table.Th w={260}>{t('policyColumn')}</Table.Th>
+                                                <Table.Th w={380}>{t('policyColumn')}</Table.Th>
                                             </Table.Tr>
                                         </Table.Thead>
                                         <Table.Tbody>
@@ -158,7 +158,7 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig }
                                                         </Text>
                                                     </Table.Td>
                                                     <Table.Td>
-                                                        <Group gap="xs" wrap="nowrap">
+                                                        <Group gap="xs" wrap="wrap">
                                                             <SegmentedControl
                                                                 size="xs"
                                                                 value={row.choice}

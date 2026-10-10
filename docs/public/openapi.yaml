@@ -122,7 +122,7 @@ paths:
         Supported methods:
         - `message/send` — send a user message. `params.message.parts` must contain text. Omit `params.message.contextId` to start a new conversation, or supply a prior `contextId` (equal to the conversation id) to continue one. Returns a terminal `completed` task whose `id` encodes the conversation and assistant-message index and whose artifacts carry the assistant reply text. Optional caller-supplied runtime headers may be provided via `params.message.metadata.runtime_context`.
         - `tasks/get` — retrieve a previously completed task by its `params.id`; rebuilds the task from the stored conversation.
-        - `tasks/cancel` — always rejected (`-32004`): tasks complete synchronously and cannot be canceled.
+        - `tasks/cancel` — not supported, always rejected (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that is waiting for an approval or an answer (`input-required`) is ended by answering its requests through `POST /agents/sessions/{conversationId}/actions/{actionId}` (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids in `error.data.pending_action_ids`.
 
         A turn that pauses for a tool approval or a question is reported as an `input-required` task; the requests to answer ride in `metadata.pendingActions` (same item shape as `required_action.actions` of the Responses API) and are answered through `POST /agents/sessions/{conversationId}/actions/{actionId}`, the `contextId` being the conversation id.
 
@@ -360,6 +360,18 @@ paths:
                   type: agent_run_conflict
                   message: An active run (queued or running) already exists for this conversation.
                   code: agent_run_conflict
+        "413":
+          description: "A file of the request is larger than the agent's file size limit (`file_too_large`), including an `https` `image_url` that is."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: "A file of the request is of a type the agent does not take (`unsupported_file_type`), or an `https` `image_url` did not answer with an `image/*` `Content-Type`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
           description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`). Also: the tenant's daily or monthly spend limit is used up (`spend_limit_exceeded`): agent spend counts toward tenant spend limits."
           content:
@@ -551,7 +563,7 @@ paths:
       tags:
         - Agent Sessions
       summary: Follow a session's events (SSE)
-      description: "Server-Sent Events. Replays the stored events after `after` (or the `Last-Event-ID` header a browser `EventSource` sends when it reconnects), then follows the session live, so a client that was not holding the original request can watch a turn in progress. Each stored event is one frame: `id: <seq>`, `event: <type>`, and a JSON `data:` line shaped like an item of the event list (`seq`, `type`, `data`, `run_id`, `created_at`). Live-only `agent.message.delta` frames (`data.text`, the model's text as it is written) have no `id` and are never stored or replayed. `: ping` comments are sent every 15 seconds; the stream ends after one hour or when the client closes it - reconnect with the last `id` to carry on."
+      description: "Server-Sent Events. Replays the stored events after `after` (or the `Last-Event-ID` header a browser `EventSource` sends when it reconnects), then follows the session live, so a client that was not holding the original request can watch a turn in progress. Each stored event is one frame: `id: <seq>`, `event: <type>`, and a JSON `data:` line shaped like an item of the event list (`seq`, `type`, `data`, `run_id`, `created_at`). Live-only `agent.message.delta` frames (`data.text`, the model's text as it is written) have no `id` and are never stored or replayed; they are emitted only for a turn whose starter streams the model (for example the dashboard's chat stream), so a turn started with `POST /agents/responses` shows the finished `agent.message` without deltas. `: ping` comments are sent every 15 seconds; the stream ends after one hour or when the client closes it - reconnect with the last `id` to carry on."
       operationId: streamAgentSessionEvents
       parameters:
         - $ref: "#/components/parameters/AgentSessionId"
@@ -581,7 +593,7 @@ paths:
             text/event-stream:
               schema:
                 type: string
-              example: "id: 12\nevent: action.required\ndata: {\"seq\":12,\"type\":\"action.required\",\"data\":{\"action_id\":\"act_0123\",\"kind\":\"tool_approval\",\"tool_name\":\"sandbox_exec\"},\"run_id\":\"run_abc\",\"created_at\":\"2026-10-01T12:00:00.000Z\"}\n\n"
+              example: "id: 12\nevent: action.required\ndata: {\"seq\":12,\"type\":\"action.required\",\"data\":{\"action_id\":\"act_0123\",\"kind\":\"tool_approval\",\"tool_name\":\"sandbox_exec\"},\"run_id\":\"run_3f9c1b7e\",\"created_at\":\"2026-10-01T12:00:00.000Z\"}\n\n"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -8030,6 +8042,18 @@ paths:
                   type: agent_run_conflict
                   message: An active run (queued or running) already exists for this conversation.
                   code: agent_run_conflict
+        "413":
+          description: "A file of the request is larger than the agent's file size limit (`file_too_large`), including an `https` `image_url` that is."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: "A file of the request is of a type the agent does not take (`unsupported_file_type`), or an `https` `image_url` did not answer with an `image/*` `Content-Type`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
           description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`). Also: the tenant's daily or monthly spend limit is used up (`spend_limit_exceeded`): agent spend counts toward tenant spend limits."
           content:
@@ -12070,6 +12094,7 @@ paths:
       tags:
         - Webhooks
       summary: Get a webhook endpoint
+      description: "Needs a token whose owner can manage webhooks, like every webhook route (`403` otherwise, whether or not the endpoint exists). A manager asking for an endpoint outside the token's reach (another project's, or a tenant-wide one) gets `404`."
       operationId: getWebhook
       parameters:
         - $ref: "#/components/parameters/WebhookId"
@@ -12830,6 +12855,23 @@ components:
           description: JSON-RPC / A2A error code (e.g. -32601 method not found, -32602 invalid params, -32001 task not found, -32004 unsupported operation, -32603 internal error, -32700 parse error).
         message:
           type: string
+        data:
+          type: object
+          additionalProperties: true
+          description: "Machine-readable detail. `type` and `code` classify an internal error (for example `pending_action`, `budget_reached`, `agent_run_conflict`). `pending_action_ids` lists the approvals / questions to answer when `message/send` is refused because the task is waiting on them (and on `tasks/cancel` for such a task); `spent_usd` and `max_cost_usd` accompany `budget_reached`."
+          properties:
+            type:
+              type: string
+            code:
+              type: string
+            pending_action_ids:
+              type: array
+              items:
+                type: string
+            spent_usd:
+              type: number
+            max_cost_usd:
+              type: number
     AgentA2aRpcParams:
       type: object
       description: Method-dependent JSON-RPC params. `message` is used by `message/send`; `id` is used by `tasks/get` and `tasks/cancel`.
@@ -12884,7 +12926,7 @@ components:
           $ref: "#/components/schemas/AgentA2aRpcError"
     AgentA2aTask:
       type: object
-      description: A completed A2A task returned by `message/send` and `tasks/get`.
+      description: "An A2A task returned by `message/send` and `tasks/get`: `completed`, or `input-required` when the turn paused for an approval or a question (the requests to answer are in `metadata.pendingActions`, same item shape as `required_action.actions` of the Responses API)."
       properties:
         kind:
           type: string
@@ -12904,12 +12946,13 @@ components:
             $ref: "#/components/schemas/AgentA2aArtifact"
     AgentA2aTaskStatus:
       type: object
-      description: Terminal task status.
+      description: Task status. `completed` is terminal; `input-required` means the task waits for a person (answer its requests through the session actions endpoint, then the turn continues).
       properties:
         state:
           type: string
           enum:
             - completed
+            - input-required
         timestamp:
           type: string
           format: date-time
@@ -13162,7 +13205,7 @@ components:
             - user_question
         tool_name:
           type: string
-          description: "`tool_approval`: the tool the model wants to call, as it is named to the model."
+          description: "`tool_approval` only: the tool the model wants to call, as it is named to the model. A `user_question` never carries it."
         args:
           type: object
           additionalProperties: true
@@ -13274,7 +13317,7 @@ components:
         - max_cost_usd
     AgentSessionEvent:
       type: object
-      description: "One event of the session's log. `data` depends on `type` (field names snake_case):\n\n- `user.message` `{ content }`\n- `session.status_running` `{ trigger: message | resume | timeout }`\n- `agent.tool_use` `{ tool_call_id, name, args, subagent? }`\n- `agent.tool_result` `{ tool_call_id, name, ok, duration_ms?, error?, subagent? }`\n- `agent.compaction` `{ at, messages_compressed?, tokens_before?, tokens_after?, ... }`\n- `action.required` `{ action_id, kind, tool_name?, args?, questions?, allow_free_text?, expires_at? }`\n- `action.resolved` `{ action_id, kind, decision?, cancelled?, expired?, resolved_by, channel: dashboard | api | timeout }`\n- `agent.message` `{ content, message_index?, stop_reason?, usage? }`\n- `session.usage` `{ turn_cost_usd, spent_usd, budget: { max_cost_usd, on_reach } }` after every turn of a session with a budget\n- `budget.reached` `{ spent_usd, max_cost_usd }`\n- `session.status_idle` `{ stop_reason, pending_action_ids?, detail? }`\n- `session.error` `{ message, code? }`\n- `session.work_done` `{}` right after an idle with `stop_reason: end_turn`\n\nOn the stream only: `agent.message.delta` `{ text }` (no `seq`, never stored)."
+      description: "One event of the session's log. `data` depends on `type` (field names snake_case):\n\n- `user.message` `{ content }`\n- `session.status_running` `{ trigger: message | resume | timeout }`\n- `agent.tool_use` `{ tool_call_id, name, args, subagent? }`\n- `agent.tool_result` `{ tool_call_id, name, ok, duration_ms?, error?, subagent? }`\n- `agent.compaction` `{ at, messages_compressed?, tokens_before?, tokens_after?, ... }`\n- `action.required` `{ action_id, kind, tool_name? (tool_approval only), args?, questions?, allow_free_text?, expires_at? }`\n- `action.resolved` `{ action_id, kind, decision?, cancelled?, expired?, resolved_by, channel: dashboard | api | portal | timeout | system }`\n- `agent.message` `{ content, message_index?, stop_reason?, usage? }`\n- `session.usage` `{ turn_cost_usd, spent_usd, budget: { max_cost_usd, on_reach } }` after every turn of a session with a budget\n- `budget.reached` `{ spent_usd, max_cost_usd }`\n- `session.status_idle` `{ stop_reason, pending_action_ids?, detail? }`\n- `session.error` `{ message, code? }`\n- `session.work_done` `{}` right after an idle with `stop_reason: end_turn`\n\nOn the stream only: `agent.message.delta` `{ text }` (no `seq`, never stored)."
       properties:
         seq:
           type: integer
@@ -13288,7 +13331,8 @@ components:
           description: Larger than 16 KB it is cut and carries `_truncated`.
         run_id:
           type: string
-          description: The background run the event belongs to, when there is one.
+          description: "The run the event belongs to, spelled as the runs API spells it (`run_<id>`, as returned by a background call and accepted by `GET /agents/runs/{runId}`). Absent on events written outside a run."
+          example: run_3f9c1b7e-2d4a-4b8e-9a51-0c6d7e8f9a10
         created_at:
           type: string
           format: date-time
@@ -13433,7 +13477,7 @@ components:
           type: string
           description: "`input_file`: the name for `file_data`."
         image_url:
-          description: "`input_image`: a `data:` URL (uploaded to the session) or an `https` URL (fetched, private addresses refused, within the agent's size limit and uploaded). The OpenAI `{ \"url\": ... }` object form is accepted too."
+          description: "`input_image`: a `data:` URL (uploaded to the session) or an `https` URL (fetched, private addresses refused, within the agent's size limit and uploaded). A fetched URL must answer with an `image/*` `Content-Type`; anything else is refused with `415` (`unsupported_file_type`). The OpenAI `{ \"url\": ... }` object form is accepted too."
           oneOf:
             - type: string
             - type: object
@@ -13689,7 +13733,7 @@ components:
           nullable: true
           allOf:
             - $ref: "#/components/schemas/AgentSessionBudget"
-          description: "A spend budget for the session this request STARTS (`null` = none, overriding the agent's default). Ignored when the request continues a session with `previous_response_id`: change that one with `PATCH /agents/sessions/{conversationId}`. When the agent has a session budget of its own, a client may lower it but not raise or remove it (`403`, `budget_override_forbidden`)."
+          description: "A spend budget for the session this request STARTS (`null` = none, overriding the agent's default). Ignored when the request continues a session with `previous_response_id` (not applied and not validated, so a client may send its default budget on every call): change that one with `PATCH /agents/sessions/{conversationId}`. When the agent has a session budget of its own, a client may lower it but not raise or remove it (`403`, `budget_override_forbidden`)."
         background:
           type: boolean
           description: "Run the turn in background mode (mirrors the OpenAI Responses API field). Only a JSON boolean is honoured. The `X-Cognipeer-Background` header takes precedence over this field, and this field takes precedence over the agent's `execution.defaultMode`, so `false` forces a synchronous call on an agent that runs in the background by default. Background mode returns `202` with an `AgentRun`; it is rejected with `400` (`agent_background_disabled`) when the agent has background execution disabled."
@@ -23211,12 +23255,14 @@ components:
           type: string
           format: date-time
           nullable: true
+          description: "When the next attempt becomes due. A lower bound: due deliveries are sent by a sweep that runs about every 30 seconds, so the attempt lands at or a little after this time."
         lastStatusCode:
           type: integer
           nullable: true
         lastError:
           type: string
           nullable: true
+          description: "Why the last attempt failed, for example `Endpoint answered HTTP 500`, `Timed out after 10000 ms` (the receiver did not answer within `WEBHOOK_TIMEOUT_MS`) or a connection error."
         lastDurationMs:
           type: integer
           nullable: true

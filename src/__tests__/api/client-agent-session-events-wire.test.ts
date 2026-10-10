@@ -89,26 +89,26 @@ describe('client session events: snake_case on the wire', () => {
     await app.close();
   });
 
-  it('the event list carries the data of an event snake_cased, tool arguments untouched', async () => {
+  it('the event list carries the data of an event snake_cased, tool arguments untouched, and the run id as the API spells it (run_<id>)', async () => {
     hoisted.db.listAgentSessionEvents.mockResolvedValue([{
-      seq: 1, type: 'agent.tool_use', runId: 'run_1',
+      seq: 1, type: 'agent.tool_use', runId: 'd90f17a3-0001',
       data: { toolCallId: 'c1', name: 'sandbox_exec', args: { workDir: '/w' } },
       createdAt: new Date('2024-01-01T00:00:00Z'), expiresAt: new Date('2024-02-01T00:00:00Z'),
     }]);
     const res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/sessions/conv-1/events', headers });
     expect(parseJsonBody<{ events: unknown[] }>(res.body).events).toEqual([{
-      seq: 1, type: 'agent.tool_use', run_id: 'run_1',
+      seq: 1, type: 'agent.tool_use', run_id: 'run_d90f17a3-0001',
       data: { tool_call_id: 'c1', name: 'sandbox_exec', args: { workDir: '/w' } },
       created_at: '2024-01-01T00:00:00.000Z',
     }]);
   });
 
-  it('the stream frames use the same field names as the list (run_id, created_at, snake_case data)', async () => {
+  it('the stream frames use the same field names as the list (run_id as run_<id>, created_at, snake_case data)', async () => {
     hoisted.follow.mockImplementation(async (options: { write: (frame: { id?: number; event: string; data: unknown }) => void }) => {
       options.write({
         id: 3,
         event: 'agent.tool_result',
-        data: { seq: 3, type: 'agent.tool_result', data: { toolCallId: 'c1', durationMs: 5 }, runId: 'run_1', createdAt: '2024-01-01T00:00:00.000Z' },
+        data: { seq: 3, type: 'agent.tool_result', data: { toolCallId: 'c1', durationMs: 5 }, runId: 'd90f17a3-0001', createdAt: '2024-01-01T00:00:00.000Z' },
       });
       options.write({
         event: 'agent.message.delta',
@@ -121,7 +121,7 @@ describe('client session events: snake_case on the wire', () => {
     expect(frames).toHaveLength(2);
     expect(frames[0]).toContain('id: 3\nevent: agent.tool_result\n');
     expect(JSON.parse(frames[0].split('data: ')[1])).toEqual({
-      seq: 3, type: 'agent.tool_result', data: { tool_call_id: 'c1', duration_ms: 5 }, run_id: 'run_1', created_at: '2024-01-01T00:00:00.000Z',
+      seq: 3, type: 'agent.tool_result', data: { tool_call_id: 'c1', duration_ms: 5 }, run_id: 'run_d90f17a3-0001', created_at: '2024-01-01T00:00:00.000Z',
     });
     expect(frames[1]).not.toContain('id:');
     expect(JSON.parse(frames[1].split('data: ')[1])).toEqual({

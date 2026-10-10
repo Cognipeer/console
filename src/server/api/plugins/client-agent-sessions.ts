@@ -24,7 +24,7 @@ import {
   resolveAgentPendingAction,
   type ResolveOutcome,
 } from '@/lib/services/agents/agentActionResolution';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { normalizeClientResolveBody, toClientErrorBody, toClientPendingAction } from '@/lib/services/agents/clientWire';
 import { activeSessionBudget, clientBudgetViolation, parseSessionBudget, sessionSpentUsd } from '@/lib/services/agents/sessionBudget';
 import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
@@ -44,6 +44,8 @@ const logger = createLogger('api:client-agent-sessions');
 
 const INTERNAL_ERROR_BODY = apiErrorBody('api_error', 'Internal error', 'internal_error');
 const NOT_FOUND_BODY = apiErrorBody('not_found_error', 'Session not found', 'session_not_found');
+// The same 409 (type and code) as `agentRunConflictErrorBody()` on the Responses route.
+const RUN_CONFLICT_BODY = apiErrorBody('agent_run_conflict', 'An active run (queued or running) already exists for this conversation.');
 
 /** The conversation `:conversationId` names, in the token's project; null (404 sent) otherwise. */
 async function requireSession(
@@ -183,11 +185,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           actorType: 'api_token',
         });
         if (queued.kind === 'conflict') {
-          return reply.code(409).send(apiErrorBody(
-            'invalid_request_error',
-            'An active run (queued or running) already exists for this conversation.',
-            'agent_run_conflict',
-          ));
+          return reply.code(409).send(RUN_CONFLICT_BODY);
         }
         return reply.code(202).send(serializeAgentRun(queued.run));
       }
@@ -195,8 +193,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       const runtime = await describeSessionRuntime(ctx.tenantDbName, outcome.conversation);
       return reply.code(200).send(serializeSession(outcome.conversation, runtime));
     } catch (error) {
-      logger.error('Client agent session update error', { error });
-      const classified = classifyAgentRunError(error);
+      const classified = logAgentRouteError(logger, 'Client agent session update error', error);
       return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
   }));
@@ -319,8 +316,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(500).send(INTERNAL_ERROR_BODY);
     } catch (error) {
       if (error instanceof AgentGuardrailBlockedError) return sendAgentGuardrailBlock(reply, error);
-      logger.error('Client agent action resolve error', { error });
-      const classified = classifyAgentRunError(error);
+      const classified = logAgentRouteError(logger, 'Client agent action resolve error', error);
       const resumeStatus = (error as { status?: unknown })?.status;
       return reply.code(
         typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
@@ -346,7 +342,7 @@ function clientRefusal(outcome: ResolveOutcome): { status: number; body: unknown
     case 'invalid':
       return { status: 400, body: apiErrorBody('invalid_request_error', outcome.message, 'invalid_resolution') };
     case 'busy':
-      return { status: 409, body: apiErrorBody('invalid_request_error', 'An active run (queued or running) already exists for this conversation.', 'agent_run_conflict') };
+      return { status: 409, body: RUN_CONFLICT_BODY };
     default:
       return null;
   }

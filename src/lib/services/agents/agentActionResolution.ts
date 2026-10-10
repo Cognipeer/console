@@ -66,7 +66,8 @@ export interface ResolveActor {
     userId: string;
     /** Owner / admin of the tenant, or admin of the project. */
     isAdmin: boolean;
-    channel: 'dashboard' | 'api';
+    /** Where the answer came from; it rides on the `action.resolved` event and the audit entry. */
+    channel: 'dashboard' | 'api' | 'portal';
     email?: string;
     role?: string;
     apiTokenId?: string;

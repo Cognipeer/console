@@ -10,6 +10,7 @@ import {
   activeSessionBudget,
   agentSessionBudget,
   clientBudgetViolation,
+  endsInAnswer,
   isSessionBudgetBreach,
   parseSessionBudget,
   planSessionBudget,
@@ -113,6 +114,40 @@ describe('after a turn', () => {
     expect(settleSessionBudget(plan, undefined, false)).toMatchObject({ spentUsd: 0.5, turnCostUsd: 0 });
   });
 
+  it('a turn that finishes on its own but leaves the total at or past the budget has reached it, exactly like a capped one', () => {
+    // 0.5 spent before, a $0.6 request: the SDK never stopped it (it was the last request), the total is 1.1.
+    expect(settleSessionBudget(plan, 0.6, false, 'completed')).toMatchObject({ spentUsd: 1.1, reached: true });
+    // Landing exactly on the budget uses it up too (the next turn is refused at remaining <= 0).
+    expect(settleSessionBudget(plan, 0.5, false, 'completed')).toMatchObject({ spentUsd: 1, reached: true });
+    // The SDK's own cap stop is still the same stop.
+    expect(settleSessionBudget(plan, 0.6, true, 'limit')).toMatchObject({ reached: true });
+    // Below the budget nothing happens, whatever the stop.
+    expect(settleSessionBudget(plan, 0.49, false, 'completed').reached).toBe(false);
+    // Another limit that left the budget used up is the budget's stop as well.
+    expect(settleSessionBudget(plan, 0.6, false, 'limit').reached).toBe(true);
+  });
+
+  it('a pause for a person and a cancellation keep their own stop even when the total is past the budget', () => {
+    expect(settleSessionBudget(plan, 0.6, false, 'paused')).toMatchObject({ spentUsd: 1.1, reached: false });
+    expect(settleSessionBudget(plan, 0.6, false, 'cancelled')).toMatchObject({ spentUsd: 1.1, reached: false });
+  });
+
+  it('a crossing turn that pauses its session is budget_paused; one that stops it is idle', () => {
+    const crossed = settleSessionBudget(plan, 0.6, false, 'completed');
+    expect(conversationRuntimePatch('budget_reached', [], crossed))
+      .toEqual({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached', pendingActionIds: [] });
+    const stopPlan = planSessionBudget(session({ budget: { maxCostUsd: 1, onReach: 'stop' }, spentUsd: 0.5 }))!;
+    expect(conversationRuntimePatch('budget_reached', [], settleSessionBudget(stopPlan, 0.6, false, 'completed')).runtimeStatus).toBe('idle');
+  });
+
+  it('a transcript that ends in the agent\'s answer has nothing to continue; one that ends in tool results does', () => {
+    expect(endsInAnswer({ messages: [{ role: 'user' }, { role: 'assistant', content: 'done' }] })).toBe(true);
+    expect(endsInAnswer({ messages: [{ role: 'user' }, { role: 'assistant', tool_calls: [{ id: 'c1' }] }] })).toBe(false);
+    expect(endsInAnswer({ messages: [{ role: 'assistant', tool_calls: [{ id: 'c1' }] }, { role: 'tool' }] })).toBe(false);
+    expect(endsInAnswer({ messages: [] })).toBe(false);
+    expect(endsInAnswer(null)).toBe(false);
+  });
+
   it('a pausing budget leaves the session budget_paused, a stopping one idle; the conversation\'s runtime fields follow the stop reason', () => {
     expect(conversationRuntimePatch('budget_reached', [], settleSessionBudget(plan, 0.6, true)))
       .toEqual({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached', pendingActionIds: [] });
@@ -198,38 +233,56 @@ describe('what an API client may do to an agent-set budget', () => {
   });
 });
 
-describe('a turn that was never persisted still counts against the session', () => {
-  const plan = { budget: { maxCostUsd: 5, onReach: 'pause' as const }, spentBefore: 1, remaining: 4, turnCapUsd: 4, sessionBinds: true };
-  const dbWith = (conversation: unknown) => {
-    const update = vi.fn(async () => undefined);
-    const db = { findAgentConversationById: vi.fn(async () => conversation), updateAgentConversationRuntime: update };
-    return { db: db as never, update };
+describe('a turn\'s spend is added to the session total, once, however the turn ends', () => {
+  const planOf = (spentBefore = 1) => planSessionBudget(session({ budget: { maxCostUsd: 5, onReach: 'pause' }, spentUsd: spentBefore }))!;
+  const dbWith = () => {
+    const add = vi.fn(async () => undefined);
+    return { db: { addAgentConversationSpend: add } as never, add };
   };
 
-  it('raises the running total to spentBefore + what the model requests cost', async () => {
+  it('adds what the model requests cost, atomically, on top of whatever the total is by then', async () => {
     const { recordSessionTurnSpend } = await import('@/lib/services/agents/sessionBudgetService');
-    const { db, update } = dbWith(session({ spentUsd: 1, budget: plan.budget }));
-    await recordSessionTurnSpend({ db, conversationId: 'c1', plan, tappedUsd: 0.75 });
-    expect(update).toHaveBeenCalledWith('c1', { spentUsd: 1.75 });
+    const { db, add } = dbWith();
+    await recordSessionTurnSpend({ db, conversationId: 'c1', plan: planOf(), tappedUsd: 0.75 });
+    // The total is raised to where the turn started (a stale one catches up), then the turn's spend is added.
+    expect(add).toHaveBeenCalledWith('c1', { addUsd: 0.75, atLeastUsd: 1 });
   });
 
-  it('never lowers or doubles a total the persisted turn already stored', async () => {
+  it('a turn that persisted its priced cost is not counted again; only what the tap saw beyond it is added', async () => {
+    const { addSessionTurnSpend, recordSessionTurnSpend } = await import('@/lib/services/agents/sessionBudgetService');
+    const { db, add } = dbWith();
+    const plan = planOf();
+    await addSessionTurnSpend({ db, conversationId: 'c1', plan, spentUsd: 0.5 }); // the persist
+    expect(add).toHaveBeenLastCalledWith('c1', { addUsd: 0.5, atLeastUsd: 1 });
+    expect(plan.accountedUsd).toBe(0.5);
+
+    await recordSessionTurnSpend({ db, conversationId: 'c1', plan, tappedUsd: 0.5 }); // the finally: same figure
+    expect(add).toHaveBeenCalledTimes(1);
+    await recordSessionTurnSpend({ db, conversationId: 'c1', plan, tappedUsd: 0.75 }); // e.g. a guardrail model's request
+    expect(add).toHaveBeenCalledTimes(2);
+    expect(add).toHaveBeenLastCalledWith('c1', { addUsd: 0.25, atLeastUsd: 1 });
+    expect(plan.accountedUsd).toBe(0.75);
+  });
+
+  it('two turns that started from the same total both land: each adds its own spend, neither sets a sum', async () => {
     const { recordSessionTurnSpend } = await import('@/lib/services/agents/sessionBudgetService');
-    const { db, update } = dbWith(session({ spentUsd: 1.75, budget: plan.budget }));
-    await recordSessionTurnSpend({ db, conversationId: 'c1', plan, tappedUsd: 0.75 });
-    expect(update).not.toHaveBeenCalled();
-    const higher = dbWith(session({ spentUsd: 2, budget: plan.budget }));
-    await recordSessionTurnSpend({ db: higher.db, conversationId: 'c1', plan, tappedUsd: 0.75 });
-    expect(higher.update).not.toHaveBeenCalled();
+    const { db, add } = dbWith();
+    // A cancelled turn and the one that followed it, both planned from a total of 1.
+    await recordSessionTurnSpend({ db, conversationId: 'c1', plan: planOf(1), tappedUsd: 0.25 });
+    await recordSessionTurnSpend({ db, conversationId: 'c1', plan: planOf(1), tappedUsd: 0.25 });
+    expect(add.mock.calls.map((call) => (call as unknown as [string, { addUsd: number }])[1].addUsd)).toEqual([0.25, 0.25]);
   });
 
   it('does nothing without a budget plan or without spend, and swallows a storage failure', async () => {
     const { recordSessionTurnSpend } = await import('@/lib/services/agents/sessionBudgetService');
-    const { db, update } = dbWith(session({}));
+    const { db, add } = dbWith();
     await recordSessionTurnSpend({ db, conversationId: 'c1', plan: null, tappedUsd: 3 });
-    await recordSessionTurnSpend({ db, conversationId: 'c1', plan, tappedUsd: 0 });
-    expect(update).not.toHaveBeenCalled();
-    const broken = { findAgentConversationById: vi.fn(async () => { throw new Error('db down'); }) } as never;
+    await recordSessionTurnSpend({ db, conversationId: 'c1', plan: planOf(), tappedUsd: 0 });
+    expect(add).not.toHaveBeenCalled();
+    const plan = planOf();
+    const broken = { addAgentConversationSpend: vi.fn(async () => { throw new Error('db down'); }) } as never;
     await expect(recordSessionTurnSpend({ db: broken, conversationId: 'c1', plan, tappedUsd: 1 })).resolves.toBeUndefined();
+    // The failed add was not accounted for, so a later attempt tries again.
+    expect(plan.accountedUsd).toBe(0);
   });
 });

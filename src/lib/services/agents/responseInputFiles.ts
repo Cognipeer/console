@@ -8,7 +8,9 @@
  *  - `file_data` (base64 or a data URL) and a `data:` `image_url` are decoded
  *    and uploaded;
  *  - an `http(s)` `image_url` is fetched through the SSRF guard, capped at the
- *    agent's file size limit, and uploaded.
+ *    agent's file size limit, and uploaded — if the URL answers with an image
+ *    (`image/*`); anything else is refused, so `image_url` is not a way to
+ *    pull arbitrary web content into the model's context.
  * The turn then reads them like any attachment (sessionFiles.ts).
  */
 
@@ -110,8 +112,12 @@ function parseDataUrl(value: string): { mimeType?: string; data: string } {
     return match ? { ...(match[1] ? { mimeType: match[1] } : {}), data: match[2]! } : { data: value };
 }
 
-/** Downloads `url` through the SSRF guard, refusing anything past `maxBytes`. */
-async function fetchRemoteFile(url: string, maxBytes: number, maxMb: number): Promise<{ data: Buffer; mimeType?: string; name: string }> {
+/**
+ * Downloads the image at `url` through the SSRF guard, refusing anything past
+ * `maxBytes` and anything the server does not declare as `image/*`. (Only
+ * `input_image` carries a URL; `input_file` is `file_id` or inline data.)
+ */
+async function fetchRemoteImage(url: string, maxBytes: number, maxMb: number): Promise<{ data: Buffer; mimeType: string; name: string }> {
     const tooLarge = () => new AgentAttachmentError(413, 'file_too_large', `The file at ${new URL(url).host} exceeds the ${maxMb} MB limit of this agent.`);
     let response: Response;
     try {
@@ -121,6 +127,16 @@ async function fetchRemoteFile(url: string, maxBytes: number, maxMb: number): Pr
     }
     if (!response.ok) {
         throw new AgentAttachmentError(400, 'attachment_unreachable', `The file could not be fetched (HTTP ${response.status}).`);
+    }
+    // Decided on the header, before a byte of the body is read.
+    const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+    if (!mimeType || !mimeType.startsWith('image/')) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new AgentAttachmentError(
+            415,
+            'unsupported_file_type',
+            `The URL at ${new URL(url).host} did not return an image (Content-Type: ${mimeType?.slice(0, 80) || 'missing'}).`,
+        );
     }
     const declared = Number(response.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > maxBytes) {
@@ -143,7 +159,7 @@ async function fetchRemoteFile(url: string, maxBytes: number, maxMb: number): Pr
     const pathName = new URL(url).pathname.split('/').filter(Boolean).pop();
     return {
         data: Buffer.concat(chunks),
-        mimeType: response.headers.get('content-type')?.split(';')[0]?.trim() || undefined,
+        mimeType,
         name: pathName && pathName.includes('.') ? decodeURIComponent(pathName) : 'image',
     };
 }
@@ -172,7 +188,7 @@ export async function storeResponseInputFiles(input: {
         let mimeType: string | undefined;
         let data: Buffer | string;
         if (file.url) {
-            const fetched = await fetchRemoteFile(file.url, maxBytes, cfg.maxFileSizeMb);
+            const fetched = await fetchRemoteImage(file.url, maxBytes, cfg.maxFileSizeMb);
             ({ data, mimeType } = fetched);
             if (!file.filename) name = fetched.name;
         } else {

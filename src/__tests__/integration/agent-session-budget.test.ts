@@ -20,6 +20,7 @@ const hoisted = vi.hoisted(() => ({
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
+  publishWebhook: vi.fn(),
   db: { current: null as unknown },
   sandboxTools: [] as unknown[],
 }));
@@ -27,6 +28,8 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('@/lib/services/users/userAuthState', () => ({ getUserAuthState: hoisted.getUserAuthState }));
 vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: hoisted.publish })) }));
 vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.recordAuditLog }));
+// What the session log tells webhook subscribers (the subscriptions themselves are covered elsewhere).
+vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
 vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: hoisted.buildModelRuntime }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
@@ -58,6 +61,7 @@ import {
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
 import {
+  createBackgroundAgentRun,
   queueAgentRunContinue,
   runAgentJobLocal,
   serializeAgentRun,
@@ -188,6 +192,7 @@ beforeEach(async () => {
   hoisted.publish.mockResolvedValue(undefined);
   hoisted.getUserAuthState.mockResolvedValue('active');
   hoisted.recordAuditLog.mockResolvedValue(undefined);
+  hoisted.publishWebhook.mockResolvedValue(undefined);
   process.env.AGENT_BACKGROUND_MAX_DURATION_MS = '10000';
   process.env.AGENT_RUN_HEARTBEAT_INTERVAL_MS = '1000';
   reloadConfig();
@@ -358,6 +363,197 @@ describe('a session budget that pauses', () => {
     const after = await stored(id);
     expect(after.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'assistant']);
     expect(after).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
+  });
+});
+
+/** The text of the answer in a Responses-shaped reply. */
+const answerText = (response: { output: Array<{ type: string; content?: Array<{ text?: string }> }> }) =>
+  response.output.filter((item) => item.type === 'message').map((item) => item.content?.[0]?.text).join('');
+/** The webhook events published so far, as `type:stopReason?`. */
+const webhookTypes = () => hoisted.publishWebhook.mock.calls.map((call) => (call[0] as { type: string }).type);
+
+describe('a turn that crosses the budget while finishing normally', () => {
+  // One model request costs $0.01, more than the $0.005 that is left: the turn is a single
+  // request that the SDK has no reason to stop — the common case for a plain chat turn.
+  const TINY = { maxCostUsd: 0.005, onReach: 'pause' as const };
+
+  it('is flagged exactly like a capped one: budget_reached, budget_paused, the event, the idle and the webhook — and the answer is delivered', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer('here is your answer'));
+    const id = String((await newConversation({ budget: TINY }))._id);
+
+    const response = await chat(id, 'spend it');
+
+    expect(answerText(response)).toBe('here is your answer');
+    expect(response.status).toBe('incomplete');
+    expect(response.stop_reason).toBe('budget_reached');
+    expect(response.stop_detail).toContain('session budget reached');
+
+    const after = await stored(id);
+    expect(after).toMatchObject({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached' });
+    expect(after.spentUsd).toBeCloseTo(REQUEST_COST, 8);
+    // The answer is in the transcript, as an ordinary finished message.
+    expect(after.messages[1]).toMatchObject({ role: 'assistant', content: 'here is your answer' });
+    expect(after.messages[1].stopReason).toBeUndefined();
+
+    expect(await eventTypes(id)).toEqual([
+      'user.message', 'session.status_running', 'agent.message', 'session.usage', 'budget.reached', 'session.status_idle',
+    ]);
+    const logged = await db.listAgentSessionEvents(id);
+    expect(logged.find((e) => e.type === 'budget.reached')?.data).toMatchObject({ spentUsd: expect.closeTo(0.01, 8), maxCostUsd: 0.005 });
+    expect(logged.find((e) => e.type === 'session.status_idle')?.data).toMatchObject({ stopReason: 'budget_reached' });
+    expect(webhookTypes()).toEqual(['budget.reached', 'session.idled']);
+    expect(hoisted.publishWebhook.mock.calls.at(-1)?.[0]).toMatchObject({ data: { stopReason: 'budget_reached' } });
+
+    // The first signal is no longer the 402 on the next message: the session already says so.
+    expect(await chat(id, 'more').catch((e) => e)).toMatchObject({ name: 'AgentBudgetReachedError', status: 402 });
+  });
+
+  it('a stopping budget ends the session idle with budget_reached', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer());
+    const id = String((await newConversation({ budget: { ...TINY, onReach: 'stop' } }))._id);
+
+    const response = await chat(id, 'go');
+
+    expect(response.stop_reason).toBe('budget_reached');
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'idle', stopReason: 'budget_reached' });
+    expect(await eventTypes(id)).toContain('budget.reached');
+  });
+
+  it('landing exactly on the budget uses it up', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer());
+    const id = String((await newConversation({ budget: { maxCostUsd: REQUEST_COST, onReach: 'pause' } }))._id);
+
+    expect((await chat(id, 'go')).stop_reason).toBe('budget_reached');
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached' });
+  });
+
+  it('a turn that stays under the budget is untouched', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer());
+    const id = String((await newConversation({ budget: { maxCostUsd: 1, onReach: 'pause' } }))._id);
+
+    const response = await chat(id, 'go');
+
+    expect(response.status).toBe('completed');
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
+    expect(await eventTypes(id)).not.toContain('budget.reached');
+    expect(webhookTypes()).toEqual(['session.idled', 'session.work_done']);
+  });
+
+  it('is the same for a dashboard (playground) session', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer('playground answer'));
+    const id = String((await newConversation({ budget: TINY }))._id);
+
+    const result = await playground(id, 'go');
+
+    expect(result.content).toBe('playground answer');
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached' });
+    expect((await stored(id)).spentUsd).toBeCloseTo(REQUEST_COST, 8);
+    expect(await eventTypes(id)).toEqual([
+      'user.message', 'session.status_running', 'agent.message', 'session.usage', 'budget.reached', 'session.status_idle',
+    ]);
+    expect(webhookTypes()).toEqual(['budget.reached', 'session.idled']);
+  });
+
+  it('is the same for a background run: it ends succeeded with stop_reason budget_reached', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer('background answer'));
+    const id = String((await newConversation({ budget: TINY }))._id);
+    const created = await createBackgroundAgentRun({
+      tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+      conversationId: id, userMessage: 'go', userId: OWNER,
+    });
+    if (created.kind !== 'created') throw new Error(created.kind);
+    const runId = String(created.run._id);
+
+    await runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+
+    const run = (await db.getAgentRunById(runId, tenantId, PROJECT_ID))!;
+    expect(run.status).toBe('succeeded'); // unchanged: old SDK clients poll for terminal states
+    expect(run.stopReason).toBe('budget_reached');
+    expect(answerText(run.result as never)).toBe('background answer');
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached' });
+    expect(webhookTypes()).toEqual(expect.arrayContaining(['budget.reached', 'session.idled', 'agent_run.succeeded']));
+  });
+
+  it('a continuation whose last request crosses the budget is flagged too', async () => {
+    await createAgent();
+    scriptModel(fourRequestScript);
+    const id = String((await newConversation({ budget: { maxCostUsd: 0.025, onReach: 'pause' } }))._id);
+    await chat(id, 'go'); // three requests: $0.03, stopped by the cap
+    await raise(id, { maxCostUsd: 0.035, onReach: 'pause' }); // room for 0.005 more; the fourth request costs 0.01
+
+    const continued = await continueSession(id);
+
+    expect(continued.result.content).toBe('all done');
+    expect(continued.response.stop_reason).toBe('budget_reached');
+    expect(continued.stopReason).toBe('budget_reached');
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached' });
+    expect((await stored(id)).spentUsd).toBeCloseTo(4 * REQUEST_COST, 8);
+    const types = await eventTypes(id);
+    expect(types.slice(-4)).toEqual(['agent.message', 'session.usage', 'budget.reached', 'session.status_idle']);
+  });
+
+  it('a turn that pauses for an approval keeps its pause even when it is past the budget', async () => {
+    await createAgent({
+      humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always', tools: { sandbox_read_file: 'always' } } },
+    });
+    scriptModel((call) => (call === 0 ? readCall(1) : finalAnswer()));
+    const id = String((await newConversation({ budget: TINY }))._id);
+
+    const response = await chat(id, 'read it');
+
+    expect(response.status).toBe('requires_action');
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'requires_action', stopReason: 'requires_action' });
+    expect(await db.listAgentPendingActions(id, { status: 'pending' })).toHaveLength(1);
+    expect(await eventTypes(id)).not.toContain('budget.reached');
+    expect(webhookTypes()).not.toContain('budget.reached');
+  });
+
+  it('raising the budget of a session whose turn had finished puts it back to idle — there is nothing to continue', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer('done already'));
+    const id = String((await newConversation({ budget: TINY }))._id);
+    await chat(id, 'go');
+
+    const raised = await raise(id, { maxCostUsd: 1, onReach: 'pause' });
+
+    expect(raised.kind).toBe('ok');
+    if (raised.kind !== 'ok') return;
+    // The client API resumes only a session that has something to carry on.
+    expect(raised.wasBudgetPaused).toBe(false);
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
+    // ...and it takes messages again.
+    scriptModel(() => finalAnswer('and another'));
+    expect((await chat(id, 'next')).status).toBe('completed');
+  });
+
+  it('removing the budget of such a session does the same', async () => {
+    await createAgent();
+    scriptModel(() => finalAnswer());
+    const id = String((await newConversation({ budget: TINY }))._id);
+    await chat(id, 'go');
+
+    const removed = await raise(id, null);
+
+    expect(removed.kind === 'ok' && removed.wasBudgetPaused).toBe(false);
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
+  });
+
+  it('a session stopped mid-turn (tool results last) is still continuable after a raise', async () => {
+    await createAgent();
+    scriptModel(fourRequestScript);
+    const id = String((await newConversation({ budget: { maxCostUsd: 0.025, onReach: 'pause' } }))._id);
+    await chat(id, 'go');
+
+    const raised = await raise(id, { maxCostUsd: 1, onReach: 'pause' });
+
+    expect(raised.kind === 'ok' && raised.wasBudgetPaused).toBe(true);
+    expect(await stored(id)).toMatchObject({ runtimeStatus: 'budget_paused', stopReason: 'budget_reached' });
   });
 });
 

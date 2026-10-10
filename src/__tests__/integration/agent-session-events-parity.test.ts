@@ -223,6 +223,34 @@ describeForEachProvider('Agent session events / pending actions', (getDb) => {
     expect(cleared?.pausedSnapshot).toBeUndefined();
   });
 
+  it('adds to the session spend atomically: from no total, up to a floor first, never lowering it, and concurrent adds all land', async () => {
+    const db = getDb();
+    const conv = await db.createAgentConversation({ tenantId, projectId, agentKey, messages: [], createdBy: 'u1' });
+    const id = String(conv._id);
+    const spent = async () => (await db.findAgentConversationById(id))?.spentUsd;
+
+    await db.addAgentConversationSpend(id, { addUsd: 0.25 }); // no total yet: it starts from 0
+    expect(await spent()).toBeCloseTo(0.25, 8);
+
+    await db.addAgentConversationSpend(id, { addUsd: 0.5, atLeastUsd: 1 }); // raised to the floor, then the spend added
+    expect(await spent()).toBeCloseTo(1.5, 8);
+
+    await db.addAgentConversationSpend(id, { atLeastUsd: 0.1 }); // a floor below the total changes nothing
+    await db.addAgentConversationSpend(id, {}); // nothing to do
+    await db.addAgentConversationSpend(id, { addUsd: -3 }); // a negative amount is not a refund
+    expect(await spent()).toBeCloseTo(1.5, 8);
+
+    // Two turns that planned from the same total (1): neither erases the other.
+    await Promise.all(Array.from({ length: 10 }, () => db.addAgentConversationSpend(id, { addUsd: 0.1, atLeastUsd: 1 })));
+    expect(await spent()).toBeCloseTo(2.5, 8);
+
+    // It moves nothing but the spend total.
+    await db.updateAgentConversationRuntime(id, { runtimeStatus: 'running' });
+    await db.addAgentConversationSpend(id, { addUsd: 0.5 });
+    expect(await db.findAgentConversationById(id)).toMatchObject({ runtimeStatus: 'running' });
+    expect(await spent()).toBeCloseTo(3, 8);
+  });
+
   it('persists stopReason on a finalized agent run', async () => {
     const db = getDb();
     const conv = `c-${Math.random().toString(36).slice(2, 8)}`;

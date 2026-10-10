@@ -153,6 +153,22 @@ describe('dashboard /api/webhooks', () => {
     expect(await db.listWebhookEndpoints(tenantId)).toHaveLength(0);
   });
 
+  it('a member gets 403, never 404, on every route of an endpoint of their own project (404 is for managers out of reach)', async () => {
+    actAs('project_admin');
+    const mine = json(await call('POST', '', body())).endpoint;
+    actAs('member');
+    expect((await call('GET', `/${mine.id}`)).statusCode).toBe(403);
+    expect((await call('PATCH', `/${mine.id}`, { description: 'x' })).statusCode).toBe(403);
+    expect((await call('DELETE', `/${mine.id}`)).statusCode).toBe(403);
+    expect((await call('POST', `/${mine.id}/rotate-secret`)).statusCode).toBe(403);
+    expect((await call('POST', `/${mine.id}/test`)).statusCode).toBe(403);
+    expect((await call('GET', `/${mine.id}/deliveries`)).statusCode).toBe(403);
+    expect((await call('POST', '/deliveries/nope/redeliver')).statusCode).toBe(403);
+    // The event catalog is the one thing a member may read.
+    expect((await call('GET', '/events')).statusCode).toBe(200);
+    expect(await db.findWebhookEndpointById(mine.id)).toBeTruthy();
+  });
+
   it('a project admin manages only endpoints of their own project', async () => {
     actAs('tenant_admin');
     const wide = json(await call('POST', '', body({ projectId: null }))).endpoint;

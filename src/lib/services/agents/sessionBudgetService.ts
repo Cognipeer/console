@@ -9,16 +9,34 @@
  * caller meant. The stop reason and `budget_paused` status a budget stop left
  * are not touched here — continuing a paused session is a separate step
  * (`executeAgentContinueLocal`), so an increase can be made without resuming.
+ * The one exception is a session whose turn FINISHED when it crossed the budget:
+ * it ended with its answer, so there is nothing to continue and it goes back to
+ * idle (see below).
  */
 
-import { getDatabase, type IAgentConversation } from '@/lib/database';
-import { parseSessionBudget, roundUsd, sessionSpentUsd, withSessionSpend, type SessionBudgetPlan } from './sessionBudget';
+import { createLogger } from '@/lib/core/logger';
+import { getDatabase, type DatabaseProvider, type IAgentConversation } from '@/lib/database';
+import { loadConversationState } from './agentTurnState';
+import {
+  endsInAnswer,
+  parseSessionBudget,
+  roundUsd,
+  sessionSpentUsd,
+  withSessionSpend,
+  type SessionBudgetPlan,
+} from './sessionBudget';
+
+const logger = createLogger('agents:session-budget');
 
 export type UpdateSessionBudgetOutcome =
   | {
     kind: 'ok';
     conversation: IAgentConversation;
-    /** The session was `budget_paused` before the change: it can be continued now. */
+    /**
+     * The session was `budget_paused` before the change and has a turn to carry
+     * on: it can be continued now. False for a session whose turn ended with its
+     * answer — that one is simply idle again.
+     */
     wasBudgetPaused: boolean;
   }
   | { kind: 'invalid'; message: string }
@@ -50,41 +68,81 @@ export async function updateSessionBudget(input: {
     next = parsed.budget;
   }
 
-  await db.updateAgentConversationRuntime(input.conversationId, {
-    budget: next,
-    // Keep the running total the budget is measured against from here on.
-    ...(next ? { spentUsd: sessionSpentUsd(conversation) } : {}),
-  });
+  await db.updateAgentConversationRuntime(input.conversationId, { budget: next });
+  // Keep the running total the budget is measured against from here on — raised
+  // atomically, never set: a turn that is spending right now must not lose its
+  // cost to this write.
+  if (next) await db.addAgentConversationSpend(input.conversationId, { atLeastUsd: sessionSpentUsd(conversation) });
+
+  // A turn that crossed the budget and finished normally left the session
+  // `budget_paused` with its answer delivered. There is nothing to carry on, so
+  // the raise (or removal) is all it needed: it is idle again, and a client that
+  // asked to resume does not get a continuation that would only be refused.
+  let wasBudgetPaused = conversation.runtimeStatus === 'budget_paused';
+  const stoppedOnBudget = wasBudgetPaused || (
+    conversation.stopReason === 'budget_reached' && conversation.runtimeStatus !== 'running' && conversation.runtimeStatus !== 'requires_action'
+  );
+  if (stoppedOnBudget && endsInAnswer(await loadConversationState(db, conversation))) {
+    await db.updateAgentConversationRuntime(input.conversationId, { runtimeStatus: 'idle', stopReason: 'end_turn' });
+    wasBudgetPaused = false;
+  }
+
   const updated = await db.findAgentConversationById(input.conversationId);
   return {
     kind: 'ok',
     conversation: withSessionSpend(updated ?? { ...conversation, budget: next }),
-    wasBudgetPaused: conversation.runtimeStatus === 'budget_paused',
+    wasBudgetPaused,
   };
 }
 
 /**
- * Brings the session's running total up to what a turn really spent, whether or
- * not the turn was persisted. A turn the caller aborted, the sync ceiling or a
- * cancel superseded, or an error cut short still billed its model requests, so
- * its spend must count against the budget. `spentBefore + tapped` is a FLOOR:
- * a turn that persisted already stored its own total, which is never lowered
- * (and never added twice).
+ * Adds what a turn spent to the session's running total — whether or not the
+ * turn was persisted. A turn the caller aborted, the sync ceiling or a cancel
+ * superseded, or an error cut short still billed its model requests, so its
+ * spend must count against the budget.
+ *
+ * `spentUsd` is the turn's spend so far; only the part the plan has not yet
+ * accounted for is added, so a turn is counted exactly once however many times
+ * this is called (its persist adds the priced cost, the `finally` adds whatever
+ * the usage tap saw beyond that). The add is atomic in the database
+ * (`addAgentConversationSpend`): two turns that overlap — a superseded one
+ * finishing while the next has started — both land, where "read the total, write
+ * back the sum" would let the last writer erase the other's spend.
  */
-export async function recordSessionTurnSpend(input: {
-  db: Awaited<ReturnType<typeof getDatabase>>;
+export async function addSessionTurnSpend(input: {
+  db: Pick<DatabaseProvider, 'addAgentConversationSpend'>;
   conversationId: string;
   plan: SessionBudgetPlan | null;
-  /** What the turn's priced model requests cost, from the usage tap. */
+  spentUsd: number;
+}): Promise<void> {
+  const { plan } = input;
+  if (!plan || !Number.isFinite(input.spentUsd)) return;
+  const delta = roundUsd(input.spentUsd - plan.accountedUsd);
+  if (!(delta > 0)) return;
+  try {
+    // `atLeastUsd`: a stored total that fell behind what the turn started from
+    // is first brought up to it, then the turn's spend is added.
+    await input.db.addAgentConversationSpend(input.conversationId, { addUsd: delta, atLeastUsd: plan.spentBefore });
+    plan.accountedUsd = roundUsd(plan.accountedUsd + delta);
+  } catch (error) {
+    // Best-effort: the turn's own result must not turn into an error here.
+    logger.warn('Could not add a turn\'s spend to the session total', {
+      conversationId: input.conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Brings the session's running total up to what a turn really spent, for a turn
+ * that was not (or not fully) accounted for when it persisted. `tappedUsd` is
+ * what the turn's priced model requests cost, from the usage tap.
+ */
+export async function recordSessionTurnSpend(input: {
+  db: Pick<DatabaseProvider, 'addAgentConversationSpend'>;
+  conversationId: string;
+  plan: SessionBudgetPlan | null;
   tappedUsd: number;
 }): Promise<void> {
-  if (!input.plan || !(input.tappedUsd > 0)) return;
-  try {
-    const floor = roundUsd(input.plan.spentBefore + input.tappedUsd);
-    const current = await input.db.findAgentConversationById(input.conversationId);
-    if (!current || sessionSpentUsd(current) >= floor) return;
-    await input.db.updateAgentConversationRuntime(input.conversationId, { spentUsd: floor });
-  } catch {
-    // Best-effort: the turn's own result must not turn into an error here.
-  }
+  await addSessionTurnSpend({ db: input.db, conversationId: input.conversationId, plan: input.plan, spentUsd: input.tappedUsd });
 }

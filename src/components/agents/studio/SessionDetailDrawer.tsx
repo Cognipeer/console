@@ -10,11 +10,16 @@
  * the conversation as one ordered stream — each tool call grouped with its
  * result — beside a Properties rail. Only a session a person started from the
  * console to try the agent offers Continue.
+ *
+ * A session that is waiting for a person shows its approval / question cards
+ * here too, answerable like on the session page, and every session offers its
+ * event log (what was asked, answered and why each run ended).
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { Alert, Badge, Button, Code, Group, Text } from '@mantine/core';
-import { IconPlayerPlay } from '@tabler/icons-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Badge, Box, Button, Code, Collapse, Group, Stack, Text, UnstyledButton } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
+import { IconChevronDown, IconChevronRight, IconHandStop, IconPlayerPlay } from '@tabler/icons-react';
 import LlmRequestDetailModal, {
     type LlmRequestDetailData,
     type LlmRequestItem,
@@ -23,6 +28,14 @@ import FunctionsList from '@/components/common/ui/FunctionsList';
 import TokenStats from '@/components/common/ui/TokenStats';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
+import { useTranslations } from '@/lib/i18n';
+import type { IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
+import PendingActionList from '../session/PendingActionCards';
+import SessionActivity from '../session/SessionActivity';
+import SessionStatusBadge from '../session/SessionStatusBadge';
+import { answerRestriction, openActionsOf, type ResolveBody } from '../session/pendingActions';
+import { sessionStatusKind, stopReasonBadge } from '../session/sessionActivityUi';
+import { useViewer } from '../session/useViewer';
 import { formatCost } from '../session/sessionUsage';
 import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
 import { isContinuableSession, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
@@ -33,6 +46,10 @@ export interface SessionDetailDrawerProps {
     session: SessionListItem | null;
     onClose: () => void;
     onContinue: (sessionId: string) => void;
+    /** The agent's `humanInTheLoop.approvers` — who may answer an open request (a notice for those who may not). */
+    approvers?: IAgentHumanInTheLoopConfig['approvers'];
+    /** A request was answered here, so the session list behind the drawer is out of date. */
+    onResolved?: () => void;
 }
 
 /**
@@ -69,15 +86,31 @@ function toItems(messages: ChatMessage[]): LlmRequestItem[] {
     return items;
 }
 
-export default function SessionDetailDrawer({ agentId, session, onClose, onContinue }: SessionDetailDrawerProps) {
+export default function SessionDetailDrawer({ agentId, session, onClose, onContinue, approvers, onResolved }: SessionDetailDrawerProps) {
+    const th = useTranslations('agents.hitl');
+    const ta = useTranslations('agents.activity');
     const [record, setRecord] = useState<SessionRecord | null>(null);
     const [error, setError] = useState<string | null>(null);
+    // Bumped to re-read the session after a request was answered.
+    const [reloadKey, setReloadKey] = useState(0);
+    const [resolvingId, setResolvingId] = useState<string | null>(null);
+    const [activityOpen, setActivityOpen] = useState(false);
+    const loadedFor = useRef<string | undefined>(undefined);
+    const viewer = useViewer();
     const sessionId = session?._id;
 
     useEffect(() => {
-        if (!sessionId) return;
+        if (!sessionId) {
+            loadedFor.current = undefined;
+            return;
+        }
         let cancelled = false;
-        setRecord(null);
+        // A reload for the same session keeps the transcript on screen.
+        if (loadedFor.current !== sessionId) {
+            loadedFor.current = sessionId;
+            setRecord(null);
+            setActivityOpen(false);
+        }
         setError(null);
         fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { cache: 'no-store' })
             .then(async (res) => {
@@ -89,7 +122,45 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                 if (!cancelled) setError(err instanceof Error ? err.message : String(err));
             });
         return () => { cancelled = true; };
-    }, [agentId, sessionId]);
+    }, [agentId, sessionId, reloadKey]);
+
+    /**
+     * Answers an approval or a question. The call runs the continuation and
+     * answers in JSON (the live stream belongs to the session page); the session
+     * is then read again so what it did next shows here.
+     */
+    const resolveAction = useCallback(async (actionId: string, body: ResolveBody) => {
+        if (!sessionId || resolvingId) return;
+        setResolvingId(actionId);
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/actions/${actionId}/resolve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                // Answered elsewhere, or timed out while the drawer was open: show how it ended.
+                if ((res.status === 409 && (err.type === 'action_not_pending' || err.code === 'action_not_pending')) || res.status === 410) {
+                    notifications.show({ title: th('resolveFailed'), message: th('resolveStateChanged'), color: 'orange' });
+                    setReloadKey((key) => key + 1);
+                    onResolved?.();
+                    return;
+                }
+                throw new Error(err.error || `${th('resolveFailed')} (HTTP ${res.status})`);
+            }
+            setReloadKey((key) => key + 1);
+            onResolved?.();
+        } catch (err) {
+            notifications.show({
+                title: th('resolveFailed'),
+                message: err instanceof Error ? err.message : String(err),
+                color: 'red',
+            });
+        } finally {
+            setResolvingId(null);
+        }
+    }, [agentId, sessionId, resolvingId, th, onResolved]);
 
     const data = useMemo<LlmRequestDetailData | null>(() => {
         if (!session) return null;
@@ -98,6 +169,20 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         const steps = messages.flatMap((m) => m.steps ?? []);
         const toolNames = [...new Set(steps.map((step) => step.name))];
         const failedSteps = steps.filter(stepFailed).length;
+        const openActions = openActionsOf(messages);
+        const status = sessionStatusKind({
+            live: false,
+            openActions: openActions.length,
+            runtimeStatus: record?.runtimeStatus ?? session.runtimeStatus,
+        });
+        // A settled session says how its last run ended; a waiting or paused one is already saying more.
+        const stopBadge = status === 'idle' ? stopReasonBadge(record?.stopReason) : null;
+        const restriction = answerRestriction({
+            approvers,
+            viewerId: viewer.userId,
+            viewerRole: viewer.role,
+            ownerId: record?.createdBy,
+        });
 
         const properties: PropertyRow[] = [
             { key: 'created', label: 'Created', value: <Text size="sm">{session.createdAt ? new Date(session.createdAt).toLocaleString() : '—'}</Text> },
@@ -131,6 +216,8 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         const badges = (
             <Group justify="space-between" wrap="nowrap">
                 <Group gap="xs" wrap="wrap">
+                    <SessionStatusBadge status={status} size="xs" />
+                    {stopBadge ? <Badge size="xs" variant="light" color={stopBadge.color}>{ta(stopBadge.key)}</Badge> : null}
                     <SessionSourceBadge source={session.source} />
                     <span className="ds-badge ds-badge-info">{session.turns ?? 0} turn{session.turns === 1 ? '' : 's'}</span>
                     {session.activeMs ? <span className="ds-badge">{formatDuration(session.activeMs)}</span> : null}
@@ -145,7 +232,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             </Group>
         );
 
-        const banner = error ? (
+        const notices = error ? (
             <Alert color="red" variant="light">Could not load the transcript: {error}</Alert>
         ) : !continuable ? (
             <Alert color="gray" variant="light" p="xs">
@@ -154,7 +241,44 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                     from the console can be continued here.
                 </Text>
             </Alert>
-        ) : undefined;
+        ) : null;
+
+        const banner = (
+            <Stack gap="xs">
+                {notices}
+                {openActions.length > 0 ? (
+                    <Alert color="orange" variant="light" icon={<IconHandStop size={16} />} title={th('waitingBadge')}>
+                        <Text size="xs">{th('waitingTooltip')}</Text>
+                        <PendingActionList
+                            actions={openActions}
+                            busy={Boolean(resolvingId)}
+                            resolvingId={resolvingId}
+                            onResolve={(actionId, body) => void resolveAction(actionId, body)}
+                            restriction={restriction}
+                        />
+                    </Alert>
+                ) : null}
+                <Box>
+                    <UnstyledButton onClick={() => setActivityOpen((open) => !open)} aria-expanded={activityOpen}>
+                        <Group gap={4}>
+                            {activityOpen ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+                            <Text size="xs" fw={600}>{ta('title')}</Text>
+                        </Group>
+                    </UnstyledButton>
+                    <Collapse in={activityOpen}>
+                        <Box mt="xs" maw={760}>
+                            <SessionActivity
+                                key={session._id}
+                                agentId={agentId}
+                                sessionId={session._id}
+                                active={activityOpen}
+                                refreshKey={`${record?.lastEventSeq ?? 0}:${record?.runtimeStatus ?? ''}:${reloadKey}`}
+                            />
+                        </Box>
+                    </Collapse>
+                </Box>
+            </Stack>
+        );
 
         return {
             badges,
@@ -163,7 +287,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             properties,
             ...(record ? { raw: { request: record.metadata ?? {}, response: messages } } : {}),
         };
-    }, [session, record, error, onContinue]);
+    }, [session, record, error, onContinue, agentId, approvers, viewer, th, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
 
     return (
         <LlmRequestDetailModal

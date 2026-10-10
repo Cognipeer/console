@@ -112,6 +112,21 @@ describe('sendSignedWebhook outcomes', () => {
     expect(await sendSignedWebhook(input)).toMatchObject({ outcome: 'network', ok: false });
   });
 
+  it('says a request that ran out of time timed out, instead of the bare "This operation was aborted"', async () => {
+    // The guard aborts its own controller at `timeoutMs`; fetch rejects with the abort's name and message.
+    hoisted.safeFetch.mockRejectedValueOnce(new DOMException('This operation was aborted', 'AbortError'));
+    expect(await sendSignedWebhook({ ...input, timeoutMs: 5000 })).toMatchObject({
+      outcome: 'network', ok: false, error: 'Timed out after 5000 ms',
+    });
+
+    hoisted.safeFetch.mockRejectedValueOnce(new DOMException('The operation timed out.', 'TimeoutError'));
+    expect(await sendSignedWebhook(input)).toMatchObject({ outcome: 'network', error: 'Timed out after 1000 ms' });
+
+    // Other network failures keep their own message.
+    hoisted.safeFetch.mockRejectedValueOnce(new Error('connect ECONNREFUSED 203.0.113.9:443'));
+    expect(await sendSignedWebhook(input)).toMatchObject({ outcome: 'network', error: 'connect ECONNREFUSED 203.0.113.9:443' });
+  });
+
   it('omits the signature without a secret, and only adds webhook-id and no-redirect when asked', async () => {
     hoisted.safeFetch.mockResolvedValue(new Response(null, { status: 200 }));
     await sendSignedWebhook({ ...input, secret: undefined });

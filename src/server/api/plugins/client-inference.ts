@@ -12,7 +12,7 @@ import {
   handleImageRequest,
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
@@ -223,8 +223,7 @@ async function handleAgentChatCompletion(input: {
           },
         });
       }
-      logger.error('Agent chat completion failed', { error });
-      const classified = classifyAgentRunError(error);
+      const classified = logAgentRouteError(logger, 'Agent chat completion failed', error);
       return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
     if ('error' in result) {
@@ -283,8 +282,8 @@ async function handleAgentChatCompletion(input: {
     }
     send(toChatChunk({ id, model, finish: true, stopReason }));
   } catch (error) {
-    logger.error('Agent chat completion stream failed', { error });
-    send({ error: toClientErrorBody(classifyAgentRunError(error).error) });
+    const classified = logAgentRouteError(logger, 'Agent chat completion stream failed', error);
+    send({ error: toClientErrorBody(classified.error) });
   } finally {
     if (!closed) {
       reply.raw.write('data: [DONE]\n\n');

@@ -4,6 +4,7 @@ import {
   toClientErrorBody,
   toClientEventData,
   toClientEventFrame,
+  toPublicRunId,
   toClientPendingAction,
   toSnakeCaseDeep,
   toSnakeKey,
@@ -48,6 +49,10 @@ describe('client wire spelling', () => {
     })).toEqual({
       seq: 7, type: 'agent.tool_result', data: { tool_call_id: 'c1' }, run_id: 'run_1', created_at: '2024-01-01T00:00:00.000Z',
     });
+    // The store holds the bare run id; a client sees the one `GET /agents/runs/{id}` takes.
+    expect(toClientEventFrame({ type: 'session.status_idle', data: {}, runId: 'd90f17a3', createdAt: 'now' }).run_id).toBe('run_d90f17a3');
+    expect(toPublicRunId('d90f17a3')).toBe('run_d90f17a3');
+    expect(toPublicRunId('run_d90f17a3')).toBe('run_d90f17a3');
     // A live-only frame has no seq and no run.
     expect(toClientEventFrame({ type: 'agent.message.delta', data: { text: 'hi' }, createdAt: 'now' })).toEqual({
       type: 'agent.message.delta', data: { text: 'hi' }, created_at: 'now',
@@ -61,6 +66,22 @@ describe('client wire spelling', () => {
     })).toEqual({
       id: 'act_1', kind: 'tool_approval', tool_name: 'sandbox_exec', args: { someArg: 1 }, status: 'pending',
       expires_at: 'e', requested_at: 'r',
+    });
+  });
+
+  it('keeps tool_name off a question (it is not a tool call), on the action and in its event', () => {
+    expect(toClientPendingAction({
+      id: 'act_2', kind: 'user_question', toolName: 'ask_user_question', questions: [{ question: 'Which env?', multiSelect: false }],
+      allowFreeText: true, status: 'pending',
+    })).toEqual({
+      id: 'act_2', kind: 'user_question', questions: [{ question: 'Which env?', multi_select: false }], allow_free_text: true, status: 'pending',
+    });
+    expect(toClientEventData({ actionId: 'act_2', kind: 'user_question', toolName: 'ask_user_question', allowFreeText: true })).toEqual({
+      action_id: 'act_2', kind: 'user_question', allow_free_text: true,
+    });
+    // An approval keeps it.
+    expect(toClientEventData({ actionId: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec' })).toEqual({
+      action_id: 'act_1', kind: 'tool_approval', tool_name: 'sandbox_exec',
     });
   });
 

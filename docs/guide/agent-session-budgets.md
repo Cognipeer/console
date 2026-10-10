@@ -15,6 +15,8 @@ A session is a conversation that can go on for days through many turns. The per-
 
 The budget is checked before each model request against what the session has actually spent, so a turn can overshoot by at most one request. The per-turn limit still applies: a turn runs under the lower of the two.
 
+A turn that finishes by itself but leaves the session at or past its budget (the common case for a plain chat turn, which is a single request) counts as reaching it: the answer is delivered, then the session is stopped exactly as above. Raising or removing the budget of such a session simply puts it back to idle, since its turn is already complete and there is nothing to continue.
+
 ## Over the API
 
 Start a session with a budget:
@@ -25,7 +27,7 @@ POST /api/client/v1/agents/responses
 { "model": "support-bot", "input": "Go through the backlog", "budget": { "max_cost_usd": 2, "on_reach": "pause" } }
 ```
 
-`budget` is read when the request starts a session; on a request that continues one (`previous_response_id`) it is ignored. `"budget": null` starts the session with no budget, overriding the agent's default.
+`budget` is read when the request starts a session. On a request that continues one (`previous_response_id`) it is ignored altogether: not applied and not validated, so a client may send its default budget on every call without it being refused (`403`) or rejected (`400`) on a follow-up turn. Change the budget of a running session with the `PATCH` below. `"budget": null` starts the session with no budget, overriding the agent's default.
 
 Read, change or remove it on the session:
 
@@ -38,7 +40,7 @@ PATCH /api/client/v1/agents/sessions/{conversationId}
 
 `{ "budget": null }` removes it. The new `max_cost_usd` has to be above what the session has already spent (`400` otherwise). The session reports `budget`, `spent_usd` and `runtime_status` (`budget_paused` while it waits).
 
-For a session that is paused on its budget, the `PATCH` also continues it: the turn runs as a [background run](/guide/agent-background-execution) and the answer is `202` with the run. Send `"resume": false` to change the budget only.
+For a session that is paused on its budget, the `PATCH` also continues it: the turn runs as a [background run](/guide/agent-background-execution) and the answer is `202` with the run. Send `"resume": false` to change the budget only. A session whose turn had already finished when it reached the budget has nothing to continue: the `PATCH` returns it idle (`200`) instead of starting a run.
 
 A message sent to a session whose budget is used up is refused with `402`:
 
@@ -51,6 +53,12 @@ A turn that hits the budget part-way is returned like any stopped run: `status: 
 ### Who may change it
 
 When an agent has a session budget, it binds its API clients: a client token can lower a session's budget but cannot remove it or raise it past the agent's amount (`403`, `budget_override_forbidden`). Turn on **Let API clients change the budget** in the Execution settings to allow it. Dashboard users are not affected.
+
+### A paused session and API-only clients
+
+A session that is `budget_paused` goes on only when its budget is raised or removed. For an agent with a session budget and **Let API clients change the budget** off, an API client can do neither: raising or removing is `403 budget_override_forbidden`, and lowering has to stay above what the session has spent, which a paused session has already passed (`400`). Such a session stays paused until someone with dashboard access continues it: in Studio, open the session and use the banner's **Increase and continue** (or **Remove budget**), which changes the budget and carries the turn on. Or turn on **Let API clients change the budget** for the agent, after which the `PATCH` above continues it (`202`).
+
+Plan for this when an agent with a session budget is driven only through the API: either allow client overrides, or have an operator watch for `budget.reached` [webhooks](/guide/webhooks).
 
 ## Events and webhooks
 

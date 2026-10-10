@@ -85,7 +85,7 @@ Name the files a message uses in the chat body: `attachments: ["<fileId>", …]`
 ```
 
 - `file_id` is a file already uploaded to the session you continue with `previous_response_id`.
-- `file_data` and a `data:` image are decoded and uploaded to the session first. An `https` image URL is fetched (private addresses are refused) within the agent's size limit and uploaded.
+- `file_data` and a `data:` image are decoded and uploaded to the session first. An `https` image URL is fetched (private addresses are refused) within the agent's size limit and uploaded, provided the server answers with an `image/*` `Content-Type`; any other answer (JSON, HTML, no type) is refused with `415 unsupported_file_type` and nothing is stored. To give the agent a document, send it as `input_file` instead.
 - With `background: true`, the run carries the attachments. For `Idempotency-Key`, only the file ids you named identify the request: a file sent inline is stored under a new id each time.
 
 ## Cleanup

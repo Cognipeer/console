@@ -131,6 +131,7 @@ import {
     activeSessionBudget,
     agentSessionBudget,
     budgetStopDetail,
+    endsInAnswer,
     isSessionBudgetBreach,
     planSessionBudget,
     sessionBudgetInvokeOptions,
@@ -139,7 +140,7 @@ import {
     type SessionBudgetPlan,
     type SessionBudgetSettlement,
 } from './sessionBudget';
-import { recordSessionTurnSpend } from './sessionBudgetService';
+import { addSessionTurnSpend, recordSessionTurnSpend } from './sessionBudgetService';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
 import {
@@ -3917,7 +3918,7 @@ async function runAgentChatTurn(
             : undefined;
         if (usage && turnCostUsd !== undefined) usage.costUsd = turnCostUsd;
         const budget = budgetPlan
-            ? settleSessionBudget(budgetPlan, turnCostUsd, isSessionBudgetBreach(budgetPlan, turnOutcome))
+            ? settleSessionBudget(budgetPlan, turnCostUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
         const outcome = budgetAwareOutcome(turnOutcome, budget);
         const outputParsed = result.output;
@@ -3987,8 +3988,10 @@ async function runAgentChatTurn(
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
                 title: firstTurnTitle(conversation, updatedMessages.length, persistedUserMessage),
-                ...(budget ? { spentUsd: budget.spentUsd } : {}),
             });
+            // The turn's cost joins the session total; added, not set, so a turn
+            // that overlaps this one cannot erase it (see `addSessionTurnSpend`).
+            if (budget) await addSessionTurnSpend({ db, conversationId, plan: budgetPlan, spentUsd: budget.turnCostUsd });
             await saveConversationState(db, {
                 conversationId,
                 tenantId,
@@ -4533,7 +4536,7 @@ async function runPlaygroundChatTurn(
                     tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: aborted.content,
                     source: 'agent-playground',
                 });
-                const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, aborted, undefined, attached.attachments);
+                const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, aborted, attached.attachments);
                 await turnEvents?.finish({
                     stopReason: 'cancelled',
                     content: aborted.content,
@@ -4593,11 +4596,13 @@ async function runPlaygroundChatTurn(
             playgroundResult.usage.costUsd = costUsd;
         }
         const budget = budgetPlan
-            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome))
+            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
         if (budget?.reached) {
             outcome = budgetAwareOutcome(turnOutcome, budget);
-            playgroundResult.stopDetail = outcome.stopDetail;
+            // A turn that finished on its own keeps its answer unmarked: the
+            // session (stop reason, status, events) says the budget was reached.
+            if (outcome.stopReason !== 'completed') playgroundResult.stopDetail = outcome.stopDetail;
         }
 
         if (sessionConversation) {
@@ -4619,8 +4624,11 @@ async function runPlaygroundChatTurn(
                 if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
                 else playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
             }
-            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult, budget?.spentUsd, attached.attachments);
+            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult, attached.attachments);
             if (messageCount !== undefined) {
+                if (budget) {
+                    await addSessionTurnSpend({ db, conversationId: String(sessionConversation._id), plan: budgetPlan, spentUsd: budget.turnCostUsd });
+                }
                 await saveConversationState(db, {
                     conversationId: String(sessionConversation._id),
                     tenantId,
@@ -4667,8 +4675,6 @@ async function persistSessionTurn(
     conversation: IAgentConversation,
     userMessage: string,
     result: AgentPlaygroundChatResult,
-    /** The session's running spend after this turn, when it has a budget. */
-    spentUsd?: number,
     /** Files the user message attaches. */
     attachments?: IAgentMessageAttachment[],
 ): Promise<number | undefined> {
@@ -4709,7 +4715,6 @@ async function persistSessionTurn(
             title: (!conversation.title || conversation.title === 'New conversation') && messages.length <= 2
                 ? userMessage.substring(0, 80)
                 : conversation.title,
-            ...(spentUsd !== undefined ? { spentUsd } : {}),
         });
         return messages.length;
     } catch (error) {
@@ -4829,12 +4834,12 @@ async function loadContinuationRun(
         throw new AgentResumeError('This session did not stop on its budget, so there is nothing to continue.');
     }
     const carried = await loadConversationState(db, conversation);
-    const last = carried?.messages?.[carried.messages.length - 1] as { role?: string; tool_calls?: unknown[] } | undefined;
-    if (!carried || !last) {
+    if (!carried || !carried.messages?.length) {
         throw new AgentResumeError('This session can no longer be continued: its stored state was not found.');
     }
-    // A transcript that already ends in the agent's own answer has nothing left to do.
-    if (last.role === 'assistant' && !(Array.isArray(last.tool_calls) && last.tool_calls.length > 0)) {
+    // A transcript that already ends in the agent's own answer has nothing left to do
+    // (the turn that crossed the budget can have finished with it).
+    if (endsInAnswer(carried)) {
         throw new AgentResumeError('This session already ended with an answer, so there is nothing to continue.');
     }
 
@@ -5165,7 +5170,7 @@ async function runAgentResumeTurn(
         const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
         const budget = budgetPlan
-            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome))
+            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
             : undefined;
         const outcome = budgetAwareOutcome(turnOutcome, budget);
 
@@ -5210,7 +5215,8 @@ async function runAgentResumeTurn(
         const messages = [...(conversation.messages ?? []), assistantMessage];
 
         if (!superseded) {
-            await db.updateAgentConversation(conversationId, { messages, ...(budget ? { spentUsd: budget.spentUsd } : {}) });
+            await db.updateAgentConversation(conversationId, { messages });
+            if (budget) await addSessionTurnSpend({ db, conversationId, plan: budgetPlan, spentUsd: budget.turnCostUsd });
             await saveConversationState(db, {
                 conversationId,
                 tenantId,

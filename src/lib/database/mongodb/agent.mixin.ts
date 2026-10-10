@@ -224,6 +224,27 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         .updateOne({ _id: new ObjectId(id) }, { $set: set });
     }
 
+    async addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void> {
+      const addUsd = typeof change.addUsd === 'number' && Number.isFinite(change.addUsd) ? Math.max(0, change.addUsd) : 0;
+      const atLeastUsd = typeof change.atLeastUsd === 'number' && Number.isFinite(change.atLeastUsd) ? Math.max(0, change.atLeastUsd) : 0;
+      if (addUsd === 0 && atLeastUsd === 0) return;
+      // An aggregation-pipeline update, so the server does the arithmetic in one
+      // atomic step. Plain `$inc` would reject a total that is not a number, and
+      // could not raise to a floor and add in the same write.
+      await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .updateOne({ _id: new ObjectId(id) }, [{
+          $set: {
+            spentUsd: {
+              $add: [
+                { $max: [{ $convert: { input: '$spentUsd', to: 'double', onError: 0, onNull: 0 } }, atLeastUsd] },
+                addUsd,
+              ],
+            },
+          },
+        }]);
+    }
+
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       await db.collection(COLLECTIONS.agentConversationStates).deleteOne({ conversationId: id });

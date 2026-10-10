@@ -37,7 +37,7 @@ const hoisted = vi.hoisted(() => ({
   updateBudget: vi.fn(),
   queueContinue: vi.fn(),
   blocking: vi.fn(),
-  db: { listAgentPendingActions: vi.fn() },
+  db: { listAgentPendingActions: vi.fn(), getAgentSessionMaxSeq: vi.fn(async () => 0) },
 }));
 
 vi.mock('@/lib/services/agents', () => ({
