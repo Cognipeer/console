@@ -667,7 +667,9 @@ describe('no budget: nothing changes', () => {
     ]);
     const after = await stored(id);
     expect(after).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
-    expect(after.spentUsd).toBeUndefined();
+    // Nothing is capped, but what the turn cost is still on the session: `spent_usd` is the sum of the turns.
+    expect(after.spentUsd).toBeGreaterThan(0);
+    expect(after.spentUsd).toBeCloseTo(after.messages[1].usage!.costUsd!, 8);
     expect(after.budget).toBeUndefined();
   });
 });

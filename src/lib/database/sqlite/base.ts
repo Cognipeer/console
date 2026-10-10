@@ -1074,6 +1074,9 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.files, 'uploadedBy', 'uploadedBy TEXT');
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_purpose_expiresAt ON ${TABLES.files}(purpose, expiresAt)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_files_conversationId ON ${TABLES.files}(conversationId)`);
+    // A bucket's objects by key: the lookup of one object, the prefix / folder
+    // listing (a key range), and what the bucket delete guard counts.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_files_bucket_key ON ${TABLES.files}(providerKey, bucketKey, key)`);
     // Agent runtime (session events / human-in-the-loop): runtime fields on the
     // conversation and the paused SDK state. All nullable; absent = idle / not paused.
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeStatus', 'runtimeStatus TEXT');
@@ -1083,7 +1086,12 @@ export class SQLiteProviderBase {
     // Session spend budget (JSON) and the running total of what the session's turns cost.
     this.ensureTableColumn(db, TABLES.agentConversations, 'budget', 'budget TEXT');
     this.ensureTableColumn(db, TABLES.agentConversations, 'spentUsd', 'spentUsd REAL');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
+    // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_status_created ON ${TABLES.agentConversations}(projectId, runtimeStatus, createdAt DESC, id DESC)`);
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency_unique

@@ -109,6 +109,7 @@ import {
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
+import { sessionHasFilesPermission } from './files-permission';
 
 const logger = createLogger('api:agents');
 
@@ -233,6 +234,14 @@ function resolveRefusal(outcome: ResolveOutcome): { status: number; body: Record
     case 'not_found':
       return { status: 404, body: { error: 'Request not found' } };
     case 'not_pending':
+      // Told apart so a client can say what happened to it: answered elsewhere, cancelled (a new
+      // message, a run cancel, the timeout policy), or timed out.
+      if (outcome.status === 'cancelled') {
+        return { status: 409, body: { error: 'This request was cancelled', type: 'action_cancelled', code: 'action_cancelled', actionStatus: outcome.status } };
+      }
+      if (outcome.status === 'expired') {
+        return { status: 410, body: { error: 'This request has expired', type: 'action_expired', code: 'action_expired', actionStatus: outcome.status } };
+      }
       return { status: 409, body: { error: 'This request is no longer open', type: 'action_not_pending', code: 'action_not_pending', actionStatus: outcome.status } };
     case 'expired':
       return { status: 410, body: { error: 'This request has expired', type: 'action_expired', code: 'action_expired' } };
@@ -517,7 +526,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
         projectId,
         user,
+        canWriteFiles: () => sessionHasFilesPermission(session, 'write'),
       });
+      if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
 
       // An agent created from the dashboard asks before its tools run unless the
@@ -595,7 +606,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantId: session.tenantId,
             projectId,
             user,
-          });
+            canWriteFiles: () => sessionHasFilesPermission(session, 'write'),
+          }, existing.config);
+          if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
           warnings = checked.warnings;
         }
@@ -1345,7 +1358,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       });
       if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Session not found' });
       if (outcome.kind === 'invalid') return reply.code(400).send({ error: outcome.message });
-      return reply.code(200).send({ session: outcome.conversation });
+      // `continuable`: the session was waiting on its budget with a turn left to carry on, so
+      // `…/continue` now makes sense. False for a budget that stops (raise it and send a message),
+      // for a session whose turn already ended with its answer, and for one that was not stopped.
+      return reply.code(200).send({ session: outcome.conversation, continuable: outcome.wasBudgetPaused });
     } catch (error) {
       return sendRouteError(reply, error, 'Update session budget error', 'Failed to update the session budget');
     }

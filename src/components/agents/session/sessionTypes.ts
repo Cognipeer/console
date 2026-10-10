@@ -11,6 +11,7 @@ import type {
     IAgentTurnCompaction,
 } from '@/lib/database/provider/types.domain';
 
+/** `deniedByUser` on a step: the call was stopped because a person said no to its approval request, not by a guardrail or a failure. */
 export type PlaygroundStep = IAgentConversationStep;
 
 /** One context summarization during a turn — older tool results replaced by a structured summary to stay inside the context budget. */
@@ -23,8 +24,21 @@ export type TurnCompaction = IAgentTurnCompaction;
  */
 export type ChatMessage = Omit<IAgentConversationMessage, 'timestamp'> & { timestamp?: string; errorType?: string };
 
-/** The SDK's verdict when it gave one; the thrown-error flag otherwise. */
+/** What turns stored before `rejected` existed say for a call that was stopped before it ran. */
+export const BLOCKED_BEFORE_RUN_ERROR = 'Blocked before the tool ran.';
+
+/**
+ * The call was stopped before it ran — by a guardrail, or because a person
+ * denied its approval request. New turns store `status: 'rejected'`; turns
+ * stored earlier carry `status: 'error'` with the text above, so both count.
+ */
+export function stepBlockedBeforeRun(step: PlaygroundStep): boolean {
+    return step.status === 'rejected' || (step.status === 'error' && step.error === BLOCKED_BEFORE_RUN_ERROR);
+}
+
+/** The SDK's verdict when it gave one; the thrown-error flag otherwise. A call a person denied is not a failure. */
 export function stepFailed(step: PlaygroundStep): boolean {
+    if (step.deniedByUser) return false;
     if (step.status) return step.status === 'error' || step.status === 'rejected';
     return Boolean(step.error);
 }

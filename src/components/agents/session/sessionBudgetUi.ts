@@ -32,8 +32,26 @@ export function sessionBudgetView(
         spentUsd,
         ratio: Math.min(1, spentUsd / budget.maxCostUsd),
         exhausted: spentUsd >= budget.maxCostUsd,
-        continuable: session?.runtimeStatus === 'budget_paused' || session?.stopReason === 'budget_reached',
+        // A pausing budget leaves the session `budget_paused`. A budget that stops instead only refuses new
+        // messages — the turn is not waiting to be carried on, even though its stop reason is the same.
+        continuable: session?.runtimeStatus === 'budget_paused'
+            || (session?.stopReason === 'budget_reached' && budget.onReach !== 'stop'),
     };
+}
+
+/**
+ * After a budget change: carry the session on only if it was waiting to be and the server's answer still
+ * says so. A turn that finished when it crossed the budget is idle again after the raise, so continuing it
+ * would be refused (409) for no reason a person could act on. The server's `continuable` is the answer when
+ * it gave one; the stored session's status is the fallback for an older server.
+ */
+export function shouldContinueAfterBudgetChange(
+    wasContinuable: boolean,
+    stored: Pick<SessionRecord, 'runtimeStatus'> | null | undefined,
+    continuable?: boolean,
+): boolean {
+    if (!wasContinuable) return false;
+    return typeof continuable === 'boolean' ? continuable : stored?.runtimeStatus === 'budget_paused';
 }
 
 /** A budget to offer in the "new budget" box: double what the session had, and clear of what it spent. */

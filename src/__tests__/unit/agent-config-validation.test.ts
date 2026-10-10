@@ -16,6 +16,8 @@ const db = {
     findToolByKey: vi.fn(),
     findMcpServerByKey: vi.fn(),
     findAgentByKey: vi.fn(),
+    findFileBucketByKey: vi.fn(),
+    findProviderByKey: vi.fn(),
 };
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => db) }));
@@ -54,6 +56,8 @@ beforeEach(() => {
     db.findMemoryStoreByKey.mockResolvedValue(null);
     db.findSkillByKey.mockResolvedValue(null);
     db.findPromptByKey.mockResolvedValue(null);
+    db.findFileBucketByKey.mockResolvedValue({ key: 'docs', providerKey: 'disk', status: 'active' });
+    db.findProviderByKey.mockResolvedValue({ key: 'disk', type: 'file', status: 'active', driver: 'local-filesystem' });
 });
 
 const validate = (config: IAgentConfig) => validateAgentConfig({ tenantDbName: 't', projectId: 'p', config, agentKey: 'me' });
@@ -262,5 +266,49 @@ describe('validateAgentConfigShape — execution settings', () => {
         expect(fields(shape({ callbackUrl: 'https://h.example.com', callbackSecret: 'short' }).errors)).toContain('execution.callbackSecret');
         expect(fields(shape({ callbackSecret: 'a'.repeat(20) }).errors)).toContain('execution.callbackSecret');
         expect(shape({ callbackUrl: 'https://h.example.com', callbackSecret: '••••••' }).errors).toEqual([]);
+    });
+});
+
+
+describe('validateAgentConfig: where session files are kept', () => {
+    const withFiles = (attachments: Record<string, unknown>) => validateAgentConfig({
+        tenantDbName: 't', tenantId: 'tenant-1', projectId: 'p', agentKey: 'me', config: { modelKey: 'gpt-main', attachments } as IAgentConfig,
+    });
+    const bucketIssues = (result: { errors: Array<{ field: string; message: string }> }) => result.errors.filter((issue) => issue.field === 'attachments.bucketKey');
+
+    it('accepts files on a bucket that can take a file — and asks the project, not the tenant at large', async () => {
+        expect((await withFiles({ enabled: true, bucketKey: 'docs' })).errors).toEqual([]);
+        expect(db.findFileBucketByKey).toHaveBeenCalledWith('tenant-1', 'docs', 'p');
+        expect(db.findProviderByKey).toHaveBeenCalledWith('tenant-1', 'disk', 'p');
+    });
+
+    it('asks for a bucket when files are on without one', async () => {
+        expect(bucketIssues(await withFiles({ enabled: true }))).toEqual([{ field: 'attachments.bucketKey', message: 'Choose a bucket to keep the files in' }]);
+        expect(db.findFileBucketByKey).not.toHaveBeenCalled();
+    });
+
+    it('refuses a bucket that is not there, is disabled, or whose provider is gone, inactive or not assigned', async () => {
+        db.findFileBucketByKey.mockResolvedValue(null);
+        expect(bucketIssues(await withFiles({ enabled: true, bucketKey: 'docs' }))[0]!.message).toBe('The bucket "docs" does not exist in this project');
+
+        db.findFileBucketByKey.mockResolvedValue({ key: 'docs', providerKey: 'disk', status: 'disabled' });
+        expect(bucketIssues(await withFiles({ enabled: true, bucketKey: 'docs' }))[0]!.message).toBe('The bucket "docs" is disabled');
+
+        db.findFileBucketByKey.mockResolvedValue({ key: 'docs', providerKey: 'disk', status: 'active' });
+        db.findProviderByKey.mockResolvedValue({ key: 'disk', type: 'file', status: 'disabled' });
+        expect(bucketIssues(await withFiles({ enabled: true, bucketKey: 'docs' }))[0]!.message).toBe('The storage provider "disk" of the bucket "docs" is not active');
+
+        db.findProviderByKey.mockImplementation(async (_t: string, _k: string, projectId?: string) => (projectId ? null : { key: 'disk', type: 'file', status: 'active' }));
+        expect(bucketIssues(await withFiles({ enabled: true, bucketKey: 'docs' }))[0]!.message).toBe('The storage provider "disk" of the bucket "docs" is not assigned to this project');
+
+        db.findProviderByKey.mockResolvedValue(null);
+        expect(bucketIssues(await withFiles({ enabled: true, bucketKey: 'docs' }))[0]!.message).toBe('The storage provider "disk" of the bucket "docs" no longer exists');
+    });
+
+    it('checks nothing about storage while files are off — a stale bucket key is not an error then', async () => {
+        db.findFileBucketByKey.mockResolvedValue(null);
+        expect((await withFiles({ enabled: false, bucketKey: 'gone' })).errors).toEqual([]);
+        expect((await withFiles({ bucketKey: 'gone' })).errors).toEqual([]);
+        expect(db.findFileBucketByKey).not.toHaveBeenCalled();
     });
 });

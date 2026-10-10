@@ -1,4 +1,5 @@
 import type { IModel, ModelCategory } from '@/lib/database';
+import { inferModelAcceptsImages } from '@/lib/providers/contracts/modelCapabilityInference';
 
 export const MODEL_CAPABILITY_SCHEMA_VERSION = '1.0' as const;
 
@@ -48,15 +49,25 @@ const OUTPUT_MODALITIES = new Set<ModelOutputModality>([
   'embeddings',
 ]);
 
+/**
+ * What a model accepts when nothing explicit is stored for it. A chat model is
+ * `text`, plus `image` when the model is flagged multimodal OR — with `modelId`
+ * given — belongs to a known vision family (`modelCapabilityInference.ts`). The
+ * model forms prefill their input-modality boxes from this, and store an
+ * override only when the person changes it.
+ */
 export function getDefaultModelInputModalities(
   category: ModelCategory,
   isMultimodal = false,
+  modelId?: string,
 ): ModelInputModality[] {
   switch (category) {
     case 'stt':
       return ['audio'];
     case 'ocr':
       return ['image', 'file'];
+    case 'llm':
+      return isMultimodal || inferModelAcceptsImages(modelId) ? ['text', 'image'] : ['text'];
     default:
       return isMultimodal ? ['text', 'image'] : ['text'];
   }
@@ -220,7 +231,7 @@ export function resolveModelCapabilities(model: IModel): ResolvedModelCapabiliti
   const overrides = readOverrides(model);
 
   const inputModalities = readModalities(overrides.inputModalities, INPUT_MODALITIES)
-    ?? getDefaultModelInputModalities(model.category, model.isMultimodal);
+    ?? getDefaultModelInputModalities(model.category, model.isMultimodal, model.modelId);
   const outputModalities = readModalities(overrides.outputModalities, OUTPUT_MODALITIES)
     ?? getDefaultModelOutputModalities(model.category);
 

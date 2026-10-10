@@ -27,7 +27,10 @@ export const STALE_RUNNING_AFTER_MS = 2 * 60 * 1000;
 
 type RuntimeDb = Pick<DatabaseProvider, 'listAgentRuns' | 'updateAgentConversationRuntime'>;
 
-function lastUpdatedMs(conversation: IAgentConversation): number {
+/** What the stale check reads: a list row without its transcript qualifies. */
+type RuntimeSubject = Pick<IAgentConversation, '_id' | 'tenantId' | 'projectId' | 'runtimeStatus' | 'stopReason' | 'createdAt' | 'updatedAt'>;
+
+function lastUpdatedMs(conversation: RuntimeSubject): number {
   const value = conversation.updatedAt ?? conversation.createdAt;
   const ms = value ? new Date(value).getTime() : NaN;
   return Number.isFinite(ms) ? ms : 0;
@@ -39,11 +42,11 @@ function lastUpdatedMs(conversation: IAgentConversation): number {
  * Anything else is returned untouched. One indexed lookup, and only for a
  * conversation that says "running" and has been quiet for the threshold.
  */
-export async function normalizeStaleRunningStatus(
+export async function normalizeStaleRunningStatus<T extends RuntimeSubject>(
   db: RuntimeDb,
-  conversation: IAgentConversation,
+  conversation: T,
   now: Date = new Date(),
-): Promise<IAgentConversation> {
+): Promise<T> {
   if (conversation.runtimeStatus !== 'running') return conversation;
   if (now.getTime() - lastUpdatedMs(conversation) <= STALE_RUNNING_AFTER_MS) return conversation;
 
@@ -77,10 +80,10 @@ export async function normalizeStaleRunningStatus(
 }
 
 /** {@link normalizeStaleRunningStatus} over a list, keeping its order. */
-export function normalizeStaleRunningStatuses(
+export function normalizeStaleRunningStatuses<T extends RuntimeSubject>(
   db: RuntimeDb,
-  conversations: IAgentConversation[],
+  conversations: T[],
   now: Date = new Date(),
-): Promise<IAgentConversation[]> {
+): Promise<T[]> {
   return Promise.all(conversations.map((conversation) => normalizeStaleRunningStatus(db, conversation, now)));
 }

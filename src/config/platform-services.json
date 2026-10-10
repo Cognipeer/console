@@ -853,28 +853,6 @@
       "settings": true
     },
     {
-      "id": "webhooks",
-      "href": "/dashboard/webhooks",
-      "icon": "IconWebhook",
-      "category": "admin",
-      "navLabelKey": "webhooks",
-      "navDescriptionKey": "webhooksDescription",
-      "tags": [
-        "webhooks",
-        "events",
-        "notifications"
-      ],
-      "searchKeywords": [
-        "webhook",
-        "event",
-        "callback",
-        "notification",
-        "olay",
-        "bildirim"
-      ],
-      "settings": true
-    },
-    {
       "id": "audit",
       "href": "/dashboard/audit",
       "icon": "IconClipboardList",

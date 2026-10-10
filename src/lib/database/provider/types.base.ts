@@ -904,7 +904,7 @@ export interface IFileRecord {
   markdownError?: string;
   markdownSize?: number;
   markdownContentType?: string;
-  /** Set on a file uploaded to an agent session (`conversation-files` bucket); absent on every other file. */
+  /** Set on a file uploaded to an agent session (stored in the bucket the agent's `attachments.bucketKey` names); absent on every other file. */
   purpose?: 'conversation';
   conversationId?: string;
   agentKey?: string;
@@ -916,6 +916,18 @@ export interface IFileRecord {
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/** Which files a listing keeps: only session files, or only the ones uploaded some other way. */
+export type FileListPurpose = 'conversation' | 'other';
+
+/** One page of a bucket seen as folders: the sub-folders and the files directly in the folder. */
+export interface IFileEntriesPage {
+  /** Full folder paths (each ends with `/`), in key order. */
+  folders: string[];
+  items: IFileRecord[];
+  /** Pass back as `cursor` for the next page; absent on the last page. */
+  nextCursor?: string;
 }
 
 export interface ISemanticCacheConfig {

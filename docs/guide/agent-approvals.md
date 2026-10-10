@@ -94,8 +94,10 @@ The turn continues inline and the answer is a normal response (`completed`, or `
 | --- | --- |
 | `403` | The caller may not answer under the agent's *Who can answer* setting. |
 | `404` | No such session or request in this project. |
-| `409` | Someone answered first (`action_not_pending`, with `action_status`), or another run is active for the conversation. |
+| `409` | Someone answered first (`action_not_pending`, with `action_status`), the request was cancelled meanwhile — a new message, a cancelled run, the timeout policy (`action_cancelled`) — or another run is active for the conversation. |
 | `410` | The request ran out of time (`action_expired`). |
+
+The three codes are told apart on purpose: a client that shows the request can say *Answered*, *Cancelled* or *Expired* instead of guessing.
 
 You can also read what a session is waiting on at any time with `GET /api/client/v1/agents/sessions/{conversationId}` ([session events](/guide/agent-session-events)), and a `requires_action` webhook (`action.required`) tells you without polling ([webhooks](/guide/webhooks)).
 

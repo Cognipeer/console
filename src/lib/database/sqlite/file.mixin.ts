@@ -2,9 +2,10 @@
  * SQLite Provider – File record + bucket operations mixin
  */
 
-import type { IFileRecord, IFileBucketRecord } from '../provider.interface';
+import type { IFileRecord, IFileBucketRecord, IFileEntriesPage, FileListPurpose } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { keyPrefixUpperBound, walkFileEntries, type KeyRange } from '../fileEntryWalk';
 
 export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
@@ -105,15 +106,31 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       return row ? this.mapFileRow(row) : null;
     }
 
+    /** `purpose` as a SQL condition: session files, or everything that is not one. */
+    protected filePurposeClause(purpose: FileListPurpose | undefined): string | null {
+      if (purpose === 'conversation') return "purpose = 'conversation'";
+      if (purpose === 'other') return "(purpose IS NULL OR purpose <> 'conversation')";
+      return null;
+    }
+
     async listFileRecords(filters: {
       providerKey: string; bucketKey: string; projectId?: string;
-      search?: string; limit?: number; cursor?: string;
+      search?: string; prefix?: string; purpose?: FileListPurpose; limit?: number; cursor?: string;
     }): Promise<{ items: IFileRecord[]; nextCursor?: string }> {
       const db = this.getTenantDb();
       const clauses: string[] = ['providerKey = @providerKey', 'bucketKey = @bucketKey'];
       const params: Record<string, unknown> = { providerKey: filters.providerKey, bucketKey: filters.bucketKey };
 
       if (filters.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+      if (filters.prefix) {
+        // A key range, not LIKE: exact (LIKE ignores case) and served by the (providerKey, bucketKey, key) index.
+        clauses.push('key >= @prefix');
+        params.prefix = filters.prefix;
+        const upper = keyPrefixUpperBound(filters.prefix);
+        if (upper !== undefined) { clauses.push('key < @prefixUpper'); params.prefixUpper = upper; }
+      }
+      const purposeClause = this.filePurposeClause(filters.purpose);
+      if (purposeClause) clauses.push(purposeClause);
       if (filters.search) { clauses.push('name LIKE @search'); params.search = this.likePattern(filters.search.trim()); }
       if (filters.cursor) { clauses.push('id > @cursor'); params.cursor = filters.cursor; }
 
@@ -131,6 +148,31 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       }
 
       return { items, nextCursor };
+    }
+
+    async listFileEntries(filters: {
+      providerKey: string; bucketKey: string; projectId?: string;
+      prefix: string; purpose?: FileListPurpose; limit?: number; cursor?: string;
+    }): Promise<IFileEntriesPage> {
+      const db = this.getTenantDb();
+      const purposeClause = this.filePurposeClause(filters.purpose);
+      const probe = async (range: KeyRange, limit: number): Promise<IFileRecord[]> => {
+        const clauses: string[] = ['providerKey = @providerKey', 'bucketKey = @bucketKey'];
+        const params: Record<string, unknown> = { providerKey: filters.providerKey, bucketKey: filters.bucketKey, limit };
+        if (filters.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+        if (range.gte !== undefined) { clauses.push('key >= @gte'); params.gte = range.gte; }
+        if (range.gt !== undefined) { clauses.push('key > @gt'); params.gt = range.gt; }
+        if (range.lt !== undefined) { clauses.push('key < @lt'); params.lt = range.lt; }
+        if (purposeClause) clauses.push(purposeClause);
+        const rows = db.prepare(`SELECT * FROM ${TABLES.files} WHERE ${clauses.join(' AND ')} ORDER BY key ASC LIMIT @limit`)
+          .all(params) as SqliteRow[];
+        return rows.map((r) => this.mapFileRow(r));
+      };
+      return walkFileEntries(probe, {
+        prefix: filters.prefix,
+        limit: Math.min(Math.max(filters.limit ?? 50, 1), 200),
+        cursor: filters.cursor,
+      });
     }
 
     async listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]> {

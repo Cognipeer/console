@@ -29,6 +29,7 @@ import {
 } from '@tabler/icons-react';
 import {
   ALL_DASHBOARD_SERVICES,
+  DASHBOARD_SUBPAGES,
   type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
@@ -424,7 +425,13 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
     const candidates: ReadonlyArray<DashboardServiceDefinition> = offered
       ? offered
       : ALL_DASHBOARD_SERVICES.filter((s) => !s.tenantAdminOnly || isTenantAdmin);
-    return candidates.map((s: DashboardServiceDefinition) => {
+    const entries = [
+      ...candidates,
+      // Pages that sit inside another service's sub-nav (Agents → Webhooks) are found by name too,
+      // when the service they sit in is one this person is offered.
+      ...DASHBOARD_SUBPAGES.filter((page) => candidates.some((s) => s.id === page.parent)),
+    ];
+    return entries.map((s) => {
       const ServiceIcon = s.icon;
       const label = tNav(s.navLabelKey);
       const description = tNav(s.navDescriptionKey);

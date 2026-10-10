@@ -2373,12 +2373,15 @@ export interface IAgentExecutionConfig {
 /**
  * Files a user attaches to a session (the composer's paperclip, the client
  * API's `input_file` / `input_image`). Every field is a stored setting; absent
- * fields take the defaults in `SESSION_FILES_DEFAULTS` (sessionFiles.ts), and
- * an agent with no `attachments` at all accepts attachments with those
- * defaults — they were impossible before, so enabling them breaks nothing.
+ * limits take the defaults in `SESSION_FILES_DEFAULTS` (sessionFilesConfig.ts).
+ *
+ * Off unless switched on, and on only with a bucket to keep the files in: the
+ * files are ordinary Document Store files in the bucket the agent names — there
+ * is no built-in fallback storage, and nothing is ever written to the server's
+ * own disk unless the operator chose a local-disk bucket on purpose.
  */
 export interface IAgentAttachmentsConfig {
-  /** false = the agent takes no attachments. Default true. */
+  /** true = the agent takes attachments (needs `bucketKey`). Default false. */
   enabled?: boolean;
   /** Most files one session may hold. Default 10. */
   maxFiles?: number;
@@ -2392,8 +2395,27 @@ export interface IAgentAttachmentsConfig {
   readPageChars?: number;
   /** Days a file lives after upload before the cleanup removes it. Default 30. */
   retentionDays?: number;
-  /** Bucket the files are stored in. Absent = the project's system `conversation-files` bucket on the built-in storage. */
+  /** Bucket of the agent's project the files are stored in. Required when `enabled`. */
   bucketKey?: string;
+  /** Root folder inside the bucket; a file lands in `<folder>/<agentKey>/<sessionId>/…`. Default `agent-sessions`. */
+  folder?: string;
+  /** Files uploaded to a session that no message has carried yet ride along with the next message. Default true. */
+  attachNewUploads?: boolean;
+  /**
+   * Most images ONE model request carries. Images travel as references and are
+   * read from the bucket at the model call; beyond this the oldest ones become a
+   * text placeholder naming the file (the agent can look again with
+   * `session_files_view_image`). Default 6.
+   */
+  maxImages?: number;
+  /** Most image bytes (before base64) one model request carries, oldest dropped first. Default 12000000. */
+  maxBytes?: number;
+  /**
+   * How many of the person's most recent image-bearing messages are shown again
+   * with a new message when the agent's own context window no longer holds them.
+   * 0 = never re-attach. Default 2.
+   */
+  carryRecentImages?: number;
 }
 
 export interface IAgentConfig {
@@ -2473,7 +2495,7 @@ export interface IAgentConfig {
    * agent created before this existed) = nothing ever pauses.
    */
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
-  /** Files users may attach to a session. Absent = accepted with the defaults. */
+  /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
 }
 
@@ -2698,6 +2720,12 @@ export interface IAgentConversationStep {
    * any tool that legitimately returns a field called `error`.
    */
   status?: 'success' | 'error' | 'rejected' | 'handoff';
+  /**
+   * A person (or the approval timeout) answered "deny" to this call: it is
+   * `rejected` and never ran, but it is a decision, not a failure — no `error`
+   * text, not counted as a failed call. A call a guardrail blocked is `error`.
+   */
+  deniedByUser?: boolean;
   /** Served from the response cache — no upstream call was made. */
   fromCache?: boolean;
   /** `output` is a compaction of the result; `originalTokenCount` is its pre-compaction size. */
@@ -2939,6 +2967,13 @@ export interface IAgentConversation {
   /** Running total of the priced usage of every turn (USD); backfilled from the messages when absent. */
   spentUsd?: number;
   /**
+   * Which turn owns the runtime fields above right now (set when a turn starts).
+   * Internal: a turn that was cut off (deadline, cancel) and finishes late writes
+   * its end state only if it is still the owner, so it cannot overwrite the turn
+   * that started after it. Never part of an API response.
+   */
+  runtimeTurnId?: string;
+  /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a
    * per-message override still wins) — see `executePlaygroundChatLocal`.
@@ -2948,6 +2983,9 @@ export interface IAgentConversation {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** A conversation as a list shows it: no transcript, just how many messages it holds. */
+export type IAgentConversationListItem = Omit<IAgentConversation, 'messages'> & { messageCount: number };
 
 /**
  * The agent runtime's own state for a conversation, carried between turns.

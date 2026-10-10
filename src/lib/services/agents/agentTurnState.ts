@@ -33,9 +33,22 @@ import type {
 } from '@cognipeer/agent-sdk';
 
 import { createLogger } from '@/lib/core/logger';
-import type { DatabaseProvider, IAgentConversation, IAgentTurnCompaction, IModelPricing } from '@/lib/database';
+import type {
+    DatabaseProvider,
+    IAgentConversation,
+    IAgentMessageAttachment,
+    IAgentTurnCompaction,
+    IModelPricing,
+} from '@/lib/database';
 
 import { chunkText } from './assembledStream';
+import {
+    rebuildUserTurn,
+    recentImageAttachments,
+    referencedImageIds,
+    withEarlierImages,
+    type ContentPart,
+} from './sessionAttachmentText';
 
 const logger = createLogger('agent-turn-state');
 
@@ -198,26 +211,15 @@ function truncateText(value: unknown, limit: number): unknown {
 /**
  * Shrinks a state to fit `MAX_STATE_BYTES`, cheapest loss first:
  *  1. the untouched `rawOutput` copies (the model worked from `output`);
- *  2. image parts of attached files;
- *  3. long tool outputs in the tool history;
- *  4. long tool results in the transcript itself.
+ *  2. long tool outputs in the tool history;
+ *  3. long tool results in the transcript itself.
  * Returns null when even that does not fit — the caller then stores nothing
  * and the next turn falls back to the text transcript.
+ *
+ * Images of attached files are not part of this: they are `session-file://`
+ * references in the state, never inline bytes, so they cost a few dozen
+ * characters each and cannot be what makes a state too large.
  */
-/** A message with its image parts replaced by a one-line note; others are returned as they are. */
-function withoutImageParts(message: LooseMessage): LooseMessage {
-    const content = (message as { content?: unknown }).content;
-    if (!Array.isArray(content) || !content.some((part) => part && (part as { type?: unknown }).type === 'image_url')) {
-        return message;
-    }
-    return {
-        ...message,
-        content: content.map((part) => (part && (part as { type?: unknown }).type === 'image_url'
-            ? { type: 'text', text: '[An attached image was here; it is not kept in the saved state.]' }
-            : part)),
-    } as LooseMessage;
-}
-
 export function serializeForStorage(carried: CarriedState): string | null {
     let text = JSON.stringify(carried);
     if (text.length <= MAX_STATE_BYTES) return text;
@@ -237,13 +239,6 @@ export function serializeForStorage(carried: CarriedState): string | null {
         delete entry.rawOutput;
         return entry;
     });
-    text = JSON.stringify(shrunk);
-    if (text.length <= MAX_STATE_BYTES) return text;
-
-    // Images an attachment put in the transcript are inline base64: usually the
-    // bulk of an oversized state, and the one thing a later turn can do without
-    // (the file itself is still attached to the session).
-    shrunk.messages = (shrunk.messages ?? []).map((message) => withoutImageParts(message as LooseMessage) as unknown as AgentSdkMessage);
     text = JSON.stringify(shrunk);
     if (text.length <= MAX_STATE_BYTES) return text;
 
@@ -358,10 +353,18 @@ export async function saveConversationState(
  * there is none) plus the new user message, with an optional system prompt in
  * front — the playground passes its prompt as a message, the live path as an
  * option.
+ *
+ * A transcript replay keeps the files the person attached: a user message that
+ * has `attachments` is rebuilt with the same words the turn first carried them
+ * in (`rebuildUserTurn`) — the documents named for the session file tools, the
+ * images as references. And whichever way the history was built, the person's
+ * last `carryRecentImages` image-bearing messages are shown again with the new
+ * message when the history no longer holds them (the SDK keeps only the first
+ * user message and the latest turns).
  */
 export function buildTurnInputState(input: {
     carried: CarriedState | null;
-    transcript: Array<{ role: string; content: string }>;
+    transcript: Array<{ role: string; content: string; attachments?: IAgentMessageAttachment[] }>;
     userMessage: string;
     /**
      * What the model is shown as the user turn when it is more than the text —
@@ -369,9 +372,32 @@ export function buildTurnInputState(input: {
      */
     userContent?: string | unknown[];
     systemPrompt?: string;
+    /** How earlier attachments are shown again. Absent = they are not (a stateless history). */
+    attachments?: {
+        supportsVision: boolean;
+        /** `attachments.carryRecentImages`; 0 = never. */
+        carryRecentImages: number;
+        /** Files the session still holds; an image whose file is gone is not carried. Absent = all. */
+        availableFileIds?: ReadonlySet<string>;
+    };
 }): AgentSdkSmartState {
+    const replay = input.attachments;
     const history: AgentSdkMessage[] = input.carried?.messages
-        ?? input.transcript.map((m) => ({ role: m.role, content: m.content }) as AgentSdkMessage);
+        ?? input.transcript.map((m) => ({
+            role: m.role,
+            content: replay && m.role === 'user' && m.attachments?.length
+                ? rebuildUserTurn(m.content, m.attachments, { supportsVision: replay.supportsVision })
+                : m.content,
+        }) as AgentSdkMessage);
+
+    let userContent: string | unknown[] = input.userContent ?? input.userMessage;
+    if (replay && replay.supportsVision && replay.carryRecentImages > 0) {
+        const visible = referencedImageIds([...history, { content: userContent }]);
+        const missing = recentImageAttachments(input.transcript, replay.carryRecentImages)
+            .filter((image) => !visible.has(image.fileId))
+            .filter((image) => !replay.availableFileIds || replay.availableFileIds.has(image.fileId));
+        userContent = withEarlierImages(userContent as string | ContentPart[], missing);
+    }
     return {
         toolHistory: [],
         toolHistoryArchived: [],
@@ -381,7 +407,7 @@ export function buildTurnInputState(input: {
         messages: [
             ...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt } as AgentSdkMessage] : []),
             ...history,
-            { role: 'user', content: input.userContent ?? input.userMessage } as AgentSdkMessage,
+            { role: 'user', content: userContent } as AgentSdkMessage,
         ],
     } as AgentSdkSmartState;
 }

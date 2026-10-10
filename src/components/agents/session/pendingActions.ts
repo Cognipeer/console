@@ -88,6 +88,21 @@ export function cancelOpenActions(messages: ChatMessage[]): ChatMessage[] {
         : message));
 }
 
+/**
+ * The resolve route says the request is not open any more: answered somewhere
+ * else (409 `action_not_pending`), cancelled — by a new message, a run cancel or
+ * the timeout policy — (409 `action_cancelled`), or timed out (410). A page that
+ * gets one reloads the session to show how it really ended, instead of failing.
+ */
+export function isStaleActionRefusal(
+    status: number,
+    body: { type?: unknown; code?: unknown } | null | undefined,
+): boolean {
+    if (status === 410) return true;
+    if (status !== 409) return false;
+    return [body?.type, body?.code].some((value) => value === 'action_not_pending' || value === 'action_cancelled');
+}
+
 export type ResolvedKind =
     | 'approved'
     | 'approved_edited'

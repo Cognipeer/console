@@ -210,7 +210,10 @@ describe('executeAgentChatLocal — session events and steps', () => {
     expect(events.every((e) => e.runId === 'run-9')).toBe(true);
 
     const runtime = db.updateAgentConversationRuntime.mock.calls.map((c) => c[1]);
-    expect(runtime[0]).toEqual({ runtimeStatus: 'running' });
+    // The turn names itself as the owner of the runtime fields, and writes its end only while it still is.
+    expect(runtime[0]).toEqual({ runtimeStatus: 'running', runtimeTurnId: expect.any(String) });
+    const owner = (runtime[0] as { runtimeTurnId: string }).runtimeTurnId;
+    expect(db.updateAgentConversationRuntime.mock.calls.slice(1).map((c) => c[2])).toEqual([{ onlyIfTurn: owner }, { onlyIfTurn: owner }]);
     expect(Object.assign({}, ...runtime)).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn', lastEventSeq: 7 });
   });
 

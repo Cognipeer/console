@@ -1,5 +1,5 @@
 /**
- * Settings → Webhooks, the parts that are not markup: how the event checkboxes
+ * Agents → Webhooks, the parts that are not markup: how the event checkboxes
  * edit a subscription (exact types and `group.*` patterns), what the list
  * shows, and that every event, group, reason and state has a label in both
  * languages. (createElement, not JSX: the suite only collects `.test.ts`.)

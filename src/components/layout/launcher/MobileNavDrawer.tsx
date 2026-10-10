@@ -195,7 +195,7 @@ export default function MobileNavDrawer({
                     <span className={classes.mobileNavItemIcon}>
                       <ItemIcon size={16} stroke={1.7} />
                     </span>
-                    <span>{item.label}</span>
+                    <span>{item.labelKey ? tNav(item.labelKey) : item.label}</span>
                     {item.badge ? (
                       <span className={classes.subnavBadge}>{item.badge}</span>
                     ) : null}

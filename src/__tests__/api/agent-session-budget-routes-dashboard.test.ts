@@ -113,6 +113,8 @@ describe('PATCH …/sessions/:sessionId', () => {
 
         expect(res.statusCode).toBe(200);
         expect(JSON.parse(res.body).session.budget).toEqual({ maxCostUsd: 5, onReach: 'pause' });
+        // The session was waiting on its budget with a turn to carry on: `…/continue` makes sense now.
+        expect(JSON.parse(res.body).continuable).toBe(true);
         expect(updateSessionBudget).toHaveBeenCalledWith({
             tenantDbName: 'tenant_acme', projectId: 'proj-1', conversationId: 'conv-1', budget: { maxCostUsd: 5, onReach: 'pause' },
         });
@@ -121,7 +123,10 @@ describe('PATCH …/sessions/:sessionId', () => {
     it('null removes the budget; a body without one is a 400; the service\'s refusal is a 400', async () => {
         mockFn(updateSessionBudget).mockResolvedValue({ kind: 'ok', wasBudgetPaused: false, conversation: CONVERSATION });
         const app = await build();
-        expect((await app.inject({ method: 'PATCH', url: SESSION_URL, headers, payload: { budget: null } })).statusCode).toBe(200);
+        const removed = await app.inject({ method: 'PATCH', url: SESSION_URL, headers, payload: { budget: null } });
+        expect(removed.statusCode).toBe(200);
+        // A budget that stops (or a turn that already ended) has nothing to continue: the client must not call `…/continue`.
+        expect(JSON.parse(removed.body).continuable).toBe(false);
         expect(mockFn(updateSessionBudget).mock.calls[0][0].budget).toBeNull();
 
         expect((await app.inject({ method: 'PATCH', url: SESSION_URL, headers, payload: {} })).statusCode).toBe(400);

@@ -8,6 +8,7 @@
  * Everything here is best effort: nothing it does may fail the turn.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { SmartAgentEvent as AgentSdkEvent } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
 import type { DatabaseProvider, IAgentTurnCompaction } from '@/lib/database';
@@ -45,6 +46,14 @@ export interface SessionTurnEventsOptions {
   userMessage?: string | (() => string);
   trigger: 'message' | 'resume' | 'timeout';
   bus?: SessionEventBus;
+  /**
+   * True once this turn has been given up on (its deadline passed, or it was
+   * cancelled) while the model call it was waiting on is still going. A turn in
+   * that state stops writing mid-turn events — a newer turn may already own the
+   * log — and its end is recorded only if no newer turn has started
+   * (`updateAgentConversationRuntime`'s `onlyIfTurn`).
+   */
+  superseded?: () => boolean;
 }
 
 export interface SessionTurnFinish {
@@ -140,29 +149,61 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
   if (options.userMessage === undefined) ensureStarted();
 
   // The conversation row says "running" at once, so a client that loads the
-  // session mid-turn knows to attach.
+  // session mid-turn knows to attach. It also names this turn as the owner of the
+  // runtime fields: a turn that is cut off and finishes late checks it before
+  // writing its end, so it cannot overwrite the turn that started after it.
+  const turnToken = randomUUID();
   const marked = (async () => {
-    await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'running' });
+    await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'running', runtimeTurnId: turnToken });
   })()
     .catch((error) => {
       logger.warn('Could not mark the session running', { conversationId, error: String(error) });
     });
 
   let finished = false;
-  const settle = async (stopReason: SessionStopReason, pendingActionIds?: string[], budget?: SessionBudgetSettlement) => {
+  /**
+   * Records the turn's end: the status first, then the closing events, then the
+   * last seq. The status goes in BEFORE the idle / action frames are written, so
+   * a follower that reloads the session on that frame never reads 'running' —
+   * and because it is conditional on this turn still owning the session, a turn
+   * a newer one has overtaken writes nothing at all (`false` from the database).
+   */
+  const settle = async (
+    stopReason: SessionStopReason,
+    emitClosing: () => void,
+    pendingActionIds?: string[],
+    budget?: SessionBudgetSettlement,
+  ) => {
     await marked;
-    // The status goes in BEFORE the buffered idle / action frames are published,
-    // so a follower that reloads the session on that frame never reads 'running'.
+    let current = true;
     try {
-      await db.updateAgentConversationRuntime(conversationId, conversationRuntimePatch(stopReason, pendingActionIds, budget));
+      const applied = await db.updateAgentConversationRuntime(
+        conversationId,
+        conversationRuntimePatch(stopReason, pendingActionIds, budget),
+        { onlyIfTurn: turnToken },
+      );
+      current = applied !== false;
     } catch (error) {
       logger.warn('Could not record the session stop reason', { conversationId, error: String(error) });
     }
+    if (!current) {
+      logger.info('A turn ended after a newer one took over the session; its end is not recorded', { conversationId, stopReason });
+      writer.abandon();
+      return;
+    }
+    guarded('closing events', emitClosing);
     await writer.close();
     try {
-      await db.updateAgentConversationRuntime(conversationId, { lastEventSeq: writer.lastSeq() });
+      await db.updateAgentConversationRuntime(conversationId, { lastEventSeq: writer.lastSeq() }, { onlyIfTurn: turnToken });
     } catch (error) {
       logger.warn('Could not record the last session event seq', { conversationId, error: String(error) });
+    }
+  };
+  const isSuperseded = () => {
+    try {
+      return options.superseded?.() === true;
+    } catch {
+      return false;
     }
   };
 
@@ -179,6 +220,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     writer,
     emit: (type, data) => guarded('emit', () => writer.emit(type, data)),
     emitInTurn: (type, data) => guarded('emit', () => {
+      if (isSuperseded()) return;
       ensureStarted();
       writer.emit(type, data);
     }),
@@ -186,6 +228,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     onSdkEvent(event) {
       if (event.type !== 'tool_call' || !event.name) return;
       guarded('tool event', () => {
+        if (isSuperseded()) return;
         ensureStarted();
         const subagent = (event as { subagentName?: string }).subagentName;
         if (event.phase === 'start') {
@@ -210,6 +253,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
 
     onCompaction(compaction) {
       guarded('compaction', () => {
+        if (isSuperseded()) return;
         ensureStarted();
         writer.emit('agent.compaction', { ...compaction });
       });
@@ -217,6 +261,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
 
     onText(text) {
       guarded('text delta', () => {
+        if (isSuperseded()) return;
         ensureStarted();
         writer.emitLive('agent.message.delta', { text });
       });
@@ -226,7 +271,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
       if (finished) return;
       finished = true;
       try {
-        guarded('finish', () => {
+        await settle(result.stopReason, () => {
           ensureStarted(result.userMessage);
           // A pause with nothing written yet has no message to report.
           if (result.content !== undefined && !(result.stopReason === 'requires_action' && !result.content.trim())) {
@@ -252,8 +297,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
             ...(result.detail ? { detail: result.detail } : {}),
           });
           if (result.stopReason === 'end_turn') writer.emit('session.work_done', {});
-        });
-        await settle(result.stopReason, result.pendingActionIds, result.budget);
+        }, result.pendingActionIds, result.budget);
       } catch (error) {
         logger.warn('Session event recorder failed (finish)', { conversationId, error: String(error) });
       }
@@ -263,7 +307,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
       if (finished) return;
       finished = true;
       try {
-        guarded('fail', () => {
+        await settle('error', () => {
           ensureStarted();
           // The client-safe classification: these events are readable by API callers.
           // A guardrail refusal is the configured outcome and its message is meant for the caller.
@@ -274,7 +318,6 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
           writer.emit('session.error', { message, ...(code ? { code } : {}) });
           writer.emit('session.status_idle', { stopReason: 'error', detail: message });
         });
-        await settle('error');
       } catch (settleError) {
         logger.warn('Session event recorder failed (fail)', { conversationId, error: String(settleError) });
       }

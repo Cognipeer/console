@@ -7,7 +7,9 @@
 import type {
   IAgent,
   AgentStatus,
+  AgentSessionRuntimeStatus,
   IAgentConversation,
+  IAgentConversationListItem,
   IAgentConversationState,
   IAgentPendingAction,
   IAgentSessionEvent,
@@ -262,8 +264,9 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async updateAgentConversationRuntime(
       id: string,
-      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
-    ): Promise<void> {
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+      options?: { onlyIfTurn?: string },
+    ): Promise<boolean> {
       const sets: string[] = [];
       const params: Record<string, unknown> = { id };
       if (patch.runtimeStatus !== undefined) { sets.push('runtimeStatus = @runtimeStatus'); params.runtimeStatus = patch.runtimeStatus; }
@@ -272,8 +275,16 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (patch.lastEventSeq !== undefined) { sets.push('lastEventSeq = @lastEventSeq'); params.lastEventSeq = patch.lastEventSeq; }
       if (patch.budget !== undefined) { sets.push('budget = @budget'); params.budget = patch.budget ? this.toJson(patch.budget) : null; }
       if (patch.spentUsd !== undefined) { sets.push('spentUsd = @spentUsd'); params.spentUsd = patch.spentUsd; }
-      if (sets.length === 0) return;
-      this.getTenantDb().prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      if (patch.runtimeTurnId !== undefined) { sets.push('runtimeTurnId = @runtimeTurnId'); params.runtimeTurnId = patch.runtimeTurnId; }
+      if (sets.length === 0) return true;
+      // One statement, so "is it still my turn?" and the write cannot be separated by another writer.
+      let where = 'id = @id';
+      if (options?.onlyIfTurn !== undefined) {
+        where += ' AND (runtimeTurnId IS NULL OR runtimeTurnId = @onlyIfTurn)';
+        params.onlyIfTurn = options.onlyIfTurn;
+      }
+      const result = this.getTenantDb().prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE ${where}`).run(params);
+      return result.changes > 0;
     }
 
     async addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void> {
@@ -375,6 +386,46 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       const rows = db.prepare(sql).all(params) as SqliteRow[];
       return rows.map((r) => this.mapConversation(r));
+    }
+
+    async listAgentConversationPage(filters: {
+      projectId: string;
+      agentKey?: string;
+      runtimeStatus?: AgentSessionRuntimeStatus;
+      limit: number;
+      after?: { createdAt: Date; id: string };
+    }): Promise<IAgentConversationListItem[]> {
+      const db = this.getTenantDb();
+      const conditions: string[] = ['projectId = @projectId'];
+      const params: Record<string, unknown> = { projectId: filters.projectId, limit: filters.limit };
+      if (filters.agentKey) { conditions.push('agentKey = @agentKey'); params.agentKey = filters.agentKey; }
+      if (filters.runtimeStatus === 'idle') {
+        conditions.push("(runtimeStatus IS NULL OR runtimeStatus = 'idle')");
+      } else if (filters.runtimeStatus) {
+        conditions.push('runtimeStatus = @runtimeStatus');
+        params.runtimeStatus = filters.runtimeStatus;
+      }
+      if (filters.after) {
+        // Keyset on (createdAt, id), newest first: the rows strictly after the last one of the previous page.
+        conditions.push('(createdAt < @afterCreatedAt OR (createdAt = @afterCreatedAt AND id < @afterId))');
+        params.afterCreatedAt = filters.after.createdAt.toISOString();
+        params.afterId = filters.after.id;
+      }
+      // No `messages` column: the transcript is the heavy part, and a list only needs how many there are.
+      const rows = db.prepare(`
+        SELECT id, tenantId, projectId, agentKey, title, metadata, createdBy, createdAt, updatedAt,
+               runtimeStatus, stopReason, pendingActionIds, lastEventSeq, budget, spentUsd,
+               json_array_length(messages) AS messageCount
+        FROM ${TABLES.agentConversations}
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY createdAt DESC, id DESC
+        LIMIT @limit
+      `).all(params) as SqliteRow[];
+      return rows.map((row) => {
+        const { messages: _messages, ...conversation } = this.mapConversation(row);
+        void _messages;
+        return { ...conversation, messageCount: Number(row.messageCount ?? 0) };
+      });
     }
 
     // ── Agent session event log ──────────────────────────────────
