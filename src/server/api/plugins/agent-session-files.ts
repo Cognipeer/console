@@ -5,7 +5,7 @@
  *
  * An upload is a raw body: `Content-Type: <the file's mime type>` and
  * `?name=<filename>` — no multipart dependency. A JSON body
- * `{ name, contentType, data: <base64> }` is accepted for small files; for that
+ * `{ name, content_type, data: <base64> }` (`contentType` too) is accepted for small files; for that
  * reason a file of type `application/json` is uploaded as `application/octet-stream`
  * (the name still decides how it is read).
  *
@@ -23,6 +23,7 @@ import { getConfig } from '@/lib/core/config';
 import { getAgentByKey, getConversationById } from '@/lib/services/agents';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import {
   deleteSessionFile,
   listSessionFiles,
@@ -64,8 +65,8 @@ function readUploadPayload(request: FastifyRequest): UploadPayload | string {
     } catch {
       return 'The body is not valid JSON.';
     }
-    const name = [body.name, body.fileName, body.filename].find((v): v is string => typeof v === 'string' && v.trim().length > 0);
-    const contentType = [body.contentType, body.mimeType, body.mime_type].find((v): v is string => typeof v === 'string');
+    const name = [body.name, body.file_name, body.fileName, body.filename].find((v): v is string => typeof v === 'string' && v.trim().length > 0);
+    const contentType = [body.content_type, body.contentType, body.mimeType, body.mime_type].find((v): v is string => typeof v === 'string');
     if (!name) return 'name is required.';
     if (typeof body.data !== 'string' || body.data.length === 0) return 'data is required (base64 or a data URL).';
     return { fileName: name, ...(contentType ? { contentType } : {}), data: body.data };
@@ -203,7 +204,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
   function sendClientError(reply: FastifyReply, error: unknown, logMessage: string) {
     const classified = classifyAgentRunError(error);
     if (classified.status >= 500) logger.error(logMessage, { error });
-    return reply.code(classified.status).send({ error: classified.error });
+    return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
   }
 
   const clientScope = (ctx: ApiTokenContext) => ({

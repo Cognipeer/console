@@ -55,6 +55,7 @@ import { reloadConfig } from '@/lib/core/config';
 import { executeAgentChatLocal, executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import {
+  checkAgentPendingActionResolution,
   resolveAgentPendingAction,
   sweepExpiredPendingActions,
   type ResolveActor,
@@ -263,7 +264,7 @@ describe('a tool that needs approval pauses the turn', () => {
     expect(response.required_action?.type).toBe('agent_actions');
     expect(response.required_action?.actions).toHaveLength(1);
     expect(response.required_action?.actions[0]).toMatchObject({
-      kind: 'tool_approval', toolName: 'sandbox_exec', args: { command: 'rm -rf /tmp/x' }, status: 'pending',
+      kind: 'tool_approval', tool_name: 'sandbox_exec', args: { command: 'rm -rf /tmp/x' }, status: 'pending',
     });
 
     const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
@@ -413,7 +414,7 @@ describe('unattended callers', () => {
 
     expect(executed).toEqual([]);
     expect(response.status).toBe('requires_action');
-    expect(response.required_action?.actions[0]).toMatchObject({ kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending' });
+    expect(response.required_action?.actions[0]).toMatchObject({ kind: 'tool_approval', tool_name: 'sandbox_exec', status: 'pending' });
     const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
     expect(action.expiresAt).toBeTruthy(); // the usual timeout applies
     expect(await storedConversation(id)).toMatchObject({ runtimeStatus: 'requires_action', pendingActionIds: [String(action._id)] });
@@ -650,7 +651,7 @@ describe('(d) a question to the user', () => {
     const action = paused.required_action!.actions[0];
     expect(action.kind).toBe('user_question');
     expect(action.questions?.[0]).toMatchObject({ question: 'Which environment?', header: 'Env' });
-    expect(action.allowFreeText).toBe(true);
+    expect(action.allow_free_text).toBe(true);
 
     const outcome = await resolve(id, action.id, { answers: { 'Which environment?': 'prod' } });
     expect(outcome.kind).toBe('resumed');
@@ -899,6 +900,101 @@ describe('(h) who may answer', () => {
   it('project_members: any member of the project may', async () => {
     const { id, actionId } = await pausedSession({ ...HITL_ON, approvers: 'project_members' });
     expect((await resolve(id, actionId, { decision: 'allow' }, stranger)).kind).toBe('resumed');
+  });
+});
+
+describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
+  const stranger: ResolveActor = { userId: 'user-2', isAdmin: false, channel: 'dashboard' };
+
+  function check(
+    conversationId: string,
+    actionId: string,
+    body: Record<string, unknown>,
+    extra: { actor?: ResolveActor; agentKey?: string; projectId?: string } = {},
+  ) {
+    return checkAgentPendingActionResolution({
+      tenantDbName: DB_NAME,
+      tenantId,
+      projectId: extra.projectId ?? PROJECT_ID,
+      conversationId,
+      actionId,
+      agentKey: extra.agentKey,
+      body,
+      actor: extra.actor ?? ownerActor,
+    });
+  }
+
+  async function paused(humanInTheLoop: NonNullable<IAgentConfig['humanInTheLoop']> = HITL_ON) {
+    await createAgent({ humanInTheLoop });
+    scriptModel(oneToolScript('ls'));
+    const id = String((await newConversation())._id);
+    const response = await chat(id, 'go');
+    return { id, actionId: response.required_action!.actions[0].id };
+  }
+
+  it('is null for an answer that would go ahead, and changes nothing', async () => {
+    const { id, actionId } = await paused();
+    const eventsBefore = (await events(id)).length;
+    const stateBefore = (await db.findAgentConversationState(id))?.pausedSnapshot;
+    const modelCalls = hoisted.buildModelRuntime.mock.calls.length;
+
+    expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
+    expect(await check(id, actionId, { decision: 'deny', comment: 'no' }, { agentKey: AGENT_KEY })).toBeNull();
+
+    expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
+    expect((await events(id)).length).toBe(eventsBefore);
+    expect((await db.findAgentConversationState(id))?.pausedSnapshot).toBe(stateBefore);
+    expect(await storedConversation(id)).toMatchObject({ runtimeStatus: 'requires_action' });
+    expect(hoisted.buildModelRuntime.mock.calls.length).toBe(modelCalls);
+    expect(executed).toEqual([]);
+    // ...and the real answer still goes through afterwards.
+    expect((await resolve(id, actionId, { decision: 'allow' })).kind).toBe('resumed');
+  });
+
+  it('says not_found for an unknown action, another conversation, another project or another agent', async () => {
+    const { id, actionId } = await paused();
+    expect(await check(id, 'act_missing', { decision: 'allow' })).toEqual({ kind: 'not_found' });
+    expect(await check('another-conversation', actionId, { decision: 'allow' })).toEqual({ kind: 'not_found' });
+    expect(await check(id, actionId, { decision: 'allow' }, { projectId: 'proj-other' })).toEqual({ kind: 'not_found' });
+    expect(await check(id, actionId, { decision: 'allow' }, { agentKey: 'someone-else' })).toEqual({ kind: 'not_found' });
+  });
+
+  it('says not_pending once the action is answered', async () => {
+    const { id, actionId } = await paused();
+    expect((await resolve(id, actionId, { decision: 'allow' })).kind).toBe('resumed');
+    expect(await check(id, actionId, { decision: 'allow' })).toEqual({ kind: 'not_pending', status: 'resolved' });
+  });
+
+  it('says expired when the time of the request is up', async () => {
+    const { id, actionId } = await paused({ ...HITL_ON, timeoutMinutes: 1 });
+    await db.updateAgentPendingAction(actionId, { expiresAt: new Date(Date.now() - 1000) });
+    expect(await check(id, actionId, { decision: 'allow' })).toEqual({ kind: 'expired' });
+  });
+
+  it('says forbidden for someone the approvers setting leaves out', async () => {
+    const { id, actionId } = await paused();
+    expect(await check(id, actionId, { decision: 'allow' }, { actor: stranger })).toMatchObject({ kind: 'forbidden' });
+    expect(await check(id, actionId, { decision: 'allow' }, { actor: { ...stranger, isAdmin: true } })).toBeNull();
+  });
+
+  it('says invalid for a body the resolve flow would refuse', async () => {
+    const { id, actionId } = await paused();
+    expect(await check(id, actionId, {})).toMatchObject({ kind: 'invalid' });
+    expect(await check(id, actionId, { decision: 'maybe' })).toMatchObject({ kind: 'invalid' });
+  });
+
+  it('checks the answers of a question against the agent free-text setting', async () => {
+    await createAgent({ humanInTheLoop: { askUser: { enabled: true, allowFreeText: false } } });
+    const questions = [{ question: 'Which environment?', options: [{ label: 'staging' }, { label: 'prod' }] }];
+    scriptModel((call) => call === 0
+      ? { role: 'assistant', content: '', tool_calls: [toolCall('q1', 'ask_user_question', { questions })] }
+      : { role: 'assistant', content: 'ok' });
+    const id = String((await newConversation())._id);
+    const actionId = (await chat(id, 'deploy')).required_action!.actions[0].id;
+
+    expect(await check(id, actionId, { answers: { 'Which environment?': 'somewhere else' } })).toMatchObject({ kind: 'invalid' });
+    expect(await check(id, actionId, { answers: { 'Which environment?': 'prod' } })).toBeNull();
+    expect(await check(id, actionId, { cancelled: true })).toBeNull();
   });
 });
 

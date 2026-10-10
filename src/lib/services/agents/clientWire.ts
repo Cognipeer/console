@@ -1,0 +1,129 @@
+/**
+ * How the agent-runtime features spell themselves on the client API.
+ *
+ * The agent family under `/client/v1` (Responses, runs, sessions) is
+ * snake_case (`stop_reason`, `required_action`, `conversation_id`). The
+ * dashboard and the stored records are camelCase, so everything that crosses
+ * to a client token goes through here: pending actions, the `data` of logged
+ * events, the error fields, and the answer a client posts.
+ *
+ * Dashboard endpoints do not use any of this — they keep their own shape.
+ */
+
+import type { AgentRunErrorBody } from './agentErrors';
+
+/** `toolCallId` → `tool_call_id`. Already-snake keys pass through. */
+export function toSnakeKey(key: string): string {
+    return key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+}
+
+/** Keys whose value is somebody else's data (tool arguments, free-form answers): never re-keyed. */
+const OPAQUE_KEYS = new Set(['args', 'answers']);
+
+/** Every object key snake_cased, depth first; values of {@link OPAQUE_KEYS} are left as they are. */
+export function toSnakeCaseDeep<T = unknown>(value: unknown): T {
+    if (Array.isArray(value)) return value.map((item) => toSnakeCaseDeep(item)) as unknown as T;
+    if (typeof value !== 'object' || value === null || value instanceof Date) return value as T;
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+        out[toSnakeKey(key)] = OPAQUE_KEYS.has(key) ? inner : toSnakeCaseDeep(inner);
+    }
+    return out as T;
+}
+
+// ── Pending actions ───────────────────────────────────────────────────────
+
+/** An approval / question as a client sees it. */
+export interface ClientPendingAction {
+    id: string;
+    kind: string;
+    tool_name?: string;
+    args?: unknown;
+    questions?: unknown[];
+    allow_free_text?: boolean;
+    status: string;
+    expires_at?: string;
+    requested_at?: string;
+}
+
+/** What `toClientPendingAction` reads: the dashboard's `PublicPendingAction`, or the copy on a message. */
+export interface PendingActionLike {
+    id: string;
+    kind: string;
+    toolName?: string;
+    args?: unknown;
+    questions?: unknown[];
+    allowFreeText?: boolean;
+    status: string;
+    expiresAt?: string;
+    requestedAt?: string;
+}
+
+export function toClientPendingAction(action: PendingActionLike): ClientPendingAction {
+    return {
+        id: action.id,
+        kind: action.kind,
+        ...(action.toolName ? { tool_name: action.toolName } : {}),
+        ...(action.args !== undefined ? { args: action.args } : {}),
+        ...(action.questions ? { questions: toSnakeCaseDeep<unknown[]>(action.questions) } : {}),
+        ...(action.allowFreeText !== undefined ? { allow_free_text: action.allowFreeText } : {}),
+        status: action.status,
+        ...(action.expiresAt ? { expires_at: action.expiresAt } : {}),
+        ...(action.requestedAt ? { requested_at: action.requestedAt } : {}),
+    };
+}
+
+// ── Session events ───────────────────────────────────────────────────────
+
+/** The `data` of a logged event for a client: keys snake_cased, tool arguments left alone. */
+export function toClientEventData(data: Record<string, unknown>): Record<string, unknown> {
+    return toSnakeCaseDeep<Record<string, unknown>>(data);
+}
+
+/** A bus / replay frame (`runId`, `createdAt`) as the client stream carries it. */
+export function toClientEventFrame(frame: {
+    seq?: number;
+    type: string;
+    data: Record<string, unknown>;
+    runId?: string;
+    createdAt: string;
+}) {
+    return {
+        ...(frame.seq !== undefined ? { seq: frame.seq } : {}),
+        type: frame.type,
+        data: toClientEventData(frame.data),
+        ...(frame.runId ? { run_id: frame.runId } : {}),
+        created_at: frame.createdAt,
+    };
+}
+
+// ── What a client posts ──────────────────────────────────────────────────
+
+/**
+ * The answer to an approval / question, as the service reads it. A client
+ * spells it `approved_args` / `remember_for_session`; the camelCase names the
+ * first drafts used are still accepted.
+ */
+export function normalizeClientResolveBody(body: Record<string, unknown>): Record<string, unknown> {
+    const out = { ...body };
+    if (out.approvedArgs === undefined && body.approved_args !== undefined) out.approvedArgs = body.approved_args;
+    if (out.rememberForSession === undefined && body.remember_for_session !== undefined) {
+        out.rememberForSession = body.remember_for_session;
+    }
+    delete out.approved_args;
+    delete out.remember_for_session;
+    return out;
+}
+
+// ── Errors ───────────────────────────────────────────────────────────────
+
+/** An agent-run error body with its extra fields snake_cased (`pending_action_ids`, `spent_usd`, `max_cost_usd`). */
+export function toClientErrorBody(error: AgentRunErrorBody): Record<string, unknown> {
+    const { pendingActionIds, spentUsd, maxCostUsd, ...rest } = error;
+    return {
+        ...rest,
+        ...(pendingActionIds !== undefined ? { pending_action_ids: pendingActionIds } : {}),
+        ...(spentUsd !== undefined ? { spent_usd: spentUsd } : {}),
+        ...(maxCostUsd !== undefined ? { max_cost_usd: maxCostUsd } : {}),
+    };
+}

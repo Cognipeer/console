@@ -88,6 +88,8 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
         [{ expiresAt: 1 }, { name: 'idx_expiresAt' }, true],
         [{ tenantId: 1, projectId: 1, idempotencyKey: 1 }, { name: 'idx_tenant_project_idempotencyKey' }, true],
         [{ tenantId: 1, projectId: 1, agentKey: 1, createdAt: -1 }, { name: 'idx_tenant_project_agent_createdAt' }, true],
+        // The reconciler's sweep for callbacks that never settled.
+        [{ callbackStatus: 1, updatedAt: 1 }, { name: 'idx_callbackStatus_updatedAt' }, true],
       ];
       let requiredOk = true;
       for (const [keys, options, required] of specs) {
@@ -184,7 +186,8 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       }
 
       const now = new Date();
-      const doc: Omit<IAgentRun, '_id'> = { ...record, createdAt: now, updatedAt: now };
+      // An empty list is stored as none, like the SQLite provider does.
+      const doc: Omit<IAgentRun, '_id'> = { ...record, attachments: record.attachments?.length ? record.attachments : null, createdAt: now, updatedAt: now };
       try {
         const result = await db
           .collection<IAgentRun>(COLLECTIONS.agentRuns)

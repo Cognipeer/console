@@ -4,19 +4,41 @@
  * Includes file records, file buckets, and vector counters.
  */
 
-import { ObjectId } from 'mongodb';
+import { ObjectId, type Db } from 'mongodb';
 import type { IFileRecord, IFileBucketRecord } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
 
 export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
+    /** Per-process memo: the session-file indexes are ensured on the first conversation file per tenant DB. */
+    private conversationFileIndexesReady = new Set<string>();
+
+    /**
+     * Ensured on the write path as well as in the boot manifest: the manifest
+     * only indexes collections that exist when a tenant DB is first bound, so a
+     * tenant whose first file is a session file would otherwise run the
+     * retention sweep and the per-session listing unindexed until a restart.
+     * Names/keys are IDENTICAL to the manifest's.
+     */
+    private async ensureConversationFileIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.conversationFileIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.files);
+      await Promise.all([
+        coll.createIndex({ purpose: 1, expiresAt: 1 }, { name: 'idx_purpose_expiresAt' }),
+        coll.createIndex({ conversationId: 1 }, { name: 'idx_conversationId' }),
+      ]);
+      this.conversationFileIndexesReady.add(dbName);
+    }
+
     // ── File records ─────────────────────────────────────────────────
 
     async createFileRecord(
       record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IFileRecord> {
       const db = this.getTenantDb();
+      if (record.conversationId || record.purpose) await this.ensureConversationFileIndexes(db).catch(() => undefined);
       const now = new Date();
       const document: Omit<IFileRecord, '_id'> & {
         createdAt: Date;
@@ -188,7 +210,7 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       const documents = await db
         .collection<IFileRecord>(COLLECTIONS.files)
         .find({ conversationId })
-        .sort({ _id: 1 })
+        .sort({ createdAt: 1, _id: 1 })
         .toArray();
       return documents.map((record) => ({ ...record, _id: record._id?.toString() }));
     }
@@ -198,7 +220,7 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       const documents = await db
         .collection<IFileRecord>(COLLECTIONS.files)
         .find({ purpose: 'conversation', expiresAt: { $lt: before } })
-        .sort({ expiresAt: 1 })
+        .sort({ expiresAt: 1, createdAt: 1, _id: 1 })
         .limit(limit)
         .toArray();
       return documents.map((record) => ({ ...record, _id: record._id?.toString() }));

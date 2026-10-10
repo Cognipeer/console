@@ -354,7 +354,9 @@ describe('tasks/get and unknown methods', () => {
     });
     const body = parseJsonBody<{ result: Record<string, unknown> }>(res.body);
     expect((body.result.status as { state: string }).state).toBe('input-required');
-    expect((body.result.metadata as { pendingActions: unknown[] }).pendingActions).toEqual(pending);
+    expect((body.result.metadata as { pendingActions: unknown[] }).pendingActions).toEqual([
+      { id: 'act_1', kind: 'tool_approval', tool_name: 'sandbox_exec', status: 'pending' },
+    ]);
   });
 
   it('returns TaskNotFound (-32001) for unknown ids and -32601 for unknown methods', async () => {

@@ -405,11 +405,32 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     // ── Agent pending actions ────────────────────────────────────
 
+    /** Per-process memo: the pending-action indexes are ensured on the first write per tenant DB. */
+    private pendingActionIndexesReady = new Set<string>();
+
+    /**
+     * Ensured on the write path as well as in the boot manifest, for the same
+     * reason as the event indexes: the manifest only covers collections that
+     * exist when a tenant DB is first bound. Names/keys are IDENTICAL to it.
+     */
+    private async ensurePendingActionIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.pendingActionIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.agentPendingActions);
+      await Promise.all([
+        coll.createIndex({ conversationId: 1, status: 1 }, { name: 'idx_conversation_status' }),
+        coll.createIndex({ status: 1, expiresAt: 1 }, { name: 'idx_status_expiresAt' }),
+        coll.createIndex({ tenantId: 1, projectId: 1, status: 1 }, { name: 'idx_tenant_project_status' }),
+      ]);
+      this.pendingActionIndexesReady.add(dbName);
+    }
+
     async createAgentPendingActions(
       actions: Array<Omit<IAgentPendingAction, '_id'>>,
     ): Promise<IAgentPendingAction[]> {
       if (actions.length === 0) return [];
       const db = this.getTenantDb();
+      await this.ensurePendingActionIndexes(db).catch(() => undefined);
       const docs = actions.map((action) => ({ ...action, _id: `act_${randomUUID().replace(/-/g, '').slice(0, 24)}` }));
       await db.collection(COLLECTIONS.agentPendingActions).insertMany(docs as never[]);
       return docs as unknown as IAgentPendingAction[];

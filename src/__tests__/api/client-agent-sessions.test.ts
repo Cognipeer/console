@@ -110,8 +110,8 @@ describe('client agent session routes', () => {
       stop_reason: 'requires_action', last_event_seq: 9,
     });
     expect(body.pending_actions).toEqual([{
-      id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', args: { cmd: 'ls' }, status: 'pending',
-      requestedAt: '2024-01-01T00:00:00.000Z',
+      id: 'act_1', kind: 'tool_approval', tool_name: 'sandbox_exec', args: { cmd: 'ls' }, status: 'pending',
+      requested_at: '2024-01-01T00:00:00.000Z',
     }]);
     expect(JSON.stringify(body)).not.toContain('sdk-secret');
   });
