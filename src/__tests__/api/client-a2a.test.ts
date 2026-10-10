@@ -41,6 +41,16 @@ vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
 }));
 
+// May the caller end the open request of a task? The policy engine's `agent.approve`; its own tests are
+// api/agent-session-authz.test.ts. Here only that the A2A surface asks, and answers its refusal as JSON-RPC.
+const approval = vi.hoisted(() => ({ ending: vi.fn(), cancelPending: vi.fn() }));
+vi.mock('@/server/api/plugins/agent-approval-authz', () => ({
+  authorizeEndingOpenRequests: approval.ending,
+  refuseCancelPending: approval.cancelPending,
+  CANCEL_PENDING_FORBIDDEN_MESSAGE: 'sending a message would cancel the open request',
+  approvalAuthorizerFor: vi.fn(),
+}));
+
 vi.mock('@/lib/services/agents/agentService', () => ({
   getAgentByKey: vi.fn(),
   executeAgentChat: vi.fn(),
@@ -102,6 +112,8 @@ beforeEach(() => {
   deleteAgentRun.mockResolvedValue(true);
   mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, createAgentRun, deleteAgentRun } as never));
   mockFn(getAgentByKey).mockResolvedValue(EXPOSED_AGENT);
+  approval.ending.mockResolvedValue({ allowed: true });
+  approval.cancelPending.mockResolvedValue(null);
 });
 
 describe('agent card', () => {
@@ -400,6 +412,66 @@ describe('tasks/get and unknown methods', () => {
     expect(body.error.message).toContain('waiting for an approval or an answer');
     expect(body.error.message).not.toContain('synchronously');
     expect(body.error.data).toEqual({ pending_action_ids: ['act_1'] });
+  });
+
+  describe('ending a task that waits on a person is answering it with "no": the policy engine says whether the caller may', () => {
+    const waiting = {
+      _id: 'conv-1', agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', runtimeStatus: 'requires_action',
+      messages: [
+        { role: 'user', content: 'Run it' },
+        { role: 'assistant', content: '', stopReason: 'paused', pendingActions: [{ id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending' }] },
+      ],
+    };
+    const rpc = (method: string, params: Record<string, unknown>) => ({
+      method: 'POST' as const, url: '/api/client/v1/a2a/support-bot', headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 20, method, params },
+    });
+
+    it('tasks/cancel is refused (-32010, with the decision id and the ids) for a caller the engine does not let answer', async () => {
+      mockFn(getConversationById).mockResolvedValue(waiting);
+      approval.ending.mockResolvedValue({ allowed: false, decisionId: 'dec-1' });
+      const app = await buildApp();
+      const res = await app.inject(rpc('tasks/cancel', { id: 'task_conv-1_1' }));
+      const body = parseJsonBody<{ error: { code: number; data: Record<string, unknown> } }>(res.body);
+      expect(body.error.code).toBe(-32010);
+      expect(body.error.data).toEqual({ pending_action_ids: ['act_1'], decision_id: 'dec-1' });
+      expect(approval.ending).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        tenantDbName: 'tenant_acme', conversation: expect.objectContaining({ _id: 'conv-1' }), agent: expect.objectContaining({ key: 'support-bot' }),
+      }));
+    });
+
+    it('tasks/cancel keeps its answer (-32004: nothing to stop, answer through the actions endpoint) for a caller who may answer', async () => {
+      mockFn(getConversationById).mockResolvedValue(waiting);
+      const app = await buildApp();
+      const res = await app.inject(rpc('tasks/cancel', { id: 'task_conv-1_1' }));
+      expect(parseJsonBody<{ error: { code: number } }>(res.body).error.code).toBe(-32004);
+    });
+
+    it('a message that would cancel the open request (cancel_pending) is refused for a caller who may not answer it', async () => {
+      mockFn(getConversationById).mockResolvedValue(waiting);
+      approval.cancelPending.mockResolvedValue({ decisionId: 'dec-2' });
+      const app = await buildApp();
+      const res = await app.inject(rpc('message/send', { message: { parts: [{ kind: 'text', text: 'never mind' }], contextId: 'conv-1' } }));
+      const body = parseJsonBody<{ error: { code: number; message: string; data: Record<string, unknown> } }>(res.body);
+      expect(body.error.code).toBe(-32010);
+      expect(body.error.message).toContain('would cancel');
+      expect(body.error.data).toEqual({ decision_id: 'dec-2' });
+      expect(mockFn(executeAgentChat)).not.toHaveBeenCalled();
+      expect(approval.cancelPending).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        tenantDbName: 'tenant_acme', conversation: expect.objectContaining({ _id: 'conv-1' }), agent: expect.objectContaining({ key: 'support-bot' }),
+      }));
+    });
+
+    it('a first message (no contextId) asks nothing', async () => {
+      mockFn(createConversation).mockResolvedValue({ _id: 'conv-2' });
+      mockFn(executeAgentChat).mockResolvedValue({
+        output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hi' }] }],
+        _conversation_messages: [{}, {}],
+      });
+      const app = await buildApp();
+      await app.inject(rpc('message/send', { message: { parts: [{ kind: 'text', text: 'hello' }] } }));
+      expect(approval.cancelPending).not.toHaveBeenCalled();
+    });
   });
 
   it('tasks/cancel on a finished or unknown task does not claim anything is pending', async () => {

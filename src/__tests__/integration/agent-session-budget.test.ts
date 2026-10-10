@@ -714,7 +714,7 @@ describe('agent spend counts toward the tenant spend limits', () => {
     const [action] = await db.listAgentPendingActions(id, { status: 'pending' });
     await expect(resolveAgentPendingAction({
       tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId: String(action._id),
-      body: { decision: 'allow' }, actor: { userId: OWNER, isAdmin: false, channel: 'api' }, mode: 'sync',
+      body: { decision: 'allow' }, actor: { userId: OWNER, channel: 'api' }, authorize: async () => ({ allowed: true }), mode: 'sync',
     })).rejects.toMatchObject({ name: 'AgentSpendLimitError' });
     expect(executed).toEqual([]); // the approved tool did not run
     // The answer was not spent: the reviewer can give it again once the limit is lifted.

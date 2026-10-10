@@ -34,13 +34,13 @@
 import { runWithTenantScope } from '@/lib/database';
 import { isPermissionService, RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
 import { isIamChannel, IAM_CHANNELS, parseCidr, toCedarDatetime, type IamChannel } from './context';
-import { serviceActionId, type ActionDefinition } from './actions';
+import { RUNTIME_ENFORCED_ACTIONS, serviceActionId, type ActionDefinition } from './actions';
 import type { CedarMessage } from './cedar';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
 import { askedGateActions } from './gateActions';
 import { getIamSchema } from './schemaState';
 import { validateCustomPolicyText } from './policyText';
-import { isRuntimeEnforced } from './runtimeEnforced';
+import { enforcedChannelsOf, isRuntimeEnforced } from './runtimeEnforced';
 
 // ── types ────────────────────────────────────────────────────────────────
 
@@ -566,32 +566,39 @@ export function compileSpecToCedar(spec: PolicySpec, view: SpecCatalogView = cur
 /**
  * Which parts of a spec can ever match a decision the server actually takes.
  *
- * Two things ask the engine questions:
+ * Three things ask the engine questions:
  *
  *  - the HTTP gates (and the handler-level checks): may this principal do
  *    `<service>.read|write` on `Service::"<service>"`, in this project and channel?
  *    The GATE plane;
  *  - the portal runtime (an enterprise feature): may this person open a portal
- *    (`portal.use`, on the Portal) and run an agent through it (`agent.invoke`, on the
- *    Agent), in the `portal` channel? The PORTAL plane. It exists only where the
- *    overlay registered the runtime (runtimeEnforced.ts).
+ *    (`portal.use`, on the Portal), run an agent through it (`agent.invoke`, on the
+ *    Agent) and answer its pending requests (`agent.approve`), in the `portal` channel?
+ *    The PORTAL plane. It exists only where the overlay registered the runtime
+ *    (runtimeEnforced.ts);
+ *  - the agent routes of the dashboard and the API: may this person answer a pending
+ *    request (`agent.approve`) and look at / act on a session somebody else started
+ *    (`agent.session_view_others`, `agent.session_manage_others`), on the Agent of the
+ *    session? The SESSION plane. Community code: always there.
  *
  * Nothing else asks about an individual resource (`agent.delete` on one agent). A
- * rule built only from parts neither plane reaches is accepted by the schema,
+ * rule built only from parts no plane reaches is accepted by the schema,
  * evaluates in the Access check and the preview, and still never changes a real
  * request - which, for a forbid, is a false assurance. The compiler therefore
  * refuses such a forbid and warns about every rule that is only partly reachable.
  *
  * A PERMIT never gains reach from the portal plane: a portal is opened by its
  * access list alone (managedPolicies.ts), so an allow rule cannot add anybody there.
+ * The same goes for `agent.approve`: the managed approval rule names who may answer,
+ * and an allow rule cannot add people there.
  */
 export interface GateReach {
   /** Level groups and service-level actions: what the gates evaluate. */
   gateActions: number;
   /** Resource-level actions NOTHING asks for (`agent.delete`...): evaluated by the Access check only. */
   resourceActions: string[];
-  /** Resource-level actions the portal runtime asks for (`portal.use`, `agent.invoke`) that the rule names; only where that runtime exists. */
-  portalActions: string[];
+  /** Resource-level actions a runtime asks for (`portal.use`, `agent.approve`...) that the rule names, in this build. */
+  runtimeActions: string[];
   /** The only resource selector is "specific resources" (no services, no projects). */
   specificOnly: boolean;
   hasSpecific: boolean;
@@ -609,17 +616,36 @@ export interface GateReach {
   gatePlane: boolean;
   /** The rule can match a decision of the portal runtime (the actions, the channel and the resources all fit). */
   portalPlane: boolean;
+  /** The rule can match a decision of the agent routes about a session (the actions, the channel and the resources all fit). */
+  sessionPlane: boolean;
   /** The rule's channels (if it limits them) include `portal`. */
   portalChannelOk: boolean;
   /** The rule names, or through the Read / Write levels covers, an action the portal runtime asks for (whatever its channel and resources say). */
   portalCovered: boolean;
-  /** Specific resources of the rule that the portal runtime can never ask about (with these actions and channels). */
+  /** The rule names, or through the Read / Write levels covers, an action the agent routes ask for about a session (whatever its channel and resources say). */
+  sessionCovered: boolean;
+  /** Specific resources of the rule that no runtime can ever ask about (with these actions and channels). */
   unenforcedSpecific: number;
   /** The rule says something about portals on purpose (names a portal action, the portal channel or a portal): what a permit's warning is about. */
   portalExplicit: boolean;
+  /** The rule names `agent.approve`: what the "an allow rule cannot add people" advice is about. */
+  approvalExplicit: boolean;
 }
 
-const PORTAL_ACTIONS = ['portal.use', 'agent.invoke'] as const;
+/** The actions of the portal itself (a rule that names one is "about portals" on purpose). */
+const PORTAL_ACTIONS: readonly string[] = ['portal.use', 'agent.invoke'];
+
+/**
+ * Can a resource selector match what `id` is asked about in `channel`? `null` = every resource. A portal reaches
+ * the agents run through it (they are `in` it), which only matters in the portal channel.
+ */
+function runtimeReaches(id: string, channel: IamChannel, sel: PolicySpecResourceSelection | null): boolean {
+  if (sel === null) return true;
+  const refs = sel.resources ?? [];
+  if (id === 'portal.use') return !!sel.services?.includes('portals') || refs.some((r) => r.type === 'portal');
+  return !!sel.services?.includes('agents') || !!sel.projects?.length
+    || refs.some((r) => r.type === 'agent' || (channel === 'portal' && r.type === 'portal'));
+}
 
 export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatalogView()): GateReach {
   const defs = spec.actions.map((a) => view.actions.get(a)).filter((a): a is ActionDefinition => !!a);
@@ -631,25 +657,33 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
   const gateActions = defs.length - defs.filter((a) => a.kind === 'resource').length;
   const specificOnly = hasSpecific && !sel?.services?.length && !sel?.projects?.length;
 
-  // Which portal actions the rule covers: named, or inside the Read (portal.use) / Write (agent.invoke) level.
+  // Which runtime actions the rule covers: named, or inside the Read / Write level that holds them.
   const hasLevel = (id: string) => defs.some((a) => a.kind === 'group' && a.id === id);
-  const usesUse = isRuntimeEnforced('portal.use') && (runtimeIds.has('portal.use') || hasLevel('Read'));
-  const usesInvoke = isRuntimeEnforced('agent.invoke') && (runtimeIds.has('agent.invoke') || hasLevel('Write'));
   const portalChannelOk = channels.length === 0 || channels.includes('portal');
   const refs = sel?.resources ?? [];
-  // Can the resource selector match what the action is asked about? (A portal reaches its agents: they are `in` it.)
-  const reachesUse = sel === null || !!sel.services?.includes('portals') || refs.some((r) => r.type === 'portal');
-  const reachesInvoke = sel === null || !!sel.services?.includes('agents') || !!sel.projects?.length
-    || refs.some((r) => r.type === 'agent' || r.type === 'portal');
-  const portalPlane = portalChannelOk && ((usesUse && reachesUse) || (usesInvoke && reachesInvoke));
-  const refReachable = (ref: PolicySpecResourceRef) => portalChannelOk
-    && ((ref.type === 'portal' && (usesUse || usesInvoke)) || (ref.type === 'agent' && usesInvoke));
+  const asked = Object.keys(RUNTIME_ENFORCED_ACTIONS)
+    .map((id) => view.actions.get(id))
+    .filter((def): def is ActionDefinition => !!def && def.kind === 'resource' && isRuntimeEnforced(def.id))
+    .filter((def) => runtimeIds.has(def.id) || (!!def.group && hasLevel(def.group)))
+    .map((def) => ({ id: def.id, channels: enforcedChannelsOf(def.id) }));
+  const portalAsked = asked.filter((a) => a.channels.includes('portal'));
+  const sessionAsked = asked.filter((a) => a.channels.some((c) => c !== 'portal'));
+  // The rule's channels meet the ones the action is asked in (no channels at all = every channel).
+  const appChannel = (a: { channels: IamChannel[] }) => a.channels.filter((c) => c !== 'portal').some((c) => channels.length === 0 || channels.includes(c));
+
+  const portalPlane = portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', sel));
+  const sessionPlane = sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', sel));
+  const refReachable = (ref: PolicySpecResourceRef) => {
+    const only = { resources: [ref] };
+    return (portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', only)))
+      || sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', only));
+  };
 
   const gateChannelOk = channels.length === 0 || channels.some((c) => c !== 'portal');
   return {
     gateActions,
     resourceActions,
-    portalActions: PORTAL_ACTIONS.filter((id) => runtimeIds.has(id)),
+    runtimeActions: [...runtimeIds],
     specificOnly,
     hasSpecific,
     portalOnly: channels.length > 0 && channels.every((c) => c === 'portal'),
@@ -657,10 +691,13 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
     unasked: unaskedGateActions(defs, sel?.services?.length ? sel.services : null),
     gatePlane: gateActions > 0 && gateChannelOk && !specificOnly,
     portalPlane,
+    sessionPlane,
     portalChannelOk,
-    portalCovered: usesUse || usesInvoke,
+    portalCovered: portalAsked.length > 0,
+    sessionCovered: sessionAsked.length > 0,
     unenforcedSpecific: refs.filter((ref) => !refReachable(ref)).length,
-    portalExplicit: runtimeIds.size > 0 || channels.includes('portal') || refs.some((r) => r.type === 'portal'),
+    portalExplicit: [...runtimeIds].some((id) => PORTAL_ACTIONS.includes(id)) || channels.includes('portal') || refs.some((r) => r.type === 'portal'),
+    approvalExplicit: runtimeIds.has('agent.approve'),
   };
 }
 
@@ -686,14 +723,15 @@ function unaskedGateActions(defs: readonly ActionDefinition[], services: readonl
 /** Why the request gates can never match the rule (what makes `gatePlane` false); empty when they can. */
 function gateSideReasons(reach: GateReach): PolicyIssue[] {
   const reasons: PolicyIssue[] = [];
-  if (reach.gateActions === 0 && !reach.portalCovered) {
+  const runtimeCovered = reach.portalCovered || reach.sessionCovered;
+  if (reach.gateActions === 0 && !runtimeCovered) {
     reasons.push({
       code: 'not_enforced_actions',
       field: 'actions',
       message: 'Rules about individual resources (such as "delete agent") are not checked by the request gates yet, so this rule would never apply. Choose service actions (Read, Write, Admin) instead.',
     });
   }
-  if (reach.specificOnly && (reach.gateActions > 0 || !reach.portalCovered)) {
+  if (reach.specificOnly && (reach.gateActions > 0 || !runtimeCovered)) {
     reasons.push({
       code: 'not_enforced_resources',
       field: 'resources',
@@ -704,7 +742,7 @@ function gateSideReasons(reach: GateReach): PolicyIssue[] {
     reasons.push({
       code: 'not_enforced_channel',
       field: 'conditions.channels',
-      message: 'The portal channel only checks opening a portal and running agents in it (Portal: use, Agent: invoke, or the Read and Write levels), so a rule limited to it with only other actions would never apply.',
+      message: 'The portal channel only checks opening a portal, running agents in it and answering their requests (Portal: use, Agent: invoke or approve, or the Read and Write levels), so a rule limited to it with only other actions would never apply.',
     });
   }
   return reasons;
@@ -728,21 +766,37 @@ function portalSideReasons(reach: GateReach): PolicyIssue[] {
 }
 
 /**
+ * Why the agent routes can never match a rule that is about a session (what makes `sessionPlane` false while it
+ * names an action of theirs); empty when it can, when the rule is not about them, or when the channel is the reason
+ * (a rule limited to the portal channel is already told so by `not_enforced_channel`).
+ */
+function sessionSideReasons(reach: GateReach): PolicyIssue[] {
+  if (!reach.sessionCovered || reach.sessionPlane || reach.portalOnly) return [];
+  return [{
+    code: 'session_wrong_scope',
+    field: 'resources',
+    message: 'Answering a request and looking at or acting on somebody else\'s session concern agents; the resources of this rule include none, so it would never apply to them.',
+  }];
+}
+
+/**
  * Why a spec can never match a decision the server takes (empty = it can).
  *
- * A deny rule is reachable through either plane. An allow rule only through the
+ * A deny rule is reachable through any plane. An allow rule only through the
  * gates (see GateReach); one that says something about portals but reaches nothing
  * else gets the reason `portal_access_list_grants`: a portal is opened by its
- * access list alone, so such a rule grants nobody anything.
+ * access list alone, so such a rule grants nobody anything. Likewise one that names
+ * `agent.approve` and reaches nothing else gets `approval_rule_grants`.
  */
 export function inertReasons(reach: GateReach, effect: PolicyEffect = 'forbid'): PolicyIssue[] {
   if (effect === 'forbid') {
-    if (reach.gatePlane || reach.portalPlane) return [];
-    return [...gateSideReasons(reach), ...portalSideReasons(reach)];
+    if (reach.gatePlane || reach.portalPlane || reach.sessionPlane) return [];
+    return [...gateSideReasons(reach), ...portalSideReasons(reach), ...sessionSideReasons(reach)];
   }
   if (reach.gatePlane) return [];
   const reasons = gateSideReasons(reach);
   if (reach.portalExplicit) reasons.push(portalGrantsIssue(false));
+  if (reach.approvalExplicit) reasons.push(approvalGrantsIssue(false));
   return reasons;
 }
 
@@ -763,6 +817,25 @@ function portalGrantsIssue(partly: boolean): PolicyIssue {
     code: 'portal_access_list_grants',
     field: 'actions',
     message: 'Opening a portal and running agents in it is allowed only by the portal access list. An allow rule cannot add people there: use a deny rule to block someone, or edit the access list on the portal.',
+  };
+}
+
+/**
+ * What an allow rule that names `agent.approve` is told: who may answer a pending request is decided by the
+ * agent's own "who can approve" setting (and the person who started the session), which an allow rule cannot widen.
+ */
+function approvalGrantsIssue(partly: boolean): PolicyIssue {
+  if (partly) {
+    return {
+      code: 'partly_approval_rule_grants',
+      field: 'actions',
+      message: 'Who may answer a pending request is decided by the agent\'s "who can approve" setting, so the approval part of this rule grants nobody anything. The rest of the rule still applies.',
+    };
+  }
+  return {
+    code: 'approval_rule_grants',
+    field: 'actions',
+    message: 'Who may answer a pending request is decided by the agent\'s "who can approve" setting. An allow rule cannot add people there: use a deny rule to block someone, or change the setting on the agent.',
   };
 }
 
@@ -824,6 +897,7 @@ function warningsFor(spec: PolicySpec, view: SpecCatalogView): PolicyIssue[] {
   if (spec.effect === 'permit') {
     for (const reason of inert) warnings.push({ ...reason, message: reason.message.replace('would never apply', 'would never grant anything') });
     if (inert.length === 0 && reach.portalExplicit) warnings.push(portalGrantsIssue(true));
+    if (inert.length === 0 && reach.approvalExplicit) warnings.push(approvalGrantsIssue(true));
   } else if (inert.length === 0) {
     if (reach.resourceActions.length > 0) {
       warnings.push({

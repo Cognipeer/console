@@ -80,6 +80,13 @@ export const MAX_GROUP_FILTER = 5_000;
 /** A server-side scan of the audit collection is abandoned after this long (MongoDB; the table is unindexed for these filters). */
 const FEED_MAX_TIME_MS = 8_000;
 
+/** The refusals about a session of an agent (resourceAuthz.ts) and the wording key of each (`denied.<key>[Policy]`). */
+const SESSION_ACTION_KEYS: ReadonlyMap<string, string> = new Map([
+  ['agent.approve', 'approve'],
+  ['agent.session_view_others', 'sessionView'],
+  ['agent.session_manage_others', 'sessionManage'],
+]);
+
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
 const iso = (d: Date | string | undefined): string => (d ? new Date(d).toISOString() : new Date(0).toISOString());
 
@@ -161,6 +168,22 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
       const from = row.ipAddress ?? 'this address';
       summary = `Blocked: ${who?.label ?? 'a token'} is not allowed from ${from} (IP allowlist)${row.path ? `: ${route}` : ''}`.replace(/\s+/g, ' ').trim();
       text = { key: row.path ? 'ipNotAllowedAt' : 'ipNotAllowed', params: { who: who?.label ?? '', ip: from, route } };
+    } else if (SESSION_ACTION_KEYS.has(action) && (str(meta.channel) !== 'portal' || action === 'agent.approve')) {
+      // A refusal about a session of an agent (resourceAuthz.ts): answering a pending request, or looking at / acting
+      // on a session somebody else started.
+      const kept = meta.policyNames && typeof meta.policyNames === 'object' && !Array.isArray(meta.policyNames)
+        ? (meta.policyNames as Record<string, unknown>)
+        : {};
+      const names = policyIds.map((id) => policyName.get(id) ?? str(kept[id]) ?? id).join('", "');
+      const whoLabel = who?.label ?? 'someone';
+      const target = str(meta.resourceName) ?? str(meta.resourceId) ?? '';
+      const byPolicy = policyIds.length > 0;
+      const verb = SESSION_ACTION_KEYS.get(action);
+      const phrase = action === 'agent.approve' ? 'answering a pending request of agent'
+        : action === 'agent.session_view_others' ? 'viewing someone else\'s session of agent'
+          : 'acting on someone else\'s session of agent';
+      summary = `Denied ${whoLabel} ${phrase} "${target}" ${byPolicy ? `by policy "${names}"` : 'because no rule allows it'}`;
+      text = { key: `denied.${verb}${byPolicy ? 'Policy' : ''}`, params: { who: whoLabel, resource: target, policies: names } };
     } else if (str(meta.channel) === 'portal' && (action === 'portal.use' || action === 'agent.invoke')) {
       // A refusal of the portal runtime (resourceAuthz.ts): about opening one portal, or running one agent through it.
       const kept = meta.policyNames && typeof meta.policyNames === 'object' && !Array.isArray(meta.policyNames)

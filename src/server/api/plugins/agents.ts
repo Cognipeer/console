@@ -92,6 +92,12 @@ import {
   streamSessionEvents,
 } from './agent-session-events';
 import {
+  approvalAuthorizerFor,
+  authorizeEndingOpenRequests,
+  CANCEL_PENDING_FORBIDDEN_MESSAGE,
+  refuseCancelPending,
+} from './agent-approval-authz';
+import {
   applyStreamHeaders,
   readJsonBody,
   requireProjectContextForRequest,
@@ -213,14 +219,11 @@ async function reserveDashboardSession(input: {
   });
 }
 
-/** Who is answering a pending action: the dashboard user, and whether they administer the project. */
+/** Who is answering a pending action: the dashboard user. Whether they may is the policy engine's decision (agent-approval-authz.ts). */
 function dashboardActor(scoped: NonNullable<Awaited<ReturnType<typeof requireScopedAgent>>>): ResolveActor {
-  const { user, userProject, session } = scoped;
-  const admin = user.role === 'owner' || user.role === 'admin' || user.role === 'project_admin'
-    || userProject?.role === 'project_admin';
+  const { user, session } = scoped;
   return {
     userId: session.userId,
-    isAdmin: admin,
     channel: 'dashboard',
     email: user.email,
     role: user.role,
@@ -237,7 +240,7 @@ function resolveRefusal(outcome: ResolveOutcome): { status: number; body: Record
     case 'expired':
       return { status: 410, body: { error: 'This request has expired', type: 'action_expired', code: 'action_expired' } };
     case 'forbidden':
-      return { status: 403, body: { error: outcome.message } };
+      return { status: 403, body: { error: outcome.message, code: 'forbidden', ...(outcome.decisionId ? { decisionId: outcome.decisionId } : {}) } };
     case 'invalid':
       return { status: 400, body: { error: outcome.message } };
     case 'busy':
@@ -326,6 +329,17 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
         type: 'pending_action',
         code: 'pending_action',
         pendingActionIds: blocking,
+      });
+      return null;
+    }
+    // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it with
+    // "no", so it takes the permission to answer.
+    const cancelRefusal = await refuseCancelPending(request, { tenantDbName: session.tenantDbName, conversation, agent });
+    if (cancelRefusal) {
+      void reply.code(403).send({
+        error: CANCEL_PENDING_FORBIDDEN_MESSAGE,
+        code: 'forbidden',
+        ...(cancelRefusal.decisionId ? { decisionId: cancelRefusal.decisionId } : {}),
       });
       return null;
     }
@@ -1137,6 +1151,20 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
         return reply.code(404).send({ error: 'Run not found' });
       }
+      // A run paused on an approval is ended by cancelling it, which answers the open request with "no".
+      if (existing.status === 'requires_action') {
+        const conversation = await getConversationById(session.tenantDbName, existing.conversationId);
+        if (conversation && conversation.projectId === projectId) {
+          const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: session.tenantDbName, conversation, agent });
+          if (!verdict.allowed) {
+            return reply.code(403).send({
+              error: 'This run is waiting for an approval or an answer. You are not allowed to answer it, so you cannot cancel it.',
+              code: 'forbidden',
+              ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}),
+            });
+          }
+        }
+      }
       const outcome = await requestAgentRunCancellation(session.tenantDbName, session.tenantId, projectId, runId);
       if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Run not found' });
       if (outcome.kind === 'already_terminal') {
@@ -1588,6 +1616,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         agentKey: scoped.agent.key,
         body,
         actor: dashboardActor(scoped),
+        authorize: approvalAuthorizerFor(request, scoped.session.tenantDbName),
         mode: 'sync',
         runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
           userId: scoped.session.userId,

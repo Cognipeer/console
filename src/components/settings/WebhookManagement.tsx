@@ -40,7 +40,6 @@ import FormShell, {
   ToggleList,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
-import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useTranslations } from '@/lib/i18n';
 import {
   eventGroups,
@@ -49,10 +48,12 @@ import {
   isEventSelected,
   isGroupSelected,
   isValidWebhookUrl,
+  parseWebhookCapabilities,
   scopeOf,
   summarizeEvents,
   toggleEvent,
   toggleGroup,
+  type WebhookCapabilities,
   type WebhookDeliveryRow,
   type WebhookEndpointRow,
   type WebhookEventType,
@@ -81,8 +82,8 @@ export default function WebhookManagement() {
   const t = useTranslations('webhooks');
   const tCommon = useTranslations('common');
   const tNotifications = useTranslations('notifications');
-  const user = useDashboardUser();
-  const isTenantAdmin = user?.role === 'owner' || user?.role === 'admin';
+  // What the person may do here is the policy engine's answer (the list response), not a guess from a role.
+  const [capabilities, setCapabilities] = useState<WebhookCapabilities>({ manage: true, workspaceScope: false });
 
   const [endpoints, setEndpoints] = useState<WebhookEndpointRow[]>([]);
   const [catalog, setCatalog] = useState<WebhookEventType[]>([]);
@@ -113,6 +114,7 @@ export default function WebhookManagement() {
       if (!list.ok) throw new Error(list.data.error || t('errors.load'));
       setForbidden(false);
       setEndpoints(list.data.endpoints ?? []);
+      setCapabilities(parseWebhookCapabilities(list.data));
       if (events.ok) setCatalog(events.data.events ?? []);
     } catch (error) {
       fail(error instanceof Error ? error.message : t('errors.load'));
@@ -244,27 +246,34 @@ export default function WebhookManagement() {
         search={{ value: query, onChange: setQuery, placeholder: t('table.search') }}
         onRefresh={() => void load()}
         refreshing={loading}
-        toolbarRight={
+        toolbarRight={capabilities.manage ? (
           <Button color="teal" size="xs" leftSection={<IconWebhook size={13} stroke={1.7} />} onClick={() => setEditor({ mode: 'create' })}>
             {t('actions.create')}
           </Button>
-        }
+        ) : undefined}
         empty={{
           title: t('table.empty'),
-          description: t('table.emptyDescription'),
-          primaryAction: { label: t('actions.create'), icon: <IconWebhook size={14} stroke={1.7} />, onClick: () => setEditor({ mode: 'create' }) },
+          description: capabilities.manage ? t('table.emptyDescription') : t('table.emptyReadOnly'),
+          ...(capabilities.manage
+            ? { primaryAction: { label: t('actions.create'), icon: <IconWebhook size={14} stroke={1.7} />, onClick: () => setEditor({ mode: 'create' }) } }
+            : {}),
         }}
         footerLeft={t('table.showing', { shown: filtered.length, total: endpoints.length })}
-        rowActions={(endpoint) => [
-          { id: 'edit', label: t('actions.edit'), icon: <IconEdit size={14} />, onClick: () => setEditor({ mode: 'edit', endpoint }) },
-          { id: 'deliveries', label: t('actions.deliveries'), icon: <IconHistory size={14} />, onClick: () => setDeliveriesFor(endpoint) },
-          { id: 'test', label: t('actions.test'), icon: <IconSend size={14} />, onClick: () => void sendTest(endpoint) },
-          { id: 'rotate', label: t('actions.rotate'), icon: <IconRefresh size={14} />, onClick: () => void rotate(endpoint) },
-          endpoint.status === 'active'
-            ? { id: 'disable', label: t('actions.disable'), icon: <IconPlayerPause size={14} />, onClick: () => void setStatus(endpoint, 'disabled') }
-            : { id: 'enable', label: t('actions.enable'), icon: <IconPlayerPlay size={14} />, onClick: () => void setStatus(endpoint, 'active') },
-          { id: 'delete', label: t('actions.delete'), icon: <IconTrash size={14} />, color: 'red', divider: true, onClick: () => setToDelete(endpoint) },
-        ]}
+        rowActions={(endpoint) => {
+          const deliveries = { id: 'deliveries', label: t('actions.deliveries'), icon: <IconHistory size={14} />, onClick: () => setDeliveriesFor(endpoint) };
+          // Read access sees the endpoints and what was sent to them; everything else needs Admin.
+          if (!capabilities.manage) return [deliveries];
+          return [
+            { id: 'edit', label: t('actions.edit'), icon: <IconEdit size={14} />, onClick: () => setEditor({ mode: 'edit', endpoint }) },
+            deliveries,
+            { id: 'test', label: t('actions.test'), icon: <IconSend size={14} />, onClick: () => void sendTest(endpoint) },
+            { id: 'rotate', label: t('actions.rotate'), icon: <IconRefresh size={14} />, onClick: () => void rotate(endpoint) },
+            endpoint.status === 'active'
+              ? { id: 'disable', label: t('actions.disable'), icon: <IconPlayerPause size={14} />, onClick: () => void setStatus(endpoint, 'disabled') }
+              : { id: 'enable', label: t('actions.enable'), icon: <IconPlayerPlay size={14} />, onClick: () => void setStatus(endpoint, 'active') },
+            { id: 'delete', label: t('actions.delete'), icon: <IconTrash size={14} />, color: 'red', divider: true, onClick: () => setToDelete(endpoint) },
+          ];
+        }}
       />
 
       {editor ? (
@@ -272,7 +281,7 @@ export default function WebhookManagement() {
           key={editor.mode === 'edit' ? editor.endpoint.id : 'create'}
           editor={editor}
           catalog={catalog}
-          canTargetAllProjects={isTenantAdmin}
+          canTargetAllProjects={capabilities.workspaceScope}
           onClose={() => setEditor(null)}
           onSaved={(endpoint, revealed) => {
             setEditor(null);
@@ -284,7 +293,7 @@ export default function WebhookManagement() {
 
       <SecretReveal reveal={secret} onClose={() => { setSecret(null); void load(); }} />
 
-      {deliveriesFor ? <DeliveriesView endpoint={deliveriesFor} onClose={() => setDeliveriesFor(null)} /> : null}
+      {deliveriesFor ? <DeliveriesView endpoint={deliveriesFor} canManage={capabilities.manage} onClose={() => setDeliveriesFor(null)} /> : null}
 
       <Modal opened={Boolean(toDelete)} onClose={() => setToDelete(null)} title={t('deleteModal.title')} size="md">
         <Text size="sm" mb="md">{t('deleteModal.description', { url: toDelete?.url ?? '' })}</Text>
@@ -520,7 +529,7 @@ const DELIVERY_BADGE: Record<WebhookDeliveryRow['status'], string> = {
   failed: 'ds-badge-err',
 };
 
-function DeliveriesView({ endpoint, onClose }: { endpoint: WebhookEndpointRow; onClose: () => void }) {
+function DeliveriesView({ endpoint, canManage, onClose }: { endpoint: WebhookEndpointRow; canManage: boolean; onClose: () => void }) {
   const t = useTranslations('webhooks');
   const tCommon = useTranslations('common');
   const tNotifications = useTranslations('notifications');
@@ -607,7 +616,7 @@ function DeliveriesView({ endpoint, onClose }: { endpoint: WebhookEndpointRow; o
                   </Table.Td>
                   <Table.Td><span className="ds-faint" style={{ fontSize: 12 }}>{formatTime(delivery.deliveredAt ?? delivery.createdAt)}</span></Table.Td>
                   <Table.Td>
-                    {delivery.status !== 'pending' ? (
+                    {canManage && delivery.status !== 'pending' ? (
                       <Button size="xs" variant="subtle" leftSection={<IconSend size={13} />} onClick={() => void redeliver(delivery)}>
                         {t('actions.redeliver')}
                       </Button>

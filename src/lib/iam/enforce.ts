@@ -93,7 +93,8 @@ export interface EnforceGateInput {
   path?: string;
   /**
    * Evaluate outside any project: no project narrowing and no default-project
-   * fallback. Only the Authorization center sets it ("what can this person do in
+   * fallback. Only the Authorization center and the quiet handler-level probe
+   * (requestAuthz.ts `quietServiceLevel`) set it ("what can this person do in
    * the workspace itself, before a project limits it?"); the gates never do.
    */
   skipProjectNarrowing?: boolean;

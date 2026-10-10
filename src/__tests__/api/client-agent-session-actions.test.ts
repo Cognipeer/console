@@ -33,7 +33,15 @@ const hoisted = vi.hoisted(() => ({
   blocking: vi.fn(),
   limits: vi.fn(),
   runSyncAgentTurn: vi.fn(),
+  cancelPending: vi.fn(),
 }));
+
+// A message under cancel_pending cancels the open request: the engine's `agent.approve` decides (api/agent-session-authz.test.ts);
+// the answering route above uses the real authorizer.
+vi.mock('@/server/api/plugins/agent-approval-authz', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/server/api/plugins/agent-approval-authz')>();
+  return { ...actual, refuseCancelPending: hoisted.cancelPending };
+});
 
 vi.mock('@/lib/services/agents', () => ({
   getConversationById: hoisted.getConversationById,
@@ -112,6 +120,7 @@ describe('client: answering a pending action', () => {
     hoisted.getAgentByKey.mockResolvedValue({ key: 'support-agent', status: 'active', config: { modelKey: 'm' } });
     hoisted.limits.mockResolvedValue({ syncTimeoutMs: 60_000, backgroundEnabled: true, defaultMode: 'sync' });
     hoisted.blocking.mockResolvedValue(null);
+    hoisted.cancelPending.mockResolvedValue(null);
     app = await createFastifyApiTestApp(async (instance) => {
       await instance.register(clientAgentSessionsApiPlugin);
       await instance.register(clientAgentsApiPlugin);
@@ -136,7 +145,9 @@ describe('client: answering a pending action', () => {
     expect(hoisted.resolve).toHaveBeenCalledWith(expect.objectContaining({
       tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', conversationId: 'conv-1', actionId: 'act_1',
       mode: 'sync', body: { decision: 'allow', comment: 'ok' },
-      actor: expect.objectContaining({ userId: 'user-1', isAdmin: true, channel: 'api', apiTokenId: 'tok-1' }),
+      actor: expect.objectContaining({ userId: 'user-1', channel: 'api', apiTokenId: 'tok-1' }),
+      // Whether the token may answer is the engine's decision, asked through this.
+      authorize: expect.any(Function),
       // The same ceiling as a synchronous /responses call.
       cancellationCell: expect.objectContaining({ cancelled: false, deadlineAt: expect.any(Number) }),
     }));
@@ -221,6 +232,44 @@ describe('client: answering a pending action', () => {
     expect(parseJsonBody<{ error: { code: string } }>(res.body).error.code).toBe(code);
   });
 
+  describe('who may answer is the engine\'s decision (agent.approve)', () => {
+    /** The service asks the authorizer the route handed it; here it answers with the verdict. */
+    const askAuthorizer = (session: Record<string, unknown>, approvers: string) => hoisted.resolve.mockImplementation(async (input: {
+      authorize: (request: unknown) => Promise<{ allowed: boolean; decisionId?: string }>;
+    }) => {
+      const verdict = await input.authorize({
+        conversation: session,
+        action: { _id: 'act_1', agentKey: 'support-agent', projectId: 'proj-1', createdBy: String(session.createdBy) },
+        approvers,
+      });
+      return verdict.allowed
+        ? { kind: 'pending', pendingActions: [] }
+        : { kind: 'forbidden', message: 'You are not allowed to answer this request.', decisionId: verdict.decisionId };
+    });
+    const someoneElses = { ...conversation, createdBy: 'user-7' };
+
+    it('lets the token of the person who started the session answer, whatever the setting', async () => {
+      askAuthorizer(conversation, 'owner');
+      const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow' } });
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('lets the token of a workspace admin answer somebody else\'s request when the agent accepts admins', async () => {
+      askAuthorizer(someoneElses, 'owner_or_admin');
+      const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow' } });
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('refuses the same token when only the person who started the session may, with a decision id to quote', async () => {
+      askAuthorizer(someoneElses, 'owner');
+      const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow' } });
+      expect(res.statusCode).toBe(403);
+      const body = parseJsonBody<{ error: { code: string; decision_id?: string } }>(res.body);
+      expect(body.error.code).toBe('action_forbidden');
+      expect(body.error.decision_id).toMatch(/^[0-9a-f-]{36}$/);
+    });
+  });
+
   it('404s a session in another project without calling the service', async () => {
     hoisted.getConversationById.mockResolvedValue({ ...conversation, projectId: 'proj-2' });
     const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow' } });
@@ -238,6 +287,23 @@ describe('client: answering a pending action', () => {
     expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
       type: 'pending_action', pending_action_ids: ['act_1'],
     });
+    expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it('a Responses call that would cancel the open request (cancel_pending) is 403 for a token the engine does not let answer it', async () => {
+    hoisted.cancelPending.mockResolvedValue({ decisionId: 'dec-5' });
+    const res = await app.inject({
+      method: 'POST', url: '/api/client/v1/agents/responses', headers,
+      payload: { model: 'support-agent', input: 'never mind', previous_response_id: 'resp_conv-1' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
+      type: 'permission_error', code: 'action_forbidden', decision_id: 'dec-5',
+    });
+    expect(hoisted.cancelPending).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ tenantDbName: 'tenant_acme', conversation, agent: expect.objectContaining({ key: 'support-agent' }) }),
+    );
     expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
   });
 });

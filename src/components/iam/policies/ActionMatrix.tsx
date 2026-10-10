@@ -205,6 +205,11 @@ export default function ActionMatrix({ catalog, index, labels, value, onChange, 
                                   {t('matrix.enforcedInPortal')}
                                 </Badge>
                               ) : null}
+                              {action.enforcedIn?.some((channel) => channel !== 'portal') ? (
+                                <Badge size="xs" variant="light" ml={6} data-testid="enforced-in-agents">
+                                  {t('matrix.enforcedInAgents')}
+                                </Badge>
+                              ) : null}
                             </>
                           }
                         />

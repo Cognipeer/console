@@ -1,8 +1,11 @@
+import { RUNTIME_ENFORCED_ACTIONS } from './actions';
+
 /**
  * Counters of the decisions about resources (opening a portal, running an agent
- * through one - resourceAuthz.ts). A leaf module: the engine reports them next to
- * its own figures (`GET /api/iam/engine/stats` -> `engine.resourceAuthz`) without
- * importing the code that produces them.
+ * through one, answering a pending request, session access - resourceAuthz.ts).
+ * A leaf module: the engine reports them next to its own figures
+ * (`GET /api/iam/engine/stats` -> `engine.resourceAuthz`) without importing the
+ * code that produces them.
  */
 
 export interface ResourceAuthzActionStats {
@@ -34,9 +37,9 @@ const zero = (): ResourceAuthzStats => ({
 
 const stats = zero();
 
-/** Actions are a closed list (resourceAuthz.ts validates them); anything else is counted as `other`. */
+/** Actions are a closed list (resourceAuthz.ts validates them: the runtime-enforced ones); anything else is counted as `other`. */
 function actionStats(action: string): ResourceAuthzActionStats {
-  const key = action === 'portal.use' || action === 'agent.invoke' ? action : 'other';
+  const key = Object.hasOwn(RUNTIME_ENFORCED_ACTIONS, action) ? action : 'other';
   return (stats.byAction[key] ??= { allows: 0, denies: 0, unavailable: 0 });
 }
 

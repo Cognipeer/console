@@ -39,6 +39,7 @@ import {
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { getHeaderValue, readJsonBody, withClientApiRequestContext } from '../fastify-utils';
 import { sendAgentGuardrailBlock } from './agent-config-write';
+import { approvalAuthorizerFor } from './agent-approval-authz';
 
 const logger = createLogger('api:client-agent-sessions');
 
@@ -273,12 +274,13 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
         body,
         actor: {
           userId: ctx.tokenRecord.userId,
-          isAdmin: owner?.role === 'owner' || owner?.role === 'admin' || owner?.role === 'project_admin',
           channel: 'api',
           ...(owner?.email ? { email: owner.email } : {}),
           ...(owner?.role ? { role: owner.role } : {}),
           ...(apiTokenId ? { apiTokenId } : {}),
         },
+        // May this token answer? The engine decides, as the token's owner within the token's scope.
+        authorize: approvalAuthorizerFor(request, ctx.tenantDbName),
         mode: background ? 'background' : 'sync',
         runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
           userId: ctx.tokenRecord.userId,
@@ -338,7 +340,10 @@ function clientRefusal(outcome: ResolveOutcome): { status: number; body: unknown
     case 'expired':
       return { status: 410, body: apiErrorBody('invalid_request_error', 'This request has expired', 'action_expired') };
     case 'forbidden':
-      return { status: 403, body: apiErrorBody('permission_error', outcome.message, 'action_forbidden') };
+      return {
+        status: 403,
+        body: apiErrorBody('permission_error', outcome.message, 'action_forbidden', outcome.decisionId ? { decision_id: outcome.decisionId } : undefined),
+      };
     case 'invalid':
       return { status: 400, body: apiErrorBody('invalid_request_error', outcome.message, 'invalid_resolution') };
     case 'busy':

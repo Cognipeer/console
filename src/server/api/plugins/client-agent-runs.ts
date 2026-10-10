@@ -10,9 +10,10 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
-import { getAgentRunStatus, requestAgentRunCancellation } from '@/lib/services/agents';
+import { getAgentRunStatus, getConversationById, requestAgentRunCancellation } from '@/lib/services/agents';
 import { agentRunNotFoundErrorBody, apiErrorBody, serializeAgentRun } from '@/lib/services/agents/agentRunService';
 import { withClientApiRequestContext } from '../fastify-utils';
+import { authorizeEndingOpenRequests } from './agent-approval-authz';
 
 const logger = createLogger('api:client-agent-runs');
 
@@ -39,6 +40,22 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/client/v1/agents/runs/:runId/cancel', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
       const { runId } = request.params as { runId: string };
+      // A run paused on an approval is ended by cancelling it, which answers the open request with "no".
+      const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, runId);
+      if (run && run.mode === 'background' && run.status === 'requires_action') {
+        const conversation = await getConversationById(ctx.tenantDbName, run.conversationId);
+        if (conversation && conversation.projectId === ctx.projectId) {
+          const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation });
+          if (!verdict.allowed) {
+            return reply.code(403).send(apiErrorBody(
+              'permission_error',
+              'This run is waiting for an approval or an answer. You are not allowed to answer it, so you cannot cancel it.',
+              'action_forbidden',
+              verdict.decisionId ? { decision_id: verdict.decisionId } : undefined,
+            ));
+          }
+        }
+      }
       const outcome = await requestAgentRunCancellation(ctx.tenantDbName, ctx.tenantId, ctx.projectId, runId);
       if (outcome.kind === 'not_found') {
         return reply.code(404).send(agentRunNotFoundErrorBody());

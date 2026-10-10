@@ -3,12 +3,18 @@
  * client API (`/api/client/v1/webhooks`) both do. The two surfaces differ only
  * in how they authenticate; scoping and rules live here once.
  *
- * Who may do what:
- *  - an endpoint scoped to a project: that project's admins, and tenant
- *    owners / admins;
- *  - a tenant-wide endpoint (`projectId` null): tenant owners / admins only.
- * Anyone else gets a 403 on the collection and a 404 on an endpoint they may not
- * see, so an id does not confirm that something exists.
+ * AUTHORITY is not here. Whether the caller may read or change webhooks at all is
+ * the policy engine's answer on the `webhooks` service, asked by the route gate
+ * (read for a GET, admin for anything else): nothing in this file looks at a role
+ * or a membership. What is left is DATA SCOPING:
+ *  - an endpoint of the project the request is made in is reachable by whoever
+ *    passed the gate;
+ *  - a tenant-wide endpoint (`projectId` null) and an endpoint of another project
+ *    are reachable only by a caller who holds `webhooks` in the workspace itself,
+ *    not narrowed by a project (`scope.workspaceAllows`; never a token, which acts
+ *    in its own project only).
+ * An endpoint outside that reach answers 404, so an id does not confirm that
+ * something exists.
  *
  * The signing secret is returned exactly twice in an endpoint's life: when it is
  * created and when it is rotated. It is stored sealed and never read back out.
@@ -40,20 +46,32 @@ export class WebhookApiError extends Error {
   }
 }
 
-export interface WebhookActor {
-  userId: string;
-  /** Tenant owner or admin. */
-  isTenantAdmin: boolean;
-  /** Admin of `scope.projectId` (tenant admins count). */
-  isProjectAdmin: boolean;
-}
+/** What the caller wants to do with an endpoint outside the project the request is made in: look at it, or change it. */
+export type WebhookReach = 'read' | 'manage';
 
 export interface WebhookScope {
   tenantDbName: string;
   tenantId: string;
   /** The project the request is made in. */
   projectId: string;
-  actor: WebhookActor;
+  /** Who is calling: recorded as the creator of an endpoint. */
+  userId: string;
+  /**
+   * Does the caller hold `webhooks` in the WORKSPACE (outside any project, before a project's limits narrow
+   * it) at the level `kind` needs - `read` for the first, `admin` for the second? The policy engine's answer
+   * (the route builds it); always false for a token. Reaches tenant-wide endpoints and those of other projects.
+   */
+  workspaceAllows: (kind: WebhookReach) => Promise<boolean>;
+  /** What the caller can do here, for the page to show or hide its controls (asked of the engine, not guessed from a role). */
+  capabilities: () => Promise<WebhookCapabilities>;
+}
+
+/** The engine's answers the Webhooks page is built from. */
+export interface WebhookCapabilities {
+  /** Create, edit, test, rotate, redeliver and delete in this project. */
+  manage: boolean;
+  /** ...and for every project / a tenant-wide endpoint. */
+  workspaceScope: boolean;
 }
 
 // ── Wire shapes ──────────────────────────────────────────────────────────
@@ -92,25 +110,18 @@ export function serializeWebhookDelivery(delivery: IWebhookDelivery) {
   };
 }
 
-// ── Rules ────────────────────────────────────────────────────────────────
+// ── Scoping ──────────────────────────────────────────────────────────────
 
-function assertCanManage(scope: WebhookScope): void {
-  if (!scope.actor.isTenantAdmin && !scope.actor.isProjectAdmin) {
-    throw new WebhookApiError(403, 'Managing webhooks requires a project admin or a tenant owner / admin', 'forbidden');
-  }
-}
-
-/** May the actor see and manage this endpoint? */
-function canAccess(scope: WebhookScope, endpoint: IWebhookEndpoint): boolean {
+/** Is this endpoint inside the reach of the caller for what they want to do with it? (Data scoping, not authority.) */
+async function inReach(scope: WebhookScope, endpoint: IWebhookEndpoint, kind: WebhookReach): Promise<boolean> {
   if (endpoint.tenantId !== scope.tenantId) return false;
-  if (scope.actor.isTenantAdmin) return true;
-  return Boolean(endpoint.projectId) && endpoint.projectId === scope.projectId && scope.actor.isProjectAdmin;
+  if (endpoint.projectId && endpoint.projectId === scope.projectId) return true;
+  return scope.workspaceAllows(kind);
 }
 
-async function loadEndpoint(db: DatabaseProvider, scope: WebhookScope, id: unknown): Promise<IWebhookEndpoint> {
-  assertCanManage(scope);
+async function loadEndpoint(db: DatabaseProvider, scope: WebhookScope, id: unknown, kind: WebhookReach): Promise<IWebhookEndpoint> {
   const endpoint = typeof id === 'string' && id ? await db.findWebhookEndpointById(id) : null;
-  if (!endpoint || !canAccess(scope, endpoint)) throw new WebhookApiError(404, 'Webhook not found', 'not_found');
+  if (!endpoint || !await inReach(scope, endpoint, kind)) throw new WebhookApiError(404, 'Webhook not found', 'not_found');
   return endpoint;
 }
 
@@ -167,16 +178,16 @@ export function listWebhookEventTypes() {
 
 export function listWebhookEndpoints(scope: WebhookScope) {
   return inTenantDb(scope, async (db) => {
-    assertCanManage(scope);
+    // The tenant-wide endpoints are listed for a caller who holds `webhooks` in the workspace itself.
     const endpoints = await db.listWebhookEndpoints(scope.tenantId, {
-      projectScopes: scope.actor.isTenantAdmin ? [scope.projectId, null] : [scope.projectId],
+      projectScopes: await scope.workspaceAllows('read') ? [scope.projectId, null] : [scope.projectId],
     });
-    return { endpoints: endpoints.map(serializeWebhookEndpoint) };
+    return { endpoints: endpoints.map(serializeWebhookEndpoint), capabilities: await scope.capabilities() };
   });
 }
 
 export function getWebhookEndpoint(scope: WebhookScope, id: string) {
-  return inTenantDb(scope, async (db) => ({ endpoint: serializeWebhookEndpoint(await loadEndpoint(db, scope, id)) }));
+  return inTenantDb(scope, async (db) => ({ endpoint: serializeWebhookEndpoint(await loadEndpoint(db, scope, id, 'read')) }));
 }
 
 export interface CreateWebhookInput {
@@ -189,7 +200,6 @@ export interface CreateWebhookInput {
 
 export function createWebhookEndpoint(scope: WebhookScope, input: CreateWebhookInput) {
   return inTenantDb(scope, async (db) => {
-    assertCanManage(scope);
     const url = await validateUrl(input.url);
     const description = validateDescription(input.description);
     const events = validateEvents(input.events);
@@ -200,10 +210,15 @@ export function createWebhookEndpoint(scope: WebhookScope, input: CreateWebhookI
     else if (typeof input.projectId === 'string' && input.projectId) projectId = input.projectId;
     else throw new WebhookApiError(400, 'projectId must be a project id, "*" or null');
 
+    // An endpoint for every project, or for another project, is workspace-level: it needs `webhooks` in the workspace.
     if (projectId === null) {
-      if (!scope.actor.isTenantAdmin) throw new WebhookApiError(403, 'A webhook for every project requires a tenant owner / admin', 'forbidden');
+      if (!await scope.workspaceAllows('manage')) {
+        throw new WebhookApiError(403, 'A webhook for every project needs workspace-level Webhooks access', 'forbidden');
+      }
     } else if (projectId !== scope.projectId) {
-      if (!scope.actor.isTenantAdmin) throw new WebhookApiError(403, 'A webhook can only be created for your own project', 'forbidden');
+      if (!await scope.workspaceAllows('manage')) {
+        throw new WebhookApiError(403, 'A webhook for another project needs workspace-level Webhooks access', 'forbidden');
+      }
       if (!await db.findProjectById(projectId)) throw new WebhookApiError(400, 'projectId does not name a project');
     }
 
@@ -223,7 +238,7 @@ export function createWebhookEndpoint(scope: WebhookScope, input: CreateWebhookI
       status: 'active',
       disabledReason: null,
       failingSince: null,
-      createdBy: scope.actor.userId,
+      createdBy: scope.userId,
     });
     return { endpoint: { ...serializeWebhookEndpoint(endpoint), secret } };
   });
@@ -238,7 +253,7 @@ export interface UpdateWebhookInput {
 
 export function updateWebhookEndpoint(scope: WebhookScope, id: string, input: UpdateWebhookInput) {
   return inTenantDb(scope, async (db) => {
-    const current = await loadEndpoint(db, scope, id);
+    const current = await loadEndpoint(db, scope, id, 'manage');
     const patch: Parameters<DatabaseProvider['updateWebhookEndpoint']>[1] = {};
 
     if (input.url !== undefined) patch.url = await validateUrl(input.url);
@@ -268,7 +283,7 @@ export function updateWebhookEndpoint(scope: WebhookScope, id: string, input: Up
 
 export function deleteWebhookEndpoint(scope: WebhookScope, id: string) {
   return inTenantDb(scope, async (db) => {
-    await loadEndpoint(db, scope, id);
+    await loadEndpoint(db, scope, id, 'manage');
     await db.deleteWebhookEndpoint(id);
     return { deleted: true };
   });
@@ -276,7 +291,7 @@ export function deleteWebhookEndpoint(scope: WebhookScope, id: string) {
 
 export function rotateWebhookSecret(scope: WebhookScope, id: string) {
   return inTenantDb(scope, async (db) => {
-    await loadEndpoint(db, scope, id);
+    await loadEndpoint(db, scope, id, 'manage');
     const secret = generateWebhookSecret();
     const updated = await db.updateWebhookEndpoint(id, { secretSealed: encryptObject(secret) });
     if (!updated) throw new WebhookApiError(404, 'Webhook not found', 'not_found');
@@ -287,7 +302,7 @@ export function rotateWebhookSecret(scope: WebhookScope, id: string) {
 /** Sends a `webhook.test` event now and returns what the receiver answered. */
 export function testWebhookEndpoint(scope: WebhookScope, id: string) {
   return inTenantDb(scope, async (db) => {
-    const endpoint = await loadEndpoint(db, scope, id);
+    const endpoint = await loadEndpoint(db, scope, id, 'manage');
     const delivery = await sendWebhookNow(db, endpoint, { type: WEBHOOK_TEST_EVENT, projectId: scope.projectId, data: {} });
     if (!delivery) throw new WebhookApiError(500, 'Could not record the test delivery', 'internal_error');
     return { delivery: serializeWebhookDelivery(delivery) };
@@ -296,7 +311,7 @@ export function testWebhookEndpoint(scope: WebhookScope, id: string) {
 
 export function listWebhookDeliveries(scope: WebhookScope, id: string, query: Record<string, unknown> = {}) {
   return inTenantDb(scope, async (db) => {
-    await loadEndpoint(db, scope, id);
+    await loadEndpoint(db, scope, id, 'read');
     const requested = Number(query.limit);
     const limit = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), MAX_DELIVERY_PAGE) : DEFAULT_DELIVERY_PAGE;
     const skipped = Number(query.skip);
@@ -313,11 +328,10 @@ export function listWebhookDeliveries(scope: WebhookScope, id: string, query: Re
 /** Puts a delivery back in the queue (same event id), for the endpoint's current URL and secret. */
 export function redeliverWebhookDelivery(scope: WebhookScope, deliveryId: string) {
   return inTenantDb(scope, async (db) => {
-    assertCanManage(scope);
     const delivery = typeof deliveryId === 'string' && deliveryId ? await db.findWebhookDeliveryById(deliveryId) : null;
     // Reached through its endpoint, so it is as visible as the endpoint is.
     const endpoint = delivery ? await db.findWebhookEndpointById(delivery.endpointId) : null;
-    if (!delivery || !endpoint || !canAccess(scope, endpoint)) throw new WebhookApiError(404, 'Delivery not found', 'not_found');
+    if (!delivery || !endpoint || !await inReach(scope, endpoint, 'manage')) throw new WebhookApiError(404, 'Delivery not found', 'not_found');
     if (endpoint.status !== 'active') throw new WebhookApiError(409, 'The endpoint is disabled; enable it first', 'endpoint_disabled');
     if (delivery.status === 'pending') throw new WebhookApiError(409, 'This delivery is already waiting to be sent', 'delivery_pending');
 

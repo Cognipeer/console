@@ -14,9 +14,13 @@
  *      type-checks against that schema and is preparsed;
  *   4. canned decisions come out right: an admin reads, a plain member cannot
  *      change an administration service, a token with an empty scope reads
- *      nothing, a token limited to one service reaches only that one, and a
+ *      nothing, a token limited to one service reaches only that one, a
  *      portal is opened (and its agents run) by the people its access list names
- *      and by nobody else - with no evaluation error from any managed rule.
+ *      and by nobody else, and a pending request of an agent session is answered
+ *      by the people the agent's `approvers` setting names and by nobody else,
+ *      and looking at / acting on somebody else's session is governed by the level
+ *      groups (a reader looks, a writer acts, nobody without `agents` does) -
+ *      with no evaluation error from any managed rule.
  */
 
 import { performance } from 'node:perf_hooks';
@@ -26,6 +30,7 @@ import { getEnforceStats } from './enforce';
 import type { IamRequestContext } from './context';
 import { tokenPrincipal, userPrincipal, type IamPrincipal, type IamResource } from './entities';
 import { ALL_MANAGED_POLICIES } from './managedPolicies';
+import { agentSessionResource, portalAgentSessionResource } from './agentEntities';
 import { portalAgentResource, portalResource, type PortalSubject } from './portalEntities';
 import { ensureSchemaPreparsed, validateAgainstSchema } from './schemaState';
 
@@ -65,6 +70,28 @@ function cannedDecisions(): CannedDecision[] {
   const portal = portalResource(CANNED_PORTAL);
   const agent = portalAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_PORTAL);
   const inPortal: IamRequestContext = { channel: 'portal' };
+
+  // A session of an agent, started by `starter`: who may answer its pending requests under each setting.
+  const starter = userPrincipal({ userId: 'iam-selftest-starter', user: { role: 'user' }, projects: ['iam-selftest-project'] });
+  const colleague = userPrincipal({ userId: 'iam-selftest-colleague', user: { role: 'user' }, projects: ['iam-selftest-project'] });
+  const projectAdmin = userPrincipal({
+    userId: 'iam-selftest-project-admin', user: { role: 'user' }, projects: ['iam-selftest-project'], adminProjects: ['iam-selftest-project'],
+  });
+  const elsewhere = userPrincipal({
+    userId: 'iam-selftest-elsewhere', user: { role: 'user' }, projects: ['iam-selftest-other'], adminProjects: ['iam-selftest-other'],
+  });
+  const reader = userPrincipal({
+    userId: 'iam-selftest-reader', user: { role: 'user', servicePermissions: { agents: 'read' } }, projects: ['iam-selftest-project'],
+  });
+  const startersToken = tokenPrincipal({ tokenId: 'iam-selftest-token-starter', owner: starter, scope: null });
+  const readOnlyToken = tokenPrincipal({ tokenId: 'iam-selftest-token-read', owner: starter, scope: { agents: 'read' } });
+  const session = (approvers: 'owner' | 'owner_or_admin' | 'project_members') => agentSessionResource({
+    id: 'iam-selftest-agent', projectId: 'iam-selftest-project', ownerIds: [starter.userId], approvers,
+  });
+  const portalSession = portalAgentSessionResource(
+    { id: 'iam-selftest-agent', projectId: 'iam-selftest-project', ownerIds: [listed.userId], approvers: 'owner_or_admin' },
+    CANNED_PORTAL,
+  );
   return [
     { name: 'admin reads models', principal: admin, action: 'models.read', service: 'models', expect: true },
     { name: 'member writes agents', principal: member, action: 'agents.write', service: 'agents', expect: true },
@@ -79,6 +106,20 @@ function cannedDecisions(): CannedDecision[] {
     { name: 'a token does not, whoever owns it', principal: listedOwnersToken, action: 'portal.use', service: 'portals', resource: portal, context: inPortal, expect: false },
     { name: 'a listed person runs an agent in a portal', principal: listed, action: 'agent.invoke', service: 'agents', resource: agent, context: inPortal, expect: true },
     { name: 'an admin who is not listed does not run one', principal: admin, action: 'agent.invoke', service: 'agents', resource: agent, context: inPortal, expect: false },
+    { name: 'whoever started a session answers it', principal: starter, action: 'agent.approve', service: 'agents', resource: session('owner'), expect: true },
+    { name: 'a colleague does not, when only the starter may', principal: colleague, action: 'agent.approve', service: 'agents', resource: session('owner'), expect: false },
+    { name: 'a colleague does not, when admins may', principal: colleague, action: 'agent.approve', service: 'agents', resource: session('owner_or_admin'), expect: false },
+    { name: 'an admin of the project does, when admins may', principal: projectAdmin, action: 'agent.approve', service: 'agents', resource: session('owner_or_admin'), expect: true },
+    { name: 'a workspace admin does, when admins may', principal: admin, action: 'agent.approve', service: 'agents', resource: session('owner_or_admin'), expect: true },
+    { name: 'an admin of another project does not', principal: elsewhere, action: 'agent.approve', service: 'agents', resource: session('owner_or_admin'), expect: false },
+    { name: 'a colleague does, when every member may', principal: colleague, action: 'agent.approve', service: 'agents', resource: session('project_members'), expect: true },
+    { name: 'a token answers like its owner', principal: startersToken, action: 'agent.approve', service: 'agents', resource: session('owner'), expect: true },
+    { name: 'a token scoped to viewing agents does not', principal: readOnlyToken, action: 'agent.approve', service: 'agents', resource: session('owner'), expect: false },
+    { name: 'a reader looks at somebody else\'s session', principal: reader, action: 'agent.session_view_others', service: 'agents', resource: session('owner'), expect: true },
+    { name: 'a reader does not act on it', principal: reader, action: 'agent.session_manage_others', service: 'agents', resource: session('owner'), expect: false },
+    { name: 'a writer acts on it', principal: colleague, action: 'agent.session_manage_others', service: 'agents', resource: session('owner'), expect: true },
+    { name: 'a listed person answers in a portal', principal: listed, action: 'agent.approve', service: 'agents', resource: portalSession, context: inPortal, expect: true },
+    { name: 'an admin who is not listed does not, in a portal', principal: admin, action: 'agent.approve', service: 'agents', resource: portalSession, context: inPortal, expect: false },
   ];
 }
 

@@ -49,12 +49,12 @@ describe('parseBuiltInReason', () => {
 
   it('classifies every built-in policy the engine ships (none falls through to "other")', () => {
     const ids = listManagedPolicies().map((p) => p.id);
-    expect(ids.length).toBe(16);
+    expect(ids.length).toBe(19);
     for (const id of ids) {
       const parsed = parseBuiltInReason(id);
       expect(parsed.kind, id).not.toBe('other');
-      // a portal rule is not about a level: it is the portal's access list
-      if (id.startsWith('managed:portal:')) expect(parsed.level, id).toBeNull();
+      // a portal rule is not about a level: it is the portal's access list; an approval rule is the session's owner and the agent's setting
+      if (id.startsWith('managed:portal:') || id.startsWith('managed:agent:')) expect(parsed.level, id).toBeNull();
       else expect(parsed.level, id).not.toBeNull();
     }
   });
@@ -65,6 +65,13 @@ describe('parseBuiltInReason', () => {
     expect(parseBuiltInReason('managed:portal:use-boundary')).toEqual({ kind: 'portalBoundary', level: null });
     expect(parseBuiltInReason('managed:portal:agent-boundary')).toEqual({ kind: 'portalBoundary', level: null });
     expect(parseBuiltInReason('managed:portal:something-new')).toEqual({ kind: 'other', level: null });
+  });
+
+  it('knows the approval rules: the session\'s owner and the agent\'s setting admit, or nothing else can', () => {
+    expect(parseBuiltInReason('managed:agent:approve')).toEqual({ kind: 'approvalRule', level: null });
+    expect(parseBuiltInReason('managed:agent:approve-token')).toEqual({ kind: 'approvalRule', level: null });
+    expect(parseBuiltInReason('managed:agent:approve-boundary')).toEqual({ kind: 'approvalBoundary', level: null });
+    expect(parseBuiltInReason('managed:agent:something-new')).toEqual({ kind: 'other', level: null });
   });
 
   it('leaves an id it does not know as "other"', () => {

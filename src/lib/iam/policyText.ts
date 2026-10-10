@@ -6,6 +6,7 @@
  */
 
 import { policyAnnotations, policyToJson, splitPolicyText, type CedarMessage } from './cedar';
+import { RUNTIME_ENFORCED_ACTIONS } from './actions';
 import { askedGateActions } from './gateActions';
 import { MANAGED_ANNOTATION } from './managedPolicies';
 import { isRuntimeEnforced } from './runtimeEnforced';
@@ -54,18 +55,21 @@ function namedActions(action: ScopeJson | undefined): string[] {
   return named;
 }
 
-/** Entity types the portal runtime asks about: the portal, the agent run through it, and the project the agent is in. */
-const PORTAL_PLANE_TYPES: ReadonlySet<string> = new Set(['Portal', 'Agent', 'Project']);
+/** Entity types the runtimes ask about: the portal, the agent (run through a portal, answered, or a session's), and the project the agent is in. */
+const RUNTIME_PLANE_TYPES: ReadonlySet<string> = new Set(['Portal', 'Agent', 'Project']);
 
 /**
- * Can a statement with this action scope match a decision of the portal runtime?
- * Only where that runtime exists (runtimeEnforced.ts). An action scope that names
- * nothing is every action; the Read and Write levels contain `portal.use` and
- * `agent.invoke`.
+ * Can a statement with this action scope match a decision of a runtime of this build
+ * (the portal's, the agent routes')? An action scope that names nothing is every action;
+ * the Read and Write levels contain the runtime actions of that level (`portal.use` and
+ * `agent.session_view_others` in Read; `agent.invoke`, `agent.approve` and
+ * `agent.session_manage_others` in Write).
  */
-function mayReachPortalRuntime(named: readonly string[]): boolean {
-  if (named.length === 0) return isRuntimeEnforced('portal.use') || isRuntimeEnforced('agent.invoke');
-  return named.some((id) => isRuntimeEnforced(id) || (id === 'Read' && isRuntimeEnforced('portal.use')) || (id === 'Write' && isRuntimeEnforced('agent.invoke')));
+function mayReachRuntime(named: readonly string[]): boolean {
+  const runtimeIds = Object.keys(RUNTIME_ENFORCED_ACTIONS).filter((id) => isRuntimeEnforced(id));
+  if (named.length === 0) return runtimeIds.length > 0;
+  const catalog = new Map(getIamSchema().catalog.map((a) => [a.id, a]));
+  return named.some((id) => isRuntimeEnforced(id) || runtimeIds.some((runtimeId) => catalog.get(runtimeId)?.group === id));
 }
 
 /**
@@ -79,9 +83,10 @@ function mayReachPortalRuntime(named: readonly string[]): boolean {
  *  - a resource scope `== / in / is` of any entity type other than Service
  *    (`Agent::"x"`, `Project::"p"`) never matches a Service.
  *
- * The one exception is the portal runtime, where it exists: it asks `portal.use`
- * about a Portal and `agent.invoke` about an Agent that is `in` the portal and in
- * its project. A statement that can match those is not flagged.
+ * The exceptions are the runtimes: the portal runtime, where it exists, asks `portal.use`
+ * about a Portal and `agent.invoke` / `agent.approve` about an Agent that is `in` the portal
+ * and in its project; the agent routes ask `agent.approve` and the session actions about
+ * the Agent of a session. A statement that can match those is not flagged.
  *
  * Only the scope is looked at (a `when` clause is arbitrary logic), so this has
  * no false positives: a statement it flags really cannot apply.
@@ -97,7 +102,7 @@ function unreachableScope(json: { action?: ScopeJson; resource?: ScopeJson }): s
     : resource?.op === 'is' ? resource.entity_type
       : undefined;
   if (entityType && entityType !== 'Service') {
-    if (PORTAL_PLANE_TYPES.has(entityType) && mayReachPortalRuntime(named)) return null;
+    if (RUNTIME_PLANE_TYPES.has(entityType) && mayReachRuntime(named)) return null;
     return `is limited to ${entityType} entities, but the request gates only check whole services`;
   }
   return null;

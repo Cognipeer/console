@@ -54,6 +54,25 @@
  * Custom forbids still restrict on top: a rule that blocks a person, a group or one
  * agent wins over the list like it wins over any permit.
  *
+ * AGENTS - `managed:agent:*`, `@managed("agent")`: who may answer a pending approval or
+ * question (`agent.approve`) is decided by the SESSION the answer is about. The Agent
+ * entity carries the people who started it (`owners`) and the agent's own `approvers`
+ * setting (`owner`, `owner_or_admin`, `project_members`, agentEntities.ts); these three
+ * policies read them, so nothing is stored per agent or per session.
+ *
+ *   agent:approve / agent:approve-token      the rule GRANTS `agent.approve` to a person, and to
+ *                                            a token on behalf of its owner: whoever started the
+ *                                            session; a project admin or a workspace owner / admin
+ *                                            when the agent accepts admins; any member of the
+ *                                            project when it accepts them
+ *   agent:approve-boundary                   forbids everyone the rule does not name, so the generic
+ *                                            "Write" permit (which every `agents` writer holds)
+ *                                            cannot approve somebody else's request
+ *
+ * Token scope and the project's own limits still apply: `agent.approve` is in the Write
+ * group, so the boundary forbids above cover it. Custom forbids restrict on top; a custom
+ * permit cannot widen it (the agent's `approvers` setting does that).
+ *
  * Written so that they cannot error: every attribute read is behind `has`, the list
  * members are typed entity references (portalEntities.ts), and a managed forbid
  * that nevertheless errors fails the decision instead of being skipped (engine.ts).
@@ -148,8 +167,9 @@ when {
   && resource has portal
   && ${onAccessList('resource.portal', '  ')}
 };`,
+  // Running an agent in a portal AND answering its pending requests there: both are open to the access list only.
   [PORTAL_POLICY_IDS.agentBoundary]: `@managed("portal")
-forbid (principal, action == Action::"agent.invoke", resource is Agent)
+forbid (principal, action in [Action::"agent.invoke", Action::"agent.approve"], resource is Agent)
 when { context has channel && context.channel == "portal" }
 unless {
   principal is User
@@ -158,18 +178,72 @@ unless {
 };`,
 });
 
-/** Every managed policy a tenant policy set starts with: the RBAC permits, the boundary forbids and the portal access rules. */
+export const AGENT_POLICY_IDS = {
+  approve: 'managed:agent:approve',
+  approveToken: 'managed:agent:approve-token',
+  approveBoundary: 'managed:agent:approve-boundary',
+} as const;
+
+/**
+ * "`who` may answer the pending requests of this session", for a User entity expression `who`
+ * (`principal`, or `principal.owner` for a token), laid out for reading. One predicate, written
+ * once: the permits and the boundary share it, so they cannot drift apart.
+ *
+ *   - whoever started the session always may (the agent's setting never takes that away);
+ *   - `project_members`: anybody who belongs to the agent's project;
+ *   - `owner_or_admin` (the default): a project admin of the agent's project, a workspace owner
+ *     or admin, and the legacy tenant role `project_admin` inside the projects they belong to.
+ */
+function mayApprove(who: string, indent: string): string {
+  return [
+    `resource has approvers && (`,
+    `${indent}  (resource has owners && resource.owners.contains(${who}))`,
+    `${indent}  || (resource.approvers == "project_members" && resource in ${who}.projects)`,
+    `${indent}  || (resource.approvers == "owner_or_admin" && (`,
+    `${indent}    ${who}.role == "owner" || ${who}.role == "admin"`,
+    `${indent}    || resource in ${who}.adminProjects`,
+    `${indent}    || (${who}.role == "project_admin" && resource in ${who}.projects)`,
+    `${indent}  ))`,
+    `${indent})`,
+  ].join('\n');
+}
+
+export const AGENT_POLICIES: Readonly<Record<string, string>> = Object.freeze({
+  [AGENT_POLICY_IDS.approve]: `@managed("agent")
+permit (principal is User, action == Action::"agent.approve", resource is Agent)
+when {
+  ${mayApprove('principal', '  ')}
+};`,
+  [AGENT_POLICY_IDS.approveToken]: `@managed("agent")
+permit (principal is ApiToken, action == Action::"agent.approve", resource is Agent)
+when {
+  ${mayApprove('principal.owner', '  ')}
+};`,
+  [AGENT_POLICY_IDS.approveBoundary]: `@managed("agent")
+forbid (principal, action == Action::"agent.approve", resource is Agent)
+unless {
+  (principal is User && (
+    ${mayApprove('principal', '    ')}
+  ))
+  || (principal is ApiToken && (
+    ${mayApprove('principal.owner', '    ')}
+  ))
+};`,
+});
+
+/** Every managed policy a tenant policy set starts with: the RBAC permits, the boundary forbids, the portal access rules and the agent approval rules. */
 export const ALL_MANAGED_POLICIES: Readonly<Record<string, string>> = Object.freeze({
   ...MANAGED_POLICIES,
   ...BOUNDARY_POLICIES,
   ...PORTAL_POLICIES,
+  ...AGENT_POLICIES,
 });
 
 export function isManagedPolicyId(id: string): boolean {
   return id.startsWith('managed:');
 }
 
-export type ManagedPolicyGroup = 'rbac' | 'boundary' | 'portal';
+export type ManagedPolicyGroup = 'rbac' | 'boundary' | 'portal' | 'agent';
 
 export interface ManagedPolicyInfo {
   /** Cedar policy id (`managed:rbac:user-read`). */
@@ -193,6 +267,7 @@ export function listManagedPolicies(): ManagedPolicyInfo[] {
 function managedGroupOf(id: string): ManagedPolicyGroup {
   if (id.startsWith('managed:boundary:')) return 'boundary';
   if (id.startsWith('managed:portal:')) return 'portal';
+  if (id.startsWith('managed:agent:')) return 'agent';
   return 'rbac';
 }
 

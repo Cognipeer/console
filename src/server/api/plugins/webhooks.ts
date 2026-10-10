@@ -1,27 +1,23 @@
 /**
  * Dashboard webhook routes (`/api/webhooks…`): the session user, acting in the
  * active project. See `webhook-routes.ts` for the routes and
- * `webhookEndpointService.ts` for who may manage what.
+ * `webhookEndpointService.ts` for the data scoping. Who may do what is the policy
+ * engine's (the `webhooks` service); nothing here looks at a role.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
-import { logWebhookRouteError, registerWebhookRoutes, type WebhookRouteAdapter } from './webhook-routes';
+import { logWebhookRouteError, registerWebhookRoutes, webhookScopeFor, type WebhookRouteAdapter } from './webhook-routes';
 import { requireProjectContextForRequest, sendProjectContextError, withApiRequestContext } from '../fastify-utils';
 
 const adapt: WebhookRouteAdapter = (handler) => withApiRequestContext(async (request, reply) => {
   try {
-    const { projectId, user, userProject, session } = await requireProjectContextForRequest(request);
-    const isTenantAdmin = user.role === 'owner' || user.role === 'admin';
-    return await handler({
+    const { projectId, session } = await requireProjectContextForRequest(request);
+    return await handler(webhookScopeFor(request, {
       tenantDbName: session.tenantDbName,
       tenantId: session.tenantId,
       projectId,
-      actor: {
-        userId: session.userId,
-        isTenantAdmin,
-        isProjectAdmin: isTenantAdmin || user.role === 'project_admin' || userProject?.role === 'project_admin',
-      },
-    }, request, reply);
+      userId: session.userId,
+    }), request, reply);
   } catch (error) {
     const sent = sendProjectContextError(reply, error);
     if (sent) return sent;

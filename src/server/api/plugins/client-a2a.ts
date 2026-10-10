@@ -36,6 +36,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConversation } from './agent-openai-bridge';
+import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-a2a');
 
@@ -45,6 +46,8 @@ const JSONRPC_VERSION = '2.0';
 // A2A-specific JSON-RPC error codes (spec §8).
 const ERR_TASK_NOT_FOUND = -32001;
 const ERR_UNSUPPORTED_OPERATION = -32004;
+// Not one of the spec's: a caller the policy engine does not let answer the request this call would end.
+const ERR_FORBIDDEN = -32010;
 
 interface A2aPart {
   kind?: string;
@@ -295,6 +298,22 @@ export async function handleA2aRpc(
       }
       const { conversationId } = resolved;
 
+      // A new message to a task that waits on a request, under `cancel_pending`, cancels that request. Over the
+      // token route the caller is a principal the engine can be asked about (the public route's callers are
+      // the conversation's creator by construction - `conversationVisibleTo` - and have no principal).
+      if (contextId && request.apiTokenContext) {
+        const refusal = await refuseCancelPending(request, {
+          tenantDbName: ctx.tenantDbName,
+          conversation: await getConversationById(ctx.tenantDbName, contextId),
+          agent,
+        });
+        if (refusal) {
+          return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, CANCEL_PENDING_FORBIDDEN_MESSAGE, {
+            ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+          }));
+        }
+      }
+
       const runtimeContext = buildRuntimeContextFromRequest(
         message.metadata?.runtime_context,
         request.headers,
@@ -387,6 +406,16 @@ export async function handleA2aRpc(
         ? (message.pendingActions ?? []).filter((action) => action.status === 'pending').map((action) => action.id)
         : [];
       if (waitingOn.length > 0) {
+        // Ending a task that waits on a request is answering it with "no": the engine says whether this caller may.
+        if (conversation && request.apiTokenContext) {
+          const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+          if (!verdict.allowed) {
+            return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, 'You are not allowed to answer the request this task waits on.', {
+              pending_action_ids: waitingOn,
+              ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+            }));
+          }
+        }
         return reply.code(200).send(jsonRpcError(
           rpcId,
           ERR_UNSUPPORTED_OPERATION,

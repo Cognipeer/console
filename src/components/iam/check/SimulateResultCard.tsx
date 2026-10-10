@@ -58,6 +58,8 @@ interface ReasonContext {
   projectLimit: { level: IamLevel; projectName: string } | null;
   /** The portal the check is about, when it is one. */
   portalId: string | null;
+  /** The answerers the agent was assumed to accept, for a check about a pending request. */
+  approvers: 'owner' | 'owner_or_admin' | 'project_members' | null;
 }
 
 function ChangeLink({ link }: { link: ReasonLink }) {
@@ -147,6 +149,14 @@ function ReasonRow({ reason, labels, ctx }: { reason: SimulateReason; labels: Ia
       title = labels.managedName(reason.cedarId, reason.name);
       detail = t('result.portalReason.boundary');
       break;
+    case 'approvalRule':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.approvalReason.rule');
+      break;
+    case 'approvalBoundary':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.approvalReason.boundary', { approvers: ctx.approvers ? t(`result.approvers.${ctx.approvers}`) : '' });
+      break;
     default:
       title = labels.managedName(reason.cedarId, reason.name);
   }
@@ -229,6 +239,7 @@ export default function SimulateResultCard({
     tokenScope: ps.tokenScope,
     projectLimit,
     portalId: result.portal?.id ?? null,
+    approvers: result.session?.approvers ?? null,
   };
   const role = labels.lookup(`iamPrincipals.roles.${ps.role}`) ?? ps.role;
   const noRuleLink = principalType === 'user' ? reasonLink('role', who, result.projectId) : null;

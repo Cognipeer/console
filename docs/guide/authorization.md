@@ -57,7 +57,7 @@ A route that declares nothing is refused with `403` and `code: "route_not_declar
 | `admin` | `admin` | `admin` |
 | `project_admin`, `user` | `write` | `none` |
 
-The administration services are `automations`, `members`, `providers`, `config`, `license`, `audit`, `gpu-fleet`, `sandbox`, `cluster`, `sso`, `ldap`, `portals`, `resources` and `iam`. A person gets one of them only through an explicit service permission or a group grant.
+The administration services are `automations`, `members`, `providers`, `config`, `license`, `audit`, `gpu-fleet`, `sandbox`, `cluster`, `sso`, `ldap`, `webhooks`, `portals`, `resources` and `iam`. A person gets one of them only through an explicit service permission or a group grant. (Project admins get no extra access to them: to let a project admin manage, say, webhooks, grant that person or their group the service.)
 
 ### How the settings combine
 
@@ -106,6 +106,7 @@ An API token acts as its owner, with three refinements:
 - It takes the owner's **group grants** too. (Until this release a token saw only its owner's own workspace level.)
 - Its **scope** is a cap: a service that is not in a scoped token's scope resolves to `none`; `{}` is a scope that allows nothing; no scope means the token inherits the owner unchanged. A scope can only narrow, never widen.
 - It runs in its **project**, so the owner's project permissions in that project limit it. A token without a project runs in the workspace's default project.
+- It never reaches beyond its project: a question that is about the workspace itself, outside any project (for example, whether a tenant-wide webhook endpoint is in reach), is always answered "no" for a token, whoever owns it.
 
 Expiry rules and IP allowlists are part of [Authentication](/guide/authentication#expiry-and-the-tenant-token-policy). The tenant-wide metrics export (`GET /api/metrics`) refuses a token that carries a service scope, because a per-service cap cannot be honoured on an export that spans every module: use an unscoped token for the scraper.
 
@@ -125,7 +126,7 @@ Expiry rules and IP allowlists are part of [Authentication](/guide/authenticatio
 
 ## Built-in policies
 
-Sixteen policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
+Nineteen policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
 
 | Policy | What it does |
 |---|---|
@@ -135,6 +136,8 @@ Sixteen policies ship with the engine. They are the same in every workspace, can
 | `managed:boundary:project-read`, `-write`, `-admin` | A service that the active project limits is denied above the project level. No custom allow can exceed it. |
 | `managed:portal:use`, `managed:portal:agent` | A person on a portal's access list (or in a group on it, or anyone when the portal is open to the workspace) may open the portal and run its agents. See [Portals](#portals). |
 | `managed:portal:use-boundary`, `managed:portal:agent-boundary` | Nobody else may, whatever their role or any allow rule says. Custom deny rules still apply on top. |
+| `managed:agent:approve`, `managed:agent:approve-token` | A person (or a token, on behalf of its owner) may answer a pending request of an agent session when they started it, or when the agent's *Who can answer* setting accepts them. See [Sessions and approvals](#sessions-and-approvals). |
+| `managed:agent:approve-boundary` | Nobody else may answer one, whatever their service level or any allow rule says. Custom deny rules still apply on top. |
 
 The simple settings stay the single place to change what people can do; the built-in policies only translate them. Nothing is stored per person or per group in a policy.
 
@@ -161,14 +164,32 @@ The conditions of one rule must all hold for it to apply. The editor warns about
 
 A deny rule that cannot be evaluated for a request (a condition that reads something the request does not have) counts as a **deny** for that request. The decision names the rule and the problem, so a rule written to block something can never stop blocking it silently. The same holds for a broad rule: one that cannot be evaluated for *every* request it matches refuses all of them, the workspace owner's access to the IAM center excepted - so the owner can always open **Policies**, find the rule the decision names and fix or disable it. (A rule that cannot even be loaded, for example after an engine upgrade, is skipped instead, and the engine reports itself as `degraded`.)
 
+## Sessions and approvals
+
+An agent session belongs to the person who started it (for API traffic, the owner of the token). Three actions of an agent decide what somebody **else** may do with it. They are checked by the agent routes of the dashboard and the API, after the route's own service check, in the `dashboard` and `api` channels:
+
+| Action | Asked when | Level |
+|---|---|---|
+| `agent.approve` | Somebody answers a pending tool approval or question; or ends one as a side effect (cancelling a paused run, a new message to an agent that cancels pending requests). Also asked by portals, in the `portal` channel. | Write |
+| `agent.session_view_others` | Somebody reads a session another person started: its transcript, events, files, runs. | Read |
+| `agent.session_manage_others` | Somebody changes a session another person started: continues it, raises its budget, uploads or deletes its files, deletes it. | Write |
+
+The person who started a session needs only the route's service check. Sessions started by something that is not a person (`a2a-public`, schedules, evaluations, red-team runs) belong to nobody in particular: they count as someone else's.
+
+- **`agent.approve`** is decided by the built-in `managed:agent:*` policies from the session's owner and the agent's *Who can answer* setting (see [Agent approvals](/guide/agent-approvals)). The generic Write permission does not grant it: a workspace writer cannot answer somebody else's request unless the setting accepts them. A custom allow rule cannot widen it (the editor warns); a custom **deny** rule narrows it.
+- **`agent.session_view_others`** and **`agent.session_manage_others`** sit in the Read and Write levels, so by default every holder of `agents` Read or Write has them, as before. To restrict them, write an ordinary deny rule in **Policies**: choose the action, and who it applies to (for example a group of contractors).
+
+The Access check asks these actions about an agent, with the session's owner and, for `agent.approve`, the agent's setting as inputs.
+
 ## Portals
 
-A portal (an Enterprise feature) lets chosen people and groups use chosen agents from a page of their own. The engine decides two things about it, in the `portal` channel:
+A portal (an Enterprise feature) lets chosen people and groups use chosen agents from a page of their own. The engine decides three things about it, in the `portal` channel:
 
 | Action | Asked when | Level |
 |---|---|---|
 | `portal.use` | A person opens the portal, on every request they make to it. | Read |
 | `agent.invoke` | A person sends a message to one of the portal's agents. | Write |
+| `agent.approve` | A person answers a pending approval or question of a session started through the portal. | Write |
 
 **The access list is the portal's built-in policy.** It lives on the portal (**Portals → the portal → Access**: everyone in the workspace, or selected people and groups), and the built-in `managed:portal:*` policies read it, so editing the list never touches a policy and nothing is stored per portal. A change to the list applies on the next request. Opening a portal is allowed **only** by the list: a workspace role, a service permission or an allow rule cannot open a portal the list does not name, and the workspace owner is no exception. API tokens never open portals.
 
@@ -184,7 +205,7 @@ A portal (an Enterprise feature) lets chosen people and groups use chosen agents
 }
 ```
 
-- `Read` in the `portal` channel covers opening portals and `Write` covers running their agents, so a rule such as "contractors: deny Write everywhere" also stops them from sending messages in a portal while they can still open it.
+- `Read` in the `portal` channel covers opening portals and `Write` covers running their agents and answering their requests, so a rule such as "contractors: deny Write everywhere" also stops them from sending messages in a portal while they can still open it.
 - A rule that names a portal also covers the agents run through it (an agent run through a portal is *in* that portal).
 - An allow rule never adds anyone to a portal; the editor says so when you write one.
 - These rules are accepted only on an installation that has portals. Without them there is nothing to apply a rule to, and a deny about portals is refused like any rule that cannot match a request.
@@ -337,7 +358,7 @@ The proxy must append the client address to `X-Forwarded-For` (nginx: `proxy_set
 - **Background work.** Scheduled jobs (inference polling, alert evaluation, analysis and red-team runs, knowledge-base ingestion) run without a principal. A policy restricts the person who starts something, not a job that was already scheduled.
 - **Realtime connections.** A WebSocket is decided once, when it connects.
 - **Public and self-authenticated routes**, by design.
-- **Individual resources.** The gates decide on services. A rule about one agent or one model is accepted by the Access check and the preview, but nothing asks it at the gate yet, so the editor refuses a deny of that kind. The exception is [portals](#portals): opening one and running an agent through it are decided per portal and per agent.
+- **Individual resources.** The gates decide on services. A rule about one agent or one model is accepted by the Access check and the preview, but nothing asks it at the gate yet, so the editor refuses a deny of that kind. The exceptions are [portals](#portals): opening one and running an agent through it are decided per portal and per agent; and the [session actions](#sessions-and-approvals) of an agent.
 
 ## API
 
@@ -345,11 +366,11 @@ The IAM API is part of the dashboard API: it authenticates with the session cook
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/iam/catalog` | Services, actions, resource types, context attributes and channels. Each action says where a real request is decided on it (`enforcedIn`: `dashboard` and `api` for a service action, `portal` for `portal.use` and `agent.invoke` where portals exist); an action without it is only evaluated by the Access check. |
+| `GET /api/iam/catalog` | Services, actions, resource types, context attributes and channels. Each action says where a real request is decided on it (`enforcedIn`: `dashboard` and `api` for a service action and for the session actions, `portal` for `portal.use`, `agent.invoke` and `agent.approve` where portals exist); an action without it is only evaluated by the Access check. |
 | `GET /api/iam/policies`, `GET /api/iam/policies/{policyId}` | Built-in and custom policies. |
 | `POST /api/iam/policies`, `PUT /api/iam/policies/{policyId}`, `DELETE /api/iam/policies/{policyId}` | Create, change (also enable and disable) and delete a custom policy. |
 | `POST /api/iam/policies/compile`, `POST /api/iam/policies/preview` | Compile a draft, and see who it would affect. Read-only. |
-| `POST /api/iam/simulate` | The Access check. Read-only. For a portal, ask `portal.use` on the resource `{ "kind": "resource", "type": "portal", "id": ... }`, or `agent.invoke` on an agent with `context: { "channel": "portal", "portalId": ... }`; the answer includes the portal's name, mode and the number of people and groups on its list. |
+| `POST /api/iam/simulate` | The Access check. Read-only. For a portal, ask `portal.use` on the resource `{ "kind": "resource", "type": "portal", "id": ... }`, or `agent.invoke` on an agent with `context: { "channel": "portal", "portalId": ... }`; the answer includes the portal's name, mode and the number of people and groups on its list. For a session action (`agent.approve`, `agent.session_view_others`, `agent.session_manage_others`) ask on an agent with `context: { "ownerId": <user who started the session>, "approvers": "owner" \| "owner_or_admin" \| "project_members" }`; the answer includes the session it assumed. |
 | `GET /api/iam/decisions/{decisionId}` | A refusal the caller saw, as an access check. |
 | `GET /api/iam/principals`, `GET /api/iam/principals/{type}/{id}` | People and tokens with their effective levels. |
 | `GET /api/iam/audit`, `GET /api/iam/audit/export` | Denials and policy changes (`kind=denials` or `changes`). |

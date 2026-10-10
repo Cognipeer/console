@@ -141,10 +141,12 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   // department's gateway feed without holding tenant-admin.
   { id: 'ai-app-gateway', label: 'AI App Gateway', description: 'Coding-agent gateway instances: identity, observation, policy enforcement and session traces.', category: 'operate' },
   { id: 'sso', label: 'Single Sign-On', description: 'OIDC single sign-on connection, attribute mapping and JIT provisioning.', category: 'admin', adminService: true },
-  // Deliberately NOT adminService: a project admin manages their own project's
-  // endpoints. The service gate lets any project member through; the webhook
-  // routes then require a project admin (tenant admin for tenant-wide endpoints).
-  { id: 'webhooks', label: 'Webhooks', description: 'Outgoing webhook subscriptions for session, run, approval, budget and schedule events.', category: 'admin' },
+  // adminService: a webhook is outbound network egress with a signing secret, so who manages
+  // them is a tenant-admin decision, delegated like any other administration service (a person's
+  // or a group's `webhooks` level in the Authorization center). The policy engine is the ONLY
+  // authority: reading needs `read`, changing needs `admin`; nothing inside the webhook code
+  // looks at a role.
+  { id: 'webhooks', label: 'Webhooks', description: 'Outgoing webhook subscriptions for session, run, approval, budget and schedule events.', category: 'admin', adminService: true },
   { id: 'ldap', label: 'LDAP Directory', description: 'LDAP/Active Directory connection, group→role mapping and JIT provisioning.', category: 'admin', adminService: true },
   // Admin surface of the portal feature (create/edit portals, choose agents and
   // who may use them). adminService: configuring what employees can reach is a

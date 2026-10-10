@@ -61,6 +61,8 @@ import {
   checkAgentPendingActionResolution,
   resolveAgentPendingAction,
   sweepExpiredPendingActions,
+  type ApprovalAuthorizer,
+  type ApprovalRequest,
   type ResolveActor,
 } from '@/lib/services/agents/agentActionResolution';
 import { runAgentJobLocal, serializeAgentRun } from '@/lib/services/agents/agentRunService';
@@ -172,7 +174,20 @@ function chat(conversationId: string, userMessage: string, extra: Record<string,
   });
 }
 
-const ownerActor: ResolveActor = { userId: OWNER, isAdmin: false, channel: 'api' };
+const ownerActor: ResolveActor = { userId: OWNER, channel: 'api' };
+
+/**
+ * Who may answer is the policy engine's decision, asked by the route through the authorizer it hands to the
+ * service (the engine's own behaviour is iam-agent-approve.test.ts). Here the authorizer is a stand-in that
+ * allows, or refuses and remembers what it was asked.
+ */
+const allow: ApprovalAuthorizer = async () => ({ allowed: true });
+function refuseAndRecord(asked: ApprovalRequest[], decisionId?: string): ApprovalAuthorizer {
+  return async (request) => {
+    asked.push(request);
+    return { allowed: false, ...(decisionId ? { decisionId } : {}) };
+  };
+}
 
 function resolve(
   conversationId: string,
@@ -180,6 +195,7 @@ function resolve(
   body: Record<string, unknown>,
   actor: ResolveActor = ownerActor,
   mode: 'sync' | 'background' = 'sync',
+  authorize: ApprovalAuthorizer = allow,
 ) {
   return resolveAgentPendingAction({
     tenantDbName: DB_NAME,
@@ -189,6 +205,7 @@ function resolve(
     actionId,
     body,
     actor,
+    authorize,
     mode,
   });
 }
@@ -883,38 +900,49 @@ describe('(h) who may answer', () => {
     const paused = await chat(id, 'go');
     return { id, actionId: paused.required_action!.actions[0].id };
   }
-  const stranger: ResolveActor = { userId: 'user-2', isAdmin: false, channel: 'dashboard' };
-  const admin: ResolveActor = { userId: 'user-3', isAdmin: true, channel: 'dashboard' };
+  const stranger: ResolveActor = { userId: 'user-2', channel: 'dashboard' };
 
-  it('owner_or_admin (default): the owner and an admin may, another member may not', async () => {
+  it('asks the authorizer with the session, the request and the agent\'s own setting, and stops on a refusal', async () => {
     const { id, actionId } = await pausedSession();
-    expect(await resolve(id, actionId, { decision: 'allow' }, stranger)).toMatchObject({ kind: 'forbidden' });
+    const asked: ApprovalRequest[] = [];
+    expect(await resolve(id, actionId, { decision: 'allow' }, stranger, 'sync', refuseAndRecord(asked, 'dec-1')))
+      .toMatchObject({ kind: 'forbidden', decisionId: 'dec-1' });
+    // Asked about THIS session (who started it), THIS request (who raised it) and the setting the turn ran with.
+    expect(asked).toHaveLength(1);
+    expect(asked[0].conversation).toMatchObject({ _id: id, agentKey: AGENT_KEY, projectId: PROJECT_ID, createdBy: OWNER });
+    expect(asked[0].action).toMatchObject({ _id: actionId, createdBy: OWNER });
+    expect(asked[0].approvers).toBe('owner_or_admin');
+    // A refused answer changes nothing: the request is still open and nothing ran.
     expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
     expect(executed).toEqual([]);
-    expect((await resolve(id, actionId, { decision: 'allow' }, admin)).kind).toBe('resumed');
-    expect((await db.findAgentPendingActionById(actionId))?.resolvedBy).toBe('user-3');
-  });
-
-  it('owner: an admin may not', async () => {
-    const { id, actionId } = await pausedSession({ ...HITL_ON, approvers: 'owner' });
-    expect((await resolve(id, actionId, { decision: 'allow' }, admin)).kind).toBe('forbidden');
-    expect((await resolve(id, actionId, { decision: 'allow' }, ownerActor)).kind).toBe('resumed');
-  });
-
-  it('project_members: any member of the project may', async () => {
-    const { id, actionId } = await pausedSession({ ...HITL_ON, approvers: 'project_members' });
+    expect(await storedConversation(id)).toMatchObject({ runtimeStatus: 'requires_action' });
+    // ...and the reviewer the engine accepts still can.
     expect((await resolve(id, actionId, { decision: 'allow' }, stranger)).kind).toBe('resumed');
+    expect((await db.findAgentPendingActionById(actionId))?.resolvedBy).toBe('user-2');
+  });
+
+  it.each(['owner', 'owner_or_admin', 'project_members'] as const)('hands the %s setting of the agent to the authorizer', async (approvers) => {
+    const { id, actionId } = await pausedSession({ ...HITL_ON, approvers });
+    const asked: ApprovalRequest[] = [];
+    await resolve(id, actionId, { decision: 'allow' }, stranger, 'sync', refuseAndRecord(asked));
+    expect(asked.map((request) => request.approvers)).toEqual([approvers]);
+  });
+
+  it('an engine outage (the authorizer throws) answers nothing and leaves the request open', async () => {
+    const { id, actionId } = await pausedSession();
+    const outage = Object.assign(new Error('Authorization is temporarily unavailable'), { status: 503 });
+    await expect(resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync', async () => { throw outage; })).rejects.toBe(outage);
+    expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
+    expect(executed).toEqual([]);
   });
 });
 
 describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
-  const stranger: ResolveActor = { userId: 'user-2', isAdmin: false, channel: 'dashboard' };
-
   function check(
     conversationId: string,
     actionId: string,
     body: Record<string, unknown>,
-    extra: { actor?: ResolveActor; agentKey?: string; projectId?: string } = {},
+    extra: { authorize?: ApprovalAuthorizer; agentKey?: string; projectId?: string } = {},
   ) {
     return checkAgentPendingActionResolution({
       tenantDbName: DB_NAME,
@@ -924,7 +952,7 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
       actionId,
       agentKey: extra.agentKey,
       body,
-      actor: extra.actor ?? ownerActor,
+      authorize: extra.authorize ?? allow,
     });
   }
 
@@ -977,8 +1005,10 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
 
   it('says forbidden for someone the approvers setting leaves out', async () => {
     const { id, actionId } = await paused();
-    expect(await check(id, actionId, { decision: 'allow' }, { actor: stranger })).toMatchObject({ kind: 'forbidden' });
-    expect(await check(id, actionId, { decision: 'allow' }, { actor: { ...stranger, isAdmin: true } })).toBeNull();
+    const asked: ApprovalRequest[] = [];
+    expect(await check(id, actionId, { decision: 'allow' }, { authorize: refuseAndRecord(asked, 'dec-2') })).toMatchObject({ kind: 'forbidden', decisionId: 'dec-2' });
+    expect(asked[0]).toMatchObject({ approvers: 'owner_or_admin', conversation: { createdBy: OWNER } });
+    expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
   });
 
   it('says invalid for a body the resolve flow would refuse', async () => {
@@ -1224,7 +1254,7 @@ describe('who resolved it: the channel rides on the event', () => {
     scriptModel(oneToolScript('ls'));
     const id = String((await newConversation())._id);
     const paused = await chat(id, 'go');
-    const portalUser: ResolveActor = { userId: OWNER, isAdmin: false, channel: 'portal' };
+    const portalUser: ResolveActor = { userId: OWNER, channel: 'portal' };
 
     const outcome = await resolve(id, paused.required_action!.actions[0].id, { decision: 'allow' }, portalUser);
 

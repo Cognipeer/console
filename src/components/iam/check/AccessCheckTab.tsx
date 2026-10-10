@@ -33,8 +33,10 @@ import {
 } from '@tabler/icons-react';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import {
+  AGENT_APPROVERS,
   IamApiError,
   iamApi,
+  type AgentApprovers,
   type DecisionPolicy,
   type DecisionRecord,
   type IamChannel,
@@ -51,6 +53,7 @@ import { useErrorText } from '../useErrorText';
 import { useIamCatalog } from '../useIamCatalog';
 import { useIamLabels } from '../useIamLabels';
 import {
+  APPROVE_ACTION,
   INVOKE_ACTION,
   applyAction,
   applyPortal,
@@ -58,6 +61,7 @@ import {
   defaultChannel,
   emptyForm,
   formToRequest,
+  isSessionAction,
   requestToForm,
   validateForm,
   type CheckForm,
@@ -524,8 +528,8 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
                       />
                     )}
                     {/* Only where portals exist (the catalog says the action is checked there), or when the portal channel was chosen by hand. */}
-                    {selectedAction.id === INVOKE_ACTION && form.resourceKind === 'resource'
-                      && (selectedAction.enforcedIn?.includes('portal') || form.channel === 'portal') ? (
+                    {(selectedAction.id === INVOKE_ACTION || selectedAction.id === APPROVE_ACTION) && form.resourceKind === 'resource'
+                      && (form.channel === 'portal' || (selectedAction.id === INVOKE_ACTION && selectedAction.enforcedIn?.includes('portal'))) ? (
                       <ResourceSelect
                         type="portal"
                         label={t('check.ctxPortal')}
@@ -535,6 +539,30 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
                         onChange={(portal) => setForm((f) => applyPortal(f, portal))}
                         error={has('portal') ? t('check.requirePortal') : undefined}
                       />
+                    ) : null}
+                    {/* A session action depends on the session: who started it, and (for a pending request) whom the agent accepts. */}
+                    {isSessionAction(selectedAction.id) ? (
+                      <Stack gap="xs" data-testid="session-inputs">
+                        <PrincipalSelect
+                          type="user"
+                          label={t('check.sessionOwner')}
+                          description={t('check.sessionOwnerHelp')}
+                          placeholder={t('check.sessionOwnerPlaceholder')}
+                          value={form.sessionOwner}
+                          onChange={(sessionOwner) => patch({ sessionOwner })}
+                        />
+                        {selectedAction.id === APPROVE_ACTION ? (
+                          <Select
+                            label={t('check.approvers')}
+                            description={t('check.approversHelp')}
+                            placeholder={t('check.approversDefault')}
+                            data={AGENT_APPROVERS.map((value) => ({ value, label: t(`result.approvers.${value}`) }))}
+                            value={form.approvers}
+                            onChange={(value) => patch({ approvers: (value as AgentApprovers | null) ?? null })}
+                            clearable
+                          />
+                        ) : null}
+                      </Stack>
                     ) : null}
                   </>
                 )}

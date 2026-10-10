@@ -18,9 +18,13 @@
  *  3. RESOURCE ACTIONS  `<type>.<verb>` derived from the resource registry
  *     (`get|list` in Read, `create|update|delete` in Write) plus the execution
  *     verbs `agent.invoke`, `tool.execute`, `mcp-server.call`, `rag-module.query`,
- *     `model.infer` (Write: they are POSTs at the gate) and `portal.use` (Read).
- *     `portal.use` and `agent.invoke` are decided by the portal runtime
- *     (RUNTIME_ENFORCED_ACTIONS); the rest are evaluated by the Access check only.
+ *     `model.infer` (Write: they are POSTs at the gate), `portal.use` (Read) and the
+ *     session verbs of an agent: `agent.approve` (Write: answer somebody's pending
+ *     approval or question), `agent.session_view_others` (Read) and
+ *     `agent.session_manage_others` (Write: look at / act on a session somebody else
+ *     started). `portal.use` and `agent.invoke` are decided by the portal runtime, the
+ *     session verbs by the agent routes (RUNTIME_ENFORCED_ACTIONS); the rest are
+ *     evaluated by the Access check only.
  *
  * Pure data + pure functions: no Cedar, no database. UIs import `describeActions`
  * / `ACTION_LEVEL_GROUPS` for labels and grouping.
@@ -81,6 +85,12 @@ export const RESOURCE_CRUD_VERBS: ReadonlyArray<{ verb: string; level: ActionLev
 /** Execution verbs bound to one specific resource type. */
 export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; level: ActionLevel }> = [
   { type: 'agent', verb: 'invoke', level: 'write' },
+  // Session verbs. A session is the conversation of one person with an agent; these decide what
+  // somebody ELSE may do with it. They sit in the Read / Write groups, so by default every
+  // `agents` reader / writer holds them (today's behaviour) and a deny rule narrows them.
+  { type: 'agent', verb: 'approve', level: 'write' },
+  { type: 'agent', verb: 'session_view_others', level: 'read' },
+  { type: 'agent', verb: 'session_manage_others', level: 'write' },
   { type: 'tool', verb: 'execute', level: 'write' },
   { type: 'mcp-server', verb: 'call', level: 'write' },
   { type: 'rag-module', verb: 'query', level: 'write' },
@@ -92,17 +102,38 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
  * Resource actions that something other than the HTTP gates decides, and the
  * channels they are decided in. Opening a portal and running an agent through one
  * are asked by the portal runtime (enterprise overlay) with `channel: 'portal'`
- * (resourceAuthz.ts). Every other resource action is evaluated by the Access check
- * only: no request of the product asks for it yet.
+ * (resourceAuthz.ts). Answering a pending approval is asked by the agent routes
+ * (dashboard, API) and by the portal runtime; looking at / acting on a session
+ * somebody else started is asked by the agent routes. Every other resource action is
+ * evaluated by the Access check only: no request of the product asks for it yet.
  *
- * Pure data; whether the runtime exists in THIS build (it needs the enterprise
- * overlay) is runtimeEnforced.ts. A policy rule about these actions is accepted
- * (and said to take effect) only where it does.
+ * Pure data; whether the runtime exists in THIS build is runtimeEnforced.ts: the
+ * `portal` channel exists only where the enterprise overlay registered its resolver,
+ * the other channels always. A policy rule about these actions is accepted (and said
+ * to take effect) only where it does.
  */
 export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChannel[]>> = Object.freeze({
   'portal.use': ['portal'],
   'agent.invoke': ['portal'],
+  'agent.approve': ['dashboard', 'api', 'portal'],
+  'agent.session_view_others': ['dashboard', 'api'],
+  'agent.session_manage_others': ['dashboard', 'api'],
 });
+
+/**
+ * The actions an agent is asked about with the SESSION it concerns: who started it
+ * (`owners`) and, for an approval, whose answer the agent accepts (`approvers`).
+ * Their resource carries those two attributes (agentEntities.ts).
+ */
+export const SESSION_RESOURCE_ACTIONS: readonly string[] = Object.freeze([
+  'agent.approve',
+  'agent.session_view_others',
+  'agent.session_manage_others',
+]);
+
+export function isSessionResourceAction(id: string): boolean {
+  return SESSION_RESOURCE_ACTIONS.includes(id);
+}
 
 /**
  * Types the schema and the catalog always carry, whatever the resource registry

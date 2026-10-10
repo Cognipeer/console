@@ -3,6 +3,12 @@
  * the client API (`/client/v1/webhooks…`). Each surface hands in how a request
  * becomes a `WebhookScope` (who is calling, in which project); the routes and
  * their rules are the same.
+ *
+ * Authority is the policy engine's, asked by the route gate: `webhooks` is an
+ * administration service, so a GET needs `read` and every other method `admin`.
+ * The routes themselves look at no role. What they add is the engine's answer to
+ * "does this caller hold `webhooks` in the workspace itself" (`webhookScopeFor`),
+ * which decides whether tenant-wide and other projects' endpoints are in reach.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -21,9 +27,37 @@ import {
   updateWebhookEndpoint,
   type WebhookScope,
 } from '@/lib/services/webhooks/webhookEndpointService';
-import { safeReadJsonBody } from '../fastify-utils';
+import { safeReadJsonBody, serviceLevelForRequest } from '../fastify-utils';
 
 const logger = createLogger('api:webhooks');
+
+/**
+ * The scope of a request: who is calling, in which project, and what the policy engine says the caller holds on
+ * `webhooks` - in the project (for the page's controls) and in the workspace itself (for what lies outside the
+ * project). Asked quietly and at most once per request. A token never holds the workspace question: it acts in its
+ * own project only, whoever owns it.
+ */
+export function webhookScopeFor(
+  request: FastifyRequest,
+  base: Pick<WebhookScope, 'tenantDbName' | 'tenantId' | 'projectId' | 'userId'>,
+): WebhookScope {
+  let workspace: ReturnType<typeof serviceLevelForRequest> | undefined;
+  let project: ReturnType<typeof serviceLevelForRequest> | undefined;
+  const workspaceLevel = () => (workspace ??= serviceLevelForRequest(request, 'webhooks', { workspace: true }));
+  const projectLevel = () => (project ??= serviceLevelForRequest(request, 'webhooks'));
+  return {
+    ...base,
+    // `webhooks` is an administration service: its levels are none, read and admin.
+    workspaceAllows: async (kind) => {
+      const level = await workspaceLevel();
+      return kind === 'read' ? level !== 'none' : level === 'admin';
+    },
+    capabilities: async () => {
+      const [inProject, inWorkspace] = await Promise.all([projectLevel(), workspaceLevel()]);
+      return { manage: inProject === 'admin', workspaceScope: inProject === 'admin' && inWorkspace === 'admin' };
+    },
+  };
+}
 
 export type WebhookRouteHandler = (
   scope: WebhookScope,

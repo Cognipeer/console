@@ -1,8 +1,10 @@
 /**
  * Answering a pending action — and what follows from it.
  *
- * `resolveAgentPendingAction` is the one entry point the dashboard and the
- * client API both call. It checks who may answer, records the answer, and —
+ * `resolveAgentPendingAction` is the one entry point the dashboard, the client
+ * API and the portal all call. It checks who may answer (the caller's
+ * `authorize`: the policy engine's `agent.approve` decision, asked by the route
+ * that has the principal), records the answer, and —
  * once every action of the pause is answered — continues the SAME turn: the
  * agent is rebuilt, the stored state restored, the answers applied with the SDK
  * and the loop invoked again (`executeAgentResumeLocal`). The continuation can
@@ -64,14 +66,34 @@ const logger = createLogger('agents:action-resolution');
 
 export interface ResolveActor {
     userId: string;
-    /** Owner / admin of the tenant, or admin of the project. */
-    isAdmin: boolean;
     /** Where the answer came from; it rides on the `action.resolved` event and the audit entry. */
     channel: 'dashboard' | 'api' | 'portal';
     email?: string;
     role?: string;
     apiTokenId?: string;
 }
+
+/**
+ * What the policy engine is asked when somebody answers: the session (who started it) and the agent's own
+ * "who can approve" setting as the paused turn ran with it. The engine decides; this is only the question.
+ */
+export interface ApprovalRequest {
+    conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
+    action: Pick<IAgentPendingAction, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
+    approvers: ResolvedHitlConfig['approvers'];
+}
+
+/** `decisionId`: the code of the engine's refusal (also in the audit trail), for the caller to quote. */
+export type ApprovalVerdict = { allowed: true } | { allowed: false; message?: string; decisionId?: string };
+
+/**
+ * May the caller answer this request? Supplied by the route (or the portal), the only place that has the
+ * principal: it asks `agent.approve` of the engine. A refusal is `{ allowed: false }`; when the engine
+ * cannot decide at all it THROWS the 503 the gate would have sent - an outage is never read as an answer.
+ */
+export type ApprovalAuthorizer = (request: ApprovalRequest) => Promise<ApprovalVerdict>;
+
+const FORBIDDEN_MESSAGE = 'You are not allowed to answer this request.';
 
 export interface ResolveAgentActionInput {
     tenantDbName: string;
@@ -84,6 +106,8 @@ export interface ResolveAgentActionInput {
     /** The request body: `{decision, comment?, approvedArgs?, rememberForSession?}` or `{answers, cancelled?}`. */
     body: Record<string, unknown>;
     actor: ResolveActor;
+    /** The policy engine's decision on `agent.approve` for this caller (see `ApprovalAuthorizer`). */
+    authorize: ApprovalAuthorizer;
     /** `background`: queue the continuation as a run instead of running it inline. */
     mode: 'sync' | 'background';
     runtimeContext?: AgentRuntimeContext;
@@ -103,7 +127,7 @@ export type ResolveOutcome =
     | { kind: 'not_found' }
     | { kind: 'not_pending'; status: IAgentPendingAction['status'] }
     | { kind: 'expired' }
-    | { kind: 'forbidden'; message: string }
+    | { kind: 'forbidden'; message: string; decisionId?: string }
     | { kind: 'invalid'; message: string }
     | { kind: 'busy' }
     /** Recorded; other requests of the same pause are still open. */
@@ -112,21 +136,6 @@ export type ResolveOutcome =
     | { kind: 'resumed'; result: AgentPlaygroundChatResult; response: AgentChatResponse; stopReason: SessionStopReason }
     /** Recorded, and the continuation is queued as a background run. */
     | { kind: 'queued'; run: IAgentRun };
-
-/** Is `actor` allowed to answer, under the agent's `approvers` setting? */
-export function mayResolve(
-    approvers: ResolvedHitlConfig['approvers'],
-    actor: Pick<ResolveActor, 'userId' | 'isAdmin'>,
-    conversation: Pick<IAgentConversation, 'createdBy'>,
-    action: Pick<IAgentPendingAction, 'createdBy'>,
-): boolean {
-    // Whoever may see the agent in this project (the routes have checked that).
-    if (approvers === 'project_members') return true;
-    const isOwner = Boolean(actor.userId)
-        && (actor.userId === String(conversation.createdBy) || actor.userId === action.createdBy);
-    if (approvers === 'owner') return isOwner;
-    return isOwner || actor.isAdmin;
-}
 
 // ── Reading the request ───────────────────────────────────────────────
 
@@ -204,6 +213,11 @@ function checkAnswers(action: IAgentPendingAction, resolution: IAgentPendingActi
 }
 
 // ── Shared bookkeeping ───────────────────────────────────────────────
+
+/** The refusal for a caller the engine does not let answer. */
+function forbidden(verdict: Extract<ApprovalVerdict, { allowed: false }>): ResolveOutcome {
+    return { kind: 'forbidden', message: verdict.message ?? FORBIDDEN_MESSAGE, ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}) };
+}
 
 /** The settings of the config the paused turn ran with. */
 async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendingAction): Promise<ResolvedHitlConfig> {
@@ -310,9 +324,9 @@ export async function pendingActionsBlockingMessage(
  * before it announces anything.
  */
 export async function checkAgentPendingActionResolution(
-    input: Pick<ResolveAgentActionInput, 'tenantDbName' | 'tenantId' | 'projectId' | 'conversationId' | 'actionId' | 'agentKey' | 'body' | 'actor'>,
+    input: Pick<ResolveAgentActionInput, 'tenantDbName' | 'tenantId' | 'projectId' | 'conversationId' | 'actionId' | 'agentKey' | 'body' | 'authorize'>,
 ): Promise<ResolveOutcome | null> {
-    const { tenantDbName, tenantId, projectId, conversationId, actor } = input;
+    const { tenantDbName, tenantId, projectId, conversationId } = input;
     return runWithTenantDb(tenantDbName, async (db) => {
         const action = await db.findAgentPendingActionById(input.actionId).catch(() => null);
         if (!action
@@ -329,10 +343,8 @@ export async function checkAgentPendingActionResolution(
         const conversation = await db.findAgentConversationById(conversationId);
         if (!conversation || conversation.projectId !== projectId) return { kind: 'not_found' };
 
-        const hitl = await hitlSettingsFor(db, action);
-        if (!mayResolve(hitl.approvers, actor, conversation, action)) {
-            return { kind: 'forbidden', message: 'You are not allowed to answer this request.' };
-        }
+        const verdict = await input.authorize({ conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
+        if (!verdict.allowed) return forbidden(verdict);
 
         const parsed = parseResolution(action, input.body);
         if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
@@ -362,11 +374,9 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
         const conversation = await db.findAgentConversationById(conversationId);
         if (!conversation || conversation.projectId !== projectId) return { kind: 'not_found' };
 
-        // 2. Who may answer.
-        const hitl = await hitlSettingsFor(db, action);
-        if (!mayResolve(hitl.approvers, actor, conversation, action)) {
-            return { kind: 'forbidden', message: 'You are not allowed to answer this request.' };
-        }
+        // 2. Who may answer: the policy engine's decision, asked by the caller (it has the principal).
+        const verdict = await input.authorize({ conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
+        if (!verdict.allowed) return forbidden(verdict);
 
         // 3. What they answered.
         const parsed = parseResolution(action, input.body);

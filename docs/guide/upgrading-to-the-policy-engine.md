@@ -35,7 +35,7 @@ If an environment ran a pre-release build of this feature (a staging system, a d
 | 6 | **The dashboard overview hides sections the caller cannot read** (models, vector, tracing), and the menu follows the effective levels in the active project. | Anyone with project limits. | Less visible |
 | 7 | **Refusals carry a decision id.** A `403` has `code`, `service`, `required` and `decisionId` and an `X-Decision-Id` header; a route without an authorization declaration is refused with `route_not_declared`. | Clients that parse refusal bodies. | - |
 | 8 | **The engine fails closed.** If it cannot decide a request, the answer is `503 authorization_unavailable` with `Retry-After`; it never falls back to another rule set. A server that cannot load the engine does not start. | Operators. | - |
-| 9 | **Three new administration services** (`portals`, `resources`, `iam`) and the IAM center. Owners and admins only, unless granted. | Nobody loses anything. | - |
+| 9 | **Four new administration services** (`portals`, `resources`, `iam`, `webhooks`) and the IAM center. Owners and admins only, unless granted. | Nobody loses anything. | - |
 
 The preflight report below counts rows 1 to 5.
 
@@ -159,7 +159,7 @@ Work through the report before the upgrade, in this order:
 ## Roll out
 
 - **A rolling update runs both versions side by side for a few minutes.** A request can be decided by the old code and the next one by the new engine, so one person can see a service disappear and reappear while the update runs. Schedule the update for a quiet period, or drain the old instances first.
-- **Do not change permissions while the update runs.** A permission map saved by the old code loses the keys that code does not know (`portals`, `resources`, `iam`).
+- **Do not change permissions while the update runs.** A permission map saved by the old code loses the keys that code does not know (`portals`, `resources`, `iam`, `webhooks`).
 - **A server that cannot run the engine does not start.** At boot it loads Cedar, compiles its schema and the built-in policies, and evaluates a few canned decisions; on failure the process exits with the reason. Check the logs of the first upgraded instance before the rest follow.
 - **Readiness.** `GET /api/health/ready` includes an `authorization-engine` check: `ok`, `degraded` or `down` (the endpoint answers `503` for `down`). If your orchestrator probes only the TCP port, point the readiness probe at this endpoint.
 - **Watch.** In the first hours, look at the **Denials** feed (**IAM center → Audit**) and at `GET /api/iam/engine/stats`: `enforce.unavailable` and `enforce.undeclaredDenies` should stay at 0, and `undeclaredRoutes.count` should be 0.
@@ -180,7 +180,7 @@ The engine adds roughly 90 MB of resident memory to each server process (Cedar's
 Redeploy the previous release. There is no data to restore and no per-workspace switch back. Two things to know:
 
 - Custom policies created after the upgrade stop applying on the old code, so a deny written after the upgrade vanishes with it.
-- A permission map saved by the old code loses the keys that code does not know (`portals`, `resources`, `iam`); grant them again after the next upgrade if you had set them.
+- A permission map saved by the old code loses the keys that code does not know (`portals`, `resources`, `iam`, `webhooks`); grant them again after the next upgrade if you had set them.
 
 The activation-instant document stays in place and is read again by the next upgrade, so older "No access" entries stay ignored. Assignments saved by the old code while you were rolled back count as saved after the activation instant.
 

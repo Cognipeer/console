@@ -672,6 +672,75 @@ describe('access check form: portals', () => {
   });
 });
 
+describe('access check form: sessions', () => {
+  const sessionAction = (verb: string, level: 'read' | 'write', enforcedIn: Array<'dashboard' | 'api' | 'portal'>) => ({
+    id: `agent.${verb}`, kind: 'resource' as const, level, service: 'agents', resourceType: 'agent', verb,
+    labelKey: `iam.action.verb.${verb}`, labelParams: { type: 'agent' }, enforcedIn,
+  });
+  const sessionCatalog: IamCatalog = {
+    ...catalog,
+    actions: [
+      ...catalog.actions.filter((a) => !a.id.startsWith('agent.approve')),
+      sessionAction('approve', 'write', ['dashboard', 'api', 'portal']),
+      sessionAction('session_view_others', 'read', ['dashboard', 'api']),
+      sessionAction('session_manage_others', 'write', ['dashboard', 'api']),
+    ],
+  };
+  const index = indexCatalog(sessionCatalog);
+  const person = (form: CheckForm): CheckForm => ({ ...form, principal: { id: 'u1', label: 'Ann' } });
+
+  it('asks about the agent of a session, with who started it and whom the agent accepts as inputs', () => {
+    let form = person(emptyForm('user'));
+    form = applyAction(form, index.actionById.get('agent.approve'));
+    // not forced into the portal channel: the dashboard and the API answer requests too
+    expect(form).toMatchObject({ resourceKind: 'resource', resourceType: 'agent', channel: 'dashboard', sessionOwner: null, approvers: null });
+    form.resource = { type: 'agent', id: 'a1', label: 'Support bot' };
+    expect(formToRequest(form)).toEqual({
+      principal: { type: 'user', id: 'u1' }, action: 'agent.approve', resource: { kind: 'resource', type: 'agent', id: 'a1' },
+      context: { channel: 'dashboard' },
+    });
+    form = { ...form, sessionOwner: { id: 'u-starter', label: 'Sam' }, approvers: 'project_members' };
+    expect(formToRequest(form)?.context).toEqual({ channel: 'dashboard', ownerId: 'u-starter', approvers: 'project_members' });
+  });
+
+  it('the setting belongs to approving alone; the owner to the three session actions', () => {
+    let form = person(emptyForm('user'));
+    form = applyAction(form, index.actionById.get('agent.approve'));
+    form = { ...form, sessionOwner: { id: 'u-starter', label: 'Sam' }, approvers: 'owner' };
+    // another session action keeps the owner and drops the setting
+    form = applyAction(form, index.actionById.get('agent.session_view_others'), index.actionById.get('agent.approve'));
+    expect(form).toMatchObject({ sessionOwner: { id: 'u-starter' }, approvers: null });
+    // an action that is not about a session drops both
+    form = applyAction(form, index.actionById.get('agent.get'), index.actionById.get('agent.session_view_others'));
+    expect(form).toMatchObject({ sessionOwner: null, approvers: null });
+    expect(formToRequest({ ...form, resource: { type: 'agent', id: 'a1', label: 'x' } })?.context).toEqual({ channel: 'dashboard' });
+  });
+
+  it('answering through a portal needs the portal, and a token cannot do it there', () => {
+    let form = person(emptyForm('user'));
+    form = applyAction(form, index.actionById.get('agent.approve'));
+    form.resource = { type: 'agent', id: 'a1', label: 'Support bot' };
+    form = applyPortal(form, { type: 'portal', id: 'P1', label: 'Branch' });
+    expect(form.channel).toBe('portal');
+    expect(formToRequest(form)?.context).toEqual({ channel: 'portal', portalId: 'P1' });
+    const byHand: CheckForm = { ...form, portal: null };
+    expect(validateForm(byHand)).toEqual(['portal']);
+    expect(applyPrincipalType(form, 'token')).toMatchObject({ channel: 'api', portal: null });
+  });
+
+  it('rebuilds the form of a refused approval from the decision and converts it back to the same request', () => {
+    const request = {
+      principal: { type: 'user' as const, id: 'u9' },
+      action: 'agent.approve',
+      resource: { kind: 'resource' as const, type: 'agent', id: 'a9' },
+      context: { channel: 'dashboard' as const, projectId: 'p1', ownerId: 'u-starter', approvers: 'owner' as const, ip: '10.1.1.1', at: '2026-03-01T10:00:00.000Z' },
+    };
+    const form = applyAction(requestToForm(request, { principal: 'Una' }), index.actionById.get('agent.approve'));
+    expect(form).toMatchObject({ sessionOwner: { id: 'u-starter' }, approvers: 'owner', ctxProjectId: 'p1' });
+    expect(formToRequest(form)).toEqual(request);
+  });
+});
+
 describe('deep links to a portal', () => {
   it('"check a person" names the portal and the channel, without a person', () => {
     const href = checkHref({ action: 'portal.use', resourceType: 'portal', resourceId: 'P 1', resourceLabel: 'Branch assistant', channel: 'portal' });

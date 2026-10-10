@@ -13,12 +13,19 @@
  * list read through the portal seam (@/enterprise/iam-portal). The person is built
  * the way the portal runtime builds them: no project narrowing, because a portal has
  * no active project.
+ *
+ * Sessions: `agent.approve`, `agent.session_view_others` and `agent.session_manage_others`
+ * are checked on the agent of a SESSION - who started it (`context.ownerId`) and which
+ * answerers the agent accepts (`context.approvers`, default `owner_or_admin`) are what the
+ * answer depends on, so they are inputs of the check. In the dashboard and API channels the
+ * person is built the way the gate builds them (project narrowing included).
  */
 
 import { runWithTenantScope } from '@/lib/database';
 import { resolveIamPortal, type IamPortalFacts } from '@/enterprise/iam-portal';
 import { isPermissionService } from '@/lib/security/rbac';
-import { RUNTIME_ENFORCED_ACTIONS, type ActionDefinition } from './actions';
+import { isSessionResourceAction, RUNTIME_ENFORCED_ACTIONS, type ActionDefinition } from './actions';
+import { agentSessionResource, DEFAULT_AGENT_APPROVERS, isAgentApprovers, portalAgentSessionResource, type AgentApprovers } from './agentEntities';
 import { IAM_CHANNELS, isIamChannel, normalizeIp, type IamChannel, type IamRequestContext } from './context';
 import { authorize, type AuthorizeResult } from './engine';
 import type { IamResource } from './entities';
@@ -41,8 +48,12 @@ export type SimulateResourceInput =
 export interface SimulateContextInput {
   projectId?: string;
   channel?: IamChannel;
-  /** The portal an agent is run through (`agent.invoke` in the portal channel). */
+  /** The portal an agent is run through, or answered through (`agent.invoke` / `agent.approve` in the portal channel). */
   portalId?: string;
+  /** A session action: the person who started the session (a user id). Absent = nobody in particular. */
+  ownerId?: string;
+  /** A session action: which answerers the agent accepts (default `owner_or_admin`). */
+  approvers?: AgentApprovers;
   ip?: string;
   /** ISO timestamp the decision is evaluated at (default: now). */
   at?: string;
@@ -82,12 +93,17 @@ interface ParsedInput {
   projectId?: string;
   channel?: IamChannel;
   portalId?: string;
+  ownerId?: string;
+  approvers?: AgentApprovers;
   ip?: string;
   at?: Date;
 }
 
-/** Actions a runtime asks about (not the gates): `portal.use`, `agent.invoke`. */
-const isRuntimeAction = (id: string): boolean => Object.hasOwn(RUNTIME_ENFORCED_ACTIONS, id);
+/** Actions the PORTAL runtime asks about (`portal.use`, `agent.invoke`, and `agent.approve` in its own channel): decided without any project. */
+const isRuntimeAction = (id: string): boolean => RUNTIME_ENFORCED_ACTIONS[id]?.includes('portal') ?? false;
+
+/** Actions that ask about an agent together with the session it concerns. */
+const needsPortalAgent = (id: string): boolean => id === 'agent.invoke' || id === 'agent.approve';
 
 export function parseSimulateInput(input: unknown): ParsedInput {
   const issues: PolicyIssue[] = [];
@@ -118,6 +134,8 @@ export function parseSimulateInput(input: unknown): ParsedInput {
   let projectId: string | undefined;
   let channel: IamChannel | undefined;
   let portalId: string | undefined;
+  let ownerId: string | undefined;
+  let approvers: AgentApprovers | undefined;
   let ip: string | undefined;
   let at: Date | undefined;
   if (input.context !== undefined && input.context !== null) {
@@ -136,6 +154,14 @@ export function parseSimulateInput(input: unknown): ParsedInput {
       if (c.portalId !== undefined && c.portalId !== null && c.portalId !== '') {
         if (isSafeId(c.portalId)) portalId = c.portalId;
         else issues.push({ message: 'context.portalId is not a valid portal id', field: 'context.portalId' });
+      }
+      if (c.ownerId !== undefined && c.ownerId !== null && c.ownerId !== '') {
+        if (isSafeId(c.ownerId)) ownerId = c.ownerId;
+        else issues.push({ message: 'context.ownerId is not a valid user id', field: 'context.ownerId' });
+      }
+      if (c.approvers !== undefined && c.approvers !== null && c.approvers !== '') {
+        if (isAgentApprovers(c.approvers)) approvers = c.approvers;
+        else issues.push({ message: 'context.approvers must be one of owner, owner_or_admin, project_members', field: 'context.approvers' });
       }
       if (c.ip !== undefined && c.ip !== null && c.ip !== '') {
         const normalized = normalizeIp(c.ip);
@@ -157,12 +183,15 @@ export function parseSimulateInput(input: unknown): ParsedInput {
     if (principalType === 'token') {
       issues.push({ message: 'API tokens cannot open portals or run agents through them; choose a person', field: 'context.channel' });
     }
-    if (action.id === 'agent.invoke' && !portalId) {
+    if (needsPortalAgent(action.id) && !portalId) {
       issues.push({ message: 'Choose the portal the agent is run through (context.portalId)', field: 'context.portalId' });
     }
   }
-  if (portalId && !(action?.id === 'agent.invoke' && channel === 'portal')) {
-    issues.push({ message: 'context.portalId applies to agent.invoke in the portal channel only', field: 'context.portalId' });
+  if (portalId && !(action && needsPortalAgent(action.id) && channel === 'portal')) {
+    issues.push({ message: 'context.portalId applies to agent.invoke and agent.approve in the portal channel only', field: 'context.portalId' });
+  }
+  if ((ownerId || approvers) && !(action && isSessionResourceAction(action.id))) {
+    issues.push({ message: 'context.ownerId and context.approvers apply to the session actions (agent.approve, agent.session_view_others, agent.session_manage_others) only', field: ownerId ? 'context.ownerId' : 'context.approvers' });
   }
 
   if (issues.length > 0 || !action || !resource) {
@@ -175,6 +204,8 @@ export function parseSimulateInput(input: unknown): ParsedInput {
     projectId,
     channel,
     portalId,
+    ownerId,
+    approvers,
     ip,
     at,
   };
@@ -196,11 +227,18 @@ async function portalOf(tenant: IamTenant, portalId: string): Promise<IamPortalF
   return facts;
 }
 
+/** The session a check about an agent is made for (who started it, which answerers the agent accepts). */
+interface SessionFacts {
+  ownerId?: string;
+  approvers: AgentApprovers;
+}
+
 async function resolveResource(
   tenant: IamTenant,
   action: ActionDefinition,
   input: SimulateResourceInput,
   portalId?: string,
+  session: SessionFacts = { approvers: DEFAULT_AGENT_APPROVERS },
 ): Promise<ResolvedResource> {
   const bad = (message: string, field = 'resource'): never => {
     throw new SimulateInputError('validation', message, 400, [{ message, field }]);
@@ -224,16 +262,22 @@ async function resolveResource(
     const { getResource } = await import('@/lib/resources/service');
     const detail = await getResource({ tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, type: input.type, id: input.id });
     if (!detail) throw new SimulateInputError('resource_not_found', `The ${input.type} "${input.id}" does not exist in this workspace`, 404);
-    if (portalId && action.id === 'agent.invoke') {
+    if (portalId && needsPortalAgent(action.id)) {
       const facts = await portalOf(tenant, portalId);
       if (!facts.agentIds.includes(input.id)) bad(`The portal "${facts.name}" does not offer this agent`, 'context.portalId');
+      const agent = { id: input.id, key: detail.key ?? undefined, projectId: detail.projectId };
       return {
-        resource: portalAgentResource(
-          { id: input.id, key: detail.key ?? undefined, projectId: detail.projectId },
-          { id: facts.id, access: facts.access },
-        ),
+        resource: action.id === 'agent.approve'
+          ? portalAgentSessionResource({ ...agent, ownerIds: [session.ownerId], approvers: session.approvers }, { id: facts.id, access: facts.access })
+          : portalAgentResource(agent, { id: facts.id, access: facts.access }),
         projectId: detail.projectId ?? undefined,
         portal: facts,
+      };
+    }
+    if (isSessionResourceAction(action.id)) {
+      return {
+        resource: agentSessionResource({ id: input.id, key: detail.key ?? undefined, projectId: detail.projectId, ownerIds: [session.ownerId], approvers: session.approvers }),
+        projectId: detail.projectId ?? undefined,
       };
     }
     return {
@@ -262,6 +306,12 @@ async function resolveResource(
   }
   if (action.kind === 'service') {
     return { resource: { kind: 'service', service: action.service ?? '' }, projectId: input.projectId };
+  }
+  if (isSessionResourceAction(action.id)) {
+    return {
+      resource: agentSessionResource({ id: '(new)', projectId: input.projectId, ownerIds: [session.ownerId], approvers: session.approvers }),
+      projectId: input.projectId,
+    };
   }
   return {
     resource: { kind: 'resource', type: action.resourceType ?? '', id: '(new)', service: action.service ?? '', projectId: input.projectId },
@@ -329,6 +379,11 @@ export interface SimulateResult {
   /** Problems the engine met while evaluating (a policy that errored); the decision above already accounts for them. */
   errors?: string[];
   /**
+   * The session a session action was checked for: who started it (null = nobody in particular) and which
+   * answerers the agent was assumed to accept.
+   */
+  session?: { ownerId: string | null; approvers: AgentApprovers };
+  /**
    * The portal a `portal.use` / `agent.invoke` check was about: what its access list is (counts only, never the
    * names - the Access check explains a decision, it does not publish the list).
    */
@@ -346,9 +401,11 @@ export interface SimulateResult {
 export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<SimulateResult> {
   const input = parseSimulateInput(rawInput);
 
-  const resolved = await resolveResource(tenant, input.action, input.resource, input.portalId);
+  const session: SessionFacts = { ownerId: input.ownerId, approvers: input.approvers ?? DEFAULT_AGENT_APPROVERS };
+  const resolved = await resolveResource(tenant, input.action, input.resource, input.portalId, session);
   // The portal runtime builds the person without any project (a portal has none): no narrowing, no project context.
   const inPortal = input.channel === 'portal' && isRuntimeAction(input.action.id);
+  // (A session action asked in the dashboard or the API runs in a project like any request: the person is narrowed by it.)
   const projectId = inPortal ? null : input.projectId ?? resolved.projectId ?? null;
 
   let evaluation: EvaluationPrincipal;
@@ -404,6 +461,7 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
     // Service actions are decided by the request gates; portal.use / agent.invoke by the portal runtime in its channel.
     enforcedAtGate: input.action.kind === 'service' || (input.action.kind === 'resource' && isRuntimeEnforced(input.action.id, context.channel as IamChannel)),
     ...(result.errors.length > 0 ? { errors: result.errors.slice(0, 10) } : {}),
+    ...(isSessionResourceAction(input.action.id) ? { session: { ownerId: session.ownerId ?? null, approvers: session.approvers } } : {}),
     ...(resolved.portal
       ? {
           portal: {

@@ -10,14 +10,18 @@ export * from './events';
 export * from './entities';
 export * from './managedPolicies';
 export * from './portalEntities';
+export * from './agentEntities';
 export {
   authorizeResourceAccess,
+  authorizeResourceForPrincipal,
   RESOURCE_AUTHZ_ACTIONS,
   type ResourceAuthzAction,
   type ResourceAuthzClient,
   type ResourceAuthzInput,
   type ResourceAuthzRequester,
   type ResourceAuthzResult,
+  type ResourceAuthzSubject,
+  type ResourcePrincipalAuthzInput,
 } from './resourceAuthz';
 export { enforcedChannelsOf, isRuntimeEnforced } from './runtimeEnforced';
 export { getIamSchema, ensureSchemaPreparsed } from './schemaState';

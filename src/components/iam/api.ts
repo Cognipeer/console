@@ -126,8 +126,8 @@ export interface ManagedPolicy {
   /** i18n keys of the same texts (`iamApi.managed.<slug>.name|description`), when the server sends them. */
   nameKey?: string;
   descriptionKey?: string;
-  /** `rbac`: reproduces role-based access; `boundary`: a limit no allow can exceed; `portal`: who may open a portal and run its agents. */
-  group: 'rbac' | 'boundary' | 'portal';
+  /** `rbac`: reproduces role-based access; `boundary`: a limit no allow can exceed; `portal`: who may open a portal and run its agents; `agent`: who may answer an agent session's pending requests. */
+  group: 'rbac' | 'boundary' | 'portal' | 'agent';
   effect: IamEffect;
   cedar: string;
 }
@@ -232,12 +232,20 @@ export type SimulateResource =
 export interface SimulateContext {
   projectId?: string;
   channel?: IamChannel;
-  /** The portal an agent is run through (`agent.invoke` in the portal channel). */
+  /** The portal an agent is run through, or answered through (`agent.invoke` / `agent.approve` in the portal channel). */
   portalId?: string;
+  /** A session action: the person who started the session (a user id). */
+  ownerId?: string;
+  /** A session action: which answerers the agent accepts (default `owner_or_admin`). */
+  approvers?: AgentApprovers;
   ip?: string;
   /** ISO timestamp. */
   at?: string;
 }
+
+/** The agent's "who can approve" setting (`humanInTheLoop.approvers`). */
+export type AgentApprovers = 'owner' | 'owner_or_admin' | 'project_members';
+export const AGENT_APPROVERS: readonly AgentApprovers[] = ['owner', 'owner_or_admin', 'project_members'];
 
 export interface SimulateRequest {
   principal: { type: 'user' | 'token'; id: string };
@@ -278,6 +286,8 @@ export interface SimulateResponse {
   errors: string[];
   /** The portal a `portal.use` / `agent.invoke` check was about: what its access list is (counts only, never the names). */
   portal: SimulatePortal | null;
+  /** The session a session action was checked for: who started it (null = nobody in particular) and the answerers the agent was assumed to accept. */
+  session: { ownerId: string | null; approvers: AgentApprovers } | null;
 }
 
 export interface SimulatePortal {
@@ -743,7 +753,14 @@ export function normalizeSimulate(raw: unknown): SimulateResponse {
     enforcedAtGate: o.enforcedAtGate === false ? false : true,
     errors: strings(o.errors),
     portal: normalizeSimulatePortal(o.portal),
+    session: normalizeSimulateSession(o.session),
   };
+}
+
+function normalizeSimulateSession(raw: unknown): SimulateResponse['session'] {
+  const o = asRecord(raw);
+  const approvers = AGENT_APPROVERS.find((value) => value === o.approvers);
+  return approvers ? { ownerId: nullableStr(o.ownerId), approvers } : null;
 }
 
 function normalizeSimulatePortal(raw: unknown): SimulatePortal | null {
@@ -781,6 +798,8 @@ export function normalizeSimulateInput(raw: unknown): SimulateRequest | null {
     ...(optStr(c.projectId) ? { projectId: optStr(c.projectId) } : {}),
     ...(channel ? { channel } : {}),
     ...(optStr(c.portalId) ? { portalId: optStr(c.portalId) } : {}),
+    ...(optStr(c.ownerId) ? { ownerId: optStr(c.ownerId) } : {}),
+    ...(AGENT_APPROVERS.find((value) => value === c.approvers) ? { approvers: AGENT_APPROVERS.find((value) => value === c.approvers) } : {}),
     ...(optStr(c.ip) ? { ip: optStr(c.ip) } : {}),
     ...(optStr(c.at) ? { at: optStr(c.at) } : {}),
   };
@@ -1092,9 +1111,11 @@ export const iamApi = {
           group:
             r.group === 'portal' || id.includes(':portal:')
               ? 'portal'
-              : r.group === 'boundary' || (r.group !== 'rbac' && !id.includes(':rbac:'))
-                ? 'boundary'
-                : 'rbac',
+              : r.group === 'agent' || id.includes(':agent:')
+                ? 'agent'
+                : r.group === 'boundary' || (r.group !== 'rbac' && !id.includes(':rbac:'))
+                  ? 'boundary'
+                  : 'rbac',
           effect: toEffect(r.effect),
           cedar: str(r.cedar),
         };

@@ -56,6 +56,16 @@ describe('getDashboardServices with the engine\'s answer for the active project'
     expect(ids(getDashboardServices({ ...asUser, effectivePermissions: {} }))).toEqual(list);
   });
 
+  it('Webhooks is an administration service: a plain member does not see it until the permission is granted', () => {
+    expect(ids(getDashboardServices({ ...asUser }))).not.toContain('webhooks');
+    expect(ids(getDashboardServices({ role: 'admin', servicePermissions: {} }))).toContain('webhooks');
+    // an own grant, or the engine's answer for this project (a group, a policy), shows it
+    expect(ids(getDashboardServices({ role: 'user', servicePermissions: { webhooks: 'read' } }))).toContain('webhooks');
+    expect(ids(getDashboardServices({ ...asUser, effectivePermissions: { webhooks: 'admin' } }))).toContain('webhooks');
+    // ...and a rule that takes it away from an admin hides it
+    expect(ids(getDashboardServices({ role: 'admin', servicePermissions: {}, effectivePermissions: { webhooks: 'none' } }))).not.toContain('webhooks');
+  });
+
   it('hides a service the active project narrowed to none, instead of leaving a link that answers 403', () => {
     const list = ids(getDashboardServices({ ...asUser, effectivePermissions: { models: 'none', agents: 'read' } }));
     expect(list).not.toContain('models');

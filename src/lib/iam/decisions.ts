@@ -4,9 +4,10 @@
  * wrote, and from it to a ready-to-run access check (`simulateInput`) that
  * reproduces the decision.
  *
- * The same goes for a refusal the portal runtime made (resourceAuthz.ts): its row
- * says which action on which portal or agent, in the portal channel, and replays as
- * that check.
+ * The same goes for a refusal about a resource (resourceAuthz.ts): the portal runtime's
+ * (which action on which portal or agent, in the portal channel) and the agent routes' (an
+ * approval, or access to somebody else's session, with who started the session and which
+ * answerers the agent accepted). Its row replays as that check.
  *
  * A replay runs against the policies as they are NOW. So the record also says what
  * became of the policies that decided: each one with its name and whether it is
@@ -16,6 +17,7 @@
 
 import { RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
 import { runWithTenantScope } from '@/lib/database';
+import { RUNTIME_ENFORCED_ACTIONS } from './actions';
 import { deniedActionOf, IAM_CHANGE_RESOURCE_TYPES } from './audit';
 import { DEFAULT_WINDOW_MS } from './auditFeed';
 import { resolvePrincipalLabels } from './labels';
@@ -101,32 +103,46 @@ async function describePolicies(tenant: IamTenant, policyIds: readonly string[],
 
 const text = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
 
-/** The check that reproduces a refusal of the portal runtime, or null when it cannot be replayed. */
-function portalReplay(
+/**
+ * The check that reproduces a refusal about a resource, or null when the row is not one (a gate refusal). A refusal the
+ * portal runtime made replays for the person; one of the agent routes also replays for the token that asked.
+ */
+function resourceReplay(
   meta: Record<string, unknown>,
-  principalId: string,
+  principal: { type: 'user' | 'token'; id: string },
   at: string,
   ip: string | null,
 ): { channel: string; resource: NonNullable<DecisionRecord['resource']>; input: SimulateInput | null } | null {
-  if (meta.channel !== 'portal') return null;
   const action = text(meta.action);
+  const channel = text(meta.channel);
   const type = text(meta.resourceType);
   const id = text(meta.resourceId);
-  const portalId = text(meta.portalId);
   const label = text(meta.resourceName);
-  if (!action || !type || !id) return null;
-  const replayable = meta.code === 'forbidden' && !!principalId && (action !== 'agent.invoke' || !!portalId);
+  if (!action || !channel || !type || !id) return null;
+  if (!Object.hasOwn(RUNTIME_ENFORCED_ACTIONS, action)) return null;
+  // A portal asks for people only; the agent routes for people and tokens.
+  if (channel === 'portal' && principal.type === 'token') return null;
+  if (channel !== 'portal' && channel !== 'dashboard' && channel !== 'api') return null;
+  const portalId = text(meta.portalId);
+  const throughPortal = channel === 'portal' && (action === 'agent.invoke' || action === 'agent.approve');
+  const projectId = text(meta.contextProjectId);
+  const ownerId = text(meta.ownerId);
+  const approvers = text(meta.approvers);
+  const replayable = meta.code === 'forbidden' && !!principal.id && (!throughPortal || !!portalId);
   return {
-    channel: 'portal',
+    channel,
     resource: { type, id, ...(label ? { label } : {}) },
     input: replayable
       ? {
-          principal: { type: 'user', id: principalId },
+          principal,
           action,
           resource: { kind: 'resource', type, id },
           context: {
-            channel: 'portal',
-            ...(action === 'agent.invoke' && portalId ? { portalId } : {}),
+            channel,
+            ...(throughPortal && portalId ? { portalId } : {}),
+            ...(channel !== 'portal' && projectId ? { projectId } : {}),
+            ...(ownerId ? { ownerId } : {}),
+            ...(approvers === 'owner' || approvers === 'owner_or_admin' || approvers === 'project_members' ? { approvers } : {}),
             ...(ip ? { ip } : {}),
             at,
           },
@@ -169,7 +185,7 @@ export async function getDecision(tenant: IamTenant, decisionId: string): Promis
   // an input of the decision, so an older row without contextIp replays without one.
   const ip = normalizeIp(typeof meta.contextIp === 'string' ? meta.contextIp : null);
   const at = new Date(row.createdAt ?? 0).toISOString();
-  const portal = isToken ? null : portalReplay(meta, principalId, at, ip);
+  const portal = resourceReplay(meta, { type: isToken ? 'token' : 'user', id: principalId }, at, ip);
   const policyIds = Array.isArray(meta.policyIds) ? meta.policyIds.filter((x): x is string => typeof x === 'string') : [];
   const keptNames = meta.policyNames && typeof meta.policyNames === 'object' && !Array.isArray(meta.policyNames)
     ? (meta.policyNames as Record<string, unknown>)

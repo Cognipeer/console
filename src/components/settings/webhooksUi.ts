@@ -41,6 +41,24 @@ export interface WebhookDeliveryRow {
   deliveredAt: string | null;
 }
 
+/**
+ * What the policy engine says the person may do on this page (`capabilities` of the list response): the controls
+ * the page shows come from it, never from a role. `manage`: change webhooks in this project. `workspaceScope`: ...
+ * and an endpoint for every project. A server that does not say (an older one) shows the controls and lets its
+ * own checks refuse; the "every project" choice then stays hidden.
+ */
+export interface WebhookCapabilities {
+  manage: boolean;
+  workspaceScope: boolean;
+}
+
+export function parseWebhookCapabilities(body: unknown): WebhookCapabilities {
+  const raw = body && typeof body === 'object' ? (body as { capabilities?: unknown }).capabilities : undefined;
+  if (!raw || typeof raw !== 'object') return { manage: true, workspaceScope: false };
+  const { manage, workspaceScope } = raw as { manage?: unknown; workspaceScope?: unknown };
+  return { manage: manage === true, workspaceScope: workspaceScope === true };
+}
+
 /** `session.idled` → `session_idled`: the i18n key (a dot would read as a path). */
 export function eventLabelKey(type: string): string {
   return type.replace(/\./g, '_');

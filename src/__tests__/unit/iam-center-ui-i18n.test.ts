@@ -100,7 +100,7 @@ describe('iamCenter i18n', () => {
       // warnings about a rule no request can match
       issueCodes: ['not_enforced_actions', 'not_enforced_resources', 'not_enforced_channel', 'not_asked_actions', 'partly_not_asked_actions'],
       // verbs of RESOURCE_CRUD_VERBS and RESOURCE_EXTRA_VERBS in lib/iam/actions.ts
-      verbs: ['get', 'list', 'create', 'update', 'delete', 'invoke', 'execute', 'call', 'query', 'infer', 'use'],
+      verbs: ['get', 'list', 'create', 'update', 'delete', 'invoke', 'execute', 'call', 'query', 'infer', 'use', 'approve', 'session_view_others', 'session_manage_others'],
     };
     const missing: string[] = [];
     for (const [family, names] of Object.entries(families)) {

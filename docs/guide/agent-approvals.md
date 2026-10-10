@@ -20,9 +20,25 @@ The turn is paused, not lost. When the request is answered, the **same turn** ca
 | Per-tool settings | none | Override the default for one tool: Default, Always ask, Never ask. The name is the one the model sees. |
 | Wait for an answer (minutes) | 1440 | How long a request stays open. `0` = never expires. |
 | When time runs out | Deny and continue | **Deny and continue**: the tool is refused (or the question skipped) and the agent carries on in the background. **Cancel the request**: the request is dropped and the session goes back to idle. |
-| Who can answer | The session owner and project admins | Only the person who started the session; the owner and project admins; or anyone with access to the agent. |
+| Who can answer | The session owner and project admins | Only the person who started the session; the owner and project admins; or anyone with access to the agent. This is the input of the **Approve** permission below. |
 | A new message while waiting | Reject it | **Reject**: the message is refused (`409 pending_action`) until the request is answered. **Cancel the request and continue**: the pending request is cancelled and the message is processed normally. |
 | When nobody can answer | Deny the tool call | See [unattended runs](#unattended-runs). |
+
+### Who may answer: the Approve permission
+
+Answering is a permission of its own, **Agent · Approve requests** (`agent.approve`), decided by the same permission engine as everything else (**Authorization** in Settings). By default it reproduces the *Who can answer* setting of the agent:
+
+| Who can answer | Who may |
+| --- | --- |
+| Only the person who started the session | that person (and their API tokens) |
+| The session owner and project admins (default) | the above, workspace owners and admins, and the admins of the agent's project |
+| Anyone with access to the agent | the above, and every member of the agent's project |
+
+The person who started the session may always answer, whatever the setting. An API token answers on behalf of its owner, and its own scope and the project's limits still apply. The same rule covers the portals (a portal's access list is checked on top).
+
+Restricting it further is an ordinary **deny** policy in **Authorization → Policies** (pick the action *Agent · Approve requests*, choose who it applies to); a policy cannot add people the setting does not accept, and the policy editor says so. A refusal answers `403` with a `decisionId` that **Authorization → Access check** can replay. The check form takes the session's owner and the agent's setting as inputs.
+
+Ending somebody's open request is answering it with "no", so the same permission guards the places where a request is ended as a side effect: cancelling a run that is paused on an approval, and sending a new message to an agent that cancels the pending request (*A new message while waiting*). Without the permission those answer `403` instead.
 
 ### What is not asked about
 
@@ -92,7 +108,7 @@ The turn continues inline and the answer is a normal response (`completed`, or `
 
 | Status | Meaning |
 | --- | --- |
-| `403` | The caller may not answer under the agent's *Who can answer* setting. |
+| `403` | The caller does not hold the **Approve requests** permission for this session (the agent's *Who can answer* setting, and any deny policy). `action_forbidden`, with a `decision_id`. |
 | `404` | No such session or request in this project. |
 | `409` | Someone answered first (`action_not_pending`, with `action_status`), or another run is active for the conversation. |
 | `410` | The request ran out of time (`action_expired`). |
@@ -103,7 +119,7 @@ You can also read what a session is waiting on at any time with `GET /api/client
 
 A background run that pauses has the non-terminal status `requires_action`; its `result` carries the same `required_action`, and the `agent_run.requires_action` callback and webhook fire. Answering queues the same run again; it finishes as usual. Cancelling a paused run ends it and drops its open requests. Clients that poll until a terminal status should stop on `requires_action` too, or they wait for a person.
 
-Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`. Unless the agent cancels the pending request on a new message, a `message/send` to a conversation that is still waiting is refused, with the ids to answer in the error's `data.pending_action_ids`. `tasks/cancel` is not supported (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that waits on a person is ended by answering its requests through the actions endpoint above (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids.
+Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`. Unless the agent cancels the pending request on a new message, a `message/send` to a conversation that is still waiting is refused, with the ids to answer in the error's `data.pending_action_ids`. `tasks/cancel` is not supported (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that waits on a person is ended by answering its requests through the actions endpoint above (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids. A caller who may not answer those requests gets the JSON-RPC error `-32010` (with a `decision_id`) from `tasks/cancel` on such a task, and from a `message/send` that would cancel the request.
 
 ## Unattended runs
 

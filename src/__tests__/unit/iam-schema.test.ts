@@ -68,6 +68,13 @@ describe('action catalog', () => {
     expect(catalog.find((a) => a.id === 'portal.use')!.group).toBe('Read');
   });
 
+  it('adds the session verbs of an agent: approve and the two "others\' sessions" actions, in their level groups', () => {
+    const verb = (id: string) => catalog.find((a) => a.id === id)!;
+    expect(verb('agent.approve')).toMatchObject({ kind: 'resource', level: 'write', group: 'Write', service: 'agents', resourceEntityTypes: ['Agent'], labelKey: 'iam.action.verb.approve' });
+    expect(verb('agent.session_view_others')).toMatchObject({ level: 'read', group: 'Read', labelKey: 'iam.action.verb.session_view_others' });
+    expect(verb('agent.session_manage_others')).toMatchObject({ level: 'write', group: 'Write', labelKey: 'iam.action.verb.session_manage_others' });
+  });
+
   it('maps HTTP methods like getRequiredPermissionLevel (read/write split)', () => {
     expect(methodToActionLevel('GET')).toBe('read');
     expect(methodToActionLevel('head')).toBe('read');
@@ -118,7 +125,10 @@ describe('generated schema', () => {
     expect(Object.keys(ns.entityTypes.Service.shape.attributes).sort()).toEqual(['adminService', 'service']);
     // an agent run through a portal is in that portal and names it; the portal carries its access list
     expect(ns.entityTypes.Agent.memberOfTypes).toEqual(['Project', 'Portal']);
-    expect(Object.keys(ns.entityTypes.Agent.shape.attributes).sort()).toEqual(['adminService', 'key', 'portal', 'service', 'tags']);
+    // ...and the session an agent is asked about: who started it, and whom the agent accepts as an approver
+    expect(Object.keys(ns.entityTypes.Agent.shape.attributes).sort()).toEqual(['adminService', 'approvers', 'key', 'owners', 'portal', 'service', 'tags']);
+    expect(ns.entityTypes.Agent.shape.attributes.owners).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'User' }, required: false });
+    expect(ns.entityTypes.Agent.shape.attributes.approvers).toMatchObject({ type: 'String', required: false });
     expect(ns.entityTypes.Agent.shape.attributes.portal).toMatchObject({ type: 'Entity', name: 'Portal', required: false });
     expect(Object.keys(ns.entityTypes.Portal.shape.attributes).sort()).toEqual(['adminService', 'allowedGroups', 'allowedUsers', 'key', 'mode', 'service', 'tags']);
     for (const name of ['mode', 'allowedUsers', 'allowedGroups']) expect(ns.entityTypes.Portal.shape.attributes[name].required).toBe(false);
@@ -178,12 +188,13 @@ describe('custom policy validation', () => {
     expect(onlyResourceActions.errors[0].message).toMatch(/individual resources/);
     const manyResourceActions = validateCustomPolicyText('forbid(principal, action in [Action::"agent.delete", Action::"tool.delete"], resource);');
     expect(manyResourceActions.valid).toBe(false);
-    const onResource = validateCustomPolicyText('forbid(principal, action, resource == Agent::"a1");');
+    // (A service action never meets an Agent or a Project: the gates ask about `Service::"x"`.)
+    const onResource = validateCustomPolicyText('forbid(principal, action == Action::"models.write", resource == Agent::"a1");');
     expect(onResource.valid).toBe(false);
     expect(onResource.errors[0].message).toMatch(/whole services/);
-    const onProjectScope = validateCustomPolicyText('forbid(principal, action, resource in Project::"p1");');
+    const onProjectScope = validateCustomPolicyText('forbid(principal, action == Action::"models.write", resource in Project::"p1");');
     expect(onProjectScope.valid).toBe(false);
-    const isAgent = validateCustomPolicyText('forbid(principal, action, resource is Agent);');
+    const isAgent = validateCustomPolicyText('forbid(principal, action == Action::"models.write", resource is Agent);');
     expect(isAgent.valid).toBe(false);
 
     // Reachable forms stay valid: a level group, a service action, a Service resource, a `when` on a project.
@@ -192,6 +203,13 @@ describe('custom policy validation', () => {
       'forbid(principal, action in [Action::"agent.delete", Action::"Write"], resource);',
       'forbid(principal, action == Action::"models.write", resource is Service);',
       'forbid(principal, action, resource) when { resource in [Project::"p1"] || (resource is Service && context has projectId && context.projectId == "p1") };',
+      // ...and the agent routes DO ask about one agent (its sessions): answering a request, and looking at / acting on
+      // somebody else's session. Every action on one agent, or on a project, reaches them.
+      'forbid(principal, action == Action::"agent.approve", resource == Agent::"a1");',
+      'forbid(principal, action == Action::"agent.session_view_others", resource in Project::"p1");',
+      'forbid(principal, action in [Action::"agent.session_manage_others", Action::"agent.update"], resource is Agent);',
+      'forbid(principal, action, resource == Agent::"a1");',
+      'forbid(principal, action, resource in Project::"p1");',
     ]) {
       expect(validateCustomPolicyText(text).valid, text).toBe(true);
     }

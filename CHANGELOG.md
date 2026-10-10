@@ -15,6 +15,18 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   the person's workspace level, an explicit level caps it.
 - A deny rule that cannot be evaluated for a request counts as a deny for that request.
 - The session payload carries `effectivePermissions`, so the navigation shows only what the active project allows.
+- Answering a pending tool approval or question of an agent session is a permission of its own, `agent.approve`.
+  By default it follows the agent's *Who can answer* setting (the person who started the session always may); a
+  deny rule in the policy editor restricts it, and it applies to the dashboard, the API and portals alike. Ending
+  somebody's open request as a side effect (cancelling a paused run, a new message to an agent that cancels pending
+  requests) takes the same permission.
+- Two more agent actions decide what somebody else may do with a session another person started:
+  `agent.session_view_others` (Read) and `agent.session_manage_others` (Write). By default every holder of
+  `agents` Read / Write has them, as before; the Access check takes the session's owner and the agent's setting as inputs.
+- Webhooks are an administration service: the policy engine is the only authority (Read to look, Admin to change),
+  owners and admins hold it by default and everybody else until it is granted. Being a project admin is no longer a
+  permission on webhooks by itself; grant **Webhooks** to the people or groups who should manage them. Tenant-wide
+  endpoints and other projects' endpoints need the permission in the workspace itself, which an API token never has.
 
 ### People and access
 

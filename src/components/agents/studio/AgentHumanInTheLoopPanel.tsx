@@ -222,6 +222,7 @@ export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig }
                         />
                         <Select
                             label={t('approvers')}
+                            description={t('approversHelp')}
                             data={[
                                 { value: 'owner', label: t('approversOwner') },
                                 { value: 'owner_or_admin', label: t('approversOwnerOrAdmin') },

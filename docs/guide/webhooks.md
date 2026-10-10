@@ -2,14 +2,27 @@
 
 A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a schedule fires. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
 
-Manage them in **Settings → Webhooks**, or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner is a project admin or a tenant owner / admin, and never a tenant-wide endpoint or another project's, whoever owns it.
+Manage them in **Settings → Webhooks**, or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner holds the `webhooks` permission (within the token's own scope), and never a tenant-wide endpoint or another project's, whoever owns it.
 
 ## Who can manage them
 
-- An endpoint for one project: that project's admins, and tenant owners / admins.
-- An endpoint for every project (`projectId: null`): tenant owners / admins only.
+The **Webhooks** permission decides, and only that. A webhook is outbound network traffic with a signing secret, so `webhooks` is an administration service, like Portals or Single Sign-On: workspace owners and admins hold it by default, everybody else holds nothing until you grant it (**Authorization → People** or **Groups**, the Webhooks row).
 
-Anyone else (a plain project member, or a token whose owner is one) gets a 403 on every route that reads or changes an endpoint or its deliveries (the event catalog, `GET /webhooks/events`, stays readable). The 404 is only for people who can manage webhooks, when the endpoint is outside their reach: another project's, or a tenant-wide one for a project admin.
+| Level | What it allows |
+| --- | --- |
+| Read | list endpoints and their deliveries, read the event catalog |
+| Admin | everything: create, edit, enable / disable, send a test event, rotate the secret, redeliver, delete |
+
+There is no "write" in between: changing a webhook needs Admin. A project's own member permissions can lower the level inside that project, never raise it, and a deny policy on `webhooks` (**Authorization → Policies**) takes it away from whoever it names.
+
+Where the permission is exercised decides what an endpoint can reach:
+
+- An endpoint of the project the request is made in: anyone who passes the gate above.
+- An endpoint for every project (`projectId: null`) and an endpoint of another project: only someone who holds the permission in the workspace itself, outside any project (a project's limits do not narrow it). A token never does: it is bound to one project.
+
+Without the permission a route answers **403** with the engine's reason and a `decisionId` (also in the `X-Decision-Id` header; look it up in **Authorization → Access check**). The **404** is for someone who holds the permission when the endpoint is outside their reach: another project's, or a tenant-wide one.
+
+Settings → Webhooks shows only what the person may do: without Admin the page is read-only, and the "every project" scope appears only with workspace-level Admin. The list response carries that as `capabilities` (`manage`, `workspaceScope`).
 
 ## Events
 

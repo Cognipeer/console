@@ -65,6 +65,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-assistants');
 
@@ -739,6 +740,16 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       return {
         status: 400,
         body: { error: 'Nothing to run: add a user message with POST .../threads/:id/messages first.' },
+      };
+    }
+
+    // Running the thread sends a message; under `cancel_pending` that cancels an open request of the session,
+    // which takes the permission to answer it.
+    const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+    if (cancelRefusal) {
+      return {
+        status: 403,
+        body: { error: CANCEL_PENDING_FORBIDDEN_MESSAGE, ...(cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : {}) },
       };
     }
 

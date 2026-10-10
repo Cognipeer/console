@@ -15,6 +15,8 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
         ...actual,
         requireProjectContextForRequest: vi.fn(),
         sendProjectContextError: vi.fn().mockReturnValue(null),
+        // The engine's decision on `agent.approve` is asked through this; the engine itself is iam-agent-approve.test.ts.
+        authorizeResourceForRequest: vi.fn(),
     };
 });
 
@@ -34,6 +36,7 @@ vi.mock('@/lib/services/agents', () => ({
     deleteConversation: vi.fn(),
     executePlaygroundChat: vi.fn(),
     getAgentById: vi.fn(),
+    getAgentByKey: vi.fn(),
     getAgentVersion: vi.fn(),
     getConversationById: vi.fn(),
     listAgents: vi.fn(),
@@ -55,16 +58,30 @@ vi.mock('@/lib/services/agents/agentActionResolution', () => ({
     pendingActionsBlockingMessage: vi.fn(),
 }));
 
+// Ending an open request (cancelling a paused run, a message under cancel_pending) takes the engine's
+// `agent.approve`: only the wiring is checked here, the decision itself is api/agent-session-authz.test.ts.
+vi.mock('@/server/api/plugins/agent-approval-authz', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/server/api/plugins/agent-approval-authz')>();
+    return { ...actual, authorizeEndingOpenRequests: vi.fn(), refuseCancelPending: vi.fn() };
+});
+
+vi.mock('@/lib/services/agents/agentRunService', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/lib/services/agents/agentRunService')>();
+    return { ...actual, getAgentRunStatus: vi.fn(), requestAgentRunCancellation: vi.fn() };
+});
+
 vi.mock('@/server/api/plugins/agent-config-write', async (importOriginal) => {
     const actual = await importOriginal<typeof import('@/server/api/plugins/agent-config-write')>();
     return { ...actual, prepareNewAgentConfig: vi.fn() };
 });
 
-import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
+import { authorizeResourceForRequest, requireProjectContextForRequest } from '@/server/api/fastify-utils';
 import { getDatabase } from '@/lib/database';
-import { createAgentRecord, getAgentById, getConversationById } from '@/lib/services/agents';
+import { createAgentRecord, executePlaygroundChat, getAgentById, getAgentByKey, getConversationById } from '@/lib/services/agents';
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { pendingActionsBlockingMessage, resolveAgentPendingAction } from '@/lib/services/agents/agentActionResolution';
+import { getAgentRunStatus, requestAgentRunCancellation } from '@/lib/services/agents/agentRunService';
+import { authorizeEndingOpenRequests, refuseCancelPending } from '@/server/api/plugins/agent-approval-authz';
 import { prepareNewAgentConfig } from '@/server/api/plugins/agent-config-write';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
 import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
@@ -90,9 +107,13 @@ beforeEach(() => {
     vi.clearAllMocks();
     mockFn(requireProjectContextForRequest).mockResolvedValue(SESSION_CTX);
     mockFn(getAgentById).mockResolvedValue(AGENT);
+    mockFn(getAgentByKey).mockResolvedValue(AGENT);
+    mockFn(authorizeResourceForRequest).mockResolvedValue({ allowed: true, source: 'engine', reasons: [], policyIds: [] });
     mockFn(getConversationById).mockResolvedValue(CONVERSATION);
     mockFn(pendingActionsBlockingMessage).mockResolvedValue(null);
-    mockFn(getDatabase).mockResolvedValue({ createAgentRun: vi.fn(async () => ({ _id: 'res-1' })), deleteAgentRun: vi.fn() });
+    mockFn(refuseCancelPending).mockResolvedValue(null);
+    mockFn(authorizeEndingOpenRequests).mockResolvedValue({ allowed: true });
+    mockFn(getDatabase).mockResolvedValue({ createAgentRun: vi.fn(async () => ({ _id: 'res-1' })), deleteAgentRun: vi.fn(async () => true) });
 });
 
 const build = async () => createFastifyApiTestApp(agentsApiPlugin);
@@ -113,10 +134,62 @@ describe('POST …/actions/:actionId/resolve', () => {
             tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', conversationId: 'conv-1',
             actionId: 'act_1', agentKey: 'field-ops', mode: 'sync',
             body: { decision: 'allow', comment: 'ok' },
-            // A project admin counts as an admin.
-            actor: expect.objectContaining({ userId: 'user-1', isAdmin: true, channel: 'dashboard' }),
+            actor: expect.objectContaining({ userId: 'user-1', channel: 'dashboard' }),
+            // Whether this caller may answer is asked of the engine through the authorizer.
+            authorize: expect.any(Function),
         }));
+        // (No role flag travels any more: `isAdmin` was the old, private authority.)
+        expect(mockFn(resolveAgentPendingAction).mock.calls[0][0].actor).not.toHaveProperty('isAdmin');
         expect(mockFn(resolveAgentPendingAction).mock.calls[0][0].stream).toBeUndefined();
+    });
+
+    describe('who may answer is the engine\'s decision (agent.approve)', () => {
+        const ACTION = { _id: 'act_1', agentKey: 'field-ops', projectId: 'proj-1', createdBy: 'user-2' };
+        /** The service asks the authorizer the route handed it; here it answers with the verdict. */
+        const askAuthorizer = (approvers: string) => mockFn(resolveAgentPendingAction).mockImplementation(async (input: {
+            authorize: (request: unknown) => Promise<{ allowed: boolean; decisionId?: string }>;
+        }) => {
+            const verdict = await input.authorize({ conversation: CONVERSATION, action: ACTION, approvers });
+            return verdict.allowed
+                ? { kind: 'pending', pendingActions: [] }
+                : { kind: 'forbidden', message: 'You are not allowed to answer this request.', decisionId: verdict.decisionId };
+        });
+
+        it('asks agent.approve of the engine for THIS session: who started it, who raised the request, the agent\'s setting', async () => {
+            askAuthorizer('owner');
+            const app = await build();
+            const res = await app.inject({ method: 'POST', url: URL, headers: { authorization: 'Bearer t' }, payload: { decision: 'allow' } });
+
+            expect(res.statusCode).toBe(200);
+            expect(authorizeResourceForRequest).toHaveBeenCalledTimes(1);
+            const [, asked] = mockFn(authorizeResourceForRequest).mock.calls[0];
+            expect(asked).toMatchObject({ action: 'agent.approve', projectId: 'proj-1', subject: { resourceName: 'field-ops' } });
+            expect(asked.resource).toMatchObject({
+                kind: 'resource', type: 'agent', id: 'agent-1', projectId: 'proj-1', key: 'field-ops',
+                attrs: {
+                    approvers: 'owner',
+                    owners: [{ __entity: { type: 'User', id: 'user-1' } }, { __entity: { type: 'User', id: 'user-2' } }],
+                },
+            });
+        });
+
+        it('answers 403 with the decision id when the engine refuses', async () => {
+            mockFn(authorizeResourceForRequest).mockResolvedValue({ allowed: false, decisionId: 'dec-9', source: 'engine', reasons: [], policyIds: [] });
+            askAuthorizer('owner_or_admin');
+            const app = await build();
+            const res = await app.inject({ method: 'POST', url: URL, headers: { authorization: 'Bearer t' }, payload: { decision: 'allow' } });
+
+            expect(res.statusCode).toBe(403);
+            expect(JSON.parse(res.body)).toMatchObject({ code: 'forbidden', decisionId: 'dec-9' });
+        });
+
+        it('does not turn an engine outage (503) into an answer', async () => {
+            mockFn(authorizeResourceForRequest).mockRejectedValue(Object.assign(new Error('Authorization is temporarily unavailable'), { status: 503 }));
+            askAuthorizer('owner');
+            const app = await build();
+            const res = await app.inject({ method: 'POST', url: URL, headers: { authorization: 'Bearer t' }, payload: { decision: 'allow' } });
+            expect(res.statusCode).not.toBe(200);
+        });
     });
 
     it('reports the requests still open when others of the same pause remain', async () => {
@@ -215,6 +288,81 @@ describe('a new message while a request is open', () => {
         expect(JSON.parse(res.body)).toMatchObject({ type: 'pending_action', pendingActionIds: ['act_1'] });
         expect(executePlaygroundChatLocal).not.toHaveBeenCalled();
         expect(pendingActionsBlockingMessage).toHaveBeenCalledWith('tenant_acme', CONVERSATION, AGENT.config);
+    });
+});
+
+describe('a new message under cancel_pending cancels the open request, which takes the permission to answer it', () => {
+    const send = async (url = '/api/agents/agent-1/chat/stream') => {
+        const app = await build();
+        return app.inject({
+            method: 'POST', url, headers: { authorization: 'Bearer t' },
+            payload: { message: 'never mind', conversationId: 'conv-1' },
+        });
+    };
+
+    it('is answered 403 (with the decision id) before the session is reserved when the engine does not let the caller answer', async () => {
+        mockFn(refuseCancelPending).mockResolvedValue({ decisionId: 'dec-1' });
+        const res = await send();
+        expect(res.statusCode).toBe(403);
+        expect(JSON.parse(res.body)).toMatchObject({ code: 'forbidden', decisionId: 'dec-1' });
+        expect(executePlaygroundChatLocal).not.toHaveBeenCalled();
+        expect(refuseCancelPending).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ tenantDbName: 'tenant_acme', conversation: CONVERSATION, agent: AGENT }),
+        );
+    });
+
+    it('goes ahead when the engine lets the caller answer (or nothing is open) - the plain /chat too', async () => {
+        mockFn(executePlaygroundChat).mockResolvedValue({ content: 'ok', version: null, steps: [] });
+        const res = await send('/api/agents/agent-1/chat');
+        expect(res.statusCode).toBe(200);
+        expect(refuseCancelPending).toHaveBeenCalled();
+        expect(executePlaygroundChat).toHaveBeenCalled();
+    });
+
+    it('/chat is refused like /chat/stream', async () => {
+        mockFn(refuseCancelPending).mockResolvedValue({ decisionId: 'dec-4' });
+        const res = await send('/api/agents/agent-1/chat');
+        expect(res.statusCode).toBe(403);
+        expect(executePlaygroundChat).not.toHaveBeenCalled();
+    });
+});
+
+describe('cancelling a run that is paused on an approval answers the open request with "no"', () => {
+    const RUN_URL = '/api/agents/agent-1/runs/run-1/cancel';
+    const run = (status: string) => ({ _id: 'run-1', agentKey: 'field-ops', mode: 'background', status, conversationId: 'conv-1' });
+    const cancel = async () => {
+        const app = await build();
+        return app.inject({ method: 'POST', url: RUN_URL, headers: { authorization: 'Bearer t' } });
+    };
+
+    it('is 403 for a caller the engine does not let answer, and the run is left alone', async () => {
+        mockFn(getAgentRunStatus).mockResolvedValue(run('requires_action'));
+        mockFn(authorizeEndingOpenRequests).mockResolvedValue({ allowed: false, decisionId: 'dec-3' });
+        const res = await cancel();
+        expect(res.statusCode).toBe(403);
+        expect(JSON.parse(res.body)).toMatchObject({ code: 'forbidden', decisionId: 'dec-3' });
+        expect(requestAgentRunCancellation).not.toHaveBeenCalled();
+        expect(authorizeEndingOpenRequests).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ tenantDbName: 'tenant_acme', conversation: CONVERSATION, agent: AGENT }),
+        );
+    });
+
+    it('cancels for a caller who may answer', async () => {
+        mockFn(getAgentRunStatus).mockResolvedValue(run('requires_action'));
+        mockFn(requestAgentRunCancellation).mockResolvedValue({ kind: 'canceled', run: { ...run('canceled'), _id: 'run-1', createdAt: new Date(), updatedAt: new Date() } });
+        const res = await cancel();
+        expect(res.statusCode).toBe(200);
+        expect(requestAgentRunCancellation).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-1');
+    });
+
+    it('asks nothing for a run that is not paused', async () => {
+        mockFn(getAgentRunStatus).mockResolvedValue(run('running'));
+        mockFn(requestAgentRunCancellation).mockResolvedValue({ kind: 'canceled', run: { ...run('canceled'), createdAt: new Date(), updatedAt: new Date() } });
+        const res = await cancel();
+        expect(res.statusCode).toBe(200);
+        expect(authorizeEndingOpenRequests).not.toHaveBeenCalled();
     });
 });
 

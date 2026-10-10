@@ -15,7 +15,11 @@
  *   Service  { service, adminService }            // service-level checks (HTTP gate)
  *   <RegistryType> in [Project] { service, adminService, key?, tags? }
  *   Portal   in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group> }
- *   Agent    in [Project, Portal] { ..., portal?: Portal }
+ *   Agent    in [Project, Portal] { ..., portal?: Portal, approvers?: String, owners?: Set<User> }
+ *
+ * `owners` and `approvers` describe the SESSION an agent is asked about (agentEntities.ts): the
+ * people who started it, and whose answer the agent accepts for a pending approval. The managed
+ * agent rules (managedPolicies.ts) and the session actions read them.
  *
  * The portal's access list is part of the Portal entity (mode / allowedUsers /
  * allowedGroups, built by portalEntities.ts), so the managed portal policies
@@ -83,7 +87,7 @@ const contextType = (): TypeJson =>
  * Bumped whenever the generated schema changes in a way the NAMES of its types and
  * actions do not show (the signature below, and so the preparsed copy, follows).
  */
-const SCHEMA_REVISION = 2;
+const SCHEMA_REVISION = 3;
 
 type EntityTypeJson = { memberOfTypes?: string[]; shape: { attributes: Record<string, TypeJson> } };
 
@@ -106,6 +110,21 @@ function applyPortalShape(entityTypes: Record<string, TypeJson>, resourceEntityT
   if (!agent) return;
   agent.memberOfTypes = [...new Set([...(agent.memberOfTypes ?? []), portalName])];
   agent.shape.attributes.portal = attr(entity(portalName), false);
+}
+
+/**
+ * What the session actions need on an Agent (see the header): who started the session and which
+ * answerers the agent accepts. Optional, like the portal's: an Agent asked about without them simply
+ * matches no rule that reads them.
+ */
+function applyAgentShape(entityTypes: Record<string, TypeJson>, resourceEntityTypes: Record<string, string>): void {
+  const agentName = resourceEntityTypes.agent;
+  const agent = agentName ? (entityTypes[agentName] as EntityTypeJson | undefined) : undefined;
+  if (!agent) return;
+  Object.assign(agent.shape.attributes, {
+    approvers: attr(str(), false),
+    owners: attr(setOf(entity('User')), false),
+  });
 }
 
 export interface BuiltSchema {
@@ -173,6 +192,7 @@ export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): 
   }
 
   applyPortalShape(entityTypes, resourceEntityTypes);
+  applyAgentShape(entityTypes, resourceEntityTypes);
 
   const actions: Record<string, TypeJson> = {};
   for (const action of catalog) {

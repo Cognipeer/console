@@ -22,6 +22,7 @@ import {
 import {
   MAX_IDEMPOTENCY_KEY_LENGTH,
   agentDefaultCallback,
+  apiErrorBody,
   backgroundDisabledErrorBody,
   invalidRequestErrorBody,
   lookupIdempotentAgentRun,
@@ -57,6 +58,7 @@ import {
   validateNativeConfigUpdate,
 } from './agent-config-write';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
 const logger = createLogger('api:client-agents');
 
@@ -176,6 +178,17 @@ function createResponsesHandler(usePublished: boolean) {
               pending_action_ids: blocking,
             },
           });
+        }
+        // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it
+        // with "no", so it takes the permission to answer.
+        const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+        if (cancelRefusal) {
+          return reply.code(403).send(apiErrorBody(
+            'permission_error',
+            CANCEL_PENDING_FORBIDDEN_MESSAGE,
+            'action_forbidden',
+            cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : undefined,
+          ));
         }
         // The session has used up its own spend budget: nothing to run (402).
         assertSessionBudgetAvailable(conversation);

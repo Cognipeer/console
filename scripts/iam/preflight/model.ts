@@ -71,10 +71,10 @@ export function directionOfLevels(before: Level, after: Level): Direction {
 /**
  * Services that did not exist before the policy engine shipped. There was no
  * rule for them, so there is no "before" to compare: they are counted, not
- * reported as changes. (All three are administration services: owner and admin
- * only unless granted.)
+ * reported as changes. (All four are administration services: owner and admin
+ * only unless granted. `webhooks` arrived in the same release as the engine.)
  */
-export const SERVICES_ADDED_WITH_ENGINE: ReadonlySet<string> = new Set(['portals', 'resources', 'iam']);
+export const SERVICES_ADDED_WITH_ENGINE: ReadonlySet<string> = new Set(['portals', 'resources', 'iam', 'webhooks']);
 
 export interface ComparedService {
   id: PermissionService;

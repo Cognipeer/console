@@ -420,7 +420,7 @@ paths:
       tags:
         - Agents
       summary: Cancel a background agent run
-      description: "Cooperative cancel. A `queued` run is canceled immediately (`status: canceled`, `error.type: canceled_by_caller`). A `running` run gets `cancel_requested_at` stamped and stops before its next step; tool or model calls already in flight are not interrupted. Poll `GET /agents/runs/{runId}` for the final status. A run paused in `requires_action` is canceled at once and its open requests are dropped. Runs already `succeeded`, `failed` or `canceled` return `409` (`agent_run_already_terminal`)."
+      description: "Cooperative cancel. A `queued` run is canceled immediately (`status: canceled`, `error.type: canceled_by_caller`). A `running` run gets `cancel_requested_at` stamped and stops before its next step; tool or model calls already in flight are not interrupted. Poll `GET /agents/runs/{runId}` for the final status. A run paused in `requires_action` is canceled at once and its open requests are dropped - which is answering them with \"no\", so it needs the same `agent.approve` permission as answering them (`403`, `action_forbidden`, with `decision_id`, otherwise). Runs already `succeeded`, `failed` or `canceled` return `409` (`agent_run_already_terminal`)."
       operationId: cancelAgentRun
       parameters:
         - name: runId
@@ -438,6 +438,8 @@ paths:
                 $ref: "#/components/schemas/AgentRun"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -607,7 +609,7 @@ paths:
       tags:
         - Agent Sessions
       summary: Answer a pending approval or question
-      description: "Answers a tool approval or a question the agent paused on (the `required_action.actions` of a `requires_action` response, or `pending_actions` of the session). The turn continues from where it paused: inline, answered in the Responses shape (which is `requires_action` again if it paused again, or while other requests of the same pause are still open), or - with `background: true` or the `X-Cognipeer-Background` header - as a background run (`202`).\n\nBody for a `tool_approval`: `decision` (`allow` | `deny`), optional `comment`, `approved_args` (an object that must satisfy the tool's schema; the tool then runs with these arguments) and `remember_for_session` (do not ask again for this tool in this session). Body for a `user_question`: `answers` (question text -> value, or a list of values for a multi-select) or `cancelled: true` to skip it.\n\nWho may answer is the agent's `approvers` setting (owner, owner or admin, or any project member); the owner of the session is the user who started it."
+      description: "Answers a tool approval or a question the agent paused on (the `required_action.actions` of a `requires_action` response, or `pending_actions` of the session). The turn continues from where it paused: inline, answered in the Responses shape (which is `requires_action` again if it paused again, or while other requests of the same pause are still open), or - with `background: true` or the `X-Cognipeer-Background` header - as a background run (`202`).\n\nBody for a `tool_approval`: `decision` (`allow` | `deny`), optional `comment`, `approved_args` (an object that must satisfy the tool's schema; the tool then runs with these arguments) and `remember_for_session` (do not ask again for this tool in this session). Body for a `user_question`: `answers` (question text -> value, or a list of values for a multi-select) or `cancelled: true` to skip it.\n\nWho may answer is the `agent.approve` permission, decided by the permission engine: the person who started the session always may; workspace owners and admins and the admins of the agent's project may when the agent's `approvers` setting is `owner_or_admin` (the default); every member of the project may when it is `project_members`. An API token answers on behalf of its owner, within its scope. A deny policy can take the permission away from whoever it names."
       operationId: resolveAgentSessionAction
       parameters:
         - $ref: "#/components/parameters/AgentSessionId"
@@ -652,7 +654,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          description: The caller may not answer this request under the agent's `approvers` setting (`action_forbidden`).
+          description: The caller does not hold the `agent.approve` permission for this session - the agent's `approvers` setting does not accept them, or a deny policy names them (`action_forbidden`, with `decision_id`).
           content:
             application/json:
               schema:
@@ -11967,7 +11969,7 @@ paths:
       tags:
         - Webhooks
       summary: List webhook endpoints
-      description: "The webhook endpoints of the token's project. Managing webhooks needs a token whose owner is a project admin of the token's project or a tenant owner / admin (`403` otherwise). A token never manages endpoints of other projects or tenant-wide endpoints, whoever owns it. The signing secret is never returned here."
+      description: "The webhook endpoints of the token's project. Needs the `webhooks` permission (Read to list, Admin for every call that changes something) held by the token's owner and allowed by the token's own scope: it is an administration service, so owners and admins hold it by default and everybody else until it is granted (`403` otherwise, with a `decisionId`). A token never reaches endpoints of other projects or tenant-wide endpoints, whoever owns it. The signing secret is never returned here."
       operationId: listWebhooks
       responses:
         "200":
@@ -11981,6 +11983,16 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/WebhookEndpoint"
+                  capabilities:
+                    type: object
+                    description: What the caller may do here, as the permission engine decides it (the Webhooks page shows its controls from this).
+                    properties:
+                      manage:
+                        type: boolean
+                        description: The caller holds Admin on `webhooks` in this project (create, edit, test, rotate, redeliver, delete).
+                      workspaceScope:
+                        type: boolean
+                        description: ...and in the workspace itself, so an endpoint for every project or for another project is in reach. Always `false` for a token.
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -12061,7 +12073,7 @@ paths:
       tags:
         - Webhooks
       summary: List webhook event types
-      description: "The event types an endpoint can subscribe to. A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`); `*` subscribes to everything. `webhook.test` is only ever sent by the test call."
+      description: "The event types an endpoint can subscribe to. Needs the `webhooks` permission (Read). A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`); `*` subscribes to everything. `webhook.test` is only ever sent by the test call."
       operationId: listWebhookEventTypes
       responses:
         "200":
@@ -12096,7 +12108,7 @@ paths:
       tags:
         - Webhooks
       summary: Get a webhook endpoint
-      description: "Needs a token whose owner can manage webhooks, like every webhook route (`403` otherwise, whether or not the endpoint exists). A manager asking for an endpoint outside the token's reach (another project's, or a tenant-wide one) gets `404`."
+      description: "Needs the `webhooks` permission (Read), like every webhook route (`403` otherwise, whether or not the endpoint exists). A caller who holds it asking for an endpoint outside the token's reach (another project's, or a tenant-wide one) gets `404`."
       operationId: getWebhook
       parameters:
         - $ref: "#/components/parameters/WebhookId"
@@ -23248,7 +23260,7 @@ components:
         projectId:
           type: string
           nullable: true
-          description: "Omitted: the token's project. Another project, or `null` / `\"*\"` for every project, is for tenant owners / admins and is refused (`403`) for an API token."
+          description: "Omitted: the token's project. Another project, or `null` / `\"*\"` for every project, needs the `webhooks` permission in the workspace itself and is refused (`403`) for an API token."
       required:
         - url
         - events

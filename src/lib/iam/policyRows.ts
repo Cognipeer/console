@@ -19,7 +19,7 @@ export interface ManagedPolicyView {
   /** i18n keys of the same texts (`iamApi.managed.<slug>.name|description`). */
   nameKey: string;
   descriptionKey: string;
-  group: 'rbac' | 'boundary' | 'portal';
+  group: 'rbac' | 'boundary' | 'portal' | 'agent';
   effect: 'permit' | 'forbid';
   cedar: string;
 }
@@ -87,7 +87,19 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
   },
   'managed:portal:agent-boundary': {
     name: 'Only the access list runs agents in a portal',
-    description: 'In a portal, nobody can run an agent unless the portal\'s access list admits them, whatever their role or any allow rule says.',
+    description: 'In a portal, nobody can run an agent or answer its pending requests unless the portal\'s access list admits them, whatever their role or any allow rule says.',
+  },
+  'managed:agent:approve': {
+    name: 'People who may answer an agent\'s pending requests',
+    description: 'A person may approve a tool call or answer a question of an agent session when they started that session, or when the agent accepts them: workspace owners and admins and the admins of the agent\'s project (the default), or every member of the project. The agent\'s "who can approve" setting is the input of this rule.',
+  },
+  'managed:agent:approve-token': {
+    name: 'API tokens answer on behalf of their owner',
+    description: 'An API token may answer a pending request exactly when its owner may. The token\'s own scope and the project limits still apply on top.',
+  },
+  'managed:agent:approve-boundary': {
+    name: 'Only the rule above answers pending requests',
+    description: 'Nobody can answer a pending request of an agent session unless the rule above names them, whatever their general access level or any allow rule says. Deny rules can still block people the rule names.',
   },
 };
 

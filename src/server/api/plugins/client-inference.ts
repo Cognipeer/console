@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { AgentGuardrailBlockedError, type AgentChatResponse } from '@/lib/services/agents/agentService';
+import { AgentGuardrailBlockedError, getConversationById, type AgentChatResponse } from '@/lib/services/agents/agentService';
 import { createLogger } from '@/lib/core/logger';
 import {
   GuardrailBlockError,
@@ -18,6 +18,7 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 import {
   resolveAgentModel,
   runAgentCompletion,
@@ -340,6 +341,24 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         async (key) => Boolean(await getModelByKey(auth.tenantDbName, key, auth.projectId)),
       );
       if (agent) {
+        // Continuing a session that waits on a request, under `cancel_pending`, cancels that request: it takes
+        // the permission to answer it.
+        if (typeof body.conversation_id === 'string') {
+          const conversation = await getConversationById(auth.tenantDbName, body.conversation_id);
+          if (conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId) {
+            const refusal = await refuseCancelPending(request, { tenantDbName: auth.tenantDbName, conversation, agent });
+            if (refusal) {
+              return reply.code(403).send({
+                error: {
+                  message: CANCEL_PENDING_FORBIDDEN_MESSAGE,
+                  type: 'permission_error',
+                  code: 'action_forbidden',
+                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+                },
+              });
+            }
+          }
+        }
         return handleAgentChatCompletion({
           agent,
           auth,

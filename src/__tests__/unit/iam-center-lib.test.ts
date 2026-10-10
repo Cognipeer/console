@@ -133,7 +133,7 @@ describe('policy rows', () => {
 
   it('describes every managed policy in plain language', () => {
     const views = listManagedPolicyViews();
-    expect(views.map((v) => v.id)).toHaveLength(16);
+    expect(views.map((v) => v.id)).toHaveLength(19);
     for (const v of views) {
       expect(v.name.length).toBeGreaterThan(5);
       expect(v.description.length).toBeGreaterThan(20);
@@ -143,6 +143,9 @@ describe('policy rows', () => {
     expect(describeManagedPolicy('managed:boundary:token-cap-write')).toMatchObject({ group: 'boundary', effect: 'forbid' });
     expect(describeManagedPolicy('managed:portal:use')).toMatchObject({ group: 'portal', effect: 'permit', nameKey: 'iamApi.managed.portal-use.name' });
     expect(describeManagedPolicy('managed:portal:agent-boundary')).toMatchObject({ group: 'portal', effect: 'forbid' });
+    expect(describeManagedPolicy('managed:agent:approve')).toMatchObject({ group: 'agent', effect: 'permit', nameKey: 'iamApi.managed.agent-approve.name' });
+    expect(describeManagedPolicy('managed:agent:approve-token')).toMatchObject({ group: 'agent', effect: 'permit' });
+    expect(describeManagedPolicy('managed:agent:approve-boundary')).toMatchObject({ group: 'agent', effect: 'forbid' });
     expect(describeManagedPolicy('managed:unknown:x')).toMatchObject({ name: 'managed:unknown:x', description: '', effect: 'permit' });
   });
 });

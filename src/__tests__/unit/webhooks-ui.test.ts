@@ -25,6 +25,7 @@ import {
   isEventSelected,
   isGroupSelected,
   isValidWebhookUrl,
+  parseWebhookCapabilities,
   scopeOf,
   summarizeEvents,
   toggleEvent,
@@ -98,6 +99,16 @@ describe('the list', () => {
     expect(isValidWebhookUrl('ftp://example.com')).toBe(false);
     expect(isValidWebhookUrl('example.com')).toBe(false);
     expect(isValidWebhookUrl('')).toBe(false);
+  });
+
+  it('builds its controls from what the engine says the person may do (`capabilities` of the list)', () => {
+    expect(parseWebhookCapabilities({ endpoints: [], capabilities: { manage: true, workspaceScope: true } })).toEqual({ manage: true, workspaceScope: true });
+    expect(parseWebhookCapabilities({ capabilities: { manage: false, workspaceScope: false } })).toEqual({ manage: false, workspaceScope: false });
+    // Only an explicit true counts.
+    expect(parseWebhookCapabilities({ capabilities: { manage: 'yes', workspaceScope: 1 } })).toEqual({ manage: false, workspaceScope: false });
+    // A server that does not say shows the controls (it refuses what it must) and keeps "every project" hidden.
+    expect(parseWebhookCapabilities({ endpoints: [] })).toEqual({ manage: true, workspaceScope: false });
+    expect(parseWebhookCapabilities(null)).toEqual({ manage: true, workspaceScope: false });
   });
 
   it('mounts with its toolbar, before any data arrives', () => {

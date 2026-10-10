@@ -26,7 +26,11 @@ import {
 } from '@/lib/iam/enforce';
 import { fetchGroupsByIds, grantsOf, listUserGroupIds } from '@/lib/iam/groupGrants';
 import { markGated, resolveRouteAuthz, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
-import { authorizeServiceAccess, type ServiceAuthzOptions, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
+import { authorizeServiceAccess, buildServicePrincipal, quietServiceLevel, type ServiceAuthzOptions, type ServiceAuthzPrincipal, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
+import type { EffectiveLevel } from '@/lib/iam/effective';
+import { authorizeResourceForPrincipal, type ResourceAuthzAction, type ResourceAuthzResult, type ResourceAuthzSubject } from '@/lib/iam/resourceAuthz';
+import { auditLevelOf } from '@/lib/iam/denialAudit';
+import type { IamResource } from '@/lib/iam/entities';
 import { canonicalRoute } from '@/lib/iam/routePattern';
 import { getUserAuthState, getUserIdentity, isUserDisabled } from '@/lib/services/users/userAuthState';
 import { isTenantRole } from '@/lib/iam/identity';
@@ -407,12 +411,45 @@ async function decideServiceForRequest(
   const route = routeLabel(request, getRequestPathname(request));
   const common = { requestId, route, method: options.method, level: options.level };
 
+  const principal = await requestPrincipal(request, service, {
+    rbac: options.rbac,
+    required: options.level ?? getRequiredPermissionLevel(options.method ?? 'GET', service),
+  });
+  if (!principal) {
+    return { allowed: false, service, required: options.level ?? 'read' };
+  }
+  return authorizeServiceAccess(principal, service, common);
+}
+
+/**
+ * Who is asking, as the engine is told: the token's owner with the token's scope, or the session
+ * user with their groups - the same description the gate decides with. Null for a token whose owner
+ * could not be loaded (nothing to decide for; the handler answers 403). Throws the 503 when a
+ * session's authorization context cannot be loaded.
+ */
+/** The session's user row and groups, read once per request however many handler-level questions it asks. */
+const sessionRbacOfRequest = new WeakMap<FastifyRequest, Promise<SessionRbacHint>>();
+
+function sessionRbacFor(request: FastifyRequest, session: ApiSessionContext): Promise<SessionRbacHint> {
+  let loading = sessionRbacOfRequest.get(request);
+  if (!loading) {
+    loading = resolveSessionRbacContext(session);
+    sessionRbacOfRequest.set(request, loading);
+    // A failed read is not remembered: the next question tries again.
+    loading.catch(() => sessionRbacOfRequest.delete(request));
+  }
+  return loading;
+}
+
+async function requestPrincipal(
+  request: FastifyRequest,
+  service: PermissionService,
+  options: { rbac?: SessionRbacHint; required: ServicePermissionLevel; projectId?: string | null },
+): Promise<ServiceAuthzPrincipal | null> {
   const tokenContext = request.apiTokenContext;
   if (tokenContext) {
-    if (!tokenContext.user) {
-      return { allowed: false, service, required: options.level ?? 'read' };
-    }
-    return authorizeServiceAccess({
+    if (!tokenContext.user) return null;
+    return {
       subject: 'token',
       tenantDbName: tokenContext.tenantDbName,
       tenantId: tokenContext.tenantId,
@@ -423,21 +460,24 @@ async function decideServiceForRequest(
       projectId: tokenContext.projectId ? String(tokenContext.projectId) : null,
       ip: getAuthzClientIp(request),
       path: getRequestPathname(request),
-    }, service, common);
+    };
   }
 
   const session = requireSessionContext(request);
   let rbac: SessionRbacHint;
   try {
-    rbac = options.rbac ?? await resolveSessionRbacContext(session);
+    rbac = options.rbac ?? await sessionRbacFor(request, session);
   } catch (error) {
     if (error instanceof RbacAuthorizationError) throw error;
     throw authorizationUnavailable(request, session.tenantDbName, 'principal_unavailable', error, {
       service,
-      required: options.level ?? getRequiredPermissionLevel(options.method ?? 'GET', service),
+      required: options.required,
     });
   }
-  return authorizeServiceAccess({
+  const project = options.projectId
+    ? { projectId: options.projectId, fromPath: true }
+    : sessionProject(request);
+  return {
     subject: 'session',
     tenantDbName: session.tenantDbName,
     tenantId: session.tenantId,
@@ -445,11 +485,105 @@ async function decideServiceForRequest(
     user: rbac.user,
     groupGrants: rbac.groupGrants,
     groups: rbac.groups,
-    projectId: sessionProject(request).projectId,
-    projectFromPath: sessionProject(request).fromPath,
+    projectId: project.projectId,
+    projectFromPath: project.fromPath,
     ip: getAuthzClientIp(request),
     path: getRequestPathname(request),
-  }, service, common);
+  };
+}
+
+/**
+ * What the caller holds on `service`, asked QUIETLY (no counter, log or audit row: a "no" here shapes an answer, it
+ * is not a refusal). `workspace: true` asks about the workspace itself, outside any project; a token never answers
+ * that (see `quietServiceLevel`). When the engine cannot decide it throws the 503 the gate would have sent.
+ */
+export async function serviceLevelForRequest(
+  request: FastifyRequest,
+  service: PermissionService,
+  options: { workspace?: boolean; rbac?: SessionRbacHint } = {},
+): Promise<EffectiveLevel> {
+  const principal = await requestPrincipal(request, service, { rbac: options.rbac, required: 'read' });
+  if (!principal) return 'none';
+  try {
+    return await quietServiceLevel(principal, service, { workspace: options.workspace });
+  } catch (error) {
+    throw authorizationUnavailable(request, principal.tenantDbName, 'evaluation_error', error, { service, required: 'read' });
+  }
+}
+
+export interface ResourceRequestAuthzInput {
+  /** A session action of an agent (`agent.approve`, `agent.session_view_others`, `agent.session_manage_others`). */
+  action: ResourceAuthzAction;
+  /** The agent together with the session it is asked about (agentSessionResource). */
+  resource: IamResource;
+  subject?: ResourceAuthzSubject;
+  /**
+   * The project the session belongs to, when the handler has already checked it is the request's:
+   * a SESSION request is then decided in exactly that project (narrowing and `context.projectId`),
+   * not in whichever one the caller's cookie names. A token always runs in its own project.
+   */
+  projectId?: string | null;
+  rbac?: SessionRbacHint;
+  /** The answer shapes a response (a list's scope) rather than refuses a request: a "no" leaves no decision id, log or audit row. */
+  quiet?: boolean;
+}
+
+/**
+ * A handler-level decision about a RESOURCE (after the route gate): the policy engine
+ * decides, with the very principal the gate used - the person or the token's owner, the
+ * project narrowing, the token scope as a cap - so a rule that names a project, a channel
+ * or a group sees what the gate saw. Works for dashboard sessions and API tokens.
+ *
+ * Like `authorizeServiceForRequest`: a refusal resolves `{ allowed: false, decisionId }` (the
+ * handler's 403 then carries it as X-Decision-Id; the refusal is audited with what decided it),
+ * and when the engine cannot decide at all it THROWS the 503 `authorization_unavailable` the gate
+ * would have sent, so a handler that merely tests `.allowed` can never read an outage as an answer.
+ * A token whose owner cannot be loaded is refused without a decision id (403).
+ */
+export async function authorizeResourceForRequest(
+  request: FastifyRequest,
+  input: ResourceRequestAuthzInput,
+): Promise<ResourceAuthzResult> {
+  const required = auditLevelOf(input.action);
+  const requestId = request.apiRequestId ?? 'unknown';
+  const route = routeLabel(request, getRequestPathname(request));
+  const principal = await requestPrincipal(request, 'agents', { rbac: input.rbac, required, projectId: input.projectId });
+  if (!principal) return { allowed: false, source: 'engine', reasons: [], policyIds: [] };
+
+  let engine;
+  try {
+    engine = await buildServicePrincipal(principal, { service: 'agents', requestId, route, method: 'POST' });
+  } catch (error) {
+    throw authorizationUnavailable(request, principal.tenantDbName, 'principal_unavailable', error, { service: 'agents', required });
+  }
+  const userAgent = request.headers['user-agent'];
+  const result = await authorizeResourceForPrincipal({
+    tenantDbName: principal.tenantDbName,
+    tenantId: principal.tenantId,
+    userId: principal.userId,
+    principal: engine,
+    channel: principal.subject === 'token' ? 'api' : 'dashboard',
+    action: input.action,
+    resource: input.resource,
+    subject: input.subject,
+    client: {
+      ip: principal.ip,
+      requestId,
+      userAgent: typeof userAgent === 'string' ? userAgent : undefined,
+      method: request.method,
+      path: principal.path,
+    },
+    // The 503 below is audited by the response hook with the same decision id.
+    auditUnavailable: false,
+    quiet: input.quiet,
+  });
+  if (!result.allowed && result.decisionId) {
+    if (result.unavailable) {
+      throw unavailableError(request, { decisionId: result.decisionId, service: 'agents', required, action: input.action, projectId: engine.contextProjectId });
+    }
+    request.iamDecisionId = result.decisionId;
+  }
+  return result;
 }
 
 /**
@@ -487,14 +621,14 @@ function resolveRequestAuthz(request: FastifyRequest, pathname: string): RouteAu
  */
 function unavailableError(
   request: FastifyRequest,
-  decision: { decisionId: string; service: PermissionService; required: ServicePermissionLevel; projectId?: string | null },
+  decision: { decisionId: string; service: PermissionService; required: ServicePermissionLevel; action?: string; projectId?: string | null },
 ): RbacAuthorizationError {
   request.iamDenial = {
     code: 'authorization_unavailable',
     decisionId: decision.decisionId,
     service: decision.service,
     required: decision.required,
-    action: undefined,
+    action: decision.action,
     projectId: decision.projectId,
     ip: getAuthzClientIp(request),
   };

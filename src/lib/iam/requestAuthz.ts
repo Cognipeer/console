@@ -13,6 +13,10 @@
  * resolved. When the engine cannot decide, the answer is a refusal with
  * `unavailable: true` (the HTTP wrapper `authorizeServiceForRequest` turns it
  * into the 503 the gate would have sent) - never an allow.
+ *
+ * `buildServicePrincipal` is the same principal as an engine principal, for the
+ * decisions about a RESOURCE (resourceAuthz.ts: answering an approval, session
+ * access) that must see exactly what the gate saw.
  */
 
 import type { IGroup } from '@/lib/database';
@@ -24,7 +28,10 @@ import {
   type ServicePermissionLevel,
   type UserServicePermissions,
 } from '@/lib/security/rbac';
-import { decideEnforced } from './enforce';
+import { describeTenantPolicySet } from './engine';
+import { managedLevel, probeServiceLevel, type EffectiveLevel } from './effective';
+import { buildEnforcePrincipal, decideEnforced } from './enforce';
+import type { IamPrincipal } from './entities';
 import type { RouteAuthzLevel } from './routeAuthz';
 
 export interface ServiceAuthzPrincipal {
@@ -108,4 +115,85 @@ export async function authorizeServiceAccess(
     decisionId: verdict.decisionId,
     ...(verdict.unavailable ? { unavailable: true as const } : {}),
   };
+}
+
+/**
+ * The engine principal of a request the handler already resolved: the person or the
+ * token's owner, the groups' grants, the project narrowing and the token scope as a cap -
+ * built by the very function the gate decides with. Throws when it cannot be built (the
+ * HTTP wrapper answers 503, as the gate does).
+ */
+export async function buildServicePrincipal(
+  principal: ServiceAuthzPrincipal,
+  options: ServiceAuthzOptions & { service?: PermissionService } = {},
+): Promise<IamPrincipal> {
+  return buildEnforcePrincipal({
+    subject: principal.subject,
+    tenantDbName: principal.tenantDbName,
+    tenantId: principal.tenantId,
+    requestId: options.requestId ?? 'unknown',
+    method: options.method ?? 'POST',
+    route: options.route ?? 'handler:resource',
+    userId: principal.userId,
+    user: principal.user,
+    groupGrants: principal.groupGrants,
+    groups: principal.groups,
+    tokenId: principal.tokenId,
+    tokenScope: principal.tokenScope,
+    requestedProjectId: principal.projectId ?? null,
+    projectFromPath: principal.projectFromPath,
+    service: options.service ?? 'agents',
+    level: options.level,
+    ip: principal.ip,
+    path: principal.path,
+  });
+}
+
+/**
+ * The level the caller holds on `service`, as the engine decides it - asked QUIETLY: no decision counter, no
+ * log line, no audit row, no decision id. For a handler that has to know what a person may do in order to
+ * shape its answer (which rows to include, which controls the page shows), where a "no" is not a refusal.
+ *
+ * `workspace: true` asks about the WORKSPACE ITSELF: the level the person holds outside any project, before a
+ * project's own limits narrow it. A token never answers that question (`none`): it is bound to one project and
+ * acts only there, whoever owns it. Custom rules that name a project do not apply to a workspace-level answer
+ * (there is no project in its context). Throws when the engine cannot decide; the HTTP wrapper answers 503.
+ */
+export async function quietServiceLevel(
+  principal: ServiceAuthzPrincipal,
+  service: PermissionService,
+  options: { workspace?: boolean } = {},
+): Promise<EffectiveLevel> {
+  const workspace = options.workspace === true;
+  if (workspace && principal.subject === 'token') return 'none';
+  const engine = await buildEnforcePrincipal({
+    subject: principal.subject,
+    tenantDbName: principal.tenantDbName,
+    tenantId: principal.tenantId,
+    requestId: 'handler-level',
+    method: 'GET',
+    route: `handler:${service}`,
+    userId: principal.userId,
+    user: principal.user,
+    groupGrants: principal.groupGrants,
+    groups: principal.groups,
+    tokenId: principal.tokenId,
+    tokenScope: principal.tokenScope,
+    requestedProjectId: workspace ? null : principal.projectId ?? null,
+    projectFromPath: workspace ? false : principal.projectFromPath,
+    skipProjectNarrowing: workspace,
+    service,
+    ip: principal.ip,
+    path: principal.path,
+  });
+  const policySet = await describeTenantPolicySet(principal.tenantDbName);
+  // No custom policy in force: the managed rules are arithmetic over the principal's own level sets (effective.ts).
+  if (policySet.custom === 0) return managedLevel(engine, service);
+  const { level } = await probeServiceLevel(principal.tenantDbName, engine, service, {
+    ...(workspace ? {} : { projectId: engine.contextProjectId }),
+    channel: principal.subject === 'token' ? 'api' : 'dashboard',
+    ip: principal.ip,
+    path: principal.path,
+  });
+  return level;
 }

@@ -212,7 +212,7 @@ function sampleReport(): PreflightReport {
     source: { provider: 'sqlite', location: 'copy of /data/sqlite' },
     redacted: false,
     options: { tenants: [], maxPrincipals: null, verifyAll: false, noMemo: false, summaryOnly: false },
-    services: { compared: 39, addedWithEngine: ['portals', 'resources', 'iam'] },
+    services: { compared: 38, addedWithEngine: ['portals', 'resources', 'iam', 'webhooks'] },
     totals: buildTotals(tenants),
     tenants,
   };
