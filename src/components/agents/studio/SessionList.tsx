@@ -40,6 +40,7 @@ import {
     IconCalendar,
     IconCopy,
     IconExternalLink,
+    IconCoin,
     IconHandStop,
     IconMessageCircle,
     IconPlayerPlay,
@@ -151,8 +152,8 @@ export interface SessionListItem {
     status?: 'success' | 'error' | 'stopped' | 'empty';
     /** Where the session came from (`metadata.source`) — see AgentConversationSource. */
     source?: string;
-    /** `requires_action`: the agent is waiting for an approval or an answer. */
-    runtimeStatus?: 'idle' | 'running' | 'requires_action';
+    /** `requires_action`: the agent is waiting for an approval or an answer; `budget_paused`: it stopped on the session's spend budget. */
+    runtimeStatus?: 'idle' | 'running' | 'requires_action' | 'budget_paused';
     hasContext?: boolean;
 }
 
@@ -210,6 +211,7 @@ export default function SessionList({
     tracesHref,
 }: SessionListProps) {
     const t = useTranslations('agents.hitl');
+    const tb = useTranslations('agents.budget');
     const [query, setQuery] = useState('');
     // Not named `window`: that shadows the global inside this component,
     // which is a trap waiting for the first line that needs the real one.
@@ -474,6 +476,13 @@ export default function SessionList({
                                                 <Tooltip label={t('waitingTooltip')} withArrow>
                                                     <Badge size="xs" variant="light" color="orange" leftSection={<IconHandStop size={10} />}>
                                                         {t('waitingBadge')}
+                                                    </Badge>
+                                                </Tooltip>
+                                            ) : null}
+                                            {session.runtimeStatus === 'budget_paused' ? (
+                                                <Tooltip label={tb('pausedTooltip')} withArrow>
+                                                    <Badge size="xs" variant="light" color="orange" leftSection={<IconCoin size={10} />}>
+                                                        {tb('pausedBadge')}
                                                     </Badge>
                                                 </Tooltip>
                                             ) : null}

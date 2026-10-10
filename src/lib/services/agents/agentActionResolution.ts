@@ -218,7 +218,7 @@ async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendingAction
 /** Writes events to the conversation's log and waits until they are stored (and published). */
 async function writeSessionEvents(
     db: DatabaseProvider,
-    scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string },
+    scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string; tenantDbName?: string },
     events: Array<{ type: 'action.resolved' | 'session.status_idle'; data: Record<string, unknown> }>,
 ): Promise<void> {
     if (events.length === 0) return;
@@ -539,7 +539,7 @@ export async function sweepExpiredPendingActions(
                 continue;
             }
             const hitl = await hitlSettingsFor(db, first);
-            const scope = { tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId };
+            const scope = { tenantDbName, tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId };
             const events: Array<{ type: 'action.resolved' | 'session.status_idle'; data: Record<string, unknown> }> = [];
             const snapshots = new Map<string, { status: IAgentPendingAction['status']; resolution?: IAgentPendingActionResolution }>();
 

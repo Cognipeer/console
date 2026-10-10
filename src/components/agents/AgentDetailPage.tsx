@@ -85,6 +85,7 @@ import type {
   IAgentSandboxConfig,
   IAgentExecutionConfig,
   IAgentHumanInTheLoopConfig,
+  IAgentAttachmentsConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
@@ -265,6 +266,7 @@ export default function AgentDetailPage() {
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
   const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
+  const [attachmentsConfig, setAttachmentsConfig] = useState<IAgentAttachmentsConfig | undefined>(undefined);
   // Build page: the published snapshot, to flag changed sections.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
@@ -360,6 +362,7 @@ export default function AgentDetailPage() {
         setSandboxConfig(cfg.sandbox);
         setExecutionConfig(cfg.execution);
         setHitlConfig(cfg.humanInTheLoop);
+        setAttachmentsConfig(cfg.attachments);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -600,6 +603,8 @@ export default function AgentDetailPage() {
     // Absent stays absent: an agent that never opened Approvals & questions
     // (every agent from before it existed) must keep never pausing.
     nextConfig.humanInTheLoop = hitlConfig && Object.keys(hitlConfig).length > 0 ? hitlConfig : undefined;
+    // Absent = attachments accepted with the defaults.
+    nextConfig.attachments = attachmentsConfig && Object.keys(attachmentsConfig).length > 0 ? attachmentsConfig : undefined;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -1177,7 +1182,12 @@ export default function AgentDetailPage() {
             {buildSection(
               'execution',
               'How API calls run: synchronously with a timeout, or in the background from the queue with a callback or polling.',
-              <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />,
+              <AgentExecutionPanel
+                value={executionConfig}
+                onChange={setExecutionConfig}
+                attachments={attachmentsConfig}
+                onAttachmentsChange={setAttachmentsConfig}
+              />,
               executionConfig?.defaultMode === 'background' ? (
                 <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
               ) : null,

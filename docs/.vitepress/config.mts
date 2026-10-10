@@ -129,6 +129,8 @@ export default defineConfig({
             { text: 'Model Hub', link: '/guide/model-hub' },
             { text: 'Model Inference', link: '/guide/inference' },
             { text: 'Agent Background Execution', link: '/guide/agent-background-execution' },
+            { text: 'Webhooks', link: '/guide/webhooks' },
+            { text: 'Session Files', link: '/guide/session-files' },
             { text: 'Vector Stores', link: '/guide/vector-stores' },
             { text: 'Reranker', link: '/guide/reranker' },
             { text: 'Web Search', link: '/guide/websearch' },

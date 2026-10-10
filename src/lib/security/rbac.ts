@@ -49,7 +49,8 @@ export type PermissionService =
   | 'ai-app-gateway'
   | 'cluster'
   | 'sso'
-  | 'ldap';
+  | 'ldap'
+  | 'webhooks';
 
 /**
  * Tenant-wide roles.
@@ -137,6 +138,10 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   // department's gateway feed without holding tenant-admin.
   { id: 'ai-app-gateway', label: 'AI App Gateway', description: 'Coding-agent gateway instances: identity, observation, policy enforcement and session traces.', category: 'operate' },
   { id: 'sso', label: 'Single Sign-On', description: 'OIDC single sign-on connection, attribute mapping and JIT provisioning.', category: 'admin', adminService: true },
+  // Deliberately NOT adminService: a project admin manages their own project's
+  // endpoints. The service gate lets any project member through; the webhook
+  // routes then require a project admin (tenant admin for tenant-wide endpoints).
+  { id: 'webhooks', label: 'Webhooks', description: 'Outgoing webhook subscriptions for session, run, approval, budget and schedule events.', category: 'admin' },
   { id: 'ldap', label: 'LDAP Directory', description: 'LDAP/Active Directory connection, group→role mapping and JIT provisioning.', category: 'admin', adminService: true },
 ];
 
@@ -186,6 +191,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/pii', service: 'pii' },
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
   { prefix: '/api/client/v1/sandbox', service: 'sandbox' },
+  { prefix: '/api/client/v1/webhooks', service: 'webhooks' },
   // Retired enforcement-plane paths, kept mapped so any client still calling
   // them is authorized (and audited) as the guardrail service rather than
   // falling through `getPermissionServiceForPath` to `null`, which means "not a
@@ -296,6 +302,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // audit_logs. The gateway writes its own request records instead.
   { prefix: '/api/ai-app-gateway', service: 'ai-app-gateway' },
   { prefix: '/api/cluster', service: 'cluster' },
+  { prefix: '/api/webhooks', service: 'webhooks' },
 ];
 
 export function isPermissionService(value: unknown): value is PermissionService {

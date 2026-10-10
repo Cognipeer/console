@@ -47,6 +47,7 @@ const SETTINGS_NAV_ORDER: string[] = [
   'providers',
   'members',
   'tokens',
+  'webhooks',
   'audit',
   'license',
   'sso',

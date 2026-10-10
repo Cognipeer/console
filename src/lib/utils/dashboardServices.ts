@@ -31,6 +31,7 @@ import {
   IconTool,
   IconUsers,
   IconVectorBezier,
+  IconWebhook,
   IconWorld,
   IconWorldSearch,
   type Icon,
@@ -80,6 +81,7 @@ const ICON_REGISTRY = {
   IconTool,
   IconUsers,
   IconVectorBezier,
+  IconWebhook,
   IconWorld,
   IconWorldSearch,
 } satisfies Record<string, Icon>;

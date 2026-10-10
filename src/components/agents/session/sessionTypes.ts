@@ -4,7 +4,12 @@
  * the two cannot drift apart on what a turn records.
  */
 
-import type { IAgentConversationMessage, IAgentConversationStep, IAgentTurnCompaction } from '@/lib/database/provider/types.domain';
+import type {
+    IAgentConversationMessage,
+    IAgentConversationStep,
+    IAgentSessionBudget,
+    IAgentTurnCompaction,
+} from '@/lib/database/provider/types.domain';
 
 export type PlaygroundStep = IAgentConversationStep;
 
@@ -33,8 +38,17 @@ export interface SessionRecord {
     createdBy?: string;
     messages?: ChatMessage[];
     metadata?: Record<string, unknown>;
-    /** What the session is doing now; absent = idle. `requires_action` = waiting on an approval or an answer. */
-    runtimeStatus?: 'idle' | 'running' | 'requires_action';
+    /**
+     * What the session is doing now; absent = idle. `requires_action` = waiting on an approval or an answer;
+     * `budget_paused` = stopped on its spend budget.
+     */
+    runtimeStatus?: 'idle' | 'running' | 'requires_action' | 'budget_paused';
+    /** Why the last turn stopped (`budget_reached` = the session budget). */
+    stopReason?: string;
+    /** The session's spend budget, when it has one. */
+    budget?: IAgentSessionBudget | null;
+    /** What the session has spent (USD), kept alongside the budget. */
+    spentUsd?: number;
     /** Highest event-log seq written when the last turn ended — where a follower resumes from. */
     lastEventSeq?: number;
 }

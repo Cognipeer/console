@@ -743,6 +743,11 @@ export const TENANT_SCHEMA_SQL = `
     markdownError TEXT,
     markdownSize INTEGER,
     markdownContentType TEXT,
+    purpose TEXT,
+    conversationId TEXT,
+    agentKey TEXT,
+    expiresAt TEXT,
+    uploadedBy TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -1551,7 +1556,9 @@ export const TENANT_SCHEMA_SQL = `
     runtimeStatus TEXT,
     stopReason TEXT,
     pendingActionIds TEXT,
-    lastEventSeq INTEGER
+    lastEventSeq INTEGER,
+    budget TEXT,
+    spentUsd REAL
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
@@ -1617,6 +1624,45 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_apa_conversation_status ON agent_pending_actions(conversationId, status);
   CREATE INDEX IF NOT EXISTS idx_apa_status_expiresAt ON agent_pending_actions(status, expiresAt);
   CREATE INDEX IF NOT EXISTS idx_apa_tenant_project_status ON agent_pending_actions(tenantId, projectId, status);
+
+  -- Outgoing webhook subscriptions and the deliveries owed to them (IWebhookEndpoint / IWebhookDelivery).
+  CREATE TABLE IF NOT EXISTS webhook_endpoints (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    url TEXT NOT NULL,
+    description TEXT,
+    events TEXT NOT NULL DEFAULT '[]',
+    secretSealed TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    disabledReason TEXT,
+    failingSince TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_whk_tenant_project ON webhook_endpoints(tenantId, projectId);
+
+  CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    endpointId TEXT NOT NULL,
+    eventId TEXT NOT NULL,
+    eventType TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    nextAttemptAt TEXT,
+    lastStatusCode INTEGER,
+    lastError TEXT,
+    lastDurationMs INTEGER,
+    createdAt TEXT NOT NULL,
+    deliveredAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_whd_status_nextAttemptAt ON webhook_deliveries(status, nextAttemptAt);
+  CREATE INDEX IF NOT EXISTS idx_whd_endpoint_createdAt ON webhook_deliveries(endpointId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_whd_tenant_eventId ON webhook_deliveries(tenantId, eventId);
 
   -- Agent skills (a project-scoped library, like prompts/tools — see IAgentSkill)
   CREATE TABLE IF NOT EXISTS agent_skills (
@@ -2155,6 +2201,7 @@ export const TENANT_SCHEMA_SQL = `
     agentKey TEXT NOT NULL,
     conversationId TEXT NOT NULL,
     userMessage TEXT NOT NULL,
+    attachments TEXT,
     version INTEGER,
     usePublished INTEGER,
     runtimeContext TEXT,
@@ -2186,6 +2233,7 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project ON agent_runs(tenantId, projectId);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_status_heartbeat ON agent_runs(status, heartbeatAt);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_expiresAt ON agent_runs(expiresAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_callbackStatus_updatedAt ON agent_runs(callbackStatus, updatedAt);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project_idempotencyKey ON agent_runs(tenantId, projectId, idempotencyKey);
   -- Enforces "at most one queued/running run per conversation" at the DB
   -- layer (§6/§12.14) — a partial unique index, not a read-then-write

@@ -109,6 +109,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     },
     { key: { status: 1, heartbeatAt: 1 }, options: { name: 'idx_status_heartbeat' } },
     { key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } },
+    // The reconciler's sweep for callbacks that never settled.
+    { key: { callbackStatus: 1, updatedAt: 1 }, options: { name: 'idx_callbackStatus_updatedAt' } },
     { key: { tenantId: 1, projectId: 1, idempotencyKey: 1 }, options: { name: 'idx_tenant_project_idempotencyKey' } },
   ],
   rag_chunks: [
@@ -195,6 +197,15 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { status: 1, expiresAt: 1 }, options: { name: 'idx_status_expiresAt' } },
     { key: { tenantId: 1, projectId: 1, status: 1 }, options: { name: 'idx_tenant_project_status' } },
   ],
+  // Outgoing webhooks: endpoints are listed per tenant/project; deliveries are
+  // swept by (status, nextAttemptAt) and read per endpoint, newest first.
+  webhook_endpoints: [{ key: { tenantId: 1, projectId: 1 }, options: { name: 'idx_tenant_project' } }],
+  webhook_deliveries: [
+    { key: { status: 1, nextAttemptAt: 1 }, options: { name: 'idx_status_nextAttemptAt' } },
+    { key: { endpointId: 1, createdAt: -1 }, options: { name: 'idx_endpoint_createdAt' } },
+    { key: { tenantId: 1, eventId: 1 }, options: { name: 'idx_tenant_eventId' } },
+    { key: { status: 1, createdAt: 1 }, options: { name: 'idx_status_createdAt' } },
+  ],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
   mcp_request_logs: [
     { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },
@@ -220,7 +231,12 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   ],
   memory_items: [{ key: { storeKey: 1, createdAt: -1 }, options: { name: 'idx_store_createdAt' } }],
   alert_events: [{ key: { ruleId: 1, firedAt: -1 }, options: { name: 'idx_rule_firedAt' } }],
-  files: [{ key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } }],
+  files: [
+    { key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } },
+    // Session files: the retention sweep, and a session's own files.
+    { key: { purpose: 1, expiresAt: 1 }, options: { name: 'idx_purpose_expiresAt' } },
+    { key: { conversationId: 1 }, options: { name: 'idx_conversationId' } },
+  ],
   config_audit_logs: [{ key: { createdAt: -1 }, options: { name: 'idx_createdAt' } }],
   // ── Sandbox (enterprise) — created only in tenant DBs that have them ──
   sandbox_instances: [

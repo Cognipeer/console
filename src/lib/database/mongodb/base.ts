@@ -81,6 +81,8 @@ export const COLLECTIONS = {
   agentConversationStates: 'agent_conversation_states',
   agentSessionEvents: 'agent_session_events',
   agentPendingActions: 'agent_pending_actions',
+  webhookEndpoints: 'webhook_endpoints',
+  webhookDeliveries: 'webhook_deliveries',
   agentSkills: 'agent_skills',
   tenants: 'tenants',
   users: 'users',

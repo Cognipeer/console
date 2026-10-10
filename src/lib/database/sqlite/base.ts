@@ -91,6 +91,8 @@ export const TABLES = {
   agentConversationStates: 'agent_conversation_states',
   agentSessionEvents: 'agent_session_events',
   agentPendingActions: 'agent_pending_actions',
+  webhookEndpoints: 'webhook_endpoints',
+  webhookDeliveries: 'webhook_deliveries',
   agentSkills: 'agent_skills',
   vectorCounters: 'vector_counters',
   vectorMigrations: 'vector_migrations',
@@ -1031,12 +1033,27 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentRuns, 'maxDurationMs', 'maxDurationMs INTEGER');
     this.ensureTableColumn(db, TABLES.agentRuns, 'stopReason', 'stopReason TEXT');
     this.ensureTableColumn(db, TABLES.agentRuns, 'resumeActionIds', 'resumeActionIds TEXT');
+    // Conversation files that ride the message of a (background) run.
+    this.ensureTableColumn(db, TABLES.agentRuns, 'attachments', 'attachments TEXT');
+    // Session files: ordinary file records tagged with the conversation they belong
+    // to. Indexed here (not in the schema SQL) because an older table has no such
+    // column until the lines above add it.
+    this.ensureTableColumn(db, TABLES.files, 'purpose', 'purpose TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'conversationId', 'conversationId TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'agentKey', 'agentKey TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'expiresAt', 'expiresAt TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'uploadedBy', 'uploadedBy TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_files_purpose_expiresAt ON ${TABLES.files}(purpose, expiresAt)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_files_conversationId ON ${TABLES.files}(conversationId)`);
     // Agent runtime (session events / human-in-the-loop): runtime fields on the
     // conversation and the paused SDK state. All nullable; absent = idle / not paused.
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeStatus', 'runtimeStatus TEXT');
     this.ensureTableColumn(db, TABLES.agentConversations, 'stopReason', 'stopReason TEXT');
     this.ensureTableColumn(db, TABLES.agentConversations, 'pendingActionIds', 'pendingActionIds TEXT');
     this.ensureTableColumn(db, TABLES.agentConversations, 'lastEventSeq', 'lastEventSeq INTEGER');
+    // Session spend budget (JSON) and the running total of what the session's turns cost.
+    this.ensureTableColumn(db, TABLES.agentConversations, 'budget', 'budget TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'spentUsd', 'spentUsd REAL');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).

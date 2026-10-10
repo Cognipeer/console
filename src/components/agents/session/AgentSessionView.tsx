@@ -76,7 +76,8 @@ import EmptyState from '@/components/common/EmptyState';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { useTranslations } from '@/lib/i18n';
-import type { IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
+import type { IAgentAttachmentsConfig, IAgentConfig, IAgentHumanInTheLoopConfig, IAgentSessionBudget } from '@/lib/database/provider/types.domain';
+import { agentTakesAttachments, resolveAttachmentsConfig } from '@/lib/services/agents/sessionFilesConfig';
 import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList';
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import { versionSelectData } from '../studio/StartSessionModal';
@@ -96,6 +97,17 @@ import {
 } from './pendingActions';
 import { interpretSessionEvent } from './sessionFollow';
 import ContextCompactionCard from './ContextCompactionCard';
+import { BudgetBanner, BudgetMeter } from './SessionBudgetControls';
+import { budgetPatchBody, sessionBudgetView } from './sessionBudgetUi';
+import { AttachButton, AttachmentChips, MessageAttachments } from './SessionAttachments';
+import {
+    attachmentIds,
+    checkAttachmentCandidate,
+    heldFileCount,
+    sessionFileUploadUrl,
+    uploadContentType,
+    type PendingAttachment,
+} from './sessionAttachmentsUi';
 import type { AgentToolConfig } from './sessionTools';
 import {
     stepFailed, type ChatMessage, type PlaygroundStep, type SessionRecord, type TurnCompaction,
@@ -108,7 +120,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: AgentToolConfig & { kind?: 'native' | 'external'; humanInTheLoop?: IAgentHumanInTheLoopConfig };
+    config?: AgentToolConfig & { kind?: 'native' | 'external'; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig };
 }
 
 interface VersionOption {
@@ -137,6 +149,7 @@ const FAILURE_HINTS: Record<string, string> = {
     agent_config_error: 'The agent’s configuration is broken — open Configure and fix the highlighted field.',
     rate_limit_error: 'The provider is rate limiting. Wait a moment and retry.',
     guardrail_block: 'A guardrail blocked this message.',
+    budget_reached: 'This session’s spend budget is used up. Raise or remove it above the message box.',
 };
 
 const STOP_LABELS: Record<NonNullable<ChatMessage['stopReason']>, string> = {
@@ -188,6 +201,8 @@ function runtimeStatusAfter(message: ChatMessage): 'idle' | 'requires_action' {
 
 export default function AgentSessionView({ agentId, sessionId }: AgentSessionViewProps) {
     const t = useTranslations('agents.hitl');
+    const tb = useTranslations('agents.budget');
+    const ta = useTranslations('agents.attachments');
     const router = useRouter();
     const searchParams = useSearchParams();
 
@@ -226,6 +241,13 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [followDismissed, setFollowDismissed] = useState(false);
     const liveActive = sending || following;
     const openActions = useMemo(() => openActionsOf(messages), [messages]);
+    // The session's spend budget (absent for a session without one), and a change to it in flight.
+    const budgetView = useMemo(() => sessionBudgetView(session, messages), [session, messages]);
+    const [budgetBusy, setBudgetBusy] = useState(false);
+    // Files uploaded to the session and waiting to go with the next message.
+    const [attached, setAttached] = useState<PendingAttachment[]>([]);
+    const [uploadingNames, setUploadingNames] = useState<string[]>([]);
+    const budgetBlocked = Boolean(budgetView?.exhausted);
     // What the composer does while the agent waits for an approval or an answer.
     const gate = composerGate(openActions.length, agent?.config?.humanInTheLoop?.onUserMessageWhilePending);
 
@@ -245,6 +267,57 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     };
 
     const isConnected = agent?.config?.kind === 'external';
+    const attachmentsConfig = useMemo(() => resolveAttachmentsConfig(agent?.config?.attachments), [agent?.config?.attachments]);
+    const takesAttachments = !readOnly && !isConnected
+        && agentTakesAttachments({ attachments: agent?.config?.attachments } as IAgentConfig);
+
+    /** Uploads picked files to the session, one by one; each becomes a chip. */
+    const uploadFiles = async (files: File[]) => {
+        for (const file of files) {
+            const refusal = checkAttachmentCandidate(file, attachmentsConfig, heldFileCount(messages, attached));
+            if (refusal) {
+                const message = refusal.code === 'too_many_files'
+                    ? ta('tooManyFiles', { max: refusal.max })
+                    : refusal.code === 'file_too_large'
+                        ? ta('fileTooLarge', { name: file.name, max: refusal.max })
+                        : ta('typeNotAccepted', { name: file.name });
+                notifications.show({ title: ta('uploadFailed', { name: file.name }), message, color: 'orange' });
+                continue;
+            }
+            setUploadingNames((names) => [...names, file.name]);
+            try {
+                const res = await fetch(sessionFileUploadUrl(agentId, sessionId, file.name), {
+                    method: 'POST',
+                    headers: { 'Content-Type': uploadContentType(file) },
+                    body: file,
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || !data.file) throw new Error(data.error || `HTTP ${res.status}`);
+                const stored = data.file as { id: string; name: string; mimeType: string; size: number; conversionStatus?: PendingAttachment['conversionStatus'] };
+                setAttached((current) => [...current, {
+                    fileId: stored.id,
+                    name: stored.name,
+                    mimeType: stored.mimeType,
+                    size: stored.size,
+                    conversionStatus: stored.conversionStatus,
+                }]);
+            } catch (err) {
+                notifications.show({
+                    title: ta('uploadFailed', { name: file.name }),
+                    message: err instanceof Error ? err.message : String(err),
+                    color: 'red',
+                });
+            } finally {
+                setUploadingNames((names) => names.filter((name, index) => index !== names.indexOf(file.name)));
+            }
+        }
+    };
+
+    /** Drops a file waiting to be sent — from the chips and from the session. */
+    const removeAttachment = async (fileId: string) => {
+        setAttached((current) => current.filter((file) => file.fileId !== fileId));
+        await fetch(`/api/agents/${agentId}/sessions/${sessionId}/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' }).catch(() => undefined);
+    };
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -325,6 +398,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             updatedAt: new Date().toISOString(),
             runtimeStatus: runtimeStatusAfter(message),
         });
+        // A session with a budget may have stopped on it (`budget_paused`): the
+        // server knows, and its status is written before the result is sent.
+        if (budgetView) void refreshSessionMeta();
     };
 
     /**
@@ -350,6 +426,18 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
+    /** Re-reads the session's own fields (status, budget, spend) and leaves the transcript on screen alone. */
+    const refreshSessionMeta = useCallback(async () => {
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { cache: 'no-store' });
+            if (!res.ok) return;
+            const data = await res.json();
+            setSession(data.session);
+        } catch {
+            // The next turn refreshes it again.
+        }
+    }, [agentId, sessionId]);
+
     /** Reloads the stored session without the page-level spinner — for a session that changed under us. */
     const refreshSession = useCallback(async (): Promise<SessionRecord | null> => {
         try {
@@ -373,24 +461,30 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
      * a message is a breakage, and the two should not be the same failure.
      */
     const sendMessage = async () => {
-        if (!input.trim() || liveActive || readOnly || gate === 'blocked') return;
+        if ((!input.trim() && attached.length === 0) || uploadingNames.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked) return;
         const message = input.trim();
+        const sentFiles = attached;
         const startedAt = Date.now();
         const previous = messages;
         setSending(true);
         setInput('');
+        setAttached([]);
         setLiveSegments([]);
         setLiveCompactions([]);
 
         // Under `cancel_pending` this message cancels what the agent waits on;
         // the cards show that right away rather than after the round trip.
         const base = gate === 'cancel' ? cancelOpenActions(messages) : messages;
-        const optimistic: ChatMessage[] = [...base, { role: 'user', content: message }];
+        const optimistic: ChatMessage[] = [
+            ...base,
+            { role: 'user', content: message, ...(sentFiles.length > 0 ? { attachments: sentFiles.map(({ fileId, name, mimeType, size }) => ({ fileId, name, mimeType, size })) } : {}) },
+        ];
         setMessages(optimistic);
 
         const body = JSON.stringify({
             message,
             conversationId: sessionId,
+            ...(sentFiles.length > 0 ? { attachments: attachmentIds(sentFiles) } : {}),
             runtime_context: parseRuntimeContextJson(runtimeContextJson),
             ...(pinnedVersion ? { version: Number(pinnedVersion) } : {}),
         });
@@ -414,6 +508,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 // to reject): nothing was started, so put the page back as it was.
                 setMessages(previous);
                 setInput(message);
+                setAttached(sentFiles);
                 notifications.show({ title: t('resolveFailed'), message: text, color: 'orange' });
                 return;
             }
@@ -421,6 +516,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 ...optimistic,
                 { role: 'error', content: text, ...(type ? { errorType: type } : {}) },
             ]);
+            // The budget ran out under us (another tab, an API call): pick up its state.
+            if (type === 'budget_reached') void refreshSessionMeta();
         };
 
         try {
@@ -549,6 +646,82 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
+    /** Adds, changes or removes the session's budget. True once the server has stored it. */
+    const patchBudget = async (budget: IAgentSessionBudget | null): Promise<boolean> => {
+        setBudgetBusy(true);
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(budget ? budgetPatchBody(budget.maxCostUsd, budget.onReach) : { budget: null }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || `${tb('saveFailed')} (HTTP ${res.status})`);
+            }
+            const data = await res.json();
+            // Keep the transcript on screen: only the session's own fields changed.
+            setSession((current) => ({ ...(data.session as SessionRecord), messages: current?.messages }));
+            return true;
+        } catch (err) {
+            notifications.show({
+                title: tb('saveFailed'),
+                message: err instanceof Error ? err.message : String(err),
+                color: 'red',
+            });
+            return false;
+        } finally {
+            setBudgetBusy(false);
+        }
+    };
+
+    /**
+     * Carries a session that stopped on its budget on from where it stopped —
+     * no new user message — and renders the continuation like any other turn
+     * (the same SSE dialect as `/chat/stream`).
+     */
+    const continueBudgetSession = async () => {
+        if (liveActive) return;
+        const startedAt = Date.now();
+        setSending(true);
+        setLiveSegments([]);
+        setLiveCompactions([]);
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/continue?stream=1`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+                body: JSON.stringify({
+                    runtime_context: parseRuntimeContextJson(runtimeContextJson),
+                    ...(pinnedVersion ? { version: Number(pinnedVersion) } : {}),
+                }),
+            });
+            if (!res.ok || !res.body) {
+                const err = await res.json().catch(() => ({}));
+                throw new TurnFailure(err.error || `${tb('continueFailed')} (HTTP ${res.status})`, err.type);
+            }
+            await consumeSse(res.body, handleTurnEvent((data) => {
+                const assistant = assistantFromResult(data, startedAt);
+                setMessages((current) => [...current, assistant]);
+                settleSession(assistant);
+            }));
+        } catch (err) {
+            const text = err instanceof Error ? err.message : String(err);
+            const type = err instanceof TurnFailure ? err.type : undefined;
+            setMessages((current) => [...current, { role: 'error', content: text, ...(type ? { errorType: type } : {}) }]);
+            void refreshSessionMeta();
+        } finally {
+            setSending(false);
+            setLiveCompactions([]);
+            setLiveSegments([]);
+        }
+    };
+
+    /** Banner / meter action: change the budget, then carry on if the session was stopped on it. */
+    const changeBudget = async (budget: IAgentSessionBudget | null) => {
+        const carryOn = Boolean(budgetView?.continuable);
+        if (await patchBudget(budget) && carryOn) await continueBudgetSession();
+    };
+
     // A session opened while a turn is still running (started elsewhere, or
     // before this page was reloaded) is followed from the event log, so the
     // operator sees it live instead of an idle page that suddenly changes.
@@ -659,6 +832,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 {t('waitingBadge')}
                             </Badge>
                         </Tooltip>
+                    ) : session?.runtimeStatus === 'budget_paused' ? (
+                        <Tooltip label={tb('pausedTooltip')} withArrow>
+                            <Badge size="sm" variant="light" color="orange" leftSection={<IconCoin size={11} />}>
+                                {tb('pausedBadge')}
+                            </Badge>
+                        </Tooltip>
                     ) : (
                         <Badge size="sm" variant="light" color="gray">{t('idle')}</Badge>
                     )}
@@ -694,6 +873,13 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             <Text size="xs" c="dimmed">{formatCost(totals.costUsd)}</Text>
                         </Group>
                     ) : null}
+                    <BudgetMeter
+                        view={budgetView}
+                        busy={liveActive || budgetBusy}
+                        readOnly={readOnly}
+                        onSave={(budget) => void changeBudget(budget)}
+                        onRemove={() => void changeBudget(null)}
+                    />
                     {session?.updatedAt ? (
                         <Text size="xs" c="dimmed">{formatRelativeTime(session.updatedAt)}</Text>
                     ) : null}
@@ -828,6 +1014,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                         onRetry={previous?.role === 'user'
                                                             ? () => {
                                                                 setInput(previous.content);
+                                                                setAttached((previous.attachments ?? []).map((file) => ({ ...file })));
                                                                 setMessages(messages.slice(0, i - 1));
                                                                 composerRef.current?.focus();
                                                             }
@@ -847,7 +1034,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 onResolve={(actionId, body) => void resolveAction(actionId, body)}
                                                             />
                                                         ) : (
-                                                            <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
+                                                            <>
+                                                                <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
+                                                                <MessageAttachments attachments={msg.attachments} />
+                                                            </>
                                                         )}
                                                     </>
                                                 )}
@@ -914,14 +1104,33 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             </ScrollArea>
                         )}
 
+                        {budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly ? (
+                            <Box px="sm" pt="sm">
+                                <BudgetBanner
+                                    view={budgetView}
+                                    busy={liveActive || budgetBusy}
+                                    onIncrease={(amount) => void changeBudget({ maxCostUsd: amount, onReach: budgetView.budget.onReach })}
+                                    onRemove={() => void changeBudget(null)}
+                                />
+                            </Box>
+                        ) : null}
+
                         <Box p="sm" className={classes.composer}>
+                            <AttachmentChips
+                                files={attached}
+                                uploading={uploadingNames}
+                                disabled={liveActive}
+                                onRemove={(fileId) => void removeAttachment(fileId)}
+                            />
                             <Textarea
                                 ref={composerRef}
                                 placeholder={readOnly
                                     ? `Read-only — this session came in via ${sessionSourceLabel(sessionSource)}`
-                                    : gate === 'blocked'
-                                        ? t('composerBlockedPlaceholder')
-                                        : 'Send a message to the agent'}
+                                    : budgetBlocked
+                                        ? tb('composerPlaceholder')
+                                        : gate === 'blocked'
+                                            ? t('composerBlockedPlaceholder')
+                                            : 'Send a message to the agent'}
                                 value={input}
                                 onChange={(event) => setInput(event.currentTarget.value)}
                                 onKeyDown={(event) => {
@@ -933,13 +1142,21 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 autosize
                                 minRows={1}
                                 maxRows={8}
-                                disabled={liveActive || readOnly || gate === 'blocked'}
+                                disabled={liveActive || readOnly || gate === 'blocked' || budgetBlocked}
+                                leftSection={takesAttachments ? (
+                                    <AttachButton
+                                        disabled={liveActive || gate === 'blocked' || budgetBlocked}
+                                        accept={attachmentsConfig.allowedMimeTypes.join(',')}
+                                        onFiles={(files) => void uploadFiles(files)}
+                                    />
+                                ) : undefined}
+                                leftSectionPointerEvents="all"
                                 rightSection={
                                     <ActionIcon
                                         size="sm"
                                         variant="filled"
                                         onClick={() => void sendMessage()}
-                                        disabled={!input.trim() || liveActive || readOnly || gate === 'blocked'}
+                                        disabled={(!input.trim() && attached.length === 0) || uploadingNames.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked}
                                     >
                                         <IconSend size={14} />
                                     </ActionIcon>

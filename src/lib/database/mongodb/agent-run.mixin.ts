@@ -384,6 +384,27 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       return docs.map(toRun);
     }
 
+    async listAgentRunsWithUndeliveredCallbacks(
+      tenantId: string,
+      options: { updatedBefore: Date; maxAttempts: number; limit?: number },
+    ): Promise<IAgentRun[]> {
+      const db = this.getTenantDb();
+      const docs = await db
+        .collection<IAgentRun>(COLLECTIONS.agentRuns)
+        .find({
+          tenantId,
+          callbackUrl: { $nin: [null, ''] },
+          callbackStatus: { $in: ['pending', 'failed'] },
+          callbackAttempts: { $not: { $gte: options.maxAttempts } },
+          status: { $in: ['succeeded', 'failed', 'canceled', 'requires_action'] },
+          updatedAt: { $lt: options.updatedBefore },
+        })
+        .sort({ updatedAt: 1 })
+        .limit(options.limit && options.limit > 0 ? options.limit : 100)
+        .toArray();
+      return docs.map(toRun);
+    }
+
     async listAgentRuns(filter: {
       tenantId: string;
       projectId: string;

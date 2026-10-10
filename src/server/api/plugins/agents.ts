@@ -8,7 +8,7 @@ import {
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { maskAgentSandboxSecrets } from '@/lib/services/agents/agentSandboxSecrets';
 import { resolveSandboxAvailability } from '@/lib/services/agents/agentSandboxTools';
-import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IUser } from '@/lib/database';
+import type { AgentStatus, IAgent, IAgentConfig, IAgentConversation, IAgentSessionBudget, IUser } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -28,11 +28,15 @@ import {
 import {
   AgentGuardrailBlockedError,
   checkAgentModel,
+  executeAgentContinueLocal,
   // Imported BY PATH: the barrel exports the queue-routing wrapper, and the
   // streaming route deliberately needs the local one (a progress callback
   // cannot cross the job queue).
   executePlaygroundChatLocal,
 } from '@/lib/services/agents/agentService';
+import { AgentBudgetReachedError } from '@/lib/services/agents/agentErrors';
+import { assertSessionBudgetAvailable, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
+import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
 import {
   validateAgentConfig,
   type AgentConfigIssue,
@@ -156,7 +160,7 @@ async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) 
  * agent and project, so an id valid for a sibling agent or project 404s. Null,
  * with the 404 already sent, when it is missing or out of scope.
  */
-async function requireScopedSession(request: FastifyRequest, reply: FastifyReply) {
+export async function requireScopedSession(request: FastifyRequest, reply: FastifyReply) {
   const scoped = await requireScopedAgent(request, reply);
   if (!scoped) return null;
   const { sessionId } = request.params as { sessionId: string };
@@ -241,6 +245,17 @@ function resolveRefusal(outcome: ResolveOutcome): { status: number; body: Record
   }
 }
 
+/** The dashboard's 402 for a session whose spend budget is used up. */
+function budgetReachedBody(error: AgentBudgetReachedError) {
+  return {
+    error: error.message,
+    type: 'budget_reached',
+    code: 'budget_reached',
+    spentUsd: error.spentUsd,
+    maxCostUsd: error.maxCostUsd,
+  };
+}
+
 const SESSION_BUSY_BODY = {
   error: 'This session already has a run in progress. Wait for it to finish or start a new session.',
   type: 'agent_run_conflict',
@@ -260,6 +275,13 @@ async function readOnlySessionSource(tenantDbName: string, conversationId: unkno
   return typeof source === 'string' && source !== 'console' ? source : null;
 }
 
+/** `attachments` from a chat body: an array of file ids (empty when absent); null when malformed. */
+function parseAttachmentIds(value: unknown): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 100) return null;
+  return value.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128) ? (value as string[]) : null;
+}
+
 /**
  * What `/chat` and `/chat/stream` both check before a playground turn runs:
  * the message, the agent in scope, a writable session and its run slot. Null —
@@ -273,6 +295,12 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
 
   if (typeof body.message !== 'string') {
     void reply.code(400).send({ error: 'Message is required' });
+    return null;
+  }
+  // Files of this session the message attaches (uploaded to `…/sessions/:id/files` first).
+  const attachments = parseAttachmentIds(body.attachments);
+  if (attachments === null) {
+    void reply.code(400).send({ error: 'attachments must be an array of file ids' });
     return null;
   }
   const agent = await agentInProjectScope(session.tenantDbName, agentId, projectId, user);
@@ -299,6 +327,14 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       });
       return null;
     }
+    // The session has used up its own spend budget.
+    try {
+      assertSessionBudgetAvailable(conversation);
+    } catch (error) {
+      if (!(error instanceof AgentBudgetReachedError)) throw error;
+      void reply.code(402).send(budgetReachedBody(error));
+      return null;
+    }
   }
   const reservation = await reserveDashboardSession({
     session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
@@ -323,9 +359,56 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       tenantDbName: session.tenantDbName,
       tenantId: session.tenantId,
       userMessage: body.message,
+      ...(attachments.length > 0 ? { attachments } : {}),
       ...(typeof body.version === 'number' ? { version: body.version } : {}),
       ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
     },
+  };
+}
+
+/**
+ * An SSE response that opens lazily — at the first event it is given — so a
+ * refusal that comes before anything has happened can still be a normal JSON
+ * response. Disabled (`enabled` false) it swallows every call.
+ */
+function openLazyEventStream(reply: FastifyReply, enabled: boolean) {
+  let started = false;
+  let closed = false;
+  const pendingFrames: Array<() => void> = [];
+  const write = (event: string, data: unknown, id?: number) => {
+    if (closed) return;
+    try {
+      reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      closed = true;
+    }
+  };
+  const start = () => {
+    if (started || !enabled) return;
+    started = true;
+    applyStreamHeaders(reply);
+    reply.raw.flushHeaders?.();
+    reply.raw.on('close', () => { closed = true; });
+    for (const frame of pendingFrames.splice(0)) frame();
+  };
+  const send = (event: string, data: unknown, id?: number) => {
+    if (!enabled) return;
+    if (!started) {
+      pendingFrames.push(() => write(event, data, id));
+      return;
+    }
+    write(event, data, id);
+  };
+  return {
+    start,
+    send,
+    started: () => started,
+    /** A callback that starts the stream and forwards one kind of progress event. */
+    live: <A extends unknown[]>(event: string, map: (...args: A) => unknown) => (...args: A) => {
+      start();
+      send(event, map(...args));
+    },
+    end: () => { if (!closed) reply.raw.end(); },
   };
 }
 
@@ -390,8 +473,10 @@ function summariseConversation(conversation: IAgentConversation) {
     failedCalls,
     status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
-    // 'requires_action' = waiting on an approval / answer (the "Waiting for you" badge).
+    // 'requires_action' = waiting on an approval / answer (the "Waiting for you" badge);
+    // 'budget_paused' = the session's spend budget stopped it.
     runtimeStatus: conversation.runtimeStatus,
+    ...(conversation.budget ? { budget: conversation.budget, spentUsd: Math.max(conversation.spentUsd ?? 0, costUsd) } : {}),
     hasContext: Boolean(
       conversation.metadata?.runtimeContext
       && Object.keys(conversation.metadata.runtimeContext as Record<string, unknown>).length > 0,
@@ -1193,6 +1278,15 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         })
         : undefined;
 
+      // Optional spend budget for this session (`null` = none); absent = the agent's default.
+      let budget: IAgentSessionBudget | null | undefined;
+      if (body.budget === null) budget = null;
+      else if (body.budget !== undefined) {
+        const parsed = parseSessionBudget(body.budget);
+        if (!parsed.ok) return reply.code(400).send({ error: parsed.message });
+        budget = parsed.budget;
+      }
+
       const created = await createConversation(
         session.tenantDbName,
         session.tenantId,
@@ -1201,6 +1295,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         agent.key,
         typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
         { source: 'console', ...(sessionContext ? { runtimeContext: sessionContext } : {}) },
+        budget,
       );
       return reply.code(201).send({ session: created });
     } catch (error) {
@@ -1224,6 +1319,134 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ session: found });
     } catch (error) {
       return sendRouteError(reply, error, 'Get agent session error', 'Failed to load session');
+    }
+  }));
+
+  // ── Session spend budget ──
+  //
+  // `{ budget: { maxCostUsd, onReach } | null }` adds, changes or removes the
+  // session's budget. A paused session is continued with `…/continue` (Studio
+  // calls this, then that).
+  app.patch('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply);
+      if (!scoped) return reply;
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (body.budget === undefined) {
+        return reply.code(400).send({ error: 'budget is required: { maxCostUsd, onReach }, or null to remove it' });
+      }
+      const outcome = await updateSessionBudget({
+        tenantDbName: scoped.session.tenantDbName,
+        projectId: scoped.projectId,
+        conversationId: String(scoped.conversation._id),
+        budget: body.budget,
+      });
+      if (outcome.kind === 'not_found') return reply.code(404).send({ error: 'Session not found' });
+      if (outcome.kind === 'invalid') return reply.code(400).send({ error: outcome.message });
+      return reply.code(200).send({ session: outcome.conversation });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Update session budget error', 'Failed to update the session budget');
+    }
+  }));
+
+  /**
+   * Continue a session that stopped on its spend budget (after the budget was
+   * raised): the agent carries on from where it stopped, with no new user
+   * message. Without `?stream=1` the call returns when the turn has finished
+   * (JSON); with it, the turn is an SSE stream in the same event format as
+   * `/chat/stream`. A refusal (402, 409, 404) is a normal JSON response either
+   * way: the stream only opens once there is a turn to report.
+   */
+  app.post('/agents/:agentId/sessions/:sessionId/continue', withApiRequestContext(async (request, reply) => {
+    let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
+    try {
+      scoped = await requireScopedSession(request, reply);
+    } catch (error) {
+      return sendRouteError(reply, error, 'Continue session error', 'Failed to continue the session');
+    }
+    if (!scoped) return reply;
+    const conversationId = String(scoped.conversation._id);
+    const source = scoped.conversation.metadata?.source;
+    if (typeof source === 'string' && source !== 'console') {
+      return reply.code(409).send({ error: `This session came in via ${source} and is read-only. Start a new session to test the agent.` });
+    }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const wantsStream = query.stream === '1' || query.stream === 'true';
+    const body = readJsonBody<Record<string, unknown>>(request);
+
+    const reservation = await reserveDashboardSession({
+      session: scoped.session,
+      projectId: scoped.projectId,
+      agentKey: scoped.agent.key,
+      conversationId,
+      userMessage: '',
+    });
+    if (reservation === null) return reply.code(409).send(SESSION_BUSY_BODY);
+
+    const stream = openLazyEventStream(reply, wantsStream);
+    const unsubscribe = wantsStream
+      ? sessionEventBus.subscribe(conversationId, (frame) => {
+        if (frame.type === 'action.required') stream.send('action', frame.data, frame.seq);
+        else if (frame.type.startsWith('session.status_')) stream.send('status', { type: frame.type, ...frame.data }, frame.seq);
+      })
+      : undefined;
+
+    try {
+      const continued = await executeAgentContinueLocal({
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        agentKey: scoped.agent.key,
+        conversationId,
+        userId: scoped.session.userId,
+        runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+          userId: scoped.session.userId,
+          source: 'playground',
+        }),
+        continuation: {
+          source: 'agent-playground',
+          ...(typeof body.version === 'number' ? { version: body.version } : {}),
+        },
+        ...(wantsStream
+          ? {
+            onToolEvent: stream.live('tool', (event) => event),
+            onTextChunk: stream.live('text', (text: string) => ({ text })),
+            onCompaction: stream.live('summary', (compaction) => compaction),
+          }
+          : {}),
+      });
+      if (wantsStream) {
+        stream.start();
+        stream.send('result', continued.result);
+        stream.end();
+        return reply;
+      }
+      return reply.code(200).send({ status: 'continued', result: continued.result });
+    } catch (error) {
+      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const resumeStatus = (error as { status?: unknown })?.status;
+      if (stream.started()) {
+        // The status line is long gone; the error travels as an event, like `/chat/stream`.
+        stream.send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+        stream.end();
+        return reply;
+      }
+      if (error instanceof AgentGuardrailBlockedError) {
+        return sendAgentGuardrailBlock(reply, error);
+      }
+      if (classified.status >= 500) logger.error('Continue session error', { error });
+      return sendProjectContextError(reply, error) ?? reply.code(
+        typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
+      ).send({
+        error: classified.error.message,
+        type: classified.error.type,
+        code: classified.error.code,
+        ...(classified.error.spentUsd !== undefined ? { spentUsd: classified.error.spentUsd } : {}),
+        ...(classified.error.maxCostUsd !== undefined ? { maxCostUsd: classified.error.maxCostUsd } : {}),
+      });
+    } finally {
+      unsubscribe?.();
+      await reservation?.release();
     }
   }));
 

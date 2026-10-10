@@ -17,6 +17,10 @@ import type {
   IAgentTracingSession,
   IAgentVersion,
   IAuditLog,
+  IWebhookDelivery,
+  IWebhookEndpoint,
+  WebhookDeliveryStatus,
+  WebhookEndpointStatus,
   IAlertEvent,
   IAlertRule,
   IApiToken,
@@ -590,6 +594,11 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     limit?: number;
     cursor?: string;
   }): Promise<{ items: IFileRecord[]; nextCursor?: string }>;
+
+  /** Every file of an agent session (`purpose: 'conversation'`), oldest first. */
+  listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]>;
+  /** Session files whose `expiresAt` has passed, for the retention sweep. */
+  listExpiredConversationFiles(before: Date, limit: number): Promise<IFileRecord[]>;
 
   countFileRecords(filters?: {
     projectId?: string;
@@ -1364,14 +1373,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentConversation | null>;
   /**
    * Writes only the runtime fields (`runtimeStatus`, `stopReason`,
-   * `pendingActionIds`, `lastEventSeq`) — no `updatedAt` bump, no re-read. The
+   * `pendingActionIds`, `lastEventSeq`, and the session `budget` / `spentUsd`;
+   * `budget: null` removes the budget) — no `updatedAt` bump, no re-read. The
    * session event recorder calls this around every turn, so it stays much
    * cheaper than `updateAgentConversation` and cannot be mistaken for a
    * transcript write.
    */
   updateAgentConversationRuntime(
     id: string,
-    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq'>>,
+    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
   ): Promise<void>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
@@ -1429,6 +1439,52 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** `status = pending AND expiresAt < now`, oldest first — the reconciler's timeout sweep. */
   listExpiredAgentPendingActions(now: Date, limit?: number): Promise<IAgentPendingAction[]>;
   deleteAgentPendingActions(conversationId: string): Promise<number>;
+
+  // ── Webhook subscriptions (tenant-specific) ──
+  createWebhookEndpoint(
+    endpoint: Omit<IWebhookEndpoint, '_id' | 'createdAt' | 'updatedAt'>,
+  ): Promise<IWebhookEndpoint>;
+  findWebhookEndpointById(id: string): Promise<IWebhookEndpoint | null>;
+  /**
+   * `projectScopes` keeps endpoints whose `projectId` is one of the entries
+   * (`null` = tenant-wide); absent = every endpoint. Oldest first.
+   */
+  listWebhookEndpoints(
+    tenantId: string,
+    filter?: { projectScopes?: Array<string | null>; status?: WebhookEndpointStatus },
+  ): Promise<IWebhookEndpoint[]>;
+  updateWebhookEndpoint(
+    id: string,
+    data: Partial<Omit<IWebhookEndpoint, '_id' | 'tenantId' | 'projectId' | 'createdBy' | 'createdAt'>>,
+  ): Promise<IWebhookEndpoint | null>;
+  /** Removes the endpoint and its deliveries. */
+  deleteWebhookEndpoint(id: string): Promise<boolean>;
+  createWebhookDeliveries(
+    deliveries: Array<Omit<IWebhookDelivery, '_id'>>,
+  ): Promise<IWebhookDelivery[]>;
+  findWebhookDeliveryById(id: string): Promise<IWebhookDelivery | null>;
+  /** Newest first. */
+  listWebhookDeliveries(
+    endpointId: string,
+    options?: { limit?: number; skip?: number; status?: WebhookDeliveryStatus },
+  ): Promise<IWebhookDelivery[]>;
+  updateWebhookDelivery(
+    id: string,
+    data: Partial<Omit<IWebhookDelivery, '_id' | 'tenantId' | 'endpointId' | 'eventId' | 'createdAt'>>,
+  ): Promise<IWebhookDelivery | null>;
+  /**
+   * Compare-and-set lease: while the delivery is `pending` and due
+   * (`nextAttemptAt <= now`), pushes `nextAttemptAt` to `leaseUntil` and returns
+   * the row; null when it is not due or someone else holds it. A worker that
+   * dies mid-attempt just lets the lease run out and the reconciler tries again.
+   */
+  claimWebhookDelivery(id: string, now: Date, leaseUntil: Date): Promise<IWebhookDelivery | null>;
+  /** `status = pending AND nextAttemptAt <= now`, oldest due first — the reconciler's retry sweep. */
+  listDueWebhookDeliveries(tenantId: string, now: Date, limit?: number): Promise<IWebhookDelivery[]>;
+  /** Marks every `pending` delivery of the endpoint `failed` (it was disabled or removed). */
+  failPendingWebhookDeliveries(endpointId: string, reason: string): Promise<number>;
+  /** Deletes settled (not `pending`) deliveries created before `olderThan`. */
+  cleanupWebhookDeliveryRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }>;
 
   // ── MCP Server operations (tenant-specific) ──
   createMcpServer(
@@ -1785,6 +1841,16 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   listQueuedAgentRuns(
     tenantId: string,
     options?: { createdBefore?: Date; limit?: number },
+  ): Promise<IAgentRun[]>;
+  /**
+   * Runs whose callback never settled: a `callbackUrl`, a `pending` / `failed`
+   * status with fewer than `maxAttempts` attempts, in a state that has a
+   * callback to send (terminal or `requires_action`), untouched since
+   * `updatedBefore`. The reconciler re-delivers these.
+   */
+  listAgentRunsWithUndeliveredCallbacks(
+    tenantId: string,
+    options: { updatedBefore: Date; maxAttempts: number; limit?: number },
   ): Promise<IAgentRun[]>;
   /**
    * Dashboard listing, newest first. Always tenant+project scoped;

@@ -198,11 +198,26 @@ function truncateText(value: unknown, limit: number): unknown {
 /**
  * Shrinks a state to fit `MAX_STATE_BYTES`, cheapest loss first:
  *  1. the untouched `rawOutput` copies (the model worked from `output`);
- *  2. long tool outputs in the tool history;
- *  3. long tool results in the transcript itself.
+ *  2. image parts of attached files;
+ *  3. long tool outputs in the tool history;
+ *  4. long tool results in the transcript itself.
  * Returns null when even that does not fit — the caller then stores nothing
  * and the next turn falls back to the text transcript.
  */
+/** A message with its image parts replaced by a one-line note; others are returned as they are. */
+function withoutImageParts(message: LooseMessage): LooseMessage {
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content) || !content.some((part) => part && (part as { type?: unknown }).type === 'image_url')) {
+        return message;
+    }
+    return {
+        ...message,
+        content: content.map((part) => (part && (part as { type?: unknown }).type === 'image_url'
+            ? { type: 'text', text: '[An attached image was here; it is not kept in the saved state.]' }
+            : part)),
+    } as LooseMessage;
+}
+
 export function serializeForStorage(carried: CarriedState): string | null {
     let text = JSON.stringify(carried);
     if (text.length <= MAX_STATE_BYTES) return text;
@@ -222,6 +237,13 @@ export function serializeForStorage(carried: CarriedState): string | null {
         delete entry.rawOutput;
         return entry;
     });
+    text = JSON.stringify(shrunk);
+    if (text.length <= MAX_STATE_BYTES) return text;
+
+    // Images an attachment put in the transcript are inline base64: usually the
+    // bulk of an oversized state, and the one thing a later turn can do without
+    // (the file itself is still attached to the session).
+    shrunk.messages = (shrunk.messages ?? []).map((message) => withoutImageParts(message as LooseMessage) as unknown as AgentSdkMessage);
     text = JSON.stringify(shrunk);
     if (text.length <= MAX_STATE_BYTES) return text;
 
@@ -341,6 +363,11 @@ export function buildTurnInputState(input: {
     carried: CarriedState | null;
     transcript: Array<{ role: string; content: string }>;
     userMessage: string;
+    /**
+     * What the model is shown as the user turn when it is more than the text —
+     * the text with attached files, or content parts with images. Absent = `userMessage`.
+     */
+    userContent?: string | unknown[];
     systemPrompt?: string;
 }): AgentSdkSmartState {
     const history: AgentSdkMessage[] = input.carried?.messages
@@ -354,7 +381,29 @@ export function buildTurnInputState(input: {
         messages: [
             ...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt } as AgentSdkMessage] : []),
             ...history,
-            { role: 'user', content: input.userMessage } as AgentSdkMessage,
+            { role: 'user', content: input.userContent ?? input.userMessage } as AgentSdkMessage,
+        ],
+    } as AgentSdkSmartState;
+}
+
+/**
+ * The input state for continuing a session with NO new user message: the carried
+ * state as it ended (the model resumes after its last tool results), with the
+ * system prompt in front when the surface hands it over as a message.
+ */
+export function buildContinueInputState(input: {
+    carried: CarriedState;
+    systemPrompt?: string;
+}): AgentSdkSmartState {
+    return {
+        toolHistory: [],
+        toolHistoryArchived: [],
+        summaries: [],
+        summaryRecords: [],
+        ...input.carried,
+        messages: [
+            ...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt } as AgentSdkMessage] : []),
+            ...(input.carried.messages ?? []),
         ],
     } as AgentSdkSmartState;
 }

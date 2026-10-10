@@ -2347,6 +2347,19 @@ export interface IAgentExecutionConfig {
   backgroundEnabled?: boolean;
   /** Longest a background run of this agent may take, minutes. */
   backgroundMaxDurationMinutes?: number;
+  /**
+   * Default spend budget of a session of this agent (copied to each session
+   * when it starts). Absent = sessions have no budget; the per-turn
+   * `runtime.limits.maxCostUsd` is separate and unchanged.
+   */
+  sessionBudget?: IAgentSessionBudget & {
+    /**
+     * May an API client remove this budget or raise it past `maxCostUsd`
+     * (session create / `PATCH`)? Default false: the budget the admin set binds
+     * the integration it is meant to constrain. Dashboard users are not affected.
+     */
+    allowClientOverride?: boolean;
+  };
   /** What an API call that does not say `background` gets. Default 'sync'. */
   defaultMode?: 'sync' | 'background';
   /** Callback for background runs started without their own `callback_url`. */
@@ -2355,6 +2368,32 @@ export interface IAgentExecutionConfig {
   callbackSecret?: string;
   /** Sealed `callbackSecret`; never returned by the API. */
   callbackSecretSealed?: string;
+}
+
+/**
+ * Files a user attaches to a session (the composer's paperclip, the client
+ * API's `input_file` / `input_image`). Every field is a stored setting; absent
+ * fields take the defaults in `SESSION_FILES_DEFAULTS` (sessionFiles.ts), and
+ * an agent with no `attachments` at all accepts attachments with those
+ * defaults — they were impossible before, so enabling them breaks nothing.
+ */
+export interface IAgentAttachmentsConfig {
+  /** false = the agent takes no attachments. Default true. */
+  enabled?: boolean;
+  /** Most files one session may hold. Default 10. */
+  maxFiles?: number;
+  /** Largest single file, MB. Default 20. */
+  maxFileSizeMb?: number;
+  /** MIME types accepted (`image/*` allowed); empty / absent = anything convertible. */
+  allowedMimeTypes?: string[];
+  /** A message's attachments are put in the user turn when their text is at most this many tokens (estimated chars/4); otherwise the agent reads them in pages. Default 30000. */
+  inlineMaxTokens?: number;
+  /** Characters per page of `session_files_read`. Default 20000. */
+  readPageChars?: number;
+  /** Days a file lives after upload before the cleanup removes it. Default 30. */
+  retentionDays?: number;
+  /** Bucket the files are stored in. Absent = the project's system `conversation-files` bucket on the built-in storage. */
+  bucketKey?: string;
 }
 
 export interface IAgentConfig {
@@ -2434,6 +2473,8 @@ export interface IAgentConfig {
    * agent created before this existed) = nothing ever pauses.
    */
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
+  /** Files users may attach to a session. Absent = accepted with the defaults. */
+  attachments?: IAgentAttachmentsConfig;
 }
 
 /** Whether a tool call waits for a person first. */
@@ -2672,9 +2713,19 @@ export interface IAgentConversationStep {
   narration?: string;
 }
 
+/** A file attached to a user message — the file itself is a conversation file (`IFileRecord`). */
+export interface IAgentMessageAttachment {
+  fileId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+}
+
 export interface IAgentConversationMessage {
   role: string;
   content: string;
+  /** Files attached to this (user) message. Absent on every message without any. */
+  attachments?: IAgentMessageAttachment[];
   /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
   reasoning?: string;
   timestamp: Date;
@@ -2752,10 +2803,25 @@ export interface IAgentTurnCompaction {
 }
 
 /** Why a turn stopped, as the session API reports it (conversation + events). */
-export type AgentSessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'cancelled' | 'error';
+export type AgentSessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'cancelled' | 'error' | 'budget_reached';
 
-/** What the conversation is doing right now. Absent = idle (every pre-existing row). */
-export type AgentSessionRuntimeStatus = 'idle' | 'running' | 'requires_action';
+/**
+ * What the conversation is doing right now. Absent = idle (every pre-existing row).
+ * `budget_paused`: the session's own spend budget was reached and the agent
+ * waits for the budget to be raised (or removed) before it goes on.
+ */
+export type AgentSessionRuntimeStatus = 'idle' | 'running' | 'requires_action' | 'budget_paused';
+
+/**
+ * A spend budget for one session (conversation): the sum of what its turns
+ * cost. `onReach: 'pause'` stops the turn and waits for a higher budget, after
+ * which the turn can be continued; `'stop'` stops it and refuses new messages
+ * until the budget is raised or removed.
+ */
+export interface IAgentSessionBudget {
+  maxCostUsd: number;
+  onReach: 'pause' | 'stop';
+}
 
 export type AgentPendingActionKind = 'tool_approval' | 'user_question';
 export type AgentPendingActionStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
@@ -2865,6 +2931,13 @@ export interface IAgentConversation {
   pendingActionIds?: string[];
   /** Highest `agent_session_events.seq` written for this conversation. */
   lastEventSeq?: number;
+  /**
+   * This session's spend budget. Copied from the agent's `execution.sessionBudget`
+   * when the session is created; can be set, raised or removed (`null`) later.
+   */
+  budget?: IAgentSessionBudget | null;
+  /** Running total of the priced usage of every turn (USD); backfilled from the messages when absent. */
+  spentUsd?: number;
   /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a
@@ -3860,6 +3933,62 @@ export type AgentRunErrorReason =
 /** Durable delivery state for the optional callback webhook (§12.6). */
 export type AgentRunCallbackStatus = 'pending' | 'delivered' | 'failed';
 
+// ── Webhook subscriptions ────────────────────────────────────────────────
+
+export type WebhookEndpointStatus = 'active' | 'disabled';
+
+/** Why an endpoint was switched off. `manual` = a person did it. */
+export type WebhookDisabledReason = 'manual' | 'redirect' | 'blocked_address' | 'sustained_failure';
+
+/**
+ * An outgoing webhook subscription (`webhook_endpoints`). `projectId` absent
+ * = every project of the tenant.
+ */
+export interface IWebhookEndpoint {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string | null;
+  url: string;
+  description?: string;
+  /** Event types and `prefix.*` patterns the endpoint subscribes to. */
+  events: string[];
+  /** Sealed (`encryptObject`) signing secret. Never returned by the API. */
+  secretSealed: string;
+  status: WebhookEndpointStatus;
+  disabledReason?: WebhookDisabledReason | null;
+  /** Start of the current unbroken run of failed deliveries; cleared by any 2xx. */
+  failingSince?: Date | null;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type WebhookDeliveryStatus = 'pending' | 'delivered' | 'failed';
+
+/**
+ * One event owed to one endpoint (`webhook_deliveries`). `pending` with a
+ * `nextAttemptAt` is the retry queue: the reconciler re-enqueues what is due.
+ */
+export interface IWebhookDelivery {
+  _id?: ObjectId | string;
+  tenantId: string;
+  /** The project the event happened in. */
+  projectId?: string | null;
+  endpointId: string;
+  eventId: string;
+  eventType: string;
+  /** The thin body that is signed and sent: `{ id, type, createdAt, projectId, data }`. */
+  payload: Record<string, unknown>;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  nextAttemptAt?: Date | null;
+  lastStatusCode?: number | null;
+  lastError?: string | null;
+  lastDurationMs?: number | null;
+  createdAt: Date;
+  deliveredAt?: Date | null;
+}
+
 export interface IAgentRun extends IUsageAttributionFields {
   _id?: ObjectId | string;
   mode: AgentRunMode;
@@ -3875,6 +4004,8 @@ export interface IAgentRun extends IUsageAttributionFields {
    */
   conversationId: string;
   userMessage: string;
+  /** Ids of the conversation files this turn's message attaches (`IFileRecord`). */
+  attachments?: string[] | null;
   /**
    * Which agent config the worker re-runs the turn with. The queue message
    * carries only ids; the worker loads the rest from this row (§7 step 2).

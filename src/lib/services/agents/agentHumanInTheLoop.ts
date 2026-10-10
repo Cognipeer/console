@@ -32,6 +32,9 @@ export const HITL_READ_ONLY_TOOLS: readonly string[] = [
     'sandbox_list_files',
     'sandbox_preview_link',
     'web_search',
+    // Read an attached session file (sessionFiles.ts).
+    'session_files_list',
+    'session_files_read',
     // The SDK's own ask-user tool: asking IS the human step.
     'ask_user_question',
 ];

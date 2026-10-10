@@ -645,6 +645,7 @@ async function persistRecord(
         etag: handle.etag,
         metadata: handle.metadata ?? request.metadata,
         markdownStatus,
+        ...(request.recordExtras ?? {}),
         createdBy: request.createdBy,
     });
 

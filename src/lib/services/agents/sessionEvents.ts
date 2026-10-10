@@ -40,6 +40,7 @@ import { getRelayTransport, type RelayTransport } from '@/lib/core/cluster';
 import { createLogger } from '@/lib/core/logger';
 import type { DatabaseProvider, IAgentSessionEvent } from '@/lib/database';
 import { AgentSessionEventSeqConflictError } from '@/lib/database/provider/errors';
+import { publishSessionWebhooks } from '@/lib/services/webhooks/sessionWebhookEvents';
 
 const logger = createLogger('agents:session-events');
 
@@ -55,13 +56,15 @@ export type SessionEventType =
   | 'agent.message'
   | 'session.status_idle'
   | 'session.error'
-  | 'session.work_done';
+  | 'session.work_done'
+  | 'session.usage'
+  | 'budget.reached';
 
 /** Never persisted — published to live subscribers only. */
 export type SessionLiveEventType = 'agent.message.delta';
 
 /** Why a turn stopped, as events and the conversation record report it. */
-export type SessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'cancelled' | 'error';
+export type SessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'cancelled' | 'error' | 'budget_reached';
 
 /**
  * Maps the runtime's turn outcome (`AgentStopReason`, plus a thrown error) onto
@@ -69,9 +72,11 @@ export type SessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'canc
  * limit → limit, cancelled → cancelled, thrown → error.
  */
 export function toSessionStopReason(
-  outcome: 'completed' | 'paused' | 'requires_action' | 'limit' | 'cancelled' | 'error' | undefined,
+  outcome: 'completed' | 'paused' | 'requires_action' | 'limit' | 'cancelled' | 'error' | 'budget_reached' | undefined,
 ): SessionStopReason {
   switch (outcome) {
+    case 'budget_reached':
+      return 'budget_reached';
     case 'paused':
     case 'requires_action':
       return 'requires_action';
@@ -276,6 +281,12 @@ export interface SessionEventWriterOptions {
   agentKey: string;
   conversationId: string;
   runId?: string;
+  /**
+   * When set, the events that are also webhook events (`session.idled`,
+   * `session.work_done`, `action.required`, `budget.reached`) are published to
+   * the tenant's webhook subscriptions once they are stored.
+   */
+  tenantDbName?: string;
   /** Defaults to the process-wide bus. */
   bus?: SessionEventBus;
   /** Defaults to `AGENT_SESSION_EVENT_RETENTION_DAYS` (30). */
@@ -316,6 +327,7 @@ const URGENT_TYPES = new Set<string>([
   'action.required',
   'action.resolved',
   'agent.message',
+  'budget.reached',
 ]);
 
 const DAY_MS = 86_400_000;
@@ -457,6 +469,15 @@ export function createSessionEventWriter(options: SessionEventWriterOptions): Se
         data: row.data,
         ...(row.runId ? { runId: row.runId } : {}),
         createdAt: row.createdAt.toISOString(),
+      });
+    }
+    // After the stored rows and the conversation's status are in place, so a
+    // receiver that calls back reads the state the event describes. Never fails the turn.
+    if (options.tenantDbName) {
+      await publishSessionWebhooks(rows, {
+        tenantDbName: options.tenantDbName, tenantId, projectId, agentKey, conversationId,
+      }).catch((error) => {
+        logger.warn('Session webhook events not published', { conversationId, error: String(error) });
       });
     }
   };

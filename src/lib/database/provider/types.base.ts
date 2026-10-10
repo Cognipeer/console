@@ -897,6 +897,14 @@ export interface IFileRecord {
   markdownError?: string;
   markdownSize?: number;
   markdownContentType?: string;
+  /** Set on a file uploaded to an agent session (`conversation-files` bucket); absent on every other file. */
+  purpose?: 'conversation';
+  conversationId?: string;
+  agentKey?: string;
+  /** When the retention cleanup removes the file (session files only). */
+  expiresAt?: Date | null;
+  /** Who uploaded it (session files); `createdBy` stays the principal the file service was called as. */
+  uploadedBy?: string;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;

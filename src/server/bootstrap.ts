@@ -30,6 +30,7 @@ import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsum
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
+import { startWebhookQueueConsumer } from '@/lib/services/webhooks/webhookConsumer';
 import { startAgentScheduler } from '@/lib/services/agents/agentScheduler';
 import { reconcileOrphanedAgentRuns, startAgentRunReconciler } from '@/lib/services/agents/agentRunReconciler';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
@@ -297,6 +298,7 @@ async function runBootstrap(): Promise<void> {
   // The consumers are no-ops for memory queue + single-node deployments.
   await bestEffort(() => Promise.all([
     startAgentQueueConsumer(),
+    startWebhookQueueConsumer(),
     startMcpQueueConsumer(),
     startBrowserQueueConsumer(),
     startCrawlerQueueConsumer(),

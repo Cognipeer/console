@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { AgentStatus, IAgentConfig } from '@/lib/database';
+import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentSessionBudget } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
   createAgentRecord,
@@ -31,7 +31,11 @@ import {
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
+import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
+import { extractResponseUserInput, namedFileIds, storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
+import { agentTakesAttachments } from '@/lib/services/agents/sessionFiles';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -54,41 +58,6 @@ import {
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 
 const logger = createLogger('api:client-agents');
-
-function extractUserMessage(input: unknown): string | null {
-  if (typeof input === 'string') {
-    return input;
-  }
-
-  if (Array.isArray(input)) {
-    for (let index = input.length - 1; index >= 0; index -= 1) {
-      const item = input[index];
-      if (!item || typeof item !== 'object') {
-        continue;
-      }
-
-      const candidate = item as {
-        content?: string | Array<Record<string, unknown>>;
-        role?: string;
-      };
-
-      if (candidate.role === 'user' && typeof candidate.content === 'string') {
-        return candidate.content;
-      }
-
-      if (candidate.role === 'user' && Array.isArray(candidate.content)) {
-        const textPart = candidate.content.find(
-          (part) => part.type === 'input_text' && typeof part.text === 'string',
-        );
-        if (textPart && typeof textPart.text === 'string') {
-          return textPart.text;
-        }
-      }
-    }
-  }
-
-  return null;
-}
 
 /**
  * Dual-prefix (§8, §12.3): `resp_<id>` is the synchronous scheme's id
@@ -137,14 +106,42 @@ function createResponsesHandler(usePublished: boolean) {
         return reply.code(400).send({ error: 'Agent is not active' });
       }
 
-      const userMessage = extractUserMessage(body.input);
-      if (!userMessage) {
+      // The text, and the files (`input_file` / `input_image`) of the last user message.
+      const userInput = extractResponseUserInput(body.input);
+      const userMessage = userInput.text ?? '';
+      if (!userMessage && userInput.files.length === 0) {
         return reply.code(400).send({
           error: 'input field is required (string or array of message items)',
         });
       }
+      if (userInput.files.length > 0 && !agentTakesAttachments(agent.config)) {
+        return reply.code(403).send(invalidRequestErrorBody('This agent does not take attachments.', 'attachments_disabled'));
+      }
+      if (userInput.files.some((file) => file.fileId) && typeof body.previous_response_id !== 'string') {
+        return reply.code(400).send(invalidRequestErrorBody(
+          'file_id names a file already uploaded to a session: continue that session with previous_response_id, or send file_data / image_url.',
+          'attachment_not_found',
+        ));
+      }
+
+      // A spend budget for the session this request starts (`null` = none).
+      // Ignored when the request continues an existing session — change that
+      // one with PATCH /client/v1/agents/sessions/:conversationId.
+      let sessionBudget: IAgentSessionBudget | null | undefined;
+      if (body.budget === null) sessionBudget = null;
+      else if (body.budget !== undefined) {
+        const parsed = parseSessionBudget(body.budget);
+        if (!parsed.ok) return reply.code(400).send(invalidRequestErrorBody(parsed.message, 'invalid_budget'));
+        sessionBudget = parsed.budget;
+      }
+      // An agent whose admin set a session budget binds its API clients to it.
+      if (sessionBudget !== undefined) {
+        const violation = clientBudgetViolation(agent.config, sessionBudget);
+        if (violation) return reply.code(403).send(invalidRequestErrorBody(violation, 'budget_override_forbidden'));
+      }
 
       let conversationId: string | undefined;
+      let sessionConversation: IAgentConversation | null = null;
       // §12.15's hash must never depend on a conversationId that is FRESH
       // on this specific attempt — a caller retrying "start a new
       // conversation" (no previous_response_id) gets a brand-new
@@ -195,7 +192,10 @@ function createResponsesHandler(usePublished: boolean) {
             },
           });
         }
+        // The session has used up its own spend budget: nothing to run (402).
+        assertSessionBudgetAvailable(conversation);
         conversationId = resolvedConversationId;
+        sessionConversation = conversation;
         idempotencyConversationScope = resolvedConversationId;
       }
 
@@ -249,12 +249,25 @@ function createResponsesHandler(usePublished: boolean) {
           projectId: ctx.projectId,
           agentKey: agent.key,
           userMessage,
+          idempotencyAttachments: namedFileIds(userInput.files),
           version: requestedVersion,
           idempotencyKey,
           idempotencyConversationScope,
         });
         if (prior.kind === 'conflict') return reply.code(409).send(idempotencyKeyConflictErrorBody());
         if (prior.kind === 'replay') return reply.code(200).send(serializeAgentRun(prior.run));
+      }
+
+      // A queued turn learns of an exhausted tenant spend limit here (429), not
+      // from a run that fails later — and before a conversation is created for it.
+      if (background) {
+        await assertQueuedTurnSpendAllowed({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentKey: agent.key,
+          userId: ctx.tokenRecord.userId,
+        });
       }
 
       if (!conversationId) {
@@ -266,8 +279,29 @@ function createResponsesHandler(usePublished: boolean) {
           agent.key,
           undefined,
           { source: 'api' },
+          sessionBudget,
         );
         conversationId = String(conversation._id);
+        sessionConversation = conversation;
+      }
+
+      // Files in the request become files of the session this turn runs on.
+      let attachments: string[] = [];
+      let namedAttachments: string[] = [];
+      if (userInput.files.length > 0 && sessionConversation) {
+        const stored = await storeResponseInputFiles({
+          files: userInput.files,
+          scope: { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId },
+          conversation: sessionConversation,
+          agentConfig: agent.config,
+          actor: {
+            userId: ctx.tokenRecord.userId,
+            licenseType: ctx.tenant.licenseType,
+            tokenId: ctx.tokenRecord._id?.toString() ?? ctx.token,
+          },
+        });
+        attachments = stored.attachments;
+        namedAttachments = stored.named;
       }
 
       const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
@@ -285,6 +319,7 @@ function createResponsesHandler(usePublished: boolean) {
           agentKey: agent.key,
           conversationId,
           userMessage,
+          ...(attachments.length > 0 ? { attachments, idempotencyAttachments: namedAttachments } : {}),
           userId: ctx.tokenRecord.userId,
           version: requestedVersion,
           usePublished,
@@ -324,6 +359,7 @@ function createResponsesHandler(usePublished: boolean) {
           usePublished,
           userId: ctx.tokenRecord.userId,
           userMessage,
+          ...(attachments.length > 0 ? { attachments } : {}),
           version: requestedVersion,
           runtimeContext,
         },
