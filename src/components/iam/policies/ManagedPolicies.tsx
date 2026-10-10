@@ -33,6 +33,7 @@ export default function ManagedPolicies({ policies, labels }: ManagedPoliciesPro
 
   const roleBased = policies.filter((p) => p.group === 'rbac');
   const boundaries = policies.filter((p) => p.group === 'boundary');
+  const portals = policies.filter((p) => p.group === 'portal');
 
   const toggleCedar = (id: string) =>
     setShown((prev) => {
@@ -106,6 +107,19 @@ export default function ManagedPolicies({ policies, labels }: ManagedPoliciesPro
           </Text>
           <Accordion variant="separated" multiple>
             {boundaries.map(renderItem)}
+          </Accordion>
+        </div>
+      ) : null}
+      {portals.length > 0 ? (
+        <div data-testid="managed-portal-group">
+          <Text size="xs" fw={600} c="dimmed" tt="uppercase" mb={4}>
+            {t('managed.portalBased')}
+          </Text>
+          <Text size="xs" c="dimmed" mb={6}>
+            {t('managed.portalHelp')}
+          </Text>
+          <Accordion variant="separated" multiple>
+            {portals.map(renderItem)}
           </Accordion>
         </div>
       ) : null}

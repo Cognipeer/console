@@ -7,7 +7,8 @@
  *
  *   projectId  the project the request runs in (resolved the way the handler
  *              resolves it, not the raw cookie)
- *   channel    'dashboard' (cookie session), 'api' (API token), 'portal' (reserved)
+ *   channel    'dashboard' (cookie session), 'api' (API token), 'portal' (a person using a
+ *              portal: opening it, running its agents - resourceAuthz.ts)
  *   ip         the caller's address as the server's trust-proxy setting sees it
  *              (Cedar `ipaddr` extension); never a raw X-Forwarded-For
  *   now        the decision time (Cedar `datetime` extension); filled in by the

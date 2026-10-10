@@ -18,6 +18,7 @@
  *    and reads the answer.
  */
 import type { QuotaTargetSource } from '@/lib/quota/targets';
+import { includesFolded } from '@/lib/shared/searchFold';
 
 export type PickerType = 'user' | 'group' | 'token' | 'agent';
 
@@ -40,10 +41,9 @@ const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : [
 const str = (value: unknown): string | undefined =>
   typeof value === 'string' && value.trim() !== '' ? value : undefined;
 
+/** Case-insensitive the Turkish-aware way ("ısparta" finds "ISPARTA", "istanbul" finds "İstanbul"). */
 function matches(query: string, ...fields: Array<string | undefined>): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return fields.some((field) => field?.toLowerCase().includes(q));
+  return !query.trim() || fields.some((field) => includesFolded(field, query));
 }
 
 async function readJson(fetcher: Fetcher, url: string): Promise<unknown | null> {
@@ -86,7 +86,8 @@ async function fallback(fetcher: Fetcher, type: 'user' | 'group' | 'token', quer
       .slice(0, PICKER_LIMIT)
       .map((g) => ({ value: String(g._id), label: str(g.name) ?? String(g._id), description: str(g.description) }));
   }
-  const body = await readJson(fetcher, '/api/tokens');
+  // `scope=project`: every token of the project (the plain list is only the caller's own tokens).
+  const body = await readJson(fetcher, '/api/tokens?scope=project');
   return asArray(asRecord(body).tokens)
     .map(asRecord)
     .filter((t) => matches(query, str(t.label)))

@@ -3,6 +3,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
 import { I18nProvider, useTranslations } from '@/lib/i18n';
+import { ConfirmProvider } from '@/components/common/confirm/ConfirmProvider';
 import { theme } from '@/theme/theme';
 import AttachedPolicies from '@/components/iam/principals/AttachedPolicies';
 import EffectivePermissions, { sourceDetail } from '@/components/iam/principals/EffectivePermissions';
@@ -28,6 +29,7 @@ type Locale = 'en' | 'tr';
 
 // The provider's props require `children`; createElement passes them as its third argument.
 const Provider = I18nProvider as React.ComponentType<{ locale?: Locale; children?: React.ReactNode }>;
+const Confirm = ConfirmProvider as React.ComponentType<{ children?: React.ReactNode }>;
 
 /** Renders a component that needs the namespaced translator, inside the providers of the app. */
 function render(
@@ -42,7 +44,7 @@ function render(
     React.createElement(
       MantineProvider,
       { theme, env: 'test' },
-      React.createElement(Provider, { locale }, React.createElement(Harness)),
+      React.createElement(Provider, { locale }, React.createElement(Confirm, null, React.createElement(Harness))),
     ),
   );
 }
@@ -136,7 +138,9 @@ describe('PrincipalDetailView', () => {
     expect(html).toContain('href="/dashboard/iam?tab=check&amp;principalType=user&amp;principalId=u1"');
     expect(html).toContain('href="/dashboard/iam?tab=policies&amp;new=1&amp;principalType=user&amp;principalId=u1"');
     expect(html).toContain('href="/dashboard/iam?tab=audit&amp;principalType=user&amp;principalId=u1"');
-    expect(html).toContain('href="/dashboard/members/u1"');
+    // People are managed in the center itself: nothing sends the reader to a member page.
+    expect(html).not.toContain('/dashboard/members');
+    expect(html).not.toContain('Open in Members');
   });
 
   it('shows services with their labels, levels and source chips, and hides the ones without access', () => {
@@ -288,7 +292,9 @@ describe('PrincipalDetailView for a token and a group', () => {
     );
     const userHtml = view('en', { summary: user.principal, detail: user });
     expect(userHtml).toContain('LDAP');
-    expect(userHtml).toContain('Cannot sign in');
+    // An account that cannot sign in is a service account (never a "programmatic user").
+    expect(userHtml).toContain('Service account');
+    expect(userHtml).not.toMatch(/programmatic/i);
   });
 
   it('says how a project was reached and folds a long list', () => {
@@ -440,14 +446,14 @@ describe('the tabs render their first frame', () => {
   it('Principals: segments, search box and a skeleton, in both languages', async () => {
     const { default: PrincipalsTab } = await import('@/components/iam/principals/PrincipalsTab');
     const en = render('en', () => React.createElement(PrincipalsTab, { canManage: true }));
-    expect(en).toContain('Users');
+    expect(en).toContain('People');
     expect(en).toContain('Groups');
     expect(en).toContain('API tokens');
-    expect(en).toContain('Search users by name or email…');
+    expect(en).toContain('Search people by name or email…');
     expect(en).toContain('aria-busy="true"');
     const tr = render('tr', () => React.createElement(PrincipalsTab, { canManage: false }));
-    expect(tr).toContain('Kullanıcılar');
-    expect(tr).toContain('Kullanıcıları ad veya e-postayla arayın…');
+    expect(tr).toContain('Kişiler');
+    expect(tr).toContain('Kişileri ad veya e-postayla arayın…');
   });
 
   it('Audit: views, filters and the export button, in both languages', async () => {

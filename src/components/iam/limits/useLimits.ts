@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { QuotaPolicyFormData } from '@/components/quota/QuotaPolicyModal';
-import { parseLimitRows, type LimitRow } from './limitsModel';
+import { applyTargetPatches, parseLimitRows, type LimitRow, type TargetPatchEntry } from './limitsModel';
+import { createResolutionCache, resolveLimitTargets } from './resolveTargets';
 
 /** A failed call to the quota API: the HTTP status and the server's machine-readable `code`. */
 export class LimitsApiError extends Error {
@@ -90,13 +91,32 @@ export interface UseLimits {
 
 /** Every quota policy of the tenant, with the names of what they point at. */
 export function useLimits(): UseLimits {
-  const [rows, setRows] = useState<LimitRow[]>([]);
+  const [loadedRows, setRows] = useState<LimitRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [saving, setSaving] = useState(false);
   const loaded = useRef(false);
+
+  // The API names people, groups, tokens and agents; models, indexes, buckets and providers are named
+  // from the resource registry (see resolveTargets.ts). Rows show at once, the names follow.
+  const resolutions = useRef(createResolutionCache());
+  const [patches, setPatches] = useState<ReadonlyMap<string, TargetPatchEntry>>(() => new Map());
+  useEffect(() => {
+    const controller = new AbortController();
+    void resolveLimitTargets(loadedRows, { signal: controller.signal, cache: resolutions.current })
+      .then((found) => {
+        if (controller.signal.aborted) return;
+        // A name that could not be looked up again this time (the registry failed for a moment) is kept.
+        setPatches((previous) => (found.size === 0 ? previous : new Map([...previous, ...found])));
+      })
+      .catch(() => {
+        // The table keeps showing the keys.
+      });
+    return () => controller.abort();
+  }, [loadedRows]);
+  const rows = useMemo(() => applyTargetPatches(loadedRows, patches), [loadedRows, patches]);
 
   const reload = useCallback(async () => {
     if (loaded.current) setRefreshing(true);

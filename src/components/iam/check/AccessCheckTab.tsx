@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import {
   Alert,
   Anchor,
+  Badge,
   Button,
   Collapse,
   Group,
@@ -25,6 +26,7 @@ import {
   IconAlertTriangle,
   IconChevronDown,
   IconChevronRight,
+  IconInfoCircle,
   IconPlayerPlay,
   IconRefresh,
   IconSearch,
@@ -33,6 +35,7 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import {
   IamApiError,
   iamApi,
+  type DecisionPolicy,
   type DecisionRecord,
   type IamChannel,
   type SimulateRequest,
@@ -48,7 +51,9 @@ import { useErrorText } from '../useErrorText';
 import { useIamCatalog } from '../useIamCatalog';
 import { useIamLabels } from '../useIamLabels';
 import {
+  INVOKE_ACTION,
   applyAction,
+  applyPortal,
   applyPrincipalType,
   defaultChannel,
   emptyForm,
@@ -133,7 +138,9 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
     (f: CheckForm): string => {
       if (f.resourceKind === 'service') return f.service ? labels.service(f.service) : '—';
       if (f.resourceKind === 'resource') {
-        return f.resourceType && f.resource ? `${labels.resourceType(f.resourceType)}: ${f.resource.label}` : '—';
+        if (!f.resourceType || !f.resource) return '—';
+        const what = `${labels.resourceType(f.resourceType)}: ${f.resource.label}`;
+        return f.portal && f.action === INVOKE_ACTION ? `${what} · ${labels.resourceType('portal')}: ${f.portal.label}` : what;
       }
       return f.projectResource
         ? t('check.targetNewIn', {
@@ -198,7 +205,7 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
         } else if (record.simulateInput) {
           const input = record.simulateInput;
           const next = applyAction(
-            requestToForm(input, { principal: record.principal.label }),
+            requestToForm(input, { principal: record.principal.label, resource: record.resource?.label }),
             index?.actionById.get(input.action),
           );
           setForm(next);
@@ -235,21 +242,29 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
       return;
     }
     const principalId = link.principalId;
-    if (!principalId) return;
+    // A link may also name only what is checked (a portal page: "check a person"): the form opens prefilled, ready for the person.
+    if (!principalId && !link.action) return;
 
     void (async () => {
       let next = emptyForm(link.principalType ?? 'user');
-      let label = principalId;
-      try {
-        label = (await iamApi.getPrincipal(next.principalType, principalId)).principal.label || label;
-      } catch {
-        /* the id is enough to run the check */
+      if (principalId) {
+        let label = principalId;
+        try {
+          label = (await iamApi.getPrincipal(next.principalType, principalId)).principal.label || label;
+        } catch {
+          /* the id is enough to run the check */
+        }
+        next.principal = { id: principalId, label };
       }
-      next.principal = { id: principalId, label };
       if (link.action) {
         const known = index.actionById.get(link.action);
         next = known ? applyAction(next, known) : { ...next, action: link.action };
       }
+      if (link.resourceType && link.resourceId && next.resourceKind === 'resource' && next.resourceType === link.resourceType) {
+        next.resource = { type: link.resourceType, id: link.resourceId, label: link.resourceLabel || link.resourceId };
+      }
+      if (link.channel && !(link.channel === 'portal' && next.principalType === 'token')) next.channel = link.channel;
+      if (link.portalId) next.portal = { type: 'portal', id: link.portalId, label: link.portalLabel || link.portalId };
       setForm(next);
       setResult(null);
       setDecision(null);
@@ -263,8 +278,11 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
 
   const projectOptions = useMemo(() => projects.map((p) => ({ value: p.id, label: p.name })), [projects]);
   const channelOptions = useMemo(
-    () => (catalog?.channels ?? []).map((c) => ({ value: c, label: labels.channel(c) })),
-    [catalog, labels],
+    () =>
+      (catalog?.channels ?? [])
+        .filter((c) => !(c === 'portal' && form.principalType === 'token'))
+        .map((c) => ({ value: c, label: labels.channel(c) })),
+    [catalog, labels, form.principalType],
   );
 
   const reset = () => {
@@ -362,41 +380,54 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
               </Alert>
             ) : null}
             {decision ? (
-              <Group gap="md" wrap="wrap">
-                <Text size="xs" c="dimmed">
-                  {t('check.decisionAt', { date: formatDateTime(decision.at, locale) })}
-                </Text>
-                {decision.method || decision.route ? (
-                  <Text size="xs" ff="monospace">
-                    {decision.method} {decision.route}
-                  </Text>
-                ) : null}
-                {decision.code ? (
+              <Stack gap="xs">
+                <Group gap="md" wrap="wrap">
                   <Text size="xs" c="dimmed">
-                    {t('check.decisionCode', { code: decision.code })}
+                    {t('check.decisionAt', { date: formatDateTime(decision.at, locale) })}
                   </Text>
-                ) : null}
-                {decision.service ? (
-                  <Text size="xs" c="dimmed">
-                    {t('check.decisionRequires', {
-                      level: labels.level(decision.required),
-                      service: labels.service(decision.service),
-                    })}
-                  </Text>
-                ) : null}
-                {decision.policyIds.length > 0 ? (
-                  <Group gap={6}>
-                    <Text size="xs" c="dimmed">
-                      {t('check.decisionPolicies')}:
+                  {decision.method || decision.route ? (
+                    <Text size="xs" ff="monospace">
+                      {decision.method} {decision.route}
                     </Text>
-                    {decision.policyIds.map((id) => (
-                      <Anchor key={id} component={Link} href={policyHref(id)} size="xs" ff="monospace">
-                        {id}
-                      </Anchor>
-                    ))}
-                  </Group>
-                ) : null}
-              </Group>
+                  ) : null}
+                  {decision.code ? (
+                    <Text size="xs" c="dimmed">
+                      {t('check.decisionCode', { code: decision.code })}
+                    </Text>
+                  ) : null}
+                  {decision.resource && decision.simulateInput ? (
+                    <Text size="xs" c="dimmed" data-testid="decision-resource">
+                      {t('check.decisionResource', {
+                        action: labels.action(decision.simulateInput.action),
+                        resource: `${labels.resourceType(decision.resource.type)}: ${decision.resource.label ?? decision.resource.id}`,
+                      })}
+                    </Text>
+                  ) : decision.service && decision.channel !== 'portal' ? (
+                    <Text size="xs" c="dimmed">
+                      {t('check.decisionRequires', {
+                        level: labels.level(decision.required),
+                        service: labels.service(decision.service),
+                      })}
+                    </Text>
+                  ) : null}
+                  {decision.channel ? (
+                    <Text size="xs" c="dimmed">
+                      {t('check.decisionChannel', { channel: labels.channel(decision.channel) })}
+                    </Text>
+                  ) : null}
+                  {decision.policies.length > 0 ? (
+                    <Group gap={6} data-testid="decision-policies">
+                      <Text size="xs" c="dimmed">
+                        {t('check.decisionPolicies')}:
+                      </Text>
+                      {decision.policies.map((policy) => (
+                        <DecidingPolicy key={policy.policyId} policy={policy} />
+                      ))}
+                    </Group>
+                  ) : null}
+                </Group>
+                <StalePolicies policies={decision.policies} replay={result?.response ?? null} />
+              </Stack>
             ) : null}
           </Stack>
         </form>
@@ -442,7 +473,9 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
                 labels={labels}
                 label={t('check.action')}
                 value={form.action}
-                onChange={(id) => setForm((f) => applyAction(f, id ? index.actionById.get(id) : undefined))}
+                onChange={(id) =>
+                  setForm((f) => applyAction(f, id ? index.actionById.get(id) : undefined, f.action ? index.actionById.get(f.action) : undefined))
+                }
                 error={has('action') ? t('check.requireAction') : undefined}
               />
 
@@ -490,8 +523,26 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
                         error={has('resource') ? t('check.requireResource') : undefined}
                       />
                     )}
+                    {/* Only where portals exist (the catalog says the action is checked there), or when the portal channel was chosen by hand. */}
+                    {selectedAction.id === INVOKE_ACTION && form.resourceKind === 'resource'
+                      && (selectedAction.enforcedIn?.includes('portal') || form.channel === 'portal') ? (
+                      <ResourceSelect
+                        type="portal"
+                        label={t('check.ctxPortal')}
+                        description={t('check.ctxPortalHelp')}
+                        placeholder={t('check.portalPlaceholder')}
+                        value={form.portal}
+                        onChange={(portal) => setForm((f) => applyPortal(f, portal))}
+                        error={has('portal') ? t('check.requirePortal') : undefined}
+                      />
+                    ) : null}
                   </>
                 )}
+                {form.principalType === 'token' && selectedAction?.enforcedIn?.includes('portal') ? (
+                  <Text size="xs" c="dimmed" data-testid="token-portal-note">
+                    {t('check.tokenPortalNote')}
+                  </Text>
+                ) : null}
               </Stack>
 
               <div>
@@ -615,5 +666,60 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
         </div>
       </SimpleGrid>
     </Stack>
+  );
+}
+
+/** A policy that decided a request: its name (linked while it exists), and what became of it. */
+function DecidingPolicy({ policy }: { policy: DecisionPolicy }) {
+  const t = useTranslations('iamCenter');
+  // A policy that is gone and whose name nobody kept is told by a short id; one that still exists by its id in full.
+  const name = policy.name ?? (policy.status === 'deleted' ? policy.policyId.slice(0, 8) : policy.policyId);
+  const label = (
+    <Text size="xs" component="span" c={policy.name ? undefined : 'dimmed'} ff={policy.name ? undefined : 'monospace'} title={policy.policyId}>
+      {name}
+    </Text>
+  );
+  return (
+    <Group gap={4} wrap="nowrap" data-testid="decision-policy" data-status={policy.status}>
+      {policy.status === 'deleted' ? (
+        label
+      ) : (
+        <Anchor component={Link} href={policyHref(policy.policyId)} size="xs">
+          {name}
+        </Anchor>
+      )}
+      {policy.status !== 'active' ? (
+        <Badge size="xs" variant="light" color={policy.status === 'deleted' ? 'red' : 'gray'}>
+          {t(`check.policyState.${policy.status}`)}
+        </Badge>
+      ) : null}
+    </Group>
+  );
+}
+
+/**
+ * A replay runs against the policies as they are now. When a policy that decided
+ * the request was switched off or deleted since, say so - and what the current
+ * policies make of the same request.
+ */
+function StalePolicies({ policies, replay }: { policies: readonly DecisionPolicy[]; replay: SimulateResponse | null }) {
+  const t = useTranslations('iamCenter');
+  const names = (status: DecisionPolicy['status']) =>
+    policies.filter((p) => p.status === status).map((p) => p.name ?? (status === 'deleted' ? p.policyId.slice(0, 8) : p.policyId)).join(', ');
+  const disabled = names('disabled');
+  const deleted = names('deleted');
+  if (!disabled && !deleted) return null;
+  return (
+    <Alert color="yellow" variant="light" icon={<IconInfoCircle size={16} />} title={t('check.decisionStale.title')} data-testid="decision-stale">
+      <Stack gap={2}>
+        {deleted ? <Text size="sm">{t('check.decisionStale.deleted', { names: deleted })}</Text> : null}
+        {disabled ? <Text size="sm">{t('check.decisionStale.disabled', { names: disabled })}</Text> : null}
+        {replay ? (
+          <Text size="sm" fw={600} data-testid="decision-stale-verdict">
+            {replay.allowed ? t('check.decisionStale.allowedNow') : t('check.decisionStale.stillDenied')}
+          </Text>
+        ) : null}
+      </Stack>
+    </Alert>
   );
 }

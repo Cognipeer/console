@@ -84,9 +84,11 @@ These paths skip authentication:
 
 For programmatic access, tenants create API tokens through the dashboard. These tokens authenticate requests to `/api/client/v1/*` endpoints.
 
-Tokens are managed under **Configure → API Tokens**. Each row shows the label, creation date, and last-used timestamp; the full secret is shown only once at creation time:
+Tokens are managed under **API Tokens**. Each row shows the label, creation date, and last-used timestamp; the full secret is shown only once at creation time. The page lists **your own tokens only**, whatever your role: an administrator does not see anybody else's there.
 
 ![API Tokens](/screenshots/authentication/01-api-tokens.png)
+
+Owners and admins manage other people's tokens, and the tokens of service accounts, under **IAM center → Principals → API tokens** (or from a person's drawer). They do so "never upward": an admin reaches every token but the owner's, and a project admin only those of service accounts in the projects they belong to. A token authorizes as its owner, so what it may do is capped by its owner's permissions and its own scope.
 
 ### Usage
 

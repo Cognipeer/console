@@ -273,6 +273,57 @@ describe('GET /api/resources/search', () => {
     it('lists the most recently changed first when nothing was typed', async () => {
       expect(keys(await search('types=model'))).toEqual(['gpt-4o-mini', 'claude-sonnet', 'gpt-4o', 'text-embedding-3', 'whisper']);
     });
+
+    describe('Turkish names (the keys say nothing about them, so only the name can be found)', () => {
+      beforeEach(() => {
+        db.listModels.mockResolvedValue([
+          model('m-ist', 'asistan-1', 'İstanbul Asistanı', 'llm', 'proj-1', 1),
+          model('m-isp', 'bot-2', 'ISPARTA Bot', 'llm', 'proj-1', 2),
+          model('m-isik', 'rapor-3', 'Işık Raporu', 'llm', 'proj-1', 3),
+          model('m-sule', 'sube-4', 'Şube Çağrı Merkezi', 'llm', 'proj-1', 4),
+          model('m-plain', 'plain-5', 'Plain model', 'llm', 'proj-1', 5),
+        ] as never);
+        clearResourceCache();
+      });
+
+      const found = async (q: string) => keys(await search(`types=model&q=${encodeURIComponent(q)}`));
+
+      it('finds a dotted capital İ with the plain i a keyboard without Turkish letters types', async () => {
+        expect(await found('istanbul')).toEqual(['asistan-1']);
+        expect(await found('ISTANBUL')).toEqual(['asistan-1']);
+        expect(await found('İSTANBUL')).toEqual(['asistan-1']);
+        expect(await found('İstanbul')).toEqual(['asistan-1']);
+      });
+
+      it('finds a dotless ı however it is typed', async () => {
+        for (const q of ['ısparta', 'ISPARTA', 'isparta', 'Isparta', 'İsparta']) expect(await found(q), q).toEqual(['bot-2']);
+        for (const q of ['ışık', 'IŞIK', 'işik', 'Işık']) expect(await found(q), q).toEqual(['rapor-3']);
+      });
+
+      it('keeps pairing the other Turkish letters, and does not strip accents', async () => {
+        expect(await found('şube')).toEqual(['sube-4']);
+        expect(await found('ŞUBE çağrı')).toEqual(['sube-4']);
+        expect(await found('çağrı merkezi')).toEqual(['sube-4']);
+        expect(await found('sube cagri')).toEqual([]);
+      });
+
+      it('finds a name inside a longer one', async () => {
+        expect(await found('asistanı')).toEqual(['asistan-1']);
+        expect(await found('ASISTANI')).toEqual(['asistan-1']);
+        expect(await found('rapor')).toEqual(['rapor-3']);
+      });
+
+      it('ranks letter-for-letter equality first, equality once folded second, then a prefix', async () => {
+        db.listModels.mockResolvedValue([
+          model('m-prefix', 'k-prefix', 'Istanbul Hotel', 'llm', 'proj-1', 9), // most recent: only a prefix
+          model('m-folded', 'k-folded', 'İSTANBUL', 'llm', 'proj-1', 5), // equal once folded
+          model('m-exact', 'k-exact', 'istanbul', 'llm', 'proj-1', 1), // exactly what was typed
+          model('m-inside', 'k-inside', 'Old İstanbul', 'llm', 'proj-1', 8), // a substring
+        ] as never);
+        clearResourceCache();
+        expect(await found('istanbul')).toEqual(['k-exact', 'k-folded', 'k-prefix', 'k-inside']);
+      });
+    });
   });
 
   describe('bounds', () => {

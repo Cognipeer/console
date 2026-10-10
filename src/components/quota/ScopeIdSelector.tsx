@@ -1,11 +1,12 @@
 'use client';
 
 import { useMemo, type ReactNode } from 'react';
-import { Select, Stack, Text } from '@mantine/core';
+import { Stack, Text } from '@mantine/core';
 import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
 import { quotaTargetSource } from '@/lib/quota/targets';
 import { useTranslations } from '@/lib/i18n';
 import { PrincipalSelect } from './PrincipalSelect';
+import { SearchableSelect } from './SearchableSelect';
 import { TargetSelect } from './TargetSelect';
 import type { PickerOption } from './pickerSources';
 
@@ -148,12 +149,11 @@ export function ScopeIdSelector({
     }
     if (resourceOptions.length > 0) {
       return (
-        <Select
+        <SearchableSelect
           placeholder={t('selectResource')}
           data={resourceOptions}
           value={value || null}
           onChange={(v) => onChange(v || undefined)}
-          searchable
           clearable
           disabled={disabled}
           nothingFoundMessage={t('noResourcesFound')}

@@ -5,7 +5,8 @@
  * GET = read, writes = admin).
  *
  *   GET    /iam/catalog                    services, actions, resource types, context attrs, channels
- *   GET    /iam/policies                   { managed, custom }
+ *   GET    /iam/policies                   { managed, custom }; with ?resourceType=&resourceId= only the custom
+ *                                          policies that name the resource or all of its kind, each with a `scope`
  *   GET    /iam/policies/:policyId
  *   POST   /iam/policies                   create (spec | cedar)              admin
  *   PUT    /iam/policies/:policyId         update (also enable / disable)     admin
@@ -32,6 +33,7 @@ import { cedarAvailable } from '@/lib/iam/cedar';
 import { authz } from '@/lib/iam/routeAuthz';
 import { buildCatalog } from '@/lib/iam/catalog';
 import { listManagedPolicyViews, summarizeEffect, toPolicyRow, toPolicyRows } from '@/lib/iam/policyRows';
+import { listPoliciesForResource, PolicyFilterError } from '@/lib/iam/policiesForResource';
 import { cedarIssues, compileSpec, isSameSpec, trustedProxiesWarning, type PolicyIssue, type PolicySpec } from '@/lib/iam/policySpec';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
 import { validateCustomPolicyText } from '@/lib/iam/policyText';
@@ -252,13 +254,19 @@ export const iamPoliciesApiPlugin: FastifyPluginAsync = async (app) => {
   // ── policies: read ──────────────────────────────────────────────────────
   app.get('/iam/policies', withApiRequestContext(async (request, reply) => {
     const session = requireSessionContext(request);
+    const filter = request.query as { resourceType?: unknown; resourceId?: unknown };
     try {
+      // Narrowed to one resource (the portal page's "policies that also apply"): the type and the id go together.
+      if (filter.resourceType !== undefined || filter.resourceId !== undefined) {
+        return reply.send(await listPoliciesForResource(tenantOf(session), filter));
+      }
       const policies = (await listPolicies(session.tenantDbName)).sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
       return reply.send({
         managed: listManagedPolicyViews(),
         custom: await toPolicyRows(tenantOf(session), policies),
       });
     } catch (error) {
+      if (error instanceof PolicyFilterError) return fail(reply, 400, 'validation', error.message);
       return internal(reply, 'Failed to list policies', error);
     }
   }));

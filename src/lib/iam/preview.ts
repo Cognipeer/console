@@ -30,12 +30,16 @@
  */
 
 import { runWithTenantScope } from '@/lib/database';
+import { hasIamPortalResolver, resolveIamPortal, type IamPortalFacts } from '@/enterprise/iam-portal';
 import type { ActionDefinition } from './actions';
 import { ALL_MANAGED_POLICIES } from './managedPolicies';
-import { preparsePolicySet, statefulIsAuthorized } from './cedar';
+import { preparsePolicySet, statefulIsAuthorized, type CedarDecision } from './cedar';
 import type { IamRequestContext } from './context';
-import { buildAuthorizeCall, buildPolicyRecord } from './engine';
+import { buildAuthorizeCall, buildPolicyRecord, forbidsOf } from './engine';
 import type { IamResource } from './entities';
+import { guardForbidErrors } from './forbidGuard';
+import { portalAgentResource, portalResource, type PortalRequester } from './portalEntities';
+import { isRuntimeEnforced } from './runtimeEnforced';
 import {
   loadEvaluationPrincipal,
   PrincipalError,
@@ -389,9 +393,11 @@ async function enumeratePrincipals(tenant: IamTenant, spec: PolicySpec | null, c
 /** An address inside the first range (the range's own base address). */
 const firstAddress = (cidr: string | undefined): string | undefined => (cidr ? cidr.split('/')[0] : undefined);
 
-function contextFor(spec: PolicySpec | null, type: 'user' | 'token'): IamRequestContext {
+function contextFor(spec: PolicySpec | null, type: 'user' | 'token', action?: ActionDefinition): IamRequestContext {
   const cond = spec?.conditions;
-  const channel = cond?.channels?.[0] ?? (type === 'token' ? 'api' : 'dashboard');
+  // The portal runtime asks its two actions in the portal channel (unless the draft says it only concerns others).
+  const portalAsked = !!action && isRuntimeEnforced(action.id) && (!cond?.channels?.length || cond.channels.includes('portal'));
+  const channel = portalAsked ? 'portal' : cond?.channels?.[0] ?? (type === 'token' ? 'api' : 'dashboard');
   let now: Date | undefined;
   if (cond?.validFrom || cond?.validUntil) {
     const from = cond.validFrom ? new Date(cond.validFrom).getTime() : -Infinity;
@@ -400,11 +406,44 @@ function contextFor(spec: PolicySpec | null, type: 'user' | 'token'): IamRequest
     now = new Date(t);
   }
   const projects = spec && 'projects' in spec.resources ? spec.resources.projects : undefined;
-  return { channel, ip: firstAddress(cond?.ipRanges?.[0]), now, projectId: projects?.[0] };
+  // A portal has no project: the portal runtime never sends one.
+  return { channel, ip: firstAddress(cond?.ipRanges?.[0]), now, projectId: portalAsked ? undefined : projects?.[0] };
 }
 
-function resourcesFor(action: ActionDefinition, spec: PolicySpec | null): IamResource[] {
+/** The portals a preview evaluates the portal actions on: the ones the draft names, else a few of the workspace's. */
+async function portalsFor(tenant: IamTenant, spec: PolicySpec | null, actions: readonly ActionDefinition[]): Promise<IamPortalFacts[]> {
+  if (!hasIamPortalResolver() || !actions.some((a) => isRuntimeEnforced(a.id))) return [];
+  const sel = spec && !('any' in spec.resources) ? (spec.resources as PolicySpecResourceSelection) : null;
+  const named = sel?.resources?.filter((r) => r.type === 'portal').map((r) => r.id) ?? [];
+  let ids = named.slice(0, 3);
+  if (ids.length === 0) {
+    try {
+      const { searchResources } = await import('@/lib/resources/service');
+      const found = await searchResources({ tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, types: ['portal'], limit: 3 });
+      ids = found.items.map((item) => item.id);
+    } catch {
+      return [];
+    }
+  }
+  const facts = await Promise.all(ids.map((id) => resolveIamPortal(tenant, id)));
+  return facts.filter((f): f is IamPortalFacts => !!f);
+}
+
+function resourcesFor(
+  action: ActionDefinition,
+  spec: PolicySpec | null,
+  portals: readonly IamPortalFacts[] = [],
+  requester?: PortalRequester,
+): IamResource[] {
   if (action.kind === 'service') return [{ kind: 'service', service: action.service ?? '' }];
+  if (action.id === 'portal.use' && portals.length > 0) {
+    return portals.map((p) => portalResource({ id: p.id, key: p.key, access: p.access }, requester));
+  }
+  if (action.id === 'agent.invoke' && portals.some((p) => p.agentIds.length > 0)) {
+    return portals
+      .filter((p) => p.agentIds.length > 0)
+      .map((p) => portalAgentResource({ id: p.agentIds[0] }, { id: p.id, access: p.access }, requester));
+  }
   const sel = spec && !('any' in spec.resources) ? (spec.resources as PolicySpecResourceSelection) : null;
   const named = sel?.resources?.filter((r) => r.type === action.resourceType) ?? [];
   const projectId = sel?.projects?.[0];
@@ -418,6 +457,13 @@ const describeResource = (r: IamResource): PreviewSample['resource'] =>
   r.kind === 'service' ? { kind: 'service', service: String(r.service) } : { kind: 'resource', type: r.type, id: r.id };
 
 // ── the preview ──────────────────────────────────────────────────────────
+
+/** Allowed / denied, or null when the engine could not decide (such a pair is not compared). A forbid that errored is not skipped. */
+function verdictOf(decision: CedarDecision, forbids: ReadonlySet<string>): boolean | null {
+  if (!decision.ok) return null;
+  const guarded = guardForbidErrors(decision, forbids);
+  return guarded.kind === 'failed' ? null : guarded.allowed;
+}
 
 export async function previewPolicy(tenant: IamTenant, input: PreviewInput, options: PreviewOptions = {}): Promise<PreviewResult> {
   const maxEvaluations = options.maxEvaluations ?? MAX_EVALUATIONS;
@@ -446,6 +492,9 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
     stop();
     const b = preparsePolicySet(BEFORE_SET, { ...ALL_MANAGED_POLICIES, ...before.record });
     const a = preparsePolicySet(AFTER_SET, { ...ALL_MANAGED_POLICIES, ...after.record });
+    // A forbid that errors must not be skipped here either: the preview judges a request the way the engine will (forbidGuard.ts).
+    const beforeForbids = forbidsOf(before.forbids);
+    const afterForbids = forbidsOf(after.forbids);
     if (!b.ok || !a.ok) {
       const errors = (!a.ok ? a.errors : !b.ok ? b.errors : []).map((e) => ({ message: e.message }));
       throw new PreviewInputError('engine_unavailable', 'The policy set could not be prepared for the preview', 503, errors);
@@ -479,6 +528,8 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
       truncated = true;
     }
     const projects = draft.spec && 'projects' in draft.spec.resources ? draft.spec.resources.projects : undefined;
+    const portals = await portalsFor(tenant, draft.spec, actions);
+    stop();
 
     // Principals: built concurrently, but only while there is time.
     const loaded = new Map<string, EvaluationPrincipal>();
@@ -524,15 +575,16 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
           principal: ev.principal,
           action: action.id,
           resource,
-          context: { ...context, projectId: context.projectId ?? ev.principal.contextProjectId },
+          // The portal runtime never sends a project; everything else runs in the one the person would be in.
+          context: { ...context, projectId: context.channel === 'portal' && isRuntimeEnforced(action.id) ? undefined : context.projectId ?? ev.principal.contextProjectId },
         },
         tenant.tenantDbName,
       );
-      const was = statefulIsAuthorized({ ...built.call, policySetId: BEFORE_SET });
-      const now = statefulIsAuthorized({ ...built.call, policySetId: AFTER_SET });
+      const was = verdictOf(statefulIsAuthorized({ ...built.call, policySetId: BEFORE_SET }), beforeForbids);
+      const now = verdictOf(statefulIsAuthorized({ ...built.call, policySetId: AFTER_SET }), afterForbids);
       evaluated++;
-      if (!was.ok || !now.ok || was.allowed === now.allowed) return;
-      if (was.allowed) flips.allowToDeny++;
+      if (was === null || now === null || was === now) return;
+      if (was) flips.allowToDeny++;
       else flips.denyToAllow++;
       const k = key(ev);
       const n = perPrincipal.get(k) ?? 0;
@@ -542,17 +594,18 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
           principal: { type: ev.type, id: ev.id, label: ev.label },
           action: action.id,
           resource: describeResource(resource),
-          before: was.allowed,
-          after: now.allowed,
+          before: was,
+          after: now,
         });
       }
     };
 
     // Targeted principals x the draft's actions.
     outer: for (const ev of loaded.values()) {
-      const context = contextFor(draft.spec, ev.type);
+      const requester: PortalRequester = { userId: ev.principal.userId, groupIds: ev.principal.groupIds };
       for (const action of actions) {
-        for (const resource of resourcesFor(action, draft.spec)) {
+        const context = contextFor(draft.spec, ev.type, action);
+        for (const resource of resourcesFor(action, draft.spec, portals, requester)) {
           if (evaluated >= maxEvaluations || timeLeft() <= 0) {
             truncated = true;
             break outer;

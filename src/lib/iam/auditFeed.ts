@@ -161,6 +161,22 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
       const from = row.ipAddress ?? 'this address';
       summary = `Blocked: ${who?.label ?? 'a token'} is not allowed from ${from} (IP allowlist)${row.path ? `: ${route}` : ''}`.replace(/\s+/g, ' ').trim();
       text = { key: row.path ? 'ipNotAllowedAt' : 'ipNotAllowed', params: { who: who?.label ?? '', ip: from, route } };
+    } else if (str(meta.channel) === 'portal' && (action === 'portal.use' || action === 'agent.invoke')) {
+      // A refusal of the portal runtime (resourceAuthz.ts): about opening one portal, or running one agent through it.
+      const kept = meta.policyNames && typeof meta.policyNames === 'object' && !Array.isArray(meta.policyNames)
+        ? (meta.policyNames as Record<string, unknown>)
+        : {};
+      const names = policyIds.map((id) => policyName.get(id) ?? str(kept[id]) ?? id).join('", "');
+      const whoLabel = who?.label ?? 'someone';
+      const target = str(meta.resourceName) ?? str(meta.resourceId) ?? '';
+      const byPolicy = policyIds.length > 0;
+      summary = action === 'portal.use'
+        ? `Denied ${whoLabel} opening portal "${target}" ${byPolicy ? `by policy "${names}"` : 'because they are not on its access list'}`
+        : `Denied ${whoLabel} running agent "${target}" in a portal ${byPolicy ? `by policy "${names}"` : 'because they are not on its access list'}`;
+      text = {
+        key: action === 'portal.use' ? (byPolicy ? 'denied.portalUsePolicy' : 'denied.portalUse') : (byPolicy ? 'denied.portalInvokePolicy' : 'denied.portalInvoke'),
+        params: { who: whoLabel, resource: target, policies: names },
+      };
     } else {
       const names = policyIds.map((id) => policyName.get(id) ?? id).join('", "');
       const reason = policyIds.length > 0 ? 'policy'

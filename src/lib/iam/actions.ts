@@ -19,13 +19,15 @@
  *     (`get|list` in Read, `create|update|delete` in Write) plus the execution
  *     verbs `agent.invoke`, `tool.execute`, `mcp-server.call`, `rag-module.query`,
  *     `model.infer` (Write: they are POSTs at the gate) and `portal.use` (Read).
- *     Used from C3 on; defined now so policies written today stay valid.
+ *     `portal.use` and `agent.invoke` are decided by the portal runtime
+ *     (RUNTIME_ENFORCED_ACTIONS); the rest are evaluated by the Access check only.
  *
  * Pure data + pure functions: no Cedar, no database. UIs import `describeActions`
  * / `ACTION_LEVEL_GROUPS` for labels and grouping.
  */
 
 import { RBAC_SERVICE_DEFINITIONS, type PermissionService } from '@/lib/security/rbac';
+import type { IamChannel } from './context';
 
 export type ActionLevel = 'read' | 'write' | 'admin';
 export type ActionLevelGroup = 'Read' | 'Write' | 'Admin';
@@ -87,12 +89,34 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
 ];
 
 /**
- * Types that exist in the product but are not (yet) in the resource registry
- * because they have no inventory provider. They are still real authorization
- * resources, so the schema and catalog always carry them.
+ * Resource actions that something other than the HTTP gates decides, and the
+ * channels they are decided in. Opening a portal and running an agent through one
+ * are asked by the portal runtime (enterprise overlay) with `channel: 'portal'`
+ * (resourceAuthz.ts). Every other resource action is evaluated by the Access check
+ * only: no request of the product asks for it yet.
+ *
+ * Pure data; whether the runtime exists in THIS build (it needs the enterprise
+ * overlay) is runtimeEnforced.ts. A policy rule about these actions is accepted
+ * (and said to take effect) only where it does.
+ */
+export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChannel[]>> = Object.freeze({
+  'portal.use': ['portal'],
+  'agent.invoke': ['portal'],
+});
+
+/**
+ * Types the schema and the catalog always carry, whatever the resource registry
+ * holds (and with the service given here, even when the registry says otherwise).
+ *
+ *  - `portal` has no inventory provider in this edition: the enterprise overlay
+ *    contributes the registry entry, and its access list is not part of it.
+ *  - `agent` is a core type. The managed portal policies (managedPolicies.ts) are
+ *    written against `Agent`, so the managed set must validate against the schema
+ *    even if the registry has not registered its types yet.
  */
 export const EXTRA_RESOURCE_TYPES: ReadonlyArray<CatalogResourceType> = [
   { type: 'portal', service: 'portals' },
+  { type: 'agent', service: 'agents' },
 ];
 
 // ── naming ───────────────────────────────────────────────────────────────
@@ -131,14 +155,20 @@ export function gateActionId(service: PermissionService | string, method: string
 
 // ── catalog ──────────────────────────────────────────────────────────────
 
-/** Merge registry types with the always-present extras (deduplicated by type id). */
+/**
+ * Merge registry types with the always-present extras (deduplicated by type id).
+ * Registry order is kept; for a type both name, the EXTRA entry's service wins, so
+ * the catalog never depends on how a registry happens to file the type.
+ */
 export function withExtraResourceTypes(types: ReadonlyArray<CatalogResourceType>): CatalogResourceType[] {
+  const extras = new Map(EXTRA_RESOURCE_TYPES.map((t) => [t.type, t]));
   const seen = new Set<string>();
   const out: CatalogResourceType[] = [];
   for (const t of [...types, ...EXTRA_RESOURCE_TYPES]) {
     if (seen.has(t.type)) continue;
     seen.add(t.type);
-    out.push({ type: t.type, service: t.service });
+    const winner = extras.get(t.type) ?? t;
+    out.push({ type: winner.type, service: winner.service });
   }
   return out;
 }

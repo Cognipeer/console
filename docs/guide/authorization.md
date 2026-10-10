@@ -36,11 +36,11 @@ A route that declares nothing is refused with `403` and `code: "route_not_declar
 
 | Setting | Where you change it | What it does |
 |---|---|---|
-| Workspace role | **Settings → Members** (owner, admin, project admin, user) | Sets the default level of every service. |
-| Own service permissions | **Settings → Members**, a person's **Service permissions** | Replaces the role default for that service. It may lower the default as well as raise it. |
-| Group grants | **Settings → Members → Groups**, a group's workspace role and service permissions | Raises the level of every member of the group. A group can only raise. |
+| Workspace role | **IAM center → Principals**, a person's **Change role** (owner, admin, project admin, user) | Sets the default level of every service. |
+| Own service permissions | **IAM center → Principals**, a person's **Edit access** | Replaces the role default for that service. It may lower the default as well as raise it. |
+| Group grants | **IAM center → Principals → Groups**, a group's workspace role and service permissions | Raises the level of every member of the group. A group can only raise. |
 | Project member permissions | **Settings → Projects**, a project's **Members**, **Project service permissions** | Caps what a member can do inside that project. It can only lower. See [Project permissions](#project-permissions). |
-| API token scope | **Settings → API Tokens** | Caps what the token can do. See [API tokens](#api-tokens). |
+| API token scope | **API Tokens** (your own tokens), or **IAM center → Principals → API tokens** (other people's, for owners and admins) | Caps what the token can do. See [API tokens](#api-tokens). |
 
 ### Levels
 
@@ -125,7 +125,7 @@ Expiry rules and IP allowlists are part of [Authentication](/guide/authenticatio
 
 ## Built-in policies
 
-Twelve policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
+Sixteen policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
 
 | Policy | What it does |
 |---|---|
@@ -133,6 +133,8 @@ Twelve policies ship with the engine. They are the same in every workspace, cann
 | `managed:rbac:token-read`, `token-write`, `token-admin` | The same for an API token, from its owner's level and the token's scope. |
 | `managed:boundary:token-cap-read`, `-write`, `-admin` | A scoped token is denied what its scope does not name. No custom allow can exceed it. |
 | `managed:boundary:project-read`, `-write`, `-admin` | A service that the active project limits is denied above the project level. No custom allow can exceed it. |
+| `managed:portal:use`, `managed:portal:agent` | A person on a portal's access list (or in a group on it, or anyone when the portal is open to the workspace) may open the portal and run its agents. See [Portals](#portals). |
+| `managed:portal:use-boundary`, `managed:portal:agent-boundary` | Nobody else may, whatever their role or any allow rule says. Custom deny rules still apply on top. |
 
 The simple settings stay the single place to change what people can do; the built-in policies only translate them. Nothing is stored per person or per group in a policy.
 
@@ -152,10 +154,46 @@ A guided rule says:
 |---|---|
 | **Who** | People, groups, API tokens, any person, any token, or everyone. A rule about a person or group also covers the API tokens they own, so a deny cannot be walked around with a token. |
 | **What** | Read, Write or Admin on every service, or specific service actions such as `models.write`. |
-| **Where** | Services, projects. |
-| **When** | A start and end time, IP ranges, channels (`dashboard`, `api`). |
+| **Where** | Services, projects, and specific portals or agents (see [Portals](#portals)). |
+| **When** | A start and end time, IP ranges, channels (`dashboard` for a signed-in session, `api` for a token, `portal` for a person using a portal). |
 
-The conditions of one rule must all hold for it to apply. The editor warns about rules that cannot do what they say: an action nothing in the product asks (`models.admin` when no route needs it), a rule about a single resource or about the `portal` channel (the gates decide on services; a deny of that kind is refused), and IP rules while `TRUSTED_PROXIES` is not set (see [below](#client-address-and-trusted-proxies)).
+The conditions of one rule must all hold for it to apply. The editor warns about rules that cannot do what they say: an action nothing in the product asks (`models.admin` when no route needs it), a rule about a single resource other than a portal or an agent run through one (the gates decide on services; a deny of that kind is refused), an allow rule about portals (a portal is opened by its access list alone, see [Portals](#portals)), and IP rules while `TRUSTED_PROXIES` is not set (see [below](#client-address-and-trusted-proxies)).
+
+A deny rule that cannot be evaluated for a request (a condition that reads something the request does not have) counts as a **deny** for that request. The decision names the rule and the problem, so a rule written to block something can never stop blocking it silently. The same holds for a broad rule: one that cannot be evaluated for *every* request it matches refuses all of them, the workspace owner's access to the IAM center excepted - so the owner can always open **Policies**, find the rule the decision names and fix or disable it. (A rule that cannot even be loaded, for example after an engine upgrade, is skipped instead, and the engine reports itself as `degraded`.)
+
+## Portals
+
+A portal (an Enterprise feature) lets chosen people and groups use chosen agents from a page of their own. The engine decides two things about it, in the `portal` channel:
+
+| Action | Asked when | Level |
+|---|---|---|
+| `portal.use` | A person opens the portal, on every request they make to it. | Read |
+| `agent.invoke` | A person sends a message to one of the portal's agents. | Write |
+
+**The access list is the portal's built-in policy.** It lives on the portal (**Portals → the portal → Access**: everyone in the workspace, or selected people and groups), and the built-in `managed:portal:*` policies read it, so editing the list never touches a policy and nothing is stored per portal. A change to the list applies on the next request. Opening a portal is allowed **only** by the list: a workspace role, a service permission or an allow rule cannot open a portal the list does not name, and the workspace owner is no exception. API tokens never open portals.
+
+**Custom deny rules still apply on top.** Use one to block a person or group that is on the list, to freeze a portal, or to stop one agent from running in portals:
+
+```json
+{
+  "effect": "forbid",
+  "principals": { "groups": ["6b1f0c52-2f0a-4c1e-9c61-3f0d8a1b7e11"] },
+  "actions": ["portal.use"],
+  "resources": { "resources": [{ "type": "portal", "id": "<portal id>" }] },
+  "conditions": { "channels": ["portal"] }
+}
+```
+
+- `Read` in the `portal` channel covers opening portals and `Write` covers running their agents, so a rule such as "contractors: deny Write everywhere" also stops them from sending messages in a portal while they can still open it.
+- A rule that names a portal also covers the agents run through it (an agent run through a portal is *in* that portal).
+- An allow rule never adds anyone to a portal; the editor says so when you write one.
+- These rules are accepted only on an installation that has portals. Without them there is nothing to apply a rule to, and a deny about portals is refused like any rule that cannot match a request.
+
+**A refusal shows a reference code.** The person sees it on the portal's error page (and in the message of a refused chat message); an administrator pastes it into **Access check → decision id** and sees the action on the portal or agent, the channel, the people and rules that decided and, for a rule that has since been switched off or deleted, which one and what the current policies say about the same request. Like every refusal it is written to the audit log, once per person, action, portal and reason per minute (a client that keeps retrying shares one reference code and one row).
+
+**When the engine cannot decide**, the portal fails closed: the person is told to try again, with a reference code, and the refusal is counted like any other "authorization unavailable" (503). It never falls back to another rule.
+
+**Large lists.** The engine's cost grows with the number of people and groups on a list (about 7 microseconds each). Above 200 entries it evaluates only the requester's part of the list, which gives the same answer. A custom rule written in Cedar that looks at *other* members of `resource.allowedUsers` sees that part, not the whole list.
 
 ### Examples
 
@@ -230,7 +268,7 @@ The **Principals** tab lists every person and token with their effective levels,
 Every refusal carries a **decision id** so that the person who was refused and the person who investigates talk about the same event:
 
 - a `403` from the permission gate has `decisionId` in the body and an `X-Decision-Id` header; OpenAI- and Anthropic-compatible routes put it in `error.decision_id`;
-- paste it into the IAM center (**Access check** → decision id), or call `GET /api/iam/decisions/{decisionId}`: you get the audit row and a ready-to-run access check that reproduces the decision;
+- paste it into the IAM center (**Access check** → decision id), or call `GET /api/iam/decisions/{decisionId}`: you get the audit row and a ready-to-run access check that reproduces the decision, the policies that decided it by name (with whether each is still in force) and, for a portal refusal, the action, the portal or agent and the channel;
 - a decision resolves while its audit row is in the 30-day window the Denials feed looks at.
 
 ```json
@@ -299,7 +337,7 @@ The proxy must append the client address to `X-Forwarded-For` (nginx: `proxy_set
 - **Background work.** Scheduled jobs (inference polling, alert evaluation, analysis and red-team runs, knowledge-base ingestion) run without a principal. A policy restricts the person who starts something, not a job that was already scheduled.
 - **Realtime connections.** A WebSocket is decided once, when it connects.
 - **Public and self-authenticated routes**, by design.
-- **Individual resources.** The gates decide on services. A rule about one agent or one model is accepted by the Access check and the preview, but nothing asks it at the gate yet, so the editor refuses a deny of that kind.
+- **Individual resources.** The gates decide on services. A rule about one agent or one model is accepted by the Access check and the preview, but nothing asks it at the gate yet, so the editor refuses a deny of that kind. The exception is [portals](#portals): opening one and running an agent through it are decided per portal and per agent.
 
 ## API
 
@@ -307,11 +345,11 @@ The IAM API is part of the dashboard API: it authenticates with the session cook
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/iam/catalog` | Services, actions, resource types, context attributes and channels. |
+| `GET /api/iam/catalog` | Services, actions, resource types, context attributes and channels. Each action says where a real request is decided on it (`enforcedIn`: `dashboard` and `api` for a service action, `portal` for `portal.use` and `agent.invoke` where portals exist); an action without it is only evaluated by the Access check. |
 | `GET /api/iam/policies`, `GET /api/iam/policies/{policyId}` | Built-in and custom policies. |
 | `POST /api/iam/policies`, `PUT /api/iam/policies/{policyId}`, `DELETE /api/iam/policies/{policyId}` | Create, change (also enable and disable) and delete a custom policy. |
 | `POST /api/iam/policies/compile`, `POST /api/iam/policies/preview` | Compile a draft, and see who it would affect. Read-only. |
-| `POST /api/iam/simulate` | The Access check. Read-only. |
+| `POST /api/iam/simulate` | The Access check. Read-only. For a portal, ask `portal.use` on the resource `{ "kind": "resource", "type": "portal", "id": ... }`, or `agent.invoke` on an agent with `context: { "channel": "portal", "portalId": ... }`; the answer includes the portal's name, mode and the number of people and groups on its list. |
 | `GET /api/iam/decisions/{decisionId}` | A refusal the caller saw, as an access check. |
 | `GET /api/iam/principals`, `GET /api/iam/principals/{type}/{id}` | People and tokens with their effective levels. |
 | `GET /api/iam/audit`, `GET /api/iam/audit/export` | Denials and policy changes (`kind=denials` or `changes`). |

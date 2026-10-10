@@ -28,7 +28,8 @@ import { fetchGroupsByIds, grantsOf, listUserGroupIds } from '@/lib/iam/groupGra
 import { markGated, resolveRouteAuthz, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
 import { authorizeServiceAccess, type ServiceAuthzOptions, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
 import { canonicalRoute } from '@/lib/iam/routePattern';
-import { getUserAuthState, isUserDisabled } from '@/lib/services/users/userAuthState';
+import { getUserAuthState, getUserIdentity, isUserDisabled } from '@/lib/services/users/userAuthState';
+import { isTenantRole } from '@/lib/iam/identity';
 import {
   ApiTokenAuthError,
   requireApiTokenFromHeader,
@@ -281,6 +282,14 @@ async function loadSessionAuthz(
  * disable/delete). Runs for EVERY cookie-authenticated request, mapped to an
  * RBAC service or not. Returns true when it sent a rejection; fail closed:
  * if the state cannot be read the request is refused with a 503.
+ *
+ * It also settles which ROLE the request carries. A session holds the role the
+ * account had when the session was issued, but a role can be changed afterwards,
+ * and the handlers decide on the role in the session context (who may administer
+ * people, manage projects, mint tokens for others...). For an account in good
+ * standing the context is therefore corrected to the role the account has now
+ * (the same briefly cached read, dropped when the account is written). When that
+ * cannot be read the request is refused (503) like an unreadable account state.
  */
 export async function rejectInactiveSessionAccount(
   reply: FastifyReply,
@@ -302,7 +311,7 @@ export async function rejectInactiveSessionAccount(
   }
 
   if (state === 'active') {
-    return false;
+    return applyCurrentRole(reply, session);
   }
 
   clearSessionCookies(reply);
@@ -312,6 +321,31 @@ export async function rejectInactiveSessionAccount(
       : { error: 'Unauthorized', message: 'Account no longer exists', code: 'account_missing' },
   );
   return true;
+}
+
+/** Sets the role of the request's session context to the one the account has now; true when it refused the request. */
+async function applyCurrentRole(
+  reply: FastifyReply,
+  session: { tenantDbName: string; tenantId: string; userId: string },
+): Promise<boolean> {
+  const headers = reply.request?.apiContextHeaders;
+  if (!headers) return false;
+  try {
+    const identity = await getUserIdentity(session.tenantDbName, session.tenantId, session.userId);
+    // A role this version does not know leaves the session's role as it is.
+    if (identity.role && headers['x-user-role'] !== identity.role) headers['x-user-role'] = identity.role;
+    return false;
+  } catch (error) {
+    logger.warn('Could not read the current role of the session account; refusing the request', {
+      userId: session.userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    reply.code(503).send({
+      error: 'Service Unavailable',
+      message: 'Unable to verify session',
+    });
+    return true;
+  }
 }
 
 /**
@@ -522,6 +556,21 @@ function applyNonServiceDeclaration(
   throw new RbacAuthorizationError(body.message, 403, body);
 }
 
+// ── the live role ────────────────────────────────────────────────────────
+
+/**
+ * For a route that runs the permission gate the context is settled once more with
+ * the row the gate has just read - not a cached answer - so a role change applies
+ * to a gated route on the very next request (the hook above already corrects every
+ * request to the cached role, at most 30 s behind).
+ */
+function applyGateLoadedRole(request: FastifyRequest, session: ApiSessionContext): void {
+  const headers = request.apiContextHeaders;
+  const loaded = request.rbacUser;
+  if (!headers || !loaded || String(loaded._id) !== String(session.userId)) return;
+  if (isTenantRole(loaded.role) && headers['x-user-role'] !== loaded.role) headers['x-user-role'] = loaded.role;
+}
+
 // ── the gates ────────────────────────────────────────────────────────────
 
 async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionContext): Promise<void> {
@@ -707,6 +756,7 @@ export function withApiRequestContext<
     try {
       if (session) {
         await enforceSessionRbac(request, session);
+        applyGateLoadedRole(request, session);
       }
     } catch (error) {
       return sendRbacError(reply, error)

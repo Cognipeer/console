@@ -296,48 +296,67 @@ describe('token routes: expiry, IP allowlist and the tenant policy', () => {
   });
 
   describe('GET /api/tokens', () => {
-    it('lists expiry, allowlist, lastUsedAt, edit rights and the policy flag', async () => {
+    it('lists expiry, allowlist, lastUsedAt, edit rights and the policy flag of the caller\'s own tokens', async () => {
       store.push(
         { _id: 'old', userId: 'user-1', tenantId: TENANT, projectId: 'proj-1', label: 'old token', tokenPrefix: 'cpeer_a', createdAt: new Date(NOW - 5 * DAY), tokenHash: 'h1' },
         {
-          _id: 'new', userId: 'owner-1', tenantId: TENANT, projectId: 'proj-1', label: 'new token', tokenPrefix: 'cpeer_b',
+          _id: 'new', userId: 'user-1', tenantId: TENANT, projectId: 'proj-1', label: 'new token', tokenPrefix: 'cpeer_b',
           createdAt: new Date(NOW - DAY), expiresAt: new Date(NOW + 20 * DAY), allowedIpRanges: ['10.0.0.0/8'],
           lastUsed: new Date(NOW - 3_600_000), tokenHash: 'h2',
         },
+        // somebody else's token: not part of this person's list
+        { _id: 'theirs', userId: 'owner-1', tenantId: TENANT, projectId: 'proj-1', label: 'owner secret', tokenPrefix: 'cpeer_c', createdAt: new Date(NOW - DAY), allowedIpRanges: ['192.0.2.0/24'], tokenHash: 'h3' },
       );
       setPolicy(db, { maxLifetimeDays: null, requireExpiry: true });
       const res = await get(USER);
       expect(res.statusCode).toBe(200);
       const { tokens } = parseJsonBody<{ tokens: TokenReply[] }>(res.body);
       const byId = Object.fromEntries(tokens.map((t) => [t._id as string, t]));
+      expect(Object.keys(byId).sort()).toEqual(['new', 'old']);
       expect(byId.old).toMatchObject({ expiresAt: null, allowedIpRanges: null, lastUsedAt: null, exceedsTenantPolicy: true, canEdit: true, canDelete: true });
-      // someone else's token: everybody sees THAT it is restricted (the badge), only an editor sees the ranges
-      expect(byId.new).toMatchObject({ allowedIpRanges: null, ipRestricted: true, allowedIpRangeCount: 1, exceedsTenantPolicy: false, canEdit: false, canDelete: false });
-      expect(JSON.stringify(byId.new)).not.toContain('10.0.0.0');
+      // everything listed is editable by the caller, so the ranges are shown to them
+      expect(byId.new).toMatchObject({ allowedIpRanges: ['10.0.0.0/8'], ipRestricted: true, allowedIpRangeCount: 1, exceedsTenantPolicy: false, canEdit: true, canDelete: true });
       expect(byId.old).toMatchObject({ ipRestricted: false, allowedIpRangeCount: 0 });
       expect(typeof byId.new.lastUsedAt).toBe('string');
+      expect(JSON.stringify(tokens)).not.toContain('owner secret');
+      expect(JSON.stringify(tokens)).not.toContain('192.0.2.0');
       expect(JSON.stringify(tokens)).not.toContain('"h1"');
       expect(JSON.stringify(tokens)).not.toContain('tokenHash');
     });
 
-    it('an admin (who may edit it) does see the ranges of a user\'s token', async () => {
+    it('lists only the caller\'s own tokens, whatever the role', async () => {
+      store.push(
+        { _id: 'o', userId: 'owner-1', tenantId: TENANT, projectId: 'proj-1', label: 'owner token', createdAt: new Date() },
+        { _id: 'a', userId: 'admin-1', tenantId: TENANT, projectId: 'proj-1', label: 'admin token', createdAt: new Date() },
+        { _id: 'p', userId: 'pa-1', tenantId: TENANT, projectId: 'proj-1', label: 'pa token', createdAt: new Date() },
+        { _id: 'u', userId: 'user-1', tenantId: TENANT, projectId: 'proj-1', label: 'user token', createdAt: new Date() },
+      );
+      for (const [who, expected] of [[OWNER, 'o'], [ADMIN, 'a'], [PA, 'p'], [USER, 'u']] as const) {
+        const res = await get(who);
+        expect(res.statusCode).toBe(200);
+        expect(parseJsonBody<{ tokens: TokenReply[] }>(res.body).tokens.map((t) => t._id)).toEqual([expected]);
+      }
+    });
+
+    it('an admin who opens a user by id (?userId=) does see the ranges of that user\'s token', async () => {
       store.push({ _id: 'tok-r', userId: 'user-1', tenantId: TENANT, projectId: 'proj-1', label: 'restricted', allowedIpRanges: ['10.0.0.0/8', '192.0.2.1/32'], createdAt: new Date() });
-      const res = await get(ADMIN);
+      const res = await get(ADMIN, '/api/tokens?userId=user-1');
       const tok = parseJsonBody<{ tokens: TokenReply[] }>(res.body).tokens.find((t) => t._id === 'tok-r')!;
       expect(tok).toMatchObject({ canEdit: true, allowedIpRanges: ['10.0.0.0/8', '192.0.2.1/32'], ipRestricted: true, allowedIpRangeCount: 2 });
     });
 
-    it('a project_admin is offered edit on service-account tokens and its own, not on others\'', async () => {
+    it('a project_admin opens service-account tokens by id, and nobody else\'s', async () => {
       store.push(
         { _id: 'own', userId: 'pa-1', tenantId: TENANT, projectId: 'proj-1', label: 'own token', createdAt: new Date() },
         { _id: 'svc', userId: 'svc-1', tenantId: TENANT, projectId: 'proj-1', label: 'svc token', createdAt: new Date() },
         { _id: 'adm', userId: 'admin-1', tenantId: TENANT, projectId: 'proj-1', label: 'admin token', createdAt: new Date() },
       );
-      const res = await get(PA);
-      const byId = Object.fromEntries(parseJsonBody<{ tokens: TokenReply[] }>(res.body).tokens.map((t) => [t._id as string, t]));
-      expect(byId.own.canEdit).toBe(true);
-      expect(byId.svc.canEdit).toBe(true);
-      expect(byId.adm.canEdit).toBe(false);
+      const ids = async (url: string) => parseJsonBody<{ tokens: TokenReply[] }>((await get(PA, url)).body).tokens.map((t) => t._id);
+      expect(await ids('/api/tokens')).toEqual(['own']);
+      expect(await ids('/api/tokens?userId=svc-1')).toEqual(['svc']);
+      const refused = await get(PA, '/api/tokens?userId=admin-1');
+      expect(refused.statusCode).toBe(403);
+      expect(refused.body).not.toContain('admin token');
     });
 
     it('an unreadable policy never breaks the listing (no flags)', async () => {
@@ -549,24 +568,43 @@ describe('token routes: expiry, IP allowlist and the tenant policy', () => {
       expect(parseJsonBody<TokenReply>(ok.body)).toMatchObject({ allowedIpRanges: ['10.0.0.0/8'], exceedsTenantPolicy: false });
     });
 
-    it('GET offers edit only where the edit would be allowed ("never upward"), not on every token', async () => {
+    it('GET lists only what the caller may manage ("never upward"): an admin never sees the owner\'s tokens', async () => {
       store.push(
         { _id: 'own', userId: 'admin-1', tenantId: TENANT, projectId: 'proj-1', label: 'own token', createdAt: new Date() },
         { _id: 'usr', userId: 'user-1', tenantId: TENANT, projectId: 'proj-1', label: 'user token', createdAt: new Date(), allowedIpRanges: ['10.0.0.0/8'] },
         { _id: 'own-er', userId: 'owner-1', tenantId: TENANT, projectId: 'proj-1', label: 'owner token', createdAt: new Date(), allowedIpRanges: ['192.0.2.0/24'] },
       );
       const byId = (res: { body: string }) => Object.fromEntries(parseJsonBody<{ tokens: TokenReply[] }>(res.body).tokens.map((t) => [t._id as string, t]));
-      // an admin edits their own and a user's, but not the workspace owner's (PUT refuses it with 403, so no button)
-      const asAdmin = byId(await get(ADMIN, '/api/projects/proj-1/tokens'));
+      // an admin manages their own and a user's, but the workspace owner's tokens are not shown at all
+      const adminRes = await get(ADMIN, '/api/projects/proj-1/tokens');
+      const asAdmin = byId(adminRes);
+      expect(Object.keys(asAdmin).sort()).toEqual(['own', 'usr']);
       expect(asAdmin.own.canEdit).toBe(true);
-      expect(asAdmin.usr.canEdit).toBe(true);
-      expect(asAdmin['own-er'].canEdit).toBe(false);
+      expect(asAdmin.usr).toMatchObject({ canEdit: true, canDelete: true, allowedIpRanges: ['10.0.0.0/8'], ipRestricted: true });
+      expect(adminRes.body).not.toContain('owner token');
+      expect(adminRes.body).not.toContain('192.0.2.0');
+      // ... and the same refusal when it tries to reach them by id
       expect((await put(ADMIN, 'own-er', { label: 'takeover' }, '/api/projects/proj-1/tokens/own-er')).statusCode).toBe(403);
-      // the allowlist of a token the caller cannot edit is not handed out; that it HAS one still is
-      expect(asAdmin['own-er']).toMatchObject({ allowedIpRanges: null, ipRestricted: true, allowedIpRangeCount: 1 });
-      expect(asAdmin.usr).toMatchObject({ allowedIpRanges: ['10.0.0.0/8'], ipRestricted: true });
-      // the owner edits everything
-      expect(Object.values(byId(await get(OWNER, '/api/projects/proj-1/tokens'))).every((t) => t.canEdit === true)).toBe(true);
+      expect((await app.inject({ method: 'DELETE', url: '/api/projects/proj-1/tokens/own-er', headers: bare(ADMIN) })).statusCode).toBe(403);
+      // the owner sees and edits everything
+      const asOwner = byId(await get(OWNER, '/api/projects/proj-1/tokens'));
+      expect(Object.keys(asOwner).sort()).toEqual(['own', 'own-er', 'usr']);
+      expect(Object.values(asOwner).every((t) => t.canEdit === true)).toBe(true);
+    });
+
+    it('GET is a listing, not a mint: it is never refused for the token quota', async () => {
+      const { checkResourceQuota } = await import('@/lib/quota/quotaGuard');
+      vi.mocked(checkResourceQuota).mockResolvedValue({ allowed: false, reason: 'API token quota exceeded' } as never);
+      store.push({ _id: 'p1', userId: 'admin-1', tenantId: TENANT, projectId: 'proj-1', label: 'proj token', createdAt: new Date() });
+      try {
+        const res = await get(ADMIN, '/api/projects/proj-1/tokens');
+        expect(res.statusCode).toBe(200);
+        expect(parseJsonBody<{ tokens: TokenReply[] }>(res.body).tokens).toHaveLength(1);
+        // minting still is
+        expect((await post(ADMIN, { label: 'one more' }, '/api/projects/proj-1/tokens')).statusCode).toBe(429);
+      } finally {
+        vi.mocked(checkResourceQuota).mockResolvedValue({ allowed: true } as never);
+      }
     });
 
     it('GET lists the new fields', async () => {

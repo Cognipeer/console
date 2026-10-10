@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 import { getConfig } from '@/lib/core/config';
 import { getDatabase } from '@/lib/database';
+import { isTenantRole } from '@/lib/iam/identity';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
@@ -17,11 +18,6 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
   const h = await headers();
   const email = h.get('x-user-email') ?? '';
   const licenseType = h.get('x-license-type') ?? '—';
-  const role = (h.get('x-user-role') ?? 'user') as
-    | 'owner'
-    | 'admin'
-    | 'project_admin'
-    | 'user';
 
   const tenantDbName = h.get('x-tenant-db-name');
   const userId = h.get('x-user-id');
@@ -41,6 +37,14 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
     redirect('/login');
   }
 
+  // The role of the account record, not the one the session was issued with: a role that was
+  // changed since sign-in shapes the navigation from the next page load on.
+  const role = (isTenantRole(user.role) ? user.role : 'user') as
+    | 'owner'
+    | 'admin'
+    | 'project_admin'
+    | 'user';
+
   // If a non-admin user has no assigned projects, do not render the dashboard at all.
   // A project counts however it was given: directly, in the legacy list, or through a group
   // (the same answer as the session endpoint and the project switcher).
@@ -56,7 +60,7 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
       supportEnabled={isSupportEntryPointEnabled()}
       isOnPrem={getConfig().deployment.isOnPrem}
       user={{
-        name: email ? email.split('@')[0] : 'Account',
+        name: user.name || (email ? email.split('@')[0] : 'Account'),
         email,
         licenseType,
         role,

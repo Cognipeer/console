@@ -9,6 +9,10 @@ const h = vi.hoisted(() => ({
     updateUser: vi.fn(),
     listApiTokens: vi.fn(),
     deleteApiToken: vi.fn(),
+    listGroupMembersByUser: vi.fn(),
+    removeGroupMember: vi.fn(),
+    listUserProjectsByUser: vi.fn(),
+    deleteUserProjectsByUser: vi.fn(),
   },
   recordAuditLog: vi.fn(),
   invalidateUserAuthState: vi.fn(),
@@ -56,6 +60,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.db.findUserById.mockResolvedValue(member);
   h.db.updateUser.mockImplementation(async (_id: string, patch: object) => ({ ...member, ...patch }));
+  h.db.listGroupMembersByUser.mockResolvedValue([]);
+  h.db.listUserProjectsByUser.mockResolvedValue([]);
   h.recordAuditLog.mockResolvedValue(undefined);
   h.invalidateUserAuthState.mockResolvedValue(undefined);
   h.invalidateApiTokenAuthCache.mockResolvedValue(undefined);
@@ -158,7 +164,7 @@ describe('setUserStatus writes', () => {
     const b = await setUserStatus({ ...base, status: 'disabled' });
     off();
 
-    expect(a).toEqual({ ok: true, user: member });
+    expect(a).toEqual({ ok: true, user: member, changed: false });
     expect(b.ok).toBe(true);
     expect(h.db.updateUser).not.toHaveBeenCalled();
     expect(h.recordAuditLog).not.toHaveBeenCalled();
@@ -284,7 +290,7 @@ describe('revokeUserApiTokens', () => {
     ]);
     h.db.deleteApiToken.mockResolvedValue(true);
 
-    await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 2, failed: 0 });
+    await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 2, failed: 0, revokedIds: ['a', 'b'] });
     expect(h.db.listApiTokens).toHaveBeenCalledWith('u2');
     expect(h.db.deleteApiToken).toHaveBeenCalledWith('a', 'u2');
     expect(h.db.deleteApiToken).toHaveBeenCalledWith('b', 'u2');
@@ -305,13 +311,13 @@ describe('revokeUserApiTokens', () => {
       { _id: 'b', tokenHash: 'hash-b' },
     ]);
     h.db.deleteApiToken.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce(true);
-    await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 1, failed: 1 });
+    await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 1, failed: 1, revokedIds: ['b'] });
     expect(h.invalidateApiTokenAuthCache).toHaveBeenCalledWith('hash-b');
   });
 
   it('a user with no tokens is a no-op', async () => {
     h.db.listApiTokens.mockResolvedValue([]);
-    await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 0, failed: 0 });
+    await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 0, failed: 0, revokedIds: [] });
   });
 });
 
@@ -335,7 +341,47 @@ describe('cleanupDeletedUser', () => {
 
   it('never throws, and still invalidates auth state when listing tokens fails', async () => {
     h.db.listApiTokens.mockRejectedValue(new Error('db down'));
-    await expect(cleanupDeletedUser('tenant_acme', 'u2')).resolves.toBeUndefined();
+    await expect(cleanupDeletedUser('tenant_acme', 'u2')).resolves.toEqual({
+      revokedTokens: 0, failedTokens: 0, removedGroupMemberships: 0, removedProjectMemberships: 0,
+    });
     expect(h.invalidateUserAuthState).toHaveBeenCalledWith('tenant_acme', 'u2');
+  });
+
+  it('removes the group and project memberships and reports what went', async () => {
+    h.db.listApiTokens.mockResolvedValue([{ _id: 'a', tokenHash: 'hash-a' }, { _id: 'b', tokenHash: 'hash-b' }]);
+    h.db.deleteApiToken.mockResolvedValue(true);
+    h.db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g1' }, { groupId: 'g2' }, { groupId: 'g3' }]);
+    h.db.removeGroupMember.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    h.db.listUserProjectsByUser.mockResolvedValue([{ projectId: 'p1' }, { projectId: 'p2' }]);
+    await expect(cleanupDeletedUser('tenant_acme', 'u2')).resolves.toEqual({
+      revokedTokens: 2, failedTokens: 0, removedGroupMemberships: 2, removedProjectMemberships: 2,
+    });
+    expect(h.db.removeGroupMember).toHaveBeenCalledWith('g1', 'u2');
+    expect(h.db.removeGroupMember).toHaveBeenCalledWith('g3', 'u2');
+    expect(h.db.deleteUserProjectsByUser).toHaveBeenCalledWith('u2');
+  });
+
+  it('carries on past a membership it cannot remove, and past a failing list', async () => {
+    h.db.listApiTokens.mockResolvedValue([]);
+    h.db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g1' }, { groupId: 'g2' }]);
+    h.db.removeGroupMember.mockRejectedValueOnce(new Error('db down')).mockResolvedValueOnce(true);
+    h.db.listUserProjectsByUser.mockRejectedValue(new Error('db down'));
+    await expect(cleanupDeletedUser('tenant_acme', 'u2')).resolves.toEqual({
+      revokedTokens: 0, failedTokens: 0, removedGroupMemberships: 1, removedProjectMemberships: 0,
+    });
+    h.db.listGroupMembersByUser.mockRejectedValue(new Error('db down'));
+    await expect(cleanupDeletedUser('tenant_acme', 'u2')).resolves.toMatchObject({ removedGroupMemberships: 0 });
+    expect(h.invalidateUserAuthState).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('setUserStatus: the batch it belongs to', () => {
+  it('reports whether it changed anything, and puts the batch id on the audit row', async () => {
+    const changed = await setUserStatus({ ...base, status: 'disabled', batchId: 'batch-1' });
+    expect(changed).toMatchObject({ ok: true, changed: true });
+    expect(h.recordAuditLog.mock.calls[0][1].metadata).toMatchObject({ batchId: 'batch-1' });
+    h.recordAuditLog.mockClear();
+    await setUserStatus({ ...base, status: 'disabled' });
+    expect(h.recordAuditLog.mock.calls[0][1].metadata).not.toHaveProperty('batchId');
   });
 });

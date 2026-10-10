@@ -6,6 +6,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { foldSearchText } from '@/lib/shared/searchFold';
 import Database from 'better-sqlite3';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { warnGlobalTenantFallback } from '../tenantScopeGuard';
@@ -135,14 +136,17 @@ export const TABLES = {
  * Functions the directory searches call. SQLite's own `LIKE` folds the case of
  * ASCII letters only, so searching "şule" or "özlem" never found "Şule" or
  * "Özlem", while MongoDB's case-insensitive `$regex` (Unicode aware) did.
- * `iam_fold(x) LIKE iam_fold(pattern)` lower-cases with the JavaScript Unicode
- * mapping on both sides, which makes the two backends answer the same. Accents
- * are NOT stripped (neither backend does): "sule" does not find "Şule" on either.
+ * `iam_fold(x) LIKE iam_fold(pattern)` folds with `foldSearchText` on both sides:
+ * the JavaScript Unicode mapping, with the four letters of the Turkish i family
+ * (I, İ, i, ı) meeting at "i" - so "istanbul" finds "İstanbul" and "ısparta"
+ * finds "ISPARTA", which a plain `toLowerCase()` gets wrong - and the two
+ * backends answer the same (the Mongo side is `foldedRegexSource`). Accents are
+ * NOT stripped (neither backend does): "sule" does not find "Şule" on either.
  * Deterministic, so SQLite may cache it within a statement.
  */
 function registerSearchFunctions(db: Database.Database): void {
   db.function('iam_fold', { deterministic: true }, (value: unknown) =>
-    value === null || value === undefined ? null : String(value).toLowerCase());
+    value === null || value === undefined ? null : foldSearchText(String(value)));
 }
 
 // ── Base class ───────────────────────────────────────────────────────

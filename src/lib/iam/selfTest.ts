@@ -14,15 +14,19 @@
  *      type-checks against that schema and is preparsed;
  *   4. canned decisions come out right: an admin reads, a plain member cannot
  *      change an administration service, a token with an empty scope reads
- *      nothing, a token limited to one service reaches only that one.
+ *      nothing, a token limited to one service reaches only that one, and a
+ *      portal is opened (and its agents run) by the people its access list names
+ *      and by nobody else - with no evaluation error from any managed rule.
  */
 
 import { performance } from 'node:perf_hooks';
 import { getCedarVersion, statefulIsAuthorized } from './cedar';
 import { buildAuthorizeCall, ensureManagedPolicySet, getIamEngineStats } from './engine';
 import { getEnforceStats } from './enforce';
-import { tokenPrincipal, userPrincipal, type IamPrincipal } from './entities';
+import type { IamRequestContext } from './context';
+import { tokenPrincipal, userPrincipal, type IamPrincipal, type IamResource } from './entities';
 import { ALL_MANAGED_POLICIES } from './managedPolicies';
+import { portalAgentResource, portalResource, type PortalSubject } from './portalEntities';
 import { ensureSchemaPreparsed, validateAgainstSchema } from './schemaState';
 
 export type EngineSelfTestResult =
@@ -35,9 +39,19 @@ interface CannedDecision {
   name: string;
   principal: IamPrincipal;
   action: string;
+  /** The service a gate decision is about; ignored when `resource` is given. */
   service: string;
+  resource?: IamResource;
+  context?: IamRequestContext;
   expect: boolean;
 }
+
+/** A portal that admits one person and one group: what the portal rules are checked against. */
+const CANNED_PORTAL: PortalSubject = {
+  id: 'iam-selftest-portal',
+  key: 'iam-selftest',
+  access: { mode: 'selected', userIds: ['iam-selftest-listed'], groupIds: ['iam-selftest-group'] },
+};
 
 function cannedDecisions(): CannedDecision[] {
   const admin = userPrincipal({ userId: 'iam-selftest-admin', user: { role: 'admin' } });
@@ -45,6 +59,12 @@ function cannedDecisions(): CannedDecision[] {
   const unscoped = tokenPrincipal({ tokenId: 'iam-selftest-token-open', owner: admin, scope: null });
   const emptyScope = tokenPrincipal({ tokenId: 'iam-selftest-token-empty', owner: admin, scope: {} });
   const oneService = tokenPrincipal({ tokenId: 'iam-selftest-token-models', owner: admin, scope: { models: 'read' } });
+  const listed = userPrincipal({ userId: 'iam-selftest-listed', user: { role: 'user' } });
+  const grouped = userPrincipal({ userId: 'iam-selftest-grouped', user: { role: 'user' }, groupIds: ['iam-selftest-group'] });
+  const listedOwnersToken = tokenPrincipal({ tokenId: 'iam-selftest-token-listed', owner: { ...listed, role: 'owner' }, scope: null });
+  const portal = portalResource(CANNED_PORTAL);
+  const agent = portalAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_PORTAL);
+  const inPortal: IamRequestContext = { channel: 'portal' };
   return [
     { name: 'admin reads models', principal: admin, action: 'models.read', service: 'models', expect: true },
     { name: 'member writes agents', principal: member, action: 'agents.write', service: 'agents', expect: true },
@@ -53,6 +73,12 @@ function cannedDecisions(): CannedDecision[] {
     { name: 'empty scope reads nothing', principal: emptyScope, action: 'models.read', service: 'models', expect: false },
     { name: 'scoped token reads its service', principal: oneService, action: 'models.read', service: 'models', expect: true },
     { name: 'scoped token stops at its scope', principal: oneService, action: 'agents.read', service: 'agents', expect: false },
+    { name: 'a listed person opens a portal', principal: listed, action: 'portal.use', service: 'portals', resource: portal, context: inPortal, expect: true },
+    { name: 'a member of a listed group opens a portal', principal: grouped, action: 'portal.use', service: 'portals', resource: portal, context: inPortal, expect: true },
+    { name: 'an admin who is not listed does not', principal: admin, action: 'portal.use', service: 'portals', resource: portal, context: inPortal, expect: false },
+    { name: 'a token does not, whoever owns it', principal: listedOwnersToken, action: 'portal.use', service: 'portals', resource: portal, context: inPortal, expect: false },
+    { name: 'a listed person runs an agent in a portal', principal: listed, action: 'agent.invoke', service: 'agents', resource: agent, context: inPortal, expect: true },
+    { name: 'an admin who is not listed does not run one', principal: admin, action: 'agent.invoke', service: 'agents', resource: agent, context: inPortal, expect: false },
   ];
 }
 
@@ -63,8 +89,8 @@ function runCanned(setId: string): string | null {
         tenant: SELF_TEST_TENANT,
         principal: c.principal,
         action: c.action,
-        resource: { kind: 'service', service: c.service },
-        context: { channel: c.principal.kind === 'token' ? 'api' : 'dashboard' },
+        resource: c.resource ?? { kind: 'service', service: c.service },
+        context: c.context ?? { channel: c.principal.kind === 'token' ? 'api' : 'dashboard' },
       },
       SELF_TEST_TENANT,
     );

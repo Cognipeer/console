@@ -10,6 +10,7 @@ import {
 import { createPortal } from 'react-dom';
 import { Button, ActionIcon } from '@mantine/core';
 import { IconCheck, IconChevronDown, IconChevronRight, IconX } from '@tabler/icons-react';
+import { useTranslations } from '@/lib/i18n';
 
 /* ──────────────────────────────────────────────────────────────────
    FormShell — full-screen overlay form layout.
@@ -73,6 +74,7 @@ export default function FormShell({
   // left expanded, pushed the form out of view. Desktop keeps the summary
   // always visible via CSS — this state only affects the stacked layout.
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const t = useTranslations('formShell');
 
   useEffect(() => {
     if (!open || disableEscape) return;
@@ -108,7 +110,7 @@ export default function FormShell({
           color="gray"
           radius="md"
           onClick={onClose}
-          aria-label="Close"
+          aria-label={t('close')}
         >
           <IconX size={16} />
         </ActionIcon>
@@ -121,7 +123,7 @@ export default function FormShell({
         </div>
         <div style={{ flex: 1 }} />
         <div className="form-header-hint">
-          Press <span className="form-kbd">ESC</span> to cancel
+          {t('escapeHintBefore')} <span className="form-kbd">ESC</span> {t('escapeHintAfter')}
         </div>
       </div>
 
@@ -167,7 +169,7 @@ export default function FormShell({
           disabled={secondaryAction?.disabled}
           onClick={secondaryAction?.onClick ?? onClose}
         >
-          {secondaryAction?.label ?? 'Cancel'}
+          {secondaryAction?.label ?? t('cancel')}
         </Button>
         {primaryAction ? (
           <Button

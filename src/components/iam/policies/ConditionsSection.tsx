@@ -74,10 +74,7 @@ export default function ConditionsSection({ draft, patch, catalog, labels, issue
       <FormField label={t('conditions.channels')} hint={t('conditions.channelsHelp')} optional>
         <ChipPicker<IamChannel>
           multiple
-          options={catalog.channels.map((c) => ({
-            value: c,
-            label: c === 'portal' ? `${labels.channel(c)} · ${t('conditions.reserved')}` : labels.channel(c),
-          }))}
+          options={catalog.channels.map((c) => ({ value: c, label: labels.channel(c) }))}
           value={new Set<IamChannel>(draft.channels)}
           onChange={(next) => patch({ channels: [...(next as Set<IamChannel>)] })}
         />

@@ -161,6 +161,9 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
           notifications.show({ color: 'yellow', message: t('errors.readOnly') });
           return;
         }
+        const resourcePrefill = link.resourceType && link.resourceId
+          ? { type: link.resourceType, id: link.resourceId, label: link.resourceLabel || link.resourceId }
+          : undefined;
         if (link.principalType && link.principalId) {
           let label = link.principalId;
           try {
@@ -168,9 +171,9 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
           } catch {
             /* open with the id; the server validates it on save */
           }
-          openEditor({ kind: 'create', prefill: { type: link.principalType, ref: { id: link.principalId, label } } });
+          openEditor({ kind: 'create', prefill: { type: link.principalType, ref: { id: link.principalId, label } }, resourcePrefill });
         } else {
-          openEditor({ kind: 'create' });
+          openEditor({ kind: 'create', resourcePrefill });
         }
         return;
       }

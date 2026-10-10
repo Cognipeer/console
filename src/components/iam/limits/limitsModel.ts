@@ -4,6 +4,8 @@
  * A "limit" is a quota policy as `GET /api/quota/policies?include=targets`
  * returns it: the policy plus the resolved name of whatever it points at.
  */
+import type { TargetResolution } from '@/components/quota/pickerSources';
+import { quotaTargetSource, type QuotaTargetSource } from '@/lib/quota/targets';
 import {
   isTenantWideKind,
   quotaGroupMode,
@@ -13,6 +15,7 @@ import {
   type QuotaPolicy,
   type QuotaScope,
 } from '@/lib/quota/types';
+import { includesFolded } from '@/lib/shared/searchFold';
 
 export interface LimitTarget {
   type: 'tenant' | 'group' | 'user' | 'token' | 'agent' | 'resource' | 'provider';
@@ -123,13 +126,17 @@ export function limitSearchText(row: LimitRow): string {
     .join(' ');
 }
 
-/** Case-insensitive match on `limitSearchText`, narrowed by scope and domain. */
+/**
+ * Case-insensitive match on `limitSearchText`, narrowed by scope and domain.
+ * Case is folded the Turkish-aware way (see searchFold): "ışık" finds "IŞIK",
+ * "istanbul" finds "İstanbul".
+ */
 export function filterLimitRows(rows: readonly LimitRow[], filters: LimitFilters): LimitRow[] {
-  const query = filters.query.trim().toLowerCase();
+  const query = filters.query.trim();
   return rows.filter((row) => {
     if (filters.scope !== 'all' && row.scope !== filters.scope) return false;
     if (filters.domain !== 'all' && row.domain !== filters.domain) return false;
-    return !query || limitSearchText(row).toLowerCase().includes(query);
+    return !query || includesFolded(limitSearchText(row), query);
   });
 }
 
@@ -141,6 +148,84 @@ export function sortLimitRows(rows: readonly LimitRow[]): LimitRow[] {
   return [...rows].sort(
     (a, b) => (SCOPE_ORDER[a.scope] ?? 9) - (SCOPE_ORDER[b.scope] ?? 9) || time(b) - time(a),
   );
+}
+
+// ── names of resource / provider targets ─────────────────────────────────
+
+/**
+ * The quota API names the person, group, token or agent a limit points at, but
+ * for a model, an index, a bucket or a provider it only knows the KEY the guard
+ * compares (`target.label` is that key). The registry knows the rest.
+ */
+export interface RegistryLookup {
+  /** One lookup per (kind of target, value, project): rows that share them share the answer. */
+  key: string;
+  source: QuotaTargetSource;
+  value: string;
+  projectId?: string;
+}
+
+/** What to ask the registry to name a row's target; null when the row needs no lookup. */
+export function registryLookupOf(row: LimitRow): RegistryLookup | null {
+  if (row.scope !== 'resource' && row.scope !== 'provider') return null;
+  // Agents are named by the quota API itself.
+  if (row.scope === 'resource' && row.domain === 'agent') return null;
+  const value = row.scopeId;
+  if (!value) return null;
+  // The server already named it (or found it gone): nothing to add.
+  if (row.target.missing || (row.target.label !== undefined && row.target.label !== value)) return null;
+  const source = quotaTargetSource(row.domain, row.scope);
+  if (!source) return null;
+  return {
+    key: `${source.id}\u0000${value}\u0000${row.projectId ?? ''}`,
+    source,
+    value,
+    ...(row.projectId ? { projectId: row.projectId } : {}),
+  };
+}
+
+/** What a lookup adds to a row's target. */
+export interface TargetPatch {
+  /** The name. */
+  label?: string;
+  /** The key, underneath the name. */
+  sublabel?: string;
+  /** The registry answered completely and has no such row. */
+  missing?: boolean;
+}
+
+/**
+ * The registry's answer as a patch of the row's target. Only a complete answer
+ * can call a target missing, and a name an SDK client reports (tracing) is
+ * allowed not to be registered at all, so that is never "not found".
+ */
+export function targetPatchOf(source: QuotaTargetSource, resolution: TargetResolution): TargetPatch | null {
+  if (resolution.status === 'found') {
+    const { label, key } = resolution.option;
+    return { label, ...(key && key !== label ? { sublabel: key } : {}) };
+  }
+  if (resolution.status === 'missing' && !source.allowsUnregistered) return { missing: true };
+  return null;
+}
+
+/** A patch and the lookup it answers, so that it is not applied to a row that has been pointed elsewhere since. */
+export interface TargetPatchEntry {
+  lookupKey: string;
+  patch: TargetPatch;
+}
+
+/** The rows with their patches applied (same array when there is nothing to apply). */
+export function applyTargetPatches(rows: readonly LimitRow[], patches: ReadonlyMap<string, TargetPatchEntry>): LimitRow[] {
+  if (patches.size === 0) return rows as LimitRow[];
+  return rows.map((row) => {
+    const entry = patches.get(String(row._id));
+    return entry && registryLookupOf(row)?.key === entry.lookupKey ? { ...row, target: { ...row.target, ...entry.patch } } : row;
+  });
+}
+
+/** The kind of thing a resource / provider limit points at (a model, a vector index...), for its badge. */
+export function targetNounOf(row: Pick<LimitRow, 'scope' | 'domain'>): QuotaTargetSource['noun'] | null {
+  return quotaTargetSource(row.domain, row.scope)?.noun ?? null;
 }
 
 // ── amounts (what a limit actually says) ─────────────────────────────────

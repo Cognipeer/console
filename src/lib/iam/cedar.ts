@@ -132,7 +132,15 @@ export interface CedarAuthorizeInput {
 }
 
 export type CedarDecision =
-  | { ok: true; allowed: boolean; reasons: string[]; errors: string[] }
+  | {
+      ok: true;
+      allowed: boolean;
+      reasons: string[];
+      /** One `<policy id>: <message>` per policy that errored while it was evaluated (Cedar skips such a policy). */
+      errors: string[];
+      /** The Cedar ids of the policies behind `errors` (a policy that errored is neither a permit nor a forbid for the decision). */
+      errorPolicyIds: string[];
+    }
   | { ok: false; errors: string[] };
 
 export function statefulIsAuthorized(input: CedarAuthorizeInput): CedarDecision {
@@ -155,6 +163,7 @@ export function statefulIsAuthorized(input: CedarAuthorizeInput): CedarDecision 
       allowed: res.response.decision === 'allow',
       reasons: res.response.diagnostics.reason,
       errors: res.response.diagnostics.errors.map((e) => `${e.policyId}: ${e.error.message}`),
+      errorPolicyIds: res.response.diagnostics.errors.map((e) => e.policyId),
     };
   } catch (error) {
     return { ok: false, errors: [error instanceof Error ? error.message : String(error)] };
@@ -228,9 +237,19 @@ export function splitPolicyText(
 
 /** Annotations (`@key("value")`) of a single policy statement, or null when it does not parse. */
 export function policyAnnotations(policyText: string): Record<string, string> | null {
+  return policyHead(policyText)?.annotations ?? null;
+}
+
+/**
+ * What the engine needs to know about a statement besides its text: whether it
+ * permits or forbids (a forbid that errors while it is evaluated must not be
+ * skipped, see engine.ts) and its annotations. Null when it does not parse.
+ */
+export function policyHead(policyText: string): { effect: 'permit' | 'forbid'; annotations: Record<string, string> } | null {
   try {
     const res = getCedar().policyToJson(policyText);
-    return res.type === 'success' ? { ...(res.json.annotations ?? {}) } : null;
+    if (res.type !== 'success') return null;
+    return { effect: res.json.effect === 'forbid' ? 'forbid' : 'permit', annotations: { ...(res.json.annotations ?? {}) } };
   } catch {
     return null;
   }

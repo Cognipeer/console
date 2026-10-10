@@ -49,12 +49,22 @@ describe('parseBuiltInReason', () => {
 
   it('classifies every built-in policy the engine ships (none falls through to "other")', () => {
     const ids = listManagedPolicies().map((p) => p.id);
-    expect(ids.length).toBe(12);
+    expect(ids.length).toBe(16);
     for (const id of ids) {
       const parsed = parseBuiltInReason(id);
       expect(parsed.kind, id).not.toBe('other');
-      expect(parsed.level, id).not.toBeNull();
+      // a portal rule is not about a level: it is the portal's access list
+      if (id.startsWith('managed:portal:')) expect(parsed.level, id).toBeNull();
+      else expect(parsed.level, id).not.toBeNull();
     }
+  });
+
+  it('knows the portal rules: the access list admits, or nothing else can', () => {
+    expect(parseBuiltInReason('managed:portal:use')).toEqual({ kind: 'portalList', level: null });
+    expect(parseBuiltInReason('managed:portal:agent')).toEqual({ kind: 'portalList', level: null });
+    expect(parseBuiltInReason('managed:portal:use-boundary')).toEqual({ kind: 'portalBoundary', level: null });
+    expect(parseBuiltInReason('managed:portal:agent-boundary')).toEqual({ kind: 'portalBoundary', level: null });
+    expect(parseBuiltInReason('managed:portal:something-new')).toEqual({ kind: 'other', level: null });
   });
 
   it('leaves an id it does not know as "other"', () => {
@@ -72,8 +82,8 @@ describe('parseBuiltInReason', () => {
 });
 
 describe('where a built-in setting is changed', () => {
-  it('a person: the member page, or the project member editor for a project limit', () => {
-    expect(reasonLink('role', { type: 'user', id: 'u 1' }, 'p1')).toEqual({ labelKey: 'member', href: '/dashboard/members/u%201' });
+  it('a person: where their access is changed, or the project member editor for a project limit', () => {
+    expect(reasonLink('role', { type: 'user', id: 'u 1' }, 'p1')).toEqual({ labelKey: 'member', href: memberHref('u 1') });
     expect(reasonLink('projectLimit', { type: 'user', id: 'u1' }, 'p-alpha')).toEqual({
       labelKey: 'projectMember',
       href: '/dashboard/projects/p-alpha?member=u1',
@@ -95,8 +105,15 @@ describe('where a built-in setting is changed', () => {
     expect(reasonLink('other', { type: 'user', id: 'u1' }, 'p1')).toBeNull();
   });
 
+  it('a portal rule leads to the portal, where its access list is edited', () => {
+    const who = { type: 'user', id: 'u1' } as const;
+    expect(reasonLink('portalBoundary', who, null, 'P 1')).toEqual({ labelKey: 'portal', href: '/dashboard/portals/P%201' });
+    expect(reasonLink('portalList', who, 'p1', 'P1')).toEqual({ labelKey: 'portal', href: '/dashboard/portals/P1' });
+    expect(reasonLink('portalBoundary', who, null)).toBeNull();
+  });
+
   it('builds the outside links', () => {
-    expect(memberHref('a/b')).toBe('/dashboard/members/a%2Fb');
+    expect(memberHref('a/b')).toContain(encodeURIComponent('a/b'));
     expect(projectMembersHref('p1')).toBe('/dashboard/projects/p1');
     expect(projectMembersHref('p1', 'u 2')).toBe('/dashboard/projects/p1?member=u%202');
     expect(projectMembersHref('p1', null)).toBe('/dashboard/projects/p1');

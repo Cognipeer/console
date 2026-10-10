@@ -29,6 +29,8 @@ export interface CheckForm {
   resource: ResourceRef | null;
   /** Resource kind `project`. */
   projectResource: string | null;
+  /** The portal an agent is run through (`agent.invoke` in the portal channel); `portal.use` names its portal as the resource. */
+  portal: ResourceRef | null;
   /** Request context. */
   ctxProjectId: string | null;
   channel: IamChannel | null;
@@ -36,6 +38,16 @@ export interface CheckForm {
   /** ISO timestamp; `null` = now. */
   at: string | null;
 }
+
+/** The action that runs an agent; in the portal channel it is asked about an agent run through a portal. */
+export const INVOKE_ACTION = 'agent.invoke';
+
+/** The actions the portal runtime asks about: a token cannot be the principal of either. */
+const PORTAL_RUNTIME_ACTIONS: readonly string[] = ['portal.use', INVOKE_ACTION];
+
+/** Opening a portal: only ever asked in the portal channel, about the portal itself. */
+const isPortalOnlyAction = (action: CatalogAction | undefined): boolean =>
+  !!action && !!action.enforcedIn && action.enforcedIn.length > 0 && action.enforcedIn.every((c) => c === 'portal') && action.id !== INVOKE_ACTION;
 
 /** The channel a request normally arrives on: a person uses the dashboard, a token calls the API. */
 export function defaultChannel(type: CheckPrincipalType): IamChannel {
@@ -52,6 +64,7 @@ export function emptyForm(type: CheckPrincipalType = 'user'): CheckForm {
     resourceType: null,
     resource: null,
     projectResource: null,
+    portal: null,
     ctxProjectId: null,
     channel: defaultChannel(type),
     ip: '',
@@ -59,7 +72,7 @@ export function emptyForm(type: CheckPrincipalType = 'user'): CheckForm {
   };
 }
 
-export type CheckIssue = 'principal' | 'action' | 'service' | 'resourceType' | 'resource' | 'project' | 'ip';
+export type CheckIssue = 'principal' | 'action' | 'service' | 'resourceType' | 'resource' | 'project' | 'portal' | 'ip';
 
 export function validateForm(form: CheckForm): CheckIssue[] {
   const issues: CheckIssue[] = [];
@@ -71,6 +84,8 @@ export function validateForm(form: CheckForm): CheckIssue[] {
     else if (!form.resource) issues.push('resource');
   }
   if (form.resourceKind === 'project' && !form.projectResource) issues.push('project');
+  // Running an agent in the portal channel is asked about the portal it is run through.
+  if (form.action === INVOKE_ACTION && form.channel === 'portal' && !form.portal) issues.push('portal');
   if (form.ip.trim() !== '' && !isValidIp(form.ip)) issues.push('ip');
   return issues;
 }
@@ -95,6 +110,7 @@ export function formToRequest(form: CheckForm): SimulateRequest | null {
   const context: SimulateContext = {
     ...(form.ctxProjectId ? { projectId: form.ctxProjectId } : {}),
     ...(form.channel ? { channel: form.channel } : {}),
+    ...(form.action === INVOKE_ACTION && form.channel === 'portal' && form.portal ? { portalId: form.portal.id } : {}),
     ...(form.ip.trim() ? { ip: form.ip.trim() } : {}),
     ...(form.at ? { at: form.at } : {}),
   };
@@ -109,7 +125,7 @@ export function formToRequest(form: CheckForm): SimulateRequest | null {
 /** Rebuilds the form from a request (a decision's `simulateInput`). Labels are the best known names. */
 export function requestToForm(
   request: SimulateRequest,
-  labels: { principal?: string; resource?: string } = {},
+  labels: { principal?: string; resource?: string; portal?: string } = {},
 ): CheckForm {
   const form = emptyForm(request.principal.type);
   form.principal = { id: request.principal.id, label: labels.principal || request.principal.id };
@@ -129,6 +145,7 @@ export function requestToForm(
   const c = request.context ?? {};
   form.ctxProjectId = c.projectId ?? null;
   form.channel = c.channel ?? null;
+  form.portal = c.portalId ? { type: 'portal', id: c.portalId, label: labels.portal || c.portalId } : null;
   form.ip = c.ip ?? '';
   form.at = c.at ?? null;
   return form;
@@ -140,9 +157,21 @@ export function requestToForm(
  * resource action on a resource of its type (an existing one, or a new one in a
  * project). Returns the form with the target adjusted; a resource that still
  * fits the new action is kept.
+ *
+ * Opening a portal is only ever asked in the portal channel, by a person: choosing
+ * it moves a still-default channel there, and choosing something else moves it
+ * back. A portal picked for running an agent belongs to that action alone.
  */
-export function applyAction(form: CheckForm, action: CatalogAction | undefined): CheckForm {
+export function applyAction(form: CheckForm, action: CatalogAction | undefined, previous?: CatalogAction): CheckForm {
   const next: CheckForm = { ...form, action: action?.id ?? null };
+  if (action?.id !== INVOKE_ACTION) next.portal = null;
+  if (isPortalOnlyAction(action)) {
+    const wasDefault = form.channel === null || form.channel === defaultChannel(form.principalType);
+    if (form.principalType === 'user' && wasDefault) next.channel = 'portal';
+  } else if (form.channel === 'portal' && (isPortalOnlyAction(previous) || (previous?.id === INVOKE_ACTION && form.portal && action?.id !== INVOKE_ACTION))) {
+    // The portal channel came with the previous action: it goes with it.
+    next.channel = defaultChannel(form.principalType);
+  }
   if (!action) return next;
   if (action.kind === 'service') {
     next.resourceKind = 'service';
@@ -162,14 +191,34 @@ export function applyAction(form: CheckForm, action: CatalogAction | undefined):
   return next;
 }
 
-/** Changing the principal type keeps the action and resource but drops the (now wrong) principal. */
+/**
+ * Choosing the portal an agent is run through puts the check in the portal channel
+ * (while the channel was still the default); clearing it puts the channel back.
+ */
+export function applyPortal(form: CheckForm, portal: ResourceRef | null): CheckForm {
+  const next: CheckForm = { ...form, portal };
+  if (portal && form.principalType === 'user' && (form.channel === null || form.channel === defaultChannel(form.principalType))) {
+    next.channel = 'portal';
+  } else if (!portal && form.channel === 'portal') {
+    next.channel = defaultChannel(form.principalType);
+  }
+  return next;
+}
+
+/**
+ * Changing the principal type keeps the action and resource but drops the (now
+ * wrong) principal. A token cannot open portals or run agents through them, so
+ * for those two actions it leaves the portal channel (and the portal) behind.
+ */
 export function applyPrincipalType(form: CheckForm, type: CheckPrincipalType): CheckForm {
   if (form.principalType === type) return form;
   const channelWasDefault = form.channel === defaultChannel(form.principalType);
+  const leavesPortal = type === 'token' && form.channel === 'portal' && !!form.action && PORTAL_RUNTIME_ACTIONS.includes(form.action);
   return {
     ...form,
     principalType: type,
     principal: null,
-    channel: channelWasDefault ? defaultChannel(type) : form.channel,
+    channel: channelWasDefault || leavesPortal ? defaultChannel(type) : form.channel,
+    portal: leavesPortal ? null : form.portal,
   };
 }

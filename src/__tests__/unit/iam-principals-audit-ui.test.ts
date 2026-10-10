@@ -184,7 +184,8 @@ const readBlob = (blob: Blob) =>
   });
 
 const rowsText = () => qa('table.ds-tbl tbody tr').map((r) => r.textContent ?? '');
-const principalCalls = () => api.to('GET', '/api/iam/principals');
+// the table's own requests: the pickers of the filter bar ask for 20 suggestions at a time
+const principalCalls = () => api.to('GET', '/api/iam/principals').filter((c) => c.query.limit !== '20');
 const lastQuery = (calls: ReturnType<ApiMock['to']>) => calls[calls.length - 1]?.query ?? {};
 
 // ── Principals ───────────────────────────────────────────────────────────
@@ -195,7 +196,8 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 describe('PrincipalsTab', () => {
   it('lists the users of the first page, 25 at a time, with role and status', async () => {
     await render(createElement(PrincipalsTab, { canManage: true }));
-    expect(principalCalls()[0]?.query).toEqual({ type: 'user', limit: '25' });
+    // the exact total is asked for once, with the first page of a view
+    expect(principalCalls()[0]?.query).toEqual({ type: 'user', limit: '25', count: '1' });
     const rows = rowsText();
     expect(rows).toHaveLength(3);
     expect(rows[0]).toContain('Ann Lee');
@@ -214,7 +216,7 @@ describe('PrincipalsTab', () => {
     await setInput(input, 'bob');
     await settle(500);
     expect(principalCalls().length).toBe(before + 1);
-    expect(lastQuery(principalCalls())).toEqual({ type: 'user', q: 'bob', limit: '25' });
+    expect(lastQuery(principalCalls())).toEqual({ type: 'user', q: 'bob', limit: '25', count: '1' });
     expect(rowsText()).toHaveLength(1);
     expect(rowsText()[0]).toContain('Bob Ray');
   });
@@ -247,7 +249,7 @@ describe('PrincipalsTab', () => {
     expect(buttonByText(/^Next$/)?.hasAttribute('disabled')).toBe(true);
     await click(buttonByText(/^Previous$/));
     await settle(250);
-    expect(lastQuery(principalCalls())).toEqual({ type: 'user', limit: '25' });
+    expect(lastQuery(principalCalls())).toEqual({ type: 'user', limit: '25', count: '1' });
     expect(text()).toContain('Page 1');
   });
 
@@ -255,7 +257,7 @@ describe('PrincipalsTab', () => {
     await render(createElement(PrincipalsTab, { canManage: true }));
     await click(qa('label').find((l) => l.textContent === 'Groups') ?? null);
     await settle(250);
-    expect(lastQuery(principalCalls())).toEqual({ type: 'group', limit: '25' });
+    expect(lastQuery(principalCalls())).toEqual({ type: 'group', limit: '25', count: '1' });
     const rows = rowsText();
     expect(rows[0]).toContain('Engineering');
     expect(rows[0]).toContain('42');
@@ -268,8 +270,9 @@ describe('PrincipalsTab', () => {
     await click(buttonByText(/Ann Lee/));
     await settle(300);
     const detailCalls = api.to('GET', '/api/iam/principals/user/u-ann');
+    // the profile first, without the (expensive) effective table; this server sends it anyway, so one request is enough
     expect(detailCalls).toHaveLength(1);
-    expect(detailCalls[0]?.query).toEqual({});
+    expect(detailCalls[0]?.query).toEqual({ effective: '0' });
     const t = text();
     expect(t).toContain('Effective permissions');
     expect(t).toContain('Model Hub'); // service label from the built-in names (the catalog key has no message)
@@ -337,7 +340,8 @@ describe('PrincipalsTab', () => {
     await click(q('.mantine-Drawer-close'));
     await settle(200);
     expect(window.location.search).not.toContain('principalId');
-    expect(window.location.search).not.toContain('principalType');
+    // the segment stays in the address bar when the drawer closes
+    expect(window.location.search).toContain('principalType=user');
   });
 
   it('?principalType=group&principalId=… opens that group straight away, on the right segment', async () => {
@@ -359,7 +363,7 @@ describe('PrincipalsTab', () => {
     ]);
     expect(text()).toContain('Could not load the list');
     expect(text()).toContain('Database timeout');
-    expect(text()).not.toContain('No users yet');
+    expect(text()).not.toContain('No people yet');
     fail = false;
     await click(buttonByText(/Try again/));
     await settle(250);
@@ -375,7 +379,7 @@ describe('PrincipalsTab', () => {
 
   it('renders in Turkish', async () => {
     await render(createElement(PrincipalsTab, { canManage: true }), [], '', 'tr');
-    expect(text()).toContain('Kullanıcılar');
+    expect(text()).toContain('Kişiler');
     expect(text()).toContain('Sahip'); // role badge
     await click(buttonByText(/Ann Lee/));
     await settle(300);

@@ -23,7 +23,7 @@ const h = vi.hoisted(() => ({
     findProjectById: vi.fn(),
     findUserProject: vi.fn(),
   },
-  getUserAuthState: vi.fn(),
+  getUserIdentity: vi.fn(),
 }));
 
 vi.mock('next/headers', () => ({
@@ -38,7 +38,7 @@ vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => h.db) }));
 vi.mock('@/lib/services/support/supportHandoff', () => ({ isSupportEntryPointEnabled: () => false }));
 vi.mock('@/lib/services/users/userAuthState', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/users/userAuthState')>()),
-  getUserAuthState: h.getUserAuthState,
+  getUserIdentity: h.getUserIdentity,
 }));
 
 // The vitest esbuild transform compiles JSX to React.createElement (the app
@@ -130,34 +130,36 @@ describe('dashboard layout (which projects count)', () => {
 
 describe('project layout', () => {
   const render = () => ProjectLayout({ children: 'kids', params: Promise.resolve({ projectId: 'p1' }) });
+  // The role in the session header is deliberately a different one in every case below: the
+  // layout decides on the account record (getUserIdentity), never on the header.
+  const accountIs = (state: string, role: string | null) =>
+    h.getUserIdentity.mockResolvedValue({ state, role });
 
   it('redirects a disabled admin before the admin short-circuit', async () => {
-    h.getUserAuthState.mockResolvedValue('disabled');
+    accountIs('disabled', 'admin');
     await expect(render()).rejects.toThrow('REDIRECT:/login');
   });
 
   it('redirects a disabled project member even though a membership exists', async () => {
-    h.headerValues['x-user-role'] = 'user';
-    h.getUserAuthState.mockResolvedValue('disabled');
+    accountIs('disabled', 'user');
     h.db.findProjectById.mockResolvedValue({ _id: 'p1', tenantId: 't1' });
     h.db.findUserProject.mockResolvedValue({ projectId: 'p1' });
     await expect(render()).rejects.toThrow('REDIRECT:/login');
   });
 
   it('lets an active admin through', async () => {
-    h.getUserAuthState.mockResolvedValue('active');
+    accountIs('active', 'admin');
     await expect(render()).resolves.toBe('kids');
   });
 
-  it('does not turn a missing user row into a redirect (existing behaviour kept)', async () => {
-    h.getUserAuthState.mockResolvedValue('missing');
-    await expect(render()).resolves.toBe('kids');
+  it('sends a deleted account (or a session of another workspace) to sign in', async () => {
+    accountIs('missing', null);
+    await expect(render()).rejects.toThrow('REDIRECT:/login');
   });
 
   describe('a member who is not an admin', () => {
     const asMember = () => {
-      h.headerValues['x-user-role'] = 'user';
-      h.getUserAuthState.mockResolvedValue('active');
+      accountIs('active', 'user');
       h.db.findProjectById.mockResolvedValue({ _id: 'p1', tenantId: 't1' });
       h.db.findUserProject.mockResolvedValue(null);
       h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', projectIds: [] });

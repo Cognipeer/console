@@ -5,10 +5,14 @@ import { useSearchParams } from 'next/navigation';
 import { Alert, Button, Group, SimpleGrid, Stack, Switch, Text, Tooltip } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
+  IconActivity,
   IconAlertTriangle,
+  IconBrain,
   IconBuildingBank,
   IconCopy,
+  IconDatabase,
   IconEdit,
+  IconFiles,
   IconGauge,
   IconKey,
   IconPackage,
@@ -26,7 +30,7 @@ import { useDeleteResource } from '@/components/common/confirm';
 import { QuotaPolicyModal, type QuotaPolicyFormData } from '@/components/quota/QuotaPolicyModal';
 import { tryTranslate } from '@/components/resources/i18nLookup';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
-import { useTranslations } from '@/lib/i18n';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import { QUOTA_DOMAINS, QUOTA_SCOPES, type QuotaDomain, type QuotaScope } from '@/lib/quota/types';
 import { parseLimitLink } from './links';
 import {
@@ -36,9 +40,9 @@ import {
   humanizeKey,
   isInertLimit,
   limitAmounts,
-  limitSearchText,
   limitStats,
   sortLimitRows,
+  targetNounOf,
   type LimitAmount,
   type LimitRow,
 } from './limitsModel';
@@ -68,11 +72,21 @@ const SCOPE_ICON: Record<QuotaScope, ReactNode> = {
   provider: <IconServer size={12} />,
 };
 
+/** What a resource limit points at, when it is more specific than "a resource". */
+const NOUN_ICON: Partial<Record<NonNullable<ReturnType<typeof targetNounOf>>, ReactNode>> = {
+  model: <IconBrain size={12} />,
+  vectorIndex: <IconDatabase size={12} />,
+  fileBucket: <IconFiles size={12} />,
+  agent: <IconRobot size={12} />,
+  agentName: <IconActivity size={12} />,
+};
+
 /** The amounts shown inline in a row; the rest are in the tooltip. */
 const INLINE_AMOUNTS = 3;
 
 export default function LimitsTab({ canManage }: LimitsTabProps) {
   const t = useTranslations('iamLimits');
+  const locale = useLocale();
   const tScopes = useTranslations('settings.quotaSection.scopes');
   const tDomains = useTranslations('settings.quotaSection.domains');
   const tConfirm = useTranslations('common.confirm.qos');
@@ -84,6 +98,9 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
 
   const [scopeFilter, setScopeFilter] = useState<QuotaScope | 'all'>('all');
   const [domainFilter, setDomainFilter] = useState<QuotaDomain | 'all'>('all');
+  // Searched here, not by the table's own box: that one lower-cases with the plain mapping, which cannot
+  // tell "İstanbul" from "istanbul" (see searchFold).
+  const [query, setQuery] = useState('');
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<LimitRow | null>(null);
   const [seed, setSeed] = useState<Partial<QuotaPolicyFormData> | null>(null);
@@ -103,14 +120,10 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
 
   const stats = useMemo(() => limitStats(rows), [rows]);
   const filtered = useMemo(
-    () => sortLimitRows(filterLimitRows(rows, { scope: scopeFilter, domain: domainFilter, query: '' })),
-    [rows, scopeFilter, domainFilter],
+    () => sortLimitRows(filterLimitRows(rows, { scope: scopeFilter, domain: domainFilter, query })),
+    [rows, scopeFilter, domainFilter, query],
   );
-  const grid = useTableControls(filtered, {
-    searchText: limitSearchText,
-    searchPlaceholder: t('filters.search'),
-    filterKey: `${scopeFilter}|${domainFilter}`,
-  });
+  const grid = useTableControls(filtered, { filterKey: `${scopeFilter}|${domainFilter}|${query}` });
 
   const openNew = useCallback(() => {
     setEditing(null);
@@ -207,16 +220,31 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
     [t],
   );
 
+  /**
+   * What kind of thing the limit points at: "Group", "Person"... and, for a resource or provider
+   * limit, what that resource is ("Model", "Vector index", "File bucket"...) rather than the
+   * catch-all "Resource".
+   */
+  const kindLabel = (row: LimitRow): string => {
+    if (row.target.type === 'agent') return t('target.agent');
+    const noun = row.scope === 'resource' || row.scope === 'provider' ? targetNounOf(row) : null;
+    return (noun && tryTranslate(t, `form.targetLabel.${noun}`, 'iamLimits')) || tScopes(row.scope);
+  };
+
+  const kindIcon = (row: LimitRow): ReactNode => {
+    if (row.target.type === 'agent') return <IconRobot size={12} />;
+    const noun = row.scope === 'resource' || row.scope === 'provider' ? targetNounOf(row) : null;
+    return (noun && NOUN_ICON[noun]) || SCOPE_ICON[row.scope];
+  };
+
   const targetCell = (row: LimitRow) => {
     const { target } = row;
-    const scopeLabel =
-      target.type === 'agent' ? t('target.agent') : tScopes(row.scope);
     return (
       <Stack gap={3}>
         <div className="ds-badge-cluster">
           <span className={`ds-badge ${SCOPE_BADGE[row.scope]}`}>
-            {target.type === 'agent' ? <IconRobot size={12} /> : SCOPE_ICON[row.scope]}
-            {scopeLabel}
+            {kindIcon(row)}
+            {kindLabel(row)}
           </span>
           {row.scope === 'group' ? (
             <Tooltip label={row.groupMode === 'shared' ? t('mode.sharedHint') : t('mode.perMemberHint')} multiline w={260}>
@@ -229,15 +257,20 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
             {t('target.everyone')}
           </Text>
         ) : (
+          // The NAME first, with the key (or e-mail, or description) underneath; a target that no longer exists is called out.
           <div className="ds-badge-cluster">
-            <Text size="sm" fw={500} lineClamp={1}>
+            <Text size="sm" fw={500} lineClamp={1} title={target.label ?? target.id}>
               {target.label ?? target.id ?? '—'}
             </Text>
-            {target.missing ? <span className="ds-badge ds-badge-err">{t('target.deleted')}</span> : null}
+            {target.missing ? (
+              <Tooltip label={t('target.notFoundHint')} multiline w={260}>
+                <span className="ds-badge ds-badge-err">{t('target.notFound')}</span>
+              </Tooltip>
+            ) : null}
           </div>
         )}
         {target.sublabel ? (
-          <Text size="xs" c="dimmed" lineClamp={1}>
+          <Text size="xs" c="dimmed" lineClamp={1} title={target.sublabel}>
             {target.sublabel}
           </Text>
         ) : null}
@@ -372,7 +405,7 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
   // beside the error would read as "there are none".
   if (error && rows.length === 0 && !loading) {
     return (
-      <Stack gap="md">
+      <Stack gap="md" lang={locale}>
         <Text size="sm" c="dimmed" maw={760}>
           {t('intro')}
         </Text>
@@ -391,7 +424,9 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
   }
 
   return (
-    <Stack gap="md">
+    // `lang`: the page's own is "en", and the upper-cased tile labels and column headings would lose their
+    // Turkish dots ("LIMITLER", not "LİMİTLER").
+    <Stack gap="md" lang={locale}>
       <Group justify="space-between" align="flex-start" wrap="wrap" gap="sm">
         <Text size="sm" c="dimmed" maw={760}>
           {t('intro')}
@@ -421,7 +456,7 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
         loading={loading}
         refreshing={refreshing}
         onRefresh={() => void reload()}
-        search={grid.search}
+        search={{ value: query, onChange: setQuery, placeholder: t('filters.search') }}
         filters={[
           {
             value: scopeFilter,
@@ -464,7 +499,7 @@ export default function LimitsTab({ canManage }: LimitsTabProps) {
         }
         empty={empty}
         pagination={grid.pagination}
-        footerLeft={grid.footerLeft(t('footerNoun'))}
+        footerLeft={t('footer', { shown: grid.records.length, total: grid.filteredCount })}
       />
 
       <QuotaPolicyModal

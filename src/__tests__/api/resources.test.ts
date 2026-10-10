@@ -150,6 +150,25 @@ describe('resources API', () => {
       expect(page.total).toBe(2);
     });
 
+    it('searches names and descriptions the Turkish way: "istanbul" finds "İstanbul", "ısparta" finds "ISPARTA"', async () => {
+      db.listAgents.mockResolvedValue([
+        { ...agentDoc, _id: 'agent-ist', key: 'a-1', name: 'İstanbul Asistanı', description: '' },
+        { ...agentDoc, _id: 'agent-isp', key: 'a-2', name: 'Şube botu', description: 'ISPARTA şubesi için' },
+        { ...agentDoc, _id: 'agent-plain', key: 'a-3', name: 'Plain agent', description: 'nothing Turkish' },
+      ] as never);
+      clearResourceCache();
+      const ids = async (q: string) =>
+        parseJsonBody<{ items: Array<{ id: string }> }>(
+          (await app.inject({ method: 'GET', url: `/api/resources?type=agent&q=${encodeURIComponent(q)}`, headers: adminHeaders })).body,
+        ).items.map((i) => i.id);
+      expect(await ids('istanbul')).toEqual(['agent-ist']);
+      expect(await ids('İSTANBUL')).toEqual(['agent-ist']);
+      expect(await ids('ısparta')).toEqual(['agent-isp']); // in the description
+      expect(await ids('isparta')).toEqual(['agent-isp']);
+      expect(await ids('ISPARTA')).toEqual(['agent-isp']);
+      expect(await ids('nothing')).toEqual(['agent-plain']);
+    });
+
     it('refresh=1 re-reads the providers, otherwise the cache is used', async () => {
       await app.inject({ method: 'GET', url: '/api/resources', headers: adminHeaders });
       await app.inject({ method: 'GET', url: '/api/resources', headers: adminHeaders });

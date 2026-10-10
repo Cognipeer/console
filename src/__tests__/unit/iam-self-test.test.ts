@@ -81,7 +81,7 @@ afterEach(() => {
 describe('engineSelfTest', () => {
   it('passes on a working engine, reporting what it checked', () => {
     const result = engineSelfTest();
-    expect(result).toMatchObject({ ok: true, checks: 7, cedar: { sdk: expect.any(String), language: expect.any(String) } });
+    expect(result).toMatchObject({ ok: true, checks: 13, cedar: { sdk: expect.any(String), language: expect.any(String) } });
     if (result.ok) {
       expect(result.durationMs).toBeGreaterThanOrEqual(0);
       expect(result.durationMs).toBeLessThan(5_000);
@@ -127,11 +127,21 @@ describe('engineSelfTest', () => {
     ['members.write', 'member cannot change members', 'deny', 'allow'],
     ['models.write', 'unscoped token acts as its owner', 'allow', 'deny'],
     ['agents.read', 'scoped token stops at its scope', 'deny', 'allow'],
+    ['portal.use', 'a listed person opens a portal', 'allow', 'deny'],
+    ['agent.invoke', 'a listed person runs an agent in a portal', 'allow', 'deny'],
   ])('notices when %s is decided the wrong way (%s)', (action, name, expected, got) => {
     flags.flipAction = action;
     const result = engineSelfTest();
     expect(result.ok).toBe(false);
     expect(!result.ok && result.error).toContain(`${name}: expected ${expected}, got ${got}`);
+  });
+});
+
+describe('the portal rules in the self-test', () => {
+  it('proves the access list decides: the listed and the grouped in, an unlisted admin and a token out - with no rule erroring', () => {
+    // runCanned fails the test on ANY evaluation error, so a managed portal rule that cannot be evaluated is caught at boot
+    expect(engineSelfTest()).toMatchObject({ ok: true });
+    expect(engineProbe()).toEqual({ ok: true });
   });
 });
 

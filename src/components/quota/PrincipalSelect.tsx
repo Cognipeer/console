@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader, Select, Text } from '@mantine/core';
 import { PICKER_LIMIT, resolvePickerOption, searchPickerOptions, type PickerOption, type PickerType } from './pickerSources';
+import { useSearchBox } from './useSearchBox';
 
 interface PrincipalSelectProps {
   type: PickerType;
@@ -26,6 +27,10 @@ const SEARCH_DEBOUNCE_MS = 250;
 /**
  * A searchable picker whose candidates come from the server as you type, so it
  * stays usable on a tenant with tens of thousands of users (see pickerSources).
+ *
+ * The box shows the chosen name; typing into it starts a fresh search (the name
+ * is replaced, never extended into a question like "Alicex"), and Enter picks
+ * the first, best-ranked result (see useSearchBox).
  */
 export function PrincipalSelect({
   type,
@@ -40,36 +45,29 @@ export function PrincipalSelect({
   disabled = false,
   clearable = true,
 }: PrincipalSelectProps) {
-  const [search, setSearch] = useState('');
+  // What was asked of the server: the words typed, not the name Mantine writes into the box after a pick.
+  const [query, setQuery] = useState('');
   const [found, setFound] = useState<PickerOption[]>([]);
-  const [loading, setLoading] = useState(false);
+  // A search is waiting out the pause after the last keystroke, or on its way.
+  const [loading, setLoading] = useState(true);
   // The option behind the current value stays selectable whatever a later search returns.
   const [chosen, setChosen] = useState<PickerOption | null>(null);
   const requestId = useRef(0);
 
   useEffect(() => {
     const id = ++requestId.current;
+    setLoading(true);
     const handle = setTimeout(() => {
-      setLoading(true);
-      searchPickerOptions(type, search)
+      searchPickerOptions(type, query)
+        .catch((): PickerOption[] => [])
         .then((options) => {
-          if (requestId.current === id) setFound(options);
-        })
-        .catch(() => {
-          if (requestId.current === id) setFound([]);
-        })
-        .finally(() => {
-          if (requestId.current === id) setLoading(false);
+          if (requestId.current !== id) return;
+          setFound(options);
+          setLoading(false);
         });
-    }, search ? SEARCH_DEBOUNCE_MS : 0);
+    }, query.trim() ? SEARCH_DEBOUNCE_MS : 0);
     return () => clearTimeout(handle);
-  }, [type, search]);
-
-  // A different kind of target invalidates the remembered choice.
-  useEffect(() => {
-    setChosen(null);
-    setSearch('');
-  }, [type]);
+  }, [type, query]);
 
   // A stored id that arrives without a name (a deep link) is looked up once.
   const [resolved, setResolved] = useState<PickerOption | null>(null);
@@ -111,6 +109,28 @@ export function PrincipalSelect({
     reportLabel.current?.(currentLabel);
   }, [currentLabel]);
 
+  const box = useSearchBox({
+    label: currentLabel,
+    value: value || null,
+    initialText: currentLabel ?? '',
+    onQuery: setQuery,
+    enter: { ready: !loading, results: found },
+  });
+
+  // A different kind of target invalidates the remembered choice and whatever was typed for the old one.
+  const resetBox = box.reset;
+  const firstType = useRef(type);
+  useEffect(() => {
+    if (firstType.current === type) return;
+    firstType.current = type;
+    setChosen(null);
+    resetBox();
+  }, [type, resetBox]);
+
+  const searching = query.trim() !== '';
+  /** The stored value, when the results do not hold it: kept selectable, but not offered while somebody searches. */
+  const pinned = Boolean(value) && !lookup.has(value ?? '');
+
   return (
     <Select
       label={label}
@@ -126,10 +146,12 @@ export function PrincipalSelect({
       searchable
       clearable={clearable}
       disabled={disabled}
-      // The server already filtered: do not filter the list a second time on the label.
-      filter={({ options }) => options}
-      searchValue={search}
-      onSearchChange={setSearch}
+      // The server already filtered and ranked: do not filter the list a second time on the label.
+      // The one thing left out is the stored value that is not among the results, while somebody searches.
+      filter={({ options }) =>
+        searching && pinned ? options.filter((option) => !('value' in option) || option.value !== value) : options
+      }
+      {...box.props}
       limit={PICKER_LIMIT}
       rightSection={loading ? <Loader size="xs" /> : undefined}
       nothingFoundMessage={nothingFoundMessage}
@@ -139,7 +161,8 @@ export function PrincipalSelect({
           <div>
             <Text size="sm">{option.label}</Text>
             {description ? (
-              <Text size="xs" c="dimmed">
+              // Not `c="dimmed"`: a highlighted option turns white, and a fixed grey would be unreadable on it.
+              <Text size="xs" style={{ opacity: 0.72 }}>
                 {description}
               </Text>
             ) : null}

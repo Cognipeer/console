@@ -16,7 +16,7 @@ import {
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { iamApi, isAbortError, type IamLevel, type SimulateReason, type SimulateRequest, type SimulateResponse } from '../api';
-import { iamHref, newPolicyHref, policyHref } from '../links';
+import { iamHref, newPolicyHref, policyHref, portalHref } from '../links';
 import { useProjects } from '../pickers/lookups';
 import type { IamLabels } from '../useIamLabels';
 import { hasProjectLimit, parseBuiltInReason, projectLimitFrom, reasonLink, type ReasonLink } from './reasonModel';
@@ -56,6 +56,8 @@ interface ReasonContext {
   tokenScope: Record<string, string> | null;
   /** The limit the project sets on `service` for this member, once the server has said. */
   projectLimit: { level: IamLevel; projectName: string } | null;
+  /** The portal the check is about, when it is one. */
+  portalId: string | null;
 }
 
 function ChangeLink({ link }: { link: ReasonLink }) {
@@ -108,7 +110,7 @@ function ReasonRow({ reason, labels, ctx }: { reason: SimulateReason; labels: Ia
   const required = levelWord(built.level ?? ctx.level);
   const role = labels.lookup(`iamPrincipals.roles.${ctx.role}`) ?? ctx.role;
   const project = ctx.projectLimit?.projectName || ctx.projectName || '';
-  const link = reasonLink(built.kind, ctx.who, ctx.projectId);
+  const link = reasonLink(built.kind, ctx.who, ctx.projectId, ctx.portalId);
 
   let title: string;
   let detail: string | null = null;
@@ -137,6 +139,14 @@ function ReasonRow({ reason, labels, ctx }: { reason: SimulateReason; labels: Ia
       detail = t('result.reason.tokenScopeDetail', { service: serviceName, limit, required });
       break;
     }
+    case 'portalList':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.portalReason.list');
+      break;
+    case 'portalBoundary':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.portalReason.boundary');
+      break;
     default:
       title = labels.managedName(reason.cedarId, reason.name);
   }
@@ -202,7 +212,7 @@ export default function SimulateResultCard({
   level = null,
 }: SimulateResultCardProps) {
   const t = useTranslations('iamCenter');
-  const { allowed, reasons, defaultDeny, principalSummary: ps, ownerSafety, errors, enforcedAtGate } = result;
+  const { allowed, reasons, defaultDeny, principalSummary: ps, ownerSafety, errors, enforcedAtGate, portal } = result;
   const { projects } = useProjects();
   const projectName = result.projectId ? (projects.find((p) => p.id === result.projectId)?.name ?? result.projectId) : null;
   const principalType = request.principal.type;
@@ -218,6 +228,7 @@ export default function SimulateResultCard({
     projectName,
     tokenScope: ps.tokenScope,
     projectLimit,
+    portalId: result.portal?.id ?? null,
   };
   const role = labels.lookup(`iamPrincipals.roles.${ps.role}`) ?? ps.role;
   const noRuleLink = principalType === 'user' ? reasonLink('role', who, result.projectId) : null;
@@ -288,6 +299,29 @@ export default function SimulateResultCard({
             </Text>
           )}
         </Section>
+
+        {portal ? (
+          <Section title={t('result.portalTitle')}>
+            <Stack gap={4} data-testid="check-portal">
+              <Group gap="xs">
+                <Text size="sm" fw={600}>
+                  {portal.name}
+                </Text>
+                {portal.status === 'disabled' ? (
+                  <Badge size="xs" variant="light" color="orange">
+                    {t('result.portalDisabled')}
+                  </Badge>
+                ) : null}
+              </Group>
+              <Text size="xs" c="dimmed">
+                {portal.mode === 'all'
+                  ? t('result.portalOpenAll')
+                  : t('result.portalAudience', { users: portal.userCount, groups: portal.groupCount })}
+              </Text>
+              <ChangeLink link={{ labelKey: 'portal', href: portalHref(portal.id) }} />
+            </Stack>
+          </Section>
+        ) : null}
 
         <Section title={t('result.principalTitle')}>
           <Stack gap={4}>

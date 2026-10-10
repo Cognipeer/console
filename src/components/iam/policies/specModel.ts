@@ -223,6 +223,17 @@ export function withPrincipal(draft: PolicyDraft, type: IamPrincipalType, princi
   return next;
 }
 
+/**
+ * Prefill from a deep link (`?new=1&resourceType=&resourceId=`): a rule about this
+ * one resource. For a portal it is "block someone from this portal": a deny rule
+ * for opening it, in the portal channel; the editor still asks who.
+ */
+export function withResource(draft: PolicyDraft, resource: ResourceRef): PolicyDraft {
+  const next: PolicyDraft = { ...draft, whereMode: 'resources', resources: [resource] };
+  if (resource.type !== 'portal') return next;
+  return { ...next, effect: 'forbid', actions: ['portal.use'], channels: ['portal'] };
+}
+
 // ── draft -> spec ────────────────────────────────────────────────────────
 
 function uniq<T>(items: readonly T[], key: (x: T) => string): T[] {

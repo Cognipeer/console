@@ -230,8 +230,9 @@ describe('directory contract', () => {
 
 // ── search is the same on both backends for names outside ASCII ──────────────
 // SQLite's LIKE only folds the case of ASCII letters; MongoDB's case-insensitive $regex folds Unicode. A person
-// typing "şule" must find "Şule" on an on-prem SQLite install exactly as on MongoDB (a function lower-cases both
-// sides there; accents are not stripped on either backend).
+// typing "şule" must find "Şule" on an on-prem SQLite install exactly as on MongoDB (a function folds both
+// sides there; accents are not stripped on either backend). The four letters of the Turkish i family (I, İ, i, ı)
+// are one letter for the search (see the next block).
 describeForEachProvider('IAM directory search: names beyond ASCII', (getDb) => {
   let db: DatabaseProvider;
   let tenantId: string;
@@ -263,7 +264,7 @@ describeForEachProvider('IAM directory search: names beyond ASCII', (getDb) => {
     expect(await names('şule')).toEqual(['Şule Yıldız']);
     expect(await names('ŞULE')).toEqual(['Şule Yıldız']);
     expect(await names('çelik')).toEqual(['İbrahim Çelik']);
-    expect(await names('ÇELİK')).toEqual([]); // dotted capital İ is not a case of plain i, on either backend
+    expect(await names('ÇELİK')).toEqual(['İbrahim Çelik']); // the dotted capital İ meets the plain i, on either backend
     expect(await names('özlem')).toEqual(['Özlem Öztürk']);
     expect(await names('öztürk')).toEqual(['Özlem Öztürk']);
     expect(await names('ünal')).toEqual(['Ayşe Ünal']);
@@ -282,10 +283,92 @@ describeForEachProvider('IAM directory search: names beyond ASCII', (getDb) => {
 
   it('applies to groups (name and description) and tokens (label) the same way', async () => {
     expect((await db.iamListGroups({ tenantId, q: 'çözüm', limit: 10 })).items.map((g) => g.name)).toEqual(['Çözüm Ekibi']);
-    expect((await db.iamListGroups({ tenantId, q: 'ŞİRKET', limit: 10 })).items).toEqual([]);
+    expect((await db.iamListGroups({ tenantId, q: 'ŞİRKET', limit: 10 })).items.map((g) => g.name)).toEqual(['Çözüm Ekibi']);
     expect((await db.iamListGroups({ tenantId, q: 'şirket', limit: 10 })).items.map((g) => g.name)).toEqual(['Çözüm Ekibi']);
     expect((await db.iamListTokens({ tenantId, q: 'çevrimiçi', limit: 10 })).items.map((t) => t.label)).toEqual(['Çevrimiçi Token']);
-    expect((await db.iamListTokens({ tenantId, q: 'ÇEVRİMİÇİ', limit: 10 })).items).toEqual([]);
+    expect((await db.iamListTokens({ tenantId, q: 'ÇEVRİMİÇİ', limit: 10 })).items.map((t) => t.label)).toEqual(['Çevrimiçi Token']);
+  });
+});
+
+// ── the Turkish i family ───────────────────────────────────────────────────────
+// "İstanbul" lower-cases to "i" + a combining dot, which no typed "istanbul" ever matched, and "ISPARTA" is "Isparta"
+// = "ısparta" in Turkish but "isparta" on an English keyboard. So I, İ, i and ı meet at "i" in the search on both
+// backends (SQLite folds both sides in iam_fold; MongoDB's pattern lists the four), whatever the case typed or stored.
+describeForEachProvider('IAM directory search: the Turkish i family', (getDb) => {
+  let db: DatabaseProvider;
+  let tenantId: string;
+
+  beforeAll(async () => {
+    db = getDb();
+    const slug = `iamdir-i-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbName = `tenant_${slug}`;
+    tenantId = String((await db.createTenant({ companyName: 'Dir I', slug, dbName, licenseType: 'FREE', ownerId: 'x' }))._id);
+    await db.switchToTenant(dbName);
+    for (const [name, email] of [
+      ['İsmail Işık', 'ismail@corp.example'],
+      ['Işıl Demir', 'isil@corp.example'],
+      ['IRMAK ISPARTA', 'irmak@corp.example'],
+      ['Ilgaz Inan', 'ilgaz@corp.example'],
+      ['Tülin Çiçek', 'tc1@corp.example'], // an address that does not spell the name, so only the name can be found
+      ['Ali Veli', 'ali@corp.example'],
+    ] as const) {
+      await db.createUser({ tenantId, email, name, password: 'h', role: 'user', licenseId: 'FREE', features: [] });
+    }
+    await db.createGroup({ tenantId, name: 'İSTANBUL Ekibi', description: 'Işık Grubu', createdBy: 't', source: 'local' } as never);
+    await db.createGroup({ tenantId, name: 'Isparta Ekibi', createdBy: 't', source: 'local' } as never);
+    await db.createApiToken({ tenantId, userId: 'someone', label: 'İşlem Anahtarı', tokenHash: `hash-${Math.random()}`, tokenPrefix: 'cp_ISL', createdBy: 'someone' } as never);
+  });
+
+  const names = async (q: string) => (await db.iamListUsers({ tenantId, q, limit: 50 })).items.map((u) => u.name).sort();
+  const groupNames = async (q: string) => (await db.iamListGroups({ tenantId, q, limit: 50 })).items.map((g) => g.name).sort();
+  const labels = async (q: string) => (await db.iamListTokens({ tenantId, q, limit: 50 })).items.map((t) => t.label).sort();
+
+  it('finds a dotted capital İ with the plain i, the dotless ı and every case of them', async () => {
+    for (const q of ['ismail', 'ISMAIL', 'İsmail', 'İSMAİL', 'ısmaıl', 'Ismail']) expect(await names(q), q).toEqual(['İsmail Işık']);
+  });
+
+  it('finds a dotless ı however it is typed', async () => {
+    for (const q of ['ışık', 'IŞIK', 'işik', 'İŞİK', 'Işık']) expect(await names(q), q).toEqual(['İsmail Işık']);
+    for (const q of ['ışıl', 'IŞIL', 'işil', 'İŞİL']) expect(await names(q), q).toEqual(['Işıl Demir']);
+  });
+
+  it('finds a capital I that stands for the dotless letter - "ISPARTA" is "ısparta" - with all of its spellings', async () => {
+    for (const q of ['ISPARTA', 'isparta', 'ısparta', 'İsparta', 'Isparta']) expect(await names(q), q).toEqual(['IRMAK ISPARTA']);
+    for (const q of ['ilgaz', 'ILGAZ', 'ılgaz', 'İlgaz']) expect(await names(q), q).toEqual(['Ilgaz Inan']);
+  });
+
+  it('finds the other Turkish letters as before, and still does not strip accents', async () => {
+    for (const q of ['çiçek', 'ÇİÇEK', 'çıçek', 'Çiçek']) expect(await names(q), q).toEqual(['Tülin Çiçek']);
+    expect(await names('tülin')).toEqual(['Tülin Çiçek']);
+    expect(await names('TÜLİN')).toEqual(['Tülin Çiçek']);
+    expect(await names('tulin')).toEqual([]); // ü is not u
+    expect(await names('cicek')).toEqual([]); // ç is not c
+  });
+
+  it('finds the i family in an e-mail address too, and leaves plain ASCII search as it was', async () => {
+    expect(await names('IRMAK@CORP')).toEqual(['IRMAK ISPARTA']);
+    expect(await names('ıRMAK@corp')).toEqual(['IRMAK ISPARTA']);
+    expect(await names('ali')).toEqual(['Ali Veli']);
+    expect(await names('CORP.EXAMPLE')).toHaveLength(6);
+  });
+
+  it('treats the characters a pattern would read as syntax as plain text', async () => {
+    for (const q of ['%', '_', 'i%', '\\', 'i.', '(i', '[i]', 'i|a', '.*']) expect(await names(q), q).toEqual([]);
+  });
+
+  it('applies to groups (name and description) and tokens (label and prefix) the same way', async () => {
+    for (const q of ['istanbul', 'İSTANBUL', 'ıstanbul']) expect(await groupNames(q), q).toEqual(['İSTANBUL Ekibi']);
+    for (const q of ['ışık', 'IŞIK', 'işik']) expect(await groupNames(q), q).toEqual(['İSTANBUL Ekibi']); // the description
+    for (const q of ['isparta', 'ISPARTA', 'ısparta']) expect(await groupNames(q), q).toEqual(['Isparta Ekibi']);
+    for (const q of ['işlem', 'İŞLEM', 'ışlem']) expect(await labels(q), q).toEqual(['İşlem Anahtarı']);
+    for (const q of ['cp_isl', 'CP_ISL', 'cp_ısl']) expect(await labels(q), q).toEqual(['İşlem Anahtarı']); // the prefix
+    expect(await labels('islem')).toEqual([]); // ş is not s
+  });
+
+  it('counts what it lists', async () => {
+    expect(await db.iamCountUsers({ tenantId, q: 'ısparta' })).toBe(1);
+    expect(await db.iamCountUsers({ tenantId, q: 'İSMAİL' })).toBe(1);
+    expect(await db.iamCountGroups({ tenantId, q: 'ıstanbul' })).toBe(1);
   });
 });
 

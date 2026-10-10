@@ -6,6 +6,7 @@ import { tryTranslate } from '@/components/resources/i18nLookup';
 import { useTranslations } from '@/lib/i18n';
 import type { QuotaTargetSource } from '@/lib/quota/targets';
 import { PICKER_LIMIT, type FetchLike, type TargetOption } from './pickerSources';
+import { useSearchBox } from './useSearchBox';
 import { useTargetResolution, useTargetSearch } from './useTargetSearch';
 
 export interface TargetSelectProps {
@@ -49,6 +50,9 @@ function storedRow(source: QuotaTargetSource, value: string): TargetOption {
  *  - The first page is there before anything is typed; typing asks the server
  *    after a short pause, and the dropdown says when it shows only the first
  *    page of many.
+ *  - Typing into a box that already holds a choice starts a fresh search (the
+ *    name is replaced, not extended), and Enter picks the first, best-ranked
+ *    result (see useSearchBox).
  *  - A saved value that no longer exists is kept and shown, with a note, never
  *    dropped (the limit would silently stop naming anything).
  *  - Someone who may not browse the registry gets a plain field for the value.
@@ -66,8 +70,6 @@ export function TargetSelect({
   const t = useTranslations('settings.quotaSection.target');
   const search = useTargetSearch(source, { fetcher });
   const [chosen, setChosen] = useState<TargetOption | null>(null);
-  // The box shows the stored value from the first paint; Mantine swaps in the name once it is known.
-  const [typed, setTyped] = useState(value ?? '');
 
   const justPicked = !!value && chosen?.value === value;
   const resolution = useTargetResolution(source, value || undefined, {
@@ -92,13 +94,27 @@ export function TargetSelect({
     reportLabel.current?.(currentLabel);
   }, [currentLabel]);
 
+  // The box shows the stored value from the first paint; Mantine swaps in the name once it is known.
+  const box = useSearchBox({
+    label: currentLabel,
+    value: selected?.id,
+    initialText: value ?? '',
+    onQuery: search.setQuery,
+    enter: { ready: !search.loading && search.status === 'ok', results: search.options },
+  });
+
+  const searching = search.query.trim() !== '';
+  /** The stored value, when the page of results does not hold it (it is kept selectable, but not offered while searching). */
+  const pinnedId = selected && !search.options.some((row) => row.id === selected.id) ? selected.id : undefined;
+
   const entries = useMemo((): Entry[] => {
     const out: Entry[] = search.options.map((row) => ({ value: row.id, label: row.label, row, kind: 'row' }));
     // A value the registry does not know is legitimate for some targets (an SDK's agent name): offer what was typed.
+    // After the registry rows, so that Enter picks the best-ranked row and not the words as typed.
     const query = search.query.trim();
     if (source.allowsUnregistered && query && !search.options.some((row) => row.value === query)) {
       const row: TargetOption = { id: `typed:${query}`, type: source.types[0] ?? 'resource', value: query, label: query };
-      out.unshift({ value: row.id, label: query, row, kind: 'typed' });
+      out.push({ value: row.id, label: query, row, kind: 'typed' });
     }
     // The stored value stays selectable whatever page the search returned.
     if (selected && !out.some((entry) => entry.value === selected.id)) {
@@ -137,12 +153,6 @@ export function TargetSelect({
   const missing = !!value && !justPicked && resolution?.status === 'missing';
   const kindWord = tryTranslate(t, `kind.${noun}`, 'settings.quotaSection.target') ?? noun;
 
-  const handleSearchChange = (text: string) => {
-    setTyped(text);
-    // Mantine writes the picked label into the box after a pick, and again on blur: that is not a question.
-    search.setQuery(selected && text === selected.label ? '' : text);
-  };
-
   const handlePick = (id: string | null) => {
     const entry = id ? entries.find((candidate) => candidate.value === id) : undefined;
     if (!entry || entry.kind === 'more') {
@@ -172,9 +182,11 @@ export function TargetSelect({
         placeholder={placeholder}
         aria-label={placeholder}
         // The server already chose and ordered the candidates: do not filter them a second time on the label.
-        filter={({ options }) => options}
-        searchValue={typed}
-        onSearchChange={handleSearchChange}
+        // The one thing left out is the stored value that is not among them, while somebody searches for something else.
+        filter={({ options }) =>
+          searching && pinnedId ? options.filter((option) => !('value' in option) || option.value !== pinnedId) : options
+        }
+        {...box.props}
         rightSection={search.loading ? <Loader size="xs" /> : undefined}
         nothingFoundMessage={nothingFound}
         maxDropdownHeight={280}
@@ -198,7 +210,9 @@ export function TargetSelect({
             <div>
               <Text size="sm">{entry.label}</Text>
               {facts ? (
-                <Text size="xs" c="dimmed">
+                // Not `c="dimmed"`: a highlighted option is filled with the accent and its text turns white, and a fixed
+                // grey would be unreadable on it. The shade follows the option's own colour instead.
+                <Text size="xs" style={{ opacity: 0.72 }}>
                   {facts}
                 </Text>
               ) : null}

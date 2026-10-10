@@ -99,8 +99,11 @@ import type {
   IamPage,
   IamPageRequest,
   IamUserQuery,
+  IamUserFilter,
   IamGroupQuery,
+  IamGroupFilter,
   IamTokenQuery,
+  IamTokenFilter,
   IamAuditQuery,
   IExternalModelPricing,
   IExternalPricingVersion,
@@ -1957,6 +1960,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   iamListTokens(query: IamTokenQuery): Promise<IamPage<IApiToken>>;
   /** Audit rows of the tenant, newest first. */
   iamListAuditEvents(query: IamAuditQuery): Promise<IamPage<IAuditLog>>;
+  /** How many users match (the same filters as `iamListUsers`, without paging). */
+  iamCountUsers(filter: IamUserFilter): Promise<number>;
+  /** How many groups match. */
+  iamCountGroups(filter: IamGroupFilter): Promise<number>;
+  /** How many API tokens match. */
+  iamCountTokens(filter: IamTokenFilter): Promise<number>;
 
   // ── GPU fleet + Agent Runtime Sandbox (tenant-scoped) ──
   // EDITION SPLIT: these enterprise methods were moved to the overlay. In the enterprise

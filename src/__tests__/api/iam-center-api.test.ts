@@ -22,6 +22,7 @@ vi.mock('@/lib/database', async (importOriginal) => {
 });
 
 import type { FastifyInstance } from 'fastify';
+import { registerIamPortalResolver } from '@/enterprise/iam-portal';
 import type { DatabaseProvider, IUser } from '@/lib/database';
 import { configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
 import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
@@ -213,7 +214,10 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(typeof row.createdAt).toBe('string');
 
       const list = await call('GET', '/api/iam/policies', A, 'reader');
-      expect(list.body.managed).toHaveLength(12);
+      expect(list.body.managed).toHaveLength(16); // six RBAC permits, six boundary forbids, four portal rules
+      expect(list.body.managed.filter((m: any) => m.group === 'portal').map((m: any) => m.id)).toEqual([
+        'managed:portal:use', 'managed:portal:use-boundary', 'managed:portal:agent', 'managed:portal:agent-boundary',
+      ]);
       expect(list.body.managed[0]).toMatchObject({ id: 'managed:rbac:user-read', group: 'rbac', effect: 'permit' });
       expect(list.body.managed[0].name).toBeTruthy();
       expect(list.body.managed[0].description).toBeTruthy();
@@ -263,6 +267,67 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(createRow.metadata).not.toHaveProperty('mode');
       expect(String(createRow.metadata!.cedar)).toContain('forbid (');
       expect(Buffer.byteLength(String(createRow.metadata!.cedar))).toBeLessThanOrEqual(4096);
+    });
+
+    it('narrows the list to one resource: the policies that name it and those for all of its kind, each with how', async () => {
+      // a build with portals: a rule about portal.use takes effect there, so the editor accepts it
+      registerIamPortalResolver(async () => null);
+      const make = async (name: string, body: Record<string, unknown>) => {
+        const res = await call('POST', '/api/iam/policies', A, 'admin', { name, enabled: true, ...body });
+        expect(res.status, `${name} ${JSON.stringify(res.body)}`).toBe(201);
+        return res.body.policyId as string;
+      };
+      const direct = await make('Block one portal', { cedar: 'forbid(principal, action == Action::"portal.use", resource == Portal::"P1");' });
+      const all = await make('Block portal use', { spec: { effect: 'forbid', principals: { groups: [A.groups.eng] }, actions: ['portal.use'], resources: { any: true } } });
+      const another = await make('Block another portal', { cedar: 'forbid(principal, action == Action::"portal.use", resource == Portal::"P2");' });
+      const unrelated = await make('Freeze agents', { spec: memberSpec(A) });
+      try {
+        const scopes = (res: { body: { custom: Array<{ policyId: string; scope?: string }> } }) =>
+          Object.fromEntries(res.body.custom.map((p) => [p.policyId, p.scope]));
+
+        const one = await call('GET', '/api/iam/policies?resourceType=portal&resourceId=P1', A, 'reader');
+        expect(one.status).toBe(200);
+        expect(one.body.managed.length).toBeGreaterThan(0); // the built-in rules are listed as always
+        expect(scopes(one)).toEqual({ [direct]: 'this', [all]: 'all' });
+        expect(one.body.custom.find((p: any) => p.policyId === direct)).toMatchObject({ name: 'Block one portal', effect: 'forbid', enabled: true });
+
+        // another portal: its own rule and the one for all portals
+        expect(scopes(await call('GET', '/api/iam/policies?resourceType=portal&resourceId=P2', A, 'reader'))).toEqual({ [another]: 'this', [all]: 'all' });
+        // one nobody wrote about: only what applies to every portal
+        expect(scopes(await call('GET', '/api/iam/policies?resourceType=portal&resourceId=P3', A, 'reader'))).toEqual({ [all]: 'all' });
+        // a type the narrowing does not judge answers an empty list, not a guess
+        const agent = await call('GET', '/api/iam/policies?resourceType=agent&resourceId=P1', A, 'reader');
+        expect(agent.status).toBe(200);
+        expect(agent.body.custom).toEqual([]);
+
+        // without the query it is the whole list, and no row has a scope
+        const everything = await call('GET', '/api/iam/policies', A, 'reader');
+        expect(everything.body.custom.map((p: any) => p.policyId)).toEqual(expect.arrayContaining([direct, all, another, unrelated]));
+        expect(everything.body.custom.every((p: any) => p.scope === undefined)).toBe(true);
+
+        // another workspace sees none of these
+        expect((await call('GET', '/api/iam/policies?resourceType=portal&resourceId=P1', B, 'reader')).body.custom).toEqual([]);
+      } finally {
+        for (const id of [direct, all, another, unrelated]) await call('DELETE', `/api/iam/policies/${id}`, A, 'admin');
+        registerIamPortalResolver(null);
+      }
+    });
+
+    it('refuses a resource filter that is not a type and an id', async () => {
+      for (const query of [
+        'resourceType=portal', // the id is missing
+        'resourceId=P1', // the type is missing
+        'resourceType=&resourceId=',
+        'resourceType=nope&resourceId=P1', // not a resource type
+        'resourceType=portal&resourceId=not%20an%20id!', // not an id
+        `resourceType=portal&resourceId=${'x'.repeat(300)}`,
+        'resourceType=portal&resourceType=agent&resourceId=P1', // repeated
+        'resourceType=portal&resourceId=P1&resourceId=P2',
+      ]) {
+        const res = await call('GET', `/api/iam/policies?${query}`, A, 'reader');
+        expect([res.status, res.body.code], query).toEqual([400, 'validation']);
+        expect(res.body.custom, query).toBeUndefined();
+      }
     });
 
     it('stores raw Cedar as is and reports mixed effects', async () => {
@@ -636,10 +701,10 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(elsewhere.body).toMatchObject({ allowed: true, projectId: t.projects.pj2 });
 
       // the principal detail agrees: the token is shown with the default project's limit ...
-      const detail = await call('GET', `/api/iam/principals/token/${open._id}`, t, 'reader');
+      const detail = await call('GET', `/api/iam/principals/token/${open._id}`, t, 'admin');
       expect(detail.body.effective.find((e: any) => e.service === 'agents').level).toBe('read');
       // ... where its owner, looked at in the workspace itself, is not limited by any project
-      const owner = await call('GET', `/api/iam/principals/user/${t.users.dave._id}`, t, 'reader');
+      const owner = await call('GET', `/api/iam/principals/user/${t.users.dave._id}`, t, 'admin');
       expect(owner.body.effective.find((e: any) => e.service === 'agents').level).toBe('write');
     });
 
@@ -842,10 +907,11 @@ describeForEachProvider('IAM center API', (getDb) => {
       const groups = await call('GET', '/api/iam/principals?type=group', A, 'reader');
       expect(groups.body.items.map((g: any) => [g.label, g.memberCount])).toEqual([['Engineering', 2], ['Operations', 1]]);
       expect(groups.body.items[0]).toMatchObject({ type: 'group', sublabel: 'All engineers' });
-      const tokens = await call('GET', '/api/iam/principals?type=token', A, 'reader');
+      // an admin sees every token but the owner's
+      const tokens = await call('GET', '/api/iam/principals?type=token', A, 'admin');
       expect(tokens.body.items.map((t: any) => t.label).sort()).toEqual(['alice-ci', 'bob-scoped']);
       expect(tokens.body.items.find((t: any) => t.label === 'alice-ci')).toMatchObject({ type: 'token', status: 'active', sublabel: 'cp_alice… · Alice a' });
-      expect((await call('GET', '/api/iam/principals?type=token&q=bob', A, 'reader')).body.items).toHaveLength(1);
+      expect((await call('GET', '/api/iam/principals?type=token&q=bob', A, 'admin')).body.items).toHaveLength(1);
     });
 
     it('counts the policies that name a principal', async () => {
@@ -854,7 +920,7 @@ describeForEachProvider('IAM center API', (getDb) => {
         expect((await call('GET', '/api/iam/principals?type=user&q=alice', A, 'reader')).body.items[0].policyCount).toBe(1);
         expect((await call('GET', '/api/iam/principals?type=user&q=bob', A, 'reader')).body.items[0].policyCount).toBe(0);
         expect((await call('GET', '/api/iam/principals?type=group&q=engineer', A, 'reader')).body.items[0].policyCount).toBe(1);
-        expect((await call('GET', '/api/iam/principals?type=token&q=alice-ci', A, 'reader')).body.items[0].policyCount).toBe(1);
+        expect((await call('GET', '/api/iam/principals?type=token&q=alice-ci', A, 'admin')).body.items[0].policyCount).toBe(1);
       } finally {
         await call('DELETE', `/api/iam/policies/${policy.body.policyId}`, A, 'admin');
       }
@@ -871,7 +937,7 @@ describeForEachProvider('IAM center API', (getDb) => {
     });
 
     it('describes a user: effective permissions with their sources, groups, projects, policies and tokens', async () => {
-      const detail = await call('GET', `/api/iam/principals/user/${A.users.alice._id}`, A, 'reader');
+      const detail = await call('GET', `/api/iam/principals/user/${A.users.alice._id}`, A, 'admin');
       expect(detail.status).toBe(200);
       expect(detail.body.principal).toMatchObject({ type: 'user', id: String(A.users.alice._id), label: 'Alice a', role: 'user', status: 'active' });
       const agents = detail.body.effective.find((e: any) => e.service === 'agents');
@@ -880,7 +946,8 @@ describeForEachProvider('IAM center API', (getDb) => {
       const members = detail.body.effective.find((e: any) => e.service === 'members');
       expect(members.level).toBe('none');
       expect(detail.body.effective.find((e: any) => e.service === 'aegis')).toBeUndefined(); // retired services are not in the matrix
-      expect(detail.body.groups).toEqual([{ id: A.groups.eng, name: 'Engineering' }]);
+      // (a group also says where it comes from and whether the membership can be removed here)
+      expect(detail.body.groups).toEqual([{ id: A.groups.eng, name: 'Engineering', source: 'local', tenantRole: 'user', removable: true }]);
       expect(detail.body.projects.map((p: any) => [p.name, p.role, p.via])).toEqual([['Project Two', 'member', 'direct']]);
       expect(detail.body.tokens.map((t: any) => t.label)).toEqual(['alice-ci']);
       expect(detail.body.tokens[0]).toMatchObject({ prefix: 'cp_alice', status: 'active', scoped: false });
@@ -918,7 +985,7 @@ describeForEachProvider('IAM center API', (getDb) => {
     });
 
     it('describes a token: its scope caps what its owner can do, and enforced policies show as a source', async () => {
-      const detail = await call('GET', `/api/iam/principals/token/${A.tokens.bobScoped}`, A, 'reader');
+      const detail = await call('GET', `/api/iam/principals/token/${A.tokens.bobScoped}`, A, 'admin');
       expect(detail.status).toBe(200);
       expect(detail.body.principal).toMatchObject({ type: 'token', label: 'bob-scoped', ownerId: String(A.users.bob._id), role: 'user', scope: { agents: 'read' } });
       expect(detail.body.tokens).toBeNull();
@@ -929,7 +996,7 @@ describeForEachProvider('IAM center API', (getDb) => {
 
       const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'No reads of prompts', spec: { effect: 'forbid', principals: { users: [String(A.users.alice._id)] }, actions: ['prompts.read'], resources: { any: true } } });
       try {
-        const aliceTok = await call('GET', `/api/iam/principals/token/${A.tokens.aliceCi}`, A, 'reader');
+        const aliceTok = await call('GET', `/api/iam/principals/token/${A.tokens.aliceCi}`, A, 'admin');
         const prompts = aliceTok.body.effective.find((e: any) => e.service === 'prompts');
         expect(prompts.level).toBe('none');
         expect(prompts.sources.some((s: any) => s.kind === 'policy')).toBe(true);
@@ -1134,7 +1201,7 @@ describeForEachProvider('IAM center API', (getDb) => {
 
         // directories
         for (const type of ['user', 'group', 'token']) {
-          const listed = await call('GET', `/api/iam/principals?type=${type}&limit=100`, B, 'reader');
+          const listed = await call('GET', `/api/iam/principals?type=${type}&limit=100`, B, 'admin');
           const idsA = new Set([...Object.values(A.users).map((u) => String(u._id)), ...Object.values(A.groups), ...Object.values(A.tokens)]);
           expect(listed.body.items.length).toBeGreaterThan(0);
           expect(listed.body.items.some((i: any) => idsA.has(i.id)), type).toBe(false);

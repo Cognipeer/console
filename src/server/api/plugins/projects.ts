@@ -5,7 +5,9 @@ import { getDatabase } from '@/lib/database';
 import { getProjectLevelsSince, ignoredProjectLevels } from '@/lib/iam/projectLevels';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { filterManageableTokens, resolveManageableProjectToken } from '@/lib/services/apiTokens/tokenGovernance';
 import {
   loadTokenPolicyForDisplay,
   prepareTokenCreate,
@@ -24,12 +26,13 @@ import type { ProjectRole } from '@/lib/database/provider/types.base';
 import type { UserServicePermissions } from '@/lib/security/rbac';
 import { mergeServicePermissions } from '@/lib/security/rbac';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
+import { foldSearchText } from '@/lib/shared/searchFold';
 import {
   readJsonBody,
   requireSessionContext,
   withApiRequestContext,
 } from '../fastify-utils';
-import { auditTokenRestrictionChange, editApiTokenForSession, readBodyObject, tokenEditHints } from './tokens';
+import { auditTokenRestrictionChange, editApiTokenForSession, readBodyObject } from './tokens';
 
 const logger = createLogger('api:projects');
 
@@ -720,7 +723,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const query = (request.query ?? {}) as { q?: string };
-      const search = query.q?.trim().toLowerCase() ?? '';
+      // Folded like every other picker search: "ismail" finds "İsmail", "ısparta" finds "ISPARTA".
+      const search = foldSearchText(query.q?.trim() ?? '');
       if (search.length < 2) {
         return reply.code(200).send({ users: [] });
       }
@@ -738,8 +742,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           return !getLegacyProjectIds(user.projectIds).includes(String(projectId));
         })
         .filter((user) => {
-          const email = (user.email ?? '').toLowerCase();
-          const name = (user.name ?? '').toLowerCase();
+          const email = foldSearchText(user.email ?? '');
+          const name = foldSearchText(user.name ?? '');
           return email.includes(search) || name.includes(search);
         })
         .slice(0, 10)
@@ -771,33 +775,18 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(access.status).send({ error: access.error });
       }
 
+      // Listing is not minting: the token quota is checked when a token is created, never here.
       const db = await getDatabase();
       const existingTokens = await db.listProjectApiTokens(session.tenantId, projectId);
-      const quotaCheck = await checkResourceQuota(
-        {
-          domain: 'global',
-          licenseType: session.licenseType as LicenseType,
-          projectId,
-          tenantDbName: session.tenantDbName,
-          tenantId: session.tenantId,
-          userId: session.userId,
-        },
-        'apiTokens',
-        existingTokens.length,
-      );
-
-      if (!quotaCheck.allowed) {
-        return reply.code(429).send({
-          error: quotaCheck.reason || 'API token quota exceeded',
-        });
-      }
 
       const policy = await loadTokenPolicyForDisplay(session.tenantDbName);
       const now = new Date();
-      // Edit rights are "never upward" (PUT decides exactly); the list only hints for the buttons.
-      const canEdit = await tokenEditHints(db, session, existingTokens);
-      const tokens = existingTokens.map((token) =>
-        presentApiToken(token, { policy, now, canDelete: true, canEdit: canEdit(token) }));
+      // What is listed is what the caller may manage - the owner sees every token of the
+      // project, an admin never the owner's (nor those of an account it cannot act on), the
+      // same rule as GET /api/tokens?scope=project - so edit and delete hold for every row.
+      const visibleTokens = await filterManageableTokens(db, session, existingTokens);
+      const tokens = visibleTokens.map((token) =>
+        presentApiToken(token, { policy, now, canDelete: true, canEdit: true }));
 
       return reply.code(200).send({ tokens });
     } catch (error) {
@@ -922,11 +911,23 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(access.status).send({ error: access.error });
       }
 
+      // The same rule as DELETE /api/tokens/:id: the owner role may delete any token of the
+      // project, an admin any but the owner's (or an account it cannot act on), and a token
+      // that is not this project's is not found.
       const db = await getDatabase();
-      const deleted = await db.deleteProjectApiToken(id, session.tenantId, projectId);
+      const target = await resolveManageableProjectToken(db, session, projectId, id);
+      if (!target.ok) {
+        return target.reason === 'forbidden'
+          ? reply.code(403).send({ error: 'Forbidden' })
+          : reply.code(404).send({ error: 'Token not found' });
+      }
+
+      // Per owner, not per workspace: deleting one token does not flush every principal's cache.
+      const deleted = await db.deleteApiToken(id, String(target.token.userId));
       if (!deleted) {
         return reply.code(404).send({ error: 'Token not found' });
       }
+      await invalidateApiTokenAuthCache(target.token.tokenHash);
 
       return reply.code(200).send({ message: 'API token deleted successfully' });
     } catch (error) {

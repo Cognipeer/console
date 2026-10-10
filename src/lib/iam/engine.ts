@@ -31,9 +31,15 @@
  * decision until the next write - and its callers load again.
  *
  * Boundaries: the managed set also carries the boundary forbids (managedPolicies.ts),
- * so no custom permit can exceed an API token's scope or the project narrowing.
+ * so no custom permit can exceed an API token's scope or the project narrowing, nor
+ * open a portal its access list does not name.
  * Actions outside the catalog are denied before evaluation for the same reason:
  * a permissive custom policy must not be able to open what no boundary governs.
+ *
+ * Forbids that cannot be evaluated: Cedar skips a policy that errors while it is
+ * evaluated, which for a FORBID means the rule silently stops blocking. An "allow"
+ * is therefore refused when a forbid of the set errored (forbidGuard.ts): a custom
+ * one counts as a deny that names it, a managed one fails the decision.
  *
  * Context: the request context (context.ts) is turned into Cedar values per
  * decision, never cached with the policy set; `now` is filled in when absent.
@@ -50,7 +56,7 @@ import { createLogger } from '@/lib/core/logger';
 import {
   getCedarVersion,
   isCedarLoaded,
-  policyAnnotations,
+  policyHead,
   preparsePolicySet,
   splitPolicyText,
   statefulIsAuthorized,
@@ -72,8 +78,10 @@ import {
 } from './entities';
 import { buildCedarContext, type IamRequestContext } from './context';
 import { onIamInvalidation } from './events';
-import { ALL_MANAGED_POLICIES } from './managedPolicies';
+import { guardForbidErrors } from './forbidGuard';
+import { ALL_MANAGED_POLICIES, MANAGED_FORBID_IDS } from './managedPolicies';
 import { getPrincipalCacheStats } from './principalCache';
+import { getResourceAuthzStats, type ResourceAuthzStats } from './resourceAuthzStats';
 import { ensureSchemaPreparsed, getIamSchema, PREPARSED_SCHEMA_NAME } from './schemaState';
 import { customCedarIds, getPolicyVersion, listPolicies, policyIdFromCedarId, type IIamPolicy } from './store';
 
@@ -138,6 +146,7 @@ const metrics = {
   allows: 0,
   denies: 0,
   errored: 0,
+  forbidErrors: 0,
   setReloads: 0,
   setLoadFailures: 0,
   latencies: new Float64Array(LATENCY_WINDOW),
@@ -160,6 +169,8 @@ export interface IamEngineStats {
   denies: number;
   /** Decisions where the evaluation itself failed (deny + errors). */
   failures: number;
+  /** Decisions an "allow" was refused because a custom forbid errored while it was evaluated (counted as a deny). */
+  forbidErrors: number;
   /** Latency over the last `window` decisions, microseconds. */
   p50Us: number;
   p99Us: number;
@@ -170,6 +181,8 @@ export interface IamEngineStats {
   tenantsLoaded: number;
   /** Custom statements, over every loaded workspace, that could not be loaded and are not applied. */
   skippedStatements: number;
+  /** Decisions about resources (portals) made through authorizeResourceAccess. */
+  resourceAuthz: ResourceAuthzStats;
   cedar: { loaded: boolean; sdk?: string; language?: string };
   uptimeMs: number;
   validateRequests: boolean;
@@ -193,6 +206,7 @@ export function getIamEngineStats(): IamEngineStats {
     allows: metrics.allows,
     denies: metrics.denies,
     failures: metrics.errored,
+    forbidErrors: metrics.forbidErrors,
     p50Us: Math.round(pick(0.5)),
     p99Us: Math.round(pick(0.99)),
     window: n,
@@ -201,6 +215,7 @@ export function getIamEngineStats(): IamEngineStats {
     principalCache: getPrincipalCacheStats(),
     tenantsLoaded: tenantStates.size,
     skippedStatements: [...tenantStates.values()].reduce((sum, state) => sum + state.skipped.length, 0),
+    resourceAuthz: getResourceAuthzStats(),
     cedar: cedarInfo,
     uptimeMs: Date.now() - metrics.startedAt,
     validateRequests: config.validateRequests,
@@ -208,7 +223,7 @@ export function getIamEngineStats(): IamEngineStats {
 }
 
 export function resetIamEngineStatsForTests(): void {
-  metrics.decisions = metrics.allows = metrics.denies = metrics.errored = 0;
+  metrics.decisions = metrics.allows = metrics.denies = metrics.errored = metrics.forbidErrors = 0;
   metrics.setReloads = metrics.setLoadFailures = 0;
   metrics.latencyCount = 0;
   metrics.latencies.fill(0);
@@ -221,6 +236,8 @@ interface LoadedSet {
   setId: string;
   /** policy cedar id -> annotations to surface as obligations. */
   obligations: Map<string, Record<string, unknown>>;
+  /** Cedar ids of the forbids in the set (managed and custom): one that errors must not be skipped (forbidGuard.ts). */
+  forbids: ReadonlySet<string>;
 }
 
 interface TenantState {
@@ -235,7 +252,7 @@ interface TenantState {
 
 const tenantStates = new Map<string, TenantState>();
 let managedLoaded = false;
-const managedSet: LoadedSet = { setId: MANAGED_SET_ID, obligations: new Map() };
+const managedSet: LoadedSet = { setId: MANAGED_SET_ID, obligations: new Map(), forbids: MANAGED_FORBID_IDS };
 
 function ensureManagedSet(): string | null {
   if (managedLoaded) return null;
@@ -267,9 +284,7 @@ function parseAnnotationValue(raw: string): unknown {
   return raw;
 }
 
-function obligationsOf(statement: string): Record<string, unknown> | null {
-  const annotations = policyAnnotations(statement);
-  if (!annotations) return null;
+function obligationsOf(annotations: Record<string, string>): Record<string, unknown> | null {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(annotations)) {
     if (RESERVED_ANNOTATIONS.has(key)) continue;
@@ -284,15 +299,17 @@ function normalizeTenant(tenant: IamTenantRef): string {
 
 /**
  * Cedar records of a list of stored policies (`custom:<id>[#n]` -> statement)
- * plus the obligations of each statement. A policy whose text no longer parses
- * is skipped (and reported through `onSkip`), never fatal.
+ * plus the obligations of each statement and which of them are forbids. A policy
+ * whose text no longer parses is skipped (and reported through `onSkip`), never
+ * fatal.
  */
 export function buildPolicyRecord(
   list: ReadonlyArray<Pick<IIamPolicy, 'policyId' | 'cedar'>>,
   onSkip?: (cedarId: string) => void,
-): { record: Record<string, string>; obligations: Map<string, Record<string, unknown>> } {
+): { record: Record<string, string>; obligations: Map<string, Record<string, unknown>>; forbids: Set<string> } {
   const record: Record<string, string> = {};
   const obligations = new Map<string, Record<string, unknown>>();
+  const forbids = new Set<string>();
   for (const policy of list) {
     const parts = splitPolicyText(policy.cedar);
     if (!parts.ok) {
@@ -301,11 +318,18 @@ export function buildPolicyRecord(
     }
     customCedarIds(policy.policyId, parts.policies.length).forEach((id, i) => {
       record[id] = parts.policies[i];
-      const ob = obligationsOf(parts.policies[i]);
+      const head = policyHead(parts.policies[i]);
+      if (head?.effect === 'forbid') forbids.add(id);
+      const ob = head ? obligationsOf(head.annotations) : null;
       if (ob) obligations.set(id, ob);
     });
   }
-  return { record, obligations };
+  return { record, obligations, forbids };
+}
+
+/** The forbids of a whole set: the managed ones plus the custom ones in `custom`. */
+export function forbidsOf(custom: ReadonlySet<string>): ReadonlySet<string> {
+  return custom.size === 0 ? MANAGED_FORBID_IDS : new Set([...MANAGED_FORBID_IDS, ...custom]);
 }
 
 /** Fixed id the statements are probed under one by one (Cedar cannot free a set, so never a fresh id per probe). */
@@ -318,11 +342,11 @@ const PROBE_SET_ID = 'probe:statement';
  */
 function loadCustomRecord(
   setId: string,
-  built: { record: Record<string, string>; obligations: Map<string, Record<string, unknown>> },
+  built: { record: Record<string, string>; obligations: Map<string, Record<string, unknown>>; forbids: ReadonlySet<string> },
   skipped: string[],
 ): LoadedSet {
   const whole = preparsePolicySet(setId, { ...ALL_MANAGED_POLICIES, ...built.record });
-  if (whole.ok) return { setId, obligations: built.obligations };
+  if (whole.ok) return { setId, obligations: built.obligations, forbids: forbidsOf(built.forbids) };
 
   const good: Record<string, string> = {};
   for (const [id, statement] of Object.entries(built.record)) {
@@ -335,7 +359,7 @@ function loadCustomRecord(
   }
   logger.error('Custom policy statements could not be loaded and are not applied', { setId, skipped: skipped.slice(0, 20) });
   const obligations = new Map([...built.obligations].filter(([id]) => id in good));
-  return { setId, obligations };
+  return { setId, obligations, forbids: forbidsOf(new Set([...built.forbids].filter((id) => id in good))) };
 }
 
 /** A load that a policy write on this node overtook: nothing of it may be applied, stored or answered with. */
@@ -508,6 +532,21 @@ function mergeObligations(set: LoadedSet, reasons: string[]): Record<string, unk
   return out;
 }
 
+let lastForbidErrorLogAt = 0;
+
+/** Count a forbid that errored and say so in the log (one line per 10 s per process: a broken rule is hit by every request). */
+function noteErroredForbids(tenantDbName: string, policyIds: readonly string[], errors: readonly string[]): void {
+  metrics.forbidErrors++;
+  const now = Date.now();
+  if (now - lastForbidErrorLogAt < 10_000) return;
+  lastForbidErrorLogAt = now;
+  logger.warn('A deny rule could not be evaluated; the request is not allowed', {
+    tenantDbName,
+    policyIds: [...new Set(policyIds)].slice(0, 10),
+    errors: errors.slice(0, 3),
+  });
+}
+
 function failure(errors: string[], started: number): AuthorizeResult {
   const durationUs = Math.round((performance.now() - started) * 1000);
   recordDecision(false, true, durationUs);
@@ -579,11 +618,25 @@ export async function authorize(input: AuthorizeInput): Promise<AuthorizeResult>
     const decision: CedarDecision = statefulIsAuthorized(call);
     if (!decision.ok) return failure(decision.errors, started);
 
+    // A forbid that errored took no part in that verdict (forbidGuard.ts): an allow is only an allow if none did.
+    // (Nothing errored, the usual case, costs nothing here.)
+    let { allowed, reasons, errors } = decision;
+    if (decision.errorPolicyIds.length > 0) {
+      const guarded = guardForbidErrors(decision, state.set.forbids);
+      if (guarded.kind === 'failed') {
+        noteErroredForbids(normalizeTenant(input.tenant), decision.errorPolicyIds.filter((id) => state.set.forbids.has(id)), guarded.errors);
+        return failure(guarded.errors, started);
+      }
+      if (guarded.erroredForbids.length > 0) noteErroredForbids(normalizeTenant(input.tenant), guarded.erroredForbids, decision.errors);
+      ({ allowed, reasons } = guarded);
+      errors = [...decision.errors, ...guarded.notes];
+    }
+
     const result: AuthorizeResult = {
-      allowed: decision.allowed,
-      reasons: decision.reasons,
-      errors: decision.errors,
-      obligations: decision.allowed ? mergeObligations(state.set, decision.reasons) : {},
+      allowed,
+      reasons,
+      errors,
+      obligations: allowed ? mergeObligations(state.set, reasons) : {},
       durationUs: 0,
     };
 

@@ -70,6 +70,21 @@ const policies = [
     limits: { rateLimit: { requests: { perMinute: 1 } } },
     target: { type: 'user', id: 'gone', label: 'gone', missing: true },
   },
+  {
+    _id: 'm', scope: 'resource', scopeId: 'gpt-4o', domain: 'llm', priority: 10, enabled: true, label: 'Flagship cap', projectId: 'proj-1', projectName: 'Retail',
+    limits: { rateLimit: { requests: { perMinute: 20 } } },
+    target: { type: 'resource', id: 'gpt-4o', label: 'GPT-4o', sublabel: 'gpt-4o' },
+  },
+  {
+    _id: 'r', scope: 'resource', scopeId: 'retired-model', domain: 'llm', priority: 10, enabled: true, label: 'Retired cap', projectId: 'proj-1', projectName: 'Retail',
+    limits: { rateLimit: { requests: { perMinute: 5 } } },
+    target: { type: 'resource', id: 'retired-model', label: 'retired-model', missing: true },
+  },
+  {
+    _id: 'v', scope: 'provider', scopeId: 'pg-main', domain: 'vector', priority: 10, enabled: true, label: 'Index provider cap', projectId: 'proj-1', projectName: 'Retail',
+    limits: { rateLimit: { vectors: { perMinute: 100 } } },
+    target: { type: 'provider', id: 'pg-main', label: 'Postgres main', sublabel: 'pg-main' },
+  },
 ];
 
 // These render whole component trees (jsdom + Mantine) or run the policy engine; on a busy machine the default 5 s is too tight.
@@ -96,9 +111,28 @@ describe('LimitsTab (server render)', () => {
     expect(html).toContain('Requests / day: 200');
     expect(html).toContain('Requests / min: 60');
     expect(html).toContain('$5,000');
-    // A deleted target and a limit that is never applied are called out.
-    expect(html).toContain('Deleted');
+    // A target that no longer exists and a limit that is never applied are called out.
+    expect(html).toContain('Not found');
+    expect(html).not.toContain('>Deleted<');
     expect(html).toContain('Not applied');
+  });
+
+  it('names a model, an index or a provider with its key underneath, and says what kind of thing it is', () => {
+    const html = render(true);
+    // The name, then the key as the second line (the same as the person's e-mail under their name).
+    expect(html).toMatch(/GPT-4o<\/p>.*gpt-4o<\/p>/);
+    expect(html).toMatch(/Postgres main<\/p>.*pg-main<\/p>/);
+    // The badge says what the target is, not the catch-all "Resource" (the filter's own options are not badges).
+    expect(html).toMatch(/<\/svg>Model<\/span>/);
+    expect(html).toMatch(/<\/svg>Provider<\/span>/);
+    expect(html).not.toMatch(/<\/svg>Resource<\/span>/);
+  });
+
+  it('flags a model that is no longer in the registry, and keeps showing its key', () => {
+    const html = render(true);
+    expect(html).toContain('retired-model');
+    // One "Not found" for the orphaned person and one for the retired model.
+    expect(html.match(/Not found/g)).toHaveLength(2);
   });
 
   it('counts group limits, agent-run limits and unapplied limits in the tiles', () => {

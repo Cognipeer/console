@@ -67,6 +67,17 @@ import type { FastifyInstance } from 'fastify';
  *     overlay no longer compiles against this tree (`legacy` / `enforced`), and
  *     a seam-6 overlay not against a seam-5 one (`unavailable`, `groups`,
  *     `registerGateAction`).
+ *     The same release adds the portal side of the engine, all as new community
+ *     modules (so this file's shape is unchanged): `authorizeResourceAccess`
+ *     (`@/lib/iam/resourceAuthz`, the decision the portal runtime asks for on
+ *     every request), the entity builders `portalResource` / `portalAgentResource`
+ *     (`@/lib/iam/portalEntities`) and the leaf seam `registerIamPortalResolver`
+ *     (`@/enterprise/iam-portal`, which the overlay calls once at load, from its
+ *     own `registry.ts`, and which is what turns the portal rules on). An overlay
+ *     that uses them needs a community tree that has them, which is what the
+ *     `compatibleCommunity` floor of COMPAT.json is for; a community tree
+ *     without an overlay never registers a resolver, and the portal rules stay
+ *     "not enforced".
  */
 export const SEAM_CONTRACT_VERSION = 6;
 

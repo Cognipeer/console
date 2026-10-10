@@ -59,9 +59,9 @@ const nonEmpty = (v: string | null): string | undefined => (v && v.trim() !== ''
 
 // ── Where access settings are changed (outside the center) ────────────────
 
-/** A person's page: workspace role and permissions. */
+/** A person's drawer in the IAM center (Principals tab): workspace role, access, groups, projects and tokens. */
 export function memberHref(userId: string): string {
-  return `/dashboard/members/${encodeURIComponent(userId)}`;
+  return iamHref('principals', { principalType: 'user', principalId: userId });
 }
 
 /**
@@ -73,8 +73,16 @@ export function projectMembersHref(projectId: string, memberId?: string | null):
   return memberId ? `${base}?member=${encodeURIComponent(memberId)}` : base;
 }
 
-/** The API tokens page (scope, expiry and network rules of every token). */
+/** The personal API tokens page: the signed-in person's own tokens (everyone else's are managed in the IAM center). */
 export const TOKENS_HREF = '/dashboard/tokens';
+
+/** The account page of the signed-in person (profile, password, link to their tokens). */
+export const ACCOUNT_HREF = '/dashboard/account';
+
+/** A portal's page, where its access list is edited. */
+export function portalHref(portalId: string): string {
+  return `/dashboard/portals/${encodeURIComponent(portalId)}`;
+}
 
 // ── Access check ─────────────────────────────────────────────────────────
 
@@ -83,6 +91,15 @@ export interface CheckLinkParams {
   principalType?: 'user' | 'token';
   principalId?: string;
   action?: string;
+  /** What the action is about: a registry resource (a portal for `portal.use`, an agent for `agent.invoke`). */
+  resourceType?: string;
+  resourceId?: string;
+  /** Display name of the resource, so the picker does not show a bare id. */
+  resourceLabel?: string;
+  channel?: 'dashboard' | 'api' | 'portal';
+  /** The portal an agent is run through (`agent.invoke` in the portal channel). */
+  portalId?: string;
+  portalLabel?: string;
 }
 
 export function checkHref(params: CheckLinkParams): string {
@@ -91,16 +108,31 @@ export function checkHref(params: CheckLinkParams): string {
     principalType: params.principalType,
     principalId: params.principalId,
     action: params.action,
+    resourceType: params.resourceId ? params.resourceType : undefined,
+    resourceId: params.resourceType ? params.resourceId : undefined,
+    resourceLabel: params.resourceId ? params.resourceLabel : undefined,
+    channel: params.channel,
+    portalId: params.portalId,
+    portalLabel: params.portalId ? params.portalLabel : undefined,
   });
 }
 
 export function parseCheckParams(params: ParamReader): CheckLinkParams {
   const type = params.get('principalType');
+  const channel = params.get('channel');
+  const resourceType = nonEmpty(params.get('resourceType'));
+  const resourceId = nonEmpty(params.get('resourceId'));
   return {
     decisionId: nonEmpty(params.get('decisionId')),
     principalType: type === 'user' || type === 'token' ? type : undefined,
     principalId: nonEmpty(params.get('principalId')),
     action: nonEmpty(params.get('action')),
+    resourceType: resourceId ? resourceType : undefined,
+    resourceId: resourceType ? resourceId : undefined,
+    resourceLabel: resourceType && resourceId ? nonEmpty(params.get('resourceLabel')) : undefined,
+    channel: channel === 'dashboard' || channel === 'api' || channel === 'portal' ? channel : undefined,
+    portalId: nonEmpty(params.get('portalId')),
+    portalLabel: nonEmpty(params.get('portalId')) ? nonEmpty(params.get('portalLabel')) : undefined,
   };
 }
 
@@ -109,6 +141,10 @@ export function parseCheckParams(params: ParamReader): CheckLinkParams {
 export interface NewPolicyLinkParams {
   principalType?: IamPrincipalType;
   principalId?: string;
+  /** A resource the new rule is about (a portal: "block someone from this portal"); the editor presets the rule for its kind. */
+  resourceType?: string;
+  resourceId?: string;
+  resourceLabel?: string;
 }
 
 export function newPolicyHref(params: NewPolicyLinkParams = {}): string {
@@ -116,6 +152,9 @@ export function newPolicyHref(params: NewPolicyLinkParams = {}): string {
     new: '1',
     principalType: params.principalId ? params.principalType : undefined,
     principalId: params.principalId,
+    resourceType: params.resourceId ? params.resourceType : undefined,
+    resourceId: params.resourceType ? params.resourceId : undefined,
+    resourceLabel: params.resourceType && params.resourceId ? params.resourceLabel : undefined,
   });
 }
 
@@ -128,16 +167,24 @@ export interface PolicyLinkParams {
   policyId?: string;
   principalType?: IamPrincipalType;
   principalId?: string;
+  resourceType?: string;
+  resourceId?: string;
+  resourceLabel?: string;
 }
 
 export function parsePolicyParams(params: ParamReader): PolicyLinkParams {
   const type = params.get('principalType');
   const principalType = type === 'user' || type === 'group' || type === 'token' ? type : undefined;
   const principalId = nonEmpty(params.get('principalId'));
+  const resourceType = nonEmpty(params.get('resourceType'));
+  const resourceId = nonEmpty(params.get('resourceId'));
   return {
     isNew: params.get('new') === '1' || params.get('new') === 'true',
     policyId: nonEmpty(params.get('policyId')),
     principalType: principalId ? principalType : undefined,
     principalId: principalType ? principalId : undefined,
+    resourceType: resourceId ? resourceType : undefined,
+    resourceId: resourceType ? resourceId : undefined,
+    resourceLabel: resourceType && resourceId ? nonEmpty(params.get('resourceLabel')) : undefined,
   };
 }

@@ -23,6 +23,7 @@ import {
   IconSearch,
   IconSettings,
   IconSun,
+  IconUserCircle,
 } from '@tabler/icons-react';
 import ProjectPill from '@/components/projects/ProjectPill';
 import { useTranslations } from '@/lib/i18n';
@@ -179,6 +180,12 @@ export default function TopbarV2({
         </Menu.Target>
         <Menu.Dropdown>
           <Menu.Label>{tAccount('menuLabel')}</Menu.Label>
+          <Menu.Item
+            leftSection={<IconUserCircle size={14} />}
+            onClick={() => onNavigate('/dashboard/account')}
+          >
+            {tAccount('profile')}
+          </Menu.Item>
           <Menu.Item
             leftSection={<IconSettings size={14} />}
             onClick={() => onNavigate(settingsHref)}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   TextInput,
   Alert,
@@ -46,8 +46,15 @@ interface CreateTokenModalProps {
   onClose: () => void;
   onSuccess: () => void;
   createUrl?: string;
-  /** Extra fields merged into the POST body alongside the form values — e.g. `{ userId }` to mint on behalf of another user from their member detail page. */
+  /** Extra fields merged into the POST body alongside the form values — e.g. `{ userId, projectId }` to mint on behalf of another person from the IAM center. */
   extraBody?: Record<string, unknown>;
+  /**
+   * A form section shown before the label (the owner and project of the token).
+   * Pass a `FormSection` numbered 1: the sections of the form itself are numbered from 2 then.
+   */
+  leadSection?: ReactNode;
+  /** The lead section is complete; false keeps the submit disabled. Default true. */
+  extraValid?: boolean;
 }
 
 interface CreatedInfo {
@@ -62,6 +69,8 @@ export default function CreateTokenModal({
   onSuccess,
   createUrl = '/api/tokens',
   extraBody,
+  leadSection,
+  extraValid = true,
 }: CreateTokenModalProps) {
   const [created, setCreated] = useState<CreatedInfo | null>(null);
   const [loading, setLoading] = useState(false);
@@ -107,7 +116,9 @@ export default function CreateTokenModal({
   const expiryError = expiryProblem(expiry, ctx);
   const allowlist = useMemo(() => parseAllowlistText(ipText, policy.maxIpRanges), [ipText, policy.maxIpRanges]);
   const ipValid = allowlist.issues.length === 0 && !allowlist.tooMany;
-  const ready = validLabel && !expiryError && ipValid;
+  const ready = validLabel && !expiryError && ipValid && extraValid;
+  // The numbered sections follow the lead section, when there is one.
+  const offset = leadSection ? 1 : 0;
 
   const checklist = [
     { id: 1, label: t('form.label'), done: validLabel },
@@ -342,8 +353,10 @@ export default function CreateTokenModal({
         },
       }}
     >
+      {leadSection}
+
       <FormSection
-        number={1}
+        number={1 + offset}
         title={t('form.label')}
         description={t('form.description')}
         done={validLabel}
@@ -360,7 +373,7 @@ export default function CreateTokenModal({
       </FormSection>
 
       <FormSection
-        number={2}
+        number={2 + offset}
         title={tIam('expiry.title')}
         description={tIam('expiry.description')}
         done={!expiryError}
@@ -377,7 +390,7 @@ export default function CreateTokenModal({
       </FormSection>
 
       <FormSection
-        number={3}
+        number={3 + offset}
         title={tIam('network.title')}
         description={tIam('network.description')}
         done={ipValid}

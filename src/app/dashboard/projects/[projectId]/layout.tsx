@@ -1,8 +1,7 @@
-import { headers } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
+import { getCurrentIdentity } from '@/lib/auth/serverIdentity';
 import { getDatabase } from '@/lib/database';
 import { findGroupProjectMembership } from '@/lib/services/projects/accessibleProjects';
-import { getUserAuthState } from '@/lib/services/users/userAuthState';
 
 export default async function ProjectLayout({
   children,
@@ -11,22 +10,18 @@ export default async function ProjectLayout({
   children: React.ReactNode;
   params: Promise<{ projectId: string }>;
 }) {
-  const headerList = await headers();
-  const tenantDbName = headerList.get('x-tenant-db-name');
-  const tenantId = headerList.get('x-tenant-id');
-  const userId = headerList.get('x-user-id');
-  const role = headerList.get('x-user-role');
+  // The account as it is now (state and role from the account record, cached for 30 s at
+  // most), not as the session was issued: a promotion, a demotion or a disable is honoured
+  // on the next navigation. A lookup failure throws (error page), never falls through.
+  const identity = await getCurrentIdentity();
   const { projectId } = await params;
 
-  if (!tenantDbName || !tenantId || !userId || !role) {
+  // Checked before the admin short-circuit below: admins can be disabled too.
+  if (!identity || identity.state !== 'active') {
     redirect('/login');
   }
 
-  // Checked before the admin short-circuit below: admins can be disabled too.
-  // Cached lookup; a lookup failure throws (error page), never falls through.
-  if ((await getUserAuthState(tenantDbName, tenantId, userId)) === 'disabled') {
-    redirect('/login');
-  }
+  const { tenantDbName, tenantId, userId, role } = identity;
 
   if (role === 'owner' || role === 'admin') {
     return children;

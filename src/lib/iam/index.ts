@@ -9,6 +9,17 @@ export * from './actions';
 export * from './events';
 export * from './entities';
 export * from './managedPolicies';
+export * from './portalEntities';
+export {
+  authorizeResourceAccess,
+  RESOURCE_AUTHZ_ACTIONS,
+  type ResourceAuthzAction,
+  type ResourceAuthzClient,
+  type ResourceAuthzInput,
+  type ResourceAuthzRequester,
+  type ResourceAuthzResult,
+} from './resourceAuthz';
+export { enforcedChannelsOf, isRuntimeEnforced } from './runtimeEnforced';
 export { getIamSchema, ensureSchemaPreparsed } from './schemaState';
 export { buildSchema, IAM_CONTEXT_ATTRS } from './schema';
 export * from './groupGrants';

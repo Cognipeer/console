@@ -201,6 +201,25 @@ describe('disabled users and the auth routes', () => {
       expect(res.statusCode).toBe(200);
       expect(sendEmail).toHaveBeenCalledTimes(1);
     });
+
+    it.each(['oidc', 'ldap', 'saml'])('answers like an unknown email and sends nothing for an account managed by %s', async (authProvider) => {
+      db.findUserByEmail.mockResolvedValue({ ...activeUser, authProvider, externalId: 'ext-1' } as never);
+      const managedRes = await forgot();
+      db.findUserByEmail.mockResolvedValue(null);
+      const unknownRes = await forgot();
+
+      expect(managedRes.statusCode).toBe(200);
+      expect(managedRes.body).toBe(unknownRes.body);
+      expect(sendEmail).not.toHaveBeenCalled();
+    });
+
+    it('still mails an account whose provider is "local", or was never recorded', async () => {
+      for (const user of [{ ...activeUser, authProvider: 'local' }, activeUser]) {
+        db.findUserByEmail.mockResolvedValue(user as never);
+        expect((await forgot()).statusCode).toBe(200);
+      }
+      expect(sendEmail).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('POST /api/auth/reset-password', () => {
@@ -225,6 +244,32 @@ describe('disabled users and the auth routes', () => {
       expect(res.statusCode).toBe(400);
       expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Invalid reset token');
       expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
+    it.each(['oidc', 'ldap', 'saml'])('rejects a valid token for an account managed by %s: no local password is ever planted', async (authProvider) => {
+      db.findUserById.mockResolvedValue({ ...activeUser, authProvider, externalId: 'ext-1' } as never);
+      const res = await reset(await resetToken(activeUser._id));
+      expect(res.statusCode).toBe(400);
+      expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Invalid reset token');
+      expect(db.updateUser).not.toHaveBeenCalled();
+      expect(bcrypt.hash).not.toHaveBeenCalled();
+    });
+
+    it('rejects an invitation link once the invitee is managed by a directory', async () => {
+      const invitee = { ...activeUser, invitedBy: 'owner-1', invitedAt: new Date(), canLogin: true };
+      const url = await createInvitationUrl({ ...invitee } as unknown as IUser, tenant.slug);
+      const token = new URL(url).searchParams.get('token')!;
+      db.findUserById.mockResolvedValue({ ...invitee, authProvider: 'oidc', externalId: 'ext-1' } as never);
+      const res = await reset(token);
+      expect(res.statusCode).toBe(400);
+      expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
+    it('still resets the password of an account whose provider is "local"', async () => {
+      db.findUserById.mockResolvedValue({ ...activeUser, authProvider: 'local' } as never);
+      const res = await reset(await resetToken(activeUser._id));
+      expect(res.statusCode).toBe(200);
+      expect(db.updateUser).toHaveBeenCalledTimes(1);
     });
 
     it('rejects an invitation link for a disabled invitee', async () => {

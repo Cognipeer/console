@@ -39,6 +39,7 @@ import { usersApiPlugin } from '@/server/api/plugins/users';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const OWNER = { _id: 'owner-1', role: 'owner', tenantId: 'tenant-1', name: 'Owner', email: 'o@x.com' };
+const MEMBER = { _id: 'user-1', role: 'user', tenantId: 'tenant-1', name: 'Member', email: 'm@x.com' };
 const TENANT = { _id: 'tenant-1', slug: 'acme', dbName: 'tenant_acme', licenseType: 'STARTER', companyName: 'Acme' };
 
 const HEADERS = {
@@ -64,7 +65,8 @@ describe('POST /api/users/bulk-import', () => {
     vi.clearAllMocks();
     db = createMockDb();
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
-    db.findUserById.mockResolvedValue(OWNER as never);
+    // the caller is judged on the account the database holds for the id the session names
+    db.findUserById.mockImplementation(async (id: string) => ({ 'owner-1': OWNER, 'user-1': MEMBER })[id] as never ?? null);
     db.findTenantById.mockResolvedValue(TENANT as never);
     db.listUsers.mockResolvedValue([OWNER] as never);
     db.createUser.mockImplementation(async (input: Record<string, unknown>) => ({ _id: `id-${String(input.name)}`, ...input }) as never);
@@ -133,5 +135,18 @@ describe('POST /api/users/bulk-import', () => {
   it('rejects non-admin sessions', async () => {
     const res = await post('a@x.com', { ...HEADERS, 'x-user-role': 'user', 'x-user-id': 'user-1' });
     expect(res.statusCode).toBe(403);
+  });
+
+  it('judges the caller on the role the account has now, not the one the session was issued with', async () => {
+    // the session says owner, the database says the account is an ordinary member
+    const demoted = await post('a@x.com', { ...HEADERS, 'x-user-role': 'owner', 'x-user-id': 'user-1' });
+    expect(demoted.statusCode).toBe(403);
+    expect(db.createUser).not.toHaveBeenCalled();
+  });
+
+  it('reads the table once for the whole import (the quota arithmetic and the import share it)', async () => {
+    const res = await post('grace@x.com,Grace Hopper\nada@x.com,Ada Lovelace\n');
+    expect(res.statusCode).toBe(201);
+    expect(db.listUsers).toHaveBeenCalledTimes(1);
   });
 });

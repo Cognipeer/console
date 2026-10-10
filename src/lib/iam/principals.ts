@@ -206,6 +206,15 @@ export interface PrincipalListInput {
   offset: number;
 }
 
+/**
+ * A page of the workspace's people, groups or tokens with their policy counts.
+ *
+ * @deprecated No route uses it: `GET /api/iam/principals` answers from `listDirectory`
+ * (directory.ts), which narrows the tokens by the viewer ("never upward") and carries the
+ * filters, sort and totals of the people screen. This list does NOT narrow tokens - it
+ * lists every one of the workspace - so it must not be put behind an endpoint or used for a
+ * screen. Kept for the policy-count helpers it exercises in tests.
+ */
 export async function listPrincipals(
   tenant: IamTenant,
   input: PrincipalListInput,
@@ -380,6 +389,8 @@ export interface PrincipalProject {
 }
 
 export interface PrincipalDetail {
+  /** Set when the caller asked not to compute the effective table (`effective` is then empty). */
+  effectiveSkipped?: true;
   principal: {
     type: PrincipalType;
     id: string;
@@ -467,9 +478,18 @@ export function policiesAffecting(
   return out;
 }
 
+export interface PrincipalDetailOptions {
+  /**
+   * Leave out the effective table - the part that asks the engine about every service - so the profile
+   * of a principal opens fast and the table is loaded when it is looked at.
+   */
+  skipEffective?: boolean;
+}
+
 export async function getPrincipalDetail(
   tenant: IamTenant,
   input: { type: PrincipalType; id: string; projectId?: string | null },
+  options: PrincipalDetailOptions = {},
 ): Promise<PrincipalDetail> {
   const policies = await listPolicies(tenant.tenantDbName);
   const projectNames = await runWithTenantScope(tenant.tenantDbName, async (db) => {
@@ -488,7 +508,7 @@ export async function getPrincipalDetail(
       return { group, memberCount: counts[input.id] ?? 0, projectLinks };
     });
     const grant = groupToGrant(loaded.group);
-    const effective: EffectiveService[] = MATRIX_SERVICES.map((def) => {
+    const effective: EffectiveService[] = options.skipEffective ? [] : MATRIX_SERVICES.map((def) => {
       const level = grant
         ? getEffectiveServicePermission({ role: grant.tenantRole, servicePermissions: grant.servicePermissions }, def.id as PermissionService)
         : 'none';
@@ -500,6 +520,7 @@ export async function getPrincipalDetail(
     });
     const affecting = new Set(policiesAffecting(policies, { type: 'group', id: input.id, groupIds: [] }));
     return {
+      ...(options.skipEffective ? { effectiveSkipped: true as const } : {}),
       principal: {
         type: 'group',
         id: input.id,
@@ -526,11 +547,13 @@ export async function getPrincipalDetail(
   const evaluation = await loadEvaluationPrincipal(tenant, { type: input.type, id: input.id }, input.projectId ?? null, { workspaceLevel: true });
 
   const activeProjectId = evaluation.principal.contextProjectId ?? input.projectId ?? null;
-  const effective = await computeEffectivePermissions(
-    tenant,
-    evaluation,
-    evaluation.narrowing ? projectNames.get(evaluation.narrowing.projectId) : (activeProjectId ? projectNames.get(activeProjectId) : undefined),
-  );
+  const effective = options.skipEffective
+    ? []
+    : await computeEffectivePermissions(
+      tenant,
+      evaluation,
+      evaluation.narrowing ? projectNames.get(evaluation.narrowing.projectId) : (activeProjectId ? projectNames.get(activeProjectId) : undefined),
+    );
 
   // The groups were read when the principal was built; only the owned tokens and the project rows are new reads.
   const groupList = evaluation.groups;
@@ -579,6 +602,7 @@ export async function getPrincipalDetail(
       };
 
   return {
+    ...(options.skipEffective ? { effectiveSkipped: true as const } : {}),
     principal,
     effective,
     groups: groupList.map((g) => ({ id: g.id, name: g.name })),

@@ -776,28 +776,6 @@
       "enterpriseModule": "prompt-optimizer"
     },
     {
-      "id": "members",
-      "href": "/dashboard/members",
-      "icon": "IconUsers",
-      "category": "admin",
-      "navLabelKey": "members",
-      "navDescriptionKey": "membersDescription",
-      "tags": [
-        "users",
-        "invite",
-        "roles"
-      ],
-      "searchKeywords": [
-        "members",
-        "users",
-        "invite",
-        "tenant",
-        "\u00fcyeler"
-      ],
-      "tenantAdminOnly": true,
-      "settings": true
-    },
-    {
       "id": "resources",
       "href": "/dashboard/resources",
       "icon": "IconCube",
@@ -903,8 +881,8 @@
       "category": "admin",
       "navLabelKey": "iam",
       "navDescriptionKey": "iamDescription",
-      "tags": ["iam", "authorization", "policy", "security"],
-      "searchKeywords": ["iam", "authorization", "policy", "cedar", "access", "permissions", "yetki", "yetki motoru", "politika"],
+      "tags": ["iam", "authorization", "policy", "security", "members", "users", "invite", "roles", "groups"],
+      "searchKeywords": ["iam", "authorization", "policy", "cedar", "access", "permissions", "yetki", "yetki motoru", "politika", "members", "users", "invite", "roles", "tenant", "people", "groups", "service account", "\u00fcyeler", "ki\u015filer", "gruplar", "servis hesab\u0131"],
       "tenantAdminOnly": true,
       "settings": true
     },

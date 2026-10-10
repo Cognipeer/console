@@ -29,6 +29,7 @@ import { BCRYPT_ROUNDS } from '@/lib/services/auth/passwordPolicy';
 import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
+import { isDirectoryManaged } from '@/lib/iam/identity';
 import { getClientIp, readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:client-members');
@@ -138,6 +139,13 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'User not found' });
       }
       if (target.role === 'owner') return reply.code(403).send({ error: 'Cannot delete the owner account' });
+      // An account of a directory (LDAP, SSO) would be created again at its next sign-in: disable it instead.
+      if (isDirectoryManaged(target)) {
+        return reply.code(409).send({
+          error: 'This account is managed by the directory; disable it instead',
+          code: 'directory_managed',
+        });
+      }
       const deleted = await db.deleteUser(id);
       if (!deleted) return reply.code(500).send({ error: 'Failed to delete user' });
       // The row is gone, so its tokens would otherwise be orphaned. Never fails the delete.
@@ -151,9 +159,9 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Disable / enable share one handler: the guards (self, owner, tenant) and the
   // audit trail live in setUserStatus, so the route only gates on role.
-  const registerStatusRoute = (action: 'disable' | 'enable') => {
+  const statusRouteHandler = (action: 'disable' | 'enable') => {
     const status = action === 'disable' ? 'disabled' : 'active';
-    app.post(`/client/v1/members/:id/${action}`, withClientApiRequestContext(async (request, reply, auth) => {
+    return withClientApiRequestContext(async (request, reply, auth) => {
       try {
         if (!isTenantAdmin(auth)) return reply.code(403).send({ error: 'Forbidden' });
         const { id } = request.params as { id: string };
@@ -192,10 +200,11 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
         logger.error(`Client ${action} member error`, { error });
         return sendApiTokenError(reply, error) ?? reply.code(500).send({ error: 'Internal server error' });
       }
-    }));
+    });
   };
-  registerStatusRoute('disable');
-  registerStatusRoute('enable');
+  // Literal paths (not a template) so the endpoint auth-coverage gate can see them.
+  app.post('/client/v1/members/:id/disable', statusRouteHandler('disable'));
+  app.post('/client/v1/members/:id/enable', statusRouteHandler('enable'));
 
   app.post('/client/v1/members/invite', withClientApiRequestContext(async (request, reply, auth) => {
     try {
@@ -220,7 +229,6 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
       const defaultProjectId = defaultProject._id ? String(defaultProject._id) : undefined;
       if (!defaultProjectId) return reply.code(400).send({ error: 'Project context is missing' });
 
-      const existingUsers = await db.listUsers();
       const quota = await checkResourceQuota(
         {
           domain: 'global',
@@ -231,7 +239,8 @@ export const clientMembersApiPlugin: FastifyPluginAsync = async (app) => {
           userId: String(auth.tokenRecord.userId),
         },
         'users',
-        existingUsers.length,
+        // a count, not the whole table
+        await db.iamCountUsers({ tenantId: auth.tenantId }),
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
 

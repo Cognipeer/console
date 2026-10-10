@@ -32,7 +32,9 @@ import {
   type PolicySpec,
 } from '@/lib/iam/policySpec';
 import { reloadConfig } from '@/lib/core/config';
-import { createPolicy, deletePolicy, listPolicies, updatePolicy } from '@/lib/iam/store';
+import { createPolicy, deletePolicy, listPolicies, updatePolicy, validateCustomPolicyText } from '@/lib/iam/store';
+import { registerIamPortalResolver } from '@/enterprise/iam-portal';
+import { portalAgentResource, portalResource } from '@/lib/iam/portalEntities';
 import { createIamTestDb, mulberry32, type IamTestDb } from '../helpers/iamTestDb';
 
 let env: IamTestDb;
@@ -573,5 +575,126 @@ describe('rules on the caller\'s address say what they depend on', () => {
     process.env.TRUSTED_PROXIES = '10.0.0.0/8';
     reloadConfig();
     expect((await compileSpec(spec)).warnings.map((w) => w.code)).not.toContain('trusted_proxies_unset');
+  });
+});
+
+describe('rules about portals', () => {
+  // The three rules an administrator writes first: block a person from a portal, block one agent in portals, block a group's
+  // reading in portals. Where there are no portals (no enterprise overlay) none of them can ever apply, so none is accepted.
+  const forbidUserOnPortal = base({ principals: { users: ['u-1'] }, actions: ['portal.use'], resources: { resources: [{ type: 'portal', id: 'P1' }] } });
+  const forbidAgentInPortals = base({
+    principals: { anyUser: true }, actions: ['agent.invoke'], resources: { resources: [{ type: 'agent', id: 'A1' }] }, conditions: { channels: ['portal'] },
+  });
+  const forbidReadInPortals = base({ principals: { groups: ['g1'] }, actions: ['Read'], resources: { any: true }, conditions: { channels: ['portal'] } });
+  const rawUser = 'forbid (principal == User::"u-1", action == Action::"portal.use", resource == Portal::"P1");';
+  const rawInPortal = 'forbid (principal, action in [Action::"portal.use", Action::"agent.invoke"], resource) when { resource in Portal::"P1" };';
+  const codes = (issues: Array<{ code?: string }>) => issues.map((i) => i.code).sort();
+
+  afterEach(() => registerIamPortalResolver(null));
+
+  describe('without portals', () => {
+    it('refuses all three, for the reasons it always gave', async () => {
+      const user = await compileSpec(forbidUserOnPortal);
+      expect(user.ok).toBe(false);
+      expect(codes(user.errors)).toEqual(['not_enforced_actions', 'not_enforced_resources']);
+      const agent = await compileSpec(forbidAgentInPortals);
+      expect(agent.ok).toBe(false);
+      expect(codes(agent.errors)).toEqual(['not_enforced_actions', 'not_enforced_channel', 'not_enforced_resources']);
+      const read = await compileSpec(forbidReadInPortals);
+      expect(read.ok).toBe(false);
+      expect(codes(read.errors)).toEqual(['not_enforced_channel']);
+    });
+
+    it('refuses the same rules written as Cedar', () => {
+      expect(validateCustomPolicyText(rawUser).valid).toBe(false);
+      expect(validateCustomPolicyText(rawUser).errors[0].message).toMatch(/individual resources|whole services/);
+      expect(validateCustomPolicyText(rawInPortal).valid).toBe(false);
+    });
+  });
+
+  describe('where portals exist', () => {
+    beforeEach(() => registerIamPortalResolver(async () => null));
+
+    it('accepts all three, without a warning that the rule is partly inert', async () => {
+      for (const spec of [forbidUserOnPortal, forbidAgentInPortals, forbidReadInPortals]) {
+        const out = await compileSpec(spec);
+        expect(out.ok, JSON.stringify(spec)).toBe(true);
+        // (a rule that covers a level also carries the note that the owner cannot be locked out of the Authorization Engine: no code)
+        expect(codes(out.warnings).filter(Boolean)).toEqual([]);
+      }
+      const read = await compileSpec(forbidReadInPortals);
+      expect(read.cedar).toContain('context has channel && ["portal"].contains(context.channel)');
+    });
+
+    it('accepts the same rules written as Cedar', () => {
+      expect(validateCustomPolicyText(rawUser)).toMatchObject({ valid: true, errors: [] });
+      expect(validateCustomPolicyText(rawInPortal)).toMatchObject({ valid: true, errors: [] });
+      expect(validateCustomPolicyText('forbid (principal, action, resource == Agent::"a1");').valid).toBe(true); // every action, one agent: reaches agent.invoke
+      expect(validateCustomPolicyText('forbid (principal, action in Action::"Read", resource in Project::"p1");').valid).toBe(true);
+    });
+
+    it('still refuses what nothing asks about, even next to portals', async () => {
+      expect(validateCustomPolicyText('forbid (principal, action == Action::"agent.delete", resource == Agent::"a1");').valid).toBe(false);
+      expect(validateCustomPolicyText('forbid (principal, action == Action::"portal.get", resource == Portal::"P1");').valid).toBe(false);
+      // opening a portal is not about a tool, a project is not a portal's, and the dashboard channel does not open portals
+      expect(codes((await compileSpec(base({ actions: ['portal.use'], resources: { services: ['models'] } }))).errors)).toEqual(['portal_wrong_scope']);
+      expect(codes((await compileSpec(base({ actions: ['portal.use'], conditions: { channels: ['dashboard'] } }))).errors)).toEqual(['portal_wrong_channel']);
+      expect(codes((await compileSpec(base({ actions: ['agents.write'], conditions: { channels: ['portal'] } }))).errors)).toEqual(['not_enforced_channel']);
+    });
+
+    it('says only what is true about a rule that is partly about portals', async () => {
+      // the Write level is asked at the gates AND (as agent.invoke) by portals: no channel warning
+      const both = await compileSpec(base({ actions: ['portal.use', 'agents.write'], conditions: { channels: ['api', 'portal'] } }));
+      expect(both.ok).toBe(true);
+      expect(codes(both.warnings)).not.toContain('partly_enforced_channel');
+      // portal channel plus an action the portal runtime does not ask: the other channels still carry it
+      const other = await compileSpec(base({ actions: ['agents.write'], conditions: { channels: ['api', 'portal'] } }));
+      expect(codes(other.warnings)).toEqual(['partly_enforced_channel']);
+      // a specific agent is checked in portals; a specific tool is not
+      const mixed = await compileSpec(base({
+        actions: ['agent.invoke', 'agents.write'], resources: { services: ['agents'], resources: [{ type: 'agent', id: 'a1' }, { type: 'tool', id: 't1' }] },
+      }));
+      expect(mixed.ok).toBe(true);
+      expect(codes(mixed.warnings)).toEqual(['partly_enforced_resources']);
+      const agentsOnly = await compileSpec(base({
+        actions: ['agent.invoke', 'agents.write'], resources: { services: ['agents'], resources: [{ type: 'agent', id: 'a1' }] },
+      }));
+      expect(codes(agentsOnly.warnings)).toEqual([]);
+    });
+
+    it('an allow rule is told that the portal list is the only thing that lets anyone in', async () => {
+      const onlyPortal = await compileSpec(base({ effect: 'permit', actions: ['portal.use'], resources: { resources: [{ type: 'portal', id: 'P1' }] } }));
+      expect(onlyPortal.ok).toBe(true);
+      expect(codes(onlyPortal.warnings)).toEqual(['portal_access_list_grants']);
+      // when it also works at the gates it is advice, not "this does nothing"
+      const alsoElsewhere = await compileSpec(base({ effect: 'permit', actions: ['Read'], resources: { any: true }, conditions: { channels: ['portal', 'dashboard'] } }));
+      expect(codes(alsoElsewhere.warnings)).toEqual(['partly_portal_access_list_grants']);
+      // a plain allow that never mentions portals says nothing about them
+      expect(codes((await compileSpec(base({ effect: 'permit', actions: ['Read'], resources: { any: true } }))).warnings)).toEqual([]);
+    });
+
+    it('a rule it accepts really blocks: the stored deny rule decides the portal check', async () => {
+      const compiled = await compileSpec(forbidUserOnPortal);
+      expect(compiled.ok).toBe(true);
+      await createPolicy(tenant(), { policyId: 'no-u1', name: 'Block u-1 from P1', cedar: compiled.cedar, spec: compiled.spec }, 'tester');
+      const access = { mode: 'all' as const, userIds: [], groupIds: [] };
+      const open = (userId: string, id = 'P1') => authorize({
+        tenant: tenant(), principal: userPrincipal({ userId, user: { role: 'user' } }), action: 'portal.use',
+        resource: portalResource({ id, access }), context: { channel: 'portal' },
+      });
+      expect(await open('u-1')).toMatchObject({ allowed: false, reasons: ['custom:no-u1'] });
+      expect((await open('u-2')).allowed).toBe(true);
+      expect((await open('u-1', 'P2')).allowed).toBe(true);
+
+      const agentRule = await compileSpec(forbidAgentInPortals);
+      await createPolicy(tenant(), { policyId: 'no-a1', name: 'No A1 in portals', cedar: agentRule.cedar, spec: agentRule.spec }, 'tester');
+      const run = (channel: string, id = 'A1') => authorize({
+        tenant: tenant(), principal: userPrincipal({ userId: 'u-2', user: { role: 'user' } }), action: 'agent.invoke',
+        resource: portalAgentResource({ id, projectId: 'p1' }, { id: 'P1', access }), context: { channel },
+      });
+      expect(await run('portal')).toMatchObject({ allowed: false, reasons: ['custom:no-a1'] });
+      expect((await run('portal', 'A2')).allowed).toBe(true);
+      expect((await run('dashboard')).allowed).toBe(true); // the dashboard playground is not a portal
+    });
   });
 });

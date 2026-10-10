@@ -7,11 +7,18 @@
  *
  * Nothing is recorded: a simulation is not traffic, it never touches the
  * decision counters or the audit log.
+ *
+ * Portals: `portal.use` is checked on a portal and `agent.invoke` on an agent run
+ * through one (`context.portalId`), in the `portal` channel, with the portal's access
+ * list read through the portal seam (@/enterprise/iam-portal). The person is built
+ * the way the portal runtime builds them: no project narrowing, because a portal has
+ * no active project.
  */
 
 import { runWithTenantScope } from '@/lib/database';
+import { resolveIamPortal, type IamPortalFacts } from '@/enterprise/iam-portal';
 import { isPermissionService } from '@/lib/security/rbac';
-import type { ActionDefinition } from './actions';
+import { RUNTIME_ENFORCED_ACTIONS, type ActionDefinition } from './actions';
 import { IAM_CHANNELS, isIamChannel, normalizeIp, type IamChannel, type IamRequestContext } from './context';
 import { authorize, type AuthorizeResult } from './engine';
 import type { IamResource } from './entities';
@@ -20,6 +27,8 @@ import { describeManagedPolicy, statementInfos } from './policyRows';
 import { isSafeId, type PolicyIssue } from './policySpec';
 import { getIamSchema } from './schemaState';
 import { isManagedPolicyId } from './managedPolicies';
+import { portalAgentResource, portalResource } from './portalEntities';
+import { isRuntimeEnforced } from './runtimeEnforced';
 import { listPolicies, policyIdFromCedarId, type IIamPolicy } from './store';
 
 // ── input ────────────────────────────────────────────────────────────────
@@ -32,6 +41,8 @@ export type SimulateResourceInput =
 export interface SimulateContextInput {
   projectId?: string;
   channel?: IamChannel;
+  /** The portal an agent is run through (`agent.invoke` in the portal channel). */
+  portalId?: string;
   ip?: string;
   /** ISO timestamp the decision is evaluated at (default: now). */
   at?: string;
@@ -70,9 +81,13 @@ interface ParsedInput {
   resource: SimulateResourceInput;
   projectId?: string;
   channel?: IamChannel;
+  portalId?: string;
   ip?: string;
   at?: Date;
 }
+
+/** Actions a runtime asks about (not the gates): `portal.use`, `agent.invoke`. */
+const isRuntimeAction = (id: string): boolean => Object.hasOwn(RUNTIME_ENFORCED_ACTIONS, id);
 
 export function parseSimulateInput(input: unknown): ParsedInput {
   const issues: PolicyIssue[] = [];
@@ -102,6 +117,7 @@ export function parseSimulateInput(input: unknown): ParsedInput {
 
   let projectId: string | undefined;
   let channel: IamChannel | undefined;
+  let portalId: string | undefined;
   let ip: string | undefined;
   let at: Date | undefined;
   if (input.context !== undefined && input.context !== null) {
@@ -117,6 +133,10 @@ export function parseSimulateInput(input: unknown): ParsedInput {
         if (isIamChannel(c.channel)) channel = c.channel;
         else issues.push({ message: `context.channel must be one of ${IAM_CHANNELS.join(', ')}`, field: 'context.channel' });
       }
+      if (c.portalId !== undefined && c.portalId !== null && c.portalId !== '') {
+        if (isSafeId(c.portalId)) portalId = c.portalId;
+        else issues.push({ message: 'context.portalId is not a valid portal id', field: 'context.portalId' });
+      }
       if (c.ip !== undefined && c.ip !== null && c.ip !== '') {
         const normalized = normalizeIp(c.ip);
         if (normalized) ip = normalized;
@@ -130,6 +150,21 @@ export function parseSimulateInput(input: unknown): ParsedInput {
     }
   }
 
+  const principalType = isRecord(principal) && principal.type === 'token' ? 'token' : 'user';
+  // Opening a portal is only ever asked in the portal channel, by a person: that is the channel to check it in.
+  if (action && !channel && action.id === 'portal.use' && principalType === 'user') channel = 'portal';
+  if (action && channel === 'portal' && isRuntimeAction(action.id)) {
+    if (principalType === 'token') {
+      issues.push({ message: 'API tokens cannot open portals or run agents through them; choose a person', field: 'context.channel' });
+    }
+    if (action.id === 'agent.invoke' && !portalId) {
+      issues.push({ message: 'Choose the portal the agent is run through (context.portalId)', field: 'context.portalId' });
+    }
+  }
+  if (portalId && !(action?.id === 'agent.invoke' && channel === 'portal')) {
+    issues.push({ message: 'context.portalId applies to agent.invoke in the portal channel only', field: 'context.portalId' });
+  }
+
   if (issues.length > 0 || !action || !resource) {
     throw new SimulateInputError('validation', issues.map((i) => i.message).join('; ') || 'Invalid request', 400, issues);
   }
@@ -139,6 +174,7 @@ export function parseSimulateInput(input: unknown): ParsedInput {
     resource,
     projectId,
     channel,
+    portalId,
     ip,
     at,
   };
@@ -150,9 +186,22 @@ interface ResolvedResource {
   resource: IamResource;
   /** The project the request runs in, when the resource pins one. */
   projectId?: string;
+  /** The portal the check is about (opened, or run through), with its access list. */
+  portal?: IamPortalFacts;
 }
 
-async function resolveResource(tenant: IamTenant, action: ActionDefinition, input: SimulateResourceInput): Promise<ResolvedResource> {
+async function portalOf(tenant: IamTenant, portalId: string): Promise<IamPortalFacts> {
+  const facts = await resolveIamPortal(tenant, portalId);
+  if (!facts) throw new SimulateInputError('resource_not_found', `The portal "${portalId}" does not exist in this workspace`, 404);
+  return facts;
+}
+
+async function resolveResource(
+  tenant: IamTenant,
+  action: ActionDefinition,
+  input: SimulateResourceInput,
+  portalId?: string,
+): Promise<ResolvedResource> {
   const bad = (message: string, field = 'resource'): never => {
     throw new SimulateInputError('validation', message, 400, [{ message, field }]);
   };
@@ -167,9 +216,26 @@ async function resolveResource(tenant: IamTenant, action: ActionDefinition, inpu
     if (action.kind !== 'resource' || action.resourceType !== input.type) {
       return bad(`The action does not apply to a ${input.type}`);
     }
+    if (input.type === 'portal') {
+      // The registry knows a portal exists; only the portal seam knows who its access list admits.
+      const facts = await portalOf(tenant, input.id);
+      return { resource: portalResource({ id: facts.id, key: facts.key, access: facts.access }), portal: facts };
+    }
     const { getResource } = await import('@/lib/resources/service');
     const detail = await getResource({ tenantDbName: tenant.tenantDbName, tenantId: tenant.tenantId, type: input.type, id: input.id });
     if (!detail) throw new SimulateInputError('resource_not_found', `The ${input.type} "${input.id}" does not exist in this workspace`, 404);
+    if (portalId && action.id === 'agent.invoke') {
+      const facts = await portalOf(tenant, portalId);
+      if (!facts.agentIds.includes(input.id)) bad(`The portal "${facts.name}" does not offer this agent`, 'context.portalId');
+      return {
+        resource: portalAgentResource(
+          { id: input.id, key: detail.key ?? undefined, projectId: detail.projectId },
+          { id: facts.id, access: facts.access },
+        ),
+        projectId: detail.projectId ?? undefined,
+        portal: facts,
+      };
+    }
     return {
       resource: {
         kind: 'resource',
@@ -262,24 +328,39 @@ export interface SimulateResult {
   enforcedAtGate: boolean;
   /** Problems the engine met while evaluating (a policy that errored); the decision above already accounts for them. */
   errors?: string[];
+  /**
+   * The portal a `portal.use` / `agent.invoke` check was about: what its access list is (counts only, never the
+   * names - the Access check explains a decision, it does not publish the list).
+   */
+  portal?: {
+    id: string;
+    key: string;
+    name: string;
+    status: 'enabled' | 'disabled';
+    mode: 'all' | 'selected';
+    userCount: number;
+    groupCount: number;
+  };
 }
 
 export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<SimulateResult> {
   const input = parseSimulateInput(rawInput);
 
-  const resolved = await resolveResource(tenant, input.action, input.resource);
-  const projectId = input.projectId ?? resolved.projectId ?? null;
+  const resolved = await resolveResource(tenant, input.action, input.resource, input.portalId);
+  // The portal runtime builds the person without any project (a portal has none): no narrowing, no project context.
+  const inPortal = input.channel === 'portal' && isRuntimeAction(input.action.id);
+  const projectId = inPortal ? null : input.projectId ?? resolved.projectId ?? null;
 
   let evaluation: EvaluationPrincipal;
   try {
-    evaluation = await loadEvaluationPrincipal(tenant, input.principal, projectId);
+    evaluation = await loadEvaluationPrincipal(tenant, input.principal, projectId, inPortal ? { workspaceLevel: true } : {});
   } catch (error) {
     if (error instanceof PrincipalError) throw new SimulateInputError('principal_not_found', error.message, 404);
     throw error;
   }
 
   const context: IamRequestContext = {
-    projectId: evaluation.principal.contextProjectId ?? projectId,
+    projectId: inPortal ? undefined : evaluation.principal.contextProjectId ?? projectId,
     channel: input.channel ?? (evaluation.type === 'token' ? 'api' : 'dashboard'),
     ip: input.ip,
     now: input.at,
@@ -320,8 +401,22 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
     },
     projectId: typeof context.projectId === 'string' && context.projectId ? context.projectId : null,
     ...(ownerSafety ? { ownerSafety: true } : {}),
-    enforcedAtGate: input.action.kind !== 'resource',
+    // Service actions are decided by the request gates; portal.use / agent.invoke by the portal runtime in its channel.
+    enforcedAtGate: input.action.kind === 'service' || (input.action.kind === 'resource' && isRuntimeEnforced(input.action.id, context.channel as IamChannel)),
     ...(result.errors.length > 0 ? { errors: result.errors.slice(0, 10) } : {}),
+    ...(resolved.portal
+      ? {
+          portal: {
+            id: resolved.portal.id,
+            key: resolved.portal.key,
+            name: resolved.portal.name,
+            status: resolved.portal.status,
+            mode: resolved.portal.access.mode,
+            userCount: resolved.portal.access.userIds.length,
+            groupCount: resolved.portal.access.groupIds.length,
+          },
+        }
+      : {}),
   };
   return out;
 }

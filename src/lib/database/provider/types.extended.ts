@@ -1681,7 +1681,8 @@ export interface IamPage<T> {
   hasMore: boolean;
 }
 
-export interface IamUserQuery extends IamPageRequest {
+/** What selects users, whether they are listed or only counted. */
+export interface IamUserFilter {
   tenantId: string;
   /** Case-insensitive substring of name or email. */
   q?: string;
@@ -1690,22 +1691,64 @@ export interface IamUserQuery extends IamPageRequest {
   status?: 'active' | 'disabled';
   /** Restrict to these ids (at most 500). */
   ids?: string[];
+  /** Leave these ids out (at most 500). */
+  excludeIds?: string[];
+  /** true = accounts that cannot sign in (service accounts), false = accounts that can. A row without the flag can sign in. */
+  canLogin?: boolean;
+  /** Where the account signs in. 'local' also matches rows that have no provider. */
+  authProviders?: Array<'local' | 'ldap' | 'oidc' | 'saml'>;
+  /**
+   * true = only accounts with an unanswered invitation (they can sign in, someone invited them, they have not
+   * accepted, and they are not disabled); false = leave those out.
+   */
+  invited?: boolean;
+  /** Members of this group. */
+  groupId?: string;
+  /**
+   * Members of this project: a direct membership, an entry of the legacy project list, or a group assigned to
+   * the project. (Owners and admins are in every project; they match only when they are listed explicitly.)
+   */
+  projectId?: string;
 }
 
-export interface IamGroupQuery extends IamPageRequest {
+export interface IamUserQuery extends IamUserFilter, IamPageRequest {
+  /** Default 'name'. Plain binary order on both backends (email by its lower-case form), the id breaks ties. */
+  sort?: 'name' | 'email' | 'createdAt';
+  dir?: 'asc' | 'desc';
+}
+
+export interface IamGroupFilter {
   tenantId: string;
   q?: string;
   ids?: string[];
+  /** Where the group comes from; 'local' also matches rows that have no source. */
+  sources?: Array<'local' | 'ldap'>;
+  /** Groups assigned to this project. */
+  projectId?: string;
 }
 
-export interface IamTokenQuery extends IamPageRequest {
+export interface IamGroupQuery extends IamGroupFilter, IamPageRequest {}
+
+export interface IamTokenFilter {
   tenantId: string;
   /** Case-insensitive substring of the label or the visible prefix. */
   q?: string;
   userId?: string;
   projectId?: string;
   ids?: string[];
+  /** 'expired' = has an expiry that has passed; 'active' = everything else. */
+  status?: 'active' | 'expired';
+  /** true = the token has a scope of its own (even an empty one), false = it inherits its owner's permissions. */
+  scoped?: boolean;
+  /** Only tokens of these owners (at most 500). An empty list matches nothing. */
+  userIds?: string[];
+  /** Leave out the tokens of these owners (at most 500). */
+  excludeUserIds?: string[];
+  /** The moment `status` is judged at (default: now). */
+  now?: Date;
 }
+
+export interface IamTokenQuery extends IamTokenFilter, IamPageRequest {}
 
 export interface IamAuditQuery extends IamPageRequest {
   tenantId: string;

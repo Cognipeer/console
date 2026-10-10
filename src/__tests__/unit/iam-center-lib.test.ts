@@ -16,6 +16,8 @@ import {
   countDirectReferences,
   describeManagedPolicy,
   listManagedPolicyViews,
+  policiesReaching,
+  policyReach,
   policyReferences,
   summarizeEffect,
   toPolicyRow,
@@ -131,7 +133,7 @@ describe('policy rows', () => {
 
   it('describes every managed policy in plain language', () => {
     const views = listManagedPolicyViews();
-    expect(views.map((v) => v.id)).toHaveLength(12);
+    expect(views.map((v) => v.id)).toHaveLength(16);
     for (const v of views) {
       expect(v.name.length).toBeGreaterThan(5);
       expect(v.description.length).toBeGreaterThan(20);
@@ -139,6 +141,8 @@ describe('policy rows', () => {
     }
     expect(describeManagedPolicy('managed:rbac:user-read')).toMatchObject({ group: 'rbac', effect: 'permit' });
     expect(describeManagedPolicy('managed:boundary:token-cap-write')).toMatchObject({ group: 'boundary', effect: 'forbid' });
+    expect(describeManagedPolicy('managed:portal:use')).toMatchObject({ group: 'portal', effect: 'permit', nameKey: 'iamApi.managed.portal-use.name' });
+    expect(describeManagedPolicy('managed:portal:agent-boundary')).toMatchObject({ group: 'portal', effect: 'forbid' });
     expect(describeManagedPolicy('managed:unknown:x')).toMatchObject({ name: 'managed:unknown:x', description: '', effect: 'permit' });
   });
 });
@@ -285,5 +289,49 @@ describe('cursors', () => {
       Buffer.from('{"o":"5"}').toString('base64url'), Buffer.from('{"o":99999999999}').toString('base64url'), 'x'.repeat(100), 5 as never]) {
       expect(decodeCursor(bad)).toBe('invalid');
     }
+  });
+});
+
+describe('which policies concern a portal', () => {
+  const portal = { type: 'portal', id: 'P1' };
+  const spec = (over: Record<string, unknown>) => policy({ cedar: 'x', spec: { effect: 'forbid', principals: { anyUser: true }, actions: ['portal.use'], resources: { any: true }, ...over } as never });
+
+  it('reads a spec exactly: this portal, every portal, or neither', () => {
+    expect(policyReach(spec({ resources: { resources: [{ type: 'portal', id: 'P1' }] } }), portal)).toBe('this');
+    expect(policyReach(spec({ resources: { resources: [{ type: 'portal', id: 'P2' }] } }), portal)).toBeNull();
+    expect(policyReach(spec({}), portal)).toBe('all');
+    expect(policyReach(spec({ actions: ['Read'] }), portal)).toBe('all');
+    expect(policyReach(spec({ actions: ['agent.invoke'], resources: { services: ['agents'] } }), portal)).toBe('all');
+    // running an agent is about the agents of the portal: a rule on the portal reaches them
+    expect(policyReach(spec({ actions: ['agent.invoke'], resources: { resources: [{ type: 'portal', id: 'P1' }] } }), portal)).toBe('this');
+  });
+
+  it('leaves out a rule about something else, or one that never applies in the portal channel', () => {
+    expect(policyReach(spec({ actions: ['models.read'] }), portal)).toBeNull();
+    expect(policyReach(spec({ resources: { services: ['models'] } }), portal)).toBeNull();
+    expect(policyReach(spec({ conditions: { channels: ['dashboard', 'api'] } }), portal)).toBeNull();
+    expect(policyReach(spec({ conditions: { channels: ['dashboard', 'portal'] } }), portal)).toBe('all');
+    expect(policyReach(spec({}), { type: 'agent', id: 'a1' })).toBeNull(); // only portals are judged
+  });
+
+  it('reads raw Cedar best-effort: a portal literal, else the actions and the Portal type', () => {
+    const raw = (cedar: string) => policy({ cedar, spec: null });
+    expect(policyReach(raw('forbid (principal == User::"u1", action == Action::"portal.use", resource == Portal::"P1");'), portal)).toBe('this');
+    expect(policyReach(raw('forbid (principal, action in [Action::"portal.use", Action::"agent.invoke"], resource) when { resource in Portal::"P1" };'), portal)).toBe('this');
+    expect(policyReach(raw('forbid (principal, action == Action::"portal.use", resource == Portal::"P2");'), portal)).toBeNull();
+    expect(policyReach(raw('forbid (principal, action == Action::"portal.use", resource is Portal);'), portal)).toBe('all');
+    expect(policyReach(raw('forbid (principal, action in Action::"Write", resource);'), portal)).toBe('all');
+    expect(policyReach(raw('forbid (principal, action == Action::"models.write", resource);'), portal)).toBeNull();
+    // a quote in an id does not end the literal early
+    expect(policyReach(raw('forbid (principal, action, resource == Portal::"we\\"ird");'), { type: 'portal', id: 'we"ird' })).toBe('this');
+  });
+
+  it('keeps the order of the policies it is given, with the scope of each', () => {
+    const list = [
+      spec({ resources: { resources: [{ type: 'portal', id: 'P1' }] } }),
+      spec({ actions: ['models.read'] }),
+      spec({}),
+    ];
+    expect(policiesReaching(list, portal).map((r) => [list.indexOf(r.policy), r.scope])).toEqual([[0, 'this'], [2, 'all']]);
   });
 });

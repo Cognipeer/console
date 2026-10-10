@@ -23,6 +23,7 @@ import {
   type Mounted,
 } from '../helpers/iamCenterUi';
 import { defaultRoutes } from '../helpers/iamCenterFixtures';
+import { memberHref } from '@/components/iam/links';
 
 const nav = vi.hoisted(() => ({ search: '', cache: new Map<string, URLSearchParams>() }));
 vi.mock('next/navigation', () => ({
@@ -138,7 +139,7 @@ describe('AccessCheckTab form', () => {
     expect(t).toContain('Denied');
     // nothing allows it: said with the person's role and the level they lack, with a way to change it
     expect(t).toContain('No rule allows this. Their workspace access (role User, own permissions and groups) does not include Write on Agents.');
-    expect(qa<HTMLAnchorElement>('a').some((a) => a.getAttribute('href') === '/dashboard/members/u-ann' && a.textContent === 'Change role or permissions')).toBe(true);
+    expect(qa<HTMLAnchorElement>('a').some((a) => a.getAttribute('href') === memberHref('u-ann') && a.textContent === 'Change role or permissions')).toBe(true);
     expect(t).toContain('Ann Lee → Agents · Write on Agents');
     // the engine decides every request: no mode, no comparison with older rules
     expect(t).not.toMatch(/Engine mode|Shadow|Monitor|legacy|current role rules/i);
@@ -301,7 +302,7 @@ describe('SimulateResultCard', () => {
     expect(t).toContain('Their workspace access (role, own permissions and groups) allows Write on Agents.');
     expect(t).not.toContain('Members can change what their access allows');
     expect(t).toContain('Built-in');
-    expect(hrefs()).toContain('/dashboard/members/u-ann');
+    expect(hrefs()).toContain(memberHref('u-ann'));
     // the custom one by its own name, linked to the editor
     const link = qa<HTMLAnchorElement>('a').find((a) => a.textContent === 'Analysts read cost');
     expect(link?.getAttribute('href')).toBe('/dashboard/iam?tab=policies&policyId=p-analysts');

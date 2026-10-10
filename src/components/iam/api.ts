@@ -95,6 +95,12 @@ export interface CatalogAction {
   verb?: string;
   labelKey: string;
   labelParams: Record<string, string>;
+  /**
+   * The channels in which a real request is decided on this action in this build
+   * (service actions: the gates, `dashboard` and `api`; `portal.use` / `agent.invoke`:
+   * `portal`, where portals exist). Absent: only the Access check evaluates it.
+   */
+  enforcedIn?: IamChannel[];
 }
 
 export interface CatalogResourceType {
@@ -120,8 +126,8 @@ export interface ManagedPolicy {
   /** i18n keys of the same texts (`iamApi.managed.<slug>.name|description`), when the server sends them. */
   nameKey?: string;
   descriptionKey?: string;
-  /** `rbac`: reproduces role-based access; `boundary`: a limit no allow can exceed. */
-  group: 'rbac' | 'boundary';
+  /** `rbac`: reproduces role-based access; `boundary`: a limit no allow can exceed; `portal`: who may open a portal and run its agents. */
+  group: 'rbac' | 'boundary' | 'portal';
   effect: IamEffect;
   cedar: string;
 }
@@ -142,6 +148,8 @@ export interface PolicyRow {
   updatedBy: string;
   /** Name or email of the last editor (the id when they no longer exist). */
   updatedByLabel: string;
+  /** Only in a list filtered by a resource: `this` names it, `all` applies to every resource of its kind. */
+  scope?: 'this' | 'all';
 }
 
 export interface PoliciesResponse {
@@ -224,6 +232,8 @@ export type SimulateResource =
 export interface SimulateContext {
   projectId?: string;
   channel?: IamChannel;
+  /** The portal an agent is run through (`agent.invoke` in the portal channel). */
+  portalId?: string;
   ip?: string;
   /** ISO timestamp. */
   at?: string;
@@ -266,6 +276,27 @@ export interface SimulateResponse {
   enforcedAtGate: boolean;
   /** Problems the engine met while evaluating (the decision already accounts for them). */
   errors: string[];
+  /** The portal a `portal.use` / `agent.invoke` check was about: what its access list is (counts only, never the names). */
+  portal: SimulatePortal | null;
+}
+
+export interface SimulatePortal {
+  id: string;
+  key: string;
+  name: string;
+  status: 'enabled' | 'disabled';
+  mode: 'all' | 'selected';
+  userCount: number;
+  groupCount: number;
+}
+
+/** A custom policy that decided a request, and what became of it since. */
+export interface DecisionPolicy {
+  policyId: string;
+  /** Its name now, else the one the denial or the policy-change trail kept; null when none is known. */
+  name: string | null;
+  /** `deleted`: the policy no longer exists. `disabled`: it exists but takes no part in decisions. */
+  status: 'active' | 'disabled' | 'deleted';
 }
 
 export interface DecisionRecord {
@@ -277,10 +308,16 @@ export interface DecisionRecord {
   route: string;
   method: string;
   code: string;
+  /** The channel the request arrived on, when the record says (`portal` for a refusal of the portal runtime). */
+  channel: string | null;
+  /** What the decision was about, for a refusal about a single resource (a portal, an agent run through one). */
+  resource: { type: string; id: string; label?: string } | null;
   /** Ready to feed Access check; `null` when the server could not reconstruct it. */
   simulateInput: SimulateRequest | null;
   /** Custom policies that decided it (empty = default deny or built-in rules). */
   policyIds: string[];
+  /** `policyIds` with their names and whether they are still in force. */
+  policies: DecisionPolicy[];
 }
 
 // ── principals ───────────────────────────────────────────────────────────
@@ -605,6 +642,7 @@ export function normalizePolicyRow(raw: unknown): PolicyRow {
     updatedAt: str(o.updatedAt),
     updatedBy: str(o.updatedBy),
     updatedByLabel: str(o.updatedByLabel, str(o.updatedBy)),
+    ...(o.scope === 'this' || o.scope === 'all' ? { scope: o.scope } : {}),
   };
 }
 
@@ -629,6 +667,7 @@ export function normalizeCatalog(raw: unknown): IamCatalog {
     for (const [k, v] of Object.entries(asRecord(r.labelParams))) {
       if (typeof v === 'string') params[k] = v;
     }
+    const enforcedIn = asArray(r.enforcedIn).map(toChannel).filter((x): x is IamChannel => x !== null);
     return {
       id: str(r.id),
       kind,
@@ -638,6 +677,7 @@ export function normalizeCatalog(raw: unknown): IamCatalog {
       ...(optStr(r.verb) ? { verb: optStr(r.verb) } : {}),
       labelKey: str(r.labelKey),
       labelParams: params,
+      ...(enforcedIn.length > 0 ? { enforcedIn } : {}),
     };
   });
   const resourceTypes = asArray(o.resourceTypes).map((t): CatalogResourceType => {
@@ -702,6 +742,21 @@ export function normalizeSimulate(raw: unknown): SimulateResponse {
     // Older servers do not say: they only ever evaluated what the gates evaluate.
     enforcedAtGate: o.enforcedAtGate === false ? false : true,
     errors: strings(o.errors),
+    portal: normalizeSimulatePortal(o.portal),
+  };
+}
+
+function normalizeSimulatePortal(raw: unknown): SimulatePortal | null {
+  const o = asRecord(raw);
+  if (!optStr(o.id)) return null;
+  return {
+    id: str(o.id),
+    key: str(o.key),
+    name: str(o.name, str(o.id)),
+    status: o.status === 'disabled' ? 'disabled' : 'enabled',
+    mode: o.mode === 'all' ? 'all' : 'selected',
+    userCount: num(o.userCount),
+    groupCount: num(o.groupCount),
   };
 }
 
@@ -725,6 +780,7 @@ export function normalizeSimulateInput(raw: unknown): SimulateRequest | null {
   const context: SimulateContext = {
     ...(optStr(c.projectId) ? { projectId: optStr(c.projectId) } : {}),
     ...(channel ? { channel } : {}),
+    ...(optStr(c.portalId) ? { portalId: optStr(c.portalId) } : {}),
     ...(optStr(c.ip) ? { ip: optStr(c.ip) } : {}),
     ...(optStr(c.at) ? { at: optStr(c.at) } : {}),
   };
@@ -738,6 +794,16 @@ export function normalizeSimulateInput(raw: unknown): SimulateRequest | null {
 
 export function normalizeDecision(raw: unknown): DecisionRecord {
   const o = asRecord(raw);
+  const policyIds = strings(o.policyIds);
+  const resource = asRecord(o.resource);
+  const known = asArray(o.policies).map((entry): DecisionPolicy => {
+    const p = asRecord(entry);
+    return {
+      policyId: str(p.policyId),
+      name: nullableStr(p.name),
+      status: p.status === 'disabled' || p.status === 'deleted' ? p.status : 'active',
+    };
+  }).filter((p) => p.policyId);
   return {
     decisionId: str(o.decisionId),
     at: str(o.at),
@@ -747,8 +813,14 @@ export function normalizeDecision(raw: unknown): DecisionRecord {
     route: str(o.route),
     method: str(o.method),
     code: str(o.code),
+    channel: nullableStr(o.channel),
+    resource: optStr(resource.type) && optStr(resource.id)
+      ? { type: str(resource.type), id: str(resource.id), ...(optStr(resource.label) ? { label: optStr(resource.label) } : {}) }
+      : null,
     simulateInput: normalizeSimulateInput(o.simulateInput),
-    policyIds: strings(o.policyIds),
+    policyIds,
+    // An older server sends the ids only: they are all the UI can say, and none is known to have changed.
+    policies: known.length > 0 ? known : policyIds.map((policyId): DecisionPolicy => ({ policyId, name: null, status: 'active' })),
   };
 }
 
@@ -1017,7 +1089,12 @@ export const iamApi = {
           description: str(r.description),
           ...(optStr(r.nameKey) ? { nameKey: optStr(r.nameKey) } : {}),
           ...(optStr(r.descriptionKey) ? { descriptionKey: optStr(r.descriptionKey) } : {}),
-          group: r.group === 'boundary' || (r.group !== 'rbac' && !id.includes(':rbac:')) ? 'boundary' : 'rbac',
+          group:
+            r.group === 'portal' || id.includes(':portal:')
+              ? 'portal'
+              : r.group === 'boundary' || (r.group !== 'rbac' && !id.includes(':rbac:'))
+                ? 'boundary'
+                : 'rbac',
           effect: toEffect(r.effect),
           cedar: str(r.cedar),
         };

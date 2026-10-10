@@ -13,10 +13,11 @@
  */
 
 import { RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
-import { IAM_CHANNELS } from './context';
+import { IAM_CHANNELS, type IamChannel } from './context';
 import { IAM_CONTEXT_ATTRS } from './schema';
 import { getIamSchema } from './schemaState';
 import { listIamResourceTypes } from './resourceTypes';
+import { enforcedChannelsOf } from './runtimeEnforced';
 
 export interface CatalogService {
   id: string;
@@ -36,6 +37,14 @@ export interface CatalogAction {
   verb?: string;
   labelKey: string;
   labelParams: Record<string, string>;
+  /**
+   * The channels in which a real request is decided on this action in this build:
+   * a service action by the request gates (`dashboard`, `api`), `portal.use` and
+   * `agent.invoke` by the portal runtime (`portal`, only where it exists). Absent
+   * (a level group, a resource action nothing asks for): the Access check and the
+   * preview evaluate it, but no request is held to the answer.
+   */
+  enforcedIn?: IamChannel[];
 }
 
 export interface CatalogResourceType {
@@ -66,16 +75,20 @@ export function buildCatalog(): IamCatalog {
       category: d.category,
       ...(d.deprecated ? { deprecated: true as const } : {}),
     })),
-    actions: schema.catalog.map((a) => ({
-      id: a.id,
-      kind: a.kind,
-      level: a.level,
-      ...(a.service ? { service: a.service } : {}),
-      ...(a.resourceType ? { resourceType: a.resourceType } : {}),
-      ...(a.verb ? { verb: a.verb } : {}),
-      labelKey: apiLabelKey(a.labelKey),
-      labelParams: a.labelParams,
-    })),
+    actions: schema.catalog.map((a) => {
+      const enforcedIn: IamChannel[] = a.kind === 'service' ? ['dashboard', 'api'] : a.kind === 'resource' ? enforcedChannelsOf(a.id) : [];
+      return {
+        id: a.id,
+        kind: a.kind,
+        level: a.level,
+        ...(a.service ? { service: a.service } : {}),
+        ...(a.resourceType ? { resourceType: a.resourceType } : {}),
+        ...(a.verb ? { verb: a.verb } : {}),
+        labelKey: apiLabelKey(a.labelKey),
+        labelParams: a.labelParams,
+        ...(enforcedIn.length > 0 ? { enforcedIn } : {}),
+      };
+    }),
     resourceTypes: listIamResourceTypes().map((t) => ({
       type: t.type,
       service: t.service,

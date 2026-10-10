@@ -2,8 +2,12 @@
  * Authorization center API, part 2: people and history. Registered by
  * plugins/iam.ts (paths under `/api/iam`, RBAC service `iam`).
  *
- *   GET /iam/principals?type=user|group|token&q=&limit=&cursor=    paged search
- *   GET /iam/principals/:type/:id?projectId=                        effective permissions, groups, projects, policies
+ *   GET /iam/principals?type=user|group|token&q=&limit=&cursor=    paged search, filters, sort, optional total
+ *   GET /iam/principals/:type/:id?projectId=                        effective permissions, groups, projects, policies,
+ *                                                                   what the viewer may do with the principal
+ *   GET /iam/principals/group/:id/members?limit=&cursor=            one page of a group's members
+ *   POST /iam/principals/user/:id/preview                           the effect of a draft role / permissions (stores nothing)
+ *   GET /iam/capabilities                                           what the signed-in person may do in the center
  *   GET /iam/audit?kind=denials|changes&from&to&principalType&principalId&service&limit&cursor
  *   GET /iam/audit/export                                           the same filters as CSV
  *   GET /iam/settings, PUT /iam/settings                            tenant token policy
@@ -15,7 +19,21 @@ import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { isPermissionService } from '@/lib/security/rbac';
 import { auditItemsToCsv, listAuditFeed, AUDIT_KINDS, type AuditFeedQuery, type AuditKind } from '@/lib/iam/auditFeed';
-import { getPrincipalDetail, listPrincipals, PrincipalError, type PrincipalType } from '@/lib/iam/principals';
+import {
+  augmentPrincipalDetail,
+  listDirectory,
+  listGroupMembers,
+  parseDirectoryFilters,
+  previewAccess,
+  tokenVisibleToViewer,
+  type AccessDraft,
+  type DirectoryViewer,
+} from '@/lib/iam/directory';
+import { ASSIGNABLE_ROLES, isAssignableRole } from '@/lib/iam/identity';
+import { authz } from '@/lib/iam/routeAuthz';
+import { checkRateLimit, type RateLimitConfig } from '@/lib/services/auth/rateLimiter';
+import { canAdministerPeople, isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
+import { getPrincipalDetail, PrincipalError, type PrincipalType } from '@/lib/iam/principals';
 import { isSafeId, type PolicyIssue } from '@/lib/iam/policySpec';
 import { recordIamChange, type IamActor } from '@/lib/iam/audit';
 import {
@@ -25,11 +43,15 @@ import {
   updateIamSettings,
 } from '@/lib/iam/settings';
 import {
+  authorizeServiceForRequest,
   requireSessionContext,
+  resolveSessionRbacContext,
   safeReadJsonBody,
+  sendProjectContextError,
   withApiRequestContext,
   type ApiSessionContext,
 } from '../fastify-utils';
+import { normalizeServicePermissions } from '@/lib/security/rbac';
 
 const logger = createLogger('api:iam-directory');
 
@@ -40,8 +62,12 @@ const AUDIT_DEFAULT_PAGE = 50;
 const AUDIT_MAX_PAGE = 200;
 export const CSV_MAX_ROWS = 10_000;
 const MAX_QUERY_LENGTH = 100;
+/** Previews of a draft of someone's access per minute and per person: each one runs the engine over every service. */
+const PREVIEW_RATE_LIMIT: RateLimitConfig = { maxAttempts: 30, windowSeconds: 60 };
 
 const tenantOf = (s: ApiSessionContext) => ({ tenantDbName: s.tenantDbName, tenantId: s.tenantId });
+/** The viewer of the directory, on the role the account has now. */
+const viewerOf = (s: ApiSessionContext): DirectoryViewer => ({ id: s.userId, role: s.userRole });
 
 function fail(reply: FastifyReply, status: number, code: string, error: string, details?: PolicyIssue[]) {
   return reply.code(status).send({ error, code, ...(details && details.length > 0 ? { details } : {}) });
@@ -153,9 +179,28 @@ export const iamDirectoryApiPlugin: FastifyPluginAsync = async (app) => {
     if (offset === 'invalid') return fail(reply, 400, 'invalid_cursor', 'Unknown cursor');
     const q = typeof query.q === 'string' ? query.q.trim().slice(0, MAX_QUERY_LENGTH) : '';
     const limit = intParam(query.limit, DEFAULT_PAGE, 1, MAX_PAGE);
+    const filters = parseDirectoryFilters(type as PrincipalType, query);
+    if (!filters.ok) return fail(reply, 400, 'invalid_filter', 'A filter has an invalid value', filters.details);
+    const wantsTotal = query.count === '1' || query.count === 'true';
     try {
-      const page = await listPrincipals(tenantOf(session), { type: type as PrincipalType, q: q || undefined, limit, offset: offset ?? 0 });
-      return reply.send({ items: page.items, nextCursor: page.hasMore ? encodeCursor((offset ?? 0) + limit) : null });
+      const page = await listDirectory(tenantOf(session), viewerOf(session), {
+        ...filters.filters,
+        type: type as PrincipalType,
+        q: q || undefined,
+        limit,
+        offset: offset ?? 0,
+        count: wantsTotal,
+        ids: filters.ids,
+      });
+      const next = (offset ?? 0) + limit;
+      // Past the deepest page a cursor may reach there is no "next": the reader narrows the filters instead.
+      const paged = page.hasMore && next <= MAX_DIRECTORY_OFFSET;
+      return reply.send({
+        items: page.items,
+        nextCursor: paged ? encodeCursor(next) : null,
+        ...(page.total !== undefined ? { total: page.total } : {}),
+        ...(page.hasMore && !paged ? { warnings: ['paging_capped'] } : {}),
+      });
     } catch (error) {
       return internal(reply, 'Failed to list principals', error);
     }
@@ -166,13 +211,126 @@ export const iamDirectoryApiPlugin: FastifyPluginAsync = async (app) => {
     const { type, id } = request.params as { type: string; id: string };
     if (!PRINCIPAL_TYPES.includes(type as PrincipalType)) return fail(reply, 400, 'invalid_type', 'type must be user, group or token');
     if (!isSafeId(id)) return fail(reply, 404, 'principal_not_found', 'Principal not found');
-    const { projectId } = request.query as { projectId?: string };
+    const { projectId, effective: effectiveParam } = request.query as { projectId?: string; effective?: string };
     if (projectId !== undefined && projectId !== '' && !isSafeId(projectId)) return fail(reply, 400, 'invalid_project', 'projectId is not a valid id');
+    // `effective=0` opens the profile without asking the engine about every service; the table is loaded when it is looked at
+    const skipEffective = effectiveParam === '0' || effectiveParam === 'false';
+    const tenant = tenantOf(session);
+    const viewer = viewerOf(session);
     try {
-      return reply.send(await getPrincipalDetail(tenantOf(session), { type: type as PrincipalType, id, projectId: projectId || null }));
+      // A token of somebody the viewer may not reach reads as a token that does not exist.
+      if (type === 'token' && !(await tokenVisibleToViewer(tenant, viewer, id))) {
+        return fail(reply, 404, 'principal_not_found', 'API token not found');
+      }
+      const detail = await getPrincipalDetail(tenant, { type: type as PrincipalType, id, projectId: projectId || null }, { skipEffective });
+      const added = await augmentPrincipalDetail(tenant, viewer, detail, { type: type as PrincipalType, id });
+      return reply.send({
+        ...detail,
+        principal: { ...detail.principal, ...added.principal },
+        ...(added.groups ? { groups: added.groups } : {}),
+        ...(added.projects ? { projects: added.projects } : {}),
+        ...(added.tokens !== undefined ? { tokens: added.tokens } : {}),
+        ...added.extra,
+      });
     } catch (error) {
       if (error instanceof PrincipalError) return fail(reply, error.code === 'principal_not_found' ? 404 : 400, error.code, error.message);
       return internal(reply, 'Failed to load the principal', error);
+    }
+  }));
+
+  app.get('/iam/principals/group/:id/members', withApiRequestContext(async (request, reply) => {
+    const session = requireSessionContext(request);
+    const { id } = request.params as { id: string };
+    if (!isSafeId(id)) return fail(reply, 404, 'principal_not_found', 'Group not found');
+    const query = request.query as Record<string, unknown>;
+    const offset = decodeCursor(query.cursor);
+    if (offset === 'invalid') return fail(reply, 400, 'invalid_cursor', 'Unknown cursor');
+    const limit = intParam(query.limit, DEFAULT_PAGE, 1, MAX_PAGE);
+    try {
+      const page = await listGroupMembers(tenantOf(session), id, { limit, offset: offset ?? 0 });
+      if (!page) return fail(reply, 404, 'principal_not_found', 'Group not found');
+      const next = (offset ?? 0) + limit;
+      const paged = page.hasMore && next <= MAX_DIRECTORY_OFFSET;
+      return reply.send({
+        items: page.items,
+        nextCursor: paged ? encodeCursor(next) : null,
+        total: page.total,
+        ...(page.hasMore && !paged ? { warnings: ['paging_capped'] } : {}),
+      });
+    } catch (error) {
+      return internal(reply, 'Failed to list the members of the group', error);
+    }
+  }));
+
+  // Compute only (it stores nothing), so a reader of the center may run it and a success is not an administrative event.
+  app.post('/iam/principals/user/:id/preview', { config: { ...authz.service('iam', 'read'), skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
+    const session = requireSessionContext(request);
+    const { id } = request.params as { id: string };
+    if (!isSafeId(id)) return fail(reply, 404, 'principal_not_found', 'User not found');
+    const body = safeReadJsonBody<Record<string, unknown>>(request);
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) return fail(reply, 400, 'invalid_body', 'The request body must be a JSON object');
+    const unknown = Object.keys(body).filter((key) => key !== 'role' && key !== 'servicePermissions');
+    if (unknown.length > 0) return fail(reply, 400, 'invalid_body', 'Only role and servicePermissions can be previewed', unknown.map((field) => ({ field, message: 'Unknown field' })));
+    if (body.role === undefined && body.servicePermissions === undefined) return fail(reply, 400, 'invalid_body', 'Send a role, servicePermissions or both');
+
+    const draft: AccessDraft = {};
+    if (body.role !== undefined) {
+      if (!isAssignableRole(body.role)) {
+        return fail(reply, 400, 'invalid_role', body.role === 'owner' ? 'The owner role cannot be assigned' : `Invalid role. Must be ${ASSIGNABLE_ROLES.join(', ')}`);
+      }
+      draft.role = body.role;
+    }
+    if (body.servicePermissions !== undefined) {
+      if (body.servicePermissions === null || typeof body.servicePermissions !== 'object' || Array.isArray(body.servicePermissions)) {
+        return fail(reply, 400, 'invalid_body', 'servicePermissions must be an object', [{ field: 'servicePermissions', message: 'Must be an object' }]);
+      }
+      // services this version does not know are dropped, like everywhere else
+      draft.servicePermissions = normalizeServicePermissions(body.servicePermissions);
+    }
+
+    const limit = checkRateLimit(`iam:principal-preview:${session.tenantDbName}:${session.userId}`, PREVIEW_RATE_LIMIT);
+    if (!limit.allowed) {
+      reply.header('Retry-After', String(Math.max(1, limit.retryAfterSeconds)));
+      return fail(reply, 429, 'rate_limited', 'Too many requests. Wait a moment and try again.');
+    }
+    try {
+      return reply.send(await previewAccess(tenantOf(session), id, draft));
+    } catch (error) {
+      if (error instanceof PrincipalError) return fail(reply, error.code === 'principal_not_found' ? 404 : 400, error.code, error.message);
+      return internal(reply, 'Failed to preview the access', error);
+    }
+  }));
+
+  // What the signed-in person can do in the center: the screens show their controls from this one answer
+  // instead of probing. Each part is the question the gate asks of the write behind the control - the
+  // engine's decision for `<service>.write` (RBAC still demands the admin level of these services) - so a
+  // policy that forbids the write is respected, and a control is never shown that would always answer 403.
+  // (Asking for `<service>.admin` would be a question no route gate ever asks.)
+  app.get('/iam/capabilities', withApiRequestContext(async (request, reply) => {
+    const session = requireSessionContext(request);
+    try {
+      const rbac = await resolveSessionRbacContext(session);
+      const [policies, members, tokens] = await Promise.all([
+        authorizeServiceForRequest(request, 'iam', { method: 'POST', rbac }),
+        authorizeServiceForRequest(request, 'members', { method: 'POST', rbac }),
+        authorizeServiceForRequest(request, 'tokens', { level: 'write', rbac }),
+      ]);
+      const manage = canAdministerPeople(session.userRole) && members.allowed;
+      return reply.send({
+        me: { userId: session.userId, role: session.userRole },
+        policies: { manage: policies.allowed },
+        people: {
+          manage,
+          grantAdmin: isOwnerOrAdmin(session.userRole),
+          assignableRoles: manage ? [...ASSIGNABLE_ROLES] : [],
+        },
+        tokens: { manageOthers: isOwnerOrAdmin(session.userRole) && tokens.allowed },
+      });
+    } catch (error) {
+      // the engine could not decide: answered as the gate would, with its 503
+      const refused = sendProjectContextError(reply, error);
+      if (refused) return refused;
+      return internal(reply, 'Failed to read the capabilities', error);
     }
   }));
 

@@ -43,7 +43,8 @@ import {
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
-import { canActOnTokensOf, clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
+import { canActOnTokensOf } from '@/lib/services/apiTokens/tokenGovernance';
+import { clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
 
 const logger = createLogger('api:client-users');
 
@@ -110,7 +111,6 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         if (existing) return reply.code(409).send({ error: 'User with this email already exists in your organization' });
       }
 
-      const existingUsers = await db.listUsers();
       const quota = await checkResourceQuota(
         {
           domain: 'global',
@@ -121,7 +121,8 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
           userId: String(auth.tokenRecord.userId),
         },
         'users',
-        existingUsers.length,
+        // a count, not the whole table
+        await db.iamCountUsers({ tenantId: auth.tenantId }),
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
 

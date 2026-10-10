@@ -14,6 +14,7 @@
  */
 import { runWithTenantScope } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { foldSearchText } from '@/lib/shared/searchFold';
 import { buildCrn } from './crn';
 import { EMPTY_GRAPH, MAX_USED_BY, buildResourceGraph, type ResourceGraph } from './graph';
 import { HEALTH_ISSUE_KINDS } from './health';
@@ -399,12 +400,13 @@ function typeInfos(snapshot: Snapshot) {
   }));
 }
 
+/** `needle` is folded (`foldSearchText`): "istanbul" finds "İstanbul Asistanı", "ısparta" finds "ISPARTA Bot". */
 function matchesQuery(r: ResourceRecord, needle: string): boolean {
   return (
-    r.name.toLowerCase().includes(needle)
-    || (r.key?.toLowerCase().includes(needle) ?? false)
-    || (r.description?.toLowerCase().includes(needle) ?? false)
-    || r.id.toLowerCase().includes(needle)
+    foldSearchText(r.name).includes(needle)
+    || (r.key ? foldSearchText(r.key).includes(needle) : false)
+    || (r.description ? foldSearchText(r.description).includes(needle) : false)
+    || foldSearchText(r.id).includes(needle)
   );
 }
 
@@ -421,7 +423,7 @@ export async function listResources(input: ListResourcesInput): Promise<ListReso
 
   const snapshot = await getSnapshot(input, input.refresh === true);
 
-  const needle = input.q?.trim().toLowerCase() || '';
+  const needle = foldSearchText(input.q?.trim() ?? '');
   const filterProjectNames = new Map(snapshot.projects.map((p) => [p.id, p.name]));
   const afterBase = snapshot.records.filter((r) => {
     // 'tenant' = not bound to a single project (all-projects, tenant-level, unassigned);
@@ -500,13 +502,14 @@ function matchesAttributeFilters(r: ResourceRecord, filters: ReadonlyArray<[stri
 
 /**
  * How well a record answers a typed query, lower is better: the exact key or
- * name first (what a person pasting a key expects at the top), then a prefix,
- * then a substring, then a hit on the description or id only.
+ * name first (what a person pasting a key expects at the top - letter for
+ * letter), then the same once folded (`needle`), then a prefix, then a
+ * substring, then a hit on the description or id only.
  */
 function matchRank(r: ResourceRecord, query: string, needle: string): number {
   if (r.key === query || r.name === query) return 0;
-  const key = r.key?.toLowerCase() ?? '';
-  const name = r.name.toLowerCase();
+  const key = foldSearchText(r.key ?? '');
+  const name = foldSearchText(r.name);
   if (key === needle || name === needle) return 1;
   if (key.startsWith(needle) || name.startsWith(needle)) return 2;
   if (key.includes(needle) || name.includes(needle)) return 3;
@@ -555,7 +558,7 @@ export async function searchResources(input: SearchResourcesInput): Promise<Sear
   const searched = new Set(types.filter((type) => !unavailable.has(type)));
 
   const query = (input.q ?? '').trim().slice(0, SEARCH_MAX_QUERY_LENGTH);
-  const needle = query.toLowerCase();
+  const needle = foldSearchText(query);
   const matches = snapshot.records.filter(
     (r) => searched.has(r.type) && matchesAttributeFilters(r, filters) && (!needle || matchesQuery(r, needle)),
   );

@@ -186,6 +186,7 @@ export default function DataGrid<T>({
   const isRefreshing = !showSkeleton && Boolean(loading || refreshing);
 
   const tFeedback = useTranslations('navigationFeedback');
+  const tGrid = useTranslations('dataGrid');
   const { push: navigate } = useNavigationFeedback();
   const pendingKey = usePendingNavigationKey(Boolean(rowHref));
   const { getIntentProps } = useIntentPrefetch({
@@ -305,7 +306,7 @@ export default function DataGrid<T>({
                   className="ds-muted"
                   style={{ fontSize: 13 }}
                 >
-                  {selected.size} selected
+                  {tGrid('selected', { count: selected.size })}
                 </span>
                 {bulkActions.map((a, i) => (
                   <Button
@@ -332,14 +333,14 @@ export default function DataGrid<T>({
             {toolbarRight}
 
             {onRefresh ? (
-              <Tooltip label="Refresh" withArrow>
+              <Tooltip label={tGrid('refresh')} withArrow>
                 <ActionIcon
                   variant="subtle"
                   color="gray"
                   radius="md"
                   onClick={onRefresh}
                   loading={refreshing}
-                  aria-label="Refresh"
+                  aria-label={tGrid('refresh')}
                 >
                   <IconRefresh size={14} stroke={1.7} />
                 </ActionIcon>
@@ -367,7 +368,7 @@ export default function DataGrid<T>({
                             el.indeterminate = someSelected && !allSelected;
                         }}
                         onChange={toggleAll}
-                        aria-label="Select all rows"
+                        aria-label={tGrid('selectAll')}
                       />
                     </th>
                   ) : null}
@@ -385,7 +386,7 @@ export default function DataGrid<T>({
                   {rowActions ? (
                     <th
                       style={{ width: 60, textAlign: 'right' }}
-                      aria-label="Actions"
+                      aria-label={tGrid('actions')}
                     />
                   ) : null}
                 </tr>
@@ -429,7 +430,7 @@ export default function DataGrid<T>({
                             className="ds-checkbox"
                             checked={isSel}
                             onChange={() => {}}
-                            aria-label="Select row"
+                            aria-label={tGrid('selectRow')}
                           />
                         </td>
                       ) : null}
@@ -477,12 +478,12 @@ export default function DataGrid<T>({
                     <select
                       className="ds-select"
                       value={pagination.pageSize}
-                      aria-label="Rows per page"
+                      aria-label={tGrid('rowsPerPage')}
                       style={{ fontSize: 12, padding: '2px 6px' }}
                       onChange={(e) => pagination.onPageSizeChange?.(Number(e.target.value))}
                     >
                       {pagination.pageSizeOptions.map((n) => (
-                        <option key={n} value={n}>{n} / page</option>
+                        <option key={n} value={n}>{tGrid('perPage', { count: n })}</option>
                       ))}
                     </select>
                   ) : null}
@@ -495,7 +496,7 @@ export default function DataGrid<T>({
                       pagination.onPageChange(Math.max(1, pagination.page - 1))
                     }
                   >
-                    Prev
+                    {tGrid('previous')}
                   </Button>
                   <span className="ds-mono" style={{ fontSize: 12 }}>
                     {pagination.page}
@@ -507,7 +508,7 @@ export default function DataGrid<T>({
                     rightSection={<IconChevronRight size={12} />}
                     onClick={() => pagination.onPageChange(pagination.page + 1)}
                   >
-                    Next
+                    {tGrid('next')}
                   </Button>
                 </>
               ) : null}
@@ -568,6 +569,7 @@ function RowActionsMenu<T>({
   actions: DataGridRowAction<T>[];
   row: T;
 }) {
+  const tGrid = useTranslations('dataGrid');
   const visible = actions.filter((a) => {
     if (!a.hidden) return true;
     return typeof a.hidden === 'function' ? !a.hidden(row) : !a.hidden;
@@ -576,7 +578,7 @@ function RowActionsMenu<T>({
   return (
     <Menu withinPortal position="bottom-end" withArrow>
       <Menu.Target>
-        <ActionIcon variant="subtle" color="gray" size="md" radius="md">
+        <ActionIcon variant="subtle" color="gray" size="md" radius="md" aria-label={tGrid('actions')}>
           <IconDots size={16} stroke={1.7} />
         </ActionIcon>
       </Menu.Target>

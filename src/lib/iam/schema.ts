@@ -14,6 +14,13 @@
  *   ApiToken { owner: User, scoped: Bool, capRead/capWrite/capAdmin: Set<String>, project?: Project }
  *   Service  { service, adminService }            // service-level checks (HTTP gate)
  *   <RegistryType> in [Project] { service, adminService, key?, tags? }
+ *   Portal   in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group> }
+ *   Agent    in [Project, Portal] { ..., portal?: Portal }
+ *
+ * The portal's access list is part of the Portal entity (mode / allowedUsers /
+ * allowedGroups, built by portalEntities.ts), so the managed portal policies
+ * (managedPolicies.ts) can read it and nothing is stored per portal. An Agent that
+ * is run through a portal is `in` that portal and names it in `portal`.
  *
  * `readSvcs/writeSvcs/adminSvcs` are the services where the principal's
  * EFFECTIVE level (role default, user override, group grants — computed by the
@@ -71,6 +78,35 @@ const contextType = (): TypeJson =>
       ]),
     ),
   );
+
+/**
+ * Bumped whenever the generated schema changes in a way the NAMES of its types and
+ * actions do not show (the signature below, and so the preparsed copy, follows).
+ */
+const SCHEMA_REVISION = 2;
+
+type EntityTypeJson = { memberOfTypes?: string[]; shape: { attributes: Record<string, TypeJson> } };
+
+/**
+ * What the portal rules need beyond the generic resource shape (see the header).
+ * Everything is optional: a Portal entity without an access list simply matches no
+ * portal rule and is refused by the managed boundary (managedPolicies.ts).
+ */
+function applyPortalShape(entityTypes: Record<string, TypeJson>, resourceEntityTypes: Record<string, string>): void {
+  const portalName = resourceEntityTypes.portal;
+  const portal = portalName ? (entityTypes[portalName] as EntityTypeJson | undefined) : undefined;
+  if (!portalName || !portal) return;
+  Object.assign(portal.shape.attributes, {
+    mode: attr(str(), false),
+    allowedUsers: attr(setOf(entity('User')), false),
+    allowedGroups: attr(setOf(entity('Group')), false),
+  });
+  const agentName = resourceEntityTypes.agent;
+  const agent = agentName ? (entityTypes[agentName] as EntityTypeJson | undefined) : undefined;
+  if (!agent) return;
+  agent.memberOfTypes = [...new Set([...(agent.memberOfTypes ?? []), portalName])];
+  agent.shape.attributes.portal = attr(entity(portalName), false);
+}
 
 export interface BuiltSchema {
   schema: CedarSchemaJson;
@@ -136,6 +172,8 @@ export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): 
     };
   }
 
+  applyPortalShape(entityTypes, resourceEntityTypes);
+
   const actions: Record<string, TypeJson> = {};
   for (const action of catalog) {
     if (action.kind === 'group') {
@@ -156,6 +194,7 @@ export function buildSchema(resourceTypes: ReadonlyArray<CatalogResourceType>): 
   const signature = [
     ...Object.keys(entityTypes).sort(),
     ...Object.keys(actions).sort(),
+    `rev:${SCHEMA_REVISION}`,
   ].join('|');
   return { schema, signature, catalog, resourceEntityTypes };
 }

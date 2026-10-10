@@ -75,6 +75,38 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.resolve(process.cwd(), '..'),
   },
+  // People, groups and API tokens are managed in the IAM center (Principals). The pages
+  // they used to live on are gone; old links and bookmarks land on the same place.
+  // Temporary (307) for now: browsers cache a permanent redirect for a long time.
+  async redirects() {
+    return [
+      {
+        source: '/dashboard/members',
+        destination: '/dashboard/iam?tab=principals&principalType=user',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/members/:userId',
+        destination: '/dashboard/iam?tab=principals&principalType=user&principalId=:userId',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/tenant-settings',
+        destination: '/dashboard/iam?tab=principals&principalType=user',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/tenant-settings/projects',
+        destination: '/dashboard/projects',
+        permanent: false,
+      },
+      {
+        source: '/dashboard/tenant-settings/projects/:projectId',
+        destination: '/dashboard/projects/:projectId',
+        permanent: false,
+      },
+    ];
+  },
   experimental: {
     serverActions: {
       bodySizeLimit: (process.env.NEXT_BODY_SIZE_LIMIT || '10mb') as `${number}mb`,

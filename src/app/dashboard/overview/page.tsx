@@ -22,19 +22,18 @@ import {
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLauncher } from '@/components/layout/launcher/LauncherContext';
-import {
-  useIntentPrefetch,
-  useIsNavigationPending,
-} from '@/components/common/navigation/useNavigationFeedback';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import RefreshIndicator from '@/components/common/ui/RefreshIndicator';
 import { SkeletonText, StatGridSkeleton } from '@/components/common/ui/Skeletons';
 import StatTile from '@/components/common/ui/StatTile';
 import StatusBadge from '@/components/common/ui/StatusBadge';
+import { CardLink } from '@/components/dashboard/CardLink';
 import {
   ActivityListSkeleton,
   PinnedServicesSkeleton,
 } from '@/components/dashboard/OverviewSkeletons';
+import { QuickStart } from '@/components/dashboard/QuickStart';
+import { quickStartTiles } from '@/components/dashboard/quickStartModel';
 import {
   IconActivity,
   IconAlertTriangle,
@@ -46,12 +45,10 @@ import {
   IconDatabase,
   IconPlus,
   IconRefresh,
-  IconRobot,
   IconRocket,
-  IconSparkles,
   IconTimeline,
 } from '@tabler/icons-react';
-import { useTranslations } from '@/lib/i18n';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import { buildDashboardDateSearchParams } from '@/lib/utils/dashboardDateFilter';
 
 interface DashboardStats {
@@ -111,7 +108,6 @@ function twoLineText(fontSize: number, lineHeight: number): CSSProperties {
 }
 
 const PINNED_DESCRIPTION_STYLE = twoLineText(11.5, 1.4);
-const QUICK_START_DESCRIPTION_STYLE = twoLineText(12.5, 1.45);
 
 const RESOURCE_ROW_STYLE: CSSProperties = {
   display: 'flex',
@@ -130,6 +126,7 @@ function emailLocalPart(email?: string | null): string | null {
 export default function DashboardOverviewPage() {
   const t = useTranslations('dashboardOverview');
   const tNav = useTranslations('navigation');
+  const locale = useLocale();
   const shellUser = useDashboardUser();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -182,9 +179,9 @@ export default function DashboardOverviewPage() {
     if (!data?.recentActivity) return [];
     return data.recentActivity.slice(0, 6).map((a) => ({
       ...a,
-      relTime: formatRelativeTime(new Date(a.timestamp)),
+      relTime: formatRelativeTime(new Date(a.timestamp), t, locale),
     }));
-  }, [data]);
+  }, [data, t, locale]);
 
   const hasData = data !== null;
   // First load: data regions show skeletons. Later loads refresh in place.
@@ -200,53 +197,76 @@ export default function DashboardOverviewPage() {
 
   const trend = data?.stats?.apiCalls?.trend ?? 0;
 
-  const quickStart = [
+  // What the person can open in the ACTIVE project (the launcher's list is the navigation's: roles, group grants,
+  // custom policies and project limits, as the engine decides them). Nothing on this page links to a service
+  // that is not in it.
+  const offered = useMemo(() => new Set(services.map((s) => String(s.id))), [services]);
+  const canOpen = (id: string) => offered.has(id);
+  const tiles = useMemo(() => quickStartTiles(services), [services]);
+
+  /** Quick links with their counts, for the services the person can open. */
+  const topResources = [
     {
-      step: '01',
-      icon: IconBrain,
-      title: 'Deploy a model',
-      desc: 'Choose a provider and create an inference endpoint.',
+      service: 'models',
+      icon: <IconBrain size={15} stroke={1.7} />,
+      label: t('home.topResources.models'),
       href: '/dashboard/models',
+      value: data ? data.stats.models.total : null,
+      hint: data
+        ? t('home.topResources.modelsHint', { llm: data.stats.models.llm, embedding: data.stats.models.embedding })
+        : '—',
     },
     {
-      step: '02',
-      icon: IconSparkles,
-      title: 'Publish a prompt',
-      desc: 'Version-controlled templates with test cases.',
-      href: '/dashboard/prompts',
+      service: 'vector',
+      icon: <IconDatabase size={15} stroke={1.7} />,
+      label: t('home.topResources.vectorIndexes'),
+      href: '/dashboard/vector',
+      value: data ? data.stats.vectors.indexes : null,
+      hint: data
+        ? t(data.stats.vectors.providers === 1 ? 'home.topResources.providerOne' : 'home.topResources.providerMany', {
+            count: data.stats.vectors.providers,
+          })
+        : '—',
     },
     {
-      step: '03',
-      icon: IconRobot,
-      title: 'Wire up an agent',
-      desc: 'Connect tools and memory into a runnable agent.',
-      href: '/dashboard/agents',
+      service: 'tracing',
+      icon: <IconActivity size={15} stroke={1.7} />,
+      label: t('home.topResources.traceSessions'),
+      href: '/dashboard/tracing',
+      value: data ? data.stats.tracing.totalSessions : null,
+      hint: data ? t('home.topResources.tokens', { count: data.stats.tracing.totalTokens.toLocaleString(locale) }) : '—',
     },
-  ];
+  ].filter((resource) => canOpen(resource.service));
 
   return (
     <PageContainer>
       <PageHeader
-        eyebrow="Overview"
-        title={userName ? `Welcome back, ${userName}` : t('title')}
+        eyebrow={t('home.eyebrow')}
+        title={userName ? t('home.welcome', { name: userName }) : t('title')}
         subtitle={
           <>
-            {launcherReady ? pinnedServices.length : '–'} pinned · {totalServices} services
-            available · <span className="ds-mono">{licenseType}</span>
+            {t(totalServices === 1 ? 'home.summaryOne' : 'home.summary', {
+              pinned: launcherReady ? pinnedServices.length : '–',
+              total: totalServices,
+            })}{' '}
+            ·{' '}
+            <span className="ds-mono">{licenseType}</span>
           </>
         }
         actions={
           <>
             <DashboardDateFilter value={dateFilter} onChange={setDateFilter} />
-            <Button
-              component={Link}
-              href="/dashboard/models"
-              color="teal"
-              size="sm"
-              leftSection={<IconPlus size={14} stroke={1.7} />}
-            >
-              Deploy model
-            </Button>
+            {canOpen('models') ? (
+              <Button
+                component={Link}
+                href="/dashboard/models"
+                color="teal"
+                size="sm"
+                leftSection={<IconPlus size={14} stroke={1.7} />}
+              >
+                {t('home.deployModel')}
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -266,12 +286,13 @@ export default function DashboardOverviewPage() {
         ) : firstLoad ? (
           <StatGridSkeleton count={4} spark />
         ) : (
-          <div className="ds-stat-grid">
+          // `lang`: the page's own is "en", and the upper-cased tile labels would lose their Turkish dots.
+          <div className="ds-stat-grid" lang={locale}>
             <StatTile
               label={t('stats.apiRequests')}
               icon={<IconBolt size={14} stroke={1.7} />}
               value={data?.stats.apiCalls.total.toLocaleString() ?? '—'}
-              delta={trend ? `${trend > 0 ? '+' : ''}${trend.toFixed(1)}% vs last 24h` : undefined}
+              delta={trend ? t('home.trend', { value: `${trend > 0 ? '+' : ''}${trend.toFixed(1)}` }) : undefined}
               deltaDir={trend > 0 ? 'up' : trend < 0 ? 'down' : null}
               spark={SPARK_CALLS}
               sparkColor="var(--teal-500)"
@@ -308,10 +329,12 @@ export default function DashboardOverviewPage() {
         <div className="ds-card ds-card-pad-lg" style={{ marginBottom: 16 }}>
           <div className="ds-row-between" style={{ marginBottom: 14 }}>
             <div>
-              <div className="ds-h3">Your pinned services</div>
+              <div className="ds-h3">{t('home.pinned.title')}</div>
               <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                {pinnedServices.length} pinned ·{' '}
-                {Math.max(0, totalServices - pinnedServices.length)} more available
+                {t('home.pinned.summary', {
+                  pinned: pinnedServices.length,
+                  more: Math.max(0, totalServices - pinnedServices.length),
+                })}
               </div>
             </div>
             <Button
@@ -320,7 +343,7 @@ export default function DashboardOverviewPage() {
               leftSection={<IconPlus size={12} />}
               onClick={openLauncher}
             >
-              Pin more
+              {t('home.pinned.pinMore')}
             </Button>
           </div>
           <div
@@ -384,7 +407,7 @@ export default function DashboardOverviewPage() {
             >
               <Group gap={6}>
                 <IconPlus size={14} />
-                <Text size="sm">Add service</Text>
+                <Text size="sm">{t('home.pinned.addService')}</Text>
               </Group>
             </UnstyledButton>
           </div>
@@ -401,74 +424,32 @@ export default function DashboardOverviewPage() {
         }}
         className="ds-grid-two"
       >
-        <div className="ds-card ds-card-pad-lg">
-          <div className="ds-row-between" style={{ marginBottom: 14 }}>
-            <div className="ds-h3">Get started</div>
-            <Text size="xs" c="dimmed">
-              Quick paths into your project
-            </Text>
-          </div>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
-              gap: 12,
-            }}
-          >
-            {quickStart.map((s) => {
-              const Icon = s.icon;
-              return (
-                <CardLink
-                  key={s.step}
-                  href={s.href}
-                  className="ds-card ds-card-pad-sm interactive"
-                  style={TILE_STYLE}
-                >
-                  <div className="ds-row ds-gap-sm" style={{ marginBottom: 10 }}>
-                    <div
-                      style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: 8,
-                        background: 'var(--ds-accent-soft)',
-                        color: 'var(--ds-accent)',
-                        display: 'grid',
-                        placeItems: 'center',
-                      }}
-                    >
-                      <Icon size={16} stroke={1.7} />
-                    </div>
-                    <span className="ds-eyebrow">Step {s.step}</span>
-                  </div>
-                  <div className="ds-h4" style={{ marginBottom: 4 }}>
-                    {s.title}
-                  </div>
-                  <div className="ds-muted" style={QUICK_START_DESCRIPTION_STYLE}>
-                    {s.desc}
-                  </div>
-                </CardLink>
-              );
-            })}
-          </div>
-        </div>
+        <QuickStart tiles={tiles} />
 
         <div
           className="ds-card ds-card-pad-lg"
-          style={{ position: 'relative', overflow: 'hidden' }}
+          style={{
+            position: 'relative',
+            overflow: 'hidden',
+            // Without the quick-start card beside it, the activity takes the whole row.
+            ...(tiles.length === 0 ? { gridColumn: '1 / -1' } : {}),
+          }}
           aria-busy={loading || undefined}
         >
           <RefreshIndicator active={refreshing} />
           <div className="ds-row-between" style={{ marginBottom: 12 }}>
-            <div className="ds-h3">Activity</div>
-            <Button
-              component={Link}
-              href="/dashboard/tracing"
-              variant="subtle"
-              size="xs"
-              rightSection={<IconChevronRight size={12} />}
-            >
-              {t('activity.viewAll')}
-            </Button>
+            <div className="ds-h3">{t('home.activityHeading')}</div>
+            {canOpen('tracing') ? (
+              <Button
+                component={Link}
+                href="/dashboard/tracing"
+                variant="subtle"
+                size="xs"
+                rightSection={<IconChevronRight size={12} />}
+              >
+                {t('activity.viewAll')}
+              </Button>
+            ) : null}
           </div>
           {failed ? (
             <SectionError bare message={t('activityError')} onRetry={retry} />
@@ -534,63 +515,41 @@ export default function DashboardOverviewPage() {
         }}
         className="ds-grid-two"
       >
-        <div className="ds-card ds-card-pad-lg">
-          <div className="ds-row-between" style={{ marginBottom: 14 }}>
-            <div>
-              <div className="ds-h3">Top resources</div>
-              <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                Quick links into your build surface
+        {topResources.length > 0 ? (
+          <div className="ds-card ds-card-pad-lg">
+            <div className="ds-row-between" style={{ marginBottom: 14 }}>
+              <div>
+                <div className="ds-h3">{t('home.topResources.title')}</div>
+                <div className="ds-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+                  {t('home.topResources.subtitle')}
+                </div>
               </div>
+              {canOpen('models') ? (
+                <Button
+                  component={Link}
+                  href="/dashboard/models"
+                  variant="subtle"
+                  size="xs"
+                  rightSection={<IconArrowRight size={12} />}
+                >
+                  {t('home.topResources.allModels')}
+                </Button>
+              ) : null}
             </div>
-            <Button
-              component={Link}
-              href="/dashboard/models"
-              variant="subtle"
-              size="xs"
-              rightSection={<IconArrowRight size={12} />}
-            >
-              All models
-            </Button>
+            <Stack gap="xs">
+              {topResources.map((resource) => (
+                <ResourceRow key={resource.service} pending={firstLoad} {...resource} />
+              ))}
+            </Stack>
           </div>
-          <Stack gap="xs">
-            <ResourceRow
-              icon={<IconBrain size={15} stroke={1.7} />}
-              label="Models"
-              href="/dashboard/models"
-              pending={firstLoad}
-              value={data ? data.stats.models.total : null}
-              hint={
-                data
-                  ? `${data.stats.models.llm} LLM · ${data.stats.models.embedding} embedding`
-                  : '—'
-              }
-            />
-            <ResourceRow
-              icon={<IconDatabase size={15} stroke={1.7} />}
-              label="Vector indexes"
-              href="/dashboard/vector"
-              pending={firstLoad}
-              value={data ? data.stats.vectors.indexes : null}
-              hint={
-                data
-                  ? `${data.stats.vectors.providers} provider${data.stats.vectors.providers === 1 ? '' : 's'}`
-                  : '—'
-              }
-            />
-            <ResourceRow
-              icon={<IconActivity size={15} stroke={1.7} />}
-              label="Trace sessions"
-              href="/dashboard/tracing"
-              pending={firstLoad}
-              value={data ? data.stats.tracing.totalSessions : null}
-              hint={data ? `${data.stats.tracing.totalTokens.toLocaleString()} tokens` : '—'}
-            />
-          </Stack>
-        </div>
+        ) : null}
 
-        <div className="ds-card ds-card-pad-lg">
+        <div
+          className="ds-card ds-card-pad-lg"
+          style={topResources.length === 0 ? { gridColumn: '1 / -1' } : undefined}
+        >
           <div className="ds-h3" style={{ marginBottom: 12 }}>
-            Resources
+            {t('resources.title')}
           </div>
           <Stack gap="xs">
             <ResourceLink
@@ -616,12 +575,12 @@ export default function DashboardOverviewPage() {
                 </Badge>
                 {(data?.stats.models.total ?? 0) > 0 ? (
                   <Badge variant="dot" color="teal" size="sm">
-                    {data!.stats.models.total} Models
+                    {t('home.planModels', { count: data!.stats.models.total })}
                   </Badge>
                 ) : null}
                 {(data?.stats.vectors.indexes ?? 0) > 0 ? (
                   <Badge variant="dot" color="violet" size="sm">
-                    {data!.stats.vectors.indexes} Indexes
+                    {t('home.planIndexes', { count: data!.stats.vectors.indexes })}
                   </Badge>
                 ) : null}
               </Group>
@@ -630,38 +589,6 @@ export default function DashboardOverviewPage() {
         </div>
       </div>
     </PageContainer>
-  );
-}
-
-/**
- * Card-style internal link: intent prefetch (hover, focus, pointer down) and
- * an instant pending state while its navigation is in flight.
- */
-function CardLink({
-  href,
-  className,
-  style,
-  children,
-}: {
-  href: string;
-  className?: string;
-  style?: CSSProperties;
-  children: ReactNode;
-}) {
-  const pending = useIsNavigationPending(href);
-  const { getIntentProps } = useIntentPrefetch({ kind: 'full' });
-  return (
-    <UnstyledButton
-      component={Link}
-      href={href}
-      prefetch={false}
-      className={className}
-      style={style}
-      data-pending={pending || undefined}
-      {...getIntentProps(href)}
-    >
-      {children}
-    </UnstyledButton>
   );
 }
 
@@ -798,15 +725,19 @@ function ResourceLink({
   );
 }
 
-function formatRelativeTime(date: Date) {
+function formatRelativeTime(
+  date: Date,
+  t: (key: string, values?: Record<string, string | number>) => string,
+  locale: string,
+) {
   const now = Date.now();
   const diff = Math.max(0, now - date.getTime());
   const min = Math.floor(diff / 60000);
-  if (min < 1) return 'just now';
-  if (min < 60) return `${min}m ago`;
+  if (min < 1) return t('home.ago.justNow');
+  if (min < 60) return t('home.ago.minutes', { count: min });
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
+  if (hr < 24) return t('home.ago.hours', { count: hr });
   const days = Math.floor(hr / 24);
-  if (days < 30) return `${days}d ago`;
-  return date.toLocaleDateString();
+  if (days < 30) return t('home.ago.days', { count: days });
+  return date.toLocaleDateString(locale);
 }

@@ -1,0 +1,333 @@
+/**
+ * Decisions about a RESOURCE, asked by a runtime that is not an HTTP gate: may this
+ * person open this portal (`portal.use`), may they run this agent through it
+ * (`agent.invoke`). The enterprise portal runtime calls `authorizeResourceAccess`
+ * on every portal request and before every message.
+ *
+ * It is the same engine, with the same managed rules and custom policies as the
+ * gates, asked in the `portal` channel:
+ *
+ *  - The portal's ACCESS LIST is the portal's built-in policy (managed:portal:*,
+ *    managedPolicies.ts): it grants, and nothing else does - no RBAC level, no
+ *    custom permit, no workspace role (an owner who is not on the list is not let
+ *    in). Custom deny rules still apply on top and can block a person, a group, a
+ *    portal or a single agent.
+ *  - The person is described the way the dashboard describes them (role, groups,
+ *    projects) but WITHOUT project narrowing: a portal has no active project, and
+ *    using one needs no project membership.
+ *  - The context carries `channel: 'portal'` and what the host knows of the request
+ *    (address, method, path); never a project.
+ *
+ * Failure semantics (the same as the gates'): if the person or the engine cannot be
+ * loaded, nothing is allowed and nothing is decided by anything else - the answer
+ * is a refusal with `unavailable: true` and its own decision id, which the caller
+ * shows as "try again" (503), not as "no access" (403).
+ *
+ * Every refusal carries a decision id. The first refusal of a kind is audited (the
+ * denials feed, the decision lookup and the Access check read that row); the same
+ * refusal repeated within a minute reuses the id and writes nothing, and a
+ * workspace writes at most TENANT_AUDIT_ROWS_PER_MINUTE of them, so a client that
+ * retries in a loop cannot flood the audit trail. An allow writes and logs nothing.
+ * Never throws.
+ */
+
+import { randomUUID } from 'node:crypto';
+import { createLogger } from '@/lib/core/logger';
+import type { RbacUserLike } from '@/lib/security/rbac';
+import { recordResourceDenial } from './denialAudit';
+import { authorize, customPolicyIdsOf } from './engine';
+import { recordAuthorizationUnavailable, type EnforceUnavailableReason } from './enforce';
+import { userPrincipal, type IamPrincipal, type IamResource } from './entities';
+import { getPrincipalContext } from './principalCache';
+import { countResourceAuditSuppressed, countResourceAuthz } from './resourceAuthzStats';
+
+const logger = createLogger('iam:resource-authz');
+let lastUnusableLogAt = 0;
+
+export const RESOURCE_AUTHZ_ACTIONS = ['portal.use', 'agent.invoke'] as const;
+export type ResourceAuthzAction = (typeof RESOURCE_AUTHZ_ACTIONS)[number];
+
+/** A repeat of the same refusal inside this window reuses its decision id and writes no audit row. */
+export const DENIAL_WINDOW_MS = 60_000;
+/** Audit rows one workspace may get from this helper per minute; beyond it a refusal still has its id (and is logged), but no row. */
+export const TENANT_AUDIT_ROWS_PER_MINUTE = 600;
+const MAX_TRACKED = 5_000;
+const MAX_REASONS = 10;
+
+/** What the host knows about the request it is asking for (all optional). */
+export interface ResourceAuthzClient {
+  /** The caller's address as the host's trust-proxy setting resolves it (policy context `ip`). */
+  ip?: string | null;
+  requestId?: string;
+  userAgent?: string;
+  /** HTTP method and path (without the query string): policy context `method` / `path`, and the audit row. */
+  method?: string;
+  path?: string;
+}
+
+/** Who is asking, as far as the resource builder needs to know (to cut a long access list down to the requester's slice). */
+export interface ResourceAuthzRequester {
+  userId: string;
+  groupIds: string[];
+}
+
+export interface ResourceAuthzInput {
+  tenantDbName: string;
+  tenantId: string;
+  userId: string;
+  /** The user's row when the caller has it; omitted = it is read (and cached for a few seconds). */
+  user?: RbacUserLike & { projectIds?: string[] };
+  channel: 'portal';
+  action: ResourceAuthzAction;
+  /**
+   * What the action is about: a portal (`portalResource`) or an agent run through one
+   * (`portalAgentResource`), from portalEntities.ts. A function receives the requester's
+   * groups once they are loaded, so a long access list can be cut down to their slice.
+   */
+  resource: IamResource | ((requester: ResourceAuthzRequester) => IamResource);
+  /** What the audit row and the decision lookup name. `portalId` is required: the replay needs it. */
+  subject: { portalId: string; portalKey?: string; resourceName?: string };
+  client?: ResourceAuthzClient;
+}
+
+export interface ResourceAuthzResult {
+  allowed: boolean;
+  /** Present on EVERY refusal (also when the engine could not decide): the code a person quotes, and the key of the audit row. */
+  decisionId?: string;
+  /** The engine (or the person's record) could not be loaded: `allowed` is false but nobody decided; answer 503, not 403. */
+  unavailable?: true;
+  source: 'engine' | 'unavailable';
+  /** Cedar ids of the policies that determined a refusal (empty: no rule allowed it). */
+  reasons: string[];
+  /** The custom policies among `reasons`. */
+  policyIds: string[];
+}
+
+// ── repeated refusals ────────────────────────────────────────────────────
+
+const recentDenials = new Map<string, { decisionId: string; at: number }>();
+const tenantAuditWindows = new Map<string, { startedAt: number; rows: number }>();
+
+export function resetResourceAuthzThrottleForTests(): void {
+  recentDenials.clear();
+  tenantAuditWindows.clear();
+}
+
+function makeRoom(now: number): void {
+  if (recentDenials.size < MAX_TRACKED) return;
+  for (const [key, entry] of recentDenials) {
+    if (now - entry.at >= DENIAL_WINDOW_MS) recentDenials.delete(key);
+  }
+  if (recentDenials.size < MAX_TRACKED) return;
+  // Still full of live entries (a flood of different refusals): forget the oldest half.
+  let dropped = 0;
+  for (const key of recentDenials.keys()) {
+    recentDenials.delete(key);
+    if (++dropped >= MAX_TRACKED / 2) break;
+  }
+}
+
+function takeAuditSlot(tenantDbName: string, now: number): boolean {
+  let window = tenantAuditWindows.get(tenantDbName);
+  if (!window || now - window.startedAt >= 60_000) {
+    if (!window && tenantAuditWindows.size >= MAX_TRACKED) tenantAuditWindows.clear();
+    window = { startedAt: now, rows: 0 };
+    tenantAuditWindows.set(tenantDbName, window);
+  }
+  if (window.rows >= TENANT_AUDIT_ROWS_PER_MINUTE) return false;
+  window.rows++;
+  return true;
+}
+
+/** The decision id of a refusal, and whether it is the first of its kind (so its audit row is due). */
+function claim(key: string, tenantDbName: string, mint: () => string): { decisionId: string; audit: boolean } {
+  const now = Date.now();
+  const hit = recentDenials.get(key);
+  if (hit && now - hit.at < DENIAL_WINDOW_MS) return { decisionId: hit.decisionId, audit: false };
+  const decisionId = mint();
+  makeRoom(now);
+  recentDenials.set(key, { decisionId, at: now });
+  const audit = takeAuditSlot(tenantDbName, now);
+  if (!audit) countResourceAuditSuppressed();
+  return { decisionId, audit };
+}
+
+// ── decision ─────────────────────────────────────────────────────────────
+
+const isText = (value: unknown): value is string => typeof value === 'string' && value !== '';
+
+function resourceRefOf(resource: IamResource | null): { type: string; id: string } {
+  return resource && resource.kind === 'resource' ? { type: resource.type, id: resource.id } : { type: 'unknown', id: '' };
+}
+
+interface Refusal {
+  input: ResourceAuthzInput;
+  resource: IamResource | null;
+  principal: IamPrincipal | null;
+}
+
+function audit(
+  refusal: Refusal,
+  decisionId: string,
+  code: 'forbidden' | 'authorization_unavailable',
+  source: 'engine' | 'unavailable',
+  reasons: string[],
+  policyIds: string[],
+): void {
+  const { input, resource, principal } = refusal;
+  const ref = resourceRefOf(resource);
+  recordResourceDenial({
+    tenantDbName: input.tenantDbName,
+    tenantId: input.tenantId,
+    userId: input.userId,
+    ...(principal?.role ? { userRole: principal.role } : {}),
+    code,
+    decisionId,
+    action: input.action,
+    channel: input.channel,
+    resourceType: ref.type,
+    resourceId: ref.id,
+    ...(input.subject.resourceName ? { resourceName: input.subject.resourceName } : {}),
+    portalId: input.subject.portalId,
+    ...(input.subject.portalKey ? { portalKey: input.subject.portalKey } : {}),
+    source,
+    reasons,
+    policyIds,
+    client: input.client,
+  });
+}
+
+function refuseUnavailable(
+  refusal: Refusal,
+  reason: EnforceUnavailableReason,
+  error: unknown,
+): ResourceAuthzResult {
+  const { input } = refusal;
+  countResourceAuthz(input.action, 'unavailable');
+  const ref = resourceRefOf(refusal.resource);
+  // Counted and logged like the gates' refusals (and so visible to the readiness report), one decision id per refusal.
+  const minted = recordAuthorizationUnavailable(input.tenantDbName, reason, error, {
+    channel: input.channel,
+    action: input.action,
+    portalId: input.subject.portalId,
+  });
+  const key = [input.tenantDbName, input.userId, input.action, `${ref.type}:${ref.id}`, input.subject.portalId, 'unavailable'].join('|');
+  const claimed = claim(key, input.tenantDbName, () => minted);
+  if (claimed.audit) audit(refusal, claimed.decisionId, 'authorization_unavailable', 'unavailable', [], []);
+  return { allowed: false, unavailable: true, decisionId: claimed.decisionId, source: 'unavailable', reasons: [], policyIds: [] };
+}
+
+function validInput(input: unknown): input is ResourceAuthzInput {
+  const i = input as Partial<ResourceAuthzInput> | null;
+  return !!i && typeof i === 'object'
+    && isText(i.tenantDbName) && isText(i.tenantId) && isText(i.userId)
+    && i.channel === 'portal'
+    && (RESOURCE_AUTHZ_ACTIONS as readonly string[]).includes(i.action as string)
+    && (typeof i.resource === 'function' || (!!i.resource && typeof i.resource === 'object'))
+    && !!i.subject && isText(i.subject.portalId);
+}
+
+async function decide(input: ResourceAuthzInput): Promise<ResourceAuthzResult> {
+  const refusal: Refusal = { input, resource: null, principal: null };
+
+  let principal: IamPrincipal;
+  let requester: ResourceAuthzRequester;
+  try {
+    const ctx = await getPrincipalContext({
+      tenantDbName: input.tenantDbName,
+      tenantId: input.tenantId,
+      userId: input.userId,
+      user: input.user,
+      // Role, groups AND projects, like the dashboard sees the person; project narrowing is not applied (a portal has no project).
+      withProjects: true,
+    });
+    principal = userPrincipal({
+      userId: input.userId,
+      user: ctx.user,
+      groupGrants: ctx.groupGrants,
+      groupIds: ctx.groupIds,
+      projects: ctx.projects,
+      adminProjects: ctx.adminProjects,
+    });
+    requester = { userId: input.userId, groupIds: ctx.groupIds };
+    refusal.principal = principal;
+  } catch (error) {
+    return refuseUnavailable(refusal, 'principal_unavailable', error);
+  }
+
+  let resource: IamResource;
+
+  try {
+    resource = typeof input.resource === 'function' ? input.resource(requester) : input.resource;
+    refusal.resource = resource;
+  } catch (error) {
+    return refuseUnavailable(refusal, 'evaluation_error', error);
+  }
+
+  const result = await authorize({
+    tenant: input.tenantDbName,
+    principal,
+    action: input.action,
+    resource,
+    context: {
+      channel: input.channel,
+      ip: input.client?.ip,
+      method: input.client?.method,
+      path: input.client?.path,
+    },
+  });
+  if (result.failed) return refuseUnavailable(refusal, 'engine_unavailable', result.errors.join(' | ') || 'engine failure');
+
+  if (result.allowed) {
+    countResourceAuthz(input.action, 'allow');
+    return { allowed: true, source: 'engine', reasons: [], policyIds: [] };
+  }
+
+  countResourceAuthz(input.action, 'deny');
+  const reasons = result.reasons.slice(0, MAX_REASONS);
+  const policyIds = customPolicyIdsOf(result.reasons).slice(0, MAX_REASONS);
+  const ref = resourceRefOf(resource);
+  const key = [
+    input.tenantDbName, input.userId, input.action, `${ref.type}:${ref.id}`, input.subject.portalId, [...reasons].sort().join(','),
+  ].join('|');
+  const claimed = claim(key, input.tenantDbName, randomUUID);
+  if (claimed.audit) {
+    logger.info('IAM: resource request denied', {
+      tenantDbName: input.tenantDbName,
+      decisionId: claimed.decisionId,
+      userId: input.userId,
+      action: input.action,
+      resourceType: ref.type,
+      resourceId: ref.id,
+      portalId: input.subject.portalId,
+      reasons,
+    });
+    audit(refusal, claimed.decisionId, 'forbidden', 'engine', reasons, policyIds);
+  }
+  return { allowed: false, decisionId: claimed.decisionId, source: 'engine', reasons, policyIds };
+}
+
+/**
+ * Is `userId` allowed to do `action` on the resource in the portal channel? See the
+ * module comment for the rules; the result never throws and a refusal always has a
+ * `decisionId`.
+ */
+export async function authorizeResourceAccess(input: ResourceAuthzInput): Promise<ResourceAuthzResult> {
+  if (!validInput(input)) {
+    // A caller bug, not a decision: refused like any outage, with an id that at least appears in the log.
+    const decisionId = randomUUID();
+    countResourceAuthz('other', 'unavailable');
+    // A caller with this bug asks on every request: one line per 10 s is enough to find it.
+    if (Date.now() - lastUnusableLogAt >= 10_000) {
+      lastUnusableLogAt = Date.now();
+      logger.error('authorizeResourceAccess was called with an unusable request', { decisionId });
+    }
+    return { allowed: false, unavailable: true, decisionId, source: 'unavailable', reasons: [], policyIds: [] };
+  }
+  try {
+    return await decide(input);
+  } catch (error) {
+    // decide() answers its own failures; this is the last line, so that nothing ever throws into a request.
+    return refuseUnavailable({ input, resource: null, principal: null }, 'evaluation_error', error);
+  }
+}

@@ -25,6 +25,7 @@ import {
   type RouteHandler,
 } from '../helpers/iamCenterUi';
 import { defaultRoutes, MANAGED } from '../helpers/iamCenterFixtures';
+import { messages } from '@/lib/i18n/messages';
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
@@ -95,6 +96,51 @@ const UNAVAILABLE = {
   summary: 'Refused GET /api/agents: authorization was temporarily unavailable',
   text: { key: 'unavailable', params: { route: 'GET /api/agents' } },
 };
+
+const GONE_ID = 'p-gone-77aa11bb';
+/** A refusal by a policy that has been deleted since: the server could only write the raw id into the sentence. */
+const GONE_DENIAL = {
+  id: 'a3',
+  at: new Date(Date.now() - 2 * 3_600_000).toISOString(),
+  kind: 'denials',
+  principal: { type: 'user', id: 'u-bob', label: 'Bob Ray' },
+  service: 'agents',
+  action: 'agents.write',
+  route: '/api/agents/a1',
+  method: 'DELETE',
+  code: 'forbidden',
+  decisionId: 'dec-0003-cccc',
+  policyId: GONE_ID,
+  summary: `Denied DELETE /api/agents/a1: agents needs write by policy "${GONE_ID}"`,
+  text: { key: 'denied.policy', params: { route: 'DELETE /api/agents/a1', service: 'agents', required: 'write', policies: GONE_ID } },
+};
+/** A refusal by a policy that still exists: the server wrote its name. */
+const LIVE_DENIAL = {
+  ...GONE_DENIAL,
+  id: 'a4',
+  policyId: 'p-contractors',
+  decisionId: 'dec-0004-dddd',
+  summary: 'Denied DELETE /api/agents/a1: agents needs write by policy "Contractors cannot write"',
+  text: { key: 'denied.policy', params: { route: 'DELETE /api/agents/a1', service: 'agents', required: 'write', policies: 'Contractors cannot write' } },
+};
+/** The policy-change trail, newest first: the deletion of the gone policy and its creation under another name. */
+const change = (id: string, action: string, key: string, name: string, policyId = GONE_ID) => ({
+  id, at: new Date(Date.now() - 86_400_000).toISOString(), kind: 'changes', principal: null, actor: 'Ada Admin', service: 'iam', action, route: null, method: null,
+  code: null, decisionId: null, policyId, summary: `${key} "${name}"`, text: { key, params: { name, effect: 'forbid', enabled: 1 } },
+});
+const CHANGES = [
+  change('c2', 'iam.policy.delete', 'policy.deleted', 'Block agent deletes'),
+  change('c1', 'iam.policy.update', 'policy.updated', 'Block agent deletes (draft)'),
+  change('c0', 'iam.policy.create', 'policy.created', 'Old name'),
+  change('cx', 'iam.policy.delete', 'policy.deleted', 'Someone else\'s policy', 'p-other'),
+];
+
+/** Answers the denials and, for `kind=changes`, the policy-change trail. */
+const trail = (denials: unknown[], changes: unknown[] = CHANGES): [string, string, RouteHandler] => [
+  'GET',
+  '/api/iam/audit',
+  (c) => ({ items: c.query.kind === 'changes' ? changes : denials, nextCursor: null }),
+];
 
 async function render(options: {
   canManage?: boolean;
@@ -232,6 +278,127 @@ describe('OverviewTab', () => {
   });
 });
 
+describe('OverviewTab (the people card)', () => {
+  it('opens the directory tab under that tab\'s own name, whatever it is called', async () => {
+    await render();
+    const open = buttonByText(/^Open /, q('[data-testid="overview-users"]')!.closest('.mantine-Paper-root')!)!;
+    expect(open.textContent).toBe(`Open ${messages.en.iamCenter.tabs.principals}`);
+    expect(open.getAttribute('href')).toBe('/dashboard/iam?tab=principals&principalType=user');
+  });
+
+  it('says so in Turkish', async () => {
+    await render({ locale: 'tr' });
+    const open = buttonByText(/sekmesini aç$/, q('[data-testid="overview-users"]')!.closest('.mantine-Paper-root')!)!;
+    expect(open.textContent).toBe(`${messages.tr.iamCenter.tabs.principals} sekmesini aç`);
+  });
+});
+
+describe('OverviewTab (header of a card)', () => {
+  it('keeps the engine status and the "view all" link at their full width; the text beside them gives way', async () => {
+    await render();
+    const asides = qa('[data-testid="overview-card-aside"]');
+    // The engine's status badge and the denials' link: the two cards that have something at their right.
+    expect(asides.map((a) => a.textContent)).toEqual(['Running', 'View all denials']);
+    for (const aside of asides) {
+      // A flex item that may shrink is what turned "RUNNING" into "RUNNI…" and clipped the link.
+      expect(aside.style.flexShrink).toBe('0');
+      expect(aside.style.whiteSpace).toBe('nowrap');
+      // ...while the title and its hint stay free to wrap.
+      const text = aside.previousElementSibling as HTMLElement;
+      expect(text.style.flex).toBe('1 1 0%');
+      expect(['0', '0px']).toContain(text.style.minWidth);
+    }
+  });
+
+  it('lets the third card of the first row take the whole row where the grid has only two columns', async () => {
+    await render();
+    const first = q('.mantine-SimpleGrid-root')!;
+    const cards = [...first.children] as HTMLElement[];
+    expect(cards).toHaveLength(3);
+    // The two before it keep their own cell; the third carries the class that spans the row between the md and xl breakpoints
+    // (overview.module.css; Chromium lays it out, see the stylesheet's comment).
+    expect(cards.map((card) => /wide/.test(card.className))).toEqual([false, false, true]);
+    expect(cards[2].textContent).toContain('People and tokens');
+  });
+
+  it('does the same in Turkish, where the words are longer', async () => {
+    await render({ locale: 'tr' });
+    expect(qa('[data-testid="overview-card-aside"]').map((a) => a.textContent)).toEqual(['Çalışıyor', 'Tüm reddedilenleri gör']);
+  });
+});
+
+describe('OverviewTab (denials by a policy that has since been deleted)', () => {
+  const denialText = () => q('[data-testid="overview-denials"]')!.textContent ?? '';
+
+  it('leaves a denial by an existing policy as the server wrote it, and reads no policy-change trail for it', async () => {
+    await render({ extra: [trail([LIVE_DENIAL])] });
+    expect(denialText()).toContain('by policy "Contractors cannot write"');
+    expect(denialText()).not.toContain('deleted');
+    expect(q('[data-testid="overview-denial-policy-id"]')).toBeNull();
+    expect(api.to('GET', '/api/iam/audit').map((c) => c.query.kind)).toEqual(['denials']);
+  });
+
+  it('shows the name the policy had, taken from the policy-change trail, and says it is deleted', async () => {
+    await render({ extra: [trail([GONE_DENIAL])] });
+    // The newest name the trail recorded for that policy, not the raw id and not another policy's name.
+    expect(denialText()).toContain('Denied DELETE /api/agents/a1: agents needs write by policy "Block agent deletes" (deleted)');
+    expect(denialText()).not.toContain(GONE_ID);
+    expect(q('[data-testid="overview-denial-policy-id"]')).toBeNull();
+    expect(api.to('GET', '/api/iam/audit').map((c) => c.query.kind).sort()).toEqual(['changes', 'denials']);
+    expect(api.to('GET', '/api/iam/audit').find((c) => c.query.kind === 'changes')!.query.limit).toBe('100');
+  });
+
+  it('shows a short, dimmed id when the trail no longer says what the policy was called', async () => {
+    await render({ extra: [trail([GONE_DENIAL], [change('cx', 'iam.policy.delete', 'policy.deleted', 'Someone else\'s policy', 'p-other')])] });
+    const id = q('[data-testid="overview-denial-policy-id"]')!;
+    expect(id.textContent).toBe('p-gone-7');
+    expect(id.getAttribute('title')).toBe(GONE_ID);
+    // dimmed and monospace, like the decision id beside it
+    expect(id.className).toMatch(/Text-root/);
+    expect(id.getAttribute('style') ?? '').toMatch(/dimmed/);
+    expect(id.getAttribute('style') ?? '').toMatch(/monospace/);
+    expect(denialText()).toContain('by policy "p-gone-7" (deleted)');
+    expect(denialText()).not.toContain(GONE_ID);
+  });
+
+  it('shows the short id too when the trail cannot be read', async () => {
+    await render({
+      extra: [['GET', '/api/iam/audit', (c) => (c.query.kind === 'changes' ? jsonResponse({ error: 'x' }, 500) : { items: [GONE_DENIAL], nextCursor: null })]],
+    });
+    expect(q('[data-testid="overview-denial-policy-id"]')!.textContent).toBe('p-gone-7');
+    expect(denialText()).toContain('(deleted)');
+  });
+
+  it('says nothing about a policy when the list of policies could not be read', async () => {
+    await render({
+      extra: [trail([GONE_DENIAL]), ['GET', '/api/iam/policies', () => jsonResponse({ error: 'x' }, 500)]],
+    });
+    // Without the list there is no telling a deleted policy from an existing one: the server's sentence stands.
+    expect(denialText()).toContain(`by policy "${GONE_ID}"`);
+    expect(denialText()).not.toContain('(deleted)');
+    expect(api.to('GET', '/api/iam/audit').map((c) => c.query.kind)).toEqual(['denials']);
+  });
+
+  it('keeps the link to the Access check of the denial', async () => {
+    await render({ extra: [trail([GONE_DENIAL])] });
+    expect(qa<HTMLAnchorElement>('a').map((a) => a.getAttribute('href'))).toContain('/dashboard/iam?tab=check&decisionId=dec-0003-cccc');
+  });
+
+  it('is worded in Turkish too', async () => {
+    await render({
+      locale: 'tr',
+      extra: [
+        ['GET', '/api/iam/audit', (c) => ({
+          items: c.query.kind === 'changes' ? CHANGES : [{ ...GONE_DENIAL, text: GONE_DENIAL.text }],
+          nextCursor: null,
+        })],
+      ],
+    });
+    expect(denialText()).toContain('"Block agent deletes" (silindi)');
+    expect(denialText()).not.toMatch(/iamOverview\.|iamAudit\./);
+  });
+});
+
 describe('OverviewTab (what needs attention)', () => {
   it('says when the engine is degraded or down', async () => {
     await render({ stats: { ...TENANT_STATS, health: { status: 'degraded', message: 'one policy statement could not be loaded' } } });
@@ -335,5 +502,17 @@ describe('OverviewTab (Turkish)', () => {
     expect(t).toContain('bir politika değerlendirilemedi');
     expect(t).toContain('GET /api/agents reddedildi: yetkilendirme geçici olarak kullanılamıyordu');
     expect(t).not.toMatch(/iamOverview\.|iamCenter\.|iamAudit\./);
+  });
+
+  it('marks the tab as Turkish text, so the upper-cased badges keep their dots ("İZİN", not "IZIN")', async () => {
+    await render({ locale: 'tr' });
+    // The page's own language is "en" and CSS upper-casing goes by it unless the text says otherwise.
+    for (const testId of ['overview-engine-status', 'overview-policies-enabled']) {
+      expect(q(`[data-testid="${testId}"]`)!.closest('[lang]')!.getAttribute('lang'), testId).toBe('tr');
+    }
+    expect(text()).toContain('1 izin');
+    await mounted.unmount();
+    await render({ locale: 'en' });
+    expect(q('[data-testid="overview-engine-status"]')!.closest('[lang]')!.getAttribute('lang')).toBe('en');
   });
 });

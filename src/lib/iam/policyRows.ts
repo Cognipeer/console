@@ -19,7 +19,7 @@ export interface ManagedPolicyView {
   /** i18n keys of the same texts (`iamApi.managed.<slug>.name|description`). */
   nameKey: string;
   descriptionKey: string;
-  group: 'rbac' | 'boundary';
+  group: 'rbac' | 'boundary' | 'portal';
   effect: 'permit' | 'forbid';
   cedar: string;
 }
@@ -72,6 +72,22 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
   'managed:boundary:project-admin': {
     name: 'Project limit (administer)',
     description: 'When the active project\'s own permissions deny administering a service, no custom policy can grant it. Project permissions only ever narrow workspace access.',
+  },
+  'managed:portal:use': {
+    name: 'People on a portal\'s access list can open it',
+    description: 'A person may open a portal when its access list names them or one of their groups, or when the portal is open to everyone in the workspace. The list is edited on the portal; no rule is stored per portal.',
+  },
+  'managed:portal:use-boundary': {
+    name: 'Only the access list opens a portal',
+    description: 'Nobody can open a portal that its access list does not admit, whatever their role or any allow rule says. Deny rules can still block people who are on the list.',
+  },
+  'managed:portal:agent': {
+    name: 'People on a portal\'s access list can run its agents',
+    description: 'In a portal, a person may run the agents it offers when the portal\'s access list admits them. Deny rules can still block a person, a group or a single agent.',
+  },
+  'managed:portal:agent-boundary': {
+    name: 'Only the access list runs agents in a portal',
+    description: 'In a portal, nobody can run an agent unless the portal\'s access list admits them, whatever their role or any allow rule says.',
   },
 };
 
@@ -167,6 +183,8 @@ export interface PolicyRow {
   updatedBy: string;
   /** Their name or email when they still exist, else the id. */
   updatedByLabel: string;
+  /** Only in a list filtered by a resource (see `policiesReaching`): `this` names it, `all` applies to every resource of its kind. */
+  scope?: 'this' | 'all';
 }
 
 export function toPolicyRow(
@@ -269,4 +287,55 @@ export function countDirectReferences(policies: ReadonlyArray<Pick<IIamPolicy, '
     refs.tokens.forEach((id) => bump(`token:${id}`));
   }
   return counts;
+}
+
+// ── which policies concern one resource ──────────────────────────────────
+
+/**
+ * How a custom policy concerns one resource: `this` (it names that very resource),
+ * `all` (it applies to every resource of the kind), or null (it does not reach it).
+ * Used to answer "which policies also apply to this portal" without evaluating
+ * anything. Only portals are judged for now: a policy reaches a portal through
+ * `portal.use` (opening it), `agent.invoke` (running its agents) or the Read / Write
+ * levels that contain them, in the portal channel. A spec is exact; raw Cedar is
+ * read best-effort from the entity literals and action names in its text.
+ */
+export function policyReach(
+  policy: Pick<IIamPolicy, 'cedar' | 'spec'>,
+  resource: { type: string; id: string },
+): 'this' | 'all' | null {
+  if (resource.type !== 'portal') return null;
+  const spec = policy.spec;
+  if (spec) {
+    const portalActions = spec.actions.filter((a) => a === 'portal.use' || a === 'agent.invoke' || a === 'Read' || a === 'Write');
+    if (portalActions.length === 0) return null;
+    const channels = spec.conditions?.channels;
+    if (channels && channels.length > 0 && !channels.includes('portal')) return null;
+    if ('any' in spec.resources && spec.resources.any === true) return 'all';
+    const sel = spec.resources as { services?: string[]; resources?: Array<{ type: string; id: string }> };
+    if (sel.resources?.some((r) => r.type === 'portal' && r.id === resource.id)) return 'this';
+    if (sel.services?.some((service) => service === 'portals' || service === 'agents')) return 'all';
+    return null;
+  }
+  const text = policy.cedar;
+  const literal = [...text.matchAll(/\bPortal::"((?:[^"\\]|\\.)*)"/g)].map((m) => unescape(m[1]));
+  if (literal.includes(resource.id)) return 'this';
+  if (literal.length > 0) return null;
+  return /\bAction::"(?:portal\.use|agent\.invoke|Read|Write)"|\bresource is Portal\b/.test(text) ? 'all' : null;
+}
+
+/**
+ * The policies that concern one resource, each with how (see `policyReach`), in the
+ * order given. The portal page lists them next to the portal's access list.
+ */
+export function policiesReaching<T extends Pick<IIamPolicy, 'cedar' | 'spec'>>(
+  policies: readonly T[],
+  resource: { type: string; id: string },
+): Array<{ policy: T; scope: 'this' | 'all' }> {
+  const out: Array<{ policy: T; scope: 'this' | 'all' }> = [];
+  for (const policy of policies) {
+    const scope = policyReach(policy, resource);
+    if (scope) out.push({ policy, scope });
+  }
+  return out;
 }

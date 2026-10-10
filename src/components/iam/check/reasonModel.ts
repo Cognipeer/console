@@ -10,7 +10,7 @@
  */
 
 import type { IamLevel, SimulateReason } from '../api';
-import { memberHref, projectMembersHref, TOKENS_HREF } from '../links';
+import { memberHref, portalHref, projectMembersHref, TOKENS_HREF } from '../links';
 
 /** What a built-in policy stands for. */
 export type BuiltInKind =
@@ -22,6 +22,10 @@ export type BuiltInKind =
   | 'projectLimit'
   /** `managed:boundary:token-cap-*`: the token's scope. */
   | 'tokenScope'
+  /** `managed:portal:use|agent`: the portal's access list admits the person. */
+  | 'portalList'
+  /** `managed:portal:*-boundary`: nothing but the portal's access list opens a portal or runs its agents. */
+  | 'portalBoundary'
   | 'other';
 
 export interface BuiltInReason {
@@ -31,8 +35,11 @@ export interface BuiltInReason {
 }
 
 const MANAGED = /^managed:(rbac|boundary):(user|token|token-cap|project)-(read|write|admin)$/;
+const PORTAL_MANAGED = /^managed:portal:(use|agent)(-boundary)?$/;
 
 export function parseBuiltInReason(cedarId: string): BuiltInReason {
+  const portal = PORTAL_MANAGED.exec(cedarId);
+  if (portal) return { kind: portal[2] ? 'portalBoundary' : 'portalList', level: null };
   const match = MANAGED.exec(cedarId);
   if (!match) return { kind: 'other', level: null };
   const [, group, who, level] = match;
@@ -51,7 +58,7 @@ export function hasProjectLimit(reasons: readonly SimulateReason[]): boolean {
 
 export interface ReasonLink {
   /** i18n key (under `iamCenter.result.change`) of the link text. */
-  labelKey: 'member' | 'projectMember' | 'project' | 'token';
+  labelKey: 'member' | 'projectMember' | 'project' | 'token' | 'portal';
   href: string;
 }
 
@@ -60,8 +67,12 @@ export function reasonLink(
   kind: BuiltInKind,
   who: { type: 'user' | 'token'; id: string },
   projectId: string | null,
+  portalId: string | null = null,
 ): ReasonLink | null {
   switch (kind) {
+    case 'portalList':
+    case 'portalBoundary':
+      return portalId ? { labelKey: 'portal', href: portalHref(portalId) } : null;
     case 'role':
       return who.type === 'user' ? { labelKey: 'member', href: memberHref(who.id) } : { labelKey: 'token', href: TOKENS_HREF };
     case 'tokenOwner':

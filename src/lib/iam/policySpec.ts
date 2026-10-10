@@ -40,6 +40,7 @@ import { trustsEveryHop } from '@/lib/security/trustedProxy';
 import { askedGateActions } from './gateActions';
 import { getIamSchema } from './schemaState';
 import { validateCustomPolicyText } from './policyText';
+import { isRuntimeEnforced } from './runtimeEnforced';
 
 // ── types ────────────────────────────────────────────────────────────────
 
@@ -565,20 +566,32 @@ export function compileSpecToCedar(spec: PolicySpec, view: SpecCatalogView = cur
 /**
  * Which parts of a spec can ever match a decision the server actually takes.
  *
- * The HTTP gates (and the handler-level checks) ask one question: may this
- * principal do `<service>.read|write` on `Service::"<service>"`, in this project
- * and channel? They never ask about an individual resource (`agent.delete` on
- * one agent), and no request runs in the `portal` channel yet. A rule built only
- * from those parts is accepted by the schema, evaluates in the Access check and
- * the preview, and still never changes a real request - which, for a forbid, is a
- * false assurance. The compiler therefore refuses such a forbid and warns about
- * every rule that is only partly reachable.
+ * Two things ask the engine questions:
+ *
+ *  - the HTTP gates (and the handler-level checks): may this principal do
+ *    `<service>.read|write` on `Service::"<service>"`, in this project and channel?
+ *    The GATE plane;
+ *  - the portal runtime (an enterprise feature): may this person open a portal
+ *    (`portal.use`, on the Portal) and run an agent through it (`agent.invoke`, on the
+ *    Agent), in the `portal` channel? The PORTAL plane. It exists only where the
+ *    overlay registered the runtime (runtimeEnforced.ts).
+ *
+ * Nothing else asks about an individual resource (`agent.delete` on one agent). A
+ * rule built only from parts neither plane reaches is accepted by the schema,
+ * evaluates in the Access check and the preview, and still never changes a real
+ * request - which, for a forbid, is a false assurance. The compiler therefore
+ * refuses such a forbid and warns about every rule that is only partly reachable.
+ *
+ * A PERMIT never gains reach from the portal plane: a portal is opened by its
+ * access list alone (managedPolicies.ts), so an allow rule cannot add anybody there.
  */
 export interface GateReach {
   /** Level groups and service-level actions: what the gates evaluate. */
   gateActions: number;
-  /** Resource-level actions (`agent.delete`...): evaluated by the Access check only. */
+  /** Resource-level actions NOTHING asks for (`agent.delete`...): evaluated by the Access check only. */
   resourceActions: string[];
+  /** Resource-level actions the portal runtime asks for (`portal.use`, `agent.invoke`) that the rule names; only where that runtime exists. */
+  portalActions: string[];
   /** The only resource selector is "specific resources" (no services, no projects). */
   specificOnly: boolean;
   hasSpecific: boolean;
@@ -592,22 +605,62 @@ export interface GateReach {
    * cannot be judged (no routes registered yet, gateActions.ts).
    */
   unasked: string[];
+  /** The rule can match a decision of the request gates. */
+  gatePlane: boolean;
+  /** The rule can match a decision of the portal runtime (the actions, the channel and the resources all fit). */
+  portalPlane: boolean;
+  /** The rule's channels (if it limits them) include `portal`. */
+  portalChannelOk: boolean;
+  /** The rule names, or through the Read / Write levels covers, an action the portal runtime asks for (whatever its channel and resources say). */
+  portalCovered: boolean;
+  /** Specific resources of the rule that the portal runtime can never ask about (with these actions and channels). */
+  unenforcedSpecific: number;
+  /** The rule says something about portals on purpose (names a portal action, the portal channel or a portal): what a permit's warning is about. */
+  portalExplicit: boolean;
 }
+
+const PORTAL_ACTIONS = ['portal.use', 'agent.invoke'] as const;
 
 export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatalogView()): GateReach {
   const defs = spec.actions.map((a) => view.actions.get(a)).filter((a): a is ActionDefinition => !!a);
-  const resourceActions = defs.filter((a) => a.kind === 'resource').map((a) => a.id);
+  const runtimeIds = new Set(defs.filter((a) => a.kind === 'resource' && isRuntimeEnforced(a.id)).map((a) => a.id));
+  const resourceActions = defs.filter((a) => a.kind === 'resource' && !runtimeIds.has(a.id)).map((a) => a.id);
   const sel = 'any' in spec.resources ? null : (spec.resources as PolicySpecResourceSelection);
   const hasSpecific = !!sel?.resources?.length;
   const channels = spec.conditions?.channels ?? [];
+  const gateActions = defs.length - defs.filter((a) => a.kind === 'resource').length;
+  const specificOnly = hasSpecific && !sel?.services?.length && !sel?.projects?.length;
+
+  // Which portal actions the rule covers: named, or inside the Read (portal.use) / Write (agent.invoke) level.
+  const hasLevel = (id: string) => defs.some((a) => a.kind === 'group' && a.id === id);
+  const usesUse = isRuntimeEnforced('portal.use') && (runtimeIds.has('portal.use') || hasLevel('Read'));
+  const usesInvoke = isRuntimeEnforced('agent.invoke') && (runtimeIds.has('agent.invoke') || hasLevel('Write'));
+  const portalChannelOk = channels.length === 0 || channels.includes('portal');
+  const refs = sel?.resources ?? [];
+  // Can the resource selector match what the action is asked about? (A portal reaches its agents: they are `in` it.)
+  const reachesUse = sel === null || !!sel.services?.includes('portals') || refs.some((r) => r.type === 'portal');
+  const reachesInvoke = sel === null || !!sel.services?.includes('agents') || !!sel.projects?.length
+    || refs.some((r) => r.type === 'agent' || r.type === 'portal');
+  const portalPlane = portalChannelOk && ((usesUse && reachesUse) || (usesInvoke && reachesInvoke));
+  const refReachable = (ref: PolicySpecResourceRef) => portalChannelOk
+    && ((ref.type === 'portal' && (usesUse || usesInvoke)) || (ref.type === 'agent' && usesInvoke));
+
+  const gateChannelOk = channels.length === 0 || channels.some((c) => c !== 'portal');
   return {
-    gateActions: defs.length - resourceActions.length,
+    gateActions,
     resourceActions,
-    specificOnly: hasSpecific && !sel?.services?.length && !sel?.projects?.length,
+    portalActions: PORTAL_ACTIONS.filter((id) => runtimeIds.has(id)),
+    specificOnly,
     hasSpecific,
     portalOnly: channels.length > 0 && channels.every((c) => c === 'portal'),
     hasPortal: channels.includes('portal'),
     unasked: unaskedGateActions(defs, sel?.services?.length ? sel.services : null),
+    gatePlane: gateActions > 0 && gateChannelOk && !specificOnly,
+    portalPlane,
+    portalChannelOk,
+    portalCovered: usesUse || usesInvoke,
+    unenforcedSpecific: refs.filter((ref) => !refReachable(ref)).length,
+    portalExplicit: runtimeIds.size > 0 || channels.includes('portal') || refs.some((r) => r.type === 'portal'),
   };
 }
 
@@ -630,31 +683,87 @@ function unaskedGateActions(defs: readonly ActionDefinition[], services: readonl
   return out;
 }
 
-/** Why a spec can never match a gate decision (empty = it can). */
-export function inertReasons(reach: GateReach): PolicyIssue[] {
+/** Why the request gates can never match the rule (what makes `gatePlane` false); empty when they can. */
+function gateSideReasons(reach: GateReach): PolicyIssue[] {
   const reasons: PolicyIssue[] = [];
-  if (reach.gateActions === 0) {
+  if (reach.gateActions === 0 && !reach.portalCovered) {
     reasons.push({
       code: 'not_enforced_actions',
       field: 'actions',
       message: 'Rules about individual resources (such as "delete agent") are not checked by the request gates yet, so this rule would never apply. Choose service actions (Read, Write, Admin) instead.',
     });
   }
-  if (reach.specificOnly) {
+  if (reach.specificOnly && (reach.gateActions > 0 || !reach.portalCovered)) {
     reasons.push({
       code: 'not_enforced_resources',
       field: 'resources',
       message: 'Rules limited to individual resources are not checked by the request gates yet, so this rule would never apply. Limit it to services or projects instead.',
     });
   }
-  if (reach.portalOnly) {
+  if (reach.portalOnly && !reach.portalCovered) {
     reasons.push({
       code: 'not_enforced_channel',
       field: 'conditions.channels',
-      message: 'No request uses the portal channel yet, so a rule limited to it would never apply.',
+      message: 'The portal channel only checks opening a portal and running agents in it (Portal: use, Agent: invoke, or the Read and Write levels), so a rule limited to it with only other actions would never apply.',
     });
   }
   return reasons;
+}
+
+/** Why the portal runtime can never match a rule that is about its actions (what makes `portalPlane` false); empty when it can or the rule is not about them. */
+function portalSideReasons(reach: GateReach): PolicyIssue[] {
+  if (!reach.portalCovered || reach.portalPlane) return [];
+  if (!reach.portalChannelOk) {
+    return [{
+      code: 'portal_wrong_channel',
+      field: 'conditions.channels',
+      message: 'Opening a portal and running agents in it are only checked in the portal channel, so a rule limited to the dashboard or the API channel would never apply to them.',
+    }];
+  }
+  return [{
+    code: 'portal_wrong_scope',
+    field: 'resources',
+    message: 'Opening a portal concerns portals, and running an agent through one concerns agents; the resources of this rule include none, so it would never apply to them.',
+  }];
+}
+
+/**
+ * Why a spec can never match a decision the server takes (empty = it can).
+ *
+ * A deny rule is reachable through either plane. An allow rule only through the
+ * gates (see GateReach); one that says something about portals but reaches nothing
+ * else gets the reason `portal_access_list_grants`: a portal is opened by its
+ * access list alone, so such a rule grants nobody anything.
+ */
+export function inertReasons(reach: GateReach, effect: PolicyEffect = 'forbid'): PolicyIssue[] {
+  if (effect === 'forbid') {
+    if (reach.gatePlane || reach.portalPlane) return [];
+    return [...gateSideReasons(reach), ...portalSideReasons(reach)];
+  }
+  if (reach.gatePlane) return [];
+  const reasons = gateSideReasons(reach);
+  if (reach.portalExplicit) reasons.push(portalGrantsIssue(false));
+  return reasons;
+}
+
+/**
+ * What an allow rule that mentions portals is told: the portal part grants nothing.
+ * `partly`: the rule also works elsewhere (the gates), so it is advice, not a reason
+ * the rule does nothing.
+ */
+function portalGrantsIssue(partly: boolean): PolicyIssue {
+  if (partly) {
+    return {
+      code: 'partly_portal_access_list_grants',
+      field: 'actions',
+      message: 'Opening a portal and running agents in it is allowed only by the portal access list, so the portal part of this rule grants nobody anything. The rest of the rule still applies.',
+    };
+  }
+  return {
+    code: 'portal_access_list_grants',
+    field: 'actions',
+    message: 'Opening a portal and running agents in it is allowed only by the portal access list. An allow rule cannot add people there: use a deny rule to block someone, or edit the access list on the portal.',
+  };
 }
 
 // ── warnings ─────────────────────────────────────────────────────────────
@@ -711,9 +820,10 @@ function warningsFor(spec: PolicySpec, view: SpecCatalogView): PolicyIssue[] {
 
   // Reachability (see gateReach): a fully unreachable forbid is an error in compileSpec; everything else is said here.
   const reach = gateReach(spec, view);
-  const inert = inertReasons(reach);
+  const inert = inertReasons(reach, spec.effect);
   if (spec.effect === 'permit') {
     for (const reason of inert) warnings.push({ ...reason, message: reason.message.replace('would never apply', 'would never grant anything') });
+    if (inert.length === 0 && reach.portalExplicit) warnings.push(portalGrantsIssue(true));
   } else if (inert.length === 0) {
     if (reach.resourceActions.length > 0) {
       warnings.push({
@@ -722,18 +832,18 @@ function warningsFor(spec: PolicySpec, view: SpecCatalogView): PolicyIssue[] {
         message: 'Some of the selected actions concern individual resources. The request gates do not check those yet, so only the service-level actions of this rule take effect.',
       });
     }
-    if (reach.hasSpecific) {
+    if (reach.hasSpecific && reach.unenforcedSpecific > 0) {
       warnings.push({
         code: 'partly_enforced_resources',
         field: 'resources',
         message: 'The specific resources you selected are not checked by the request gates yet. The services and projects of this rule still apply.',
       });
     }
-    if (reach.hasPortal) {
+    if (reach.hasPortal && !reach.portalCovered) {
       warnings.push({
         code: 'partly_enforced_channel',
         field: 'conditions.channels',
-        message: 'No request uses the portal channel yet. The other channels of this rule still apply.',
+        message: 'The portal channel only checks opening a portal and running agents in it; for the other actions of this rule only the other channels apply.',
       });
     }
   }
@@ -881,7 +991,7 @@ export async function compileSpec(input: unknown, tenant?: SpecTenant, view: Spe
   const warnings = [...warningsFor(parsed.spec, view), ...cedarIssues(validation.warnings, cedar, validation.statements)];
   if (parsed.spec.effect === 'forbid') {
     // A deny rule that can never match a real request would look like protection and be none.
-    const unreachable = inertReasons(gateReach(parsed.spec, view));
+    const unreachable = inertReasons(gateReach(parsed.spec, view), 'forbid');
     if (unreachable.length > 0) return { ok: false, cedar, errors: unreachable, warnings };
   }
   return {

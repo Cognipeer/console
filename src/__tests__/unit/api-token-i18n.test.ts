@@ -58,7 +58,6 @@ const ALL_T_FILES = [
 const TIAM_ONLY_FILES = [
   'src/components/settings/CreateTokenModal.tsx',
   'src/components/settings/TokenManagement.tsx',
-  'src/app/dashboard/members/[userId]/page.tsx',
 ];
 
 function staticKeys(file: string, translator: 't' | 'tIam'): string[] {

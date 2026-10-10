@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Text, CopyButton } from '@mantine/core';
-import { IconKey, IconTrash, IconCopy, IconCheck, IconAdjustments } from '@tabler/icons-react';
+import { Button, Text } from '@mantine/core';
+import { IconKey, IconTrash, IconAdjustments } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import CreateTokenModal from './CreateTokenModal';
 import { useTranslations, useLocale } from '@/lib/i18n';
@@ -69,7 +69,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     const q = query.trim().toLowerCase();
     if (!q) return tokens;
     return tokens.filter((token) =>
-      [token.label, token.tokenPrefix, token.userId]
+      [token.label, token.tokenPrefix]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(q)),
     );
@@ -103,11 +103,6 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
     fetchTokens();
   };
 
-  const maskToken = (token: string) => {
-    if (token.length <= 12) return token;
-    return `${token.substring(0, 8)}...${token.substring(token.length - 4)}`;
-  };
-
   if (forbidden) {
     return (
       <div className="ds-empty" style={{ padding: 48 }}>
@@ -126,11 +121,7 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
         <div className="ds-col" style={{ gap: 2 }}>
           <span style={{ fontSize: 13, fontWeight: 500 }}>{token.label}</span>
           <span className="ds-faint ds-mono" style={{ fontSize: 11 }}>
-            {token.token
-              ? maskToken(token.token)
-              : token.tokenPrefix
-                ? `${token.tokenPrefix}...`
-                : t('table.hidden')}
+            {token.tokenPrefix ? `${token.tokenPrefix}...` : t('table.hidden')}
           </span>
         </div>
       ),
@@ -175,31 +166,6 @@ export default function TokenManagement({ projectId }: { projectId?: string }) {
           {token.expiresAt ? formatRelative(token.expiresAt, locale) : tIam('table.noExpiry')}
         </span>
       ),
-    },
-    {
-      key: 'copy',
-      label: '',
-      width: 60,
-      align: 'right',
-      render: (token) =>
-        token.token ? (
-          <CopyButton value={token.token}>
-            {({ copied, copy }) => (
-              <Button
-                size="xs"
-                variant="subtle"
-                color={copied ? 'teal' : 'gray'}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  copy();
-                }}
-                leftSection={copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
-              >
-                {copied ? t('copy.copied') : t('copy.copyToken')}
-              </Button>
-            )}
-          </CopyButton>
-        ) : null,
     },
   ];
 

@@ -59,8 +59,10 @@ import {
   summarizeSpec,
   validateDraft,
   withPrincipal,
+  withResource,
   type PolicyDraft,
   type PrincipalRef,
+  type ResourceRef,
 } from './specModel';
 import { splitWarnings } from './issues';
 import { useCompile } from './useCompile';
@@ -72,6 +74,8 @@ export interface PolicyEditorTarget {
   policy?: PolicyRow;
   /** Deep-link prefill: the new policy is about this principal. */
   prefill?: { type: IamPrincipalType; ref: PrincipalRef };
+  /** Deep-link prefill: the new policy is about this resource (a portal to block someone from). */
+  resourcePrefill?: ResourceRef;
 }
 
 interface PolicyEditorProps {
@@ -95,8 +99,9 @@ const CEDAR_STARTER = [
 
 function initialDraft(target: PolicyEditorTarget, copySuffix: string): PolicyDraft {
   if (target.kind === 'create' || !target.policy) {
-    const base = emptyDraft();
-    return target.prefill ? withPrincipal(base, target.prefill.type, target.prefill.ref) : base;
+    let draft = emptyDraft();
+    if (target.resourcePrefill) draft = withResource(draft, target.resourcePrefill);
+    return target.prefill ? withPrincipal(draft, target.prefill.type, target.prefill.ref) : draft;
   }
   const draft = draftFromRow(target.policy);
   if (target.kind === 'duplicate') {

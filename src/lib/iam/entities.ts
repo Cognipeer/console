@@ -211,7 +211,19 @@ export type IamResource =
       projectId?: string | null;
       key?: string;
       tags?: string[];
+      /** Further parents of the entity besides its project (an agent run through a portal is `in` that portal). */
+      parents?: ReadonlyArray<{ type: string; id: string }>;
+      /**
+       * Further attributes (Cedar JSON values: entity references are `{ __entity: { type, id } }`).
+       * Merged after the base ones and never able to replace `service`, `adminService`,
+       * `key` or `tags`: a caller cannot make a resource claim another service.
+       */
+      attrs?: Record<string, unknown>;
+      /** Entities the attributes and parents point at, sent with the request (the Portal an agent belongs to). */
+      extra?: ReadonlyArray<CedarEntity>;
     };
+
+const PROTECTED_RESOURCE_ATTRS: ReadonlySet<string> = new Set(['service', 'adminService', 'key', 'tags']);
 
 export function isAdminService(service: string): boolean {
   return isPermissionService(service) ? !!getServiceDefinition(service).adminService : false;
@@ -236,9 +248,15 @@ export function resourceEntities(
   };
   if (resource.key) attrs.key = resource.key;
   if (resource.tags) attrs.tags = resource.tags;
+  for (const [name, value] of Object.entries(resource.attrs ?? {})) {
+    if (!PROTECTED_RESOURCE_ATTRS.has(name)) attrs[name] = value as Attrs[string];
+  }
   const entity = {
     uid: uid(typeName, resource.id),
-    parents: resource.projectId ? [uid('Project', resource.projectId)] : [],
+    parents: [
+      ...(resource.projectId ? [uid('Project', resource.projectId)] : []),
+      ...(resource.parents ?? []).map((parent) => uid(parent.type, parent.id)),
+    ],
     attrs,
   } satisfies CedarEntity;
   const entities: CedarEntity[] = [entity];
@@ -250,6 +268,7 @@ export function resourceEntities(
     });
     if (tenantDbName) entities.push({ uid: uid('Tenant', tenantDbName), parents: [], attrs: {} });
   }
+  entities.push(...(resource.extra ?? []));
   return { uid: entity.uid, entities };
 }
 

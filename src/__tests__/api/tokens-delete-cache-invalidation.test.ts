@@ -77,9 +77,9 @@ beforeEach(() => {
 describe('DELETE /api/tokens/:id — invalidates the auth cache entry', () => {
   it('evicts the cache entry for the deleted project-scoped token (admin/owner path)', async () => {
     mockDb.listProjectApiTokens.mockResolvedValue([
-      { _id: 'token-1', tenantId: 'tenant-1', projectId: 'proj-1', tokenHash: 'a'.repeat(64) },
+      { _id: 'token-1', userId: 'user-9', tenantId: 'tenant-1', projectId: 'proj-1', tokenHash: 'a'.repeat(64) },
     ] as never);
-    mockDb.deleteProjectApiToken.mockResolvedValue(true);
+    mockDb.deleteApiToken.mockResolvedValue(true);
 
     const app = await buildApp();
     const res = await app.inject({
@@ -90,6 +90,9 @@ describe('DELETE /api/tokens/:id — invalidates the auth cache entry', () => {
 
     expect(res.statusCode).toBe(200);
     expect(mockCacheDel).toHaveBeenCalledWith(apiAuthCacheKey('a'.repeat(64)));
+    // deleted for its owner - not by flushing the workspace's principals (the project-wide delete does that)
+    expect(mockDb.deleteApiToken).toHaveBeenCalledWith('token-1', 'user-9');
+    expect(mockDb.deleteProjectApiToken).not.toHaveBeenCalled();
   });
 
   it('evicts the cache entry for a self-owned token (user path)', async () => {
@@ -112,7 +115,7 @@ describe('DELETE /api/tokens/:id — invalidates the auth cache entry', () => {
 
   it('does not touch the cache when the delete target was not found', async () => {
     mockDb.listProjectApiTokens.mockResolvedValue([]);
-    mockDb.deleteProjectApiToken.mockResolvedValue(false);
+    mockDb.deleteApiToken.mockResolvedValue(false);
 
     const app = await buildApp();
     const res = await app.inject({
@@ -127,9 +130,9 @@ describe('DELETE /api/tokens/:id — invalidates the auth cache entry', () => {
 
   it('still deletes successfully even if the cache eviction itself fails (best-effort)', async () => {
     mockDb.listProjectApiTokens.mockResolvedValue([
-      { _id: 'token-3', tenantId: 'tenant-1', projectId: 'proj-1', tokenHash: 'c'.repeat(64) },
+      { _id: 'token-3', userId: 'user-9', tenantId: 'tenant-1', projectId: 'proj-1', tokenHash: 'c'.repeat(64) },
     ] as never);
-    mockDb.deleteProjectApiToken.mockResolvedValue(true);
+    mockDb.deleteApiToken.mockResolvedValue(true);
     mockCacheDel.mockRejectedValueOnce(new Error('cache unavailable'));
 
     const app = await buildApp();

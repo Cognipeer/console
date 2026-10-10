@@ -43,10 +43,9 @@ import {
 import type { UserServicePermissions } from '@/lib/security/rbac';
 
 /** Display order of the Settings section items in the left nav. */
-const SETTINGS_NAV_ORDER: string[] = [
+export const SETTINGS_NAV_ORDER: string[] = [
   'projects',
   'providers',
-  'members',
   'resources',
   'tokens',
   'audit',

@@ -199,6 +199,8 @@ describe('principal detail', () => {
         status: 'active',
         expiresAt: '2026-12-01T00:00:00.000Z',
         lastUsedAt: null,
+        projectId: null,
+        createdAt: null,
       },
     ]);
   });
@@ -301,17 +303,7 @@ describe('principal extras (what the server adds to the principal)', () => {
     expect(group.extras).toMatchObject({ source: 'ldap', tenantRole: 'admin' });
 
     // nothing to read: every extra is simply absent
-    expect(parsePrincipalDetail({}, 'user', 'u').extras).toEqual({
-      ownerId: null,
-      ownerLabel: null,
-      expiresAt: null,
-      lastUsedAt: null,
-      scoped: null,
-      authProvider: null,
-      canLogin: null,
-      source: null,
-      tenantRole: null,
-    });
+    expect(Object.values(parsePrincipalDetail({}, 'user', 'u').extras).every((v) => v === null)).toBe(true);
   });
 
   it('parses an owned token and turns it into a list row', () => {
@@ -323,6 +315,8 @@ describe('principal extras (what the server adds to the principal)', () => {
       status: 'expired',
       expiresAt: null,
       lastUsedAt: '2026-01-01T00:00:00.000Z',
+      projectId: null,
+      createdAt: null,
     });
     expect(parseOwnedToken({ label: 'no id' })).toBeNull();
     const token = parseOwnedToken({ id: 't', label: 'ci', prefix: 'cp_1', status: 'active' })!;
@@ -472,7 +466,10 @@ describe('deep links', () => {
     expect(iamLinks.policy('pol 1')).toBe('/dashboard/iam?tab=policies&policyId=pol+1');
     expect(iamLinks.audit('user', 'u1')).toBe('/dashboard/iam?tab=audit&principalType=user&principalId=u1');
     expect(iamLinks.principal('group', 'g1')).toBe('/dashboard/iam?tab=principals&principalType=group&principalId=g1');
-    expect(iamLinks.member('a/b')).toBe('/dashboard/members/a%2Fb');
+    // People are managed in the center itself: there is no member page to link to any more.
+    expect('member' in iamLinks).toBe(false);
+    expect(iamLinks.tokensOf('u 1')).toBe('/dashboard/iam?tab=principals&principalType=token&ownerId=u+1');
+    expect(iamLinks.editPerson('u1', 'role')).toBe('/dashboard/iam?tab=principals&principalType=user&principalId=u1&edit=role');
   });
 
   it('only users and tokens can be simulated', () => {

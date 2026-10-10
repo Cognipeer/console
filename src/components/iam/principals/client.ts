@@ -13,6 +13,8 @@
  * test can feed it handler payloads in the node test environment.
  */
 
+import { normalizeServicePermissions, type UserServicePermissions } from '@/lib/security/rbac';
+import type { ApiTokenRow } from '../tokens/tokenModel';
 import { checkHref, iamHref, newPolicyHref, policyHref } from '../links';
 
 // ── primitives ────────────────────────────────────────────────────────────
@@ -97,6 +99,13 @@ export interface PrincipalRef {
   label: string;
 }
 
+/** The principal a drawer shows; `summary` is the list row it was opened from. */
+export interface PrincipalTarget {
+  type: PrincipalType;
+  id: string;
+  summary?: PrincipalSummary | null;
+}
+
 export interface PrincipalSummary extends PrincipalRef {
   sublabel: string | null;
   role: string | null;
@@ -105,14 +114,51 @@ export interface PrincipalSummary extends PrincipalRef {
   memberCount: number | null;
   /** Custom policies that reference the principal, one of its groups, or everyone. */
   policyCount: number;
+
+  // What the directory list adds. Left `undefined` (not null) when a server does not send them.
+  /** Users: the sign-in address. */
+  email?: string;
+  /** Users: a person, or a service account (cannot sign in). */
+  kind?: 'person' | 'service';
+  /** Users: where the account lives: local, ldap, oidc or saml. */
+  authProvider?: string;
+  /** Users: name, email and password are kept in a directory, not here. */
+  managed?: boolean;
+  createdAt?: string;
+  invitedAt?: string;
+  /** Groups: local or ldap (a directory group). */
+  source?: string;
+  /** Groups: the workspace role every member gets. */
+  tenantRole?: string;
+
+  // Tokens.
+  prefix?: string;
+  ownerId?: string;
+  ownerLabel?: string;
+  ownerKind?: 'person' | 'service';
+  ownerDisabled?: boolean;
+  /** The owner's account no longer exists. */
+  ownerMissing?: boolean;
+  projectId?: string;
+  projectName?: string;
+  scoped?: boolean;
+  expiresAt?: string;
+  lastUsedAt?: string;
+
+  /** What THIS viewer may do to the row's principal; `undefined` when the server did not say. */
+  allowedActions?: AllowedActions;
 }
+
+const asBool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
+const optString = (v: unknown): string | undefined => asString(v) ?? undefined;
+const optKind = (v: unknown): 'person' | 'service' | undefined => (v === 'person' || v === 'service' ? v : undefined);
 
 export function parsePrincipalSummary(raw: unknown, fallbackType?: PrincipalType): PrincipalSummary | null {
   const r = asRecord(raw);
   const type = isPrincipalType(r.type) ? r.type : fallbackType;
   const id = asId(r.id);
   if (!type || !id) return null;
-  return {
+  const summary: PrincipalSummary = {
     type,
     id,
     label: asString(r.label) ?? asString(r.name) ?? id,
@@ -122,6 +168,33 @@ export function parsePrincipalSummary(raw: unknown, fallbackType?: PrincipalType
     memberCount: asNumber(r.memberCount),
     policyCount: Math.max(0, asNumber(r.policyCount) ?? 0),
   };
+  const actions = parseAllowedActions(r.allowedActions);
+  if (actions) summary.allowedActions = actions;
+  if (type === 'user') {
+    summary.email = optString(r.email);
+    summary.kind = optKind(r.kind);
+    summary.authProvider = optString(r.authProvider);
+    summary.managed = asBool(r.managed);
+    summary.createdAt = optString(r.createdAt);
+    summary.invitedAt = optString(r.invitedAt);
+  } else if (type === 'group') {
+    summary.source = optString(r.source);
+    summary.tenantRole = optString(r.tenantRole);
+  } else {
+    summary.prefix = optString(r.prefix);
+    summary.ownerId = optString(r.ownerId);
+    summary.ownerLabel = optString(r.ownerLabel);
+    summary.ownerKind = optKind(r.ownerKind);
+    summary.ownerDisabled = asBool(r.ownerDisabled);
+    summary.ownerMissing = asBool(r.ownerMissing);
+    summary.projectId = optString(r.projectId);
+    summary.projectName = optString(r.projectName);
+    summary.scoped = asBool(r.scoped);
+    summary.expiresAt = optString(r.expiresAt);
+    summary.lastUsedAt = optString(r.lastUsedAt);
+    summary.createdAt = optString(r.createdAt);
+  }
+  return summary;
 }
 
 export const DEFAULT_PAGE_SIZE = 25;
@@ -132,17 +205,28 @@ export interface PrincipalListQuery {
   q?: string;
   limit?: number;
   cursor?: string | null;
+  /** Filters of the segment (`role`, `status`, `kind`, `source`, `sort`, `dir`, `ownerId`, `projectId`, `scoped`). */
+  filters?: Record<string, string>;
+  /** Ask the server for the exact `total` of this view (one scan; ask on the first page only). */
+  count?: boolean;
+  /** Hydrate saved ids (at most 100), intersected with the other filters. */
+  ids?: readonly string[];
 }
 
 export interface PrincipalPage {
   items: PrincipalSummary[];
   nextCursor: string | null;
+  /** Exact size of the filtered view, when it was asked for. */
+  total?: number;
 }
 
 export function clampLimit(limit: number | undefined, fallback = DEFAULT_PAGE_SIZE): number {
   if (typeof limit !== 'number' || !Number.isFinite(limit)) return fallback;
   return Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(limit)));
 }
+
+/** Most ids the server hydrates in one request. */
+export const MAX_HYDRATE_IDS = 100;
 
 export function principalsListUrl(query: PrincipalListQuery): string {
   const params = new URLSearchParams();
@@ -151,6 +235,13 @@ export function principalsListUrl(query: PrincipalListQuery): string {
   if (q) params.set('q', q);
   params.set('limit', String(clampLimit(query.limit)));
   if (query.cursor) params.set('cursor', query.cursor);
+  for (const [key, value] of Object.entries(query.filters ?? {})) {
+    // The type, search text, limit and cursor have their own fields; a filter never overrides them.
+    if (value !== '' && !['type', 'q', 'limit', 'cursor', 'count', 'ids'].includes(key)) params.set(key, value);
+  }
+  if (query.count) params.set('count', '1');
+  const ids = (query.ids ?? []).filter(Boolean).slice(0, MAX_HYDRATE_IDS);
+  if (ids.length > 0) params.set('ids', ids.join(','));
   return `/api/iam/principals?${params.toString()}`;
 }
 
@@ -166,7 +257,12 @@ export function parsePrincipalPage(raw: unknown, type: PrincipalType): Principal
     seen.add(key);
     items.push(item);
   }
-  return { items, nextCursor: asString(r.nextCursor) };
+  const total = asNumber(r.total);
+  return {
+    items,
+    nextCursor: asString(r.nextCursor),
+    ...(total !== null && total >= 0 ? { total: Math.floor(total) } : {}),
+  };
 }
 
 export async function fetchPrincipals(query: PrincipalListQuery, signal?: AbortSignal): Promise<PrincipalPage> {
@@ -267,6 +363,12 @@ export function countByLevel(rows: EffectiveRow[]): Record<PermissionLevel, numb
 export interface GroupRef {
   id: string;
   name: string;
+  /** local or ldap (a directory group, whose membership the directory sets). */
+  source?: string;
+  /** The workspace role the group gives its members. */
+  tenantRole?: string;
+  /** The membership can be removed here (a local group). `undefined` = the server did not say. */
+  removable?: boolean;
 }
 
 export interface ProjectRef {
@@ -276,6 +378,8 @@ export interface ProjectRef {
   /** How the principal got into the project: direct, group, legacy or implicit (owners and admins reach every project). */
   via: string | null;
   groupName: string | null;
+  /** A direct (or legacy) membership: it can be changed or removed from here. `undefined` = the server did not say. */
+  removable?: boolean;
 }
 
 function parseGroups(raw: unknown): GroupRef[] {
@@ -286,7 +390,13 @@ function parseGroups(raw: unknown): GroupRef[] {
     const id = asId(r.id) ?? asId(r.groupId);
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    out.push({ id, name: asString(r.name) ?? asString(r.label) ?? id });
+    out.push({
+      id,
+      name: asString(r.name) ?? asString(r.label) ?? id,
+      source: optString(r.source),
+      tenantRole: optString(r.tenantRole),
+      removable: asBool(r.removable),
+    });
   }
   return out;
 }
@@ -305,6 +415,7 @@ function parseProjects(raw: unknown): ProjectRef[] {
       role: asString(r.role),
       via: asString(r.via),
       groupName: asString(r.groupName),
+      removable: asBool(r.removable),
     });
   }
   return out;
@@ -435,12 +546,93 @@ export interface PrincipalExtras {
   lastUsedAt: string | null;
   /** Tokens: whether the token has a scope that caps it (null when the server did not say). */
   scoped: boolean | null;
-  /** Users: `local`, `ldap`, `oidc` or `saml`; `canLogin === false` is a programmatic user. */
+  /** Users: `local`, `ldap`, `oidc` or `saml`; `canLogin === false` is a service account. */
   authProvider: string | null;
   canLogin: boolean | null;
   /** Groups: `local` or `ldap` (directory), and the tenant role every member gets. */
   source: string | null;
   tenantRole: string | null;
+
+  // Users: the profile facts.
+  email: string | null;
+  createdAt: string | null;
+  invitedAt: string | null;
+  inviteAcceptedAt: string | null;
+  /** An invitation was sent and not accepted yet. */
+  pendingInvite: boolean | null;
+  disabledAt: string | null;
+  disabledBy: string | null;
+  disabledReason: string | null;
+  /** Users: name, email and password are kept in a directory (read-only here). */
+  managed: ManagedInfo | null;
+  /** Users: the DIRECT per-service overrides; groups: the grants. `null` when the server did not send them. */
+  servicePermissions: UserServicePermissions | null;
+  /** Tokens: project the token was minted in. */
+  projectId: string | null;
+  projectName: string | null;
+  createdBy: string | null;
+}
+
+/** Which profile fields a directory keeps. */
+export interface ManagedInfo {
+  directory: boolean;
+  provider: string | null;
+  readOnly: string[];
+}
+
+/** One thing the viewer may or may not do to the principal, with the reason when not. */
+export interface AllowedAction {
+  allowed: boolean;
+  /** `forbidden`, `self`, `owner_immutable`, `higher_privileges`, `directory_managed`, `no_pending_invite`, `account_disabled`. */
+  reason?: string;
+}
+
+export type AllowedActions = Record<string, AllowedAction>;
+
+export const USER_ACTION_IDS = [
+  'editProfile',
+  'changeRole',
+  'editPermissions',
+  'disable',
+  'enable',
+  'delete',
+  'copyInvitationLink',
+  'manageGroups',
+  'manageProjects',
+  'mintToken',
+  'revokeTokens',
+] as const;
+export type UserActionId = (typeof USER_ACTION_IDS)[number];
+
+export function parseAllowedActions(raw: unknown): AllowedActions | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out: AllowedActions = {};
+  for (const [id, value] of Object.entries(raw as Rec)) {
+    if (typeof value === 'boolean') {
+      out[id] = { allowed: value };
+      continue;
+    }
+    const r = asRecord(value);
+    if (typeof r.allowed !== 'boolean') continue;
+    const reason = asString(r.reason);
+    out[id] = reason ? { allowed: r.allowed, reason } : { allowed: r.allowed };
+  }
+  return out;
+}
+
+export function parseManaged(raw: unknown): ManagedInfo | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = asRecord(raw);
+  return {
+    directory: r.directory === true,
+    provider: asString(r.provider),
+    readOnly: asArray(r.readOnly).filter((x): x is string => typeof x === 'string'),
+  };
+}
+
+function parseOverrides(raw: unknown): UserServicePermissions | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return normalizeServicePermissions(raw);
 }
 
 /** A token of a user, as the user's detail lists it. */
@@ -453,17 +645,33 @@ export interface OwnedToken {
   status: string | null;
   expiresAt: string | null;
   lastUsedAt: string | null;
+  /** The project the token was minted in. */
+  projectId: string | null;
+  createdAt: string | null;
 }
 
 export interface PrincipalDetail {
   principal: PrincipalSummary;
   extras: PrincipalExtras;
   effective: EffectiveRow[];
+  /** True when the server skipped the effective table (`effective=0`); the Access section loads it on demand. */
+  effectiveSkipped: boolean;
   groups: GroupRef[];
   projects: ProjectRef[];
   policies: AttachedPolicy[];
   /** Owned tokens (users only); null when the server did not send the list. */
   tokens: OwnedToken[] | null;
+  /** The viewer may not see this person's tokens (the workspace owner's, for an admin). */
+  tokensHidden: boolean;
+  /** More tokens than the list carries. */
+  tokensTruncated: boolean;
+  tokensTotal: number | null;
+  /** What THIS viewer may do to the principal; null when the server did not say (older servers). */
+  allowedActions: AllowedActions | null;
+  /** Users: the roles THIS viewer may give this person. */
+  assignableRoles: string[] | null;
+  /** Tokens: the row the token forms consume. */
+  tokenRow: ApiTokenRow | null;
 }
 
 function parseExtras(raw: unknown): PrincipalExtras {
@@ -478,6 +686,19 @@ function parseExtras(raw: unknown): PrincipalExtras {
     canLogin: typeof r.canLogin === 'boolean' ? r.canLogin : null,
     source: asString(r.source),
     tenantRole: asString(r.tenantRole),
+    email: asString(r.email),
+    createdAt: asString(r.createdAt),
+    invitedAt: asString(r.invitedAt),
+    inviteAcceptedAt: asString(r.inviteAcceptedAt),
+    pendingInvite: typeof r.pendingInvite === 'boolean' ? r.pendingInvite : null,
+    disabledAt: asString(r.disabledAt),
+    disabledBy: asString(r.disabledBy),
+    disabledReason: asString(r.disabledReason),
+    managed: parseManaged(r.managed),
+    servicePermissions: parseOverrides(r.servicePermissions),
+    projectId: asId(r.projectId),
+    projectName: asString(r.projectName),
+    createdBy: asId(r.createdBy),
   };
 }
 
@@ -493,6 +714,8 @@ export function parseOwnedToken(raw: unknown): OwnedToken | null {
     status: asString(r.status),
     expiresAt: asString(r.expiresAt),
     lastUsedAt: asString(r.lastUsedAt) ?? asString(r.lastUsed),
+    projectId: asId(r.projectId),
+    createdAt: asString(r.createdAt),
   };
 }
 
@@ -510,9 +733,31 @@ export function ownedTokenSummary(token: OwnedToken): PrincipalSummary {
   };
 }
 
-export function principalDetailUrl(type: PrincipalType, id: string, projectId?: string | null): string {
+export function principalDetailUrl(
+  type: PrincipalType,
+  id: string,
+  projectId?: string | null,
+  options: { effective?: boolean } = {},
+): string {
   const base = `/api/iam/principals/${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
-  return projectId ? `${base}?projectId=${encodeURIComponent(projectId)}` : base;
+  const query: string[] = [];
+  if (projectId) query.push(`projectId=${encodeURIComponent(projectId)}`);
+  // The effective table is the expensive part: ask without it first, then with it.
+  if (options.effective === false) query.push('effective=0');
+  return query.length > 0 ? `${base}?${query.join('&')}` : base;
+}
+
+/** `tokenRow` of a token detail: the dashboard token shape (`_id`, `label`, expiry, allowlist...). */
+function parseTokenRow(raw: unknown): ApiTokenRow | null {
+  const r = asRecord(raw);
+  const id = asId(r._id) ?? asId(r.id);
+  if (!id) return null;
+  return { ...(r as unknown as ApiTokenRow), _id: id, label: asString(r.label) ?? id, createdAt: asString(r.createdAt) ?? '' };
+}
+
+function parseStringList(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw.filter((x): x is string => typeof x === 'string' && x !== '');
 }
 
 export function parsePrincipalDetail(raw: unknown, type: PrincipalType, id: string): PrincipalDetail {
@@ -540,14 +785,25 @@ export function parsePrincipalDetail(raw: unknown, type: PrincipalType, id: stri
   const tokens = Array.isArray(r.tokens)
     ? r.tokens.map(parseOwnedToken).filter((t): t is OwnedToken => t !== null)
     : null;
+  const inner = asRecord(r.principal);
+  // The viewer-specific parts sit next to `principal`; an older or leaner shape may nest them inside it.
+  const pick = (key: string): unknown => (r[key] !== undefined ? r[key] : inner[key]);
+  const tokensTotal = asNumber(pick('tokensTotal'));
   return {
     principal,
     extras: parseExtras(r.principal),
     effective: parseEffective(r.effective),
+    effectiveSkipped: r.effectiveSkipped === true,
     groups: parseGroups(r.groups),
     projects: parseProjects(r.projects),
     policies,
     tokens,
+    tokensHidden: pick('tokensHidden') === true,
+    tokensTruncated: pick('tokensTruncated') === true,
+    tokensTotal: tokensTotal === null ? null : Math.max(0, Math.floor(tokensTotal)),
+    allowedActions: parseAllowedActions(pick('allowedActions')),
+    assignableRoles: parseStringList(pick('assignableRoles')),
+    tokenRow: type === 'token' ? parseTokenRow(pick('tokenRow')) : null,
   };
 }
 
@@ -556,8 +812,13 @@ export async function fetchPrincipalDetail(
   id: string,
   projectId?: string | null,
   signal?: AbortSignal,
+  options: { effective?: boolean } = {},
 ): Promise<PrincipalDetail> {
-  return parsePrincipalDetail(await iamRequest(principalDetailUrl(type, id, projectId), { signal }), type, id);
+  return parsePrincipalDetail(
+    await iamRequest(principalDetailUrl(type, id, projectId, options), { signal }),
+    type,
+    id,
+  );
 }
 
 // ── deep links ────────────────────────────────────────────────────────────
@@ -582,8 +843,11 @@ export const iamLinks = {
   policy: (policyId: string) => policyHref(policyId),
   /** Audit tab filtered to one principal (a group: the denials of its members). */
   audit: (type: PrincipalType, id: string) => iamHref('audit', { principalType: type, principalId: id }),
-  /** The member page of a user (outside the IAM center). */
-  member: (userId: string) => `/dashboard/members/${encodeURIComponent(userId)}`,
+  /** The segment of the Principals tab that lists the tokens of one person. */
+  tokensOf: (ownerId: string) => iamHref('principals', { principalType: 'token', ownerId }),
+  /** Principals tab with a full-screen form open for a person (`edit=role|profile|access|memberships`). */
+  editPerson: (userId: string, edit: 'profile' | 'role' | 'access' | 'memberships') =>
+    iamHref('principals', { principalType: 'user', principalId: userId, edit }),
 };
 
 // ── cursor pager ──────────────────────────────────────────────────────────

@@ -281,6 +281,21 @@ describe('normalizeCatalog', () => {
     expect(c.channels).toEqual(['dashboard', 'api', 'portal']);
     expect(c.contextAttrs).toEqual([]);
   });
+
+  it('reads where an action is checked, keeping only real channels', () => {
+    const c = normalizeCatalog({
+      actions: [
+        { id: 'portal.use', kind: 'resource', level: 'read', enforcedIn: ['portal'] },
+        { id: 'agents.write', kind: 'service', level: 'write', enforcedIn: ['dashboard', 'api', 'smoke-signal', 7] },
+        { id: 'agent.delete', kind: 'resource', level: 'write', enforcedIn: [] },
+        { id: 'Read', kind: 'group', level: 'read' },
+      ],
+    });
+    expect(c.actions[0].enforcedIn).toEqual(['portal']);
+    expect(c.actions[1].enforcedIn).toEqual(['dashboard', 'api']);
+    expect(c.actions[2]).not.toHaveProperty('enforcedIn'); // nothing asks it: only the Access check evaluates it
+    expect(c.actions[3]).not.toHaveProperty('enforcedIn');
+  });
 });
 
 describe('normalizeSpec / normalizePolicyRow', () => {
@@ -348,6 +363,17 @@ describe('normalizeSimulate', () => {
     expect(normalizeSimulate({})).toMatchObject({ allowed: false, defaultDeny: false, projectId: null });
   });
 
+  it('reads the portal a check was about, and nothing when there was none', () => {
+    const r = normalizeSimulate({
+      allowed: false,
+      portal: { id: 'P1', key: 'branch', name: 'Branch assistant', status: 'disabled', mode: 'all', userCount: 3, groupCount: 'many' },
+    });
+    expect(r.portal).toEqual({ id: 'P1', key: 'branch', name: 'Branch assistant', status: 'disabled', mode: 'all', userCount: 3, groupCount: 0 });
+    expect(normalizeSimulate({ portal: { id: 'P2' } }).portal).toMatchObject({ name: 'P2', status: 'enabled', mode: 'selected' });
+    expect(normalizeSimulate({}).portal).toBeNull();
+    expect(normalizeSimulate({ portal: { name: 'no id' } }).portal).toBeNull();
+  });
+
   it('distinguishes an empty token scope from no scope', () => {
     expect(normalizeSimulate({ principalSummary: { tokenScope: {} } }).principalSummary.tokenScope).toEqual({});
     expect(normalizeSimulate({ principalSummary: { tokenScope: null } }).principalSummary.tokenScope).toBeNull();
@@ -362,6 +388,32 @@ describe('normalizeSimulateInput / normalizeDecision', () => {
     expect(normalizeSimulateInput({ ...base, resource: { kind: 'service' } })).toBeNull();
     expect(normalizeSimulateInput({ ...base, principal: { type: 'group', id: 'g' }, resource: { kind: 'service', service: 's' } })).toBeNull();
     expect(normalizeSimulateInput(undefined)).toBeNull();
+  });
+
+  it('keeps the portal an agent is run through, and the channel, resource and policies of a portal refusal', () => {
+    const input = normalizeSimulateInput({
+      principal: { type: 'user', id: 'u1' }, action: 'agent.invoke', resource: { kind: 'resource', type: 'agent', id: 'a1' },
+      context: { channel: 'portal', portalId: 'P1', ip: '10.0.0.1', at: '2026-10-10T09:00:00.000Z' },
+    });
+    expect(input?.context).toEqual({ channel: 'portal', portalId: 'P1', ip: '10.0.0.1', at: '2026-10-10T09:00:00.000Z' });
+    const d = normalizeDecision({
+      decisionId: 'd1', code: 'forbidden', channel: 'portal', resource: { type: 'portal', id: 'P1', label: 'Branch assistant' },
+      policyIds: ['p-1', 'p-2', 'p-3'],
+      policies: [{ policyId: 'p-1', name: 'Freeze', status: 'disabled' }, { policyId: 'p-2', name: null, status: 'deleted' }, { policyId: 'p-3', status: 'who-knows' }, { name: 'no id' }],
+    });
+    expect(d).toMatchObject({ channel: 'portal', resource: { type: 'portal', id: 'P1', label: 'Branch assistant' } });
+    expect(d.policies).toEqual([
+      { policyId: 'p-1', name: 'Freeze', status: 'disabled' },
+      { policyId: 'p-2', name: null, status: 'deleted' },
+      { policyId: 'p-3', name: null, status: 'active' }, // a state it does not know is not claimed to be a change
+    ]);
+  });
+
+  it('falls back to the bare ids from a server that does not describe the policies, and to no channel or resource', () => {
+    const d = normalizeDecision({ decisionId: 'd2', policyIds: ['p-9'] });
+    expect(d.policies).toEqual([{ policyId: 'p-9', name: null, status: 'active' }]);
+    expect(d.channel).toBeNull();
+    expect(d.resource).toBeNull();
   });
 
   it('keeps a decision usable when the server cannot reconstruct the request', () => {
@@ -438,5 +490,22 @@ describe('principals / audit / settings', () => {
     expect(normalizeSettings({ tokens: { maxLifetimeDays: 90, requireExpiry: true } })).toEqual({ tokens: { maxLifetimeDays: 90, requireExpiry: true } });
     expect(normalizeSettings({ tokens: { maxLifetimeDays: 0 } })).toEqual({ tokens: { maxLifetimeDays: null, requireExpiry: false } });
     expect(normalizeSettings(undefined)).toEqual({ tokens: { maxLifetimeDays: null, requireExpiry: false } });
+  });
+});
+
+describe('policies of the portal group', () => {
+  it('maps a built-in portal rule to its own group, and keeps the scope a filtered list adds', async () => {
+    mockFetch(() => json({
+      managed: [
+        { id: 'managed:rbac:user-read', group: 'rbac', effect: 'permit' },
+        { id: 'managed:boundary:project-read', group: 'boundary', effect: 'forbid' },
+        { id: 'managed:portal:use-boundary', group: 'portal', effect: 'forbid' },
+        { id: 'managed:portal:agent', effect: 'permit' }, // an older server that sends no group: the id says it
+      ],
+      custom: [{ policyId: 'p1', scope: 'this' }, { policyId: 'p2', scope: 'all' }, { policyId: 'p3', scope: 'nonsense' }, { policyId: 'p4' }],
+    }));
+    const { managed, custom } = await iamApi.listPolicies();
+    expect(managed.map((m) => m.group)).toEqual(['rbac', 'boundary', 'portal', 'portal']);
+    expect(custom.map((p) => p.scope)).toEqual(['this', 'all', undefined, undefined]);
   });
 });

@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState, type ReactNode } from 'react';
-import { Checkbox, Collapse, Group, Pill, Text, TextInput, UnstyledButton } from '@mantine/core';
+import { Badge, Checkbox, Collapse, Group, Pill, Text, TextInput, UnstyledButton } from '@mantine/core';
 import { IconChevronDown, IconChevronRight, IconSearch } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { CatalogService, IamCatalog } from '../api';
@@ -200,6 +200,11 @@ export default function ActionMatrix({ catalog, index, labels, value, onChange, 
                             <>
                               {labels.action(action.id)}
                               <code>{action.id}</code>
+                              {action.enforcedIn?.includes('portal') ? (
+                                <Badge size="xs" variant="light" ml={6} data-testid="enforced-in-portal">
+                                  {t('matrix.enforcedInPortal')}
+                                </Badge>
+                              ) : null}
                             </>
                           }
                         />

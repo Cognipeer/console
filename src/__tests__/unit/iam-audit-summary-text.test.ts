@@ -46,6 +46,18 @@ describe('formatAuditText', () => {
       .toBe('Denied GET /api/x: models because no rule allows it');
   });
 
+  it('refusals of the portal runtime: opening a portal, running an agent in one - by the list, or by a policy', () => {
+    const who = { who: 'Ann Lee', resource: 'Branch assistant', policies: '' };
+    expect(sentence('en', item('denied.portalUse', who))).toBe('Denied Ann Lee opening portal "Branch assistant" because they are not on its access list');
+    expect(sentence('en', item('denied.portalUsePolicy', { ...who, policies: 'Freeze' }))).toBe('Denied Ann Lee opening portal "Branch assistant" by policy "Freeze"');
+    expect(sentence('en', item('denied.portalInvoke', { ...who, resource: 'Support bot' }))).toBe('Denied Ann Lee running agent "Support bot" in a portal because they are not on its access list');
+    expect(sentence('en', item('denied.portalInvokePolicy', { ...who, resource: 'Support bot', policies: 'Freeze' }))).toBe('Denied Ann Lee running agent "Support bot" in a portal by policy "Freeze"');
+    expect(sentence('tr', item('denied.portalUse', who))).toBe('Reddedildi: Ann Lee, "Branch assistant" portalını açamadı çünkü portalın erişim listesinde yok');
+    expect(sentence('tr', item('denied.portalUsePolicy', { ...who, policies: 'Freeze' }))).toBe('Reddedildi: Ann Lee, "Branch assistant" portalını "Freeze" politikası nedeniyle açamadı');
+    expect(sentence('tr', item('denied.portalInvoke', { ...who, resource: 'Support bot' }))).toMatch(/Support bot.*ajanını çalıştıramadı/);
+    expect(sentence('tr', item('denied.portalInvokePolicy', { ...who, resource: 'Support bot', policies: 'Freeze' }))).toMatch(/"Freeze" politikası nedeniyle çalıştıramadı/);
+  });
+
   it('blocked rows', () => {
     expect(sentence('tr', item('undeclared', { route: 'GET /api/zz' }))).toBe('Engellendi: GET /api/zz için yetki tanımı yok');
     // The engine could not decide (HTTP 503): said as such, not as a denial by a rule.

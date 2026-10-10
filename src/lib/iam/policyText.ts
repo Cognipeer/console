@@ -8,6 +8,7 @@
 import { policyAnnotations, policyToJson, splitPolicyText, type CedarMessage } from './cedar';
 import { askedGateActions } from './gateActions';
 import { MANAGED_ANNOTATION } from './managedPolicies';
+import { isRuntimeEnforced } from './runtimeEnforced';
 import { getIamSchema, validateAgainstSchema } from './schemaState';
 
 export const MAX_POLICY_TEXT_BYTES = 64 * 1024;
@@ -53,6 +54,20 @@ function namedActions(action: ScopeJson | undefined): string[] {
   return named;
 }
 
+/** Entity types the portal runtime asks about: the portal, the agent run through it, and the project the agent is in. */
+const PORTAL_PLANE_TYPES: ReadonlySet<string> = new Set(['Portal', 'Agent', 'Project']);
+
+/**
+ * Can a statement with this action scope match a decision of the portal runtime?
+ * Only where that runtime exists (runtimeEnforced.ts). An action scope that names
+ * nothing is every action; the Read and Write levels contain `portal.use` and
+ * `agent.invoke`.
+ */
+function mayReachPortalRuntime(named: readonly string[]): boolean {
+  if (named.length === 0) return isRuntimeEnforced('portal.use') || isRuntimeEnforced('agent.invoke');
+  return named.some((id) => isRuntimeEnforced(id) || (id === 'Read' && isRuntimeEnforced('portal.use')) || (id === 'Write' && isRuntimeEnforced('agent.invoke')));
+}
+
 /**
  * Why the SCOPE of a statement (its `action` and `resource` heads) can never
  * match a decision the server takes, or null. The request gates only ask about
@@ -64,21 +79,26 @@ function namedActions(action: ScopeJson | undefined): string[] {
  *  - a resource scope `== / in / is` of any entity type other than Service
  *    (`Agent::"x"`, `Project::"p"`) never matches a Service.
  *
+ * The one exception is the portal runtime, where it exists: it asks `portal.use`
+ * about a Portal and `agent.invoke` about an Agent that is `in` the portal and in
+ * its project. A statement that can match those is not flagged.
+ *
  * Only the scope is looked at (a `when` clause is arbitrary logic), so this has
  * no false positives: a statement it flags really cannot apply.
  */
 function unreachableScope(json: { action?: ScopeJson; resource?: ScopeJson }): string | null {
   const catalog = new Map(getIamSchema().catalog.map((a) => [a.id, a]));
   const named = namedActions(json.action);
-  if (named.length > 0 && named.every((id) => catalog.get(id)?.kind === 'resource')) {
+  if (named.length > 0 && named.every((id) => catalog.get(id)?.kind === 'resource' && !isRuntimeEnforced(id))) {
     return 'only names actions about individual resources, which the request gates do not check yet';
   }
   const resource = json.resource;
-  if (resource && (resource.op === '==' || resource.op === 'in') && resource.entity?.type && resource.entity.type !== 'Service') {
-    return `is limited to ${resource.entity.type} entities, but the request gates only check whole services`;
-  }
-  if (resource?.op === 'is' && resource.entity_type && resource.entity_type !== 'Service') {
-    return `is limited to ${resource.entity_type} entities, but the request gates only check whole services`;
+  const entityType = resource && (resource.op === '==' || resource.op === 'in') ? resource.entity?.type
+    : resource?.op === 'is' ? resource.entity_type
+      : undefined;
+  if (entityType && entityType !== 'Service') {
+    if (PORTAL_PLANE_TYPES.has(entityType) && mayReachPortalRuntime(named)) return null;
+    return `is limited to ${entityType} entities, but the request gates only check whole services`;
   }
   return null;
 }

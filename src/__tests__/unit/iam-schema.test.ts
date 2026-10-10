@@ -116,8 +116,14 @@ describe('generated schema', () => {
     expect(Object.keys(token).sort()).toEqual(['capAdmin', 'capRead', 'capWrite', 'owner', 'project', 'scoped']);
     expect(token.project.required).toBe(false);
     expect(Object.keys(ns.entityTypes.Service.shape.attributes).sort()).toEqual(['adminService', 'service']);
-    expect(ns.entityTypes.Agent.memberOfTypes).toEqual(['Project']);
-    expect(Object.keys(ns.entityTypes.Agent.shape.attributes).sort()).toEqual(['adminService', 'key', 'service', 'tags']);
+    // an agent run through a portal is in that portal and names it; the portal carries its access list
+    expect(ns.entityTypes.Agent.memberOfTypes).toEqual(['Project', 'Portal']);
+    expect(Object.keys(ns.entityTypes.Agent.shape.attributes).sort()).toEqual(['adminService', 'key', 'portal', 'service', 'tags']);
+    expect(ns.entityTypes.Agent.shape.attributes.portal).toMatchObject({ type: 'Entity', name: 'Portal', required: false });
+    expect(Object.keys(ns.entityTypes.Portal.shape.attributes).sort()).toEqual(['adminService', 'allowedGroups', 'allowedUsers', 'key', 'mode', 'service', 'tags']);
+    for (const name of ['mode', 'allowedUsers', 'allowedGroups']) expect(ns.entityTypes.Portal.shape.attributes[name].required).toBe(false);
+    expect(ns.entityTypes.Portal.shape.attributes.allowedUsers).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'User' } });
+    expect(ns.entityTypes.Portal.shape.attributes.allowedGroups).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'Group' } });
   });
 
   it('the six managed policies parse and type-check against it (0 validation errors)', () => {

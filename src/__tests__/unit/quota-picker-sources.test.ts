@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   PICKER_LIMIT,
   resolveTargetOption,
+  searchPickerOptions,
   searchTargetOptions,
   targetSearchUrl,
   type FetchLike,
@@ -224,5 +225,59 @@ describe('resolveTargetOption', () => {
   it('passes "unavailable" and "failed" on instead of calling a value missing it could not check', async () => {
     expect(await resolveTargetOption(source('llm'), 'gpt-4o', answer({}, 403))).toEqual({ status: 'unavailable' });
     expect(await resolveTargetOption(source('llm'), 'gpt-4o', answer({}, 500))).toEqual({ status: 'failed' });
+  });
+});
+
+describe('searchPickerOptions (people, groups, tokens)', () => {
+  /** A server where the directory search is closed to the caller (403) and only the plain lists answer. */
+  function plainListsOnly(lists: Record<string, unknown>) {
+    const asked: string[] = [];
+    const fetcher = async (url: string) => {
+      asked.push(url);
+      const path = url.split('?')[0];
+      if (path in lists) return { ok: true, status: 200, json: async () => lists[path] };
+      return { ok: false, status: 403, json: async () => ({ error: 'Forbidden' }) };
+    };
+    return { fetcher, asked };
+  }
+
+  it('asks the directory search first, with the typed words and the picker\'s page size', async () => {
+    const asked: string[] = [];
+    const fetcher = async (url: string) => {
+      asked.push(url);
+      return { ok: true, status: 200, json: async () => ({ items: [{ id: 'u1', label: 'Ann Lee', sublabel: 'ann@acme.test' }] }) };
+    };
+    expect(await searchPickerOptions('user', ' ann ', fetcher)).toEqual([{ value: 'u1', label: 'Ann Lee', description: 'ann@acme.test' }]);
+    expect(asked).toEqual([`/api/iam/principals?type=user&limit=${PICKER_LIMIT}&q=ann`]);
+  });
+
+  it('falls back to the plain lists and finds a Turkish name whatever its case', async () => {
+    const { fetcher } = plainListsOnly({
+      '/api/users': { users: [
+        { _id: 'u1', name: 'İlker Işık', email: 'ilker@acme.test' },
+        { _id: 'u2', name: 'ISPARTA Bölge', email: 'isparta@acme.test' },
+        { _id: 'u3', name: 'Ann Lee', email: 'ann@acme.test' },
+      ] },
+      '/api/groups': { groups: [
+        { _id: 'g1', name: 'Şube Müdürleri', description: 'İstanbul' },
+        { _id: 'g2', name: 'Sales' },
+      ] },
+    });
+    expect((await searchPickerOptions('user', 'ilker', fetcher)).map((o) => o.value)).toEqual(['u1']);
+    expect((await searchPickerOptions('user', 'IŞIK', fetcher)).map((o) => o.value)).toEqual(['u1']);
+    expect((await searchPickerOptions('user', 'ısparta', fetcher)).map((o) => o.value)).toEqual(['u2']);
+    expect((await searchPickerOptions('user', 'ISPARTA', fetcher)).map((o) => o.value)).toEqual(['u2']);
+    expect((await searchPickerOptions('user', 'ANN@ACME', fetcher)).map((o) => o.value)).toEqual(['u3']);
+    expect((await searchPickerOptions('group', 'ŞUBE', fetcher)).map((o) => o.value)).toEqual(['g1']);
+    expect((await searchPickerOptions('group', 'istanbul', fetcher)).map((o) => o.value)).toEqual(['g1']);
+    expect((await searchPickerOptions('group', '', fetcher)).map((o) => o.value)).toEqual(['g1', 'g2']);
+  });
+
+  it('asks for every token of the project in the fallback, not only the caller\'s own', async () => {
+    const { fetcher, asked } = plainListsOnly({
+      '/api/tokens': { tokens: [{ _id: 't1', label: 'CI Pipeline' }, { _id: 't2', label: 'Nightly job' }] },
+    });
+    expect((await searchPickerOptions('token', 'ci', fetcher)).map((o) => o.value)).toEqual(['t1']);
+    expect(asked.at(-1)).toBe('/api/tokens?scope=project');
   });
 });

@@ -34,24 +34,33 @@ import {
   type EngineStatus,
   type PoliciesResponse,
 } from '../api';
-import { emptyAuditFilters, fetchAudit, type AuditPage } from '../audit/client';
+import { emptyAuditFilters, fetchAudit, type AuditItem, type AuditPage } from '../audit/client';
 import { formatAuditText } from '../audit/summaryText';
 import { checkHref, iamHref, newPolicyHref, policyHref } from '../links';
 import { fetchPrincipals, isAbortError, type PrincipalPage, type PrincipalType } from '../principals/client';
 import { formatRelativeTime, shortId } from '../principals/format';
 import { PrincipalAvatar } from '../principals/visuals';
+import classes from './overview.module.css';
 import {
   countLabel,
   countPolicies,
+  deletedPolicyIds,
+  deletedPolicyOf,
   formatMicros,
   formatRate,
   skippedPolicies,
+  splitAtPolicySlot,
+  storedPolicyNames,
+  withPolicySlot,
 } from './overviewModel';
 
 /** A directory count is read from one page of this size: exact up to it, "N+" beyond. */
 const COUNT_PAGE = 100;
 const RECENT_DENIALS = 5;
+/** How many policy changes are read to recover the names of policies that have been deleted since they denied something. */
+const CHANGES_PAGE = 100;
 const PROJECTS_HREF = '/dashboard/projects';
+const NO_NAMES: ReadonlyMap<string, string> = new Map();
 
 type Loaded<T> = { status: 'loading' } | { status: 'ok'; value: T } | { status: 'error'; error: unknown };
 
@@ -85,12 +94,25 @@ const INITIAL: OverviewData = {
 
 const STATUS_COLOR: Record<EngineStatus, string> = { ok: 'green', degraded: 'yellow', down: 'red' };
 
-function Card({ title, hint, children, right }: { title: string; hint?: string; children: ReactNode; right?: ReactNode }) {
+function Card({
+  title,
+  hint,
+  children,
+  right,
+  className,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+  right?: ReactNode;
+  className?: string;
+}) {
   return (
-    <Paper withBorder radius="md" p="md">
+    <Paper withBorder radius="md" p="md" className={className}>
       <Stack gap="sm">
         <Group justify="space-between" align="flex-start" wrap="nowrap" gap="xs">
-          <div style={{ minWidth: 0 }}>
+          {/* The text gives way (it wraps); the badge or link beside it keeps its width, so it is never cut ("RUNNI…"). */}
+          <div style={{ minWidth: 0, flex: 1 }}>
             <Text fw={600}>{title}</Text>
             {hint ? (
               <Text size="xs" c="dimmed">
@@ -98,7 +120,11 @@ function Card({ title, hint, children, right }: { title: string; hint?: string; 
               </Text>
             ) : null}
           </div>
-          {right}
+          {right ? (
+            <div style={{ flexShrink: 0, whiteSpace: 'nowrap' }} data-testid="overview-card-aside">
+              {right}
+            </div>
+          ) : null}
         </Group>
         {children}
       </Stack>
@@ -184,6 +210,32 @@ export default function OverviewTab({ canManage }: { canManage: boolean }) {
     () => (stats?.policySet && policies ? skippedPolicies(stats.policySet.skipped, policies.custom) : []),
     [stats, policies],
   );
+
+  // A denial by a policy that has been deleted since carries the policy's raw id in its sentence. The name the
+  // policy had is recovered from the policy-change trail (read only when there is such a denial); when the trail
+  // no longer has it, a short id stands in.
+  const knownPolicies = useMemo(
+    () => (policies ? new Map(policies.custom.map((p) => [p.policyId, p.name] as const)) : null),
+    [policies],
+  );
+  const shownDenials = data.denials.status === 'ok' ? data.denials.value.items : null;
+  const goneKey = useMemo(() => deletedPolicyIds(shownDenials ?? [], knownPolicies).join('\u0000'), [shownDenials, knownPolicies]);
+  const [storedNames, setStoredNames] = useState<ReadonlyMap<string, string>>(NO_NAMES);
+  useEffect(() => {
+    if (!goneKey) {
+      setStoredNames(NO_NAMES);
+      return;
+    }
+    const controller = new AbortController();
+    fetchAudit(emptyAuditFilters('changes'), { limit: CHANGES_PAGE }, controller.signal)
+      .then((page) => {
+        if (!controller.signal.aborted) setStoredNames(storedPolicyNames(page.items));
+      })
+      .catch(() => {
+        /* the short id stands in for the name */
+      });
+    return () => controller.abort();
+  }, [goneKey]);
 
   const everythingFailed = Object.values(data).every((section) => section.status === 'error');
 
@@ -284,7 +336,34 @@ export default function OverviewTab({ canManage }: { canManage: boolean }) {
 
   // ── cards ──────────────────────────────────────────────────────────────────
 
-  const denials = data.denials.status === 'ok' ? data.denials.value.items : null;
+  const denials = shownDenials;
+
+  /** A denial's sentence; the policy of a deleted one shows the name it had, or a short dimmed id. */
+  const denialText = (item: AuditItem): ReactNode => {
+    const gone = deletedPolicyOf(item, knownPolicies, storedNames);
+    const slotted = gone ? withPolicySlot(item, gone.policyId) : null;
+    const parts = slotted ? splitAtPolicySlot(formatAuditText(slotted, tAudit, tCenter)) : null;
+    if (!gone || !parts) return formatAuditText(item, tAudit, tCenter);
+    const [before, after] = parts;
+    // The note goes after the closing quote of `by policy "..."`, not inside it.
+    const closing = after.startsWith('"') ? '"' : '';
+    return (
+      <>
+        {before}
+        {gone.name ?? (
+          <Text span inherit c="dimmed" ff="monospace" title={gone.policyId} data-testid="overview-denial-policy-id">
+            {shortId(gone.policyId)}
+          </Text>
+        )}
+        {closing}
+        <Text span inherit c="dimmed" data-testid="overview-denial-policy-deleted">
+          {' '}
+          ({t('denials.policyDeleted')})
+        </Text>
+        {closing ? after.slice(1) : after}
+      </>
+    );
+  };
 
   const shortcuts: Array<{ href: string; icon: ReactNode; title: string; text: string; id: string }> = [
     { id: 'check', href: checkHref({}), icon: <IconChecklist size={18} />, title: t('links.check.title'), text: t('links.check.text') },
@@ -295,7 +374,8 @@ export default function OverviewTab({ canManage }: { canManage: boolean }) {
   ];
 
   return (
-    <Stack gap="lg">
+    // `lang`: the page's own is "en", and CSS upper-casing (the badges) would turn Turkish "izin" into "IZIN", not "İZİN".
+    <Stack gap="lg" lang={locale}>
       <Group justify="space-between" align="flex-end" wrap="wrap" gap="sm">
         <div style={{ flex: 1, minWidth: 240 }}>
           <Text fw={600}>{t('title')}</Text>
@@ -407,7 +487,7 @@ export default function OverviewTab({ canManage }: { canManage: boolean }) {
         </Card>
 
         {/* People */}
-        <Card title={t('people.title')} hint={t('people.hint')}>
+        <Card title={t('people.title')} hint={t('people.hint')} className={classes.wide}>
           <SimpleGrid cols={3} spacing="sm">
             <Figure label={t('people.users')} value={countOf(data.users)} testId="overview-users" />
             <Figure label={t('people.groups')} value={countOf(data.groups)} testId="overview-groups" />
@@ -420,7 +500,8 @@ export default function OverviewTab({ canManage }: { canManage: boolean }) {
               size="xs"
               variant="default"
             >
-              {t('people.open')}
+              {/* Named after the tab it opens, whatever that tab is called. */}
+              {t('people.open', { tab: tCenter('tabs.principals') })}
             </Button>
           </Group>
         </Card>
@@ -451,7 +532,7 @@ export default function OverviewTab({ canManage }: { canManage: boolean }) {
                   <PrincipalAvatar type={item.principal?.type ?? 'user'} label={item.principal?.label ?? '?'} size={28} />
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <Text size="sm" lineClamp={2}>
-                      {formatAuditText(item, tAudit, tCenter)}
+                      {denialText(item)}
                     </Text>
                     <Group gap="xs">
                       <Text size="xs" c="dimmed">

@@ -8,6 +8,7 @@ import type { IamCatalog, PolicyRow, PolicySpec } from '@/components/iam/api';
 import { indexCatalog, matchesQuery, serviceCategory, sortActionIds } from '@/components/iam/catalogModel';
 import {
   applyAction,
+  applyPortal,
   applyPrincipalType,
   defaultChannel,
   emptyForm,
@@ -36,6 +37,7 @@ import {
   summarizeSpec,
   validateDraft,
   withPrincipal,
+  withResource,
   type PolicyDraft,
 } from '@/components/iam/policies/specModel';
 import { describeSpec, listWithMore } from '@/components/iam/policies/specSummary';
@@ -563,6 +565,158 @@ describe('access check form', () => {
       resource: { kind: 'resource', type: 'agent', id: 'a9' },
       context: { projectId: 'p1', channel: 'api', ip: '10.1.1.1', at: '2026-03-01T10:00:00.000Z' },
     });
+  });
+});
+
+// ── access check: portals ────────────────────────────────────────────────
+
+describe('access check form: portals', () => {
+  const portalCatalog: IamCatalog = {
+    ...catalog,
+    actions: [
+      ...catalog.actions.map((a) => (a.id === 'agent.invoke' ? { ...a, enforcedIn: ['portal' as const] } : a)),
+      {
+        id: 'portal.use', kind: 'resource', level: 'read', service: 'portals', resourceType: 'portal', verb: 'use',
+        labelKey: 'iam.action.verb.use', labelParams: { type: 'portal' }, enforcedIn: ['portal'],
+      },
+    ],
+  };
+  const index = indexCatalog(portalCatalog);
+  const person = (form: CheckForm): CheckForm => ({ ...form, principal: { id: 'u1', label: 'Ann' } });
+
+  it('opening a portal is checked on the portal, in the portal channel', () => {
+    let form = person(emptyForm('user'));
+    form = applyAction(form, index.actionById.get('portal.use'), undefined);
+    expect(form).toMatchObject({ resourceKind: 'resource', resourceType: 'portal', channel: 'portal', portal: null });
+    expect(validateForm(form)).toEqual(['resource']);
+    form.resource = { type: 'portal', id: 'P1', label: 'Branch assistant' };
+    expect(formToRequest(form)).toEqual({
+      principal: { type: 'user', id: 'u1' },
+      action: 'portal.use',
+      resource: { kind: 'resource', type: 'portal', id: 'P1' },
+      context: { channel: 'portal' },
+    });
+  });
+
+  it('choosing something else moves the channel the portal action brought back', () => {
+    let form = person(emptyForm('user'));
+    const use = index.actionById.get('portal.use');
+    form = applyAction(form, use);
+    form = applyAction(form, index.actionById.get('agents.read'), use);
+    expect(form.channel).toBe('dashboard');
+    // a channel chosen on purpose is left alone
+    let custom: CheckForm = person({ ...emptyForm('user'), channel: 'api' });
+    custom = applyAction(custom, use);
+    expect(custom.channel).toBe('api');
+  });
+
+  it('a token is not put in the portal channel by an action that is only asked there', () => {
+    const form = applyAction({ ...emptyForm('token'), principal: { id: 't1', label: 'ci' } }, index.actionById.get('portal.use'));
+    expect(form.channel).toBe('api');
+  });
+
+  it('running an agent in the portal channel needs the portal it is run through', () => {
+    let form = person(emptyForm('user'));
+    form = applyAction(form, index.actionById.get('agent.invoke'));
+    form.resource = { type: 'agent', id: 'a1', label: 'Support bot' };
+    // not forced into the portal channel: the dashboard playground runs agents too
+    expect(form.channel).toBe('dashboard');
+    expect(validateForm(form)).toEqual([]);
+
+    form = applyPortal(form, { type: 'portal', id: 'P1', label: 'Branch assistant' });
+    expect(form.channel).toBe('portal');
+    expect(formToRequest(form)).toEqual({
+      principal: { type: 'user', id: 'u1' },
+      action: 'agent.invoke',
+      resource: { kind: 'resource', type: 'agent', id: 'a1' },
+      context: { channel: 'portal', portalId: 'P1' },
+    });
+
+    form = applyPortal(form, null);
+    expect(form.channel).toBe('dashboard');
+    expect(formToRequest(form)?.context).toEqual({ channel: 'dashboard' });
+
+    // the portal channel picked by hand, without a portal
+    const byHand: CheckForm = { ...form, channel: 'portal' };
+    expect(validateForm(byHand)).toEqual(['portal']);
+    expect(formToRequest(byHand)).toBeNull();
+  });
+
+  it('a portal belongs to the agent action alone', () => {
+    let form = person(emptyForm('user'));
+    form = applyAction(form, index.actionById.get('agent.invoke'));
+    form = applyPortal(form, { type: 'portal', id: 'P1', label: 'Branch assistant' });
+    form = applyAction(form, index.actionById.get('agent.get'), index.actionById.get('agent.invoke'));
+    expect(form.portal).toBeNull();
+    expect(form.channel).toBe('dashboard');
+  });
+
+  it('a token that is switched to leaves the portal channel and the portal behind - for the portal actions only', () => {
+    let form = person(emptyForm('user'));
+    form = applyAction(form, index.actionById.get('agent.invoke'));
+    form = applyPortal(form, { type: 'portal', id: 'P1', label: 'Branch assistant' });
+    form = applyPrincipalType(form, 'token');
+    expect(form).toMatchObject({ principalType: 'token', channel: 'api', portal: null, principal: null });
+  });
+
+  it('rebuilds the form of a portal denial and converts it back to the same request', () => {
+    const request = {
+      principal: { type: 'user' as const, id: 'u9' },
+      action: 'agent.invoke',
+      resource: { kind: 'resource' as const, type: 'agent', id: 'a9' },
+      context: { channel: 'portal' as const, portalId: 'P9', ip: '10.1.1.1', at: '2026-03-01T10:00:00.000Z' },
+    };
+    const form = applyAction(requestToForm(request, { principal: 'Una', portal: 'Branch assistant' }), index.actionById.get('agent.invoke'));
+    expect(form).toMatchObject({ channel: 'portal', portal: { type: 'portal', id: 'P9', label: 'Branch assistant' } });
+    expect(formToRequest(form)).toEqual(request);
+  });
+});
+
+describe('deep links to a portal', () => {
+  it('"check a person" names the portal and the channel, without a person', () => {
+    const href = checkHref({ action: 'portal.use', resourceType: 'portal', resourceId: 'P 1', resourceLabel: 'Branch assistant', channel: 'portal' });
+    expect(href).toBe('/dashboard/iam?tab=check&action=portal.use&resourceType=portal&resourceId=P+1&resourceLabel=Branch+assistant&channel=portal');
+    expect(parseCheckParams(new URL(`https://x${href}`).searchParams)).toEqual({
+      action: 'portal.use', resourceType: 'portal', resourceId: 'P 1', resourceLabel: 'Branch assistant', channel: 'portal',
+      decisionId: undefined, principalType: undefined, principalId: undefined, portalId: undefined, portalLabel: undefined,
+    });
+  });
+
+  it('keeps the portal an agent is run through, and ignores a half-given resource or an unknown channel', () => {
+    const href = checkHref({ principalType: 'user', principalId: 'u1', action: 'agent.invoke', resourceType: 'agent', resourceId: 'a1', channel: 'portal', portalId: 'P1', portalLabel: 'Branch assistant' });
+    expect(parseCheckParams(new URL(`https://x${href}`).searchParams)).toMatchObject({ portalId: 'P1', portalLabel: 'Branch assistant', resourceType: 'agent', resourceId: 'a1' });
+    expect(parseCheckParams(new URLSearchParams('resourceType=portal&channel=sms&portalLabel=x'))).toEqual({
+      decisionId: undefined, principalType: undefined, principalId: undefined, action: undefined,
+      resourceType: undefined, resourceId: undefined, resourceLabel: undefined, channel: undefined, portalId: undefined, portalLabel: undefined,
+    });
+    expect(checkHref({ action: 'portal.use', resourceType: 'portal' })).toBe('/dashboard/iam?tab=check&action=portal.use');
+  });
+
+  it('"block someone from this portal" opens a new rule about that portal', () => {
+    const href = newPolicyHref({ resourceType: 'portal', resourceId: 'P1', resourceLabel: 'Branch assistant' });
+    expect(href).toBe('/dashboard/iam?tab=policies&new=1&resourceType=portal&resourceId=P1&resourceLabel=Branch+assistant');
+    expect(parsePolicyParams(new URL(`https://x${href}`).searchParams)).toMatchObject({
+      isNew: true, resourceType: 'portal', resourceId: 'P1', resourceLabel: 'Branch assistant',
+    });
+    expect(newPolicyHref({ resourceId: 'P1' })).toBe('/dashboard/iam?tab=policies&new=1');
+  });
+
+  it('presets the rule: a portal is blocked by a deny rule on opening it, in the portal channel', () => {
+    const portal = withResource(emptyDraft(), { type: 'portal', id: 'P1', label: 'Branch assistant' });
+    expect(portal).toMatchObject({
+      effect: 'forbid', actions: ['portal.use'], channels: ['portal'], whereMode: 'resources',
+      resources: [{ type: 'portal', id: 'P1', label: 'Branch assistant' }],
+    });
+    expect(draftToSpec({ ...portal, anyUser: true })).toEqual({
+      effect: 'forbid',
+      principals: { anyUser: true },
+      actions: ['portal.use'],
+      resources: { resources: [{ type: 'portal', id: 'P1' }] },
+      conditions: { channels: ['portal'] },
+    });
+    // another kind of resource only scopes the rule
+    const agent = withResource(emptyDraft(), { type: 'agent', id: 'a1', label: 'Support bot' });
+    expect(agent).toMatchObject({ effect: 'permit', actions: [], channels: [], whereMode: 'resources' });
   });
 });
 

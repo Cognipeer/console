@@ -21,7 +21,7 @@ vi.mock('@/lib/database', () => ({
   },
 }));
 
-import { clearResourceCache, searchResources, SEARCH_MAX_LIMIT } from '@/lib/resources/service';
+import { clearResourceCache, listResources, searchResources, SEARCH_MAX_LIMIT } from '@/lib/resources/service';
 
 interface Tenant {
   dbName: string;
@@ -160,6 +160,29 @@ describeForEachProvider('Resource registry searchResources', (getDb) => {
     expect(widest.total).toBe(63);
     // Narrowing by a typed query still sees past the first page.
     expect(keys(await search(main, { types: ['model'], q: 'bulk-59' }))).toEqual(['bulk-59']);
+  });
+
+  it('finds Turkish names the way people type them: İ, I, i and ı are one letter', async () => {
+    const db = getDb();
+    await db.switchToTenant(main.dbName);
+    // the keys say nothing about the names, so only the name can be found
+    await db.createModel(model(main, 'asistan-1', 'İstanbul Asistanı', 'llm', main.projectA));
+    await db.createModel(model(main, 'bot-2', 'ISPARTA Bot', 'llm', main.projectA));
+    await db.createModel(model(main, 'rapor-3', 'Işık Raporu', 'llm', main.projectB));
+    await db.createModel(model(main, 'sube-4', 'Şube Çağrı Merkezi', 'llm', main.projectB));
+    clearResourceCache();
+
+    for (const q of ['istanbul', 'ISTANBUL', 'İSTANBUL', 'ıstanbul']) expect(keys(await search(main, { types: ['model'], q })), q).toEqual(['asistan-1']);
+    for (const q of ['isparta', 'ISPARTA', 'ısparta', 'İsparta']) expect(keys(await search(main, { types: ['model'], q })), q).toEqual(['bot-2']);
+    for (const q of ['ışık', 'IŞIK', 'işik', 'İŞİK']) expect(keys(await search(main, { types: ['model'], q })), q).toEqual(['rapor-3']);
+    expect(keys(await search(main, { types: ['model'], q: 'ŞUBE ÇAĞRI' }))).toEqual(['sube-4']);
+    expect(keys(await search(main, { types: ['model'], q: 'sube cagri' }))).toEqual([]); // accents are not stripped
+
+    // the registry list reads its query the same way
+    const list = async (q: string) =>
+      (await listResources({ tenantDbName: main.dbName, tenantId: main.tenantId, type: 'model', q })).items.map((i) => i.key);
+    for (const q of ['istanbul', 'İSTANBUL']) expect(await list(q), q).toEqual(['asistan-1']);
+    for (const q of ['ısparta', 'ISPARTA']) expect(await list(q), q).toEqual(['bot-2']);
   });
 
   it('keeps two tenants apart', async () => {
