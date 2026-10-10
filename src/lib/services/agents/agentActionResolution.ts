@@ -303,6 +303,43 @@ export async function pendingActionsBlockingMessage(
     return open.length > 0 ? open.map((action) => String(action._id)) : null;
 }
 
+/**
+ * The read-only part of the resolve flow: would this answer be refused, and why?
+ * Null when it would go ahead. Changes nothing, so a caller that streams can refuse
+ * before it announces anything.
+ */
+export async function checkAgentPendingActionResolution(
+    input: Pick<ResolveAgentActionInput, 'tenantDbName' | 'tenantId' | 'projectId' | 'conversationId' | 'actionId' | 'agentKey' | 'body' | 'actor'>,
+): Promise<ResolveOutcome | null> {
+    const { tenantDbName, tenantId, projectId, conversationId, actor } = input;
+    return runWithTenantDb(tenantDbName, async (db) => {
+        const action = await db.findAgentPendingActionById(input.actionId).catch(() => null);
+        if (!action
+            || action.tenantId !== tenantId
+            || action.projectId !== projectId
+            || action.conversationId !== conversationId
+            || (input.agentKey !== undefined && action.agentKey !== input.agentKey)) {
+            return { kind: 'not_found' };
+        }
+        if (action.status === 'expired') return { kind: 'expired' };
+        if (action.status !== 'pending') return { kind: 'not_pending', status: action.status };
+        if (action.expiresAt && new Date(action.expiresAt).getTime() <= Date.now()) return { kind: 'expired' };
+
+        const conversation = await db.findAgentConversationById(conversationId);
+        if (!conversation || conversation.projectId !== projectId) return { kind: 'not_found' };
+
+        const hitl = await hitlSettingsFor(db, action);
+        if (!mayResolve(hitl.approvers, actor, conversation, action)) {
+            return { kind: 'forbidden', message: 'You are not allowed to answer this request.' };
+        }
+
+        const parsed = parseResolution(action, input.body);
+        if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
+        const answersProblem = checkAnswers(action, parsed.resolution);
+        return answersProblem ? { kind: 'invalid', message: answersProblem } : null;
+    });
+}
+
 // ── The resolve flow ─────────────────────────────────────────────────
 
 export async function resolveAgentPendingAction(input: ResolveAgentActionInput): Promise<ResolveOutcome> {
