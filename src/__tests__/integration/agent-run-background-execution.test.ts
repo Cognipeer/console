@@ -174,6 +174,33 @@ describe('background execution core (§7)', () => {
     expect((finalStatus?.result as { id?: string } | null)?.id).toBe(`resp_${run._id}`);
   });
 
+  it('records how the turn ended: end_turn, and a limit stop still finalizes succeeded with stopReason limit', async () => {
+    hoisted.executeAgentChatLocal.mockResolvedValueOnce({ ...fakeResponse('resp_a'), stop_reason: 'completed' });
+    const completed = await createRun('conv-stop-end');
+    await runAgentJobLocal({ runId: String(completed._id), tenantId, tenantDbName: dbName });
+    const endTurn = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(completed._id));
+    expect(endTurn?.status).toBe('succeeded');
+    expect(endTurn?.stopReason).toBe('end_turn');
+
+    hoisted.executeAgentChatLocal.mockResolvedValueOnce({
+      ...fakeResponse('resp_b'), status: 'incomplete', stop_reason: 'limit', stop_detail: 'maxWallClockMs (1000ms) exceeded',
+    });
+    const limited = await createRun('conv-stop-limit');
+    await runAgentJobLocal({ runId: String(limited._id), tenantId, tenantDbName: dbName });
+    const stopped = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(limited._id));
+    expect(stopped?.status).toBe('succeeded'); // unchanged: old SDK clients poll for terminal states
+    expect(stopped?.stopReason).toBe('limit');
+  });
+
+  it('a failed run records stopReason error', async () => {
+    hoisted.executeAgentChatLocal.mockRejectedValueOnce(new Error('model exploded'));
+    const run = await createRun('conv-stop-error');
+    await runAgentJobLocal({ runId: String(run._id), tenantId, tenantDbName: dbName });
+    const failed = await getAgentRunStatus(dbName, tenantId, PROJECT_ID, String(run._id));
+    expect(failed?.status).toBe('failed');
+    expect(failed?.stopReason).toBe('error');
+  });
+
   it('a second background request against the same conversation gets a conflict while the first is queued/running', async () => {
     hoisted.executeAgentChatLocal.mockImplementation(() => new Promise(() => undefined));
 

@@ -68,6 +68,7 @@ import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
@@ -83,6 +84,7 @@ import type {
   IAgentMemoryConfig,
   IAgentSandboxConfig,
   IAgentExecutionConfig,
+  IAgentHumanInTheLoopConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
@@ -187,6 +189,8 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   memory: { top: 'configure', sub: 'memory' },
   sandbox: { top: 'configure', sub: 'sandbox' },
   execution: { top: 'configure', sub: 'execution' },
+  hitl: { top: 'configure', sub: 'hitl' },
+  approvals: { top: 'configure', sub: 'hitl' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
   deploy: { top: 'deploy' },
@@ -260,6 +264,7 @@ export default function AgentDetailPage() {
   const [memoryConfig, setMemoryConfig] = useState<IAgentMemoryConfig | undefined>(undefined);
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
   const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
+  const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
   // Build page: the published snapshot, to flag changed sections.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
@@ -354,6 +359,7 @@ export default function AgentDetailPage() {
         setMemoryConfig(cfg.memory);
         setSandboxConfig(cfg.sandbox);
         setExecutionConfig(cfg.execution);
+        setHitlConfig(cfg.humanInTheLoop);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -591,6 +597,9 @@ export default function AgentDetailPage() {
     // silently wipe a value an import or the API set, since `config` replaces
     // the stored object wholesale rather than merging.
     nextConfig.promptVariables = agent?.config?.promptVariables;
+    // Absent stays absent: an agent that never opened Approvals & questions
+    // (every agent from before it existed) must keep never pausing.
+    nextConfig.humanInTheLoop = hitlConfig && Object.keys(hitlConfig).length > 0 ? hitlConfig : undefined;
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -971,6 +980,11 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="sessions" leftSection={<IconMessageCircle size={14} />}>
             Sessions
             {sessions.length > 0 ? <Badge size="xs" variant="light" ml={6}>{sessions.length}</Badge> : null}
+            {sessions.some((item) => item.runtimeStatus === 'requires_action') ? (
+              <Badge size="xs" variant="filled" color="orange" ml={4} title={t('hitl.waitingTooltip')}>
+                {sessions.filter((item) => item.runtimeStatus === 'requires_action').length}
+              </Badge>
+            ) : null}
           </Tabs.Tab>
           <Tabs.Tab value="configure" leftSection={<IconSettings size={14} />}>
             Build
@@ -1166,6 +1180,28 @@ export default function AgentDetailPage() {
               <AgentExecutionPanel value={executionConfig} onChange={setExecutionConfig} />,
               executionConfig?.defaultMode === 'background' ? (
                 <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'hitl',
+              t('hitl.sectionDescription'),
+              <AgentHumanInTheLoopPanel
+                value={hitlConfig}
+                onChange={setHitlConfig}
+                toolConfig={{
+                  toolBindings,
+                  knowledgeEngineKey: configForm.values.knowledgeEngineKey || undefined,
+                  subagents,
+                  skills,
+                  memory: memoryConfig,
+                  sandbox: sandboxConfig,
+                }}
+              />,
+              hitlConfig?.toolApproval?.enabled || hitlConfig?.askUser?.enabled ? (
+                <Badge size="xs" color="orange" variant="light" w="fit-content">
+                  {[hitlConfig?.toolApproval?.enabled ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
+                    .filter(Boolean).join(' + ')}
+                </Badge>
               ) : null,
             )}
             {buildSection(

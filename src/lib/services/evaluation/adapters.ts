@@ -501,6 +501,9 @@ export function buildTargetInvoker(target: IEvaluationTarget, ctx: EvaluationMod
         conversationId: String(conversation._id),
         userMessage: toUserMessage(item),
         userId,
+        // No one is present during a suite run: a gated tool follows the agent's
+        // `humanInTheLoop.unattended` setting (deny by default).
+        unattended: true,
         // A pinned version wins; otherwise follow whatever is published. Both
         // paths read an immutable snapshot — the draft config is never what a
         // suite tests, because a half-finished edit in the playground would

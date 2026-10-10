@@ -75,6 +75,8 @@ import LoadingState from '@/components/common/LoadingState';
 import EmptyState from '@/components/common/EmptyState';
 import RuntimeContextEditor, { parseRuntimeContextJson } from '@/components/common/RuntimeContextEditor';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
+import { useTranslations } from '@/lib/i18n';
+import type { IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
 import { isContinuableSession, sessionSourceLabel } from '../studio/SessionList';
 import CompareVersionsDrawer from '../studio/CompareVersionsDrawer';
 import { versionSelectData } from '../studio/StartSessionModal';
@@ -84,6 +86,15 @@ import LiveToolCalls, {
     appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
 } from './LiveToolCalls';
 import { consumeSse } from './consumeSse';
+import PendingActionList from './PendingActionCards';
+import {
+    applyLocalResolution,
+    cancelOpenActions,
+    composerGate,
+    openActionsOf,
+    type ResolveBody,
+} from './pendingActions';
+import { interpretSessionEvent } from './sessionFollow';
 import ContextCompactionCard from './ContextCompactionCard';
 import type { AgentToolConfig } from './sessionTools';
 import {
@@ -97,7 +108,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: AgentToolConfig & { kind?: 'native' | 'external' };
+    config?: AgentToolConfig & { kind?: 'native' | 'external'; humanInTheLoop?: IAgentHumanInTheLoopConfig };
 }
 
 interface VersionOption {
@@ -134,7 +145,49 @@ const STOP_LABELS: Record<NonNullable<ChatMessage['stopReason']>, string> = {
     paused: 'Run paused',
 };
 
+/**
+ * The assistant message a turn's `result` event describes — shared by a normal
+ * turn and by the continuation of a paused one, which are the same shape.
+ */
+function assistantFromResult(data: Record<string, unknown>, startedAt: number): ChatMessage {
+    return {
+        role: 'assistant',
+        content: String(data.content ?? ''),
+        ...(typeof data.reasoning === 'string' && data.reasoning ? { reasoning: data.reasoning } : {}),
+        ...(Array.isArray(data.steps) && data.steps.length > 0
+            ? { steps: data.steps as PlaygroundStep[] }
+            : {}),
+        ...(data.output !== undefined ? { output: data.output } : {}),
+        ...(data.outputError ? { outputError: String(data.outputError) } : {}),
+        ...(data.usage ? { usage: data.usage as ChatMessage['usage'] } : {}),
+        ...(typeof data.stopReason === 'string' ? { stopReason: data.stopReason as ChatMessage['stopReason'] } : {}),
+        ...(typeof data.stopDetail === 'string' ? { stopDetail: data.stopDetail } : {}),
+        ...(Array.isArray(data.compactions) && data.compactions.length > 0
+            ? { compactions: data.compactions as TurnCompaction[] }
+            : {}),
+        ...(Array.isArray(data.compactedTools) && data.compactedTools.length > 0
+            ? { compactedTools: data.compactedTools as ChatMessage['compactedTools'] }
+            : {}),
+        ...(Array.isArray(data.warnings) && data.warnings.length > 0
+            ? { warnings: data.warnings as string[] }
+            : {}),
+        ...(Array.isArray(data.pendingActions) && data.pendingActions.length > 0
+            ? { pendingActions: data.pendingActions as ChatMessage['pendingActions'] }
+            : {}),
+        version: (data.version as number | null) ?? null,
+        // The server times the invoke itself; the round trip is the
+        // fallback for an older response that carries no latency.
+        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : Date.now() - startedAt,
+    };
+}
+
+/** Pause again after a continuation? Then the session is still waiting. */
+function runtimeStatusAfter(message: ChatMessage): 'idle' | 'requires_action' {
+    return openActionsOf([message]).length > 0 ? 'requires_action' : 'idle';
+}
+
 export default function AgentSessionView({ agentId, sessionId }: AgentSessionViewProps) {
+    const t = useTranslations('agents.hitl');
     const router = useRouter();
     const searchParams = useSearchParams();
 
@@ -164,6 +217,17 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([]);
     const generating = isGenerating(liveSegments);
     const [liveCompactions, setLiveCompactions] = useState<TurnCompaction[]>([]);
+    // A request (tool approval / question) is being sent, and which one.
+    const [resolvingId, setResolvingId] = useState<string | null>(null);
+    // Following a turn this page did not start: it shows the same live view as
+    // one it ran itself, fed from the session event log instead.
+    const [following, setFollowing] = useState(false);
+    const [followedUser, setFollowedUser] = useState<string | null>(null);
+    const [followDismissed, setFollowDismissed] = useState(false);
+    const liveActive = sending || following;
+    const openActions = useMemo(() => openActionsOf(messages), [messages]);
+    // What the composer does while the agent waits for an approval or an answer.
+    const gate = composerGate(openActions.length, agent?.config?.humanInTheLoop?.onUserMessageWhilePending);
 
     const viewportRef = useRef<HTMLDivElement>(null);
     const turnRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -254,6 +318,52 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
     };
 
+    /** Marks the session as no longer running / waiting once a turn's result lands. */
+    const settleSession = (message: ChatMessage) => {
+        setSession((current) => current && {
+            ...current,
+            updatedAt: new Date().toISOString(),
+            runtimeStatus: runtimeStatusAfter(message),
+        });
+    };
+
+    /**
+     * One event of a turn's SSE stream. A normal turn and the continuation of a
+     * paused one arrive in the same dialect (`/chat/stream`); `onResult` is the
+     * only thing that differs — where the final answer is placed.
+     *
+     * `action` and `status` events are not handled here: the `result` that
+     * closes the stream already carries the pending actions it raised.
+     */
+    const handleTurnEvent = (onResult: (data: Record<string, unknown>) => void) => (event: string, data: unknown) => {
+        if (event === 'tool') {
+            setLiveSegments((current) => applyLiveToolEvent(current, data as LiveToolEvent));
+        } else if (event === 'text') {
+            setLiveSegments((current) => appendLiveText(current, String((data as { text?: string }).text ?? '')));
+        } else if (event === 'summary') {
+            setLiveCompactions((current) => [...current, data as TurnCompaction]);
+        } else if (event === 'result') {
+            onResult(data as Record<string, unknown>);
+        } else if (event === 'error') {
+            const payload = data as { error?: string; type?: string };
+            throw new TurnFailure(String(payload.error || 'Chat failed'), payload.type);
+        }
+    };
+
+    /** Reloads the stored session without the page-level spinner — for a session that changed under us. */
+    const refreshSession = useCallback(async (): Promise<SessionRecord | null> => {
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { cache: 'no-store' });
+            if (!res.ok) return null;
+            const data = await res.json();
+            setSession(data.session);
+            setMessages(data.session.messages ?? []);
+            return data.session as SessionRecord;
+        } catch {
+            return null;
+        }
+    }, [agentId, sessionId]);
+
     /**
      * Runs a turn over SSE so the tool calls show up as they happen.
      *
@@ -263,15 +373,19 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
      * a message is a breakage, and the two should not be the same failure.
      */
     const sendMessage = async () => {
-        if (!input.trim() || sending || readOnly) return;
+        if (!input.trim() || liveActive || readOnly || gate === 'blocked') return;
         const message = input.trim();
         const startedAt = Date.now();
+        const previous = messages;
         setSending(true);
         setInput('');
         setLiveSegments([]);
         setLiveCompactions([]);
 
-        const optimistic: ChatMessage[] = [...messages, { role: 'user', content: message }];
+        // Under `cancel_pending` this message cancels what the agent waits on;
+        // the cards show that right away rather than after the round trip.
+        const base = gate === 'cancel' ? cancelOpenActions(messages) : messages;
+        const optimistic: ChatMessage[] = [...base, { role: 'user', content: message }];
         setMessages(optimistic);
 
         const body = JSON.stringify({
@@ -282,36 +396,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         });
 
         const applyResult = (data: Record<string, unknown>) => {
-            setMessages([
-                ...optimistic,
-                {
-                    role: 'assistant',
-                    content: String(data.content ?? ''),
-                    ...(typeof data.reasoning === 'string' && data.reasoning ? { reasoning: data.reasoning } : {}),
-                    ...(Array.isArray(data.steps) && data.steps.length > 0
-                        ? { steps: data.steps as PlaygroundStep[] }
-                        : {}),
-                    ...(data.output !== undefined ? { output: data.output } : {}),
-                    ...(data.outputError ? { outputError: String(data.outputError) } : {}),
-                    ...(data.usage ? { usage: data.usage as ChatMessage['usage'] } : {}),
-                    ...(typeof data.stopReason === 'string' ? { stopReason: data.stopReason as ChatMessage['stopReason'] } : {}),
-                    ...(typeof data.stopDetail === 'string' ? { stopDetail: data.stopDetail } : {}),
-                    ...(Array.isArray(data.compactions) && data.compactions.length > 0
-                        ? { compactions: data.compactions as TurnCompaction[] }
-                        : {}),
-                    ...(Array.isArray(data.compactedTools) && data.compactedTools.length > 0
-                        ? { compactedTools: data.compactedTools as ChatMessage['compactedTools'] }
-                        : {}),
-                    ...(Array.isArray(data.warnings) && data.warnings.length > 0
-                        ? { warnings: data.warnings as string[] }
-                        : {}),
-                    version: (data.version as number | null) ?? null,
-                    // The server times the invoke itself; the round trip is the
-                    // fallback for an older response that carries no latency.
-                    latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : Date.now() - startedAt,
-                },
-            ]);
-            setSession((current) => current && { ...current, updatedAt: new Date().toISOString() });
+            const assistant = assistantFromResult(data, startedAt);
+            setMessages([...optimistic, assistant]);
+            settleSession(assistant);
         };
 
         // The failure stays in the transcript, under the message that caused
@@ -322,6 +409,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         const fail = (error: unknown) => {
             const text = error instanceof Error ? error.message : String(error);
             const type = error instanceof TurnFailure ? error.type : undefined;
+            if (type === 'pending_action') {
+                // Refused because a request is still open (the agent's policy is
+                // to reject): nothing was started, so put the page back as it was.
+                setMessages(previous);
+                setInput(message);
+                notifications.show({ title: t('resolveFailed'), message: text, color: 'orange' });
+                return;
+            }
             setMessages([
                 ...optimistic,
                 { role: 'error', content: text, ...(type ? { errorType: type } : {}) },
@@ -356,20 +451,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 return;
             }
 
-            await consumeSse(res.body, (event, data) => {
-                if (event === 'tool') {
-                    setLiveSegments((current) => applyLiveToolEvent(current, data as LiveToolEvent));
-                } else if (event === 'text') {
-                    setLiveSegments((current) => appendLiveText(current, String((data as { text?: string }).text ?? '')));
-                } else if (event === 'summary') {
-                    setLiveCompactions((current) => [...current, data as TurnCompaction]);
-                } else if (event === 'result') {
-                    applyResult(data as Record<string, unknown>);
-                } else if (event === 'error') {
-                    const payload = data as { error?: string; type?: string };
-                    throw new TurnFailure(String(payload.error || 'Chat failed'), payload.type);
-                }
-            });
+            await consumeSse(res.body, handleTurnEvent(applyResult));
         } catch (err) {
             fail(err);
         } finally {
@@ -380,6 +462,159 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setLiveSegments([]);
         }
     };
+
+    /**
+     * Answers an approval or a question and renders the continuation like any
+     * other turn: the resolve call streams the same events as `/chat/stream`
+     * (`?stream=1`), and the paused turn picks up where it stopped.
+     *
+     * The call answers in plain JSON, not a stream, when there is nothing to
+     * continue yet (other requests of the same pause are still open) or when it
+     * is refused. The card is marked answered only once the server has accepted
+     * the answer, so a refusal leaves it open with what was typed.
+     */
+    const resolveAction = async (actionId: string, body: ResolveBody) => {
+        if (liveActive || resolvingId) return;
+        const startedAt = Date.now();
+        setResolvingId(actionId);
+        setSending(true);
+        setLiveSegments([]);
+        setLiveCompactions([]);
+
+        let accepted = messages;
+        let recorded = false;
+        const markAccepted = () => {
+            recorded = true;
+            accepted = applyLocalResolution(accepted, actionId, body);
+            setMessages(accepted);
+        };
+
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/actions/${actionId}/resolve?stream=1`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+                body: JSON.stringify(body),
+            });
+            const isStream = (res.headers.get('content-type') ?? '').includes('text/event-stream');
+
+            if (!res.ok || !res.body) {
+                const err = await res.json().catch(() => ({}));
+                // The request was answered elsewhere or timed out while this
+                // page was open: show how it really ended instead of a stale card.
+                if ((res.status === 409 && (err.type === 'action_not_pending' || err.code === 'action_not_pending'))
+                    || res.status === 410) {
+                    notifications.show({ title: t('resolveFailed'), message: t('resolveStateChanged'), color: 'orange' });
+                    await refreshSession();
+                    return;
+                }
+                throw new TurnFailure(err.error || `${t('resolveFailed')} (HTTP ${res.status})`, err.type);
+            }
+
+            if (!isStream) {
+                // Answer recorded, nothing to run yet.
+                const data = await res.json().catch(() => ({}));
+                markAccepted();
+                if (data.status === 'resumed' && data.result) {
+                    const assistant = assistantFromResult(data.result as Record<string, unknown>, startedAt);
+                    setMessages([...accepted, assistant]);
+                    settleSession(assistant);
+                }
+                return;
+            }
+
+            markAccepted();
+            await consumeSse(res.body, handleTurnEvent((data) => {
+                const assistant = assistantFromResult(data, startedAt);
+                setMessages([...accepted, assistant]);
+                settleSession(assistant);
+            }));
+        } catch (err) {
+            if (!recorded) {
+                // Refused (or never reached the server) before anything was recorded:
+                // say why and keep the card open.
+                const text = err instanceof Error ? err.message : String(err);
+                notifications.show({ title: t('resolveFailed'), message: text, color: 'red' });
+            } else {
+                // The answer was recorded and the continuation then failed: the
+                // failure belongs in the transcript, after the answered card.
+                const text = err instanceof Error ? err.message : String(err);
+                const type = err instanceof TurnFailure ? err.type : undefined;
+                setMessages([...accepted, { role: 'error', content: text, ...(type ? { errorType: type } : {}) }]);
+            }
+        } finally {
+            setResolvingId(null);
+            setSending(false);
+            setLiveCompactions([]);
+            setLiveSegments([]);
+        }
+    };
+
+    // A session opened while a turn is still running (started elsewhere, or
+    // before this page was reloaded) is followed from the event log, so the
+    // operator sees it live instead of an idle page that suddenly changes.
+    const followedStatus = session?.runtimeStatus;
+    const followedSeq = session?.lastEventSeq ?? 0;
+    useEffect(() => {
+        if (loading || sending || followDismissed || followedStatus !== 'running') return undefined;
+        const controller = new AbortController();
+        let active = true;
+        setFollowing(true);
+        setFollowedUser(null);
+        setLiveSegments([]);
+        setLiveCompactions([]);
+
+        const stopped = { current: false };
+        void (async () => {
+            try {
+                const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/events/stream?after=${followedSeq}`, {
+                    headers: { Accept: 'text/event-stream' },
+                    signal: controller.signal,
+                    cache: 'no-store',
+                });
+                if (!res.ok || !res.body) return;
+                await consumeSse(res.body, (event, frame) => {
+                    if (!active) return;
+                    const step = interpretSessionEvent(event, frame);
+                    if (step.kind === 'user') setFollowedUser(step.content);
+                    else if (step.kind === 'tool') setLiveSegments((current) => applyLiveToolEvent(current, step.event));
+                    else if (step.kind === 'text') setLiveSegments((current) => appendLiveText(current, step.text));
+                    else if (step.kind === 'compaction') setLiveCompactions((current) => [...current, step.compaction as unknown as TurnCompaction]);
+                    else if (step.kind === 'idle' || step.kind === 'error') {
+                        stopped.current = true;
+                        controller.abort();
+                    }
+                });
+            } catch {
+                // Aborted (done, or the page moved on) or the connection dropped:
+                // either way the stored session is the source of truth below.
+            } finally {
+                if (active) {
+                    // The turn's persisted result replaces the live view. One
+                    // retry covers the gap between the idle event and the write.
+                    const fresh = await refreshSession();
+                    if (active && fresh?.runtimeStatus === 'running' && stopped.current) {
+                        await new Promise((resolve) => { setTimeout(resolve, 1500); });
+                        if (active) await refreshSession();
+                    }
+                    if (active) {
+                        setFollowing(false);
+                        setFollowedUser(null);
+                        setLiveSegments([]);
+                        setLiveCompactions([]);
+                    }
+                }
+            }
+        })();
+
+        return () => {
+            active = false;
+            controller.abort();
+            setFollowing(false);
+            setFollowedUser(null);
+            setLiveSegments([]);
+            setLiveCompactions([]);
+        };
+    }, [loading, sending, followDismissed, followedStatus, followedSeq, agentId, sessionId, refreshSession]);
 
     const deleteSession = async () => {
         setDeleting(true);
@@ -416,9 +651,17 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             title={
                 <>
                     <span className="detail-title">{session?.title || 'Session'}</span>
-                    <Badge size="sm" variant="light" color={sending ? 'blue' : 'gray'}>
-                        {sending ? 'Running' : 'Idle'}
-                    </Badge>
+                    {liveActive ? (
+                        <Badge size="sm" variant="light" color="blue">{t('running')}</Badge>
+                    ) : openActions.length > 0 ? (
+                        <Tooltip label={t('waitingTooltip')} withArrow>
+                            <Badge size="sm" variant="light" color="orange" leftSection={<IconHandStop size={11} />}>
+                                {t('waitingBadge')}
+                            </Badge>
+                        </Tooltip>
+                    ) : (
+                        <Badge size="sm" variant="light" color="gray">{t('idle')}</Badge>
+                    )}
                     <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
                         {agent.name}
                     </Badge>
@@ -466,7 +709,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             value={pinnedVersion}
                             onChange={(next) => setPinnedVersion(next ?? '')}
                             allowDeselect={false}
-                            disabled={sending}
+                            disabled={liveActive}
                         />
                     ) : null}
                     {!isConnected && versions.length > 0 ? (
@@ -490,7 +733,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         variant="light"
                         leftSection={<IconPlayerPlay size={14} />}
                         onClick={continueSession}
-                        disabled={sending}
+                        disabled={liveActive}
                     >
                         Continue
                     </Button>
@@ -555,7 +798,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     ) : null}
 
                     <div className={classes.panelBody}>
-                        {messages.length === 0 && !sending ? (
+                        {messages.length === 0 && !liveActive ? (
                             <Center className={classes.chatEmpty}>
                                 <Stack align="center" gap="sm">
                                     <ThemeIcon size={48} radius="xl" variant="light" color="gray">
@@ -597,7 +840,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                             {msg.role === 'assistant' ? <TurnPills message={msg} /> : null}
                                                         </Group>
                                                         {msg.role === 'assistant' ? (
-                                                            <AssistantTurn message={msg} />
+                                                            <AssistantTurn
+                                                                message={msg}
+                                                                busy={liveActive || Boolean(resolvingId)}
+                                                                resolvingId={resolvingId}
+                                                                onResolve={(actionId, body) => void resolveAction(actionId, body)}
+                                                            />
                                                         ) : (
                                                             <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
                                                         )}
@@ -611,10 +859,31 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                             No message in this session contains “{search.trim()}”.
                                         </Text>
                                     ) : null}
-                                    {sending ? (
+                                    {following && followedUser ? (
+                                        <Box>
+                                            <Group gap={6} mb={4}>
+                                                <RoleBadge user agentName={agent.name} />
+                                            </Group>
+                                            <Text size="sm" className={classes.preWrap}>{followedUser}</Text>
+                                        </Box>
+                                    ) : null}
+                                    {liveActive ? (
                                         <Box>
                                             <Group gap={6} mb={4}>
                                                 <RoleBadge agentName={agent.name} />
+                                                {following ? (
+                                                    <>
+                                                        <Text size="10px" c="dimmed">{t('following')}</Text>
+                                                        <Button
+                                                            size="compact-xs"
+                                                            variant="subtle"
+                                                            color="gray"
+                                                            onClick={() => setFollowDismissed(true)}
+                                                        >
+                                                            {t('stopFollowing')}
+                                                        </Button>
+                                                    </>
+                                                ) : null}
                                             </Group>
                                             {liveCompactions.map((compaction, index) => (
                                                 <ContextCompactionCard key={`live-${index}`} compaction={compaction} live />
@@ -650,7 +919,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 ref={composerRef}
                                 placeholder={readOnly
                                     ? `Read-only — this session came in via ${sessionSourceLabel(sessionSource)}`
-                                    : 'Send a message to the agent'}
+                                    : gate === 'blocked'
+                                        ? t('composerBlockedPlaceholder')
+                                        : 'Send a message to the agent'}
                                 value={input}
                                 onChange={(event) => setInput(event.currentTarget.value)}
                                 onKeyDown={(event) => {
@@ -662,18 +933,29 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 autosize
                                 minRows={1}
                                 maxRows={8}
-                                disabled={sending || readOnly}
+                                disabled={liveActive || readOnly || gate === 'blocked'}
                                 rightSection={
                                     <ActionIcon
                                         size="sm"
                                         variant="filled"
                                         onClick={() => void sendMessage()}
-                                        disabled={!input.trim() || sending || readOnly}
+                                        disabled={!input.trim() || liveActive || readOnly || gate === 'blocked'}
                                     >
                                         <IconSend size={14} />
                                     </ActionIcon>
                                 }
                             />
+                            {gate !== 'open' && !readOnly ? (
+                                <Alert
+                                    variant="light"
+                                    color={gate === 'blocked' ? 'gray' : 'orange'}
+                                    icon={<IconHandStop size={14} />}
+                                    mt={6}
+                                    p="xs"
+                                >
+                                    <Text size="xs">{gate === 'blocked' ? t('composerBlocked') : t('composerCancelWarning')}</Text>
+                                </Alert>
+                            ) : null}
                             <Group justify="space-between" mt={6}>
                                 <Text size="10px" c="dimmed">Enter to send · Shift+Enter for a new line</Text>
                                 <UnstyledButton onClick={() => setOverrideOpen((value) => !value)}>
@@ -708,7 +990,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         sessionContext={sessionContext}
                         agentConfig={agent.config}
                         messages={messages}
-                        running={sending}
+                        running={liveActive}
                         onGoToTurn={goToTurn}
                     />
                 </Paper>
@@ -818,7 +1100,17 @@ function FailedTurn({ message, onRetry }: { message: ChatMessage; onRetry?: () =
     );
 }
 
-function AssistantTurn({ message }: { message: ChatMessage }) {
+function AssistantTurn({
+    message,
+    busy,
+    resolvingId,
+    onResolve,
+}: {
+    message: ChatMessage;
+    busy: boolean;
+    resolvingId: string | null;
+    onResolve: (actionId: string, body: ResolveBody) => void;
+}) {
     return (
         <Box className={classes.chatMarkdown}>
             {message.reasoning ? (
@@ -834,8 +1126,19 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
                     compactedTools={index === message.compactions!.length - 1 ? message.compactedTools : undefined}
                 />
             ))}
-            {message.stopReason ? <StopNotice message={message} /> : null}
+            {/* A pause with cards says what it waits for on the cards themselves. */}
+            {message.stopReason && !(message.stopReason === 'paused' && message.pendingActions?.length)
+                ? <StopNotice message={message} />
+                : null}
             <Markdown text={message.content} />
+            {message.pendingActions?.length ? (
+                <PendingActionList
+                    actions={message.pendingActions}
+                    busy={busy}
+                    resolvingId={resolvingId}
+                    onResolve={onResolve}
+                />
+            ) : null}
             {message.output !== undefined ? <StructuredOutputBlock output={message.output} /> : null}
             {message.outputError ? (
                 <Alert variant="light" color="red" icon={<IconAlertTriangle size={14} />} mt="xs" p="xs">

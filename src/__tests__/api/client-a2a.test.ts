@@ -190,6 +190,29 @@ describe('message/send', () => {
     });
   });
 
+  it('reports a turn that paused for an approval as input-required, with the pending actions', async () => {
+    mockFn(createConversation).mockResolvedValue({ _id: 'conv-1' });
+    const actions = [{ id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending', requestedAt: 'now' }];
+    mockFn(executeAgentChat).mockResolvedValue({
+      status: 'requires_action',
+      stop_reason: 'requires_action',
+      required_action: { type: 'agent_actions', actions },
+      output: [{ id: 'm1', type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '' }] }],
+      _conversation_messages: [{ role: 'user' }, { role: 'assistant' }],
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 8, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Run it' }] } } },
+    });
+    const body = parseJsonBody<{ result: Record<string, unknown> }>(res.body);
+    expect((body.result.status as { state: string }).state).toBe('input-required');
+    expect(body.result.metadata).toEqual({ stopReason: 'requires_action', pendingActions: actions });
+    expect(body.result.id).toBe('task_conv-1_1');
+  });
+
   it('reuses the conversation for a known contextId and rejects a foreign one', async () => {
     mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockResolvedValue({
@@ -313,6 +336,29 @@ describe('tasks/get and unknown methods', () => {
     expect((body.result.status as { state: string }).state).toBe('completed');
     expect((body.result.artifacts as Array<{ parts: Array<{ text: string }> }>)[0].parts[0].text)
       .toBe('Hi there');
+  });
+
+  it('tasks/get reports a message with an open request as input-required', async () => {
+    const pending = [{ id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending' }];
+    mockFn(getConversationById).mockResolvedValue({
+      agentKey: 'support-bot',
+      projectId: 'proj-1',
+      createdBy: 'user-1',
+      messages: [
+        { role: 'user', content: 'Run it' },
+        { role: 'assistant', content: '', stopReason: 'paused', pendingActions: pending },
+      ],
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 3, method: 'tasks/get', params: { id: 'task_conv-1_1' } },
+    });
+    const body = parseJsonBody<{ result: Record<string, unknown> }>(res.body);
+    expect((body.result.status as { state: string }).state).toBe('input-required');
+    expect((body.result.metadata as { pendingActions: unknown[] }).pendingActions).toEqual(pending);
   });
 
   it('returns TaskNotFound (-32001) for unknown ids and -32601 for unknown methods', async () => {

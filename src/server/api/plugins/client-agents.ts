@@ -31,6 +31,7 @@ import {
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -179,6 +180,19 @@ function createResponsesHandler(usePublished: boolean) {
           || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
           return reply.code(404).send({
             error: 'previous_response_id does not match a valid conversation',
+          });
+        }
+        // Waiting on an approval or an answer, and the agent refuses new
+        // messages meanwhile: say so before any run is created.
+        const blocking = await pendingActionsBlockingMessage(ctx.tenantDbName, conversation, agent.config);
+        if (blocking) {
+          return reply.code(409).send({
+            error: {
+              type: 'pending_action',
+              code: 'pending_action',
+              message: 'This session is waiting for an approval or an answer. Resolve it before sending a new message.',
+              pendingActionIds: blocking,
+            },
           });
         }
         conversationId = resolvedConversationId;

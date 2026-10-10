@@ -118,6 +118,30 @@ import {
     type AgentStopReason,
 } from './agentTurnState';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
+import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
+import {
+    applyToolApprovals,
+    denyUnattendedTools,
+    resolveHitlConfig,
+    resolveHitlRunMode,
+    sessionAllowedTools,
+} from './agentHumanInTheLoop';
+import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
+import {
+    AgentResumeError,
+    PAUSE_UNAVAILABLE_WARNING,
+    actionRequiredEventData,
+    assertNoBlockingPending,
+    cancelPendingForNewMessage,
+    openPause,
+    parsePausedState,
+    toMessagePendingAction,
+    toPublicPendingAction,
+    toSdkAnswerSet,
+    type OpenedPause,
+    type PublicPendingAction,
+} from './agentPendingActions';
 
 const logger = createLogger('agents');
 
@@ -2521,7 +2545,9 @@ export async function getConversationById(
 ): Promise<IAgentConversation | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    return db.findAgentConversationById(conversationId);
+    const conversation = await db.findAgentConversationById(conversationId);
+    // A "running" session whose turn died (process crash) reads as ended.
+    return conversation ? normalizeStaleRunningStatus(db, conversation) : null;
 }
 
 export async function listConversations(
@@ -2531,7 +2557,7 @@ export async function listConversations(
 ): Promise<IAgentConversation[]> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    return db.listAgentConversations(agentKey, filters);
+    return normalizeStaleRunningStatuses(db, await db.listAgentConversations(agentKey, filters));
 }
 
 export async function deleteConversation(
@@ -2651,6 +2677,17 @@ export interface AgentChatRequest {
     conversationId: string;
     userMessage: string;
     userId: string;
+    /** The background run executing this turn, when there is one — stamped on its session events. */
+    runId?: string;
+    /**
+     * No interactive user on this turn (a schedule, an eval or red-team case, an
+     * OpenAI-shaped or Assistants client). An approval-gated tool call or a
+     * question then follows the agent's `humanInTheLoop.unattended` setting —
+     * `deny` (default: the call fails, the run goes on), `pause` (waits for
+     * Studio, like an attended run) or `allow` (runs without approval) — rather
+     * than parking on a prompt no one will see.
+     */
+    unattended?: boolean;
     /** Request a specific published version (API/SDK) */
     version?: number;
     /** When true, use the published version (default for API/SDK calls) */
@@ -2822,11 +2859,13 @@ export interface AgentChatResponse {
      * `incomplete` when a run limit, a cancellation or a pause ended the run
      * before a final answer — see `incomplete_details` and `stop_reason`.
      */
-    status: 'completed' | 'failed' | 'incomplete';
+    status: 'completed' | 'failed' | 'incomplete' | 'requires_action';
     /** OpenAI Responses convention: why the response is `incomplete`. */
     incomplete_details?: { reason: string } | null;
-    /** How the agent run ended; `completed` for a normal final answer. */
-    stop_reason?: AgentStopReason;
+    /** How the agent run ended; `completed` for a normal final answer, `requires_action` while it waits on a person. */
+    stop_reason?: AgentStopReason | 'requires_action';
+    /** Present when `status` is `requires_action`: the approvals / questions to resolve. */
+    required_action?: { type: 'agent_actions'; actions: PublicPendingAction[] };
     /** The runtime's own wording for a non-`completed` stop, e.g. which limit. */
     stop_detail?: string;
     usage: ResponseUsage;
@@ -3042,8 +3081,22 @@ async function buildLocalAgentRun(input: {
     memoryConversationId?: string;
     threadId?: string;
     onMessageRewrite?: (rewrite: PluginMessageRewrite) => void;
+    /**
+     * No interactive user on this run (see `AgentChatRequest.unattended`). The
+     * agent's `humanInTheLoop.unattended` setting then decides what a gated
+     * tool call or a question does: deny it, pause for Studio, or run it.
+     */
+    unattended?: boolean;
+    /**
+     * False when there is no conversation to park a paused turn on (a stateless
+     * playground call). `pause` cannot be honoured there, so it behaves as
+     * `deny`.
+     */
+    canPause?: boolean;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, config, runtimeContext, actorId, source } = input;
+    const hitl = resolveHitlConfig(config.humanInTheLoop);
+    const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
 
     if (!config.modelKey) throw new Error('Agent has no model configured');
     const { model, lcModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
@@ -3217,11 +3270,26 @@ async function buildLocalAgentRun(input: {
     const tracingMetadata = buildTracingMetadata(runtimeContext);
     const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model);
 
+    // Tool approval: the SDK pauses a call whose tool carries `needsApproval`.
+    // Only the tools built above are gated — the SDK's own (todo, context,
+    // delegation, skills…) are not in this list. A run nobody can answer either
+    // pauses like any other (`ask`), refuses the gated calls (`deny`: the model
+    // gets an error result, the tool never runs) or runs them as they are
+    // (`allow`, the owner's explicit choice).
+    const allowedTools = sessionAllowedTools(input.conversation?.metadata);
+    const gatedTools = hitlMode === 'ask'
+        ? applyToolApprovals(tools, hitl, allowedTools)
+        : hitlMode === 'deny'
+            ? denyUnattendedTools(tools, hitl, allowedTools)
+            : tools;
+
     const sdkAgent = createSmartAgent({
         name: agent.name,
         version: input.version != null ? String(input.version) : undefined,
         model: sdkModel,
-        ...(tools.length > 0 ? { tools } : {}),
+        ...(gatedTools.length > 0 ? { tools: gatedTools } : {}),
+        // Nobody to ask in the other modes, so the question tool is not offered.
+        ...(hitlMode === 'ask' && hitl.askUserEnabled ? { humanInTheLoop: { askUser: { allowFreeText: hitl.allowFreeText } } } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
         // thing to the host, and the shorter option object is what every other
         // conditional field here does.
@@ -3245,7 +3313,7 @@ async function buildLocalAgentRun(input: {
         },
     });
 
-    return { sdkAgent, model, systemPrompt, cleanupTasks, warnings };
+    return { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: gatedTools };
 }
 
 /**
@@ -3295,6 +3363,16 @@ function firstTurnTitle(conversation: IAgentConversation, messageCount: number, 
 }
 
 /**
+ * The session stop reason of a turn. A pause that could be opened is
+ * `requires_action`; one that could not (state too large to keep) has nothing to
+ * wait on, so the session is not left "waiting".
+ */
+function sessionStopReason(outcome: AgentStopReason, pause: OpenedPause | null | undefined): SessionStopReason {
+    if (outcome === 'paused') return pause ? 'requires_action' : 'end_turn';
+    return toSessionStopReason(outcome);
+}
+
+/**
  * The OpenAI Responses–shaped reply to one exchange. `outcome` is absent for a
  * connected agent, which reports no stop reason at all.
  */
@@ -3310,8 +3388,11 @@ function toAgentChatResponse(input: {
     usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
     outputParsed?: unknown;
     outputError?: string;
+    /** The approvals / questions the turn paused on — makes the response `requires_action`. */
+    pendingActions?: PublicPendingAction[];
 }): AgentChatResponse {
     const { reasoning, outcome, usage } = input;
+    const requiresAction = (input.pendingActions?.length ?? 0) > 0;
     const responseId = `resp_${input.conversationId}`;
     const msgId = `msg_${Date.now().toString(36)}`;
     const reasoningId = `rs_${Date.now().toString(36)}`;
@@ -3328,8 +3409,13 @@ function toAgentChatResponse(input: {
                 : []),
             { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content }] },
         ],
-        status: stopped ? 'incomplete' : 'completed',
-        ...(stopped
+        status: requiresAction ? 'requires_action' : stopped ? 'incomplete' : 'completed',
+        ...(requiresAction
+            ? {
+                stop_reason: 'requires_action' as const,
+                required_action: { type: 'agent_actions' as const, actions: input.pendingActions! },
+            }
+            : stopped
             ? {
                 incomplete_details: { reason: incompleteReason(stopped.stopReason, stopped.stopDetail) },
                 stop_reason: stopped.stopReason,
@@ -3350,9 +3436,27 @@ function toAgentChatResponse(input: {
     };
 }
 
-/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+/**
+ * Local (non-routed) implementation. Exported so the queue consumer can call it.
+ *
+ * Wraps the turn so a throw — from anywhere in it — is recorded as a
+ * `session.error` on the conversation's event log before it propagates.
+ */
 export async function executeAgentChatLocal(
     request: AgentChatRequest,
+): Promise<AgentChatResponse> {
+    const scope: { events?: SessionTurnEvents } = {};
+    try {
+        return await runAgentChatTurn(request, scope);
+    } catch (error) {
+        await scope.events?.fail(error).catch(() => undefined);
+        throw error;
+    }
+}
+
+async function runAgentChatTurn(
+    request: AgentChatRequest,
+    scope: { events?: SessionTurnEvents },
 ): Promise<AgentChatResponse> {
     const {
         tenantDbName,
@@ -3391,7 +3495,7 @@ export async function executeAgentChatLocal(
     }
 
     // 2. Load conversation
-    const conversation = await db.findAgentConversationById(conversationId);
+    let conversation = await db.findAgentConversationById(conversationId);
     // findAgentConversationById resolves purely by _id — it has no projectId
     // parameter — so without this check, any caller who can produce another
     // project's conversationId (a previous_response_id / A2A contextId / any
@@ -3403,6 +3507,40 @@ export async function executeAgentChatLocal(
     if (!conversation || conversation.projectId !== projectId) {
         throw new Error(`Conversation "${conversationId}" not found`);
     }
+
+    // A message that arrives while the session waits on an approval or a
+    // question is refused (or cancels the request) per the agent's own setting.
+    // Checked before the event log opens: a refusal must not mark the session
+    // idle or write an error into it.
+    const hitlSettings = resolveHitlConfig(config.humanInTheLoop);
+    await assertNoBlockingPending(db, conversation, hitlSettings);
+
+    // The session event log for this turn. The ledger collects what `input.pre`
+    // rewrote on the wire: step 6 persists the redacted user turn rather than
+    // the raw one, and the log's `user.message` carries the same text.
+    const rewriteLedger = new MessageRewriteLedger();
+    const turnEvents = startSessionTurnEvents({
+        db,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId,
+        ...(request.runId ? { runId: request.runId } : {}),
+        userMessage: () => rewriteLedger.resolve(userMessage),
+        trigger: 'message',
+    });
+    scope.events = turnEvents;
+    if (hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+        conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
+    }
+    // Text deltas ride the caller's own stream callback: a caller that did not
+    // ask for text must not switch the model call into streaming mode.
+    const onTextChunk = request.onTextChunk
+        ? (text: string) => {
+            turnEvents.onText(text);
+            request.onTextChunk?.(text);
+        }
+        : undefined;
 
     // 2b. Connected (external) agent — see `runExternalAgentTurn`.
     if (config.kind === 'external' && config.connection) {
@@ -3423,7 +3561,7 @@ export async function executeAgentChatLocal(
             userMessage,
             runtimeContext: request.runtimeContext,
             source: 'agent',
-            onTextChunk: request.onTextChunk,
+            onTextChunk,
             signal: request.signal,
             // A cancelled turn is still written to the conversation below.
             persistPartial: true,
@@ -3440,12 +3578,20 @@ export async function executeAgentChatLocal(
         // §12.12: a deadline/cancel decision made about this turn while the
         // external HTTP call was in flight must not be overwritten by a late
         // write once it finally returns.
-        if (!isCancellationCellTripped(request.cancellationCell)) {
+        const externalSuperseded = isCancellationCellTripped(request.cancellationCell);
+        if (!externalSuperseded) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
                 title: firstTurnTitle(conversation, updatedMessages.length, turn.userMessage),
             });
         }
+        await turnEvents.finish({
+            stopReason: toSessionStopReason(turn.cancelled || externalSuperseded ? 'cancelled' : 'completed'),
+            content: turn.content,
+            messageIndex: updatedMessages.length - 1,
+            userMessage: turn.userMessage,
+            ...(externalOutcome?.stopDetail ? { detail: externalOutcome.stopDetail } : {}),
+        });
 
         return toAgentChatResponse({
             conversationId,
@@ -3458,11 +3604,8 @@ export async function executeAgentChatLocal(
         });
     }
 
-    // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`. The
-    // ledger collects what `input.pre` rewrote on the wire, so step 6 can
-    // persist the redacted user turn rather than the raw one.
-    const rewriteLedger = new MessageRewriteLedger();
-    const { sdkAgent, model, cleanupTasks, warnings } = await buildLocalAgentRun({
+    // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
+    const { sdkAgent, model, cleanupTasks, warnings, hitl } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -3480,6 +3623,7 @@ export async function executeAgentChatLocal(
         memoryConversationId: conversationId,
         threadId: conversationId,
         onMessageRewrite: (rewrite) => rewriteLedger.record(rewrite),
+        unattended: request.unattended,
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -3493,15 +3637,27 @@ export async function executeAgentChatLocal(
         userMessage,
     });
     const userTurnIndex = inputState.messages.length - 1;
+    // Tool calls the carried state already holds belong to earlier turns.
+    const priorExecutionIds = new Set(
+        (carried?.toolHistory ?? [])
+            .map((entry) => (entry as { executionId?: unknown }).executionId)
+            .filter((id): id is string => typeof id === 'string'),
+    );
 
     try {
         // 5. Invoke
         const compactions: IAgentTurnCompaction[] = [];
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
-        const streamed = captureStreamedText(request.onTextChunk);
+        const streamed = captureStreamedText(onTextChunk);
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
-                if (event.type === 'summarization') compactions.push(compactionFromEvent(event));
+                if (event.type === 'summarization') {
+                    const compaction = compactionFromEvent(event);
+                    compactions.push(compaction);
+                    turnEvents.onCompaction(compaction);
+                    return;
+                }
+                turnEvents.onSdkEvent(event);
             },
             ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
@@ -3531,6 +3687,12 @@ export async function executeAgentChatLocal(
                 { role: 'assistant', content: streamed.text(), ...outcome, timestamp: new Date() },
             ];
             logger.info('Agent chat aborted by caller mid-call (not persisted)', { agentKey, conversationId });
+            await turnEvents.finish({
+                stopReason: 'cancelled',
+                content: streamed.text(),
+                detail: outcome.stopDetail,
+                userMessage: rewriteLedger.resolve(userMessage),
+            });
             return toAgentChatResponse({
                 conversationId,
                 priorMessageCount: conversation.messages?.length ?? 0,
@@ -3574,6 +3736,35 @@ export async function executeAgentChatLocal(
         const compactedTools = compactions.length > 0
             ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
+        // The same per-call detail a dashboard session stores, so a conversation
+        // started over the API shows its tool calls when it is opened there.
+        const steps = extractPlaygroundSteps(result, priorExecutionIds);
+
+        // §12.12: the deadline (sync ceiling, §5) or an async cancel flag
+        // (background mode, §7 step 6) may have already decided this turn's
+        // outcome while `sdkAgent.invoke()` was in flight — a late-arriving
+        // result here must never overwrite that decision by persisting
+        // anyway, however complete the answer looks.
+        const supersededByDeadlineOrCancel = isCancellationCellTripped(request.cancellationCell);
+
+        // The run stopped for a person: keep what it needs to continue.
+        let pause: OpenedPause | null = null;
+        if (outcome.stopReason === 'paused' && !supersededByDeadlineOrCancel) {
+            pause = await openPause(db, {
+                state: result.state,
+                source: 'agent',
+                tenantId,
+                projectId,
+                agentKey,
+                conversationId,
+                ...(request.runId ? { runId: request.runId } : {}),
+                hitl,
+                agentVersion: resolvedVersion,
+                usePublished: Boolean(request.usePublished || request.version !== undefined),
+                createdBy: request.userId,
+            });
+            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+        }
 
         // 6. Update conversation with new messages — the REWRITTEN user turn,
         // and the title cut from the same string.
@@ -3584,11 +3775,13 @@ export async function executeAgentChatLocal(
                 role: 'assistant',
                 content: outcome.content,
                 ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+                ...(steps.length > 0 ? { steps } : {}),
                 ...(outcome.stopReason !== 'completed'
                     ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                     : {}),
                 ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
                 ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+                ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
                 ...(usage ? { usage } : {}),
                 ...(outputParsed !== undefined ? { output: outputParsed } : {}),
                 ...(outputError ? { outputError } : {}),
@@ -3596,12 +3789,6 @@ export async function executeAgentChatLocal(
             },
         ];
 
-        // §12.12: the deadline (sync ceiling, §5) or an async cancel flag
-        // (background mode, §7 step 6) may have already decided this turn's
-        // outcome while `sdkAgent.invoke()` was in flight — a late-arriving
-        // result here must never overwrite that decision by persisting
-        // anyway, however complete the answer looks.
-        const supersededByDeadlineOrCancel = isCancellationCellTripped(request.cancellationCell);
         if (!supersededByDeadlineOrCancel) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
@@ -3614,6 +3801,7 @@ export async function executeAgentChatLocal(
                 agentKey,
                 state: result.state,
                 messageCount: updatedMessages.length,
+                ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
             });
         }
 
@@ -3623,6 +3811,19 @@ export async function executeAgentChatLocal(
             messageCount: updatedMessages.length,
             persisted: !supersededByDeadlineOrCancel,
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
+        });
+
+        for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
+        await turnEvents.finish({
+            // A turn the deadline or an async cancel already decided was not
+            // persisted; the log says what the caller was told.
+            stopReason: supersededByDeadlineOrCancel ? 'cancelled' : sessionStopReason(outcome.stopReason, pause),
+            ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
+            content: outcome.content,
+            messageIndex: updatedMessages.length - 1,
+            userMessage: persistedUserMessage,
+            ...(usage ? { usage: { ...usage } } : {}),
+            ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
         });
 
         return toAgentChatResponse({
@@ -3637,6 +3838,7 @@ export async function executeAgentChatLocal(
             usage,
             outputParsed,
             outputError,
+            ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
         });
     } finally {
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
@@ -3804,9 +4006,26 @@ function describeStructuredOutputError(error: unknown): string {
     return JSON.stringify(error);
 }
 
-/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+/**
+ * Local (non-routed) implementation. Exported so the queue consumer can call it.
+ * A Session turn (one with a `conversationId`) is recorded in the conversation's
+ * event log; a throw from anywhere in it becomes a `session.error` there.
+ */
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
+): Promise<AgentPlaygroundChatResult> {
+    const scope: { events?: SessionTurnEvents } = {};
+    try {
+        return await runPlaygroundChatTurn(request, scope);
+    } catch (error) {
+        await scope.events?.fail(error).catch(() => undefined);
+        throw error;
+    }
+}
+
+async function runPlaygroundChatTurn(
+    request: AgentPlaygroundChatRequest,
+    scope: { events?: SessionTurnEvents },
 ): Promise<AgentPlaygroundChatResult> {
     const { tenantDbName, tenantId, projectId, agentKey, userMessage } = request;
 
@@ -3828,9 +4047,49 @@ export async function executePlaygroundChatLocal(
         }
         sessionConversation = found;
     }
+    // The draft unless a version is asked for. Reading the published snapshot
+    // is what makes "does my change actually help?" answerable in one screen.
+    let config = agent.config;
+    let ranVersion: number | null = null;
+    if (typeof request.version === 'number') {
+        const snapshot = await db.findAgentVersion(String(agent._id), request.version);
+        if (!snapshot) throw new Error(`Version ${request.version} not found for agent "${agentKey}"`);
+        config = snapshot.snapshot.config;
+        ranVersion = request.version;
+    }
+
+    // A message that arrives while the session waits on an approval or a
+    // question is refused (or cancels the request) per the agent's own setting.
+    // Checked before the event log opens: a refusal must not mark the session
+    // idle or write an error into it.
+    const hitlSettings = resolveHitlConfig(config.humanInTheLoop);
+    if (sessionConversation) await assertNoBlockingPending(db, sessionConversation, hitlSettings);
     const history = sessionConversation
         ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
         : request.history;
+    // Only a persisted Session has an event log; a stateless call has nowhere to put one.
+    const turnEvents = sessionConversation
+        ? startSessionTurnEvents({
+            db,
+            tenantId,
+            projectId,
+            agentKey,
+            conversationId: String(sessionConversation._id),
+            userMessage,
+            trigger: 'message',
+        })
+        : undefined;
+    scope.events = turnEvents;
+    if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+        sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
+    }
+    // Text deltas ride the caller's own stream callback (see `runAgentChatTurn`).
+    const onTextChunk = turnEvents && request.onTextChunk
+        ? (text: string) => {
+            turnEvents.onText(text);
+            request.onTextChunk?.(text);
+        }
+        : request.onTextChunk;
     // A Session resumes from the state its last turn ended in (tool results,
     // summaries, plan) — the text transcript alone lost all of that. A
     // stateless call has only the history it was handed.
@@ -3850,17 +4109,6 @@ export async function executePlaygroundChatLocal(
         }
         : request.runtimeContext;
 
-    // The draft unless a version is asked for. Reading the published snapshot
-    // is what makes "does my change actually help?" answerable in one screen.
-    let config = agent.config;
-    let ranVersion: number | null = null;
-    if (typeof request.version === 'number') {
-        const snapshot = await db.findAgentVersion(String(agent._id), request.version);
-        if (!snapshot) throw new Error(`Version ${request.version} not found for agent "${agentKey}"`);
-        config = snapshot.snapshot.config;
-        ranVersion = request.version;
-    }
-
     // Connected (external) agent — see `runExternalAgentTurn`. `content` is
     // the guarded answer: the only copy for a stateless call, and what a
     // Session persists — never the raw upstream reply.
@@ -3877,7 +4125,7 @@ export async function executePlaygroundChatLocal(
             userMessage,
             runtimeContext,
             source: 'agent-playground',
-            onTextChunk: request.onTextChunk,
+            onTextChunk,
             signal: request.signal,
             persistPartial: Boolean(sessionConversation),
         });
@@ -3890,14 +4138,20 @@ export async function executePlaygroundChatLocal(
                 : {}),
         };
         if (sessionConversation) {
-            await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
+            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
+            await turnEvents?.finish({
+                stopReason: toSessionStopReason(cancelled ? 'cancelled' : 'completed'),
+                content,
+                ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
+                ...(externalResult.stopDetail ? { detail: externalResult.stopDetail } : {}),
+            });
         }
 
         logger.info('Connected agent playground chat completed', { agentKey });
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -3919,6 +4173,8 @@ export async function executePlaygroundChatLocal(
         // A session's turns group under one Observability thread, the same way
         // API turns do — the agent Sessions drawer renders that thread.
         threadId: request.conversationId,
+        // A stateless call has nowhere to park a paused turn.
+        canPause: Boolean(sessionConversation),
     });
 
     const inputState = buildTurnInputState({
@@ -3936,14 +4192,16 @@ export async function executePlaygroundChatLocal(
     // Surface progress to the caller (best-effort; never fails the run).
     const { onToolEvent, onCompaction, signal } = request;
     const compactions: IAgentTurnCompaction[] = [];
-    const streamed = captureStreamedText(request.onTextChunk);
+    const streamed = captureStreamedText(onTextChunk);
     const invokeConfig = {
         onEvent: (event: AgentSdkEvent) => {
+            turnEvents?.onSdkEvent(event);
             if (event.type === 'summarization') {
                 // Collected for the turn record either way; forwarded live
                 // so a session shows the compaction as it happens.
                 const compaction = compactionFromEvent(event);
                 compactions.push(compaction);
+                turnEvents?.onCompaction(compaction);
                 try {
                     onCompaction?.(compaction);
                 } catch (callbackError) {
@@ -4000,7 +4258,13 @@ export async function executePlaygroundChatLocal(
                     tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: aborted.content,
                     source: 'agent-playground',
                 });
-                await persistSessionTurn(db, sessionConversation, userMessage, aborted);
+                const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, aborted);
+                await turnEvents?.finish({
+                    stopReason: 'cancelled',
+                    content: aborted.content,
+                    ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
+                    detail: CALLER_ABORT_DETAIL,
+                });
             }
             return aborted;
         }
@@ -4050,6 +4314,24 @@ export async function executePlaygroundChatLocal(
         }
 
         if (sessionConversation) {
+            // The run stopped for a person: keep what it needs to continue.
+            let pause: OpenedPause | null = null;
+            if (outcome.stopReason === 'paused') {
+                pause = await openPause(db, {
+                    state: result.state,
+                    source: 'agent-playground',
+                    tenantId,
+                    projectId,
+                    agentKey,
+                    conversationId: String(sessionConversation._id),
+                    hitl,
+                    agentVersion: ranVersion,
+                    usePublished: ranVersion !== null,
+                    createdBy: runtimeContext?.userId ?? String(sessionConversation.createdBy),
+                });
+                if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
+                else playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
+            }
             const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
             if (messageCount !== undefined) {
                 await saveConversationState(db, {
@@ -4059,8 +4341,18 @@ export async function executePlaygroundChatLocal(
                     agentKey,
                     state: result.state,
                     messageCount,
+                    ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
                 });
             }
+            for (const action of pause?.actions ?? []) turnEvents?.emitInTurn('action.required', actionRequiredEventData(action));
+            await turnEvents?.finish({
+                stopReason: sessionStopReason(outcome.stopReason, pause),
+                ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
+                content: playgroundResult.content,
+                ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
+                ...(playgroundResult.usage ? { usage: { ...playgroundResult.usage } } : {}),
+                ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+            });
         }
 
         return playgroundResult;
@@ -4105,6 +4397,7 @@ async function persistSessionTurn(
                 ...(result.compactions?.length ? { compactions: result.compactions } : {}),
                 ...(result.compactedTools?.length ? { compactedTools: result.compactedTools } : {}),
                 ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+                ...(result.pendingActions?.length ? { pendingActions: result.pendingActions } : {}),
                 version: result.version ?? null,
             },
         ];
@@ -4123,5 +4416,435 @@ async function persistSessionTurn(
             conversationId: String(conversation._id),
             error: error instanceof Error ? error.message : String(error),
         });
+    }
+}
+
+
+// ── Continuing a paused turn ────────────────────────────────────────────
+
+export interface AgentResumeRequest {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    conversationId: string;
+    /** Who drives the continuation (the approver, or the turn's owner for a timeout). */
+    userId: string;
+    trigger: 'resume' | 'timeout';
+    /** The background run executing this continuation, when there is one. */
+    runId?: string;
+    runtimeContext?: AgentRuntimeContext;
+    cancellationCell?: AgentRunCancellationCell;
+    signal?: AbortSignal;
+    onToolEvent?: (event: AgentToolCallEvent) => void;
+    onTextChunk?: (text: string) => void;
+    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    /** Called right before the SDK loop is invoked — after this the answers are spent. */
+    onInvokeStart?: () => void;
+}
+
+export interface AgentResumeResult {
+    /** The new assistant message, in the dashboard playground's shape. */
+    result: AgentPlaygroundChatResult;
+    /** The same turn in the Responses shape (`requires_action` when it paused again). */
+    response: AgentChatResponse;
+    stopReason: SessionStopReason;
+}
+
+/** What a continuation reads back about the pause it continues. */
+async function loadPausedRun(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    request: Pick<AgentResumeRequest, 'projectId' | 'agentKey' | 'conversationId'>,
+) {
+    const conversation = await db.findAgentConversationById(request.conversationId);
+    if (!conversation || conversation.projectId !== request.projectId || conversation.agentKey !== request.agentKey) {
+        throw new Error(`Conversation "${request.conversationId}" not found`);
+    }
+    const stored = await db.findAgentConversationState(request.conversationId);
+    const paused = stored?.pausedSnapshot ? parsePausedState(stored.pausedSnapshot) : null;
+    if (!paused) {
+        throw new AgentResumeError('This run can no longer be continued: its paused state was not found.', 409, { stateLost: true });
+    }
+    const actions = await db.listAgentPendingActions(request.conversationId);
+    const bySdkId = new Map(actions.map((action) => [action.sdkId, action]));
+    const approvals = (paused.state.pendingApprovals ?? []).filter((entry) => entry.status === 'pending');
+    const questions = (paused.state.pendingUserQuestions ?? []).filter((entry) => entry.status === 'pending');
+    if (approvals.length + questions.length === 0) {
+        throw new AgentResumeError('This run is not waiting for anything.', 409, { stateLost: true });
+    }
+    const open = [...approvals, ...questions].filter((entry) => bySdkId.get(entry.id)?.status !== 'resolved');
+    if (open.length > 0) throw new AgentResumeError('Not every pending action has been answered yet.');
+    const anchor = bySdkId.get(approvals[0]?.id ?? questions[0].id)!;
+
+    const agent = await db.findAgentByKey(request.agentKey, request.projectId);
+    if (!agent) throw new Error(`Agent "${request.agentKey}" not found`);
+    // The same agent the paused turn ran: its pinned version, or the draft.
+    let config: IAgentConfig = agent.config;
+    const version = anchor.agentVersion ?? null;
+    if (version !== null) {
+        const snapshot = await db.findAgentVersion(String(agent._id), version);
+        if (!snapshot) throw new Error(`Version ${version} not found for agent "${request.agentKey}"`);
+        config = snapshot.snapshot.config;
+    }
+    return { conversation, agent, config, version, paused, approvals, questions, bySdkId };
+}
+
+/**
+ * Do reviewer-edited arguments satisfy the tool's own schema? Checked before a
+ * resolution is recorded (the caller answers 400), because the SDK itself would
+ * only notice at execution. Builds the agent to read the tool's schema, so it
+ * runs only when a reviewer actually changed the arguments.
+ */
+export async function validateApprovedArgs(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    conversationId: string;
+    userId: string;
+    toolName: string;
+    approvedArgs: Record<string, unknown>;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+    const db = await getDatabase();
+    await db.switchToTenant(input.tenantDbName);
+    const conversation = await db.findAgentConversationById(input.conversationId);
+    if (!conversation || conversation.projectId !== input.projectId) throw new Error(`Conversation "${input.conversationId}" not found`);
+    const agent = await db.findAgentByKey(input.agentKey, input.projectId);
+    if (!agent) throw new Error(`Agent "${input.agentKey}" not found`);
+
+    const built = await buildLocalAgentRun({
+        db,
+        tenantDbName: input.tenantDbName,
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        agentKey: input.agentKey,
+        agent,
+        config: agent.config,
+        actorId: input.userId,
+        source: 'agent',
+        route: 'agent.chat',
+        userId: input.userId,
+        conversation,
+        memoryConversationId: input.conversationId,
+        threadId: input.conversationId,
+    });
+    try {
+        const tool = built.tools.find((candidate) => candidate.name === input.toolName);
+        // A tool this agent no longer has cannot be validated; the resume reports it.
+        if (!tool) return { ok: true };
+        const { validateToolArgs } = await import('@cognipeer/agent-sdk');
+        const checked = validateToolArgs(tool, input.approvedArgs);
+        return checked.ok ? { ok: true } : { ok: false, message: checked.message };
+    } finally {
+        await runBoundToolCleanup(built.cleanupTasks, { agentKey: input.agentKey, mode: 'chat' });
+    }
+}
+
+/**
+ * Continues a paused turn once every pending action is answered: the agent is
+ * rebuilt from the config the paused turn used, the stored state is restored,
+ * each resolution is applied with the SDK (`resolveToolApproval` /
+ * `resolveUserQuestion`) and the same smart loop is invoked again — so an
+ * approved tool runs, a denied one reaches the model as a refusal, and the
+ * turn can finish or pause again. The result is a NEW assistant message; there
+ * is no new user message.
+ */
+export async function executeAgentResumeLocal(request: AgentResumeRequest): Promise<AgentResumeResult> {
+    const scope: { events?: SessionTurnEvents } = {};
+    try {
+        return await runAgentResumeTurn(request, scope);
+    } catch (error) {
+        await scope.events?.fail(error).catch(() => undefined);
+        throw error;
+    }
+}
+
+async function runAgentResumeTurn(
+    request: AgentResumeRequest,
+    scope: { events?: SessionTurnEvents },
+): Promise<AgentResumeResult> {
+    const { tenantDbName, tenantId, projectId, agentKey, conversationId } = request;
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    let pausedRun: Awaited<ReturnType<typeof loadPausedRun>>;
+    try {
+        pausedRun = await loadPausedRun(db, request);
+    } catch (error) {
+        // The state this run would continue from is gone: the session is not
+        // waiting for anything any more, so it must not keep saying it is.
+        if (error instanceof AgentResumeError && error.stateLost) {
+            await db.updateAgentConversationRuntime(conversationId, {
+                runtimeStatus: 'idle', stopReason: 'error', pendingActionIds: [],
+            }).catch(() => undefined);
+        }
+        throw error;
+    }
+    const {
+        conversation, agent, config, version, paused, approvals, questions, bySdkId,
+    } = pausedRun;
+    const source = paused.source;
+    const startedAt = Date.now();
+
+    // Same merge as a playground turn: the session's context under the caller's.
+    const sessionContext = conversation.metadata?.runtimeContext as AgentRuntimeContext | undefined;
+    const runtimeContext: AgentRuntimeContext | undefined = sessionContext
+        ? {
+            ...sessionContext,
+            ...request.runtimeContext,
+            headers: { ...sessionContext.headers, ...request.runtimeContext?.headers },
+            metadata: { ...sessionContext.metadata, ...request.runtimeContext?.metadata },
+        }
+        : request.runtimeContext;
+
+    const { sdkAgent, model, cleanupTasks, warnings, hitl } = await buildLocalAgentRun({
+        db,
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        agent,
+        config,
+        runtimeContext,
+        actorId: source === 'agent' ? request.userId : `agent:${agentKey}`,
+        source,
+        route: source === 'agent' ? 'agent.chat' : 'agent.playground',
+        userId: request.userId,
+        version,
+        conversation,
+        memoryConversationId: conversationId,
+        threadId: conversationId,
+    });
+
+    try {
+        const turnEvents = startSessionTurnEvents({
+            db,
+            tenantId,
+            projectId,
+            agentKey,
+            conversationId,
+            ...(request.runId ? { runId: request.runId } : {}),
+            trigger: request.trigger,
+        });
+        scope.events = turnEvents;
+        const onTextChunk = request.onTextChunk
+            ? (text: string) => {
+                turnEvents.onText(text);
+                request.onTextChunk?.(text);
+            }
+            : undefined;
+
+        // Apply every answer with the SDK, then run the loop again.
+        let state = paused.state;
+        try {
+            for (const entry of approvals) {
+                const action = bySdkId.get(entry.id)!;
+                const resolution = action.resolution ?? {};
+                state = sdkAgent.resolveToolApproval(state, {
+                    id: entry.id,
+                    approved: resolution.decision === 'allow',
+                    ...(resolution.approvedArgs ? { approvedArgs: resolution.approvedArgs } : {}),
+                    ...(action.resolvedBy ? { decidedBy: action.resolvedBy } : {}),
+                    ...(resolution.comment ? { comment: resolution.comment } : {}),
+                });
+            }
+            for (const entry of questions) {
+                const action = bySdkId.get(entry.id)!;
+                const resolution = action.resolution ?? {};
+                state = sdkAgent.resolveUserQuestion(state, {
+                    id: entry.id,
+                    answers: toSdkAnswerSet(entry.questions, resolution.answers),
+                    cancelled: resolution.cancelled === true,
+                    ...(action.resolvedBy ? { answeredBy: action.resolvedBy } : {}),
+                });
+            }
+        } catch (error) {
+            throw new AgentResumeError(error instanceof Error ? error.message : 'The answers could not be applied.', 400);
+        }
+
+        const priorExecutionIds = new Set(
+            (state.toolHistory ?? [])
+                .map((entry) => (entry as { executionId?: unknown }).executionId)
+                .filter((id): id is string => typeof id === 'string'),
+        );
+        const inputMessageCount = (state.messages ?? []).length;
+        const compactions: IAgentTurnCompaction[] = [];
+        const streamed = captureStreamedText(onTextChunk);
+        const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
+        const invokeConfig = {
+            onEvent: (event: AgentSdkEvent) => {
+                turnEvents.onSdkEvent(event);
+                if (event.type === 'summarization') {
+                    const compaction = compactionFromEvent(event);
+                    compactions.push(compaction);
+                    turnEvents.onCompaction(compaction);
+                    try {
+                        request.onCompaction?.(compaction);
+                    } catch (callbackError) {
+                        logger.warn('onCompaction callback failed', { agentKey, error: callbackError });
+                    }
+                    return;
+                }
+                if (!request.onToolEvent || event.type !== 'tool_call' || !event.name) return;
+                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+                try {
+                    request.onToolEvent({
+                        phase: event.phase,
+                        name: event.name,
+                        id: event.id,
+                        ...(event.args !== undefined ? { args: event.args } : {}),
+                        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+                        ...(event.error?.message ? { error: event.error.message } : {}),
+                    });
+                } catch (callbackError) {
+                    logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
+                }
+            },
+            ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
+            ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
+            ...(request.cancellationCell?.deadlineAt !== undefined
+                ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
+                : {}),
+        };
+
+        request.onInvokeStart?.();
+        const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(state, invokeConfig)
+            .catch((error: unknown) => {
+                if (request.signal?.aborted) return null;
+                throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
+            })
+            .finally(() => cancellationBridge.stop());
+
+        const messageCountBefore = conversation.messages?.length ?? 0;
+        if (!settled) {
+            const aborted: AgentPlaygroundChatResult = {
+                content: streamed.text(),
+                latencyMs: Date.now() - startedAt,
+                version,
+                stopReason: 'cancelled',
+                stopDetail: CALLER_ABORT_DETAIL,
+            };
+            await turnEvents.finish({ stopReason: 'cancelled', content: aborted.content, detail: CALLER_ABORT_DETAIL });
+            return {
+                result: aborted,
+                response: toAgentChatResponse({
+                    conversationId,
+                    priorMessageCount: messageCountBefore,
+                    agentName: agent.name,
+                    version,
+                    content: aborted.content,
+                    messages: conversation.messages ?? [],
+                    outcome: { stopReason: 'cancelled', stopDetail: CALLER_ABORT_DETAIL },
+                }),
+                stopReason: 'cancelled',
+            };
+        }
+        const result = settled;
+
+        const blocked = guardrailBlockedError(result);
+        if (blocked) throw blocked;
+
+        const assistantReasoning = extractAgentReasoning(result);
+        const outcome = describeTurnOutcome(result, inputMessageCount);
+        const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        const compactedTools = compactions.length > 0
+            ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
+            : [];
+        const steps = extractPlaygroundSteps(result, priorExecutionIds);
+        const costUsd = await priceTurn(model.pricing, usage);
+        if (costUsd !== undefined && usage) usage.costUsd = costUsd;
+
+        const superseded = isCancellationCellTripped(request.cancellationCell);
+        let pause: OpenedPause | null = null;
+        if (outcome.stopReason === 'paused' && !superseded) {
+            const firstAction = bySdkId.get(approvals[0]?.id ?? questions[0].id)!;
+            pause = await openPause(db, {
+                state: result.state,
+                source,
+                tenantId,
+                projectId,
+                agentKey,
+                conversationId,
+                ...(request.runId ? { runId: request.runId } : {}),
+                hitl,
+                agentVersion: version,
+                usePublished: firstAction.usePublished ?? false,
+                createdBy: firstAction.createdBy ?? request.userId,
+            });
+            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+        }
+
+        const assistantMessage: IAgentConversation['messages'][number] = {
+            role: 'assistant',
+            content: outcome.content,
+            timestamp: new Date(),
+            ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+            ...(steps.length > 0 ? { steps } : {}),
+            ...(outcome.stopReason !== 'completed'
+                ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
+                : {}),
+            ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+            ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+            ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
+            ...(usage ? { usage } : {}),
+            ...(result.output !== undefined ? { output: result.output } : {}),
+            ...(result.outputError ? { outputError: describeStructuredOutputError(result.outputError) } : {}),
+            latencyMs: Date.now() - startedAt,
+            version,
+        };
+        const messages = [...(conversation.messages ?? []), assistantMessage];
+
+        if (!superseded) {
+            await db.updateAgentConversation(conversationId, { messages });
+            await saveConversationState(db, {
+                conversationId,
+                tenantId,
+                projectId,
+                agentKey,
+                state: result.state,
+                messageCount: messages.length,
+                ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
+            });
+        }
+        logger.info(superseded ? 'Agent resume completed but superseded (not persisted)' : 'Agent resume completed', {
+            agentKey,
+            conversationId,
+            persisted: !superseded,
+            ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
+        });
+
+        for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
+        const stopReason: SessionStopReason = superseded ? 'cancelled' : sessionStopReason(outcome.stopReason, pause);
+        await turnEvents.finish({
+            stopReason,
+            ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
+            content: outcome.content,
+            messageIndex: messages.length - 1,
+            ...(usage ? { usage: { ...usage } } : {}),
+            ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+        });
+
+        const { timestamp: _timestamp, role: _role, ...playground } = assistantMessage;
+        void _timestamp; void _role;
+        return {
+            result: playground,
+            response: toAgentChatResponse({
+                conversationId,
+                priorMessageCount: messageCountBefore,
+                agentName: agent.name,
+                version,
+                content: outcome.content,
+                messages,
+                reasoning: assistantReasoning,
+                outcome,
+                usage,
+                outputParsed: result.output,
+                outputError: result.outputError ? describeStructuredOutputError(result.outputError) : undefined,
+                ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
+            }),
+            stopReason,
+        };
+    } finally {
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: source === 'agent' ? 'chat' : 'playground' });
     }
 }

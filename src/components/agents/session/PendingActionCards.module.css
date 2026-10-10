@@ -1,0 +1,39 @@
+/*
+ * The approval / question cards in the transcript. A card that waits for a
+ * person carries an orange edge so it cannot be mistaken for the agent's own
+ * text above it; once settled the edge turns neutral and the card shrinks to
+ * one line, because by then it is history.
+ */
+.card {
+  border-left: 3px solid var(--mantine-color-orange-5);
+  background: var(--mantine-color-body);
+}
+
+.settled {
+  border-left: 3px solid var(--mantine-color-gray-4);
+}
+
+.settledApproved {
+  border-left-color: var(--mantine-color-teal-5);
+}
+
+.settledDenied {
+  border-left-color: var(--mantine-color-red-5);
+}
+
+.args {
+  max-height: 14rem;
+  overflow: auto;
+  font-size: var(--mantine-font-size-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.argsEditor textarea {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: var(--mantine-font-size-xs);
+}
+
+.optionDescription {
+  line-height: 1.35;
+}

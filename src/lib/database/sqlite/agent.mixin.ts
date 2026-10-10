@@ -4,7 +4,17 @@
  * Includes agent CRUD and conversation management.
  */
 
-import type { IAgent, AgentStatus, IAgentConversation, IAgentConversationState, IAgentVersion } from '../provider.interface';
+import type {
+  IAgent,
+  AgentStatus,
+  IAgentConversation,
+  IAgentConversationState,
+  IAgentPendingAction,
+  IAgentSessionEvent,
+  IAgentVersion,
+  NewAgentSessionEvent,
+} from '../provider.interface';
+import { AgentSessionEventSeqConflictError } from '../provider/errors';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
 
@@ -201,8 +211,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       db.prepare(`
         INSERT INTO ${TABLES.agentConversations}
-        (id, tenantId, projectId, agentKey, title, messages, metadata, createdBy, createdAt, updatedAt)
-        VALUES (@id, @tenantId, @projectId, @agentKey, @title, @messages, @metadata, @createdBy, @createdAt, @updatedAt)
+        (id, tenantId, projectId, agentKey, title, messages, metadata, createdBy, createdAt, updatedAt,
+         runtimeStatus, stopReason, pendingActionIds, lastEventSeq)
+        VALUES (@id, @tenantId, @projectId, @agentKey, @title, @messages, @metadata, @createdBy, @createdAt, @updatedAt,
+         @runtimeStatus, @stopReason, @pendingActionIds, @lastEventSeq)
       `).run({
         id,
         tenantId: conversation.tenantId,
@@ -214,6 +226,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         createdBy: conversation.createdBy,
         createdAt: now,
         updatedAt: now,
+        runtimeStatus: conversation.runtimeStatus ?? null,
+        stopReason: conversation.stopReason ?? null,
+        pendingActionIds: conversation.pendingActionIds ? this.toJson(conversation.pendingActionIds) : null,
+        lastEventSeq: conversation.lastEventSeq ?? null,
       });
 
       return { ...conversation, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
@@ -231,14 +247,35 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.title !== undefined) { sets.push('title = @title'); params.title = data.title; }
       if (data.messages !== undefined) { sets.push('messages = @messages'); params.messages = this.toJson(data.messages); }
       if (data.metadata !== undefined) { sets.push('metadata = @metadata'); params.metadata = this.toJson(data.metadata); }
+      if (data.runtimeStatus !== undefined) { sets.push('runtimeStatus = @runtimeStatus'); params.runtimeStatus = data.runtimeStatus; }
+      if (data.stopReason !== undefined) { sets.push('stopReason = @stopReason'); params.stopReason = data.stopReason; }
+      if (data.pendingActionIds !== undefined) { sets.push('pendingActionIds = @pendingActionIds'); params.pendingActionIds = this.toJson(data.pendingActionIds); }
+      if (data.lastEventSeq !== undefined) { sets.push('lastEventSeq = @lastEventSeq'); params.lastEventSeq = data.lastEventSeq; }
 
       db.prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findAgentConversationById(id);
     }
 
+    async updateAgentConversationRuntime(
+      id: string,
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq'>>,
+    ): Promise<void> {
+      const sets: string[] = [];
+      const params: Record<string, unknown> = { id };
+      if (patch.runtimeStatus !== undefined) { sets.push('runtimeStatus = @runtimeStatus'); params.runtimeStatus = patch.runtimeStatus; }
+      if (patch.stopReason !== undefined) { sets.push('stopReason = @stopReason'); params.stopReason = patch.stopReason; }
+      if (patch.pendingActionIds !== undefined) { sets.push('pendingActionIds = @pendingActionIds'); params.pendingActionIds = this.toJson(patch.pendingActionIds); }
+      if (patch.lastEventSeq !== undefined) { sets.push('lastEventSeq = @lastEventSeq'); params.lastEventSeq = patch.lastEventSeq; }
+      if (sets.length === 0) return;
+      this.getTenantDb().prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+    }
+
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       db.prepare(`DELETE FROM ${TABLES.agentConversationStates} WHERE conversationId = @id`).run({ id });
+      // The session's event log and pending approvals die with it.
+      db.prepare(`DELETE FROM ${TABLES.agentSessionEvents} WHERE conversationId = @id`).run({ id });
+      db.prepare(`DELETE FROM ${TABLES.agentPendingActions} WHERE conversationId = @id`).run({ id });
       return db.prepare(`DELETE FROM ${TABLES.agentConversations} WHERE id = @id`).run({ id }).changes === 1;
     }
 
@@ -255,6 +292,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         projectId: String(row.projectId ?? ''),
         agentKey: String(row.agentKey),
         snapshot: String(row.snapshot),
+        ...(row.pausedSnapshot ? { pausedSnapshot: String(row.pausedSnapshot) } : {}),
         messageCount: Number(row.messageCount) || 0,
         sizeBytes: Number(row.sizeBytes) || 0,
         createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
@@ -269,10 +307,11 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       const now = this.now();
       db.prepare(`
         INSERT INTO ${TABLES.agentConversationStates}
-        (id, conversationId, tenantId, projectId, agentKey, snapshot, messageCount, sizeBytes, createdAt, updatedAt)
-        VALUES (@id, @conversationId, @tenantId, @projectId, @agentKey, @snapshot, @messageCount, @sizeBytes, @now, @now)
+        (id, conversationId, tenantId, projectId, agentKey, snapshot, pausedSnapshot, messageCount, sizeBytes, createdAt, updatedAt)
+        VALUES (@id, @conversationId, @tenantId, @projectId, @agentKey, @snapshot, @pausedSnapshot, @messageCount, @sizeBytes, @now, @now)
         ON CONFLICT(conversationId) DO UPDATE SET
           snapshot = excluded.snapshot,
+          pausedSnapshot = excluded.pausedSnapshot,
           messageCount = excluded.messageCount,
           sizeBytes = excluded.sizeBytes,
           updatedAt = excluded.updatedAt
@@ -283,6 +322,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         projectId: state.projectId,
         agentKey: state.agentKey,
         snapshot: state.snapshot,
+        // Null clears a paused state left by an earlier pause.
+        pausedSnapshot: state.pausedSnapshot ?? null,
         messageCount: state.messageCount,
         sizeBytes: state.sizeBytes,
         now,
@@ -320,6 +361,218 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return rows.map((r) => this.mapConversation(r));
     }
 
+    // ── Agent session event log ──────────────────────────────────
+
+    async appendAgentSessionEvents(events: NewAgentSessionEvent[]): Promise<void> {
+      if (events.length === 0) return;
+      const db = this.getTenantDb();
+      const insert = db.prepare(`
+        INSERT INTO ${TABLES.agentSessionEvents}
+        (id, tenantId, projectId, agentKey, conversationId, seq, type, data, runId, createdAt, expiresAt)
+        VALUES (@id, @tenantId, @projectId, @agentKey, @conversationId, @seq, @type, @data, @runId, @createdAt, @expiresAt)
+      `);
+      // One transaction: a conflicting seq keeps nothing of the batch.
+      const run = db.transaction(() => {
+        for (const event of events) {
+          insert.run({
+            id: event._id ?? `sevt_${this.newId().replace(/-/g, '').slice(0, 24)}`,
+            tenantId: event.tenantId,
+            projectId: event.projectId,
+            agentKey: event.agentKey,
+            conversationId: event.conversationId,
+            seq: event.seq,
+            type: event.type,
+            data: this.toJson(event.data ?? {}),
+            runId: event.runId ?? null,
+            createdAt: new Date(event.createdAt).toISOString(),
+            expiresAt: new Date(event.expiresAt).toISOString(),
+          });
+        }
+      });
+      try {
+        run();
+      } catch (error) {
+        if ((error as { code?: string } | null)?.code === 'SQLITE_CONSTRAINT_UNIQUE'
+          || (error as { code?: string } | null)?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY') {
+          throw new AgentSessionEventSeqConflictError(events[0].conversationId);
+        }
+        throw error;
+      }
+    }
+
+    async listAgentSessionEvents(
+      conversationId: string,
+      options?: { afterSeq?: number; types?: string[]; limit?: number },
+    ): Promise<IAgentSessionEvent[]> {
+      const db = this.getTenantDb();
+      const conditions = ['conversationId = @conversationId'];
+      const params: Record<string, unknown> = { conversationId };
+      if (options?.afterSeq !== undefined && options.afterSeq > 0) {
+        conditions.push('seq > @afterSeq');
+        params.afterSeq = options.afterSeq;
+      }
+      if (options?.types && options.types.length > 0) {
+        const names = options.types.map((_, i) => `@type${i}`);
+        options.types.forEach((t, i) => { params[`type${i}`] = t; });
+        conditions.push(`type IN (${names.join(', ')})`);
+      }
+      let sql = `SELECT * FROM ${TABLES.agentSessionEvents} WHERE ${conditions.join(' AND ')} ORDER BY seq ASC`;
+      if (options?.limit) sql += ` LIMIT ${Math.max(1, Math.floor(options.limit))}`;
+      const rows = db.prepare(sql).all(params) as SqliteRow[];
+      return rows.map((row) => ({
+        _id: String(row.id),
+        tenantId: String(row.tenantId),
+        projectId: String(row.projectId ?? ''),
+        agentKey: String(row.agentKey),
+        conversationId: String(row.conversationId),
+        seq: Number(row.seq),
+        type: String(row.type),
+        data: this.parseJson<Record<string, unknown>>(row.data, {}),
+        ...(row.runId ? { runId: String(row.runId) } : {}),
+        createdAt: new Date(row.createdAt as string),
+        expiresAt: new Date(row.expiresAt as string),
+      }));
+    }
+
+    async getAgentSessionMaxSeq(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const row = db.prepare(
+        `SELECT MAX(seq) AS maxSeq FROM ${TABLES.agentSessionEvents} WHERE conversationId = @conversationId`,
+      ).get({ conversationId }) as { maxSeq: number | null } | undefined;
+      return Number(row?.maxSeq ?? 0) || 0;
+    }
+
+    async deleteAgentSessionEvents(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.agentSessionEvents} WHERE conversationId = @conversationId`).run({ conversationId }).changes;
+    }
+
+    async cleanupAgentSessionEventRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }> {
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = { olderThan: options.olderThan.toISOString() };
+      const batched = Boolean(options.batchSize && options.batchSize > 0);
+      const sql = batched
+        ? `DELETE FROM ${TABLES.agentSessionEvents} WHERE id IN (SELECT id FROM ${TABLES.agentSessionEvents} WHERE expiresAt < @olderThan LIMIT @batchSize)`
+        : `DELETE FROM ${TABLES.agentSessionEvents} WHERE expiresAt < @olderThan`;
+      return { deletedCount: db.prepare(sql).run(batched ? { ...params, batchSize: options.batchSize } : params).changes };
+    }
+
+    // ── Agent pending actions ────────────────────────────────────
+
+    async createAgentPendingActions(
+      actions: Array<Omit<IAgentPendingAction, '_id'>>,
+    ): Promise<IAgentPendingAction[]> {
+      if (actions.length === 0) return [];
+      const db = this.getTenantDb();
+      const insert = db.prepare(`
+        INSERT INTO ${TABLES.agentPendingActions}
+        (id, tenantId, projectId, agentKey, conversationId, runId, kind, sdkId, toolCallId, toolName, args, questions,
+         allowFreeText, status, requestedAt, expiresAt, resolvedAt, resolvedBy, resolution, agentVersion, usePublished, createdBy)
+        VALUES (@id, @tenantId, @projectId, @agentKey, @conversationId, @runId, @kind, @sdkId, @toolCallId, @toolName, @args,
+         @questions, @allowFreeText, @status, @requestedAt, @expiresAt, @resolvedAt, @resolvedBy, @resolution, @agentVersion,
+         @usePublished, @createdBy)
+      `);
+      const created: IAgentPendingAction[] = actions.map((action) => ({
+        ...action,
+        _id: `act_${this.newId().replace(/-/g, '').slice(0, 24)}`,
+      }));
+      db.transaction(() => {
+        for (const action of created) {
+          insert.run({
+            id: action._id,
+            tenantId: action.tenantId,
+            projectId: action.projectId,
+            agentKey: action.agentKey,
+            conversationId: action.conversationId,
+            runId: action.runId ?? null,
+            kind: action.kind,
+            sdkId: action.sdkId,
+            toolCallId: action.toolCallId ?? null,
+            toolName: action.toolName ?? null,
+            args: action.args === undefined ? null : this.toJson(action.args),
+            questions: action.questions ? this.toJson(action.questions) : null,
+            allowFreeText: action.allowFreeText === undefined ? null : action.allowFreeText ? 1 : 0,
+            status: action.status,
+            requestedAt: new Date(action.requestedAt).toISOString(),
+            expiresAt: action.expiresAt ? new Date(action.expiresAt).toISOString() : null,
+            resolvedAt: action.resolvedAt ? new Date(action.resolvedAt).toISOString() : null,
+            resolvedBy: action.resolvedBy ?? null,
+            resolution: action.resolution ? this.toJson(action.resolution) : null,
+            agentVersion: action.agentVersion ?? null,
+            usePublished: action.usePublished === undefined ? null : action.usePublished ? 1 : 0,
+            createdBy: action.createdBy ?? null,
+          });
+        }
+      })();
+      return created;
+    }
+
+    async findAgentPendingActionById(id: string): Promise<IAgentPendingAction | null> {
+      const db = this.getTenantDb();
+      const row = db.prepare(`SELECT * FROM ${TABLES.agentPendingActions} WHERE id = @id`).get({ id }) as SqliteRow | undefined;
+      return row ? this.mapPendingAction(row) : null;
+    }
+
+    async listAgentPendingActions(
+      conversationId: string,
+      options?: { status?: IAgentPendingAction['status'] },
+    ): Promise<IAgentPendingAction[]> {
+      const db = this.getTenantDb();
+      const params: Record<string, unknown> = { conversationId };
+      let sql = `SELECT * FROM ${TABLES.agentPendingActions} WHERE conversationId = @conversationId`;
+      if (options?.status) { sql += ' AND status = @status'; params.status = options.status; }
+      sql += ' ORDER BY requestedAt ASC, rowid ASC';
+      return (db.prepare(sql).all(params) as SqliteRow[]).map((row) => this.mapPendingAction(row));
+    }
+
+    async updateAgentPendingAction(
+      id: string,
+      data: Partial<Omit<IAgentPendingAction, '_id' | 'tenantId' | 'projectId' | 'conversationId'>>,
+      options?: { onlyIfStatus?: IAgentPendingAction['status'] },
+    ): Promise<IAgentPendingAction | null> {
+      const db = this.getTenantDb();
+      const sets: string[] = [];
+      const params: Record<string, unknown> = { id, onlyIfStatus: options?.onlyIfStatus ?? 'pending' };
+      const scalar = ['status', 'resolvedBy', 'toolName', 'toolCallId', 'sdkId', 'runId', 'createdBy'] as const;
+      for (const field of scalar) {
+        if (data[field] !== undefined) { sets.push(`${field} = @${field}`); params[field] = data[field]; }
+      }
+      for (const field of ['requestedAt', 'expiresAt', 'resolvedAt'] as const) {
+        if (data[field] !== undefined) {
+          sets.push(`${field} = @${field}`);
+          params[field] = data[field] ? new Date(data[field] as Date).toISOString() : null;
+        }
+      }
+      for (const field of ['args', 'questions', 'resolution'] as const) {
+        if (data[field] !== undefined) { sets.push(`${field} = @${field}`); params[field] = data[field] === null ? null : this.toJson(data[field]); }
+      }
+      if (data.agentVersion !== undefined) { sets.push('agentVersion = @agentVersion'); params.agentVersion = data.agentVersion; }
+      for (const field of ['allowFreeText', 'usePublished'] as const) {
+        if (data[field] !== undefined) { sets.push(`${field} = @${field}`); params[field] = data[field] ? 1 : 0; }
+      }
+      if (sets.length === 0) return this.findAgentPendingActionById(id);
+      const result = db.prepare(
+        `UPDATE ${TABLES.agentPendingActions} SET ${sets.join(', ')} WHERE id = @id AND status = @onlyIfStatus`,
+      ).run(params);
+      if (result.changes === 0) return null;
+      return this.findAgentPendingActionById(id);
+    }
+
+    async listExpiredAgentPendingActions(now: Date, limit = 100): Promise<IAgentPendingAction[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.agentPendingActions}
+         WHERE status = 'pending' AND expiresAt IS NOT NULL AND expiresAt < @now
+         ORDER BY expiresAt ASC LIMIT @limit`,
+      ).all({ now: now.toISOString(), limit }) as SqliteRow[];
+      return rows.map((row) => this.mapPendingAction(row));
+    }
+
+    async deleteAgentPendingActions(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      return db.prepare(`DELETE FROM ${TABLES.agentPendingActions} WHERE conversationId = @conversationId`).run({ conversationId }).changes;
+    }
+
     // ── Private helpers ──────────────────────────────────────────
 
     private mapAgent(row: SqliteRow): IAgent {
@@ -348,6 +601,33 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       };
     }
 
+    private mapPendingAction(row: SqliteRow): IAgentPendingAction {
+      return {
+        _id: String(row.id),
+        tenantId: String(row.tenantId),
+        projectId: String(row.projectId ?? ''),
+        agentKey: String(row.agentKey),
+        conversationId: String(row.conversationId),
+        ...(row.runId ? { runId: String(row.runId) } : {}),
+        kind: String(row.kind) as IAgentPendingAction['kind'],
+        sdkId: String(row.sdkId),
+        ...(row.toolCallId ? { toolCallId: String(row.toolCallId) } : {}),
+        ...(row.toolName ? { toolName: String(row.toolName) } : {}),
+        ...(row.args !== null && row.args !== undefined ? { args: this.parseJson<unknown>(row.args, undefined) } : {}),
+        ...(row.questions ? { questions: this.parseJson<IAgentPendingAction['questions']>(row.questions, []) } : {}),
+        ...(row.allowFreeText !== null && row.allowFreeText !== undefined ? { allowFreeText: Number(row.allowFreeText) === 1 } : {}),
+        status: String(row.status) as IAgentPendingAction['status'],
+        requestedAt: new Date(row.requestedAt as string),
+        expiresAt: row.expiresAt ? new Date(row.expiresAt as string) : null,
+        resolvedAt: row.resolvedAt ? new Date(row.resolvedAt as string) : null,
+        ...(row.resolvedBy ? { resolvedBy: String(row.resolvedBy) } : {}),
+        ...(row.resolution ? { resolution: this.parseJson<IAgentPendingAction['resolution']>(row.resolution, {}) } : {}),
+        agentVersion: row.agentVersion === null || row.agentVersion === undefined ? null : Number(row.agentVersion),
+        ...(row.usePublished !== null && row.usePublished !== undefined ? { usePublished: Number(row.usePublished) === 1 } : {}),
+        ...(row.createdBy ? { createdBy: String(row.createdBy) } : {}),
+      };
+    }
+
     private mapConversation(row: SqliteRow): IAgentConversation {
       return {
         _id: String(row.id),
@@ -357,6 +637,10 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         title: row.title ? String(row.title) : undefined,
         messages: this.parseJson(row.messages, []),
         metadata: row.metadata ? this.parseJson(row.metadata, {}) : undefined,
+        ...(row.runtimeStatus ? { runtimeStatus: String(row.runtimeStatus) as IAgentConversation['runtimeStatus'] } : {}),
+        ...(row.stopReason ? { stopReason: String(row.stopReason) as IAgentConversation['stopReason'] } : {}),
+        ...(row.pendingActionIds ? { pendingActionIds: this.parseJson<string[]>(row.pendingActionIds, []) } : {}),
+        ...(row.lastEventSeq !== null && row.lastEventSeq !== undefined ? { lastEventSeq: Number(row.lastEventSeq) } : {}),
         createdBy: String(row.createdBy),
         createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
         updatedAt: row.updatedAt ? new Date(row.updatedAt as string) : undefined,

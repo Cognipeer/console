@@ -66,7 +66,8 @@ export async function startAgentQueueConsumer(): Promise<void> {
   // Background runs + their callbacks, with their own concurrency: a run can
   // take 30 minutes, and sharing the chat queue's slots blocked chat.
   queue.consume(AGENT_RUN_QUEUE, async (ctx: JobContext<QueuePayload>) => {
-    if (ctx.name === 'run') {
+    // `resume` = a run queued to continue a paused turn; the worker reads which from the row.
+    if (ctx.name === 'run' || ctx.name === 'resume') {
       return runAgentJobLocal(ctx.data as unknown as { runId: string; tenantId: string; tenantDbName: string });
     }
     if (ctx.name === 'callback') {

@@ -38,14 +38,14 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           INSERT INTO ${TABLES.agentRuns}
           (id, mode, tenantId, tenantDbName, projectId, agentKey, conversationId,
            userMessage, version, usePublished, runtimeContext,
-           idempotencyKey, idempotencyRequestHash, status, errorReason,
+           idempotencyKey, idempotencyRequestHash, status, errorReason, resumeActionIds,
            result, errorMessage, cancelRequestedAt, workerId, heartbeatAt,
            callbackUrl, callbackSecret, maxDurationMs, callbackStatus, callbackAttempts,
            userId, apiTokenId, actorType,
            createdAt, startedAt, completedAt, expiresAt, updatedAt)
           VALUES (@id, @mode, @tenantId, @tenantDbName, @projectId, @agentKey, @conversationId,
            @userMessage, @version, @usePublished, @runtimeContext,
-           @idempotencyKey, @idempotencyRequestHash, @status, @errorReason,
+           @idempotencyKey, @idempotencyRequestHash, @status, @errorReason, @resumeActionIds,
            @result, @errorMessage, @cancelRequestedAt, @workerId, @heartbeatAt,
            @callbackUrl, @callbackSecret, @maxDurationMs, @callbackStatus, @callbackAttempts,
            @userId, @apiTokenId, @actorType,
@@ -66,6 +66,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
           idempotencyRequestHash: record.idempotencyRequestHash ?? null,
           status: record.status,
           errorReason: record.errorReason ?? null,
+          resumeActionIds: record.resumeActionIds?.length ? this.toJson(record.resumeActionIds) : null,
           result: record.result !== undefined && record.result !== null ? this.toJson(record.result) : null,
           errorMessage: record.errorMessage ?? null,
           cancelRequestedAt: record.cancelRequestedAt ? new Date(record.cancelRequestedAt).toISOString() : null,
@@ -163,9 +164,32 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       params.tenantId = tenantId;
       return this.updateAgentRunIf(
         id,
-        `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status = 'running'`,
+        `UPDATE ${TABLES.agentRuns} SET ${sets.join(', ')} WHERE id = @id AND tenantId = @tenantId AND status IN ('running', 'requires_action')`,
         params,
       );
+    }
+
+    async requeueAgentRunForResume(
+      id: string,
+      tenantId: string,
+      resumeActionIds: string[],
+    ): Promise<IAgentRun | null> {
+      try {
+        return await this.updateAgentRunIf(id, `
+          UPDATE ${TABLES.agentRuns}
+          SET status = 'queued', resumeActionIds = @resumeActionIds, stopReason = NULL, result = NULL,
+              errorReason = NULL, errorMessage = NULL, workerId = NULL, cancelRequestedAt = NULL,
+              completedAt = NULL, updatedAt = @updatedAt
+          WHERE id = @id AND tenantId = @tenantId AND status = 'requires_action'
+        `, { id, tenantId, resumeActionIds: this.toJson(resumeActionIds), updatedAt: this.now() });
+      } catch (error) {
+        // The partial unique index: another run took the conversation's slot.
+        if (isSqliteUniqueConstraintError(error)) {
+          const held = await this.findAgentRunByIdRaw(id);
+          throw new AgentRunConflictError(held?.conversationId ?? id);
+        }
+        throw error;
+      }
     }
 
     async updateAgentRunCallback(
@@ -194,7 +218,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const sets: string[] = ['updatedAt = @updatedAt'];
       const params: Record<string, unknown> = { id, updatedAt: now };
       const scalarFields = [
-        'status', 'errorReason', 'errorMessage', 'workerId',
+        'status', 'errorReason', 'stopReason', 'errorMessage', 'workerId',
         'callbackUrl', 'callbackSecret', 'callbackStatus', 'projectId',
         'idempotencyKey', 'idempotencyRequestHash',
       ];
@@ -212,6 +236,10 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         sets.push('runtimeContext = @runtimeContext');
         const rc = (data as { runtimeContext?: unknown }).runtimeContext;
         params.runtimeContext = rc === null ? null : this.toJson(rc);
+      }
+      if (data.resumeActionIds !== undefined) {
+        sets.push('resumeActionIds = @resumeActionIds');
+        params.resumeActionIds = data.resumeActionIds?.length ? this.toJson(data.resumeActionIds) : null;
       }
       if (data.callbackAttempts !== undefined) {
         sets.push('callbackAttempts = @callbackAttempts');
@@ -380,6 +408,8 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         idempotencyRequestHash: (row.idempotencyRequestHash as string) ?? null,
         status: row.status as IAgentRun['status'],
         errorReason: (row.errorReason as IAgentRun['errorReason']) ?? null,
+        stopReason: (row.stopReason as IAgentRun['stopReason']) ?? null,
+        resumeActionIds: row.resumeActionIds ? this.parseJson(row.resumeActionIds, [] as string[]) : null,
         result: row.result ? this.parseJson(row.result, null as Record<string, unknown> | null) : null,
         errorMessage: (row.errorMessage as string) ?? null,
         cancelRequestedAt: this.toDate(row.cancelRequestedAt) ?? null,

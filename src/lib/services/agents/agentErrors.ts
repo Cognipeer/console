@@ -28,6 +28,24 @@ export interface AgentRunErrorBody {
      */
     type: string;
     code?: string | null;
+    /** `pending_action` only: the approvals / questions the session is waiting on. */
+    pendingActionIds?: string[];
+}
+
+/**
+ * A new message arrived while the conversation waits on an approval or a
+ * question and the agent's policy (`onUserMessageWhilePending: 'reject'`) is to
+ * refuse it. Answered 409 `{ error: { type: 'pending_action', pendingActionIds } }`.
+ */
+export class AgentPendingActionError extends Error {
+    readonly status = 409;
+    readonly pendingActionIds: string[];
+
+    constructor(pendingActionIds: string[]) {
+        super('This session is waiting for an approval or an answer. Resolve it before sending a new message.');
+        this.name = 'AgentPendingActionError';
+        this.pendingActionIds = pendingActionIds;
+    }
 }
 
 export interface ClassifiedAgentRunError {
@@ -76,6 +94,18 @@ export function classifyAgentRunError(
     },
 ): ClassifiedAgentRunError {
     const message = error instanceof Error ? error.message : String(error ?? '');
+
+    if (error instanceof AgentPendingActionError) {
+        return {
+            status: 409,
+            error: {
+                message: error.message,
+                type: 'pending_action',
+                code: 'pending_action',
+                pendingActionIds: error.pendingActionIds,
+            },
+        };
+    }
 
     // Another turn (sync or background) already holds this conversation.
     if (error instanceof AgentRunConflictError) {

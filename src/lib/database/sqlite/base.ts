@@ -89,6 +89,8 @@ export const TABLES = {
   agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
   agentConversationStates: 'agent_conversation_states',
+  agentSessionEvents: 'agent_session_events',
+  agentPendingActions: 'agent_pending_actions',
   agentSkills: 'agent_skills',
   vectorCounters: 'vector_counters',
   vectorMigrations: 'vector_migrations',
@@ -1027,6 +1029,15 @@ export class SQLiteProviderBase {
     // Sealed HMAC secret for agent-run callbacks (agentRunService).
     this.ensureTableColumn(db, TABLES.agentRuns, 'callbackSecret', 'callbackSecret TEXT');
     this.ensureTableColumn(db, TABLES.agentRuns, 'maxDurationMs', 'maxDurationMs INTEGER');
+    this.ensureTableColumn(db, TABLES.agentRuns, 'stopReason', 'stopReason TEXT');
+    this.ensureTableColumn(db, TABLES.agentRuns, 'resumeActionIds', 'resumeActionIds TEXT');
+    // Agent runtime (session events / human-in-the-loop): runtime fields on the
+    // conversation and the paused SDK state. All nullable; absent = idle / not paused.
+    this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeStatus', 'runtimeStatus TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'stopReason', 'stopReason TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'pendingActionIds', 'pendingActionIds TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'lastEventSeq', 'lastEventSeq INTEGER');
+    this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency_unique

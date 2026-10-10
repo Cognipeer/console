@@ -182,6 +182,19 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [{ key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } }],
   agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
+  // Append-only session event log. The unique pair is the sequence guard; the
+  // TTL index (expireAfterSeconds 0 = "at expiresAt") is the retention. The
+  // agent mixin also ensures both on its first write — names/keys IDENTICAL.
+  agent_session_events: [
+    { key: { conversationId: 1, seq: 1 }, options: { name: 'uniq_conversation_seq', unique: true } },
+    { key: { expiresAt: 1 }, options: { name: 'ttl_expiresAt', expireAfterSeconds: 0 } },
+  ],
+  // Tool approvals / questions a turn paused on (human-in-the-loop).
+  agent_pending_actions: [
+    { key: { conversationId: 1, status: 1 }, options: { name: 'idx_conversation_status' } },
+    { key: { status: 1, expiresAt: 1 }, options: { name: 'idx_status_expiresAt' } },
+    { key: { tenantId: 1, projectId: 1, status: 1 }, options: { name: 'idx_tenant_project_status' } },
+  ],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
   mcp_request_logs: [
     { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },

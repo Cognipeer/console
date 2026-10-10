@@ -41,3 +41,26 @@ export class AgentRunConflictError extends Error {
     this.conversationId = conversationId;
   }
 }
+
+/**
+ * Thrown by `appendAgentSessionEvents` when an event's `(conversationId, seq)` is
+ * already taken. The session event writer re-reads the conversation's max seq and
+ * retries once; a second conflict surfaces as a dropped batch (events are best
+ * effort — they must never fail the turn they describe).
+ *
+ * `writtenIds` lists the events of THIS call that were stored before the conflict
+ * (an ordered Mongo insert keeps what precedes the failing document; SQLite rolls
+ * the whole batch back, so it is empty there). A retry skips those instead of
+ * storing them a second time under new seq numbers.
+ */
+export class AgentSessionEventSeqConflictError extends Error {
+  readonly conversationId: string;
+  readonly writtenIds: string[];
+
+  constructor(conversationId: string, writtenIds: string[] = []) {
+    super(`Session event sequence conflict on conversation "${conversationId}"`);
+    this.name = 'AgentSessionEventSeqConflictError';
+    this.conversationId = conversationId;
+    this.writtenIds = writtenIds;
+  }
+}

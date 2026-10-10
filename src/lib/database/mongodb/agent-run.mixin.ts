@@ -263,8 +263,48 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       tenantId: string,
       data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
     ): Promise<IAgentRun | null> {
-      const run = await this.setAgentRun({ _id: objectId(id), tenantId, status: 'running' }, { ...data, updatedAt: new Date() });
+      // A paused (`requires_action`) run can be finalized too: cancelled, or
+      // settled by a continuation that ran inline.
+      const run = await this.setAgentRun(
+        { _id: objectId(id), tenantId, status: { $in: ['running', 'requires_action'] } },
+        { ...data, updatedAt: new Date() },
+      );
       if (run && !ACTIVE_STATUSES.has(run.status)) await this.releaseConversationLock(run.conversationId, id);
+      return run;
+    }
+
+    async requeueAgentRunForResume(
+      id: string,
+      tenantId: string,
+      resumeActionIds: string[],
+    ): Promise<IAgentRun | null> {
+      const paused = await this.agentRunsCollection().findOne({ _id: objectId(id), tenantId, status: 'requires_action' });
+      if (!paused) return null;
+      await this.ensureAgentRunsIndexes();
+      // The slot is taken again before the row goes back to `queued`.
+      const lockId = conversationLockId(paused.conversationId);
+      if (!(await this.acquireAgentRunLock(lockId, 'conversation'))) throw new AgentRunConflictError(paused.conversationId);
+      const run = await this.setAgentRun(
+        { _id: objectId(id), tenantId, status: 'requires_action' },
+        {
+          status: 'queued',
+          resumeActionIds,
+          stopReason: null,
+          result: null,
+          errorReason: null,
+          errorMessage: null,
+          workerId: null,
+          cancelRequestedAt: null,
+          completedAt: null,
+          updatedAt: new Date(),
+        },
+      );
+      if (!run) {
+        await this.getTenantDb().collection<AgentRunLockDoc>(COLLECTIONS.agentRunLocks)
+          .deleteOne({ _id: lockId, runId: null }).catch(() => undefined);
+        return null;
+      }
+      await this.bindAgentRunLock(lockId, id);
       return run;
     }
 

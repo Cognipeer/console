@@ -272,6 +272,15 @@ export async function loadConversationState(
 }
 
 /**
+ * The normal (repaired) snapshot `saveConversationState` stores for a state,
+ * or null when it is too large even trimmed. Exposed so a pause can budget
+ * its own copy against it: both live in one document.
+ */
+export function serializeCarriedState(state: AgentSdkSmartState | undefined): string | null {
+    return state ? serializeForStorage(pickCarried(state)) : null;
+}
+
+/**
  * Stores the state a turn ended in. Best-effort, like the transcript write it
  * follows: a failure here costs the next turn its memory of this one, not the
  * answer the caller already has.
@@ -286,11 +295,17 @@ export async function saveConversationState(
         state: AgentSdkSmartState | undefined;
         /** `conversation.messages.length` AFTER this turn was appended. */
         messageCount: number;
+        /**
+         * The full resumable state of a run that stopped for a person (see
+         * `agentPendingActions.serializePausedState`). Absent clears one left
+         * by an earlier pause — a finished turn never carries it forward.
+         */
+        pausedSnapshot?: string;
     },
 ): Promise<void> {
     try {
         if (!input.state) return;
-        const snapshot = serializeForStorage(pickCarried(input.state));
+        const snapshot = serializeCarriedState(input.state);
         if (snapshot === null) {
             logger.warn('Agent state is too large to store even trimmed; the next turn replays the transcript', {
                 conversationId: input.conversationId,
@@ -304,6 +319,7 @@ export async function saveConversationState(
             projectId: input.projectId,
             agentKey: input.agentKey,
             snapshot,
+            ...(input.pausedSnapshot ? { pausedSnapshot: input.pausedSnapshot } : {}),
             messageCount: input.messageCount,
             sizeBytes: snapshot.length,
         });

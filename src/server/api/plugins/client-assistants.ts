@@ -766,6 +766,9 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
         userId: ctx.tokenRecord.userId,
         userMessage: toRun.content,
         runtimeContext,
+        // The Assistants wire has no way to answer an approval: a gated tool
+        // follows the agent's `humanInTheLoop.unattended` setting (deny by default).
+        unattended: true,
       });
 
       // `executeAgentChat` just persisted the (user, assistant) pair itself —

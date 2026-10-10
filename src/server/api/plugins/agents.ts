@@ -72,6 +72,19 @@ import {
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import { sessionEventBus } from '@/lib/services/agents/sessionEvents';
+import { DASHBOARD_AGENT_HITL_DEFAULTS } from '@/lib/services/agents/agentHumanInTheLoop';
+import {
+  pendingActionsBlockingMessage,
+  resolveAgentPendingAction,
+  type ResolveActor,
+  type ResolveOutcome,
+} from '@/lib/services/agents/agentActionResolution';
+import {
+  listConversationActions,
+  listSessionEvents,
+  streamSessionEvents,
+} from './agent-session-events';
 import {
   applyStreamHeaders,
   readJsonBody,
@@ -139,6 +152,28 @@ async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) 
 }
 
 /**
+ * `requireScopedAgent` plus the session `:sessionId` names — scoped to this
+ * agent and project, so an id valid for a sibling agent or project 404s. Null,
+ * with the 404 already sent, when it is missing or out of scope.
+ */
+async function requireScopedSession(request: FastifyRequest, reply: FastifyReply) {
+  const scoped = await requireScopedAgent(request, reply);
+  if (!scoped) return null;
+  const { sessionId } = request.params as { sessionId: string };
+  let found: IAgentConversation | null = null;
+  try {
+    found = await getConversationById(scoped.session.tenantDbName, sessionId);
+  } catch {
+    found = null;
+  }
+  if (!found || found.agentKey !== scoped.agent.key || found.projectId !== scoped.projectId) {
+    void reply.code(404).send({ error: 'Session not found' });
+    return null;
+  }
+  return { ...scoped, conversation: found };
+}
+
+/**
  * Logs a failed route and answers it: the project-context status when that is
  * what failed, else a 500 with `message`.
  */
@@ -170,6 +205,40 @@ async function reserveDashboardSession(input: {
     userMessage: input.userMessage,
     userId: input.session.userId,
   });
+}
+
+/** Who is answering a pending action: the dashboard user, and whether they administer the project. */
+function dashboardActor(scoped: NonNullable<Awaited<ReturnType<typeof requireScopedAgent>>>): ResolveActor {
+  const { user, userProject, session } = scoped;
+  const admin = user.role === 'owner' || user.role === 'admin' || user.role === 'project_admin'
+    || userProject?.role === 'project_admin';
+  return {
+    userId: session.userId,
+    isAdmin: admin,
+    channel: 'dashboard',
+    email: user.email,
+    role: user.role,
+  };
+}
+
+/** The refusal for a resolve that did not start a continuation, or null for the outcomes that did. */
+function resolveRefusal(outcome: ResolveOutcome): { status: number; body: Record<string, unknown> } | null {
+  switch (outcome.kind) {
+    case 'not_found':
+      return { status: 404, body: { error: 'Request not found' } };
+    case 'not_pending':
+      return { status: 409, body: { error: 'This request is no longer open', type: 'action_not_pending', code: 'action_not_pending', actionStatus: outcome.status } };
+    case 'expired':
+      return { status: 410, body: { error: 'This request has expired', type: 'action_expired', code: 'action_expired' } };
+    case 'forbidden':
+      return { status: 403, body: { error: outcome.message } };
+    case 'invalid':
+      return { status: 400, body: { error: outcome.message } };
+    case 'busy':
+      return { status: 409, body: SESSION_BUSY_BODY };
+    default:
+      return null;
+  }
 }
 
 const SESSION_BUSY_BODY = {
@@ -215,6 +284,21 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
   if (readOnlySource) {
     void reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
     return null;
+  }
+  // The session is waiting on an approval or an answer and the agent refuses
+  // new messages meanwhile (`onUserMessageWhilePending: 'reject'`).
+  if (typeof body.conversationId === 'string') {
+    const conversation = await getConversationById(session.tenantDbName, body.conversationId);
+    const blocking = await pendingActionsBlockingMessage(session.tenantDbName, conversation, agent.config);
+    if (blocking) {
+      void reply.code(409).send({
+        error: 'This session is waiting for an approval or an answer. Resolve it before sending a new message.',
+        type: 'pending_action',
+        code: 'pending_action',
+        pendingActionIds: blocking,
+      });
+      return null;
+    }
   }
   const reservation = await reserveDashboardSession({
     session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
@@ -306,6 +390,8 @@ function summariseConversation(conversation: IAgentConversation) {
     failedCalls,
     status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
+    // 'requires_action' = waiting on an approval / answer (the "Waiting for you" badge).
+    runtimeStatus: conversation.runtimeStatus,
     hasContext: Boolean(
       conversation.metadata?.runtimeContext
       && Object.keys(conversation.metadata.runtimeContext as Record<string, unknown>).length > 0,
@@ -346,6 +432,14 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         user,
       });
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
+
+      // An agent created from the dashboard asks before its tools run unless the
+      // form said otherwise. Stored explicitly so it shows (and can be changed)
+      // in Configure → Approvals & questions. The client API's create route does
+      // not do this: an API-created agent keeps running unattended.
+      if (prepared.config.kind !== 'external' && prepared.config.humanInTheLoop === undefined) {
+        prepared.config.humanInTheLoop = structuredClone(DASHBOARD_AGENT_HITL_DEFAULTS);
+      }
 
       const agent = await createAgentRecord(
         session.tenantDbName,
@@ -928,8 +1022,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
       const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
-      const allowed = new Set(['queued', 'running', 'succeeded', 'failed', 'canceled']);
-      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'>;
+      const allowed = new Set(['queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
+      const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
       const runs = await listAgentRuns(session.tenantDbName, {
         tenantId: session.tenantId,
         projectId,
@@ -1151,6 +1245,185 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── Session event log + pending actions ──
+
+  app.get('/agents/:agentId/sessions/:sessionId/events', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply);
+      if (!scoped) return reply;
+      const body = await listSessionEvents(
+        scoped.session.tenantDbName,
+        String(scoped.conversation._id),
+        (request.query ?? {}) as Record<string, unknown>,
+      );
+      return reply.code(200).send(body);
+    } catch (error) {
+      return sendRouteError(reply, error, 'List session events error', 'Failed to list session events');
+    }
+  }));
+
+  app.get('/agents/:agentId/sessions/:sessionId/events/stream', withApiRequestContext(async (request, reply) => {
+    let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
+    try {
+      scoped = await requireScopedSession(request, reply);
+    } catch (error) {
+      return sendRouteError(reply, error, 'Session event stream error', 'Failed to open the event stream');
+    }
+    if (!scoped) return reply;
+    return streamSessionEvents(request, reply, scoped.session.tenantDbName, String(scoped.conversation._id));
+  }));
+
+  app.get('/agents/:agentId/sessions/:sessionId/actions', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply);
+      if (!scoped) return reply;
+      const body = await listConversationActions(
+        scoped.session.tenantDbName,
+        String(scoped.conversation._id),
+        (request.query ?? {}) as Record<string, unknown>,
+      );
+      return reply.code(200).send(body);
+    } catch (error) {
+      return sendRouteError(reply, error, 'List session actions error', 'Failed to list session actions');
+    }
+  }));
+
+  /**
+   * Answer a pending approval / question and let the paused turn continue.
+   *
+   * Without `?stream=1` the call returns when the continuation has finished
+   * (JSON). With it, the continuation is an SSE stream in the SAME event format
+   * as `/chat/stream` (`tool`, `text`, `summary`, `result`, `error`, plus the
+   * additive `action` / `status`), so a client renders it like any other turn.
+   * A refusal (404, 403, 409, 410, 400) is a normal JSON response either way:
+   * the stream only opens once there is a continuation to report.
+   */
+  app.post('/agents/:agentId/sessions/:sessionId/actions/:actionId/resolve', withApiRequestContext(async (request, reply) => {
+    let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
+    try {
+      scoped = await requireScopedSession(request, reply);
+    } catch (error) {
+      return sendRouteError(reply, error, 'Resolve action error', 'Failed to resolve the request');
+    }
+    if (!scoped) return reply;
+
+    const { actionId } = request.params as { actionId: string };
+    const conversationId = String(scoped.conversation._id);
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const wantsStream = query.stream === '1' || query.stream === 'true';
+    const body = readJsonBody<Record<string, unknown>>(request);
+
+    // The stream opens lazily; the continuation's first event starts it.
+    let started = false;
+    let closed = false;
+    const pendingFrames: Array<() => void> = [];
+    const write = (event: string, data: unknown, id?: number) => {
+      if (closed) return;
+      try {
+        reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        closed = true;
+      }
+    };
+    const startStream = () => {
+      if (started || !wantsStream) return;
+      started = true;
+      applyStreamHeaders(reply);
+      reply.raw.flushHeaders?.();
+      reply.raw.on('close', () => { closed = true; });
+      for (const frame of pendingFrames.splice(0)) frame();
+    };
+    const send = (event: string, data: unknown, id?: number) => {
+      if (!wantsStream) return;
+      if (!started) {
+        pendingFrames.push(() => write(event, data, id));
+        return;
+      }
+      write(event, data, id);
+    };
+    const live = <A extends unknown[]>(event: string, map: (...args: A) => unknown) => (...args: A) => {
+      startStream();
+      send(event, map(...args));
+    };
+
+    const unsubscribe = wantsStream
+      ? sessionEventBus.subscribe(conversationId, (frame) => {
+        if (frame.type === 'action.required') send('action', frame.data, frame.seq);
+        else if (frame.type.startsWith('session.status_')) send('status', { type: frame.type, ...frame.data }, frame.seq);
+      })
+      : undefined;
+
+    try {
+      const outcome = await resolveAgentPendingAction({
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        conversationId,
+        actionId,
+        agentKey: scoped.agent.key,
+        body,
+        actor: dashboardActor(scoped),
+        mode: 'sync',
+        runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+          userId: scoped.session.userId,
+          source: 'playground',
+        }),
+        ...(wantsStream
+          ? {
+            stream: {
+              onToolEvent: live('tool', (event) => event),
+              onTextChunk: live('text', (text: string) => ({ text })),
+              onCompaction: live('summary', (compaction) => compaction),
+            },
+          }
+          : {}),
+        audit: {
+          ipAddress: request.ip,
+          userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
+        },
+      });
+
+      const refusal = resolveRefusal(outcome);
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
+
+      if (outcome.kind === 'pending') {
+        return reply.code(200).send({ status: 'requires_action', pendingActions: outcome.pendingActions });
+      }
+      if (outcome.kind === 'resumed') {
+        if (wantsStream) {
+          startStream();
+          send('result', outcome.result);
+          if (!closed) reply.raw.end();
+          return reply;
+        }
+        return reply.code(200).send({ status: 'resumed', result: outcome.result });
+      }
+      return reply.code(500).send({ error: 'Unexpected resolution outcome' });
+    } catch (error) {
+      const classified = classifyAgentRunError(error, { exposeInternal: true });
+      const resumeStatus = (error as { status?: unknown })?.status;
+      if (started) {
+        // The status line is long gone; the error travels as an event, like `/chat/stream`.
+        send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
+        if (!closed) reply.raw.end();
+        return reply;
+      }
+      if (error instanceof AgentGuardrailBlockedError) {
+        return sendAgentGuardrailBlock(reply, error);
+      }
+      logger.error('Resolve action error', { error });
+      return sendProjectContextError(reply, error) ?? reply.code(
+        typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
+      ).send({
+        error: classified.error.message,
+        type: classified.error.type,
+        code: classified.error.code,
+      });
+    } finally {
+      unsubscribe?.();
+    }
+  }));
+
   /**
    * The same run as `/chat`, reported as it happens.
    *
@@ -1180,14 +1453,25 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
     let closed = false;
     reply.raw.on('close', () => { closed = true; });
-    const send = (event: string, data: unknown) => {
+    const send = (event: string, data: unknown, id?: number) => {
       if (closed) return;
       try {
-        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        reply.raw.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       } catch {
         closed = true;
       }
     };
+
+    // Additive events for a Session turn, taken from the same log the
+    // `/events` endpoints serve (`id:` = the event's seq): `action` when the
+    // agent pauses for an approval or a question, `status` as the turn starts
+    // and stops. The events above are unchanged; an older client ignores these.
+    const unsubscribeSessionEvents = typeof turn.run.conversationId === 'string'
+      ? sessionEventBus.subscribe(turn.run.conversationId, (frame) => {
+        if (frame.type === 'action.required') send('action', frame.data, frame.seq);
+        else if (frame.type.startsWith('session.status_')) send('status', { type: frame.type, ...frame.data }, frame.seq);
+      })
+      : undefined;
 
     try {
       const result = await executePlaygroundChatLocal({
@@ -1216,6 +1500,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
     } finally {
+      unsubscribeSessionEvents?.();
       await turn.reservation?.release();
       if (!closed) reply.raw.end();
     }

@@ -1,0 +1,260 @@
+/**
+ * One turn's view of the session event log: the call sites of
+ * `executeAgentChatLocal` / `executePlaygroundChatLocal` (and the resume path)
+ * feed it the SDK's events and the turn's outcome; it writes the events
+ * (`sessionEvents.ts`) and keeps the conversation's runtime fields
+ * (`runtimeStatus`, `stopReason`, `pendingActionIds`, `lastEventSeq`) in step.
+ *
+ * Everything here is best effort: nothing it does may fail the turn.
+ */
+
+import type { SmartAgentEvent as AgentSdkEvent } from '@cognipeer/agent-sdk';
+import { createLogger } from '@/lib/core/logger';
+import type { DatabaseProvider, IAgentTurnCompaction } from '@/lib/database';
+import { classifyAgentRunError } from './agentErrors';
+import {
+  createSessionEventWriter,
+  type SessionEventBus,
+  type SessionEventWriter,
+  type SessionStopReason,
+} from './sessionEvents';
+
+const logger = createLogger('agents:session-turn-events');
+
+type TurnDb = Pick<
+  DatabaseProvider,
+  'appendAgentSessionEvents' | 'getAgentSessionMaxSeq' | 'updateAgentConversationRuntime'
+>;
+
+export interface SessionTurnEventsOptions {
+  db: TurnDb;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  conversationId: string;
+  runId?: string;
+  /**
+   * The user's message, when this turn starts from one (absent when resuming a
+   * pause). A function reads it late: a guardrail may rewrite the text during
+   * the run, and the log must carry what the transcript stores, not the raw
+   * input — see `ensureStarted`.
+   */
+  userMessage?: string | (() => string);
+  trigger: 'message' | 'resume' | 'timeout';
+  bus?: SessionEventBus;
+}
+
+export interface SessionTurnFinish {
+  stopReason: SessionStopReason;
+  /** The user turn as persisted (after any guardrail rewrite); used if the turn's start events are still unwritten. */
+  userMessage?: string;
+  /** The answer (or the partial text a stopped run ended with). Omit when the turn produced no message. */
+  content?: string;
+  /** Index of the assistant message in `conversation.messages`. */
+  messageIndex?: number;
+  usage?: Record<string, unknown>;
+  /** The runtime's wording for a limit / pause. */
+  detail?: string;
+  pendingActionIds?: string[];
+}
+
+export interface SessionTurnEvents {
+  readonly writer: SessionEventWriter;
+  /** Maps the SDK's tool-call events onto `agent.tool_use` / `agent.tool_result`. */
+  onSdkEvent(event: AgentSdkEvent): void;
+  onCompaction(compaction: IAgentTurnCompaction): void;
+  /** A text delta of the answer — live only. */
+  onText(text: string): void;
+  /**
+   * Emit any persisted event directly (bookkeeping that happens before the
+   * model is called, like cancelling a pending request for a new message).
+   */
+  emit: SessionEventWriter['emit'];
+  /**
+   * Emit an event that belongs after the turn's opening events (`action.required`
+   * when the run stops for a person): the lazily written `user.message` /
+   * `session.status_running` go first so the log reads in order.
+   */
+  emitInTurn: SessionEventWriter['emit'];
+  /** Turn ended normally (any stop reason but a thrown error). */
+  finish(result: SessionTurnFinish): Promise<void>;
+  /** Turn threw. */
+  fail(error: unknown): Promise<void>;
+}
+
+/** The conversation fields that describe a turn's end. */
+export function conversationRuntimePatch(
+  stopReason: SessionStopReason,
+  pendingActionIds: string[] = [],
+) {
+  return {
+    runtimeStatus: stopReason === 'requires_action' ? ('requires_action' as const) : ('idle' as const),
+    stopReason,
+    pendingActionIds: stopReason === 'requires_action' ? pendingActionIds : [],
+  };
+}
+
+export function startSessionTurnEvents(options: SessionTurnEventsOptions): SessionTurnEvents {
+  const { db, conversationId } = options;
+  const writer = createSessionEventWriter({
+    db,
+    tenantId: options.tenantId,
+    projectId: options.projectId,
+    agentKey: options.agentKey,
+    conversationId,
+    ...(options.runId ? { runId: options.runId } : {}),
+    ...(options.bus ? { bus: options.bus } : {}),
+  });
+
+  // `user.message` + `session.status_running` are written lazily — at the first
+  // sign the model call went out (a tool call, a text delta, the end of the
+  // turn) — so the message is the one the transcript stores: an `input.pre`
+  // guardrail rewrites it before the first model call, and writing the raw text
+  // up front would put into the event log what the guardrail just removed.
+  let started = false;
+  const ensureStarted = (persistedText?: string) => {
+    if (started) return;
+    started = true;
+    if (options.userMessage !== undefined) {
+      const text = persistedText
+        ?? (typeof options.userMessage === 'function' ? options.userMessage() : options.userMessage);
+      writer.emit('user.message', { content: text });
+    }
+    writer.emit('session.status_running', { trigger: options.trigger });
+  };
+  // A turn that resumes a pause has no message to hold back.
+  if (options.userMessage === undefined) ensureStarted();
+
+  // The conversation row says "running" at once, so a client that loads the
+  // session mid-turn knows to attach.
+  const marked = (async () => {
+    await db.updateAgentConversationRuntime(conversationId, { runtimeStatus: 'running' });
+  })()
+    .catch((error) => {
+      logger.warn('Could not mark the session running', { conversationId, error: String(error) });
+    });
+
+  let finished = false;
+  const settle = async (stopReason: SessionStopReason, pendingActionIds?: string[]) => {
+    await marked;
+    // The status goes in BEFORE the buffered idle / action frames are published,
+    // so a follower that reloads the session on that frame never reads 'running'.
+    try {
+      await db.updateAgentConversationRuntime(conversationId, conversationRuntimePatch(stopReason, pendingActionIds));
+    } catch (error) {
+      logger.warn('Could not record the session stop reason', { conversationId, error: String(error) });
+    }
+    await writer.close();
+    try {
+      await db.updateAgentConversationRuntime(conversationId, { lastEventSeq: writer.lastSeq() });
+    } catch (error) {
+      logger.warn('Could not record the last session event seq', { conversationId, error: String(error) });
+    }
+  };
+
+  /** The recorder is an observer: nothing it does may reach the turn it observes. */
+  const guarded = (what: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (error) {
+      logger.warn(`Session event recorder failed (${what})`, { conversationId, error: String(error) });
+    }
+  };
+
+  return {
+    writer,
+    emit: (type, data) => guarded('emit', () => writer.emit(type, data)),
+    emitInTurn: (type, data) => guarded('emit', () => {
+      ensureStarted();
+      writer.emit(type, data);
+    }),
+
+    onSdkEvent(event) {
+      if (event.type !== 'tool_call' || !event.name) return;
+      guarded('tool event', () => {
+        ensureStarted();
+        const subagent = (event as { subagentName?: string }).subagentName;
+        if (event.phase === 'start') {
+          writer.emit('agent.tool_use', {
+            toolCallId: event.id,
+            name: event.name,
+            ...(event.args !== undefined ? { args: event.args } : {}),
+            ...(subagent ? { subagent } : {}),
+          });
+        } else if (event.phase === 'success' || event.phase === 'error') {
+          writer.emit('agent.tool_result', {
+            toolCallId: event.id,
+            name: event.name,
+            ok: event.phase === 'success',
+            ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+            ...(event.error?.message ? { error: event.error.message } : {}),
+            ...(subagent ? { subagent } : {}),
+          });
+        }
+      });
+    },
+
+    onCompaction(compaction) {
+      guarded('compaction', () => {
+        ensureStarted();
+        writer.emit('agent.compaction', { ...compaction });
+      });
+    },
+
+    onText(text) {
+      guarded('text delta', () => {
+        ensureStarted();
+        writer.emitLive('agent.message.delta', { text });
+      });
+    },
+
+    async finish(result) {
+      if (finished) return;
+      finished = true;
+      try {
+        guarded('finish', () => {
+          ensureStarted(result.userMessage);
+          // A pause with nothing written yet has no message to report.
+          if (result.content !== undefined && !(result.stopReason === 'requires_action' && !result.content.trim())) {
+            writer.emit('agent.message', {
+              content: result.content,
+              ...(result.messageIndex !== undefined ? { messageIndex: result.messageIndex } : {}),
+              ...(result.stopReason !== 'end_turn' ? { stopReason: result.stopReason } : {}),
+              ...(result.usage ? { usage: result.usage } : {}),
+            });
+          }
+          writer.emit('session.status_idle', {
+            stopReason: result.stopReason,
+            ...(result.pendingActionIds?.length ? { pendingActionIds: result.pendingActionIds } : {}),
+            ...(result.detail ? { detail: result.detail } : {}),
+          });
+          if (result.stopReason === 'end_turn') writer.emit('session.work_done', {});
+        });
+        await settle(result.stopReason, result.pendingActionIds);
+      } catch (error) {
+        logger.warn('Session event recorder failed (finish)', { conversationId, error: String(error) });
+      }
+    },
+
+    async fail(error) {
+      if (finished) return;
+      finished = true;
+      try {
+        guarded('fail', () => {
+          ensureStarted();
+          // The client-safe classification: these events are readable by API callers.
+          // A guardrail refusal is the configured outcome and its message is meant for the caller.
+          const blocked = error instanceof Error && error.name === 'AgentGuardrailBlockedError';
+          const classified = classifyAgentRunError(error, { exposeInternal: false });
+          const message = blocked ? (error as Error).message : classified.error.message;
+          const code = blocked ? 'guardrail_block' : classified.error.code;
+          writer.emit('session.error', { message, ...(code ? { code } : {}) });
+          writer.emit('session.status_idle', { stopReason: 'error', detail: message });
+        });
+        await settle('error');
+      } catch (settleError) {
+        logger.warn('Session event recorder failed (fail)', { conversationId, error: String(settleError) });
+      }
+    },
+  };
+}

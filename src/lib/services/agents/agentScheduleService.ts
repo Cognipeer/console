@@ -145,6 +145,9 @@ export async function runAgentSchedule(ctx: RunScheduleContext): Promise<Schedul
         userMessage: ctx.schedule.message,
         userId: ctx.userId,
         usePublished: true,
+        // No one is watching a scheduled run: a gated tool follows the agent's
+        // `humanInTheLoop.unattended` setting (deny by default).
+        unattended: true,
         runtimeContext: {
             source: 'api',
             userId: ctx.userId,

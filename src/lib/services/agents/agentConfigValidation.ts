@@ -25,6 +25,7 @@ import {
 } from './bindingResolution';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
+import { validateHitlConfig } from './agentHumanInTheLoop';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -242,6 +243,10 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
             issues.warnings.push({ field: 'sandbox.tools', message: 'Sandbox access is on but every sandbox tool is off' });
         }
     }
+
+    const hitl = validateHitlConfig(config);
+    issues.errors.push(...hitl.errors);
+    issues.warnings.push(...hitl.warnings);
 
     const memory = config.memory;
     if (memory?.enabled && !memory.memoryStoreKey) {

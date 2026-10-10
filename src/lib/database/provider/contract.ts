@@ -8,6 +8,9 @@ import type {
   IAgent,
   IAgentConversation,
   IAgentConversationState,
+  IAgentPendingAction,
+  IAgentSessionEvent,
+  NewAgentSessionEvent,
   IAgentSkill,
   IAgentTracingEvent,
   IAgentTracingDashboardAggregate,
@@ -1359,6 +1362,17 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     data: Partial<Omit<IAgentConversation, 'tenantId' | 'agentKey' | 'createdBy'>>,
   ): Promise<IAgentConversation | null>;
+  /**
+   * Writes only the runtime fields (`runtimeStatus`, `stopReason`,
+   * `pendingActionIds`, `lastEventSeq`) — no `updatedAt` bump, no re-read. The
+   * session event recorder calls this around every turn, so it stays much
+   * cheaper than `updateAgentConversation` and cannot be mistaken for a
+   * transcript write.
+   */
+  updateAgentConversationRuntime(
+    id: string,
+    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq'>>,
+  ): Promise<void>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   listAgentConversations(
@@ -1372,6 +1386,49 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     state: Omit<IAgentConversationState, '_id' | 'createdAt' | 'updatedAt'>,
   ): Promise<void>;
   deleteAgentConversationState(conversationId: string): Promise<boolean>;
+
+  // ── Agent session event log (tenant-specific, append-only) ──
+  /**
+   * Appends events. A `(conversationId, seq)` that already exists makes the whole
+   * call throw `AgentSessionEventSeqConflictError`. Nothing is kept from the
+   * conflicting batch on SQLite; on Mongo an ordered insert keeps the events
+   * before the conflict, and the error's `writtenIds` names them — a caller
+   * re-reads the max seq and retries only the rest, so no event is stored
+   * twice. An event may carry its own `_id`; one without gets a generated id.
+   */
+  appendAgentSessionEvents(events: NewAgentSessionEvent[]): Promise<void>;
+  /** Events with `seq > afterSeq`, ascending. `types` filters by exact type. */
+  listAgentSessionEvents(
+    conversationId: string,
+    options?: { afterSeq?: number; types?: string[]; limit?: number },
+  ): Promise<IAgentSessionEvent[]>;
+  /** Highest `seq` written for the conversation; 0 when there are none. */
+  getAgentSessionMaxSeq(conversationId: string): Promise<number>;
+  deleteAgentSessionEvents(conversationId: string): Promise<number>;
+  /** Retention sweep (SQLite; Mongo also has a TTL index). Deletes events with `expiresAt < olderThan`. */
+  cleanupAgentSessionEventRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }>;
+
+  // ── Agent pending actions (tenant-specific; tool approvals / questions a turn paused on) ──
+  createAgentPendingActions(
+    actions: Array<Omit<IAgentPendingAction, '_id'>>,
+  ): Promise<IAgentPendingAction[]>;
+  findAgentPendingActionById(id: string): Promise<IAgentPendingAction | null>;
+  listAgentPendingActions(
+    conversationId: string,
+    options?: { status?: IAgentPendingAction['status'] },
+  ): Promise<IAgentPendingAction[]>;
+  /**
+   * Compare-and-set: applies `data` only while the row's status is `onlyIfStatus`
+   * (default `pending`). Null when it matched nothing — someone else resolved it first.
+   */
+  updateAgentPendingAction(
+    id: string,
+    data: Partial<Omit<IAgentPendingAction, '_id' | 'tenantId' | 'projectId' | 'conversationId'>>,
+    options?: { onlyIfStatus?: IAgentPendingAction['status'] },
+  ): Promise<IAgentPendingAction | null>;
+  /** `status = pending AND expiresAt < now`, oldest first — the reconciler's timeout sweep. */
+  listExpiredAgentPendingActions(now: Date, limit?: number): Promise<IAgentPendingAction[]>;
+  deleteAgentPendingActions(conversationId: string): Promise<number>;
 
   // ── MCP Server operations (tenant-specific) ──
   createMcpServer(
@@ -1664,16 +1721,28 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IAgentRun | null>;
   /**
    * Persist a run's terminal status, guarded so it only applies while the
-   * run is still `running`. This is what prevents a deadline-timer-driven
+   * run is still `running` (or paused, see below). This is what prevents a deadline-timer-driven
    * `failed` transition (§12.13) from later being clobbered back to
    * `succeeded` by an abandoned `invoke()` call that eventually settles
    * (§12.12) — the CAS guard, not the caller's discretion, is the actual
-   * protection.
+   * protection. A paused (`requires_action`) run can be finalized as well:
+   * a cancel, or a continuation that completed inline.
    */
   finalizeAgentRun(
     id: string,
     tenantId: string,
     data: Partial<Omit<IAgentRun, '_id' | 'tenantId' | 'createdAt'>>,
+  ): Promise<IAgentRun | null>;
+  /**
+   * Puts a paused (`requires_action`) run back in the queue to continue its
+   * turn: CAS from `requires_action` to `queued`, taking the conversation's
+   * active-run slot again. Null when the run is not paused any more; throws
+   * `AgentRunConflictError` when another run holds the slot.
+   */
+  requeueAgentRunForResume(
+    id: string,
+    tenantId: string,
+    resumeActionIds: string[],
   ): Promise<IAgentRun | null>;
   /**
    * Updates callback delivery bookkeeping ONLY (`callbackStatus`,
