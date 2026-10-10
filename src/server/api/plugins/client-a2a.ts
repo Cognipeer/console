@@ -21,6 +21,7 @@ import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService
  */
 
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { toClientPendingAction } from '@/lib/services/agents/clientWire';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import type { IAgent } from '@/lib/database';
@@ -156,7 +157,9 @@ function completedTask(
 /**
  * A task paused for an approval or a question: A2A's `input-required`. The
  * actions to resolve ride in `metadata.pendingActions` (resolve them through
- * the session actions endpoint; the task then continues).
+ * the session actions endpoint; the task then continues). The actions are
+ * spelled as the rest of the client API does (`tool_name`, `allow_free_text`);
+ * the A2A envelope keeps the protocol's own camelCase.
  */
 function inputRequiredTask(
     id: string,
@@ -355,7 +358,7 @@ export async function handleA2aRpc(
       if (message.pendingActions?.some((action) => action.status === 'pending')) {
         return reply.code(200).send(jsonRpcOk(
           rpcId,
-          inputRequiredTask(requestedId, parsed.conversationId, message.content, message.pendingActions),
+          inputRequiredTask(requestedId, parsed.conversationId, message.content, message.pendingActions.map(toClientPendingAction)),
         ));
       }
       return reply.code(200).send(jsonRpcOk(

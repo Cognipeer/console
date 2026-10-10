@@ -31,6 +31,7 @@ import {
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
 import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
@@ -188,7 +189,7 @@ function createResponsesHandler(usePublished: boolean) {
               type: 'pending_action',
               code: 'pending_action',
               message: 'This session is waiting for an approval or an answer. Resolve it before sending a new message.',
-              pendingActionIds: blocking,
+              pending_action_ids: blocking,
             },
           });
         }
@@ -388,7 +389,7 @@ function createResponsesHandler(usePublished: boolean) {
       // Which failure it was — a provider rejecting its key, a model that no
       // longer exists, a rate limit — instead of one opaque 500 for all.
       const classified = classifyAgentRunError(error);
-      return reply.code(classified.status).send({ error: classified.error });
+      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
   });
 }

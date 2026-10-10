@@ -38,6 +38,7 @@ export function WebhookMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       if (this.webhookIndexesReady.has(dbName)) return;
       const coll = db.collection(COLLECTIONS.webhookDeliveries);
       await Promise.all([
+        db.collection(COLLECTIONS.webhookEndpoints).createIndex({ tenantId: 1, projectId: 1 }, { name: 'idx_tenant_project' }),
         coll.createIndex({ status: 1, nextAttemptAt: 1 }, { name: 'idx_status_nextAttemptAt' }),
         coll.createIndex({ endpointId: 1, createdAt: -1 }, { name: 'idx_endpoint_createdAt' }),
         coll.createIndex({ tenantId: 1, eventId: 1 }, { name: 'idx_tenant_eventId' }),
@@ -52,6 +53,7 @@ export function WebhookMixin<TBase extends Constructor<MongoDBProviderBase>>(Bas
       endpoint: Omit<IWebhookEndpoint, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IWebhookEndpoint> {
       const db = this.getTenantDb();
+      await this.ensureWebhookIndexes(db).catch(() => undefined);
       const now = new Date();
       const doc = { ...endpoint, projectId: endpoint.projectId ?? null, _id: newId('whk'), createdAt: now, updatedAt: now };
       await db.collection(COLLECTIONS.webhookEndpoints).insertOne(doc as never);

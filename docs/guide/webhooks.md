@@ -2,7 +2,7 @@
 
 A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a schedule fires. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
 
-Manage them in **Settings → Webhooks**, or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token).
+Manage them in **Settings → Webhooks**, or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner is a project admin or a tenant owner / admin, and never a tenant-wide endpoint or another project's, whoever owns it.
 
 ## Who can manage them
 
@@ -65,6 +65,8 @@ Enabling it again re-checks the address. Deliveries that were still queued when 
 | `WEBHOOK_CONCURRENCY` | `8` | deliveries sent at once per node |
 
 ## API
+
+The endpoint and delivery objects use `camelCase` (`projectId`, `disabledReason`, `failingSince`, `eventType`, `nextAttemptAt`), like the other resource-management endpoints; errors are `{ "error": "…", "code": "…" }`. The agent endpoints you may call from a handler (runs, sessions, events) are `snake_case`.
 
 | | |
 | --- | --- |

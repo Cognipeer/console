@@ -25,6 +25,7 @@ import {
   type ResolveOutcome,
 } from '@/lib/services/agents/agentActionResolution';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { normalizeClientResolveBody, toClientErrorBody, toClientPendingAction } from '@/lib/services/agents/clientWire';
 import { activeSessionBudget, clientBudgetViolation, parseSessionBudget, sessionSpentUsd } from '@/lib/services/agents/sessionBudget';
 import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
@@ -78,7 +79,7 @@ function serializeSession(conversation: IAgentConversation, runtime: Awaited<Ret
     agent: conversation.agentKey,
     runtime_status: runtime.runtimeStatus,
     stop_reason: runtime.stopReason,
-    pending_actions: runtime.pendingActions,
+    pending_actions: runtime.pendingActions.map(toClientPendingAction),
     last_event_seq: runtime.lastEventSeq,
     budget: publicSessionBudget(conversation),
     spent_usd: sessionSpentUsd(conversation),
@@ -196,7 +197,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       logger.error('Client agent session update error', { error });
       const classified = classifyAgentRunError(error);
-      return reply.code(classified.status).send({ error: classified.error });
+      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
   }));
 
@@ -209,6 +210,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
         ctx.tenantDbName,
         String(conversation._id),
         (request.query ?? {}) as Record<string, unknown>,
+        'client',
       );
       return reply.code(200).send({ object: 'list', ...body });
     } catch (error) {
@@ -227,7 +229,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(500).send(INTERNAL_ERROR_BODY);
     }
     if (!conversation) return reply;
-    return streamSessionEvents(request, reply, ctx.tenantDbName, String(conversation._id));
+    return streamSessionEvents(request, reply, ctx.tenantDbName, String(conversation._id), 'client');
   }));
 
   // ── Answer a pending approval / question ──
@@ -243,7 +245,8 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       const conversation = await requireSession(request, reply, ctx);
       if (!conversation) return reply;
       const { actionId } = request.params as { actionId: string };
-      const body = readJsonBody<Record<string, unknown>>(request);
+      // `approved_args` / `remember_for_session` (snake_case, like the rest of the client API).
+      const body = normalizeClientResolveBody(readJsonBody<Record<string, unknown>>(request));
 
       const agent = await getAgentByKey(ctx.tenantDbName, conversation.agentKey, ctx.projectId);
       const limits = await resolveAgentExecutionLimits({
@@ -305,7 +308,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
           output: [],
           status: 'requires_action',
           stop_reason: 'requires_action',
-          required_action: { type: 'agent_actions', actions: outcome.pendingActions },
+          required_action: { type: 'agent_actions', actions: outcome.pendingActions.map(toClientPendingAction) },
         });
       }
       if (outcome.kind === 'resumed') {
@@ -321,7 +324,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       const resumeStatus = (error as { status?: unknown })?.status;
       return reply.code(
         typeof resumeStatus === 'number' && (error as Error).name === 'AgentResumeError' ? resumeStatus : classified.status,
-      ).send({ error: classified.error });
+      ).send({ error: toClientErrorBody(classified.error) });
     }
   }));
 };
@@ -334,7 +337,7 @@ function clientRefusal(outcome: ResolveOutcome): { status: number; body: unknown
     case 'not_pending':
       return {
         status: 409,
-        body: apiErrorBody('invalid_request_error', 'This request is no longer open', 'action_not_pending', { actionStatus: outcome.status }),
+        body: apiErrorBody('invalid_request_error', 'This request is no longer open', 'action_not_pending', { action_status: outcome.status }),
       };
     case 'expired':
       return { status: 410, body: apiErrorBody('invalid_request_error', 'This request has expired', 'action_expired') };

@@ -135,7 +135,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
 
     async listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]> {
       const db = this.getTenantDb();
-      const rows = db.prepare(`SELECT * FROM ${TABLES.files} WHERE conversationId = @conversationId ORDER BY id ASC`)
+      const rows = db.prepare(`SELECT * FROM ${TABLES.files} WHERE conversationId = @conversationId ORDER BY createdAt ASC, rowid ASC`)
         .all({ conversationId }) as SqliteRow[];
       return rows.map((r) => this.mapFileRow(r));
     }
@@ -145,7 +145,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       const rows = db.prepare(`
         SELECT * FROM ${TABLES.files}
         WHERE purpose = 'conversation' AND expiresAt IS NOT NULL AND expiresAt < @before
-        ORDER BY expiresAt ASC LIMIT @limit
+        ORDER BY expiresAt ASC, createdAt ASC, rowid ASC LIMIT @limit
       `).all({ before: before.toISOString(), limit }) as SqliteRow[];
       return rows.map((r) => this.mapFileRow(r));
     }

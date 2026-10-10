@@ -258,7 +258,7 @@ describe('client: session budget', () => {
     });
     expect(res.statusCode).toBe(402);
     expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
-      type: 'budget_reached', spentUsd: 1.02, maxCostUsd: 1,
+      type: 'budget_reached', spent_usd: 1.02, max_cost_usd: 1,
     });
     expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
   });

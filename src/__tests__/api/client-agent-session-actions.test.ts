@@ -144,6 +144,45 @@ describe('client: answering a pending action', () => {
     }));
   });
 
+  it('reads the answer in snake_case (approved_args, remember_for_session); the camelCase names still work', async () => {
+    hoisted.resolve.mockResolvedValue({ kind: 'queued', run: { _id: 'r1', status: 'queued' } });
+    await app.inject({
+      method: 'POST', url: URL, headers,
+      payload: { decision: 'allow', approved_args: { command: 'ls' }, remember_for_session: true },
+    });
+    expect(hoisted.resolve.mock.calls[0][0].body).toEqual({
+      decision: 'allow', approvedArgs: { command: 'ls' }, rememberForSession: true,
+    });
+
+    await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow', approvedArgs: { a: 1 }, rememberForSession: false } });
+    expect(hoisted.resolve.mock.calls[1][0].body).toEqual({ decision: 'allow', approvedArgs: { a: 1 }, rememberForSession: false });
+  });
+
+  it('answers the other open requests of the pause with snake_case fields', async () => {
+    hoisted.resolve.mockResolvedValue({
+      kind: 'pending',
+      pendingActions: [{
+        id: 'act_2', kind: 'user_question', status: 'pending', requestedAt: '2024-01-01T00:00:00.000Z',
+        expiresAt: '2024-01-02T00:00:00.000Z', allowFreeText: true,
+        questions: [{ question: 'Which?', multiSelect: true, options: [{ label: 'a' }] }],
+      }],
+    });
+    const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow' } });
+    expect(parseJsonBody<{ required_action: { actions: unknown[] } }>(res.body).required_action.actions).toEqual([{
+      id: 'act_2', kind: 'user_question', status: 'pending', requested_at: '2024-01-01T00:00:00.000Z',
+      expires_at: '2024-01-02T00:00:00.000Z', allow_free_text: true,
+      questions: [{ question: 'Which?', multi_select: true, options: [{ label: 'a' }] }],
+    }]);
+  });
+
+  it('spells the 409 for an answered request with action_status', async () => {
+    hoisted.resolve.mockResolvedValue({ kind: 'not_pending', status: 'resolved' });
+    const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow' } });
+    expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
+      code: 'action_not_pending', action_status: 'resolved',
+    });
+  });
+
   it('background: true queues the continuation and answers 202 with the run', async () => {
     hoisted.resolve.mockResolvedValue({ kind: 'queued', run: { _id: 'r1', status: 'queued' } });
     const res = await app.inject({ method: 'POST', url: URL, headers, payload: { decision: 'allow', background: true } });
@@ -199,7 +238,7 @@ describe('client: answering a pending action', () => {
     });
     expect(res.statusCode).toBe(409);
     expect(parseJsonBody<{ error: Record<string, unknown> }>(res.body).error).toMatchObject({
-      type: 'pending_action', pendingActionIds: ['act_1'],
+      type: 'pending_action', pending_action_ids: ['act_1'],
     });
     expect(hoisted.runSyncAgentTurn).not.toHaveBeenCalled();
   });

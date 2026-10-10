@@ -12,6 +12,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { IAgentConversation, IAgentPendingAction, IAgentSessionEvent } from '@/lib/database';
 import { toPublicPendingAction, type PublicPendingAction } from '@/lib/services/agents/agentPendingActions';
 import { runWithTenantDb } from '@/lib/services/agents/agentRunService';
+import { toClientEventData, toClientEventFrame } from '@/lib/services/agents/clientWire';
 import { followSessionEvents, parseResumeSeq } from '@/lib/services/agents/sessionEvents';
 import { applyStreamHeaders } from '../fastify-utils';
 
@@ -20,12 +21,15 @@ const logger = createLogger('api:agent-session-events');
 const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 1_000;
 
+/** Who is reading: the dashboard keeps the stored (camelCase) `data`; a client gets it snake_cased. */
+export type SessionEventWire = 'dashboard' | 'client';
+
 /** The wire shape of one logged event. */
-export function serializeSessionEvent(event: IAgentSessionEvent) {
+export function serializeSessionEvent(event: IAgentSessionEvent, wire: SessionEventWire = 'dashboard') {
   return {
     seq: event.seq,
     type: event.type,
-    data: event.data,
+    data: wire === 'client' ? toClientEventData(event.data) : event.data,
     ...(event.runId ? { run_id: event.runId } : {}),
     created_at: new Date(event.createdAt).toISOString(),
   };
@@ -46,6 +50,7 @@ export async function listSessionEvents(
   tenantDbName: string,
   conversationId: string,
   query: Record<string, unknown>,
+  wire: SessionEventWire = 'dashboard',
 ) {
   const afterSeq = parseResumeSeq(undefined, query.after);
   const requested = Number(query.limit);
@@ -62,7 +67,7 @@ export async function listSessionEvents(
   }));
   const page = rows.slice(0, limit);
   return {
-    events: page.map(serializeSessionEvent),
+    events: page.map((event) => serializeSessionEvent(event, wire)),
     has_more: rows.length > limit,
     last_seq: page.length > 0 ? page[page.length - 1].seq : afterSeq,
   };
@@ -98,12 +103,15 @@ export async function describeSessionRuntime(tenantDbName: string, conversation:
  * `EventSource` sends on reconnect) or `?after=`; subscribes to the live bus
  * before replaying from the DB so no event falls between the two. Persisted
  * events carry `id: <seq>`; live-only events (text deltas) have no id.
+ * A `client` stream spells the frame like the client event list (`run_id`,
+ * `created_at`, snake_case `data`); the dashboard's frames keep their shape.
  */
 export async function streamSessionEvents(
   request: FastifyRequest,
   reply: FastifyReply,
   tenantDbName: string,
   conversationId: string,
+  wire: SessionEventWire = 'dashboard',
 ): Promise<FastifyReply> {
   const query = (request.query ?? {}) as Record<string, unknown>;
   const afterSeq = parseResumeSeq(request.headers['last-event-id'], query.after);
@@ -132,7 +140,7 @@ export async function streamSessionEvents(
       ...(types ? { types } : {}),
       signal: controller.signal,
       write: (frame) => writeRaw(
-        `${frame.id !== undefined ? `id: ${frame.id}\n` : ''}event: ${frame.event}\ndata: ${JSON.stringify(frame.data)}\n\n`,
+        `${frame.id !== undefined ? `id: ${frame.id}\n` : ''}event: ${frame.event}\ndata: ${JSON.stringify(wire === 'client' ? toClientEventFrame(frame.data) : frame.data)}\n\n`,
       ),
       writePing: () => writeRaw(': ping\n\n'),
     }));

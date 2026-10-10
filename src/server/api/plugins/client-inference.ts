@@ -13,6 +13,7 @@ import {
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -224,7 +225,7 @@ async function handleAgentChatCompletion(input: {
       }
       logger.error('Agent chat completion failed', { error });
       const classified = classifyAgentRunError(error);
-      return reply.code(classified.status).send({ error: classified.error });
+      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
     if ('error' in result) {
       return reply.code(result.status).send({
@@ -283,7 +284,7 @@ async function handleAgentChatCompletion(input: {
     send(toChatChunk({ id, model, finish: true, stopReason }));
   } catch (error) {
     logger.error('Agent chat completion stream failed', { error });
-    send({ error: classifyAgentRunError(error).error });
+    send({ error: toClientErrorBody(classifyAgentRunError(error).error) });
   } finally {
     if (!closed) {
       reply.raw.write('data: [DONE]\n\n');

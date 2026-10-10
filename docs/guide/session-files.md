@@ -41,13 +41,26 @@ Content-Type: application/pdf
 <bytes>
 ```
 
-A small file can go as JSON instead: `{ "name": "notes.txt", "contentType": "text/plain", "data": "<base64 or data URL>" }`. (A `.json` file goes as `application/octet-stream`; its name still says what it is.)
+A small file can go as JSON instead: `{ "name": "notes.txt", "content_type": "text/plain", "data": "<base64 or data URL>" }` (`contentType` is accepted too). (A `.json` file goes as `application/octet-stream`; its name still says what it is.)
 
 | Call | |
 | --- | --- |
 | `POST …/files?name=` | Upload. 201 with the file; 413 too large, 415 type not accepted, 409 too many files, 429 quota, 403 attachments off. |
-| `GET …/files` | The session's files. |
+| `GET …/files` | The session's files: `{ "object": "list", "data": [...] }`. |
 | `DELETE …/files/{fileId}` | Delete one. |
+
+A file, as the client API returns it (the dashboard's calls use `camelCase`):
+
+```json
+{
+  "id": "6710…", "object": "agent.session.file", "session_id": "6f1c…",
+  "name": "contract.pdf", "mime_type": "application/pdf", "size": 183422,
+  "conversion_status": "succeeded",
+  "created_at": "2026-10-01T12:00:00.000Z", "expires_at": "2026-10-31T12:00:00.000Z"
+}
+```
+
+`conversion_status` is `succeeded` when the text could be read, `pending` while it converts, and `failed` or `skipped` when only the original exists (`conversion_error` says why); the agent then knows the file is there but cannot read it. `{conversationId}` is the id inside `resp_{conversationId}`.
 
 The dashboard has the same three under `/api/agents/{agentId}/sessions/{sessionId}/files`. Uploads count toward the project's file quotas like any other file.
 

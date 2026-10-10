@@ -318,6 +318,15 @@ describe('client API: upload, list, delete', () => {
     expect(res.statusCode).toBe(201);
   });
 
+  it('reads the JSON form in snake_case (content_type) as well as camelCase', async () => {
+    const data = Buffer.from('a').toString('base64');
+    const res = await app.inject({
+      method: 'POST', url: CLIENT_URL, headers: clientHeaders, payload: { file_name: 'b.txt', content_type: 'text/plain', data },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(mockFn(uploadSessionFile).mock.calls.at(-1)![0]).toMatchObject({ fileName: 'b.txt', contentType: 'text/plain', data });
+  });
+
   it('shapes refusals as API errors: bad request 400, limits at their own status', async () => {
     let res = await app.inject({ method: 'POST', url: CLIENT_URL, headers: { ...clientHeaders, 'content-type': 'application/pdf' }, payload: Buffer.from('x') });
     expect(res.statusCode).toBe(400);

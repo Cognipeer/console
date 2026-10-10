@@ -105,6 +105,7 @@ import { withAssembledStream } from './assembledStream';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import { toClientPendingAction, type ClientPendingAction } from './clientWire';
 import {
     agentTakesAttachments,
     assembleTurnAttachments,
@@ -2924,7 +2925,7 @@ export interface AgentChatResponse {
     /** How the agent run ended; `completed` for a normal final answer, `requires_action` while it waits on a person. */
     stop_reason?: AgentStopReason | 'requires_action' | 'budget_reached';
     /** Present when `status` is `requires_action`: the approvals / questions to resolve. */
-    required_action?: { type: 'agent_actions'; actions: PublicPendingAction[] };
+    required_action?: { type: 'agent_actions'; actions: ClientPendingAction[] };
     /** The runtime's own wording for a non-`completed` stop, e.g. which limit. */
     stop_detail?: string;
     usage: ResponseUsage;
@@ -3569,7 +3570,7 @@ function toAgentChatResponse(input: {
         ...(requiresAction
             ? {
                 stop_reason: 'requires_action' as const,
-                required_action: { type: 'agent_actions' as const, actions: input.pendingActions! },
+                required_action: { type: 'agent_actions' as const, actions: input.pendingActions!.map(toClientPendingAction) },
             }
             : stopped
             ? {
