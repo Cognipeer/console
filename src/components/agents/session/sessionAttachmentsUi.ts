@@ -80,3 +80,8 @@ export function isImageAttachment(file: Pick<IAgentMessageAttachment, 'mimeType'
 export function lacksReadableText(file: PendingAttachment): boolean {
     return !isImageAttachment(file) && (file.conversionStatus === 'failed' || file.conversionStatus === 'skipped');
 }
+
+/** The "Allowed file types" text → the MIME types it lists (comma-separated; blanks dropped). */
+export function parseMimeTypes(text: string): string[] {
+    return text.split(',').map((entry) => entry.trim()).filter(Boolean);
+}

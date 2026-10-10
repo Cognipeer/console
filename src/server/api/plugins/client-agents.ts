@@ -30,7 +30,7 @@ import {
   validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { classifyAgentRunError, logAgentRunFailure } from '@/lib/services/agents/agentErrors';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLimits';
 import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
@@ -125,22 +125,6 @@ function createResponsesHandler(usePublished: boolean) {
         ));
       }
 
-      // A spend budget for the session this request starts (`null` = none).
-      // Ignored when the request continues an existing session — change that
-      // one with PATCH /client/v1/agents/sessions/:conversationId.
-      let sessionBudget: IAgentSessionBudget | null | undefined;
-      if (body.budget === null) sessionBudget = null;
-      else if (body.budget !== undefined) {
-        const parsed = parseSessionBudget(body.budget);
-        if (!parsed.ok) return reply.code(400).send(invalidRequestErrorBody(parsed.message, 'invalid_budget'));
-        sessionBudget = parsed.budget;
-      }
-      // An agent whose admin set a session budget binds its API clients to it.
-      if (sessionBudget !== undefined) {
-        const violation = clientBudgetViolation(agent.config, sessionBudget);
-        if (violation) return reply.code(403).send(invalidRequestErrorBody(violation, 'budget_override_forbidden'));
-      }
-
       let conversationId: string | undefined;
       let sessionConversation: IAgentConversation | null = null;
       // §12.15's hash must never depend on a conversationId that is FRESH
@@ -198,6 +182,26 @@ function createResponsesHandler(usePublished: boolean) {
         conversationId = resolvedConversationId;
         sessionConversation = conversation;
         idempotencyConversationScope = resolvedConversationId;
+      }
+
+      // A spend budget for the session this request starts (`null` = none).
+      // A request that continues a session ignores the field altogether — not
+      // read, not validated, so a client that always sends its default budget
+      // keeps working on follow-up turns. That session's budget changes with
+      // PATCH /client/v1/agents/sessions/:conversationId.
+      let sessionBudget: IAgentSessionBudget | null | undefined;
+      if (!conversationId) {
+        if (body.budget === null) sessionBudget = null;
+        else if (body.budget !== undefined) {
+          const parsed = parseSessionBudget(body.budget);
+          if (!parsed.ok) return reply.code(400).send(invalidRequestErrorBody(parsed.message, 'invalid_budget'));
+          sessionBudget = parsed.budget;
+        }
+        // An agent whose admin set a session budget binds its API clients to it.
+        if (sessionBudget !== undefined) {
+          const violation = clientBudgetViolation(agent.config, sessionBudget);
+          if (violation) return reply.code(403).send(invalidRequestErrorBody(violation, 'budget_override_forbidden'));
+        }
       }
 
       // Effective execution limits: min(env ceiling, tenant quota, the
@@ -385,10 +389,11 @@ function createResponsesHandler(usePublished: boolean) {
         });
         return sendAgentGuardrailBlock(reply, error);
       }
-      logAgentRunFailure(logger, 'Client agent responses error', error);
       // Which failure it was — a provider rejecting its key, a model that no
-      // longer exists, a rate limit — instead of one opaque 500 for all.
-      const classified = classifyAgentRunError(error);
+      // longer exists, a rate limit — instead of one opaque 500 for all. A
+      // refusal the caller can act on (a spent budget, a pending approval) is
+      // logged as such, without a stack; only a server fault is an error.
+      const classified = logAgentRouteError(logger, 'Client agent responses error', error);
       return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
   });

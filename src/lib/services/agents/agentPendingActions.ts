@@ -398,11 +398,16 @@ export function actionResolvedEventData(
     };
 }
 
+/** Who cancelled the open actions, for the row and the `action.resolved` event. */
+const NEW_MESSAGE_CANCEL = 'system:new_message';
+
 /**
  * Cancels every open action of the conversation because a new message arrives
- * (`onUserMessageWhilePending: 'cancel_pending'`): rows → `cancelled`, the
- * message copies updated, the paused state dropped. The normal (repaired)
- * snapshot stays, so the next turn simply loses the unanswered call.
+ * (`onUserMessageWhilePending: 'cancel_pending'`) — or, with `resolvedBy`, for
+ * another system reason (the background run that was waiting on them was
+ * cancelled): rows → `cancelled`, the message copies updated, the paused state
+ * dropped. The normal (repaired) snapshot stays, so the next turn simply loses
+ * the unanswered call.
  *
  * Returns the conversation with its messages as they now read.
  */
@@ -412,6 +417,7 @@ export async function cancelPendingForNewMessage(
         | 'findAgentConversationState' | 'saveAgentConversationState'>,
     conversation: IAgentConversation,
     emit?: SessionEventWriter['emit'],
+    resolvedBy: string = NEW_MESSAGE_CANCEL,
 ): Promise<IAgentConversation> {
     if (conversation.runtimeStatus !== 'requires_action') return conversation;
     const conversationId = String(conversation._id);
@@ -422,14 +428,14 @@ export async function cancelPendingForNewMessage(
         const cancelled = await db.updateAgentPendingAction(String(action._id), {
             status: 'cancelled',
             resolvedAt: new Date(),
-            resolvedBy: 'system:new_message',
+            resolvedBy,
             resolution: { cancelled: true },
         });
         if (!cancelled) continue;
         updates.set(String(action._id), { status: 'cancelled', resolution: { cancelled: true } });
         emit?.('action.resolved', actionResolvedEventData(action, {
             cancelled: true,
-            resolvedBy: 'system:new_message',
+            resolvedBy,
             channel: 'system',
         }));
     }

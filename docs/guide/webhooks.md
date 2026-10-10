@@ -9,7 +9,7 @@ Manage them in **Settings → Webhooks**, or through the API (`/api/webhooks` fo
 - An endpoint for one project: that project's admins, and tenant owners / admins.
 - An endpoint for every project (`projectId: null`): tenant owners / admins only.
 
-Anyone else gets a 403 on the list and a 404 on an endpoint they may not see.
+Anyone else (a plain project member, or a token whose owner is one) gets a 403 on every route that reads or changes an endpoint or its deliveries (the event catalog, `GET /webhooks/events`, stays readable). The 404 is only for people who can manage webhooks, when the endpoint is outside their reach: another project's, or a tenant-wide one for a project admin.
 
 ## Events
 
@@ -46,6 +46,10 @@ Deliveries can repeat. Deduplicate on `webhook-id`.
 
 Answer with any 2xx within the timeout. Anything else is retried on a schedule (default 1 min, 5 min, 30 min, 2 h, 6 h, 12 h, 24 h: eight attempts in all). Retries are stored, so they survive restarts.
 
+The schedule is a lower bound, not an exact timer. A retry becomes due at the time shown in `nextAttemptAt`, but due deliveries are picked up by a sweep that runs about every 30 seconds, so a retry lands between the scheduled wait and that wait plus roughly 30 seconds. With the default schedule (a minute or more) the difference is small; with a short custom schedule such as `5,10` the gaps can be several times longer than the numbers you set.
+
+A delivery that gets no answer within the timeout is recorded with `lastError` of `Timed out after <ms> ms` (and no `lastStatusCode`), so a slow receiver is not mistaken for a refused one.
+
 An endpoint is switched off, with the reason shown in the list, when:
 
 - it answers with a redirect (3xx): redirects are not followed, update the URL;
@@ -59,7 +63,7 @@ Enabling it again re-checks the address. Deliveries that were still queued when 
 | Variable | Default | |
 | --- | --- | --- |
 | `WEBHOOK_TIMEOUT_MS` | `10000` | per-attempt timeout |
-| `WEBHOOK_RETRY_SCHEDULE_SECONDS` | `60,300,1800,7200,21600,43200,86400` | wait before each retry |
+| `WEBHOOK_RETRY_SCHEDULE_SECONDS` | `60,300,1800,7200,21600,43200,86400` | minimum wait before each retry (due retries are sent by a sweep that runs about every 30 s) |
 | `WEBHOOK_AUTO_DISABLE_HOURS` | `72` | continuous-failure window |
 | `WEBHOOK_DELIVERY_RETENTION_DAYS` | `30` | settled deliveries are deleted after this |
 | `WEBHOOK_CONCURRENCY` | `8` | deliveries sent at once per node |

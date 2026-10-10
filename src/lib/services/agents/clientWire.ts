@@ -31,6 +31,15 @@ export function toSnakeCaseDeep<T = unknown>(value: unknown): T {
     return out as T;
 }
 
+/**
+ * A run id as the API hands it out and takes it back: `run_<id>`. The store
+ * (and the dashboard's own event frames) hold the bare id; a client joins an
+ * event to `GET /agents/runs/{id}` on the prefixed one.
+ */
+export function toPublicRunId(runId: string): string {
+    return runId.startsWith('run_') ? runId : `run_${runId}`;
+}
+
 // ── Pending actions ───────────────────────────────────────────────────────
 
 /** An approval / question as a client sees it. */
@@ -63,7 +72,9 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
     return {
         id: action.id,
         kind: action.kind,
-        ...(action.toolName ? { tool_name: action.toolName } : {}),
+        // A question is not a tool call: the stored `toolName` of one (the SDK's
+        // ask-user tool) is an internal detail and stays off the wire.
+        ...(action.toolName && action.kind === 'tool_approval' ? { tool_name: action.toolName } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: toSnakeCaseDeep<unknown[]>(action.questions) } : {}),
         ...(action.allowFreeText !== undefined ? { allow_free_text: action.allowFreeText } : {}),
@@ -75,9 +86,14 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
 
 // ── Session events ───────────────────────────────────────────────────────
 
-/** The `data` of a logged event for a client: keys snake_cased, tool arguments left alone. */
+/**
+ * The `data` of a logged event for a client: keys snake_cased, tool arguments
+ * left alone, and — as on a pending action — no `tool_name` for a question.
+ */
 export function toClientEventData(data: Record<string, unknown>): Record<string, unknown> {
-    return toSnakeCaseDeep<Record<string, unknown>>(data);
+    const wire = toSnakeCaseDeep<Record<string, unknown>>(data);
+    if (data.kind === 'user_question') delete wire.tool_name;
+    return wire;
 }
 
 /** A bus / replay frame (`runId`, `createdAt`) as the client stream carries it. */
@@ -92,7 +108,7 @@ export function toClientEventFrame(frame: {
         ...(frame.seq !== undefined ? { seq: frame.seq } : {}),
         type: frame.type,
         data: toClientEventData(frame.data),
-        ...(frame.runId ? { run_id: frame.runId } : {}),
+        ...(frame.runId ? { run_id: toPublicRunId(frame.runId) } : {}),
         created_at: frame.createdAt,
     };
 }

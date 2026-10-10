@@ -79,7 +79,13 @@ export async function sendSignedWebhook(input: WebhookSendInput): Promise<Webhoo
     return { outcome: 'http_error', ok: false, statusCode, durationMs, error: `Endpoint answered HTTP ${statusCode}` };
   } catch (error) {
     const durationMs = Date.now() - startedAt;
-    const message = error instanceof Error ? error.message : String(error);
+    // The guard aborts the request when `timeoutMs` runs out, and fetch reports that as a
+    // bare "This operation was aborted". This sender passes no signal of its own, so an
+    // abort here is the timeout: say so, or a slow receiver looks like a cancelled call.
+    const name = (error as { name?: unknown } | null)?.name;
+    const message = name === 'AbortError' || name === 'TimeoutError'
+      ? `Timed out after ${input.timeoutMs} ms`
+      : error instanceof Error ? error.message : String(error);
     // By name, not instanceof: the guard's error class is not importable from every test double of the module.
     // A failed DNS lookup says nothing about the address: it is a transient network
     // failure (retried), not a rejected target.

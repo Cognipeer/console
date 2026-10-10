@@ -12,7 +12,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { IAgentConversation, IAgentPendingAction, IAgentSessionEvent } from '@/lib/database';
 import { toPublicPendingAction, type PublicPendingAction } from '@/lib/services/agents/agentPendingActions';
 import { runWithTenantDb } from '@/lib/services/agents/agentRunService';
-import { toClientEventData, toClientEventFrame } from '@/lib/services/agents/clientWire';
+import { toClientEventData, toClientEventFrame, toPublicRunId } from '@/lib/services/agents/clientWire';
 import { followSessionEvents, parseResumeSeq } from '@/lib/services/agents/sessionEvents';
 import { applyStreamHeaders } from '../fastify-utils';
 
@@ -30,7 +30,7 @@ export function serializeSessionEvent(event: IAgentSessionEvent, wire: SessionEv
     seq: event.seq,
     type: event.type,
     data: wire === 'client' ? toClientEventData(event.data) : event.data,
-    ...(event.runId ? { run_id: event.runId } : {}),
+    ...(event.runId ? { run_id: wire === 'client' ? toPublicRunId(event.runId) : event.runId } : {}),
     created_at: new Date(event.createdAt).toISOString(),
   };
 }
@@ -87,14 +87,26 @@ export async function listConversationActions(
   return { actions: actions.map(toPublicPendingAction) };
 }
 
-/** What the session record exposes about its runtime state (client `GET …/sessions/:id`). */
+/**
+ * What the session record exposes about its runtime state (client `GET …/sessions/:id`).
+ *
+ * `lastEventSeq` is read from the event log, not from the conversation row: the
+ * row is stamped only when a turn's writer closes, so mid-run it still held the
+ * previous turn's value while the log already held more — and it is the seq a
+ * client resumes the stream from. The stamp stays as the floor: once retention
+ * has emptied an idle session's log, it is all that is left of the count.
+ */
 export async function describeSessionRuntime(tenantDbName: string, conversation: IAgentConversation) {
-  const pending = await runWithTenantDb(tenantDbName, (db) => db.listAgentPendingActions(String(conversation._id), { status: 'pending' }));
+  const conversationId = String(conversation._id);
+  const { pending, newestSeq } = await runWithTenantDb(tenantDbName, async (db) => ({
+    pending: await db.listAgentPendingActions(conversationId, { status: 'pending' }),
+    newestSeq: await db.getAgentSessionMaxSeq(conversationId),
+  }));
   return {
     runtimeStatus: conversation.runtimeStatus ?? 'idle',
     stopReason: conversation.stopReason ?? null,
     pendingActions: pending.map(toPublicPendingAction),
-    lastEventSeq: conversation.lastEventSeq ?? 0,
+    lastEventSeq: Math.max(conversation.lastEventSeq ?? 0, newestSeq),
   };
 }
 

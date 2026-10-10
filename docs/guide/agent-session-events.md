@@ -37,10 +37,10 @@ Returns `{ "object": "list", "events": [...], "has_more": false, "last_seq": 41 
 Each event:
 
 ```json
-{ "seq": 38, "type": "agent.tool_result", "data": { "tool_call_id": "call_1", "name": "sandbox_exec", "ok": true, "duration_ms": 812 }, "run_id": "run_…", "created_at": "2026-10-01T12:00:03.120Z" }
+{ "seq": 38, "type": "agent.tool_result", "data": { "tool_call_id": "call_1", "name": "sandbox_exec", "ok": true, "duration_ms": 812 }, "run_id": "run_3f9c…", "created_at": "2026-10-01T12:00:03.120Z" }
 ```
 
-`seq` is unique and ascending within the session. `data` larger than 16 KB is cut and carries `_truncated: true`. Field names are `snake_case`, like the rest of the agent endpoints; the tool `args` inside an event are the tool's own and are left as they are.
+`run_id` is the run id as `GET /agents/runs/{runId}` and the 202 of a background call return it (`run_` plus the id), so an event joins to its run directly. Events written outside a run carry none. `seq` is unique and ascending within the session. `data` larger than 16 KB is cut and carries `_truncated: true`. Field names are `snake_case`, like the rest of the agent endpoints; the tool `args` inside an event are the tool's own and are left as they are.
 
 ### Event types
 
@@ -51,8 +51,8 @@ Each event:
 | `agent.tool_use` | `tool_call_id`, `name`, `args`, `subagent?` |
 | `agent.tool_result` | `tool_call_id`, `name`, `ok`, `duration_ms?`, `error?`, `subagent?` |
 | `agent.compaction` | what a context compaction did (`at`, `messages_compressed`, `tokens_before`, `tokens_after`, …) |
-| `action.required` | `action_id`, `kind`, `tool_name?`, `args?`, `questions?`, `allow_free_text?`, `expires_at?` |
-| `action.resolved` | `action_id`, `kind`, `decision?`, `cancelled?`, `expired?`, `resolved_by`, `channel` (`dashboard`, `api` or `timeout`) |
+| `action.required` | `action_id`, `kind`, `tool_name?` (`tool_approval` only), `args?`, `questions?`, `allow_free_text?`, `expires_at?` |
+| `action.resolved` | `action_id`, `kind`, `decision?`, `cancelled?`, `expired?`, `resolved_by`, `channel` (`dashboard`, `api`, `portal`, `timeout` or `system`) |
 | `agent.message` | `content`, `message_index?`, `stop_reason?`, `usage?` |
 | `session.usage` | `turn_cost_usd`, `spent_usd`, `budget` (sessions with a [budget](/guide/agent-session-budgets)) |
 | `budget.reached` | `spent_usd`, `max_cost_usd` |
@@ -77,7 +77,11 @@ event: agent.tool_use
 data: {"seq":42,"type":"agent.tool_use","data":{"tool_call_id":"call_2","name":"web_search","args":{"query":"…"}},"run_id":"run_…","created_at":"…"}
 ```
 
-`data` has the same shape as an item of the event list. Besides the stored events, the stream carries `agent.message.delta` frames (`data: { "text": "…" }`) with the model's text as it is written. They have no `id` and are not stored, so a client that reconnects gets the finished `agent.message` instead. A `: ping` comment is sent every 15 seconds. The stream ends after an hour or when you close it; reconnect with the last `id` to pick up where you left off.
+`data` has the same shape as an item of the event list. Besides the stored events, the stream carries `agent.message.delta` frames (`data: { "text": "…" }`) with the model's text as it is written. They have no `id` and are not stored, so a client that reconnects gets the finished `agent.message` instead.
+
+`agent.message.delta` frames exist only for a turn whose starter streams. A turn started with `POST /agents/responses` (synchronous or background) does not stream the model, so a follower sees the finished `agent.message` arrive at once, without deltas. Deltas appear when the caller that starts the turn asks for a streamed answer, for example the dashboard's chat stream in Studio. Do not wait for deltas: build a follower around the stored events, and treat deltas as a bonus when they come.
+
+A `: ping` comment is sent every 15 seconds. The stream ends after an hour or when you close it; reconnect with the last `id` to pick up where you left off.
 
 With Redis configured, the stream follows a turn that runs on another node.
 
@@ -85,4 +89,4 @@ A client that only needs to know when something happened can use [webhooks](/gui
 
 ## The dashboard
 
-The same log is available to the dashboard under `/api/agents/{agentId}/sessions/{sessionId}/events` and `…/events/stream`, plus `GET …/actions` for the session's approvals and questions. The dashboard stream's frames keep the dashboard's own field names (`runId`, `createdAt`). When you open a session that is running, Studio follows it from `last_event_seq`.
+The same log is available to the dashboard under `/api/agents/{agentId}/sessions/{sessionId}/events` and `…/events/stream`, plus `GET …/actions` for the session's approvals and questions. The dashboard stream's frames keep the dashboard's own field names and values (`runId`, the bare id without the `run_` prefix, and `createdAt`). When you open a session that is running, Studio follows it from `last_event_seq`.

@@ -209,6 +209,21 @@ describe('message/send', () => {
     expect(body.result.id).toBe('task_conv-1_1');
   });
 
+  it('a message sent while the task waits on a person names the ids to answer', async () => {
+    const { AgentPendingActionError } = await import('@/lib/services/agents/agentErrors');
+    mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
+    mockFn(executeAgentChat).mockRejectedValue(new AgentPendingActionError(['act_1', 'act_2']));
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 9, method: 'message/send', params: { message: { parts: [{ kind: 'text', text: 'Hi' }], contextId: 'conv-9' } } },
+    });
+    const body = parseJsonBody<{ error: { data: Record<string, unknown> } }>(res.body);
+    expect(body.error.data).toEqual({ type: 'pending_action', code: 'pending_action', pending_action_ids: ['act_1', 'act_2'] });
+  });
+
   it('reuses the conversation for a known contextId and rejects a foreign one', async () => {
     mockFn(getConversationById).mockResolvedValue({ agentKey: 'support-bot', projectId: 'proj-1', createdBy: 'user-1', messages: [] });
     mockFn(executeAgentChat).mockResolvedValue({
@@ -357,6 +372,57 @@ describe('tasks/get and unknown methods', () => {
     expect((body.result.metadata as { pendingActions: unknown[] }).pendingActions).toEqual([
       { id: 'act_1', kind: 'tool_approval', tool_name: 'sandbox_exec', status: 'pending' },
     ]);
+  });
+
+  it('tasks/cancel on a task waiting for a person says how to end the wait, with the ids', async () => {
+    const pending = [
+      { id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', status: 'pending' },
+      { id: 'act_2', kind: 'user_question', status: 'resolved' },
+    ];
+    mockFn(getConversationById).mockResolvedValue({
+      agentKey: 'support-bot',
+      projectId: 'proj-1',
+      createdBy: 'user-1',
+      messages: [
+        { role: 'user', content: 'Run it' },
+        { role: 'assistant', content: '', stopReason: 'paused', pendingActions: pending },
+      ],
+    });
+    const app = await buildApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/client/v1/a2a/support-bot',
+      headers: { authorization: 'Bearer tok' },
+      payload: { jsonrpc: '2.0', id: 10, method: 'tasks/cancel', params: { id: 'task_conv-1_1' } },
+    });
+    const body = parseJsonBody<{ error: { code: number; message: string; data: Record<string, unknown> } }>(res.body);
+    expect(body.error.code).toBe(-32004);
+    expect(body.error.message).toContain('waiting for an approval or an answer');
+    expect(body.error.message).not.toContain('synchronously');
+    expect(body.error.data).toEqual({ pending_action_ids: ['act_1'] });
+  });
+
+  it('tasks/cancel on a finished or unknown task does not claim anything is pending', async () => {
+    mockFn(getConversationById).mockResolvedValue({
+      agentKey: 'support-bot',
+      projectId: 'proj-1',
+      createdBy: 'user-1',
+      messages: [{ role: 'user', content: 'Hello' }, { role: 'assistant', content: 'Hi there' }],
+    });
+    const app = await buildApp();
+    for (const id of ['task_conv-1_1', 'nonsense']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/client/v1/a2a/support-bot',
+        headers: { authorization: 'Bearer tok' },
+        payload: { jsonrpc: '2.0', id: 11, method: 'tasks/cancel', params: { id } },
+      });
+      const body = parseJsonBody<{ error: { code: number; message: string; data?: unknown } }>(res.body);
+      expect(body.error.code).toBe(-32004);
+      expect(body.error.message).toContain('cannot be canceled');
+      expect(body.error.message).not.toContain('synchronously');
+      expect(body.error.data).toBeUndefined();
+    }
   });
 
   it('returns TaskNotFound (-32001) for unknown ids and -32601 for unknown methods', async () => {

@@ -51,3 +51,19 @@ export function validBudgetAmount(amount: unknown, view: SessionBudgetView | nul
 export function budgetPatchBody(maxCostUsd: number, onReach: IAgentSessionBudget['onReach']) {
     return { budget: { maxCostUsd, onReach } };
 }
+
+/** How the server words the `stopDetail` of a turn the SESSION budget stopped (`budgetStopDetail`). */
+const BUDGET_STOP_DETAIL = /^session budget reached\b/i;
+
+/**
+ * A turn stopped by the session budget. The stored reason is the SDK's generic
+ * `limit` — the detail is what tells it from the per-turn limits.
+ */
+export function isBudgetStop(message: Pick<ChatMessage, 'stopReason' | 'stopDetail'>): boolean {
+    return message.stopReason === 'limit' && BUDGET_STOP_DETAIL.test(message.stopDetail ?? '');
+}
+
+/** "$0.60 of $0.50" out of "session budget reached ($0.60 of $0.50)". */
+export function budgetStopAmounts(stopDetail: string | undefined): string | undefined {
+    return /\(([^)]+)\)/.exec(stopDetail ?? '')?.[1];
+}

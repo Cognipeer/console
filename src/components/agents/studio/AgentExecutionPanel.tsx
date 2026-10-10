@@ -27,8 +27,10 @@ import {
     TextInput,
 } from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
+import { useTranslations } from '@/lib/i18n';
 import type { IAgentAttachmentsConfig, IAgentExecutionConfig } from '@/lib/database/provider/types.domain';
 import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
+import { parseMimeTypes } from '../session/sessionAttachmentsUi';
 import { ConfigBlock } from './ConfigSection';
 import { SANDBOX_SECRET_MASK } from './AgentSandboxPanel';
 
@@ -59,7 +61,48 @@ function compact(next: IAgentExecutionConfig): IAgentExecutionConfig | undefined
     return entries.length > 0 ? (Object.fromEntries(entries) as IAgentExecutionConfig) : undefined;
 }
 
+/**
+ * The "Allowed file types" field. It keeps the text as typed — a comma and a
+ * space are part of typing the next type — and hands the parsed list up on every
+ * change; the text is tidied when the field loses focus. Re-deriving the text
+ * from the list on each keystroke would swallow the separator.
+ */
+function MimeTypesInput({
+    value,
+    onChange,
+    label,
+    description,
+}: {
+    value: string[];
+    onChange: (next: string[]) => void;
+    label: string;
+    description: string;
+}) {
+    const [text, setText] = useState(() => value.join(', '));
+    const stored = value.join('\n');
+    // The agent was reloaded from outside: show what is stored, but never rewrite what is being typed.
+    useEffect(() => {
+        setText((current) => (parseMimeTypes(current).join('\n') === stored ? current : stored.split('\n').filter(Boolean).join(', ')));
+    }, [stored]);
+
+    return (
+        <TextInput
+            label={label}
+            description={description}
+            placeholder="application/pdf, image/*"
+            value={text}
+            onChange={(event) => {
+                setText(event.currentTarget.value);
+                onChange(parseMimeTypes(event.currentTarget.value));
+            }}
+            onBlur={() => setText(parseMimeTypes(text).join(', '))}
+        />
+    );
+}
+
 export default function AgentExecutionPanel({ value, onChange, attachments, onAttachmentsChange }: AgentExecutionPanelProps) {
+    const tb = useTranslations('agents.budget');
+    const ta = useTranslations('agents.attachments');
     const [limits, setLimits] = useState<ExecutionLimits | null>(null);
 
     useEffect(() => {
@@ -103,12 +146,12 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                 />
             </ConfigBlock>
 
-            <ConfigBlock title="Session budget">
+            <ConfigBlock title={tb('cfgTitle')}>
                 <Stack gap="sm">
                     <NumberInput
-                        label="Budget per session (USD)"
-                        description="The most one session — all its turns together — may cost. Every new session starts with this budget, and it can be raised, lowered or removed for a single session. Empty = no session budget."
-                        placeholder="No budget"
+                        label={tb('cfgAmountLabel')}
+                        description={tb('cfgAmountDescription')}
+                        placeholder={tb('cfgNoBudget')}
                         min={0}
                         decimalScale={4}
                         value={current.sessionBudget?.maxCostUsd ?? ''}
@@ -121,7 +164,7 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                     />
                     {current.sessionBudget ? (
                         <Stack gap={4}>
-                            <Text size="sm" fw={500}>When the budget is reached</Text>
+                            <Text size="sm" fw={500}>{tb('onReachLabel')}</Text>
                             <SegmentedControl
                                 w="fit-content"
                                 value={current.sessionBudget.onReach}
@@ -129,19 +172,17 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                                     sessionBudget: { ...current.sessionBudget!, onReach: onReach === 'stop' ? 'stop' : 'pause' },
                                 })}
                                 data={[
-                                    { value: 'pause', label: 'Pause and wait' },
-                                    { value: 'stop', label: 'Stop' },
+                                    { value: 'pause', label: tb('cfgPause') },
+                                    { value: 'stop', label: tb('cfgStop') },
                                 ]}
                             />
                             <Text size="xs" c="dimmed">
-                                {current.sessionBudget.onReach === 'pause'
-                                    ? 'The turn stops where it is and the session waits. Once the budget is raised it carries on from where it stopped, with no new message.'
-                                    : 'The turn stops and new messages are refused until the budget is raised or removed.'}
-                                {' '}The per-turn cost limit (Advanced settings) is separate and still applies.
+                                {current.sessionBudget.onReach === 'pause' ? tb('cfgPauseDescription') : tb('cfgStopDescription')}
+                                {' '}{tb('cfgPerTurnNote')}
                             </Text>
                             <Switch
-                                label="Let API clients change the budget"
-                                description="Off: a client token can lower a session's budget but not remove it or raise it past the amount above. Dashboard users are not affected."
+                                label={tb('cfgClientOverride')}
+                                description={tb('cfgClientOverrideDescription')}
                                 checked={current.sessionBudget.allowClientOverride === true}
                                 onChange={(event) => set({
                                     sessionBudget: { ...current.sessionBudget!, allowClientOverride: event.currentTarget.checked },
@@ -153,11 +194,11 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
             </ConfigBlock>
 
             {onAttachmentsChange ? (
-                <ConfigBlock title="Attachments">
+                <ConfigBlock title={ta('cfgTitle')}>
                     <Stack gap="sm">
                         <Switch
-                            label="Accept attached files"
-                            description="Users can attach documents and images to a session (the paperclip in the composer, input_file / input_image over the API). Empty fields below use the defaults shown."
+                            label={ta('cfgAccept')}
+                            description={ta('cfgAcceptDescription')}
                             checked={attachmentsEnabled}
                             onChange={(event) => setAttachments({ enabled: event.currentTarget.checked ? undefined : false })}
                         />
@@ -165,7 +206,7 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                             <>
                                 <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
                                     <NumberInput
-                                        label="Files per session"
+                                        label={ta('cfgMaxFiles')}
                                         placeholder={String(SESSION_FILES_DEFAULTS.maxFiles)}
                                         min={1}
                                         max={100}
@@ -174,15 +215,15 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                                         onChange={(v) => setAttachments({ maxFiles: typeof v === 'number' ? v : undefined })}
                                     />
                                     <NumberInput
-                                        label="Largest file (MB)"
+                                        label={ta('cfgMaxFileSize')}
                                         placeholder={String(SESSION_FILES_DEFAULTS.maxFileSizeMb)}
                                         min={1}
                                         value={currentAttachments.maxFileSizeMb ?? ''}
                                         onChange={(v) => setAttachments({ maxFileSizeMb: typeof v === 'number' ? v : undefined })}
                                     />
                                     <NumberInput
-                                        label="Put in the message up to (tokens)"
-                                        description="A message’s files that fit are placed in the turn; longer ones are read page by page with tools."
+                                        label={ta('cfgInlineTokens')}
+                                        description={ta('cfgInlineTokensDescription')}
                                         placeholder={String(SESSION_FILES_DEFAULTS.inlineMaxTokens)}
                                         min={100}
                                         allowDecimal={false}
@@ -190,7 +231,7 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                                         onChange={(v) => setAttachments({ inlineMaxTokens: typeof v === 'number' ? v : undefined })}
                                     />
                                     <NumberInput
-                                        label="Page size when reading (characters)"
+                                        label={ta('cfgReadPage')}
                                         placeholder={String(SESSION_FILES_DEFAULTS.readPageChars)}
                                         min={500}
                                         allowDecimal={false}
@@ -198,27 +239,24 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                                         onChange={(v) => setAttachments({ readPageChars: typeof v === 'number' ? v : undefined })}
                                     />
                                     <NumberInput
-                                        label="Keep files for (days)"
-                                        description="After this the file is deleted automatically."
+                                        label={ta('cfgRetention')}
+                                        description={ta('cfgRetentionDescription')}
                                         placeholder={String(SESSION_FILES_DEFAULTS.retentionDays)}
                                         min={1}
                                         allowDecimal={false}
                                         value={currentAttachments.retentionDays ?? ''}
                                         onChange={(v) => setAttachments({ retentionDays: typeof v === 'number' ? v : undefined })}
                                     />
-                                    <TextInput
-                                        label="Allowed file types"
-                                        description="Comma-separated MIME types, image/* allowed. Empty = any file that can be read."
-                                        placeholder="application/pdf, image/*"
-                                        value={(currentAttachments.allowedMimeTypes ?? []).join(', ')}
-                                        onChange={(event) => setAttachments({
-                                            allowedMimeTypes: event.currentTarget.value.split(',').map((entry) => entry.trim()).filter(Boolean),
-                                        })}
+                                    <MimeTypesInput
+                                        label={ta('cfgMimeTypes')}
+                                        description={ta('cfgMimeTypesDescription')}
+                                        value={currentAttachments.allowedMimeTypes ?? []}
+                                        onChange={(allowedMimeTypes) => setAttachments({ allowedMimeTypes })}
                                     />
                                 </SimpleGrid>
                                 <TextInput
-                                    label="Storage bucket"
-                                    description="Empty = the project’s system “conversation-files” bucket on the built-in storage."
+                                    label={ta('cfgBucket')}
+                                    description={ta('cfgBucketDescription')}
                                     placeholder="conversation-files"
                                     value={currentAttachments.bucketKey ?? ''}
                                     onChange={(event) => setAttachments({ bucketKey: event.currentTarget.value.trim() || undefined })}

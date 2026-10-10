@@ -132,6 +132,13 @@ export interface SessionBudgetPlan {
   turnCapUsd: number;
   /** The session budget — not the agent's per-turn limit — is the tighter of the two. */
   sessionBinds: boolean;
+  /**
+   * What of this turn's spend has been added to the session's stored total so
+   * far (`addSessionTurnSpend` keeps it). Starts at 0; the turn's persist and the
+   * `finally` that catches an unpersisted turn each add only what is not in yet,
+   * so the turn is counted exactly once however it ends.
+   */
+  accountedUsd: number;
 }
 
 /**
@@ -156,6 +163,7 @@ export function planSessionBudget(
     remaining,
     turnCapUsd: sessionBinds ? remaining : perTurn!,
     sessionBinds,
+    accountedUsd: 0,
   };
 }
 
@@ -193,22 +201,50 @@ export interface SessionBudgetSettlement {
   budget: IAgentSessionBudget;
   turnCostUsd: number;
   spentUsd: number;
-  /** The turn was stopped by the session budget. */
+  /** The session budget is used up after this turn — the SDK stopped the turn on it, or the turn ended with the total at or past the budget. */
   reached: boolean;
 }
 
+/**
+ * Adds the turn's cost to the session total and says whether the budget is
+ * used up. `breach` is the SDK having stopped the turn on the session cap. A
+ * turn that finished on its own can still be the one that crossed the line (a
+ * single model request that costs more than what was left — a plain chat turn
+ * is exactly that), so `reached` is also true whenever the total is at or past
+ * the budget: the same stop, event and webhook as a capped turn, with the answer
+ * delivered all the same.
+ *
+ * `stopReason` is how the turn ended. A pause for a person and a cancellation
+ * keep their own stop: the pending request has to stay answerable, and a caller
+ * who cancelled is told so. Either way the next turn is refused by the plan.
+ */
 export function settleSessionBudget(
   plan: SessionBudgetPlan,
   turnCostUsd: number | undefined,
-  reached: boolean,
+  breach: boolean,
+  stopReason?: string,
 ): SessionBudgetSettlement {
   const turn = typeof turnCostUsd === 'number' && Number.isFinite(turnCostUsd) && turnCostUsd > 0 ? turnCostUsd : 0;
-  return { budget: plan.budget, turnCostUsd: turn, spentUsd: roundUsd(plan.spentBefore + turn), reached };
+  const spentUsd = roundUsd(plan.spentBefore + turn);
+  const keepsOwnStop = stopReason === 'paused' || stopReason === 'cancelled';
+  const crossed = !keepsOwnStop && spentUsd >= plan.budget.maxCostUsd;
+  return { budget: plan.budget, turnCostUsd: turn, spentUsd, reached: breach || crossed };
 }
 
 /** The stored message wording for a turn the session budget stopped. */
 export function budgetStopDetail(settlement: SessionBudgetSettlement): string {
   return `session budget reached ($${formatUsd(settlement.spentUsd)} of $${formatUsd(settlement.budget.maxCostUsd)})`;
+}
+
+/**
+ * A transcript that ends in the agent's own answer (an assistant message that
+ * asks for no tool): the turn is complete, so there is nothing a continuation
+ * could carry on. A session can still be `budget_paused` then — the turn that
+ * crossed the budget finished normally.
+ */
+export function endsInAnswer(carried: { messages?: unknown[] } | null | undefined): boolean {
+  const last = carried?.messages?.[carried.messages.length - 1] as { role?: string; tool_calls?: unknown[] } | undefined;
+  return Boolean(last) && last!.role === 'assistant' && !(Array.isArray(last!.tool_calls) && last!.tool_calls.length > 0);
 }
 
 /** Event payload of `session.usage`. */

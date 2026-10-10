@@ -64,7 +64,7 @@ A paused response has `status: "requires_action"` and the requests in `required_
 }
 ```
 
-A question looks the same with `kind: "user_question"`, `questions: [{ question, header?, multi_select?, options: [{ label, value?, description? }] }]` and `allow_free_text`.
+A question looks the same with `kind: "user_question"`, `questions: [{ question, header?, multi_select?, options: [{ label, value?, description? }] }]` and `allow_free_text`, and no `tool_name` or `args`: those belong to a tool approval only.
 
 Answer it with:
 
@@ -103,7 +103,7 @@ You can also read what a session is waiting on at any time with `GET /api/client
 
 A background run that pauses has the non-terminal status `requires_action`; its `result` carries the same `required_action`, and the `agent_run.requires_action` callback and webhook fire. Answering queues the same run again; it finishes as usual. Cancelling a paused run ends it and drops its open requests. Clients that poll until a terminal status should stop on `requires_action` too, or they wait for a person.
 
-Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`.
+Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`. Unless the agent cancels the pending request on a new message, a `message/send` to a conversation that is still waiting is refused, with the ids to answer in the error's `data.pending_action_ids`. `tasks/cancel` is not supported (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that waits on a person is ended by answering its requests through the actions endpoint above (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids.
 
 ## Unattended runs
 

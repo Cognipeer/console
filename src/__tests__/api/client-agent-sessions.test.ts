@@ -32,6 +32,7 @@ const hoisted = vi.hoisted(() => ({
   db: {
     listAgentSessionEvents: vi.fn(),
     listAgentPendingActions: vi.fn(),
+    getAgentSessionMaxSeq: vi.fn(async () => 0),
   },
 }));
 
@@ -114,6 +115,21 @@ describe('client agent session routes', () => {
       requested_at: '2024-01-01T00:00:00.000Z',
     }]);
     expect(JSON.stringify(body)).not.toContain('sdk-secret');
+  });
+
+  it('last_event_seq is the newest event in the log, even mid-run while the row still holds the previous turn\'s stamp', async () => {
+    hoisted.getConversationById.mockResolvedValue(conversation({ runtimeStatus: 'running', lastEventSeq: 0 }));
+    hoisted.db.listAgentPendingActions.mockResolvedValue([]);
+    hoisted.db.getAgentSessionMaxSeq.mockResolvedValueOnce(3);
+    const res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/sessions/conv-1', headers: { authorization: '******' } });
+    expect(hoisted.db.getAgentSessionMaxSeq).toHaveBeenCalledWith('conv-1');
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ runtime_status: 'running', last_event_seq: 3 });
+
+    // The stamp is the floor: a log retention has emptied cannot take the count back.
+    hoisted.getConversationById.mockResolvedValue(conversation({ lastEventSeq: 9 }));
+    hoisted.db.getAgentSessionMaxSeq.mockResolvedValueOnce(0);
+    const idle = await app.inject({ method: 'GET', url: '/api/client/v1/agents/sessions/conv-1', headers: { authorization: '******' } });
+    expect(parseJsonBody<Record<string, unknown>>(idle.body)).toMatchObject({ last_event_seq: 9 });
   });
 
   it('a conversation without runtime fields reads as idle', async () => {

@@ -55,6 +55,17 @@ export interface FormShellProps {
   disableEscape?: boolean;
 }
 
+/** The header's "Press ESC to cancel" — absent when the overlay ignores Escape (`disableEscape`). */
+function EscapeHint({ disableEscape = false }: { disableEscape?: boolean }) {
+  const t = useTranslations('formShell');
+  if (disableEscape) return null;
+  return (
+    <div className="form-header-hint">
+      {t('escapeHintBefore')} <span className="form-kbd">ESC</span> {t('escapeHintAfter')}
+    </div>
+  );
+}
+
 export default function FormShell({
   open,
   onClose,
@@ -122,9 +133,7 @@ export default function FormShell({
           </div>
         </div>
         <div style={{ flex: 1 }} />
-        <div className="form-header-hint">
-          {t('escapeHintBefore')} <span className="form-kbd">ESC</span> {t('escapeHintAfter')}
-        </div>
+        <EscapeHint disableEscape={disableEscape} />
       </div>
 
       <div

@@ -276,6 +276,16 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       this.getTenantDb().prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE id = @id`).run(params);
     }
 
+    async addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void> {
+      const addUsd = typeof change.addUsd === 'number' && Number.isFinite(change.addUsd) ? Math.max(0, change.addUsd) : 0;
+      const atLeastUsd = typeof change.atLeastUsd === 'number' && Number.isFinite(change.atLeastUsd) ? Math.max(0, change.atLeastUsd) : 0;
+      if (addUsd === 0 && atLeastUsd === 0) return;
+      // One statement: SQLite serializes it, so concurrent spends cannot interleave a read and a write.
+      this.getTenantDb().prepare(
+        `UPDATE ${TABLES.agentConversations} SET spentUsd = MAX(COALESCE(spentUsd, 0), @atLeastUsd) + @addUsd WHERE id = @id`,
+      ).run({ id, addUsd, atLeastUsd });
+    }
+
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       db.prepare(`DELETE FROM ${TABLES.agentConversationStates} WHERE conversationId = @id`).run({ id });

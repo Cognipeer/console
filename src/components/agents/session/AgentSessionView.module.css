@@ -212,7 +212,8 @@
 }
 
 .liveDot,
-.idleDot {
+.idleDot,
+.waitingDot {
   width: 7px;
   height: 7px;
   border-radius: 999px;
@@ -226,6 +227,11 @@
 
 .idleDot {
   background: var(--ds-text-faint);
+}
+
+/* Waiting for a person, or paused on the budget: not running, not idle. */
+.waitingDot {
+  background: var(--ds-warn);
 }
 
 .sideTabs {
@@ -307,6 +313,30 @@
 
 .eventName {
   min-width: 0;
+}
+
+/* One entry of the session event log (the Activity tab and the drawer). */
+.activityRow {
+  padding: 3px 6px;
+  border-radius: var(--mantine-radius-sm);
+}
+
+.activityRow:hover {
+  background: var(--ds-surface-2);
+}
+
+.activityDot {
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.activityTime {
+  width: 56px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 64em) {

@@ -11,6 +11,9 @@
  * to the available width, however many turns there are.
  */
 
+import { resolvedKind } from './pendingActions';
+import { stepFailed, type ChatMessage } from './sessionTypes';
+
 /** The narrowest a segment is drawn while there is room for that. */
 export const TIMELINE_MIN_SEGMENT_PX = 4;
 
@@ -102,4 +105,24 @@ export function pickSegmentLabel(
     if (measure(parts.full) <= room) return parts.full;
     if (measure(parts.duration) <= room) return parts.duration;
     return null;
+}
+
+/**
+ * Which turns the strip draws as failures. A run that errored, hit a limit or
+ * had a tool call fail is one. A turn paused for an approval or an answer, or
+ * cancelled by the person, is not — and neither is a call a person denied: its
+ * step reads `rejected`, like a guardrail block, but the person decided it.
+ */
+export function failedTurnFlags(messages: ChatMessage[]): boolean[] {
+    const denied = new Set<string>();
+    return messages.map((message) => {
+        const failed = message.role === 'error'
+            || message.stopReason === 'limit'
+            || Boolean(message.steps?.some((step) => stepFailed(step) && !(step.status === 'rejected' && denied.has(step.name))));
+        // A denial is answered on the paused turn and shows up in the turn after it.
+        for (const action of message.pendingActions ?? []) {
+            if (action.toolName && resolvedKind(action) === 'denied') denied.add(action.toolName);
+        }
+        return failed;
+    });
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { ReactNode, useMemo, type MouseEvent } from 'react';
+import { Fragment, ReactNode, useMemo, type MouseEvent } from 'react';
 import {
   ActionIcon,
   Button,
@@ -562,6 +562,46 @@ function EmptyView({ empty }: { empty?: DataGridEmpty }) {
   );
 }
 
+/** The actions of a row that are not hidden for it. */
+function visibleRowActions<T>(actions: DataGridRowAction<T>[], row: T): DataGridRowAction<T>[] {
+  return actions.filter((a) => {
+    if (!a.hidden) return true;
+    return typeof a.hidden === 'function' ? !a.hidden(row) : !a.hidden;
+  });
+}
+
+/**
+ * The items of a row's actions menu. A bare `{ divider: true }` is a divider; an
+ * action that has a label (or a handler) as well is a divider followed by the
+ * item, so `{ id: 'delete', label, divider: true }` keeps its Delete entry.
+ */
+export function RowActionItems<T>({ actions, row }: { actions: DataGridRowAction<T>[]; row: T }) {
+  return (
+    <>
+      {visibleRowActions(actions, row).map((a, idx) => {
+        const hasItem = a.label !== undefined || a.onClick !== undefined;
+        const disabled =
+          typeof a.disabled === 'function' ? a.disabled(row) : !!a.disabled;
+        return (
+          <Fragment key={a.id ?? `${idx}`}>
+            {a.divider ? <Menu.Divider /> : null}
+            {hasItem ? (
+              <Menu.Item
+                color={a.color}
+                leftSection={a.icon}
+                disabled={disabled}
+                onClick={() => a.onClick?.(row)}
+              >
+                {a.label}
+              </Menu.Item>
+            ) : null}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}
+
 function RowActionsMenu<T>({
   actions,
   row,
@@ -570,11 +610,7 @@ function RowActionsMenu<T>({
   row: T;
 }) {
   const tGrid = useTranslations('dataGrid');
-  const visible = actions.filter((a) => {
-    if (!a.hidden) return true;
-    return typeof a.hidden === 'function' ? !a.hidden(row) : !a.hidden;
-  });
-  if (visible.length === 0) return null;
+  if (visibleRowActions(actions, row).length === 0) return null;
   return (
     <Menu withinPortal position="bottom-end" withArrow>
       <Menu.Target>
@@ -583,22 +619,7 @@ function RowActionsMenu<T>({
         </ActionIcon>
       </Menu.Target>
       <Menu.Dropdown>
-        {visible.map((a, idx) => {
-          if (a.divider) return <Menu.Divider key={`d-${idx}`} />;
-          const disabled =
-            typeof a.disabled === 'function' ? a.disabled(row) : !!a.disabled;
-          return (
-            <Menu.Item
-              key={a.id ?? `${idx}`}
-              color={a.color}
-              leftSection={a.icon}
-              disabled={disabled}
-              onClick={() => a.onClick?.(row)}
-            >
-              {a.label}
-            </Menu.Item>
-          );
-        })}
+        <RowActionItems actions={actions} row={row} />
       </Menu.Dropdown>
     </Menu>
   );

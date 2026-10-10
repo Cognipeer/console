@@ -22,6 +22,20 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
     output: 'Structured output',
 };
 
+/**
+ * Sections whose heading is translated: the message key under `agents`. The
+ * rest of the headings are English until their sections are localized.
+ */
+export const CONFIG_SECTION_TITLE_KEYS: Record<string, string> = {
+    hitl: 'hitl.sectionTitle',
+};
+
+/** A section's heading in the viewer's language — `translate` is `useTranslations('agents')`. */
+export function configSectionTitle(id: string, translate: (key: string) => string): string {
+    const key = CONFIG_SECTION_TITLE_KEYS[id];
+    return key ? translate(key) : CONFIG_SECTION_TITLES[id] ?? id;
+}
+
 export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     basic: ['modelKey', 'knowledgeEngineKey', 'toolBindings', 'guardrails', 'inputGuardrailKey', 'outputGuardrailKey'],
     prompt: ['systemPrompt', 'promptKey', 'promptVariables'],

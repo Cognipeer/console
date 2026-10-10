@@ -48,7 +48,7 @@ import {
   executeAgentContinueLocal,
   executeAgentResumeLocal,
 } from './agentService';
-import { toSessionStopReason } from './sessionEvents';
+import { createSessionEventWriter, toSessionStopReason, type SessionEventType } from './sessionEvents';
 import { cancelPendingForNewMessage } from './agentPendingActions';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
@@ -612,22 +612,60 @@ export async function settlePausedAgentRuns(
   }
 }
 
-/** A paused run is cancelled: its open requests are cancelled and the conversation is idle again. */
+/**
+ * A paused run is cancelled: its open requests are cancelled and the conversation
+ * is idle again — and the log and the webhook subscribers hear about it the way
+ * they do when a new message cancels the requests (`action.resolved` per request,
+ * then `session.status_idle`), so a consumer is not left believing the session
+ * still waits.
+ */
 async function dropPausedConversation(db: DatabaseProvider, run: IAgentRun): Promise<void> {
-  const conversation = await db.findAgentConversationById(run.conversationId);
-  if (conversation) {
-    await cancelPendingForNewMessage(db, conversation).catch((error) => {
+  const runId = String(run._id);
+  try {
+    const conversation = await db.findAgentConversationById(run.conversationId);
+    // Only a session that still waits on this pause is reset: one a newer message
+    // has moved on (or that is idle already) is not this run's to touch.
+    if (!conversation || conversation.runtimeStatus !== 'requires_action') return;
+
+    const events: Array<{ type: SessionEventType; data: Record<string, unknown> }> = [];
+    await cancelPendingForNewMessage(
+      db,
+      conversation,
+      (type, data) => { events.push({ type, data: data ?? {} }); },
+      'system:run_cancelled',
+    ).catch((error) => {
       logger.warn('Could not cancel the open requests of a cancelled run', {
-        runId: String(run._id),
+        runId,
         error: error instanceof Error ? error.message : String(error),
       });
     });
+
+    // The status goes in BEFORE the idle frame is published, so a follower that
+    // reloads the session on it never reads 'requires_action'.
+    await db.updateAgentConversationRuntime(run.conversationId, {
+      runtimeStatus: 'idle',
+      stopReason: 'cancelled',
+      pendingActionIds: [],
+    });
+    const writer = createSessionEventWriter({
+      db,
+      tenantDbName: run.tenantDbName,
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      agentKey: run.agentKey,
+      conversationId: run.conversationId,
+      runId,
+    });
+    for (const event of events) writer.emit(event.type, event.data);
+    writer.emit('session.status_idle', { stopReason: 'cancelled' });
+    await writer.close();
+    await db.updateAgentConversationRuntime(run.conversationId, { lastEventSeq: writer.lastSeq() });
+  } catch (error) {
+    logger.warn('Could not reset the conversation of a cancelled paused run', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
-  await db.updateAgentConversationRuntime(run.conversationId, {
-    runtimeStatus: 'idle',
-    stopReason: 'cancelled',
-    pendingActionIds: [],
-  }).catch(() => undefined);
 }
 
 // ── §7: background execution ─────────────────────────────────────────────
@@ -1065,6 +1103,9 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
     const cancellationCell: AgentRunCancellationCell = { cancelled: false, deadlineAt };
 
     let resolveCancelObserved: (() => void) | undefined;
+    // Set when the CALLER asked for the cancel (the poll saw `cancelRequestedAt`);
+    // losing the row to the reconciler also trips the cell, but is not that.
+    let cancelRequestedByCaller = false;
     const cancelObservedPromise = new Promise<typeof CANCEL_SENTINEL>((resolve) => {
       resolveCancelObserved = () => resolve(CANCEL_SENTINEL);
     });
@@ -1099,7 +1140,8 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
         try {
           const current = await db.getAgentRunById(runId, tenantId, claimed.projectId);
           if (current?.cancelRequestedAt && !cancellationCell.cancelled) {
-            logger.info('Cancel request observed; finalizing without waiting for invoke()', { runId });
+            logger.info('Cancel request observed; stopping the turn', { runId });
+            cancelRequestedByCaller = true;
             markSuperseded();
           }
         } catch (error) {
@@ -1186,15 +1228,28 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
       );
 
       const raced = await Promise.race([invokePromise, deadlineTimer.promise, cancelObservedPromise]);
-      stopAllTimers();
 
       if (raced === CANCEL_SENTINEL || (cancellationCell.cancelled && raced !== TIMEOUT_SENTINEL)) {
-        // Cancelled by the caller: the run may still be finishing in the background, but
-        // what its model calls spent so far counts.
+        // The cancel cannot interrupt a tool or model call already in flight
+        // (§12.2): the turn keeps going until its next checkpoint, and its tail
+        // still writes — its events, the session's runtime fields, its spend.
+        // The conversation stays reserved until that tail has landed: this row
+        // keeps the slot (the heartbeat keeps running, so the reconciler leaves it
+        // alone) and a message sent meanwhile gets the usual conflict instead of
+        // starting a second turn the old one then writes over. The run's own
+        // ceiling bounds the wait, so a hung call cannot hold the slot for good.
+        if (cancelRequestedByCaller) {
+          clearInterval(cancelPollTimer);
+          await Promise.race([invokePromise, deadlineTimer.promise]);
+        }
+        stopAllTimers();
+        // What the turn's model calls spent counts, including the tail that
+        // landed while the slot was held.
         settleAgentRun(quotaCaller, usage);
         await finalize('canceled', { errorReason: 'canceled_by_caller' });
         return;
       }
+      stopAllTimers();
 
       if (raced === TIMEOUT_SENTINEL) {
         settleAgentRun(quotaCaller, usage);

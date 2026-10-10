@@ -71,7 +71,7 @@ import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentExecutionPanel from './studio/AgentExecutionPanel';
 import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
-import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections } from './studio/configSections';
+import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
 import AgentSchedulesPanel from './studio/AgentSchedulesPanel';
 import AgentSkillsPanel from './studio/AgentSkillsPanel';
@@ -914,7 +914,7 @@ export default function AgentDetailPage() {
     (id === 'basic' || !isConnected) && sectionVisible(id) ? (
       <ConfigSection
         id={id}
-        title={CONFIG_SECTION_TITLES[id]}
+        title={configSectionTitle(id, t)}
         description={description}
         meta={meta}
         changed={changedSections.has(id)}
@@ -1076,6 +1076,8 @@ export default function AgentDetailPage() {
                 : null}
               onClose={() => setViewedSessionId(null)}
               onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
+              approvers={hitlConfig?.approvers}
+              onResolved={() => void loadSessions()}
             />
           </SectionCard>
         </Tabs.Panel>
@@ -1823,7 +1825,7 @@ for chunk in stream:
         agentId={agentId}
         publishedVersion={agent.publishedVersion ?? null}
         versions={Array.from({ length: agent.latestVersion ?? 0 }, (_, index) => (agent.latestVersion ?? 0) - index)}
-        changedSections={[...changedSections].map((id) => CONFIG_SECTION_TITLES[id] ?? id)}
+        changedSections={[...changedSections].map((id) => configSectionTitle(id, t))}
       />
       <StartSessionModal
         opened={startSessionOpen}

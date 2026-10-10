@@ -7,9 +7,10 @@
  * extra fetch, no second source of truth. Tokens, cost and latency are
  * recorded per turn when the turn runs (`agentService.ts#persistSessionTurn`),
  * so a session reopened a week later shows the same numbers it showed live.
+ * The one exception is the Activity tab, which reads the session's event log.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
     Badge,
     Box,
@@ -25,10 +26,13 @@ import {
     UnstyledButton,
 } from '@mantine/core';
 import { IconCheck, IconCopy } from '@tabler/icons-react';
+import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { stepFailed, type ChatMessage, type PlaygroundStep, type TurnCompaction } from './sessionTypes';
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
 import ContextCompactionCard, { compactionShrinkLabel } from './ContextCompactionCard';
+import SessionActivity from './SessionActivity';
+import { stopReasonBadge, type SessionStatusKind } from './sessionActivityUi';
 import {
     collectConfiguredTools,
     countUnnamedToolSurfaces,
@@ -38,7 +42,14 @@ import {
 import classes from './AgentSessionView.module.css';
 
 export interface SessionSidePanelProps {
+    agentId: string;
     sessionId: string;
+    /** What the session is doing — running, waiting for a person, paused on its budget, or idle. */
+    status: SessionStatusKind;
+    /** Why the last turn stopped (the session's `stopReason`). */
+    stopReason?: string;
+    /** Changes whenever the session may have logged something new — refreshes the Activity tab. */
+    activityKey: string;
     createdAt?: string;
     updatedAt?: string;
     agentName: string;
@@ -50,7 +61,6 @@ export interface SessionSidePanelProps {
     /** The agent's stored config — what it CAN call, versus what it did. */
     agentConfig?: AgentToolConfig;
     messages: ChatMessage[];
-    running: boolean;
     /** Jumps the transcript to the turn an event belongs to. */
     onGoToTurn: (index: number) => void;
 }
@@ -62,7 +72,11 @@ interface FlatEvent {
 }
 
 export default function SessionSidePanel({
+    agentId,
     sessionId,
+    status,
+    stopReason,
+    activityKey,
     createdAt,
     updatedAt,
     agentName,
@@ -72,9 +86,17 @@ export default function SessionSidePanel({
     sessionContext,
     agentConfig,
     messages,
-    running,
     onGoToTurn,
 }: SessionSidePanelProps) {
+    const th = useTranslations('agents.hitl');
+    const tb = useTranslations('agents.budget');
+    const ta = useTranslations('agents.activity');
+    const [tab, setTab] = useState<string | null>('session');
+    const statusLabel = status === 'running'
+        ? th('running')
+        : status === 'waiting' ? th('waitingBadge') : status === 'budget_paused' ? tb('pausedBadge') : th('idle');
+    // A settled session says how its last run ended; a running / waiting one is already saying more.
+    const stopBadge = status === 'idle' ? stopReasonBadge(stopReason) : null;
     const totals = useMemo(() => summariseSession(messages), [messages]);
 
     const events = useMemo<FlatEvent[]>(() => {
@@ -153,7 +175,8 @@ export default function SessionSidePanel({
 
     return (
         <Tabs
-            defaultValue="session"
+            value={tab}
+            onChange={setTab}
             className={classes.sidePanel}
             classNames={{ list: classes.sideTabs, tab: classes.sideTab }}
         >
@@ -164,8 +187,9 @@ export default function SessionSidePanel({
             <Box className={classes.sideSummary}>
                 <Group justify="space-between" wrap="nowrap" gap="xs">
                     <Group gap={6} wrap="nowrap">
-                        <span className={running ? classes.liveDot : classes.idleDot} />
-                        <Text size="xs" fw={600}>{running ? 'Running' : 'Idle'}</Text>
+                        <span className={status === 'running' ? classes.liveDot : status === 'idle' ? classes.idleDot : classes.waitingDot} />
+                        <Text size="xs" fw={600}>{statusLabel}</Text>
+                        {stopBadge ? <Badge size="xs" variant="light" color={stopBadge.color}>{ta(stopBadge.key)}</Badge> : null}
                     </Group>
                     <Badge size="xs" variant="light" color={pinnedVersion ? 'teal' : 'gray'}>
                         {pinnedVersion
@@ -195,6 +219,7 @@ export default function SessionSidePanel({
                 <Tabs.Tab value="context">
                     Context{compactions.length > 0 ? <span className={classes.tabCount}>{compactions.length}</span> : null}
                 </Tabs.Tab>
+                <Tabs.Tab value="activity">{ta('tabLabel')}</Tabs.Tab>
             </Tabs.List>
 
             <ScrollArea className={classes.sidePanelBody}>
@@ -387,6 +412,15 @@ export default function SessionSidePanel({
                             </Box>
                         </Stack>
                     )}
+                </Tabs.Panel>
+
+                <Tabs.Panel value="activity" p="md">
+                    <SessionActivity
+                        agentId={agentId}
+                        sessionId={sessionId}
+                        active={tab === 'activity'}
+                        refreshKey={activityKey}
+                    />
                 </Tabs.Panel>
 
                 <Tabs.Panel value="tools" p="md">

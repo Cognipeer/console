@@ -9,6 +9,7 @@
  */
 
 import type {
+    IAgentHumanInTheLoopConfig,
     IAgentMessagePendingAction,
     IAgentPendingActionResolution,
     IAgentUserQuestion,
@@ -262,4 +263,36 @@ export function composerGate(
 ): ComposerGate {
     if (openCount === 0) return 'open';
     return policy === 'cancel_pending' ? 'cancel' : 'blocked';
+}
+
+// ── Who may answer ───────────────────────────────────────────────────────
+
+/** Which `approvers` setting limits who may answer — what the notice above an open request names. */
+export type AnswerRestriction = 'owner' | 'owner_or_admin';
+
+/** Tenant roles that administer every project (the server also counts a project-level admin). */
+const ADMIN_ROLES = new Set(['owner', 'admin', 'project_admin']);
+
+/**
+ * The restriction to tell the viewer about, or `null` when there is nothing to
+ * say: the agent lets any member answer, the viewer started the session, or the
+ * viewer is an admin — and also whenever the page cannot tell (no viewer, no
+ * session owner).
+ *
+ * A notice, not a lock: the server decides at resolve time (and also counts
+ * project admins, which the page does not know), so the buttons stay usable and
+ * a refusal is still reported.
+ */
+export function answerRestriction(input: {
+    approvers?: IAgentHumanInTheLoopConfig['approvers'];
+    viewerId?: string;
+    viewerRole?: string;
+    ownerId?: string;
+}): AnswerRestriction | null {
+    const policy = input.approvers ?? 'owner_or_admin';
+    if (policy === 'project_members') return null;
+    if (!input.viewerId || !input.ownerId) return null;
+    if (input.viewerId === input.ownerId) return null;
+    if (policy === 'owner') return 'owner';
+    return input.viewerRole && ADMIN_ROLES.has(input.viewerRole) ? null : 'owner_or_admin';
 }

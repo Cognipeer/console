@@ -1413,6 +1413,14 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     id: string,
     patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
   ): Promise<void>;
+  /**
+   * Atomically moves the session's running spend total (`spentUsd`): first up to
+   * `atLeastUsd` when it is below that (a missing total counts as 0), then by
+   * `addUsd`. The database does the arithmetic, so two writers that spend at the
+   * same time both land — reading the total and writing back a sum lets the last
+   * writer erase the other's. Never lowers the total.
+   */
+  addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void>;
   deleteAgentConversation(id: string): Promise<boolean>;
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   listAgentConversations(
