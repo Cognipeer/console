@@ -27,7 +27,8 @@ import {
     TextInput,
 } from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
-import type { IAgentExecutionConfig } from '@/lib/database/provider/types.domain';
+import type { IAgentAttachmentsConfig, IAgentExecutionConfig } from '@/lib/database/provider/types.domain';
+import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
 import { ConfigBlock } from './ConfigSection';
 import { SANDBOX_SECRET_MASK } from './AgentSandboxPanel';
 
@@ -41,6 +42,15 @@ interface ExecutionLimits {
 export interface AgentExecutionPanelProps {
     value: IAgentExecutionConfig | undefined;
     onChange: (next: IAgentExecutionConfig | undefined) => void;
+    /** `config.attachments` — shown (and editable) only when the page passes the pair. */
+    attachments?: IAgentAttachmentsConfig;
+    onAttachmentsChange?: (next: IAgentAttachmentsConfig | undefined) => void;
+}
+
+/** Drops keys left empty so an untouched agent saves no `attachments` at all. */
+function compactAttachments(next: IAgentAttachmentsConfig): IAgentAttachmentsConfig | undefined {
+    const entries = Object.entries(next).filter(([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0));
+    return entries.length > 0 ? (Object.fromEntries(entries) as IAgentAttachmentsConfig) : undefined;
 }
 
 /** Drops keys left empty so an untouched agent saves no `execution` at all. */
@@ -49,7 +59,7 @@ function compact(next: IAgentExecutionConfig): IAgentExecutionConfig | undefined
     return entries.length > 0 ? (Object.fromEntries(entries) as IAgentExecutionConfig) : undefined;
 }
 
-export default function AgentExecutionPanel({ value, onChange }: AgentExecutionPanelProps) {
+export default function AgentExecutionPanel({ value, onChange, attachments, onAttachmentsChange }: AgentExecutionPanelProps) {
     const [limits, setLimits] = useState<ExecutionLimits | null>(null);
 
     useEffect(() => {
@@ -63,6 +73,9 @@ export default function AgentExecutionPanel({ value, onChange }: AgentExecutionP
 
     const current = value ?? {};
     const set = (patch: Partial<IAgentExecutionConfig>) => onChange(compact({ ...current, ...patch }));
+    const currentAttachments = attachments ?? {};
+    const setAttachments = (patch: Partial<IAgentAttachmentsConfig>) => onAttachmentsChange?.(compactAttachments({ ...currentAttachments, ...patch }));
+    const attachmentsEnabled = currentAttachments.enabled !== false;
     const backgroundEnabled = current.backgroundEnabled !== false;
     const effectiveSync = Math.min(current.syncTimeoutSeconds ?? Infinity, limits?.syncTimeoutSeconds ?? Infinity);
     const effectiveBackground = Math.min(
@@ -89,6 +102,133 @@ export default function AgentExecutionPanel({ value, onChange }: AgentExecutionP
                     maw={320}
                 />
             </ConfigBlock>
+
+            <ConfigBlock title="Session budget">
+                <Stack gap="sm">
+                    <NumberInput
+                        label="Budget per session (USD)"
+                        description="The most one session — all its turns together — may cost. Every new session starts with this budget, and it can be raised, lowered or removed for a single session. Empty = no session budget."
+                        placeholder="No budget"
+                        min={0}
+                        decimalScale={4}
+                        value={current.sessionBudget?.maxCostUsd ?? ''}
+                        onChange={(v) => set({
+                            sessionBudget: typeof v === 'number' && v > 0
+                                ? { ...current.sessionBudget, maxCostUsd: v, onReach: current.sessionBudget?.onReach ?? 'pause' }
+                                : undefined,
+                        })}
+                        maw={420}
+                    />
+                    {current.sessionBudget ? (
+                        <Stack gap={4}>
+                            <Text size="sm" fw={500}>When the budget is reached</Text>
+                            <SegmentedControl
+                                w="fit-content"
+                                value={current.sessionBudget.onReach}
+                                onChange={(onReach) => set({
+                                    sessionBudget: { ...current.sessionBudget!, onReach: onReach === 'stop' ? 'stop' : 'pause' },
+                                })}
+                                data={[
+                                    { value: 'pause', label: 'Pause and wait' },
+                                    { value: 'stop', label: 'Stop' },
+                                ]}
+                            />
+                            <Text size="xs" c="dimmed">
+                                {current.sessionBudget.onReach === 'pause'
+                                    ? 'The turn stops where it is and the session waits. Once the budget is raised it carries on from where it stopped, with no new message.'
+                                    : 'The turn stops and new messages are refused until the budget is raised or removed.'}
+                                {' '}The per-turn cost limit (Advanced settings) is separate and still applies.
+                            </Text>
+                            <Switch
+                                label="Let API clients change the budget"
+                                description="Off: a client token can lower a session's budget but not remove it or raise it past the amount above. Dashboard users are not affected."
+                                checked={current.sessionBudget.allowClientOverride === true}
+                                onChange={(event) => set({
+                                    sessionBudget: { ...current.sessionBudget!, allowClientOverride: event.currentTarget.checked },
+                                })}
+                            />
+                        </Stack>
+                    ) : null}
+                </Stack>
+            </ConfigBlock>
+
+            {onAttachmentsChange ? (
+                <ConfigBlock title="Attachments">
+                    <Stack gap="sm">
+                        <Switch
+                            label="Accept attached files"
+                            description="Users can attach documents and images to a session (the paperclip in the composer, input_file / input_image over the API). Empty fields below use the defaults shown."
+                            checked={attachmentsEnabled}
+                            onChange={(event) => setAttachments({ enabled: event.currentTarget.checked ? undefined : false })}
+                        />
+                        {attachmentsEnabled ? (
+                            <>
+                                <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
+                                    <NumberInput
+                                        label="Files per session"
+                                        placeholder={String(SESSION_FILES_DEFAULTS.maxFiles)}
+                                        min={1}
+                                        max={100}
+                                        allowDecimal={false}
+                                        value={currentAttachments.maxFiles ?? ''}
+                                        onChange={(v) => setAttachments({ maxFiles: typeof v === 'number' ? v : undefined })}
+                                    />
+                                    <NumberInput
+                                        label="Largest file (MB)"
+                                        placeholder={String(SESSION_FILES_DEFAULTS.maxFileSizeMb)}
+                                        min={1}
+                                        value={currentAttachments.maxFileSizeMb ?? ''}
+                                        onChange={(v) => setAttachments({ maxFileSizeMb: typeof v === 'number' ? v : undefined })}
+                                    />
+                                    <NumberInput
+                                        label="Put in the message up to (tokens)"
+                                        description="A message’s files that fit are placed in the turn; longer ones are read page by page with tools."
+                                        placeholder={String(SESSION_FILES_DEFAULTS.inlineMaxTokens)}
+                                        min={100}
+                                        allowDecimal={false}
+                                        value={currentAttachments.inlineMaxTokens ?? ''}
+                                        onChange={(v) => setAttachments({ inlineMaxTokens: typeof v === 'number' ? v : undefined })}
+                                    />
+                                    <NumberInput
+                                        label="Page size when reading (characters)"
+                                        placeholder={String(SESSION_FILES_DEFAULTS.readPageChars)}
+                                        min={500}
+                                        allowDecimal={false}
+                                        value={currentAttachments.readPageChars ?? ''}
+                                        onChange={(v) => setAttachments({ readPageChars: typeof v === 'number' ? v : undefined })}
+                                    />
+                                    <NumberInput
+                                        label="Keep files for (days)"
+                                        description="After this the file is deleted automatically."
+                                        placeholder={String(SESSION_FILES_DEFAULTS.retentionDays)}
+                                        min={1}
+                                        allowDecimal={false}
+                                        value={currentAttachments.retentionDays ?? ''}
+                                        onChange={(v) => setAttachments({ retentionDays: typeof v === 'number' ? v : undefined })}
+                                    />
+                                    <TextInput
+                                        label="Allowed file types"
+                                        description="Comma-separated MIME types, image/* allowed. Empty = any file that can be read."
+                                        placeholder="application/pdf, image/*"
+                                        value={(currentAttachments.allowedMimeTypes ?? []).join(', ')}
+                                        onChange={(event) => setAttachments({
+                                            allowedMimeTypes: event.currentTarget.value.split(',').map((entry) => entry.trim()).filter(Boolean),
+                                        })}
+                                    />
+                                </SimpleGrid>
+                                <TextInput
+                                    label="Storage bucket"
+                                    description="Empty = the project’s system “conversation-files” bucket on the built-in storage."
+                                    placeholder="conversation-files"
+                                    value={currentAttachments.bucketKey ?? ''}
+                                    onChange={(event) => setAttachments({ bucketKey: event.currentTarget.value.trim() || undefined })}
+                                    maw={420}
+                                />
+                            </>
+                        ) : null}
+                    </Stack>
+                </ConfigBlock>
+            ) : null}
 
             <ConfigBlock title="Background runs">
                 <Stack gap="sm">

@@ -29,7 +29,7 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     skills: ['skills', 'skillPolicy'],
     memory: ['memory'],
     sandbox: ['sandbox'],
-    execution: ['execution'],
+    execution: ['execution', 'attachments'],
     hitl: ['humanInTheLoop'],
     advanced: ['runtime'],
     output: ['structuredOutput'],

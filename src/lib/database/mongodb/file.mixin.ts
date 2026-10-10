@@ -183,6 +183,27 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       };
     }
 
+    async listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]> {
+      const db = this.getTenantDb();
+      const documents = await db
+        .collection<IFileRecord>(COLLECTIONS.files)
+        .find({ conversationId })
+        .sort({ _id: 1 })
+        .toArray();
+      return documents.map((record) => ({ ...record, _id: record._id?.toString() }));
+    }
+
+    async listExpiredConversationFiles(before: Date, limit: number): Promise<IFileRecord[]> {
+      const db = this.getTenantDb();
+      const documents = await db
+        .collection<IFileRecord>(COLLECTIONS.files)
+        .find({ purpose: 'conversation', expiresAt: { $lt: before } })
+        .sort({ expiresAt: 1 })
+        .limit(limit)
+        .toArray();
+      return documents.map((record) => ({ ...record, _id: record._id?.toString() }));
+    }
+
     async countFileRecords(filters?: { projectId?: string }): Promise<number> {
       const db = this.getTenantDb();
       const query: Record<string, unknown> = {};

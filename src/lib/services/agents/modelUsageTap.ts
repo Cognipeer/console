@@ -18,7 +18,7 @@
 
 import { createLogger } from '@/lib/core/logger';
 import type { IModel } from '@/lib/database';
-import { logModelUsage, type TokenUsage } from '@/lib/services/models/usageLogger';
+import { calculateCost, logModelUsage, type TokenUsage } from '@/lib/services/models/usageLogger';
 import { addRunUsage } from './runUsage';
 
 const logger = createLogger('agent-model-usage');
@@ -37,6 +37,12 @@ export interface ModelUsageTapContext {
     /** The usage row's `route` — tells an agent call apart from a gateway call. */
     route: string;
     agentKey?: string;
+    /**
+     * Called once per model request with what it cost — the one place every
+     * request of an agent passes through, so this is where the tenant's spend
+     * limit is debited (see agentSpendLimits.ts). Never allowed to fail a request.
+     */
+    onCost?: (cost: { currency: string; totalCost: number }) => void;
 }
 
 /**
@@ -102,6 +108,16 @@ function record(
     addRunUsage(usage.totalTokens);
     const toolCalls = countToolCalls(outcome.message);
     const finishReason = finishReasonOf(outcome.message);
+    if (ctx.onCost && (usage.inputTokens || usage.outputTokens)) {
+        try {
+            ctx.onCost(calculateCost(ctx.model.pricing, usage));
+        } catch (error) {
+            logger.warn('Agent spend could not be settled', {
+                model: ctx.model.key,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
     void logModelUsage(ctx.tenantDbName, ctx.model, {
         requestId: `agent-${ctx.agentKey ?? 'run'}-${outcome.startedAt}-${Math.random().toString(36).slice(2, 8)}`,
         route: ctx.route,

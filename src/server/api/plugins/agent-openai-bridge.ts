@@ -173,7 +173,7 @@ export interface AgentCompletionUsage {
  * precise reason travels in the non-OpenAI `stop_reason` field.
  */
 export function agentFinishReason(stopReason: AgentChatResponse['stop_reason']): 'stop' | 'length' {
-    return stopReason === 'limit' ? 'length' : 'stop';
+    return stopReason === 'limit' || stopReason === 'budget_reached' ? 'length' : 'stop';
 }
 
 /** The OpenAI chat-completion envelope, filled from an agent run. */

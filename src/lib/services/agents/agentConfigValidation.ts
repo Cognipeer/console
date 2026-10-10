@@ -179,6 +179,24 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         const backgroundMaxMinutes = Math.max(1, Math.floor(env.backgroundMaxDurationMs / 60_000));
         checkNumber(issues, 'execution.syncTimeoutSeconds', execution.syncTimeoutSeconds, { min: 5, max: syncMaxSeconds, integer: true });
         checkNumber(issues, 'execution.backgroundMaxDurationMinutes', execution.backgroundMaxDurationMinutes, { min: 1, max: backgroundMaxMinutes, integer: true });
+        const sessionBudget = execution.sessionBudget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
+        if (sessionBudget !== undefined && sessionBudget !== null) {
+            if (typeof sessionBudget !== 'object' || Array.isArray(sessionBudget)) {
+                issues.errors.push({ field: 'execution.sessionBudget', message: 'must be an object: { maxCostUsd, onReach }' });
+            } else {
+                if (!isNumber(sessionBudget.maxCostUsd)) {
+                    issues.errors.push({ field: 'execution.sessionBudget.maxCostUsd', message: 'is required and must be a number' });
+                } else {
+                    checkNumber(issues, 'execution.sessionBudget.maxCostUsd', sessionBudget.maxCostUsd, { min: 0, exclusiveMin: true });
+                }
+                if (sessionBudget.onReach !== 'pause' && sessionBudget.onReach !== 'stop') {
+                    issues.errors.push({ field: 'execution.sessionBudget.onReach', message: 'must be one of: pause, stop' });
+                }
+                if (sessionBudget.allowClientOverride !== undefined && typeof sessionBudget.allowClientOverride !== 'boolean') {
+                    issues.errors.push({ field: 'execution.sessionBudget.allowClientOverride', message: 'must be a boolean' });
+                }
+            }
+        }
         if (execution.defaultMode !== undefined && execution.defaultMode !== 'sync' && execution.defaultMode !== 'background') {
             issues.errors.push({ field: 'execution.defaultMode', message: 'must be one of: sync, background' });
         }
@@ -199,6 +217,19 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
         if (execution.callbackSecret && !execution.callbackUrl) {
             issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
+        }
+    }
+
+    const attachments = config.attachments;
+    if (attachments) {
+        checkNumber(issues, 'attachments.maxFiles', attachments.maxFiles, { min: 1, max: 100, integer: true });
+        checkNumber(issues, 'attachments.maxFileSizeMb', attachments.maxFileSizeMb, { min: 0, exclusiveMin: true, max: getConfig().limits.fileUploadMaxMb });
+        checkNumber(issues, 'attachments.inlineMaxTokens', attachments.inlineMaxTokens, { min: 100, integer: true });
+        checkNumber(issues, 'attachments.readPageChars', attachments.readPageChars, { min: 500, max: 200_000, integer: true });
+        checkNumber(issues, 'attachments.retentionDays', attachments.retentionDays, { min: 1, max: 3650 });
+        if (attachments.allowedMimeTypes !== undefined
+            && (!Array.isArray(attachments.allowedMimeTypes) || attachments.allowedMimeTypes.some((entry) => typeof entry !== 'string'))) {
+            issues.errors.push({ field: 'attachments.allowedMimeTypes', message: 'must be a list of MIME types (image/* is allowed)' });
         }
     }
 

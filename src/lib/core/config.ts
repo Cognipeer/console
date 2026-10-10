@@ -374,6 +374,24 @@ export interface AppConfig {
     /** A `queued` run older than this with no worker is republished by the reconciler. */
     runRequeueAfterMs: number;
   };
+
+  /**
+   * Outgoing webhook subscriptions (`webhook_endpoints` / `webhook_deliveries`).
+   * The retry schedule is the wait after each failed attempt, in seconds: with
+   * the default seven entries a delivery is tried up to eight times.
+   */
+  webhooks: {
+    /** Per-attempt timeout. */
+    timeoutMs: number;
+    /** Deliveries sent at once per node. */
+    concurrency: number;
+    /** Wait before retry 1, 2, ... after a failed attempt (seconds). */
+    retryScheduleSeconds: number[];
+    /** An endpoint failing continuously for longer than this is disabled. */
+    autoDisableHours: number;
+    /** Delivery rows older than this are deleted by the reconciler's retention pass. */
+    deliveryRetentionDays: number;
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -469,6 +487,16 @@ function validateProductionAppUrl(value: string): string | null {
 /* ------------------------------------------------------------------ */
 /*  Config Builder                                                    */
 /* ------------------------------------------------------------------ */
+
+/** `WEBHOOK_RETRY_SCHEDULE_SECONDS`: positive integers, comma separated; unusable input keeps the default. */
+const DEFAULT_WEBHOOK_RETRY_SCHEDULE_SECONDS = [60, 300, 1800, 7200, 21600, 43200, 86400];
+function webhookRetrySchedule(source: ConfigSource): number[] {
+  const parsed = list(source, 'WEBHOOK_RETRY_SCHEDULE_SECONDS', [])
+    .map((entry) => Number(entry))
+    .filter((seconds) => Number.isFinite(seconds) && seconds > 0)
+    .map((seconds) => Math.floor(seconds));
+  return parsed.length > 0 ? parsed : DEFAULT_WEBHOOK_RETRY_SCHEDULE_SECONDS;
+}
 
 function buildConfig(source: ConfigSource): AppConfig {
   const nodeEnv = str(source, 'NODE_ENV', 'development');
@@ -702,6 +730,14 @@ function buildConfig(source: ConfigSource): AppConfig {
       runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
       sessionEventRetentionDays: Math.max(int(source, 'AGENT_SESSION_EVENT_RETENTION_DAYS', 30), 1),
       ...boundedAgentRunConfig(source),
+    },
+
+    webhooks: {
+      timeoutMs: Math.max(int(source, 'WEBHOOK_TIMEOUT_MS', 10_000), 1_000),
+      concurrency: Math.max(int(source, 'WEBHOOK_CONCURRENCY', 8), 1),
+      retryScheduleSeconds: webhookRetrySchedule(source),
+      autoDisableHours: Math.max(int(source, 'WEBHOOK_AUTO_DISABLE_HOURS', 72), 1),
+      deliveryRetentionDays: Math.max(int(source, 'WEBHOOK_DELIVERY_RETENTION_DAYS', 30), 1),
     },
   };
 }

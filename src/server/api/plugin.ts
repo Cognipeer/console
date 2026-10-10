@@ -24,6 +24,8 @@ import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
 import { clientAgentSessionsApiPlugin } from './plugins/client-agent-sessions';
+import { agentSessionFilesApiPlugin } from './plugins/agent-session-files';
+import { clientWebhooksApiPlugin } from './plugins/client-webhooks';
 import { clientAssistantsApiPlugin } from './plugins/client-assistants';
 import { clientAnalyticsApiPlugin } from './plugins/client-analytics';
 import { clientAuditApiPlugin } from './plugins/client-audit';
@@ -60,6 +62,7 @@ import { clientWebSearchApiPlugin } from './plugins/client-websearch';
 import { clientBrowserApiPlugin } from './plugins/client-browser';
 import { clientBrowserMcpApiPlugin } from './plugins/client-browser-mcp';
 import { auditApiPlugin } from './plugins/audit';
+import { webhooksApiPlugin } from './plugins/webhooks';
 import { automationsApiPlugin } from './plugins/automations';
 import { browserApiPlugin } from './plugins/browser';
 import { crawlerApiPlugin } from './plugins/crawler';
@@ -486,7 +489,9 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
   await app.register(clientAgentRunsApiPlugin);
+  await app.register(clientWebhooksApiPlugin);
   await app.register(clientAgentSessionsApiPlugin);
+  await app.register(agentSessionFilesApiPlugin);
   await app.register(clientAssistantsApiPlugin);
   await app.register(clientAnalyticsApiPlugin);
   await app.register(clientAuditApiPlugin);
@@ -574,6 +579,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(usersApiPlugin);
   await app.register(vectorApiPlugin);
   await app.register(websearchApiPlugin);
+  await app.register(webhooksApiPlugin);
 
   // ── Enterprise overlay seam ──────────────────────────────────────────────
   // Registers the enterprise Fastify plugins (gpu-fleet, sandbox runtime,

@@ -16,6 +16,7 @@ import {
   apiErrorBody,
   backgroundDisabledErrorBody,
   isBackgroundModeRequested,
+  queueAgentRunContinue,
   resolveAgentExecutionLimits,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
@@ -24,6 +25,8 @@ import {
   type ResolveOutcome,
 } from '@/lib/services/agents/agentActionResolution';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { activeSessionBudget, clientBudgetViolation, parseSessionBudget, sessionSpentUsd } from '@/lib/services/agents/sessionBudget';
+import { updateSessionBudget } from '@/lib/services/agents/sessionBudgetService';
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import type { LicenseType } from '@/lib/license/license-manager';
@@ -61,6 +64,27 @@ async function requireSession(
   return found;
 }
 
+/** The session's budget as the client API spells it, or null. */
+export function publicSessionBudget(conversation: Pick<IAgentConversation, 'budget'>) {
+  const budget = activeSessionBudget(conversation);
+  return budget ? { max_cost_usd: budget.maxCostUsd, on_reach: budget.onReach } : null;
+}
+
+/** The session resource: its runtime state, budget and what it has spent. */
+function serializeSession(conversation: IAgentConversation, runtime: Awaited<ReturnType<typeof describeSessionRuntime>>) {
+  return {
+    id: String(conversation._id),
+    object: 'agent.session',
+    agent: conversation.agentKey,
+    runtime_status: runtime.runtimeStatus,
+    stop_reason: runtime.stopReason,
+    pending_actions: runtime.pendingActions,
+    last_event_seq: runtime.lastEventSeq,
+    budget: publicSessionBudget(conversation),
+    spent_usd: sessionSpentUsd(conversation),
+  };
+}
+
 export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Runtime state: running / idle / waiting for an action ──
   app.get('/client/v1/agents/sessions/:conversationId', withClientApiRequestContext(async (request, reply, ctx) => {
@@ -68,18 +92,111 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       const conversation = await requireSession(request, reply, ctx);
       if (!conversation) return reply;
       const runtime = await describeSessionRuntime(ctx.tenantDbName, conversation);
-      return reply.code(200).send({
-        id: String(conversation._id),
-        object: 'agent.session',
-        agent: conversation.agentKey,
-        runtime_status: runtime.runtimeStatus,
-        stop_reason: runtime.stopReason,
-        pending_actions: runtime.pendingActions,
-        last_event_seq: runtime.lastEventSeq,
-      });
+      return reply.code(200).send(serializeSession(conversation, runtime));
     } catch (error) {
       logger.error('Client agent session get error', { error });
       return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  }));
+
+  // ── Session spend budget ──
+  //
+  // `{ budget: { max_cost_usd, on_reach } | null, resume?: boolean }` adds,
+  // changes or removes the session's budget (a new budget must exceed what the
+  // session has already spent). A session paused on its budget is then
+  // continued — without a new message — as a background run (202 with the run),
+  // unless `resume` is false (default true).
+  app.patch('/client/v1/agents/sessions/:conversationId', withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const conversation = await requireSession(request, reply, ctx);
+      if (!conversation) return reply;
+      const body = readJsonBody<Record<string, unknown>>(request);
+      if (body.budget === undefined) {
+        return reply.code(400).send(apiErrorBody(
+          'invalid_request_error', 'budget is required: { max_cost_usd, on_reach }, or null to remove it', 'invalid_budget',
+        ));
+      }
+      if (body.resume !== undefined && typeof body.resume !== 'boolean') {
+        return reply.code(400).send(apiErrorBody('invalid_request_error', 'resume must be a boolean', 'invalid_request'));
+      }
+      const resume = body.resume !== false;
+
+      // An agent whose admin set a session budget binds its API clients to it.
+      const requestedBudget = body.budget === null ? null : parseSessionBudget(body.budget);
+      if (requestedBudget === null || requestedBudget.ok) {
+        const owningAgent = await getAgentByKey(ctx.tenantDbName, conversation.agentKey, ctx.projectId);
+        const violation = clientBudgetViolation(
+          owningAgent?.config,
+          requestedBudget === null ? null : requestedBudget.budget,
+          activeSessionBudget(conversation),
+        );
+        if (violation) return reply.code(403).send(apiErrorBody('permission_error', violation, 'budget_override_forbidden'));
+      }
+
+      // A continuation runs in the background: fail before changing anything if it cannot.
+      const willResume = resume && conversation.runtimeStatus === 'budget_paused';
+      const agent = willResume ? await getAgentByKey(ctx.tenantDbName, conversation.agentKey, ctx.projectId) : null;
+      const limits = willResume
+        ? await resolveAgentExecutionLimits({
+          agentConfig: agent?.config,
+          quotaContext: {
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            licenseType: ctx.tenant.licenseType as LicenseType,
+            userId: ctx.tokenRecord.userId,
+            tokenId: ctx.tokenRecord._id?.toString(),
+          },
+        })
+        : null;
+      if (limits && !limits.backgroundEnabled) return reply.code(400).send(backgroundDisabledErrorBody());
+
+      const outcome = await updateSessionBudget({
+        tenantDbName: ctx.tenantDbName,
+        projectId: ctx.projectId,
+        conversationId: String(conversation._id),
+        budget: body.budget,
+      });
+      if (outcome.kind === 'not_found') return reply.code(404).send(NOT_FOUND_BODY);
+      if (outcome.kind === 'invalid') {
+        return reply.code(400).send(apiErrorBody('invalid_request_error', outcome.message, 'invalid_budget'));
+      }
+
+      if (willResume && outcome.wasBudgetPaused) {
+        const apiTokenId = ctx.tokenRecord._id ? String(ctx.tokenRecord._id) : undefined;
+        const queued = await queueAgentRunContinue({
+          tenantDbName: ctx.tenantDbName,
+          tenantId: ctx.tenantId,
+          projectId: ctx.projectId,
+          agentKey: conversation.agentKey,
+          conversationId: String(conversation._id),
+          userId: ctx.tokenRecord.userId,
+          // Config the way /agents/responses runs it: the published version, else the draft.
+          usePublished: true,
+          runtimeContext: buildRuntimeContextFromRequest(body.runtime_context, request.headers, {
+            userId: ctx.tokenRecord.userId,
+            tokenId: apiTokenId,
+            source: 'api',
+          }),
+          ...(apiTokenId ? { apiTokenId } : {}),
+          actorType: 'api_token',
+        });
+        if (queued.kind === 'conflict') {
+          return reply.code(409).send(apiErrorBody(
+            'invalid_request_error',
+            'An active run (queued or running) already exists for this conversation.',
+            'agent_run_conflict',
+          ));
+        }
+        return reply.code(202).send(serializeAgentRun(queued.run));
+      }
+
+      const runtime = await describeSessionRuntime(ctx.tenantDbName, outcome.conversation);
+      return reply.code(200).send(serializeSession(outcome.conversation, runtime));
+    } catch (error) {
+      logger.error('Client agent session update error', { error });
+      const classified = classifyAgentRunError(error);
+      return reply.code(classified.status).send({ error: classified.error });
     }
   }));
 

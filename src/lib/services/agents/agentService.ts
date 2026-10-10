@@ -35,7 +35,7 @@ import {
     shouldRenderInlinePrompt,
     type RenderedPrompt,
 } from './promptVariables';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -104,7 +104,41 @@ import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
-import { annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import {
+    agentTakesAttachments,
+    assembleTurnAttachments,
+    buildSessionFileTools,
+    buildUserTurnContent,
+    conversationHasFiles,
+    deleteConversationFiles,
+    resolveAttachmentsConfig,
+    resolveTurnAttachments,
+    sessionFileToolDefinitions,
+    stripAttachmentBlock,
+    NO_ATTACHMENTS,
+    type AssembledAttachments,
+} from './sessionFiles';
+import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
+import {
+    agentSpendSettler,
+    assertAgentTurnSpendAllowed,
+    resolveAgentSpendScope,
+    type AgentSpendScope,
+} from './agentSpendLimits';
+import {
+    activeSessionBudget,
+    agentSessionBudget,
+    budgetStopDetail,
+    isSessionBudgetBreach,
+    planSessionBudget,
+    sessionBudgetInvokeOptions,
+    withSessionSpend,
+    settleSessionBudget,
+    type SessionBudgetPlan,
+    type SessionBudgetSettlement,
+} from './sessionBudget';
+import { recordSessionTurnSpend } from './sessionBudgetService';
 import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from './agentQuota';
 import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
@@ -115,9 +149,11 @@ import {
     compactedToolResults,
     compactionFromEvent,
     describeTurnOutcome,
+    buildContinueInputState,
     loadConversationState,
     saveConversationState,
     type AgentStopReason,
+    type AgentTurnOutcome,
 } from './agentTurnState';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
@@ -943,7 +979,8 @@ function persistedUserTurn(input: {
 }): string {
     const entry = input.result.messages?.[input.index];
     const fromResult = entry?.role === 'user' ? agentMessageText(entry.content) : '';
-    return input.ledger.resolve(fromResult || input.fallback);
+    // What the turn added for attached files (sessionFiles.ts) is not the person's text.
+    return stripAttachmentBlock(input.ledger.resolve(fromResult || input.fallback));
 }
 
 /**
@@ -1288,17 +1325,19 @@ export const __testables = {
 
 /**
  * `limits.maxCostUsd` is enforced by the SDK only through a `costEstimator`;
- * without one the limit did nothing at all. Built only when the limit is set,
- * from the pricing of the agent's model and of every sub-agent model override
- * — a delegated call spends from the same budget.
+ * without one the limit did nothing at all. Built only when the limit is set —
+ * or the session has a spend budget, which rides on the same SDK limit — from
+ * the pricing of the agent's model and of every sub-agent model override: a
+ * delegated call spends from the same budget.
  */
 async function buildAgentCostEstimator(
     tenantDbName: string,
     projectId: string,
     config: IAgentConfig,
     primary: { key?: string; modelId?: string; pricing?: IModelPricing | null },
+    sessionBudgetActive = false,
 ): Promise<ReturnType<typeof buildCostEstimator>> {
-    if (!(Number(config.runtime?.limits?.maxCostUsd) > 0)) return undefined;
+    if (!sessionBudgetActive && !(Number(config.runtime?.limits?.maxCostUsd) > 0)) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
     const models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }> = [
         { names: [primary.key, primary.modelId], pricing: primary.pricing },
@@ -1310,7 +1349,7 @@ async function buildAgentCostEstimator(
     }
     const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
     if (!estimator) {
-        logger.warn('maxCostUsd is set but the agent model has no pricing; the cost limit cannot be enforced', {
+        logger.warn('A cost limit is set but the agent model has no pricing; the cost limit cannot be enforced', {
             modelKey: primary.key,
         });
     }
@@ -1411,6 +1450,8 @@ type BuildSubagentsInput = {
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
     runtimeContext?: AgentRuntimeContext;
+    /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
+    spend?: AgentSpendScope;
 };
 
 /**
@@ -1511,7 +1552,7 @@ async function buildAgentSubagents(
 
         let childModel: unknown;
         if (modelKey) {
-            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey);
+            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend);
         }
 
         subagents.push({
@@ -1563,6 +1604,7 @@ async function buildSubagentModel(
     tenantId: string,
     projectId: string,
     modelKey: string,
+    spend?: AgentSpendScope,
 ): Promise<unknown> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
@@ -1580,6 +1622,7 @@ async function buildSubagentModel(
             tenantDbName,
             model,
             route: 'agent.subagent',
+            ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
         });
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
@@ -2527,9 +2570,18 @@ export async function createConversation(
     title?: string,
     /** Session-level context — applied to every turn, see `executePlaygroundChatLocal`. */
     metadata?: Record<string, unknown>,
+    /**
+     * The session's spend budget. Absent = the agent's own default
+     * (`execution.sessionBudget`); `null` = none, whatever the agent's default.
+     */
+    budget?: IAgentSessionBudget | null,
 ): Promise<IAgentConversation> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
+
+    const sessionBudget = budget === undefined
+        ? agentSessionBudget((await db.findAgentByKey(agentKey, projectId))?.config)
+        : budget ?? undefined;
 
     return db.createAgentConversation({
         tenantId,
@@ -2538,6 +2590,7 @@ export async function createConversation(
         title: title || 'New conversation',
         messages: [],
         ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
+        ...(sessionBudget ? { budget: sessionBudget, spentUsd: 0 } : {}),
         createdBy: userId,
     });
 }
@@ -2550,7 +2603,7 @@ export async function getConversationById(
     await db.switchToTenant(tenantDbName);
     const conversation = await db.findAgentConversationById(conversationId);
     // A "running" session whose turn died (process crash) reads as ended.
-    return conversation ? normalizeStaleRunningStatus(db, conversation) : null;
+    return conversation ? withSessionSpend(await normalizeStaleRunningStatus(db, conversation)) : null;
 }
 
 export async function listConversations(
@@ -2574,6 +2627,8 @@ export async function deleteConversation(
     if (conversation?.metadata?.sandbox) {
         await destroyConversationSandbox({ tenantDbName, tenantId: conversation.tenantId, conversation });
     }
+    // So do the files attached to it (object, markdown and row).
+    if (conversation) await deleteConversationFiles(tenantDbName, conversation);
     return db.deleteAgentConversation(conversationId);
 }
 
@@ -2679,6 +2734,8 @@ export interface AgentChatRequest {
     agentKey: string;
     conversationId: string;
     userMessage: string;
+    /** Ids of the conversation's files this message attaches (uploaded to the session first). */
+    attachments?: string[];
     userId: string;
     /** The background run executing this turn, when there is one — stamped on its session events. */
     runId?: string;
@@ -2755,6 +2812,8 @@ export interface AgentPlaygroundChatRequest {
     projectId: string;
     agentKey: string;
     userMessage: string;
+    /** Ids of the session's files this message attaches (a Session only; uploaded to it first). */
+    attachments?: string[];
     /**
      * Previous messages for context. Ignored (and the DB history loaded
      * instead) whenever `conversationId` is set — a caller-supplied history
@@ -2866,7 +2925,7 @@ export interface AgentChatResponse {
     /** OpenAI Responses convention: why the response is `incomplete`. */
     incomplete_details?: { reason: string } | null;
     /** How the agent run ended; `completed` for a normal final answer, `requires_action` while it waits on a person. */
-    stop_reason?: AgentStopReason | 'requires_action';
+    stop_reason?: AgentStopReason | 'requires_action' | 'budget_reached';
     /** Present when `status` is `requires_action`: the approvals / questions to resolve. */
     required_action?: { type: 'agent_actions'; actions: PublicPendingAction[] };
     /** The runtime's own wording for a non-`completed` stop, e.g. which limit. */
@@ -2893,7 +2952,7 @@ export interface AgentChatResponse {
  * is OpenAI's own value, so a stock client recognizes the output-token cap;
  * the rest are this API's, named after the limit that fired.
  */
-export function incompleteReason(stopReason: AgentStopReason, stopDetail?: string): string {
+export function incompleteReason(stopReason: AgentStopReason | 'budget_reached', stopDetail?: string): string {
     if (stopReason === 'limit') {
         if (stopDetail?.startsWith('maxTotalOutputTokens')) return 'max_output_tokens';
         if (stopDetail?.startsWith('maxCostUsd')) return 'max_cost';
@@ -3138,10 +3197,24 @@ async function buildLocalAgentRun(input: {
      * `deny`.
      */
     canPause?: boolean;
+    /**
+     * Whose spend this run is: every model request it makes is debited to the
+     * tenant's spend limits (agentSpendLimits.ts). Absent for a build that never
+     * calls the model (reading a tool's schema).
+     */
+    spend?: AgentSpendScope;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, config, runtimeContext, actorId, source } = input;
     const hitl = resolveHitlConfig(config.humanInTheLoop);
     const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
+
+    // What this run's priced model requests add up to (sub-agent models too),
+    // read by the caller to keep the session budget true even when the turn is
+    // never persisted.
+    let tappedUsd = 0;
+    const spend: AgentSpendScope | undefined = input.spend
+        ? { ...input.spend, observe: (cost) => { if (Number.isFinite(cost.totalCost) && cost.totalCost > 0) tappedUsd += cost.totalCost; } }
+        : undefined;
 
     if (!config.modelKey) throw new Error('Agent has no model configured');
     const { model, lcModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
@@ -3266,6 +3339,23 @@ async function buildLocalAgentRun(input: {
         toolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
 
+    // Files attached to the session: the agent can list them and read them page
+    // by page — for what was too long to put in the turn, and for earlier
+    // uploads. Offered whenever the conversation holds a file.
+    if (agentTakesAttachments(config) && input.conversation
+        && await conversationHasFiles(db, String(input.conversation._id))) {
+        const readPageChars = resolveAttachmentsConfig(config.attachments).readPageChars;
+        tools.push(...buildSessionFileTools({
+            createToolFn: createTool,
+            zod: z,
+            guard: toolGuard,
+            scope: { tenantDbName, tenantId, projectId },
+            conversationId: String(input.conversation._id),
+            readPageChars,
+        }));
+        toolDefinitions.push(...sessionFileToolDefinitions(readPageChars));
+    }
+
     // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
     // the other bound tools once the run is over. A conversation keeps a
     // persistent sandbox across its turns, a stateless call gets a throwaway one.
@@ -3294,6 +3384,7 @@ async function buildLocalAgentRun(input: {
         model,
         route: input.route,
         agentKey,
+        ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
     });
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
@@ -3306,6 +3397,7 @@ async function buildLocalAgentRun(input: {
         zod: z,
         guard: toolGuard,
         runtimeContext,
+        ...(spend ? { spend } : {}),
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
@@ -3313,7 +3405,14 @@ async function buildLocalAgentRun(input: {
     const outputSchema = resolveStructuredOutputSchema(config.structuredOutput);
     const skillPolicy = resolveAgentSkillPolicy(config);
     const tracingMetadata = buildTracingMetadata(runtimeContext);
-    const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model);
+    const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
+    const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model, sessionBudgetActive);
+    if (sessionBudgetActive && !costEstimator) {
+        // A budget nothing can measure would let the session spend without
+        // limit, so the turn is refused rather than run unmetered.
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: source === 'agent' ? 'chat' : 'playground' });
+        throw new Error('Session budget cannot be enforced: the agent model has no pricing set. Set the model pricing or remove the session budget.');
+    }
 
     // Tool approval: the SDK pauses a call whose tool carries `needsApproval`.
     // Only the tools built above are gated — the SDK's own (todo, context,
@@ -3358,7 +3457,7 @@ async function buildLocalAgentRun(input: {
         },
     });
 
-    return { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: gatedTools };
+    return { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: gatedTools, costEstimator, tappedUsd: () => tappedUsd };
 }
 
 /**
@@ -3400,6 +3499,58 @@ export function agentMayStreamAnswer(config: GuardrailBindingSource): boolean {
     return resolveBindings(config, 'output.pre').length === 0;
 }
 
+/**
+ * The files a message attaches, checked against the session BEFORE anything
+ * runs (a refusal must not mark the session running or leave tools open).
+ * Throws `AgentAttachmentError`; empty when the message attaches nothing.
+ */
+async function resolveMessageAttachments(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    conversation: IAgentConversation | null;
+    config: IAgentConfig;
+    fileIds: string[] | undefined;
+}): Promise<IFileRecord[]> {
+    if (!input.fileIds || input.fileIds.length === 0) return [];
+    if (!input.conversation) {
+        throw new AgentAttachmentError(400, 'attachment_not_found', 'Attachments belong to a session; start one and upload the files to it first.');
+    }
+    if (!agentTakesAttachments(input.config)) {
+        throw new AgentAttachmentError(403, 'attachments_disabled', 'This agent does not take attachments.');
+    }
+    return resolveTurnAttachments(
+        { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId },
+        String(input.conversation._id),
+        input.fileIds,
+    );
+}
+
+/**
+ * The attached files made ready for the model — in the turn, or readable with
+ * the session file tools, images as parts when the model takes them. Never
+ * fails the turn: what could not be read is a warning.
+ */
+async function assembleMessageAttachments(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    records: IFileRecord[];
+    config: IAgentConfig;
+    model: Parameters<typeof resolveModelCapabilities>[0];
+    warnings: Set<string>;
+}): Promise<AssembledAttachments> {
+    if (input.records.length === 0) return NO_ATTACHMENTS;
+    const assembled = await assembleTurnAttachments({
+        scope: { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId },
+        records: input.records,
+        cfg: resolveAttachmentsConfig(input.config.attachments),
+        supportsVision: resolveModelCapabilities(input.model).inputModalities.includes('image'),
+    });
+    for (const warning of assembled.warnings) input.warnings.add(warning);
+    return assembled;
+}
+
 /** The first exchange of a "New conversation" names it after what was asked. */
 function firstTurnTitle(conversation: IAgentConversation, messageCount: number, userText: string): string | undefined {
     return conversation.title === 'New conversation' && messageCount <= 2
@@ -3412,7 +3563,12 @@ function firstTurnTitle(conversation: IAgentConversation, messageCount: number, 
  * `requires_action`; one that could not (state too large to keep) has nothing to
  * wait on, so the session is not left "waiting".
  */
-function sessionStopReason(outcome: AgentStopReason, pause: OpenedPause | null | undefined): SessionStopReason {
+function sessionStopReason(
+    outcome: AgentStopReason,
+    pause: OpenedPause | null | undefined,
+    settlement?: SessionBudgetSettlement,
+): SessionStopReason {
+    if (settlement?.reached) return 'budget_reached';
     if (outcome === 'paused') return pause ? 'requires_action' : 'end_turn';
     return toSessionStopReason(outcome);
 }
@@ -3429,7 +3585,7 @@ function toAgentChatResponse(input: {
     content: string;
     messages: IAgentConversation['messages'];
     reasoning?: string;
-    outcome?: { stopReason: AgentStopReason; stopDetail?: string };
+    outcome?: { stopReason: AgentStopReason | 'budget_reached'; stopDetail?: string };
     usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
     outputParsed?: unknown;
     outputError?: string;
@@ -3560,12 +3716,28 @@ async function runAgentChatTurn(
     const hitlSettings = resolveHitlConfig(config.humanInTheLoop);
     await assertNoBlockingPending(db, conversation, hitlSettings);
 
+    // The files this message attaches must be files of this session.
+    const attachedRecords = await resolveMessageAttachments({
+        tenantDbName, tenantId, projectId, conversation, config, fileIds: request.attachments,
+    });
+
+    // The session's own budget and the tenant's spend limit, for a turn that
+    // calls a model (a connected agent spends nothing here). Refused before the
+    // event log opens, like the check above.
+    const callsModel = !(config.kind === 'external' && config.connection);
+    const budgetPlan = callsModel ? planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd) : null;
+    const spend = callsModel && config.modelKey
+        ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.userId })
+        : undefined;
+    if (spend) await assertAgentTurnSpendAllowed(spend, config);
+
     // The session event log for this turn. The ledger collects what `input.pre`
     // rewrote on the wire: step 6 persists the redacted user turn rather than
     // the raw one, and the log's `user.message` carries the same text.
     const rewriteLedger = new MessageRewriteLedger();
     const turnEvents = startSessionTurnEvents({
         db,
+        tenantDbName,
         tenantId,
         projectId,
         agentKey,
@@ -3650,7 +3822,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -3669,6 +3841,7 @@ async function runAgentChatTurn(
         threadId: conversationId,
         onMessageRewrite: (rewrite) => rewriteLedger.record(rewrite),
         unattended: request.unattended,
+        ...(spend ? { spend } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -3676,10 +3849,14 @@ async function runAgentChatTurn(
     // transcript when there is none — see agentTurnState.ts.
     const now = new Date();
     const carried = await loadConversationState(db, conversation);
+    const attached = await assembleMessageAttachments({
+        tenantDbName, tenantId, projectId, records: attachedRecords, config, model, warnings,
+    });
     const inputState = buildTurnInputState({
         carried,
         transcript: conversation.messages || [],
         userMessage,
+        userContent: buildUserTurnContent(userMessage, attached),
     });
     const userTurnIndex = inputState.messages.length - 1;
     // Tool calls the carried state already holds belong to earlier turns.
@@ -3709,6 +3886,7 @@ async function runAgentChatTurn(
             ...(request.cancellationCell?.deadlineAt !== undefined
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
                 : {}),
+            ...sessionBudgetInvokeOptions(budgetPlan),
         };
 
         const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(inputState, liveInvokeConfig)
@@ -3774,8 +3952,18 @@ async function runAgentChatTurn(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const outcome = describeTurnOutcome(result, inputState.messages.length);
+        const turnOutcome = describeTurnOutcome(result, inputState.messages.length);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        // What the turn cost: kept on the message (the session's running total
+        // is the sum of these) and, with a session budget, checked against it.
+        const turnCostUsd = usage
+            ? await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage })
+            : undefined;
+        if (usage && turnCostUsd !== undefined) usage.costUsd = turnCostUsd;
+        const budget = budgetPlan
+            ? settleSessionBudget(budgetPlan, turnCostUsd, isSessionBudgetBreach(budgetPlan, turnOutcome))
+            : undefined;
+        const outcome = budgetAwareOutcome(turnOutcome, budget);
         const outputParsed = result.output;
         const outputError = result.outputError ? describeStructuredOutputError(result.outputError) : undefined;
         const compactedTools = compactions.length > 0
@@ -3815,7 +4003,12 @@ async function runAgentChatTurn(
         // and the title cut from the same string.
         const updatedMessages: IAgentConversation['messages'] = [
             ...(conversation.messages || []),
-            { role: 'user', content: persistedUserMessage, timestamp: now },
+            {
+                role: 'user',
+                content: persistedUserMessage,
+                ...(attached.attachments.length > 0 ? { attachments: attached.attachments } : {}),
+                timestamp: now,
+            },
             {
                 role: 'assistant',
                 content: outcome.content,
@@ -3838,6 +4031,7 @@ async function runAgentChatTurn(
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
                 title: firstTurnTitle(conversation, updatedMessages.length, persistedUserMessage),
+                ...(budget ? { spentUsd: budget.spentUsd } : {}),
             });
             await saveConversationState(db, {
                 conversationId,
@@ -3862,13 +4056,14 @@ async function runAgentChatTurn(
         await turnEvents.finish({
             // A turn the deadline or an async cancel already decided was not
             // persisted; the log says what the caller was told.
-            stopReason: supersededByDeadlineOrCancel ? 'cancelled' : sessionStopReason(outcome.stopReason, pause),
+            stopReason: supersededByDeadlineOrCancel ? 'cancelled' : sessionStopReason(outcome.stopReason, pause, budget),
             ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
             content: outcome.content,
             messageIndex: updatedMessages.length - 1,
             userMessage: persistedUserMessage,
             ...(usage ? { usage: { ...usage } } : {}),
             ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+            ...(budget && !supersededByDeadlineOrCancel ? { budget } : {}),
         });
 
         return toAgentChatResponse({
@@ -3879,13 +4074,14 @@ async function runAgentChatTurn(
             content: outcome.content,
             messages: updatedMessages,
             reasoning: assistantReasoning,
-            outcome,
+            outcome: budget?.reached ? { stopReason: 'budget_reached', stopDetail: outcome.stopDetail } : outcome,
             usage,
             outputParsed,
             outputError,
             ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
         });
     } finally {
+        await recordSessionTurnSpend({ db, conversationId, plan: budgetPlan, tappedUsd: tappedUsd() });
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
     }
 }
@@ -4059,6 +4255,57 @@ async function priceTurn(
     }
 }
 
+/**
+ * What a turn cost, for the session budget. With a budget in force this is the
+ * SDK's own per-request usage priced by the cost estimator — the figure the
+ * budget was enforced against, sub-agent models at their own prices — and
+ * otherwise (or when the SDK reported no per-request usage) the turn's total
+ * usage at the primary model's price.
+ */
+async function priceAgentTurn(input: {
+    plan: SessionBudgetPlan | null;
+    result: Pick<AgentSdkInvokeResult, 'state'>;
+    costEstimator: ReturnType<typeof buildCostEstimator>;
+    pricing: IModelPricing | null | undefined;
+    usage: AgentPlaygroundChatResult['usage'];
+}): Promise<number | undefined> {
+    const perRequest = (input.result.state as {
+        usage?: {
+            perRequest?: Array<{
+                modelName?: string;
+                usage?: {
+                    prompt_tokens?: number;
+                    completion_tokens?: number;
+                    prompt_tokens_details?: { cached_tokens?: number };
+                    completion_tokens_details?: { reasoning_tokens?: number };
+                };
+            }>;
+        };
+    } | undefined)?.usage?.perRequest;
+    if (input.plan && input.costEstimator && Array.isArray(perRequest) && perRequest.length > 0) {
+        let cost = 0;
+        for (const request of perRequest) {
+            cost += input.costEstimator({
+                modelName: request.modelName,
+                inputTokens: Number(request.usage?.prompt_tokens) || 0,
+                outputTokens: Number(request.usage?.completion_tokens) || 0,
+                cachedInputTokens: Number(request.usage?.prompt_tokens_details?.cached_tokens) || 0,
+                reasoningTokens: Number(request.usage?.completion_tokens_details?.reasoning_tokens) || 0,
+            }) || 0;
+        }
+        return cost;
+    }
+    return priceTurn(input.pricing, input.usage);
+}
+
+/**
+ * The turn's outcome as it is reported when the SESSION budget stopped it: the
+ * SDK's `limit` becomes `budget_reached`, with the budget's own wording.
+ */
+function budgetAwareOutcome(outcome: AgentTurnOutcome, settlement: SessionBudgetSettlement | undefined): AgentTurnOutcome {
+    return settlement?.reached ? { ...outcome, stopDetail: budgetStopDetail(settlement) } : outcome;
+}
+
 function describeStructuredOutputError(error: unknown): string {
     if (typeof error === 'string') return error;
     const record = error as { message?: unknown; issues?: unknown } | null;
@@ -4124,6 +4371,26 @@ async function runPlaygroundChatTurn(
     // idle or write an error into it.
     const hitlSettings = resolveHitlConfig(config.humanInTheLoop);
     if (sessionConversation) await assertNoBlockingPending(db, sessionConversation, hitlSettings);
+
+    // The files this message attaches must be files of this session.
+    const attachedRecords = await resolveMessageAttachments({
+        tenantDbName, tenantId, projectId, conversation: sessionConversation, config, fileIds: request.attachments,
+    });
+
+    // The session's own budget (a Session only — a stateless call has none) and
+    // the tenant's spend limit, for a turn that calls a model. Refused before the
+    // event log opens, like the check above.
+    const callsModel = !(config.kind === 'external' && config.connection);
+    const budgetPlan = callsModel && sessionConversation
+        ? planSessionBudget(sessionConversation, config.runtime?.limits?.maxCostUsd)
+        : null;
+    const spend = callsModel && config.modelKey
+        ? await resolveAgentSpendScope({
+            tenantDbName, tenantId, projectId,
+            userId: request.runtimeContext?.userId ?? (sessionConversation ? String(sessionConversation.createdBy) : undefined),
+        })
+        : undefined;
+    if (spend) await assertAgentTurnSpendAllowed(spend, config);
     const history = sessionConversation
         ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
         : request.history;
@@ -4131,6 +4398,7 @@ async function runPlaygroundChatTurn(
     const turnEvents = sessionConversation
         ? startSessionTurnEvents({
             db,
+            tenantDbName,
             tenantId,
             projectId,
             agentKey,
@@ -4211,7 +4479,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -4235,12 +4503,17 @@ async function runPlaygroundChatTurn(
         threadId: request.conversationId,
         // A stateless call has nowhere to park a paused turn.
         canPause: Boolean(sessionConversation),
+        ...(spend ? { spend } : {}),
     });
 
+    const attached = await assembleMessageAttachments({
+        tenantDbName, tenantId, projectId, records: attachedRecords, config, model, warnings,
+    });
     const inputState = buildTurnInputState({
         carried,
         transcript: history || [],
         userMessage,
+        userContent: buildUserTurnContent(userMessage, attached),
         systemPrompt,
     });
     const priorExecutionIds = new Set(
@@ -4287,6 +4560,7 @@ async function runPlaygroundChatTurn(
         ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
         // The SDK checks it between steps and hands it to the model call.
         ...(signal ? { cancellationToken: signal } : {}),
+        ...sessionBudgetInvokeOptions(budgetPlan),
     };
 
     const invokeStartedAt = Date.now();
@@ -4318,7 +4592,7 @@ async function runPlaygroundChatTurn(
                     tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: aborted.content,
                     source: 'agent-playground',
                 });
-                const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, aborted);
+                const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, aborted, undefined, attached.attachments);
                 await turnEvents?.finish({
                     stopReason: 'cancelled',
                     content: aborted.content,
@@ -4339,10 +4613,13 @@ async function runPlaygroundChatTurn(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const outcome = describeTurnOutcome(result, inputState.messages.length);
+        const turnOutcome = describeTurnOutcome(result, inputState.messages.length);
         const compactedTools = compactions.length > 0
             ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
+
+        // Priced below; the session budget (if any) is settled once the cost is known.
+        let outcome: AgentTurnOutcome = turnOutcome;
 
         logger.info('Playground chat completed', {
             agentKey,
@@ -4368,9 +4645,18 @@ async function runPlaygroundChatTurn(
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
         };
 
-        const costUsd = await priceTurn(model.pricing, playgroundResult.usage);
+        const costUsd = await priceAgentTurn({
+            plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage: playgroundResult.usage,
+        });
         if (costUsd !== undefined && playgroundResult.usage) {
             playgroundResult.usage.costUsd = costUsd;
+        }
+        const budget = budgetPlan
+            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome))
+            : undefined;
+        if (budget?.reached) {
+            outcome = budgetAwareOutcome(turnOutcome, budget);
+            playgroundResult.stopDetail = outcome.stopDetail;
         }
 
         if (sessionConversation) {
@@ -4392,7 +4678,7 @@ async function runPlaygroundChatTurn(
                 if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
                 else playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
             }
-            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
+            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult, budget?.spentUsd, attached.attachments);
             if (messageCount !== undefined) {
                 await saveConversationState(db, {
                     conversationId: String(sessionConversation._id),
@@ -4406,17 +4692,21 @@ async function runPlaygroundChatTurn(
             }
             for (const action of pause?.actions ?? []) turnEvents?.emitInTurn('action.required', actionRequiredEventData(action));
             await turnEvents?.finish({
-                stopReason: sessionStopReason(outcome.stopReason, pause),
+                stopReason: sessionStopReason(outcome.stopReason, pause, budget),
                 ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
                 content: playgroundResult.content,
                 ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
                 ...(playgroundResult.usage ? { usage: { ...playgroundResult.usage } } : {}),
                 ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+                ...(budget ? { budget } : {}),
             });
         }
 
         return playgroundResult;
     } finally {
+        if (sessionConversation) {
+            await recordSessionTurnSpend({ db, conversationId: String(sessionConversation._id), plan: budgetPlan, tappedUsd: tappedUsd() });
+        }
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
     }
 }
@@ -4436,12 +4726,21 @@ async function persistSessionTurn(
     conversation: IAgentConversation,
     userMessage: string,
     result: AgentPlaygroundChatResult,
+    /** The session's running spend after this turn, when it has a budget. */
+    spentUsd?: number,
+    /** Files the user message attaches. */
+    attachments?: IAgentMessageAttachment[],
 ): Promise<number | undefined> {
     try {
         const now = new Date();
         const messages: IAgentConversation['messages'] = [
             ...conversation.messages,
-            { role: 'user', content: userMessage, timestamp: now },
+            {
+                role: 'user',
+                content: userMessage,
+                ...(attachments && attachments.length > 0 ? { attachments } : {}),
+                timestamp: now,
+            },
             {
                 role: 'assistant',
                 content: result.content,
@@ -4469,6 +4768,7 @@ async function persistSessionTurn(
             title: (!conversation.title || conversation.title === 'New conversation') && messages.length <= 2
                 ? userMessage.substring(0, 80)
                 : conversation.title,
+            ...(spentUsd !== undefined ? { spentUsd } : {}),
         });
         return messages.length;
     } catch (error) {
@@ -4501,6 +4801,19 @@ export interface AgentResumeRequest {
     onCompaction?: (compaction: IAgentTurnCompaction) => void;
     /** Called right before the SDK loop is invoked — after this the answers are spent. */
     onInvokeStart?: () => void;
+    /**
+     * Set to continue a session that stopped on its spend budget rather than on
+     * a pause: there are no answers to apply and no new user message — the loop
+     * is invoked on the state the session ended in and the model carries on from
+     * its last tool results. `source` is the surface it belongs to (the
+     * dashboard's playground or the live API); `usePublished` / `version` pick
+     * the config the way a normal turn does.
+     */
+    continuation?: {
+        source: 'agent' | 'agent-playground';
+        usePublished?: boolean;
+        version?: number;
+    };
 }
 
 export interface AgentResumeResult {
@@ -4547,6 +4860,58 @@ async function loadPausedRun(
         config = snapshot.snapshot.config;
     }
     return { conversation, agent, config, version, paused, approvals, questions, bySdkId };
+}
+
+/**
+ * What continuing a budget-stopped session reads back: the conversation, the
+ * config the continuation runs with, and the state the session ended in. Refuses
+ * (409) a session that did not stop on its budget, is waiting for a person, or
+ * has no stored state to carry on from.
+ */
+async function loadContinuationRun(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    request: Pick<AgentResumeRequest, 'tenantDbName' | 'projectId' | 'agentKey' | 'conversationId'>,
+    continuation: NonNullable<AgentResumeRequest['continuation']>,
+) {
+    const conversation = await db.findAgentConversationById(request.conversationId);
+    if (!conversation || conversation.projectId !== request.projectId || conversation.agentKey !== request.agentKey) {
+        throw new Error(`Conversation "${request.conversationId}" not found`);
+    }
+    if (conversation.runtimeStatus === 'requires_action') {
+        throw new AgentResumeError('This session is waiting for an approval or an answer. Resolve it first.');
+    }
+    if (conversation.runtimeStatus === 'running') {
+        throw new AgentResumeError('This session is running a turn right now.');
+    }
+    // `error`: an earlier attempt to continue failed — the stored state is untouched, so try again.
+    if (conversation.stopReason !== 'budget_reached' && conversation.stopReason !== 'error') {
+        throw new AgentResumeError('This session did not stop on its budget, so there is nothing to continue.');
+    }
+    const carried = await loadConversationState(db, conversation);
+    const last = carried?.messages?.[carried.messages.length - 1] as { role?: string; tool_calls?: unknown[] } | undefined;
+    if (!carried || !last) {
+        throw new AgentResumeError('This session can no longer be continued: its stored state was not found.');
+    }
+    // A transcript that already ends in the agent's own answer has nothing left to do.
+    if (last.role === 'assistant' && !(Array.isArray(last.tool_calls) && last.tool_calls.length > 0)) {
+        throw new AgentResumeError('This session already ended with an answer, so there is nothing to continue.');
+    }
+
+    let agent: IAgent;
+    let config: IAgentConfig;
+    let version: number | null = null;
+    if (continuation.usePublished || continuation.version !== undefined) {
+        const resolved = await resolveAgentConfig(request.tenantDbName, request.agentKey, request.projectId, continuation.version);
+        agent = resolved.agent;
+        config = resolved.config;
+        version = resolved.resolvedVersion;
+    } else {
+        const found = await db.findAgentByKey(request.agentKey, request.projectId);
+        if (!found) throw new Error(`Agent "${request.agentKey}" not found`);
+        agent = found;
+        config = found.config;
+    }
+    return { conversation, agent, config, version, carried };
 }
 
 /**
@@ -4601,6 +4966,19 @@ export async function validateApprovedArgs(input: {
 }
 
 /**
+ * Continues a session that stopped on its spend budget, after the budget was
+ * raised: the same smart loop, invoked on the state the session ended in with no
+ * new user message. The result is a NEW assistant message, like a resume.
+ */
+export function executeAgentContinueLocal(
+    request: Omit<AgentResumeRequest, 'trigger' | 'continuation'> & {
+        continuation: NonNullable<AgentResumeRequest['continuation']>;
+    },
+): Promise<AgentResumeResult> {
+    return executeAgentResumeLocal({ ...request, trigger: 'resume' });
+}
+
+/**
  * Continues a paused turn once every pending action is answered: the agent is
  * rebuilt from the config the paused turn used, the stored state is restored,
  * each resolution is applied with the SDK (`resolveToolApproval` /
@@ -4627,24 +5005,46 @@ async function runAgentResumeTurn(
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
 
-    let pausedRun: Awaited<ReturnType<typeof loadPausedRun>>;
-    try {
-        pausedRun = await loadPausedRun(db, request);
-    } catch (error) {
-        // The state this run would continue from is gone: the session is not
-        // waiting for anything any more, so it must not keep saying it is.
-        if (error instanceof AgentResumeError && error.stateLost) {
-            await db.updateAgentConversationRuntime(conversationId, {
-                runtimeStatus: 'idle', stopReason: 'error', pendingActionIds: [],
-            }).catch(() => undefined);
+    // A pause to continue — or, for a budget-stopped session, the state it ended in.
+    let pausedRun: Awaited<ReturnType<typeof loadPausedRun>> | null = null;
+    let continued: Awaited<ReturnType<typeof loadContinuationRun>> | null = null;
+    if (request.continuation) {
+        continued = await loadContinuationRun(db, request, request.continuation);
+    } else {
+        try {
+            pausedRun = await loadPausedRun(db, request);
+        } catch (error) {
+            // The state this run would continue from is gone: the session is not
+            // waiting for anything any more, so it must not keep saying it is.
+            if (error instanceof AgentResumeError && error.stateLost) {
+                await db.updateAgentConversationRuntime(conversationId, {
+                    runtimeStatus: 'idle', stopReason: 'error', pendingActionIds: [],
+                }).catch(() => undefined);
+            }
+            throw error;
         }
-        throw error;
     }
-    const {
-        conversation, agent, config, version, paused, approvals, questions, bySdkId,
-    } = pausedRun;
-    const source = paused.source;
+    const loaded = (pausedRun ?? continued)!;
+    const { conversation, agent, config, version } = loaded;
+    const paused = pausedRun?.paused ?? null;
+    const approvals = pausedRun?.approvals ?? [];
+    const questions = pausedRun?.questions ?? [];
+    const bySdkId = pausedRun?.bySdkId ?? new Map<string, IAgentPendingAction>();
+    const source: 'agent' | 'agent-playground' = paused?.source ?? request.continuation!.source;
     const startedAt = Date.now();
+
+    // The session's own budget and the tenant's spend limit, before the model is
+    // called. A refusal here comes before `onInvokeStart`, so a pause's answers
+    // are not spent and can be given again once the limit is lifted.
+    const budgetPlan = planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd);
+    // A continued pause is the spend of whoever started the turn, not of the approver.
+    const anchorAction = bySdkId.get(approvals[0]?.id ?? questions[0]?.id ?? '');
+    const spend = config.modelKey
+        ? await resolveAgentSpendScope({
+            tenantDbName, tenantId, projectId, userId: anchorAction?.createdBy ?? request.userId,
+        })
+        : undefined;
+    if (spend) await assertAgentTurnSpendAllowed(spend, config);
 
     // Same merge as a playground turn: the session's context under the caller's.
     const sessionContext = conversation.metadata?.runtimeContext as AgentRuntimeContext | undefined;
@@ -4657,7 +5057,7 @@ async function runAgentResumeTurn(
         }
         : request.runtimeContext;
 
-    const { sdkAgent, model, cleanupTasks, warnings, hitl } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -4674,11 +5074,13 @@ async function runAgentResumeTurn(
         conversation,
         memoryConversationId: conversationId,
         threadId: conversationId,
+        ...(spend ? { spend } : {}),
     });
 
     try {
         const turnEvents = startSessionTurnEvents({
             db,
+            tenantDbName,
             tenantId,
             projectId,
             agentKey,
@@ -4694,8 +5096,15 @@ async function runAgentResumeTurn(
             }
             : undefined;
 
-        // Apply every answer with the SDK, then run the loop again.
-        let state = paused.state;
+        // Apply every answer with the SDK, then run the loop again. A budget-stopped
+        // session has no answers: it carries on from the state it ended in.
+        let state = paused
+            ? paused.state
+            : buildContinueInputState({
+                carried: continued!.carried,
+                // The dashboard playground hands the agent its prompt as a message.
+                ...(source === 'agent-playground' && systemPrompt ? { systemPrompt } : {}),
+            });
         try {
             for (const entry of approvals) {
                 const action = bySdkId.get(entry.id)!;
@@ -4765,6 +5174,7 @@ async function runAgentResumeTurn(
             ...(request.cancellationCell?.deadlineAt !== undefined
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
                 : {}),
+            ...sessionBudgetInvokeOptions(budgetPlan),
         };
 
         request.onInvokeStart?.();
@@ -4805,19 +5215,23 @@ async function runAgentResumeTurn(
         if (blocked) throw blocked;
 
         const assistantReasoning = extractAgentReasoning(result);
-        const outcome = describeTurnOutcome(result, inputMessageCount);
+        const turnOutcome = describeTurnOutcome(result, inputMessageCount);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const compactedTools = compactions.length > 0
             ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
         const steps = extractPlaygroundSteps(result, priorExecutionIds);
-        const costUsd = await priceTurn(model.pricing, usage);
+        const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
         if (costUsd !== undefined && usage) usage.costUsd = costUsd;
+        const budget = budgetPlan
+            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome))
+            : undefined;
+        const outcome = budgetAwareOutcome(turnOutcome, budget);
 
         const superseded = isCancellationCellTripped(request.cancellationCell);
         let pause: OpenedPause | null = null;
         if (outcome.stopReason === 'paused' && !superseded) {
-            const firstAction = bySdkId.get(approvals[0]?.id ?? questions[0].id)!;
+            const firstAction = anchorAction;
             pause = await openPause(db, {
                 state: result.state,
                 source,
@@ -4828,8 +5242,8 @@ async function runAgentResumeTurn(
                 ...(request.runId ? { runId: request.runId } : {}),
                 hitl,
                 agentVersion: version,
-                usePublished: firstAction.usePublished ?? false,
-                createdBy: firstAction.createdBy ?? request.userId,
+                usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
+                createdBy: firstAction?.createdBy ?? request.userId,
             });
             if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
         }
@@ -4855,7 +5269,7 @@ async function runAgentResumeTurn(
         const messages = [...(conversation.messages ?? []), assistantMessage];
 
         if (!superseded) {
-            await db.updateAgentConversation(conversationId, { messages });
+            await db.updateAgentConversation(conversationId, { messages, ...(budget ? { spentUsd: budget.spentUsd } : {}) });
             await saveConversationState(db, {
                 conversationId,
                 tenantId,
@@ -4874,7 +5288,7 @@ async function runAgentResumeTurn(
         });
 
         for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
-        const stopReason: SessionStopReason = superseded ? 'cancelled' : sessionStopReason(outcome.stopReason, pause);
+        const stopReason: SessionStopReason = superseded ? 'cancelled' : sessionStopReason(outcome.stopReason, pause, budget);
         await turnEvents.finish({
             stopReason,
             ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
@@ -4882,6 +5296,7 @@ async function runAgentResumeTurn(
             messageIndex: messages.length - 1,
             ...(usage ? { usage: { ...usage } } : {}),
             ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+            ...(budget && !superseded ? { budget } : {}),
         });
 
         const { timestamp: _timestamp, role: _role, ...playground } = assistantMessage;
@@ -4896,7 +5311,7 @@ async function runAgentResumeTurn(
                 content: outcome.content,
                 messages,
                 reasoning: assistantReasoning,
-                outcome,
+                outcome: budget?.reached ? { stopReason: 'budget_reached', stopDetail: outcome.stopDetail } : outcome,
                 usage,
                 outputParsed: result.output,
                 outputError: result.outputError ? describeStructuredOutputError(result.outputError) : undefined,
@@ -4905,6 +5320,7 @@ async function runAgentResumeTurn(
             stopReason,
         };
     } finally {
+        await recordSessionTurnSpend({ db, conversationId, plan: budgetPlan, tappedUsd: tappedUsd() });
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: source === 'agent' ? 'chat' : 'playground' });
     }
 }

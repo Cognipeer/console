@@ -212,9 +212,9 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       db.prepare(`
         INSERT INTO ${TABLES.agentConversations}
         (id, tenantId, projectId, agentKey, title, messages, metadata, createdBy, createdAt, updatedAt,
-         runtimeStatus, stopReason, pendingActionIds, lastEventSeq)
+         runtimeStatus, stopReason, pendingActionIds, lastEventSeq, budget, spentUsd)
         VALUES (@id, @tenantId, @projectId, @agentKey, @title, @messages, @metadata, @createdBy, @createdAt, @updatedAt,
-         @runtimeStatus, @stopReason, @pendingActionIds, @lastEventSeq)
+         @runtimeStatus, @stopReason, @pendingActionIds, @lastEventSeq, @budget, @spentUsd)
       `).run({
         id,
         tenantId: conversation.tenantId,
@@ -230,6 +230,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         stopReason: conversation.stopReason ?? null,
         pendingActionIds: conversation.pendingActionIds ? this.toJson(conversation.pendingActionIds) : null,
         lastEventSeq: conversation.lastEventSeq ?? null,
+        budget: conversation.budget ? this.toJson(conversation.budget) : null,
+        spentUsd: conversation.spentUsd ?? null,
       });
 
       return { ...conversation, _id: id, createdAt: new Date(now), updatedAt: new Date(now) };
@@ -251,6 +253,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (data.stopReason !== undefined) { sets.push('stopReason = @stopReason'); params.stopReason = data.stopReason; }
       if (data.pendingActionIds !== undefined) { sets.push('pendingActionIds = @pendingActionIds'); params.pendingActionIds = this.toJson(data.pendingActionIds); }
       if (data.lastEventSeq !== undefined) { sets.push('lastEventSeq = @lastEventSeq'); params.lastEventSeq = data.lastEventSeq; }
+      if (data.budget !== undefined) { sets.push('budget = @budget'); params.budget = data.budget ? this.toJson(data.budget) : null; }
+      if (data.spentUsd !== undefined) { sets.push('spentUsd = @spentUsd'); params.spentUsd = data.spentUsd; }
 
       db.prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE id = @id`).run(params);
       return this.findAgentConversationById(id);
@@ -258,7 +262,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async updateAgentConversationRuntime(
       id: string,
-      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq'>>,
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
     ): Promise<void> {
       const sets: string[] = [];
       const params: Record<string, unknown> = { id };
@@ -266,6 +270,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (patch.stopReason !== undefined) { sets.push('stopReason = @stopReason'); params.stopReason = patch.stopReason; }
       if (patch.pendingActionIds !== undefined) { sets.push('pendingActionIds = @pendingActionIds'); params.pendingActionIds = this.toJson(patch.pendingActionIds); }
       if (patch.lastEventSeq !== undefined) { sets.push('lastEventSeq = @lastEventSeq'); params.lastEventSeq = patch.lastEventSeq; }
+      if (patch.budget !== undefined) { sets.push('budget = @budget'); params.budget = patch.budget ? this.toJson(patch.budget) : null; }
+      if (patch.spentUsd !== undefined) { sets.push('spentUsd = @spentUsd'); params.spentUsd = patch.spentUsd; }
       if (sets.length === 0) return;
       this.getTenantDb().prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE id = @id`).run(params);
     }
@@ -641,6 +647,8 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         ...(row.stopReason ? { stopReason: String(row.stopReason) as IAgentConversation['stopReason'] } : {}),
         ...(row.pendingActionIds ? { pendingActionIds: this.parseJson<string[]>(row.pendingActionIds, []) } : {}),
         ...(row.lastEventSeq !== null && row.lastEventSeq !== undefined ? { lastEventSeq: Number(row.lastEventSeq) } : {}),
+        ...(row.budget ? { budget: this.parseJson<IAgentConversation['budget']>(row.budget, null) } : {}),
+        ...(row.spentUsd !== null && row.spentUsd !== undefined ? { spentUsd: Number(row.spentUsd) } : {}),
         createdBy: String(row.createdBy),
         createdAt: row.createdAt ? new Date(row.createdAt as string) : undefined,
         updatedAt: row.updatedAt ? new Date(row.updatedAt as string) : undefined,

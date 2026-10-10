@@ -40,6 +40,8 @@ export interface UploadFileRequest {
   createdBy: string;
   convertToMarkdown?: boolean;
   keyHint?: string;
+  /** Session-file tags written onto the record (`IFileRecord.purpose` and friends). */
+  recordExtras?: Partial<Pick<IFileRecord, 'purpose' | 'conversationId' | 'agentKey' | 'expiresAt' | 'uploadedBy'>>;
 }
 
 export interface UploadFileResponse {

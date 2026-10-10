@@ -48,6 +48,7 @@ export const SETTINGS_NAV_ORDER: string[] = [
   'providers',
   'resources',
   'tokens',
+  'webhooks',
   'audit',
   'iam',
   'license',

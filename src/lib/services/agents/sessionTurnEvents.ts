@@ -12,6 +12,7 @@ import type { SmartAgentEvent as AgentSdkEvent } from '@cognipeer/agent-sdk';
 import { createLogger } from '@/lib/core/logger';
 import type { DatabaseProvider, IAgentTurnCompaction } from '@/lib/database';
 import { classifyAgentRunError } from './agentErrors';
+import { sessionUsageEventData, type SessionBudgetSettlement } from './sessionBudget';
 import {
   createSessionEventWriter,
   type SessionEventBus,
@@ -28,6 +29,8 @@ type TurnDb = Pick<
 
 export interface SessionTurnEventsOptions {
   db: TurnDb;
+  /** Present = the turn's `session.idled` / `action.required` / … also reach webhook subscriptions. */
+  tenantDbName?: string;
   tenantId: string;
   projectId: string;
   agentKey: string;
@@ -56,6 +59,12 @@ export interface SessionTurnFinish {
   /** The runtime's wording for a limit / pause. */
   detail?: string;
   pendingActionIds?: string[];
+  /**
+   * The session's spend budget after this turn. Present only for a session that
+   * has one: it adds `session.usage` (and `budget.reached` when the turn was
+   * stopped by it), and a pausing budget leaves the session `budget_paused`.
+   */
+  budget?: SessionBudgetSettlement;
 }
 
 export interface SessionTurnEvents {
@@ -86,9 +95,13 @@ export interface SessionTurnEvents {
 export function conversationRuntimePatch(
   stopReason: SessionStopReason,
   pendingActionIds: string[] = [],
+  budget?: SessionBudgetSettlement,
 ) {
+  const budgetPaused = stopReason === 'budget_reached' && budget?.budget.onReach === 'pause';
   return {
-    runtimeStatus: stopReason === 'requires_action' ? ('requires_action' as const) : ('idle' as const),
+    runtimeStatus: stopReason === 'requires_action'
+      ? ('requires_action' as const)
+      : budgetPaused ? ('budget_paused' as const) : ('idle' as const),
     stopReason,
     pendingActionIds: stopReason === 'requires_action' ? pendingActionIds : [],
   };
@@ -103,6 +116,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     agentKey: options.agentKey,
     conversationId,
     ...(options.runId ? { runId: options.runId } : {}),
+    ...(options.tenantDbName ? { tenantDbName: options.tenantDbName } : {}),
     ...(options.bus ? { bus: options.bus } : {}),
   });
 
@@ -135,12 +149,12 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
     });
 
   let finished = false;
-  const settle = async (stopReason: SessionStopReason, pendingActionIds?: string[]) => {
+  const settle = async (stopReason: SessionStopReason, pendingActionIds?: string[], budget?: SessionBudgetSettlement) => {
     await marked;
     // The status goes in BEFORE the buffered idle / action frames are published,
     // so a follower that reloads the session on that frame never reads 'running'.
     try {
-      await db.updateAgentConversationRuntime(conversationId, conversationRuntimePatch(stopReason, pendingActionIds));
+      await db.updateAgentConversationRuntime(conversationId, conversationRuntimePatch(stopReason, pendingActionIds, budget));
     } catch (error) {
       logger.warn('Could not record the session stop reason', { conversationId, error: String(error) });
     }
@@ -223,6 +237,15 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
               ...(result.usage ? { usage: result.usage } : {}),
             });
           }
+          if (result.budget) {
+            writer.emit('session.usage', sessionUsageEventData(result.budget));
+            if (result.budget.reached) {
+              writer.emit('budget.reached', {
+                spentUsd: result.budget.spentUsd,
+                maxCostUsd: result.budget.budget.maxCostUsd,
+              });
+            }
+          }
           writer.emit('session.status_idle', {
             stopReason: result.stopReason,
             ...(result.pendingActionIds?.length ? { pendingActionIds: result.pendingActionIds } : {}),
@@ -230,7 +253,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
           });
           if (result.stopReason === 'end_turn') writer.emit('session.work_done', {});
         });
-        await settle(result.stopReason, result.pendingActionIds);
+        await settle(result.stopReason, result.pendingActionIds, result.budget);
       } catch (error) {
         logger.warn('Session event recorder failed (finish)', { conversationId, error: String(error) });
       }

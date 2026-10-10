@@ -212,10 +212,10 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async updateAgentConversationRuntime(
       id: string,
-      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq'>>,
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
     ): Promise<void> {
       const set: Record<string, unknown> = {};
-      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq'] as const) {
+      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq', 'budget', 'spentUsd'] as const) {
         if (patch[key] !== undefined) set[key] = patch[key];
       }
       if (Object.keys(set).length === 0) return;

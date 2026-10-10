@@ -17,6 +17,7 @@ vi.mock('node:dns/promises', () => ({
 import {
   assertPublicUrl,
   isPrivateIpAddress,
+  OutboundDnsError,
   OutboundNetworkError,
   safeFetch,
 } from '@/lib/security/outboundFetch';
@@ -72,6 +73,26 @@ describe('isPrivateIpAddress', () => {
       expect(isPrivateIpAddress(ip), ip).toBe(true);
     }
     expect(isPrivateIpAddress('2606:2800:220:1:248:1893:25c8:1946')).toBe(false);
+  });
+});
+
+describe('assertPublicUrl: a failed lookup is not a private address', () => {
+  it('throws an OutboundDnsError (still an OutboundNetworkError) and does not cache the failure', async () => {
+    const error = await assertPublicUrl('https://flaky.example.net/hook').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OutboundDnsError);
+    expect(error).toBeInstanceOf(OutboundNetworkError);
+    expect((error as OutboundDnsError).code).toBe('dns_lookup_failed');
+    expect((error as Error).message).not.toMatch(/private/);
+
+    // The resolver recovered: the very next check must look the host up again.
+    mockLookupOnce([{ address: '93.184.216.34', family: 4 }], [{ address: '93.184.216.34', family: 4 }]);
+    await expect(assertPublicUrl('https://flaky.example.net/hook')).resolves.toBeInstanceOf(URL);
+  });
+
+  it('a resolved private address is still the plain refusal, not a DNS error', async () => {
+    const error = await assertPublicUrl('https://internal.corp.example/hook').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OutboundNetworkError);
+    expect(error).not.toBeInstanceOf(OutboundDnsError);
   });
 });
 
