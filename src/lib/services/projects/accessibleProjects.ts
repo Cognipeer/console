@@ -26,10 +26,12 @@ export async function collectAccessibleProjectIds(
     }
   }
 
-  // Projects inherited through group membership.
+  // Projects inherited through group membership (one read per group, all at once).
   const groupMemberships = await db.listGroupMembersByUser(userId);
-  for (const groupMembership of groupMemberships) {
-    const groupProjects = await db.listGroupProjectsByGroup(String(groupMembership.groupId));
+  const assignments = await Promise.all(
+    groupMemberships.map((groupMembership) => db.listGroupProjectsByGroup(String(groupMembership.groupId))),
+  );
+  for (const groupProjects of assignments) {
     for (const groupProject of groupProjects) {
       if (groupProject.projectId) {
         projectIds.add(String(groupProject.projectId));
@@ -43,9 +45,9 @@ export async function collectAccessibleProjectIds(
 /**
  * The caller's membership in ONE project, as a role plus merged service
  * overrides, built from the project assignments of the user's groups only.
- * Used by the enforce-mode project resolution for a user whose access to the
- * project comes through a group (no direct UserProject / legacy `projectIds`
- * entry). Null when no group of the user is assigned to the project.
+ * Used by the project resolution for a user whose access to the project comes
+ * through a group (no direct UserProject / legacy `projectIds` entry). Null when
+ * no group of the user is assigned to the project.
  */
 export async function findGroupProjectMembership(
   db: Pick<DatabaseProvider, 'listGroupMembersByUser' | 'listGroupProjectsByProject'>,

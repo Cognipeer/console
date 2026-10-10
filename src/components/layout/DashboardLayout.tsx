@@ -26,6 +26,7 @@ import ServiceSubNav, {
   type SubNavItem,
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
+import { useEffectivePermissions } from './useEffectivePermissions';
 import { LauncherProvider } from './launcher/LauncherContext';
 import { DashboardUserProvider, type DashboardUser } from './DashboardUserContext';
 import { openSupport } from '@/lib/support/openSupport';
@@ -149,15 +150,20 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
     [hasShellUser, shellUserName, shellUserEmail, shellUserLicense, shellUserRole],
   );
 
+  // What the engine allows in the ACTIVE project (null while loading or when it could not say:
+  // the menu is then role-based). A service narrowed to "none" here is not offered at all.
+  const effectivePermissions = useEffectivePermissions();
+
   const allowedServices = useMemo(
     () =>
       getDashboardServices({
         isTenantAdmin,
         role: defaultUser.role,
         servicePermissions: defaultUser.servicePermissions,
+        effectivePermissions,
         isOnPrem,
       }),
-    [defaultUser.role, defaultUser.servicePermissions, isTenantAdmin, isOnPrem],
+    [defaultUser.role, defaultUser.servicePermissions, effectivePermissions, isTenantAdmin, isOnPrem],
   );
 
   const settingsServices = useMemo(

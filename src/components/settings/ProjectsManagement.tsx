@@ -8,6 +8,7 @@ import { useDeleteResource } from '@/components/common/confirm';
 import { useTranslations } from '@/lib/i18n';
 import { IconEdit, IconPlus, IconStar, IconTrash } from '@tabler/icons-react';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
+import { notifyActiveProjectChanged } from '@/components/layout/useEffectivePermissions';
 
 type Project = {
   _id: string;
@@ -129,6 +130,8 @@ export default function ProjectsManagement() {
       }
       await fetchProjects();
       router.refresh();
+      // What the navigation shows depends on the active project's limits.
+      notifyActiveProjectChanged();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to set active project';
       notifications.show({ title: 'Projects', message, color: 'red' });

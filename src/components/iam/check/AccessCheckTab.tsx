@@ -38,7 +38,7 @@ import {
   type SimulateRequest,
   type SimulateResponse,
 } from '../api';
-import { parseCheckParams, policyHref } from '../links';
+import { iamHref, parseCheckParams, policyHref } from '../links';
 import ActionSelect from '../pickers/ActionSelect';
 import PrincipalSelect from '../pickers/PrincipalSelect';
 import ResourceSelect from '../pickers/ResourceSelect';
@@ -70,6 +70,17 @@ interface CheckResult {
   response: SimulateResponse;
   principalLabel: string;
   resourceLabel: string;
+  /** The service the checked action belongs to, and the level it asks for. */
+  service: string | null;
+  level: 'read' | 'write' | 'admin' | null;
+}
+
+/** A refusal because the engine could not decide (not a policy answer): shown as such, with a way to check on it. */
+const UNAVAILABLE_CODES = ['engine_unavailable', 'authorization_unavailable'];
+
+interface CheckFailure {
+  message: string;
+  unavailable: boolean;
 }
 
 const toIso = (value: Date | string | null): string | null => {
@@ -96,7 +107,7 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
   const [form, setForm] = useState<CheckForm>(() => emptyForm());
   const [result, setResult] = useState<CheckResult | null>(null);
   const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CheckFailure | null>(null);
   const [showErrors, setShowErrors] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
 
@@ -104,6 +115,8 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
   const [decision, setDecision] = useState<DecisionRecord | null>(null);
   const [decisionLoading, setDecisionLoading] = useState(false);
   const [decisionError, setDecisionError] = useState<string | null>(null);
+  // A decision that was not a policy answer at all: the engine could not decide that request (HTTP 503).
+  const [decisionUnavailable, setDecisionUnavailable] = useState(false);
 
   const runSeq = useRef(0);
 
@@ -143,23 +156,29 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
       try {
         const response = await iamApi.simulate(request);
         if (seq !== runSeq.current) return;
+        const checked = index?.actionById.get(request.action);
         setResult({
           request,
           response,
           principalLabel: f.principal?.label ?? request.principal.id,
           resourceLabel: describeResource(f),
+          service: checked?.service ?? null,
+          level: checked && checked.kind !== 'group' ? checked.level : null,
         });
       } catch (err) {
         if (seq !== runSeq.current) return;
         setResult(null);
-        setError(
-          err instanceof IamApiError && err.status === 403 ? t('errors.forbidden') : errorText(err, t('check.failed')),
-        );
+        setError({
+          message:
+            err instanceof IamApiError && err.status === 403 ? t('errors.forbidden') : errorText(err, t('check.failed')),
+          unavailable:
+            err instanceof IamApiError && (err.status === 503 || UNAVAILABLE_CODES.includes(err.code ?? '')),
+        });
       } finally {
         if (seq === runSeq.current) setRunning(false);
       }
     },
-    [describeResource, errorText, t],
+    [describeResource, errorText, index, t],
   );
 
   const loadDecision = useCallback(
@@ -168,10 +187,15 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
       if (!id) return;
       setDecisionLoading(true);
       setDecisionError(null);
+      setDecisionUnavailable(false);
       try {
         const record = await iamApi.getDecision(id);
         setDecision(record);
-        if (record.simulateInput) {
+        if (record.code === 'authorization_unavailable') {
+          // The engine could not decide this request; there was no policy answer to replay.
+          setDecisionUnavailable(true);
+          setResult(null);
+        } else if (record.simulateInput) {
           const input = record.simulateInput;
           const next = applyAction(
             requestToForm(input, { principal: record.principal.label }),
@@ -251,6 +275,7 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
     setShowErrors(false);
     setDecision(null);
     setDecisionError(null);
+    setDecisionUnavailable(false);
     setDecisionInput('');
   };
 
@@ -319,6 +344,22 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
               <Text size="sm" c="red">
                 {decisionError}
               </Text>
+            ) : null}
+            {decisionUnavailable ? (
+              <Alert
+                color="orange"
+                variant="light"
+                icon={<IconAlertTriangle size={16} />}
+                title={t('check.decisionUnavailableTitle')}
+                data-testid="decision-unavailable"
+              >
+                <Stack gap={6} align="flex-start">
+                  <Text size="sm">{t('check.decisionUnavailable')}</Text>
+                  <Anchor component={Link} href={iamHref('overview')} size="sm">
+                    {t('check.openOverview')}
+                  </Anchor>
+                </Stack>
+              </Alert>
             ) : null}
             {decision ? (
               <Group gap="md" wrap="wrap">
@@ -535,8 +576,20 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
         {/* Result */}
         <div>
           {error ? (
-            <Alert color="red" icon={<IconAlertTriangle size={16} />} title={t('check.failed')}>
-              {error}
+            <Alert
+              color={error.unavailable ? 'orange' : 'red'}
+              icon={<IconAlertTriangle size={16} />}
+              title={error.unavailable ? t('check.unavailableTitle') : t('check.failed')}
+              data-testid={error.unavailable ? 'check-unavailable' : 'check-failed'}
+            >
+              <Stack gap={6} align="flex-start">
+                <Text size="sm">{error.message}</Text>
+                {error.unavailable ? (
+                  <Anchor component={Link} href={iamHref('overview')} size="sm">
+                    {t('check.openOverview')}
+                  </Anchor>
+                ) : null}
+              </Stack>
             </Alert>
           ) : result ? (
             <SimulateResultCard
@@ -546,6 +599,8 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
               principalLabel={result.principalLabel}
               resourceLabel={result.resourceLabel}
               canManage={canManage}
+              service={result.service}
+              level={result.level}
             />
           ) : (
             <Paper withBorder radius="md" p="xl">

@@ -7,18 +7,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/lib/database', async () => {
   const actual = await vi.importActual<typeof import('@/lib/database')>('@/lib/database');
+  const getDatabase = vi.fn();
   return {
     ...actual,
-    getDatabase: vi.fn().mockResolvedValue({
-      switchToTenant: vi.fn().mockResolvedValue(undefined),
-      findUserById: vi.fn().mockResolvedValue({
-        _id: 'user-1',
-        email: 'a@b.com',
-        role: 'owner',
-        tenantId: 'tenant-1',
-        servicePermissions: {},
-      }),
-    }),
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope,
+    // which must reach this mock and not the real database.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
   };
 });
 
@@ -73,6 +68,8 @@ import {
   detokenizePii,
   scanWithPolicy,
 } from '@/lib/services/pii';
+import { getDatabase } from '@/lib/database';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const HEADERS = {
@@ -101,6 +98,16 @@ const MOCK_POLICY = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The signed-in caller the gate loads: the workspace owner.
+  const db = createMockDb();
+  db.findUserById.mockResolvedValue({
+    _id: 'user-1',
+    email: 'a@b.com',
+    role: 'owner',
+    tenantId: 'tenant-1',
+    servicePermissions: {},
+  } as never);
+  (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   (listPiiPolicies as ReturnType<typeof vi.fn>).mockResolvedValue([MOCK_POLICY]);
   (createPiiPolicy as ReturnType<typeof vi.fn>).mockResolvedValue(MOCK_POLICY);
   (detectPii as ReturnType<typeof vi.fn>).mockReturnValue({

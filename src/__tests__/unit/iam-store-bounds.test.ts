@@ -3,7 +3,8 @@
  * alone (50 statements, 64 KB, 500 policies) allow 25,000 statements, which is
  * ~67 ms of event-loop time per decision and ~5 s of blocked loop per policy write.
  * The store therefore also caps the total number of policies, statements and bytes,
- * counting disabled and monitor policies, and lets a change that does not grow the
+ * counting disabled policies (and policies an earlier build stored in the retired
+ * monitor mode, which are disabled now), and lets a change that does not grow the
  * set through so nobody is locked out of cleaning up.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -52,12 +53,12 @@ const statement = (n: number, pad = '') => `forbid(principal is User, action == 
 const statements = (count: number, from = 0, pad = '') => Array.from({ length: count }, (_, i) => statement(from + i, pad)).join('\n');
 
 /** Writes policies straight into the collection, the way a tenant that already crossed a cap would look. */
-async function putRaw(policyId: string, cedar: string): Promise<void> {
+async function putRaw(policyId: string, cedar: string, extra: Record<string, unknown> = {}): Promise<void> {
   const now = new Date().toISOString();
   await env.db.runWithTenant(tenant(), async () => {
     await env.db.iamDocPut('iam_policies', policyId, {
-      _id: policyId, policyId, name: policyId, cedar, spec: null, mode: 'enforce', enabled: true,
-      createdBy: 't', updatedBy: 't', createdAt: now, updatedAt: now,
+      _id: policyId, policyId, name: policyId, cedar, spec: null, enabled: true,
+      createdBy: 't', updatedBy: 't', createdAt: now, updatedAt: now, ...extra,
     });
   });
   invalidateTenantPolicies(tenant());
@@ -92,10 +93,17 @@ describe('statements in total', () => {
     expect(error.message).toMatch(/would make 501/);
   });
 
-  it('counts disabled and monitor policies too', async () => {
+  it('counts disabled policies too', async () => {
     for (let i = 0; i < 9; i++) {
-      await createPolicy(tenant(), { policyId: `p${i}`, name: `p${i}`, cedar: statements(50, i * 50), mode: 'monitor', enabled: false }, 't');
+      await createPolicy(tenant(), { policyId: `p${i}`, name: `p${i}`, cedar: statements(50, i * 50), enabled: false }, 't');
     }
+    await createPolicy(tenant(), { policyId: 'last', name: 'last', cedar: statements(50, 450) }, 't');
+    await limitError(createPolicy(tenant(), { policyId: 'over', name: 'x', cedar: statement(1) }, 't'));
+  });
+
+  it('counts the policies an earlier build stored in monitor mode (disabled now, but still stored and listed)', async () => {
+    for (let i = 0; i < 9; i++) await putRaw(`old${i}`, statements(50, i * 50), { mode: 'monitor' });
+    expect((await listPolicies(tenant())).every((p) => !p.enabled)).toBe(true);
     await createPolicy(tenant(), { policyId: 'last', name: 'last', cedar: statements(50, 450) }, 't');
     await limitError(createPolicy(tenant(), { policyId: 'over', name: 'x', cedar: statement(1) }, 't'));
   });
@@ -121,7 +129,8 @@ describe('statements in total', () => {
     await updatePolicy(tenant(), 'old1', { cedar: statements(3, 50) }, 't');
     await deletePolicy(tenant(), 'old2');
     // toggles never look at the totals at all
-    expect((await updatePolicy(tenant(), 'old3', { enabled: false, mode: 'monitor' }, 't')).enabled).toBe(false);
+    expect((await updatePolicy(tenant(), 'old3', { enabled: false }, 't')).enabled).toBe(false);
+    expect((await updatePolicy(tenant(), 'old3', { enabled: true }, 't')).enabled).toBe(true);
   });
 });
 

@@ -25,12 +25,13 @@ import {
 } from '@/lib/services/projects/projectService';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { authz } from '@/lib/iam/routeAuthz';
-import { resolveEnforcement } from '@/lib/iam/shadow/mode';
-import { collectAccessibleProjectIds as collectGroupAwareProjectIds } from '@/lib/services/projects/accessibleProjects';
+import { computeSessionEffectivePermissions } from '@/lib/iam/effective';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { tryExternalAuthenticate } from '@/enterprise/external-auth';
 import { isUserDisabled, isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import {
   clearSessionCookies,
+  getAuthzClientIp,
   getClientIp,
   getSessionContext,
   readJsonBody,
@@ -54,44 +55,6 @@ type RegisterBody = {
   name?: string;
   password?: string;
 };
-
-/**
- * Projects a user can open, as the LEGACY session logic sees them: legacy
- * `projectIds` plus direct UserProject memberships (groups are not consulted).
- */
-async function collectDirectProjectIds(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  userId: string,
-  legacyProjectIds?: string[],
-): Promise<string[]> {
-  const projectIds = new Set((legacyProjectIds ?? []).map(String).filter(Boolean));
-  const memberships = await db.listUserProjectsByUser(userId);
-
-  for (const membership of memberships) {
-    if (membership.projectId) {
-      projectIds.add(String(membership.projectId));
-    }
-  }
-
-  return Array.from(projectIds);
-}
-
-/**
- * Same question, tenant-aware: tenants in authorization-engine `enforce` mode
- * use the shared group-aware helper (projects inherited through groups count),
- * every other tenant keeps the legacy answer.
- */
-async function collectAccessibleProjectIds(
-  tenantDbName: string,
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  userId: string,
-  legacyProjectIds?: string[],
-): Promise<string[]> {
-  if (await resolveEnforcement(tenantDbName)) {
-    return collectGroupAwareProjectIds(db, userId, legacyProjectIds);
-  }
-  return collectDirectProjectIds(db, userId, legacyProjectIds);
-}
 
 function sendRateLimitHeaders(
   headers: Record<string, string | undefined>,
@@ -190,7 +153,6 @@ export async function issueSessionForAuthenticatedUser(
 
     if (authenticatedUser.role === 'user' || authenticatedUser.role === 'project_admin') {
       const allowed = await collectAccessibleProjectIds(
-        authenticatedTenant.dbName,
         db,
         userIdStr,
         authenticatedUser.projectIds,
@@ -714,11 +676,32 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const accessibleProjectIds = await collectAccessibleProjectIds(
-        session.tenantDbName,
         db,
         session.userId,
         user.projectIds,
       );
+
+      // What the engine allows this user in the active project, for navigation.
+      // Computed from the cached principal; if the engine cannot answer, the
+      // fields are null and the client falls back to the role-based view (this
+      // is a hint for the menu - the gates decide every request on their own).
+      let effectivePermissions: Record<string, string> | null = null;
+      let effectiveProjectId: string | null = null;
+      try {
+        const effective = await computeSessionEffectivePermissions({
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          user,
+          activeProjectId: request.cookies.active_project_id,
+          ip: getAuthzClientIp(request),
+        });
+        effectivePermissions = effective.levels;
+        effectiveProjectId = effective.projectId;
+      } catch (error) {
+        logger.warn('Could not compute the effective permissions of the session', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
 
       return reply.code(200).send({
         authenticated: true,
@@ -727,6 +710,8 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         userId: session.userId,
         role: user.role,
         servicePermissions: normalizeServicePermissions(user.servicePermissions),
+        effectivePermissions,
+        effectiveProjectId,
       });
     } catch (error) {
       logger.error('Session endpoint error', { error });

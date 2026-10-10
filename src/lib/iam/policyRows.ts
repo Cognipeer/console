@@ -9,7 +9,6 @@ import { resolvePrincipalLabels } from './labels';
 import { listManagedPolicies } from './managedPolicies';
 import type { PolicySpec } from './policySpec';
 import type { IIamPolicy } from './store';
-import { getPolicyMonitorTotals, type PolicyMonitorTotals } from './shadow/aggregate';
 
 // ── managed policies ─────────────────────────────────────────────────────
 
@@ -152,18 +151,12 @@ export function summarizeEffect(cedar: string): { effect: PolicyEffectSummary; s
 
 // ── rows ─────────────────────────────────────────────────────────────────
 
-export interface PolicyMonitorStatsView {
-  wouldAllow: number;
-  wouldDeny: number;
-  since: string | null;
-}
-
 export interface PolicyRow {
   policyId: string;
   name: string;
   description: string;
   effect: PolicyEffectSummary;
-  mode: 'monitor' | 'enforce';
+  /** A policy is either enabled (it takes part in decisions) or disabled. */
   enabled: boolean;
   spec: PolicySpec | null;
   cedar: string;
@@ -174,22 +167,18 @@ export interface PolicyRow {
   updatedBy: string;
   /** Their name or email when they still exist, else the id. */
   updatedByLabel: string;
-  monitorStats: PolicyMonitorStatsView | null;
 }
 
 export function toPolicyRow(
   policy: IIamPolicy,
-  totals?: ReadonlyMap<string, PolicyMonitorTotals>,
   labels?: ReadonlyMap<string, string>,
 ): PolicyRow {
   const { effect, statementCount } = summarizeEffect(policy.cedar);
-  const t = totals?.get(policy.policyId);
   return {
     policyId: policy.policyId,
     name: policy.name,
     description: policy.description ?? '',
     effect,
-    mode: policy.mode,
     enabled: policy.enabled,
     spec: policy.spec ?? null,
     cedar: policy.cedar,
@@ -198,35 +187,21 @@ export function toPolicyRow(
     updatedAt: policy.updatedAt.toISOString(),
     updatedBy: policy.updatedBy,
     updatedByLabel: labels?.get(policy.updatedBy) ?? policy.updatedBy,
-    // Only a monitor-mode policy has "would change" counts; zero until it matches something.
-    monitorStats: policy.mode === 'monitor'
-      ? { wouldAllow: t?.wouldAllow ?? 0, wouldDeny: t?.wouldDeny ?? 0, since: t?.since ?? null }
-      : null,
   };
 }
 
-/** Rows for a list of policies, with the monitor counts and editor names of the tenant attached. */
+/** Rows for a list of policies, with the editor names of the tenant attached. */
 export async function toPolicyRows(
   tenant: { tenantDbName: string; tenantId: string },
   policies: IIamPolicy[],
 ): Promise<PolicyRow[]> {
-  const needStats = policies.some((p) => p.mode === 'monitor');
-  let totals: Map<string, PolicyMonitorTotals> | undefined;
-  if (needStats) {
-    try {
-      totals = await getPolicyMonitorTotals(tenant.tenantDbName);
-    } catch {
-      // The counts are a nicety; the policy list must not depend on the shadow store.
-      totals = undefined;
-    }
-  }
   let labels: Map<string, string> | undefined;
   try {
     labels = (await resolvePrincipalLabels(tenant, { users: policies.map((p) => p.updatedBy).filter(Boolean) })).users;
   } catch {
     labels = undefined;
   }
-  return policies.map((p) => toPolicyRow(p, totals, labels));
+  return policies.map((p) => toPolicyRow(p, labels));
 }
 
 // ── who a policy mentions ────────────────────────────────────────────────

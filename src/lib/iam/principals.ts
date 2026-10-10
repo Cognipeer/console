@@ -2,7 +2,7 @@
  * Principals of the Authorization center: who can be searched, inspected and
  * simulated. Users, groups and API tokens - listed with server-side paging (a
  * 20K-person organisation is never loaded as a whole) and described with their
- * EFFECTIVE permissions: what the enforce-mode engine would really allow, and
+ * EFFECTIVE permissions: what the engine really allows, and
  * where each level comes from (role, direct grant, group, token scope, project,
  * custom policy).
  *
@@ -24,14 +24,13 @@ import {
   type ServicePermissionLevel,
   type UserServicePermissions,
 } from '@/lib/security/rbac';
-import { authorize } from './engine';
+import { probeServiceLevel } from './effective';
 import { buildEnforcePrincipalWithNarrowing } from './enforce';
-import { serviceActionId } from './actions';
 import type { IamPrincipal } from './entities';
 import { groupToGrant, loadUserGroups } from './groupGrants';
 import { listPolicies } from './store';
 import { countDirectReferences, policyReferences, toPolicyRows, type PolicyRow } from './policyRows';
-import { narrowLevel, type NarrowingResult } from './projectNarrowing';
+import { getDefaultProjectId, narrowLevel, type NarrowingResult } from './projectNarrowing';
 
 export type PrincipalType = 'user' | 'group' | 'token';
 
@@ -82,11 +81,11 @@ export interface EvaluationPrincipal {
   type: 'user' | 'token';
   id: string;
   label: string;
-  /** The enforce-mode (target semantics) principal: groups, project narrowing, token cap. */
+  /** The principal the gates build: groups, project narrowing, token cap. */
   principal: IamPrincipal;
   /** The user - for a token, its owner. */
   user: IUser;
-  /** The user's group grants (what a SESSION sees; legacy tokens ignore them). */
+  /** The user's group grants (a token owner's apply to the token as well). */
   groupGrants: GroupTenantGrant[];
   /** Name of the group behind each entry of `groupGrants` (same order). */
   grantGroupNames: string[];
@@ -109,11 +108,15 @@ export interface EvaluationOptions {
    * own settings can deny what the workspace allows.
    */
   workspaceLevel?: boolean;
+  /** Bulk callers (the impact preview): read the principal cache but do not fill it. */
+  noStore?: boolean;
 }
 
 /**
- * Build the principal the enforce gate would build for this user / token acting
- * in `projectId` (null = whatever project the gate would pick without a cookie).
+ * Build the principal the gate would build for this user / token acting in
+ * `projectId` (null = whatever project the gate would pick without a cookie).
+ * A token without a project of its own runs in the workspace's default project,
+ * exactly as the token gate resolves it (apiTokenAuth.ts).
  */
 export async function loadEvaluationPrincipal(
   tenant: IamTenant,
@@ -133,7 +136,7 @@ export async function loadEvaluationPrincipal(
     if (!user || isForeign(user, tenant.tenantId)) {
       throw new PrincipalError('principal_not_found', ref.type === 'token' ? 'The owner of this token no longer exists' : 'User not found');
     }
-    const groups: IGroup[] = await loadUserGroups(db, userId);
+    const groups: IGroup[] = await loadUserGroups(db, userId, tenant.tenantId);
     return { token, user, groups };
   });
 
@@ -141,7 +144,11 @@ export async function loadEvaluationPrincipal(
     .map((g) => ({ name: g.name, grant: groupToGrant(g) }))
     .filter((p): p is { name: string; grant: GroupTenantGrant } => !!p.grant);
   const groupGrants = grantPairs.map((p) => p.grant);
-  const requestedProjectId = projectId ?? (loaded.token?.projectId ? String(loaded.token.projectId) : null);
+  let requestedProjectId = projectId ?? (loaded.token?.projectId ? String(loaded.token.projectId) : null);
+  if (!requestedProjectId && loaded.token) {
+    // The token gate runs a project-less token in the default project (apiTokenAuth.ts); so must anything that mirrors it.
+    requestedProjectId = await getDefaultProjectId(tenant.tenantDbName, tenant.tenantId);
+  }
   const { principal, narrowing } = await buildEnforcePrincipalWithNarrowing({
     subject: ref.type === 'token' ? 'token' : 'session',
     tenantDbName: tenant.tenantDbName,
@@ -152,13 +159,14 @@ export async function loadEvaluationPrincipal(
     userId: String(loaded.user._id),
     user: loaded.user,
     groupGrants,
+    groups: loaded.groups,
     tokenId: loaded.token ? String(loaded.token._id) : undefined,
     tokenScope: loaded.token ? loaded.token.servicePermissions ?? null : undefined,
     requestedProjectId,
     // The workspace-level answer (before any project limits it) only when asked for.
     skipProjectNarrowing: options.workspaceLevel === true && !requestedProjectId,
     service: 'iam',
-    legacyAllowed: true,
+    noStore: options.noStore,
   });
 
   return {
@@ -277,8 +285,6 @@ export interface EffectiveService {
   sources: EffectiveSource[];
 }
 
-const LEVEL_ACTIONS: ReadonlyArray<'read' | 'write' | 'admin'> = ['read', 'write', 'admin'];
-
 /** Services shown in the matrix: everything but the retired ones. */
 const MATRIX_SERVICES = RBAC_SERVICE_DEFINITIONS.filter((d) => !d.deprecated);
 
@@ -334,21 +340,17 @@ export async function computeEffectivePermissions(
     if (token && scope) sources.push({ kind: 'token-scope', label: 'Token scope', level: scope[service] ?? 'none' });
 
     // 6. the engine's answer: the level reached when every level up to it is allowed
-    //    (a policy that forbids reading but allows writing leaves nothing usable)
-    let level: EffectiveLevel = 'none';
-    const policyIds = new Set<string>();
-    for (const candidate of LEVEL_ACTIONS) {
-      const res = await authorize({
-        tenant: tenant.tenantDbName,
-        principal: evaluation.principal,
-        action: serviceActionId(service, candidate),
-        resource: { kind: 'service', service },
-        context: { projectId: evaluation.principal.contextProjectId, channel: token ? 'api' : 'dashboard' },
+    //    (a policy that forbids reading but allows writing leaves nothing usable).
+    //    The workspace owner's own session always reaches `iam`, whatever a rule says (owner safety, enforce.ts;
+    //    an API token of the owner is an ordinary principal).
+    const probed = !token && user.role === 'owner' && service === 'iam'
+      ? { level: 'admin' as const, reasons: [] as string[] }
+      : await probeServiceLevel(tenant.tenantDbName, evaluation.principal, service, {
+        projectId: evaluation.principal.contextProjectId,
+        channel: token ? 'api' : 'dashboard',
       });
-      res.reasons.filter((r) => r.startsWith('custom:')).forEach((r) => policyIds.add(r));
-      if (!res.allowed) break;
-      level = candidate;
-    }
+    const level = probed.level;
+    const policyIds = new Set<string>(probed.reasons.filter((r) => r.startsWith('custom:')));
     // What RBAC alone would give (managed rules only), to see whether a policy moved it.
     let rbac = baseLevel;
     if (projectMembership) rbac = narrowLevel(rbac, projectMembership, service);
@@ -413,7 +415,7 @@ async function userProjects(
   tenant: IamTenant,
   db: DatabaseProvider,
   user: IUser,
-  groupList: IGroup[],
+  groupList: ReadonlyArray<{ id: string; name: string }>,
   projectNames: Map<string, string>,
 ): Promise<PrincipalProject[]> {
   const out = new Map<string, PrincipalProject>();
@@ -428,15 +430,16 @@ async function userProjects(
   for (const m of await db.listUserProjectsByUser(String(user._id))) {
     if (m.projectId) out.set(String(m.projectId), { id: String(m.projectId), name: name(String(m.projectId)), role: m.role, via: 'direct' });
   }
-  for (const group of groupList) {
-    for (const gp of await db.listGroupProjectsByGroup(String(group._id))) {
+  const groupRows = await Promise.all(groupList.map((group) => db.listGroupProjectsByGroup(group.id)));
+  groupList.forEach((group, i) => {
+    for (const gp of groupRows[i]) {
       const id = String(gp.projectId);
       const existing = out.get(id);
       // a direct membership already says everything; otherwise a group can add or upgrade
       if (existing && (existing.via === 'direct' || existing.role === 'project_admin')) continue;
       out.set(id, { id, name: name(id), role: gp.role, via: 'group', groupName: group.name });
     }
-  }
+  });
   return [...out.values()];
 }
 
@@ -529,19 +532,22 @@ export async function getPrincipalDetail(
     evaluation.narrowing ? projectNames.get(evaluation.narrowing.projectId) : (activeProjectId ? projectNames.get(activeProjectId) : undefined),
   );
 
-  const { groupList, ownedTokens, projects } = await runWithTenantScope(tenant.tenantDbName, async (db) => {
-    const groupList = await loadUserGroups(db, String(evaluation.user._id));
-    const ownedTokens = evaluation.type === 'user'
-      ? (await db.iamListTokens({ tenantId: tenant.tenantId, userId: String(evaluation.user._id), limit: 100 })).items
-      : null;
-    const projects = await userProjects(tenant, db, evaluation.user, groupList, projectNames);
-    return { groupList, ownedTokens, projects };
+  // The groups were read when the principal was built; only the owned tokens and the project rows are new reads.
+  const groupList = evaluation.groups;
+  const { ownedTokens, projects } = await runWithTenantScope(tenant.tenantDbName, async (db) => {
+    const [ownedTokens, projects] = await Promise.all([
+      evaluation.type === 'user'
+        ? db.iamListTokens({ tenantId: tenant.tenantId, userId: String(evaluation.user._id), limit: 100 }).then((page) => page.items)
+        : Promise.resolve(null),
+      userProjects(tenant, db, evaluation.user, groupList, projectNames),
+    ]);
+    return { ownedTokens, projects };
   });
 
   const affecting = new Set(policiesAffecting(policies, {
     type: evaluation.type,
     id: evaluation.id,
-    groupIds: groupList.map((g) => String(g._id)),
+    groupIds: groupList.map((g) => g.id),
     ownerId: evaluation.type === 'token' ? String(evaluation.user._id) : undefined,
   }));
 
@@ -575,7 +581,7 @@ export async function getPrincipalDetail(
   return {
     principal,
     effective,
-    groups: groupList.map((g) => ({ id: String(g._id), name: g.name })),
+    groups: groupList.map((g) => ({ id: g.id, name: g.name })),
     projects,
     policies: await toPolicyRows(tenant, policies.filter((p) => affecting.has(p.policyId))),
     tokens: ownedTokens ? ownedTokens.map(tokenSummary) : null,

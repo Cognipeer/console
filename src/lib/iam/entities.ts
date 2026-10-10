@@ -5,10 +5,11 @@
  * rbac.ts functions (getEffectiveServicePermissionWithGroups, the token
  * minPermission rule), never re-implemented, and exposed to policy as three
  * upward-closed string sets. That is the whole trick that keeps the managed
- * policies tiny and the parity with the legacy gate provable (see the parity
- * fuzz test): Cedar cannot iterate a principal's parents' attributes, and an
- * explicit per-user override can LOWER a role default while groups only RAISE
- * (rbac.ts:496-530), so that logic has to live in TypeScript.
+ * policies tiny and the parity with the plain role arithmetic provable (see the
+ * parity fuzz test): Cedar cannot iterate a principal's parents' attributes, and
+ * an explicit per-user override can LOWER a role default while groups only RAISE
+ * (rbac.ts getEffectiveServicePermissionWithGroups), so that logic has to live in
+ * TypeScript.
  *
  * Pure and synchronous. Loading data from the database (and caching it) is
  * principalCache.ts; this file only maps already-loaded data to entities.
@@ -99,7 +100,7 @@ export interface IamPrincipal {
   userId: string;
   /** Tenant role string as stored ('' when unknown). */
   role: string;
-  /** Group ids the user is a member of (Cedar parents). Empty for legacy-parity token principals. */
+  /** Group ids the user is a member of (Cedar parents). */
   groupIds: string[];
   /** Effective levels of the user (for tokens: of the owner). */
   sets: LevelSets;

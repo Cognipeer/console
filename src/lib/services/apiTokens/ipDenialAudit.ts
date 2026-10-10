@@ -88,7 +88,7 @@ export function recordTokenIpDenial(input: TokenIpDenialInput): void {
         ipAddress: input.clientIp,
         userAgent: input.userAgent,
         // `iamEnforce` is what the Authorization center's denials feed selects on: an allowlist
-        // refusal is an access denial an administrator looks for there, in every authorization mode.
+        // refusal is an access denial an administrator looks for there.
         metadata: { code: TOKEN_IP_NOT_ALLOWED, iamEnforce: true },
       },
     ),

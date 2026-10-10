@@ -73,7 +73,7 @@ const DETAIL: Record<string, unknown> = {
     groups: [{ id: 'g-eng', name: 'Engineering' }],
     projects: [{ id: 'proj-a', name: 'Alpha', role: 'project_admin', via: 'direct' }, { id: 'proj-b', name: 'Beta', role: 'member', via: 'group', groupName: 'Engineering' }],
     policies: [
-      { policyId: 'p-notebooks', name: 'Allow notebooks', description: '', effect: 'permit', mode: 'enforce', enabled: true, spec: { effect: 'permit', principals: { groups: ['g-eng'] }, actions: ['agents.write'], resources: { any: true } }, cedar: '', statementCount: 1, createdAt: '', updatedAt: '', updatedBy: '', monitorStats: null },
+      { policyId: 'p-notebooks', name: 'Allow notebooks', description: '', effect: 'permit', enabled: true, spec: { effect: 'permit', principals: { groups: ['g-eng'] }, actions: ['agents.write'], resources: { any: true } }, cedar: '', statementCount: 1, createdAt: '', updatedAt: '', updatedBy: '', updatedByLabel: '' },
     ],
     tokens: [{ id: 't-ci', label: 'CI pipeline', prefix: 'cp_8f2a', projectId: null, scoped: true, createdAt: null, expiresAt: null, lastUsedAt: null, status: 'active' }],
   },
@@ -98,13 +98,12 @@ const DETAIL: Record<string, unknown> = {
 const DENIALS = [
   { id: 'a1', at: '2026-10-09T10:00:00.000Z', kind: 'denials', principal: { type: 'user', id: 'u-bob', label: 'Bob Ray' }, service: 'models', action: 'models.write', route: '/api/models/m1', method: 'PUT', code: 'forbidden', decisionId: 'dec-0001', summary: 'Denied PUT /api/models/m1: models needs write because no rule allows it' },
   { id: 'a2', at: '2026-10-09T09:00:00.000Z', kind: 'denials', principal: { type: 'token', id: 't-ci', label: 'CI pipeline' }, service: 'iam', action: 'security', route: '/api/internal/x', method: 'GET', code: 'route_not_declared', summary: 'Blocked: GET /api/internal/x has no authorization declaration' },
+  // the engine could not decide (HTTP 503): not a policy answer
+  { id: 'a3', at: '2026-10-09T08:00:00.000Z', kind: 'denials', principal: { type: 'user', id: 'u-bob', label: 'Bob Ray' }, service: 'agents', action: 'agents.read', route: '/api/agents', method: 'GET', code: 'authorization_unavailable', decisionId: 'dec-0003', summary: 'Refused GET /api/agents: authorization was temporarily unavailable', text: { key: 'unavailable', params: { route: 'GET /api/agents' } } },
 ];
 const CHANGES = [
-  { id: 'c1', at: '2026-10-08T10:00:00.000Z', kind: 'changes', principal: null, actor: 'ann@example.com', service: 'iam', action: 'iam.policy.create', policyId: 'p-notebooks', summary: 'Created policy "Allow notebooks" (permit, enforce)' },
+  { id: 'c1', at: '2026-10-08T10:00:00.000Z', kind: 'changes', principal: null, actor: 'ann@example.com', service: 'iam', action: 'iam.policy.create', policyId: 'p-notebooks', summary: 'Created policy "Allow notebooks" (permit)' },
   { id: 'c2', at: '2026-10-08T09:00:00.000Z', kind: 'changes', principal: null, actor: 'ann@example.com', service: 'tokens', action: 'token.restrictions.updated', summary: 'Changed the restrictions of token "CI pipeline"' },
-];
-const MONITOR = [
-  { id: 'm1', at: '2026-10-07T10:00:00.000Z', kind: 'monitor', principal: { type: 'user', id: 'u-ann', label: 'Ann Lee' }, service: 'agents', action: 'agents.write', route: '/api/agents/a1', method: 'PUT', code: 'would_deny', policyId: 'p-notebooks', summary: 'Policy "Allow notebooks" would deny PUT /api/agents/a1 (12 times since 2026-10-01)' },
 ];
 
 const page = <T>(items: T[], cursor: string | undefined, size: number, next: (offset: number) => string) => {
@@ -140,7 +139,7 @@ function routes(extra: Array<[string, string | RegExp, RouteHandler]> = []): Arr
       'GET',
       '/api/iam/audit',
       (c) => {
-        const all = c.query.kind === 'changes' ? CHANGES : c.query.kind === 'monitor' ? MONITOR : DENIALS;
+        const all = c.query.kind === 'changes' ? CHANGES : DENIALS;
         const items = all.filter((i) => (!c.query.service || i.service === c.query.service) && (!c.query.principalId || i.principal?.id === c.query.principalId));
         return page(items, c.query.cursor, Number(c.query.limit ?? 25), (o) => `o${o}`);
       },
@@ -390,31 +389,39 @@ const auditCalls = () => api.to('GET', '/api/iam/audit');
 
 describe('AuditTab', () => {
   it('lists the denials: who, what, the request and the decision that opens the Access check', async () => {
-    await render(createElement(AuditTab, { canManage: true }));
+    await render(createElement(AuditTab));
     expect(auditCalls()[0]?.query).toEqual({ kind: 'denials', limit: '25' });
     const rows = rowsText();
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     expect(rows[0]).toContain('Bob Ray');
     expect(rows[0]).toContain('Model Hub');
     expect(rows[0]).toContain('Write'); // `models.write`: the service name already says "models"
     expect(rows[0]).toContain('PUT /api/models/m1');
     expect(rows[0]).toContain('Forbidden');
     expect(rows[1]).toContain('Route not declared');
+    // a request the engine could not decide is said as such - not as a rule that denied it
+    expect(rows[2]).toContain('Engine unavailable');
+    expect(rows[2]).toContain('Refused GET /api/agents: authorization was temporarily unavailable');
+    expect(rows[2]).not.toContain('Forbidden');
     const hrefs = qa<HTMLAnchorElement>('a').map((a) => a.getAttribute('href'));
     expect(hrefs).toContain('/dashboard/iam?tab=check&decisionId=dec-0001');
+    // its decision id opens the Access check too, which explains that there was no policy answer
+    expect(hrefs).toContain('/dashboard/iam?tab=check&decisionId=dec-0003');
     // the principal opens in the Principals tab
     expect(hrefs).toContain('/dashboard/iam?tab=principals&principalType=user&principalId=u-bob');
     expect(hrefs).toContain('/dashboard/iam?tab=principals&principalType=token&principalId=t-ci');
   });
 
   it('says how long denials look back when no date range is picked', async () => {
-    await render(createElement(AuditTab, { canManage: true }));
+    await render(createElement(AuditTab));
     expect(text()).toContain('Without a date range the last 30 days are shown.');
     expect(qa<HTMLInputElement>('input, button').some((e) => e.getAttribute('placeholder') === 'Last 30 days' || e.textContent === 'Last 30 days')).toBe(true);
   });
 
-  it('switches between denials, policy changes and monitor results', async () => {
-    await render(createElement(AuditTab, { canManage: true }));
+  it('switches between denials and policy changes (there is no monitor view any more)', async () => {
+    await render(createElement(AuditTab));
+    expect(qa('label').map((l) => l.textContent)).toEqual(expect.arrayContaining(['Denials', 'Policy changes']));
+    expect(qa('label').map((l) => l.textContent)).not.toContain('Monitor');
     await click(qa('label').find((l) => l.textContent === 'Policy changes') ?? null);
     await settle(250);
     expect(auditCalls().pop()?.query).toEqual({ kind: 'changes', limit: '25' });
@@ -426,16 +433,14 @@ describe('AuditTab', () => {
     expect(rowsText()[1]).toContain('Token restrictions changed');
     expect(rowsText()[1]).not.toContain('token.restrictions.updated');
 
-    await click(qa('label').find((l) => l.textContent === 'Monitor') ?? null);
+    await click(qa('label').find((l) => l.textContent === 'Denials') ?? null);
     await settle(250);
-    expect(auditCalls().pop()?.query).toEqual({ kind: 'monitor', limit: '25' });
-    expect(rowsText()[0]).toContain('Would deny');
-    expect(rowsText()[0]).toContain('Ann Lee');
+    expect(auditCalls().pop()?.query).toEqual({ kind: 'denials', limit: '25' });
   });
 
   it('shows a short id for a person or token that no longer has a name, the whole id on hover', async () => {
     const gone = 'bfc9decb-1383-4c0d-a4a6-89f184c250e5';
-    await render(createElement(AuditTab, { canManage: true }), [
+    await render(createElement(AuditTab), [
       [
         'GET',
         '/api/iam/audit',
@@ -452,7 +457,7 @@ describe('AuditTab', () => {
   });
 
   it('pages with the cursor of the server', async () => {
-    await render(createElement(AuditTab, { canManage: true }), [
+    await render(createElement(AuditTab), [
       [
         'GET',
         '/api/iam/audit',
@@ -468,12 +473,12 @@ describe('AuditTab', () => {
 
   it('applies the filters of a link: view, service and principal (named after a lookup)', async () => {
     await render(
-      createElement(AuditTab, { canManage: true }),
+      createElement(AuditTab),
       [],
-      '?tab=audit&kind=monitor&service=agents&principalType=user&principalId=u-ann',
+      '?tab=audit&kind=denials&service=agents&principalType=user&principalId=u-ann',
     );
     expect(auditCalls()[0]?.query).toEqual({
-      kind: 'monitor',
+      kind: 'denials',
       service: 'agents',
       principalType: 'user',
       principalId: 'u-ann',
@@ -486,15 +491,20 @@ describe('AuditTab', () => {
   });
 
   it('drops a principal the view cannot be filtered by (a token under policy changes)', async () => {
-    await render(createElement(AuditTab, { canManage: true }), [], '?kind=changes&principalType=token&principalId=t-ci');
+    await render(createElement(AuditTab), [], '?kind=changes&principalType=token&principalId=t-ci');
     expect(auditCalls()[0]?.query).toEqual({ kind: 'changes', limit: '25' });
   });
 
   it('clears the filters but keeps the view', async () => {
-    await render(createElement(AuditTab, { canManage: true }), [], '?kind=monitor&service=agents');
+    await render(createElement(AuditTab), [], '?kind=changes&service=iam');
     await click(buttonByText(/Clear filters/));
     await settle(250);
-    expect(auditCalls().pop()?.query).toEqual({ kind: 'monitor', limit: '25' });
+    expect(auditCalls().pop()?.query).toEqual({ kind: 'changes', limit: '25' });
+  });
+
+  it('opens an old link to the removed monitor view on the denials instead', async () => {
+    await render(createElement(AuditTab), [], '?tab=audit&kind=monitor&service=agents');
+    expect(auditCalls()[0]?.query).toEqual({ kind: 'denials', service: 'agents', limit: '25' });
   });
 
   it('exports the same filters as CSV and hands the file to the browser', async () => {
@@ -509,7 +519,7 @@ describe('AuditTab', () => {
       anchors.push(this);
     });
     await render(
-      createElement(AuditTab, { canManage: true }),
+      createElement(AuditTab),
       [
         [
           'GET',
@@ -529,7 +539,7 @@ describe('AuditTab', () => {
 
   it('tells the admin when the export failed', async () => {
     // the app mounts <Notifications /> in its root layout; a test has to do it itself
-    await render(createElement(Fragment, null, createElement(Notifications, null), createElement(AuditTab, { canManage: true })), [
+    await render(createElement(Fragment, null, createElement(Notifications, null), createElement(AuditTab)), [
       ['GET', '/api/iam/audit/export', () => jsonResponse({ error: 'Too many rows', code: 'internal' }, 500)],
     ]);
     await click(buttonByText(/Export CSV/));
@@ -540,7 +550,7 @@ describe('AuditTab', () => {
 
   it('carries the load error in the grid, and a retry', async () => {
     let fail = true;
-    await render(createElement(AuditTab, { canManage: false }), [
+    await render(createElement(AuditTab), [
       ['GET', '/api/iam/audit', () => (fail ? jsonResponse({ error: 'Forbidden', code: 'forbidden' }, 403) : { items: DENIALS, nextCursor: null })],
     ]);
     expect(text()).toContain('You need read access to the IAM service to view the audit trail.');
@@ -548,29 +558,18 @@ describe('AuditTab', () => {
     fail = false;
     await click(buttonByText(/Try again/));
     await settle(250);
-    expect(rowsText()).toHaveLength(2);
+    expect(rowsText()).toHaveLength(DENIALS.length);
   });
 
-  it('suggests monitor mode to admins when there is nothing to report', async () => {
-    await render(
-      createElement(AuditTab, { canManage: true }),
-      [['GET', '/api/iam/audit', () => ({ items: [], nextCursor: null })]],
-      '?kind=monitor',
-    );
-    expect(text()).toContain('Nothing to report');
-    expect(text()).toContain('Set a policy to monitor mode');
-    await mounted.unmount();
-    await render(
-      createElement(AuditTab, { canManage: false }),
-      [['GET', '/api/iam/audit', () => ({ items: [], nextCursor: null })]],
-      '?kind=monitor',
-    );
-    expect(text()).toContain('Nothing to report');
-    expect(text()).not.toContain('Set a policy to monitor mode');
+  it('says plainly that nothing was refused, with no hint about a monitor mode', async () => {
+    await render(createElement(AuditTab), [['GET', '/api/iam/audit', () => ({ items: [], nextCursor: null })]]);
+    expect(text()).toContain('No denials');
+    expect(text()).toContain('The policy engine has not refused any request in this period.');
+    expect(text()).not.toMatch(/monitor mode|Nothing to report/i);
   });
 
   it('renders in Turkish', async () => {
-    await render(createElement(AuditTab, { canManage: true }), [], '', 'tr');
+    await render(createElement(AuditTab), [], '', 'tr');
     expect(text()).toContain('Reddedilenler');
     expect(text()).toContain('Yetkisiz'); // the `forbidden` code
     expect(text()).toContain('CSV olarak dışa aktar');

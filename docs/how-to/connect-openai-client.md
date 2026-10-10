@@ -31,8 +31,10 @@ project until you replace the token.
 - At least one model of category `llm` in the target project. If you have none,
   work through [Create your first model](/how-to/first-model) first.
 - The token owner needs Model Hub `read` **and** `write`: listing models is a
-  `GET` (`read`), and a chat completion is a `POST` (`write`). RBAC is evaluated
-  against the user who created the token. See
+  `GET` (`read`), and a chat completion is a `POST` (`write`). The token acts as
+  the user who created it: their role, permissions and groups, capped by the
+  token's scope and limited by their permissions in the token's project, decide
+  what it may do. See [Authorization](/guide/authorization) and
   [Authentication](/guide/authentication) for the role table.
 
 ## Step 1 — Select the project

@@ -1,17 +1,25 @@
 /**
  * Impact preview (`POST /api/iam/policies/preview`): "what would change if this
- * policy were enforced?" - the tenant's CURRENT enforce-mode policy set against
- * the same set with the draft applied (replacing the stored version when
- * `policyId` is given), over
+ * policy were enabled?" - the tenant's CURRENT policy set (its enabled policies)
+ * against the same set with the draft applied (replacing the stored version when
+ * `policyId` is given), over the principals the draft reaches x the actions it
+ * covers.
  *
- *   - the principals the draft targets x the actions it covers, and
- *   - the principals behind recent shadow findings x the gate action of their request.
+ * The principals come from the directory, not from traffic: the people and tokens
+ * the draft names, the members of the groups it names, and - when it names nobody
+ * in particular - a spread over the workspace (owners and admins first: their
+ * paths differ from an ordinary member's), up to MAX_PRINCIPALS. When the whole
+ * audience was enumerated and checked, `principals.targeted` says how many it is;
+ * when it is a sample, `truncated` says so.
  *
- * Bounded: at most MAX_EVALUATIONS decisions and DEADLINE_MS of wall clock; when
- * either runs out the result says `truncated: true`. The draft is evaluated as if
- * enforced whatever its mode (the point is to see the impact before enabling it),
- * under the conditions it declares (a channel / IP / time window it asks for is
- * assumed to hold - otherwise a conditional policy would always look like a no-op).
+ * Bounded: at most MAX_PRINCIPALS people and tokens, MAX_EVALUATIONS decisions
+ * and DEADLINE_MS of wall clock; when any runs out the result says
+ * `truncated: true`. The draft is evaluated as if enabled whatever its state (the
+ * point is to see the impact before enabling it), under the conditions it
+ * declares (a channel / IP / time window it asks for is assumed to hold -
+ * otherwise a conditional policy would always look like a no-op). The principals
+ * are read without filling the principal cache: a preview must not push the hot
+ * entries of live traffic out.
  *
  * The two sets are preparsed into the WASM instance under FIXED ids (Cedar has
  * no way to free a set, so a fresh id per preview would leak). There are
@@ -22,7 +30,7 @@
  */
 
 import { runWithTenantScope } from '@/lib/database';
-import { gateActionId, type ActionDefinition } from './actions';
+import type { ActionDefinition } from './actions';
 import { ALL_MANAGED_POLICIES } from './managedPolicies';
 import { preparsePolicySet, statefulIsAuthorized } from './cedar';
 import type { IamRequestContext } from './context';
@@ -44,15 +52,18 @@ import {
 import { policyReferences } from './policyRows';
 import { validateCustomPolicyText } from './policyText';
 import { getIamSchema } from './schemaState';
-import { listShadowEntries } from './shadow/aggregate';
 import { getPolicy, listPolicies } from './store';
 
-export const MAX_EVALUATIONS = 2_000;
-export const DEADLINE_MS = 3_000;
+export const MAX_EVALUATIONS = 20_000;
+export const DEADLINE_MS = 5_000;
+/** People and tokens a preview looks at. */
+export const MAX_PRINCIPALS = 1_000;
 const MAX_SAMPLES = 50;
 const MAX_SAMPLES_PER_PRINCIPAL = 4;
-const MAX_PRINCIPALS = 40;
-const MAX_SHADOW_SAMPLES = 150;
+/** Principals built at the same time (each is a few directory reads). */
+const LOAD_CONCURRENCY = 16;
+/** Directory pages are read this many rows at a time (the directory serves at most 200). */
+const PAGE = 200;
 /** How many previews (of different workspaces) may hold a pair of preparsed sets at once. */
 const PREVIEW_SLOTS = 4;
 const DRAFT_POLICY_ID = '__draft__';
@@ -76,8 +87,6 @@ export interface PreviewInput {
   policyId?: string;
   spec?: unknown;
   cedar?: string;
-  /** Accepted for symmetry with the editor; the impact is always computed as if enforced. */
-  mode?: string;
 }
 
 export interface PreviewSample {
@@ -89,16 +98,19 @@ export interface PreviewSample {
 }
 
 export interface PreviewResult {
+  /** Decisions compared (one per principal x action x resource). */
   evaluated: number;
   /**
    * True when the numbers describe a SAMPLE of the people the policy reaches (or
-   * the evaluation budget ran out): see `principals` for how big a sample.
+   * the budget ran out): see `principals` for how big a sample.
    */
   truncated: boolean;
   /**
-   * `evaluated`: people / tokens the draft was actually checked for. `targeted`: how
-   * many the policy reaches (members of its groups, the users and tokens it names),
-   * or null when it reaches "everyone" and the real number is the directory's.
+   * `evaluated`: people / tokens the draft was fully checked for. `targeted`: how
+   * many the policy reaches - the users and tokens it names plus the members of its
+   * groups, or, for a policy that reaches everybody, the size of the directory when
+   * it was listed completely - or null when that number is not known (a directory
+   * larger than the preview looks at).
    */
   principals: { evaluated: number; targeted: number | null };
   flips: { allowToDeny: number; denyToAllow: number };
@@ -253,55 +265,124 @@ function actionsOf(spec: PolicySpec | null, cedar: string, catalog: readonly Act
   return [...out.values()];
 }
 
-async function samplePrincipals(
-  tenant: IamTenant,
-  spec: PolicySpec | null,
-  cedar: string,
-): Promise<{ principals: Array<{ type: 'user' | 'token'; id: string }>; targeted: number | null }> {
-  const refs = policyReferences({ cedar, spec });
-  const users = new Set<string>([...refs.users].slice(0, 20));
-  const tokens = new Set<string>([...refs.tokens].slice(0, 10));
-  const specific = refs.users.size + refs.groups.size + refs.tokens.size > 0;
-  // A policy that names nobody in particular (conditions only, say) applies to everyone.
-  const everyoneUsers = refs.any || refs.anyUser || !(specific || refs.anyToken);
-  const everyoneTokens = refs.any || refs.anyToken || !(specific || refs.anyUser);
+interface PrincipalRef { type: 'user' | 'token'; id: string }
 
-  let targeted: number | null = refs.any || everyoneUsers || everyoneTokens ? null : refs.users.size + refs.tokens.size;
+interface Audience {
+  /** Who to check, most relevant first. */
+  principals: PrincipalRef[];
+  /** How many people / tokens the policy reaches when that is known; null when it is not. */
+  targeted: number | null;
+}
+
+/**
+ * The people and tokens in scope of a draft, read through the directory queries
+ * (paged, tenant-scoped), most relevant first:
+ *
+ *  1. the users and tokens it names;
+ *  2. the members of the groups it names;
+ *  3. when it names nobody in particular: a spread over the workspace, owners
+ *     and admins first (their paths through the managed rules differ from a
+ *     member's), then project admins, then members, then tokens;
+ *  4. a few tokens owned by the first people: a policy about a person reaches
+ *     their tokens too.
+ *
+ * `targeted` is exact when the audience is named, or when everybody was listed
+ * to the end within MAX_PRINCIPALS; otherwise null.
+ */
+async function enumeratePrincipals(tenant: IamTenant, spec: PolicySpec | null, cedar: string): Promise<Audience> {
+  const refs = policyReferences({ cedar, spec });
+  const named = refs.users.size + refs.groups.size + refs.tokens.size > 0;
+  // A policy that names nobody in particular (conditions only, say) applies to everyone.
+  const everyoneUsers = refs.any || refs.anyUser || !(named || refs.anyToken);
+  const everyoneTokens = refs.any || refs.anyToken || !(named || refs.anyUser);
+
+  const users = new Set<string>();
+  const tokens = new Set<string>();
+  const room = () => MAX_PRINCIPALS - users.size - tokens.size;
+
+  /** Members of the named groups (counted, not listed: the list is capped). */
+  let groupMembers = 0;
+  /** Every directory list that fed an "everybody" audience was read to its end. */
+  let usersComplete = true;
+  let tokensComplete = true;
+
   await runWithTenantScope(tenant.tenantDbName, async (db) => {
-    if (targeted !== null && refs.groups.size > 0) {
+    for (const id of refs.users) if (room() > 0) users.add(id);
+    for (const id of refs.tokens) if (room() > 0) tokens.add(id);
+
+    if (refs.groups.size > 0) {
       const counts = await db.iamCountGroupMembers([...refs.groups]);
-      targeted += Object.values(counts).reduce((sum, n) => sum + n, 0);
-    }
-    // members of the targeted groups
-    const groups = [...refs.groups].slice(0, 4);
-    for (const groupId of groups) {
-      const page = await db.iamListGroupMemberIds(groupId, { limit: Math.max(3, Math.floor(24 / groups.length)) });
-      page.items.forEach((id) => users.add(id));
-    }
-    if (everyoneUsers) {
-      // a spread of roles: the owner/admin paths and the ordinary ones differ
-      for (const role of ['owner', 'admin', 'project_admin', 'user']) {
-        const page = await db.iamListUsers({ tenantId: tenant.tenantId, roles: [role], status: 'active', limit: role === 'user' ? 8 : 3 });
-        page.items.forEach((u) => users.add(String(u._id)));
+      groupMembers = Object.values(counts).reduce((sum, n) => sum + n, 0);
+      const groups = [...refs.groups];
+      for (let g = 0; g < groups.length && room() > 0; g++) {
+        // each remaining group gets an equal share of what is left
+        let share = Math.max(25, Math.floor(room() / (groups.length - g)));
+        for (let offset = 0; share > 0 && room() > 0; offset += PAGE) {
+          const page = await db.iamListGroupMemberIds(groups[g], { limit: Math.min(PAGE, share), offset });
+          for (const id of page.items) if (room() > 0) users.add(id);
+          share -= page.items.length;
+          if (!page.hasMore) break;
+        }
       }
     }
-    if (everyoneTokens) {
-      const page = await db.iamListTokens({ tenantId: tenant.tenantId, limit: 8 });
-      page.items.forEach((t) => tokens.add(String(t._id)));
+
+    if (everyoneUsers) {
+      // owners and admins first: they are few, and each takes a different path through the rules
+      const roles: Array<{ role: string; cap: number }> = [
+        { role: 'owner', cap: 10 },
+        { role: 'admin', cap: 100 },
+        { role: 'project_admin', cap: 200 },
+        { role: 'user', cap: MAX_PRINCIPALS },
+      ];
+      for (const { role, cap } of roles) {
+        let taken = 0;
+        let more = true;
+        for (let offset = 0; more && taken < cap && room() > 0; offset += PAGE) {
+          const page = await db.iamListUsers({
+            tenantId: tenant.tenantId,
+            roles: [role],
+            status: 'active',
+            limit: Math.min(PAGE, cap - taken, room()),
+            offset,
+          });
+          for (const u of page.items) {
+            users.add(String(u._id));
+            taken++;
+          }
+          more = page.hasMore;
+        }
+        if (more) usersComplete = false;
+      }
     }
+
+    if (everyoneTokens) {
+      let more = true;
+      for (let offset = 0; more && room() > 0; offset += PAGE) {
+        const page = await db.iamListTokens({ tenantId: tenant.tenantId, limit: Math.min(PAGE, room()), offset });
+        for (const t of page.items) tokens.add(String(t._id));
+        more = page.hasMore;
+      }
+      if (more) tokensComplete = false;
+    }
+
     // A user / group policy reaches the tokens its people own: include a few of them.
-    for (const userId of [...users].slice(0, 5)) {
-      const page = await db.iamListTokens({ tenantId: tenant.tenantId, userId, limit: 2 });
-      page.items.forEach((t) => tokens.add(String(t._id)));
+    for (const userId of [...users].slice(0, 25)) {
+      if (room() <= 0) break;
+      const page = await db.iamListTokens({ tenantId: tenant.tenantId, userId, limit: Math.min(2, room()) });
+      for (const t of page.items) tokens.add(String(t._id));
     }
   });
+
+  // The audience size, when it is known: named people plus group members, or the whole directory when it was listed to its end.
+  const reachUsers = everyoneUsers ? (usersComplete ? users.size : null) : refs.users.size + groupMembers;
+  const reachTokens = everyoneTokens ? (tokensComplete ? tokens.size : null) : refs.tokens.size;
 
   return {
     principals: [
       ...[...users].map((id) => ({ type: 'user' as const, id })),
       ...[...tokens].map((id) => ({ type: 'token' as const, id })),
     ].slice(0, MAX_PRINCIPALS),
-    targeted,
+    targeted: reachUsers === null || reachTokens === null ? null : reachUsers + reachTokens,
   };
 }
 
@@ -355,11 +436,11 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
     // Inside the slot: compiling a draft reads the directory, so it is bounded like the rest of the preview.
     const draft = await resolveDraft(tenant, input);
     stop();
-    // The sets: live enforce policies, with and without the draft.
-    const enforce = (await listPolicies(tenant.tenantDbName, { enabled: true })).filter((p) => p.mode === 'enforce');
-    const before = buildPolicyRecord(enforce);
+    // The sets: the live (enabled) policies, with and without the draft.
+    const enabled = await listPolicies(tenant.tenantDbName, { enabled: true });
+    const before = buildPolicyRecord(enabled);
     const after = buildPolicyRecord([
-      ...enforce.filter((p) => p.policyId !== input.policyId),
+      ...enabled.filter((p) => p.policyId !== input.policyId),
       { policyId: DRAFT_POLICY_ID, cedar: draft.cedar },
     ]);
     stop();
@@ -374,17 +455,17 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
     let truncated = false;
 
     // What to evaluate. An EDIT also changes the effect for whoever the stored version targeted.
-    const replaced = input.policyId ? enforce.find((p) => p.policyId === input.policyId) : undefined;
+    const replaced = input.policyId ? enabled.find((p) => p.policyId === input.policyId) : undefined;
     const sources = [draft, ...(replaced ? [{ cedar: replaced.cedar, spec: replaced.spec }] : [])];
     const actionMap = new Map<string, ActionDefinition>();
     for (const s of sources) for (const a of actionsOf(s.spec, s.cedar, catalog)) actionMap.set(a.id, a);
     let actions = [...actionMap.values()];
-    const targetMap = new Map<string, { type: 'user' | 'token'; id: string }>();
+    const targetMap = new Map<string, PrincipalRef>();
     let targeted: number | null = 0;
     for (const s of sources) {
-      const sampled = await samplePrincipals(tenant, s.spec, s.cedar);
-      for (const t of sampled.principals) targetMap.set(`${t.type}:${t.id}`, t);
-      targeted = targeted === null || sampled.targeted === null ? null : targeted + sampled.targeted;
+      const audience = await enumeratePrincipals(tenant, s.spec, s.cedar);
+      for (const t of audience.principals) targetMap.set(`${t.type}:${t.id}`, t);
+      targeted = targeted === null || audience.targeted === null ? null : targeted + audience.targeted;
     }
     let targets = [...targetMap.values()].slice(0, MAX_PRINCIPALS);
     if (actions.length > maxEvaluations) {
@@ -402,37 +483,41 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
     // Principals: built concurrently, but only while there is time.
     const loaded = new Map<string, EvaluationPrincipal>();
     const key = (t: { type: string; id: string }) => `${t.type}:${t.id}`;
-    const load = async (ref: { type: 'user' | 'token'; id: string }) => {
+    const load = async (ref: PrincipalRef) => {
       if (loaded.has(key(ref))) return;
       if (timeLeft() < deadlineMs * 0.4) {
         truncated = true; // people we had no time to look at
         return;
       }
       try {
-        loaded.set(key(ref), await loadEvaluationPrincipal(tenant, ref, projects?.[0] ?? null));
+        loaded.set(key(ref), await loadEvaluationPrincipal(tenant, ref, projects?.[0] ?? null, { noStore: true }));
       } catch (error) {
         if (!(error instanceof PrincipalError)) throw error;
       }
     };
-    const pool = async (refs: Array<{ type: 'user' | 'token'; id: string }>) => {
+    const pool = async (refs: PrincipalRef[]) => {
       let next = 0;
-      await Promise.all(Array.from({ length: Math.min(6, refs.length) }, async () => {
+      await Promise.all(Array.from({ length: Math.min(LOAD_CONCURRENCY, refs.length) }, async () => {
         while (next < refs.length) await load(refs[next++]);
       }));
     };
     await pool(targets);
     stop();
-    // Everybody the draft was checked for (the shadow findings below add real requests on top).
-    const checkedPrincipals = targets.filter((t) => loaded.has(key(t))).length;
-    // A preview of a policy that reaches more people than were checked is a sample, whatever the budget said.
-    if (targeted === null || checkedPrincipals < targeted) truncated = true;
 
     const flips = { allowToDeny: 0, denyToAllow: 0 };
     const samples: PreviewSample[] = [];
     const perPrincipal = new Map<string, number>();
     let evaluated = 0;
+    /** People / tokens every action of the draft was compared for. */
+    let checkedPrincipals = 0;
 
     const evaluate = (ev: EvaluationPrincipal, action: ActionDefinition, resource: IamResource, context: IamRequestContext): void => {
+      // Owner safety (enforce.ts): the workspace owner's own session always reaches `iam`, whatever a rule says, so a
+      // rule on it changes nothing for them. (An API token of the owner is an ordinary principal.)
+      if (ev.type === 'user' && ev.role === 'owner' && resource.kind === 'service' && resource.service === 'iam') {
+        evaluated++;
+        return;
+      }
       const built = buildAuthorizeCall(
         {
           tenant: tenant.tenantDbName,
@@ -479,36 +564,11 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
           }
         }
       }
+      checkedPrincipals++;
     }
 
-    // Recent shadow findings: the real requests of real principals.
-    if (!truncated && timeLeft() > deadlineMs * 0.25) {
-      const entries = await listShadowEntries(tenant.tenantDbName, { flush: false }).catch(() => []);
-      const wanted: Array<{ ref: { type: 'user' | 'token'; id: string }; service: string; method: string }> = [];
-      for (const entry of entries) {
-        if (!entry.service || entry.service === '(none)') continue;
-        for (const sample of entry.samples.slice(-3)) {
-          const ref = sample.tokenId ? { type: 'token' as const, id: sample.tokenId } : { type: 'user' as const, id: sample.userId };
-          wanted.push({ ref, service: entry.service, method: entry.method });
-          if (wanted.length >= MAX_SHADOW_SAMPLES) break;
-        }
-        if (wanted.length >= MAX_SHADOW_SAMPLES) break;
-      }
-      await pool(wanted.map((w) => w.ref).filter((r, i, all) => all.findIndex((x) => key(x) === key(r)) === i));
-      stop();
-      for (const w of wanted) {
-        const ev = loaded.get(key(w.ref));
-        if (!ev) continue;
-        if (evaluated >= maxEvaluations || timeLeft() <= 0) {
-          truncated = true;
-          break;
-        }
-        const action = catalog.find((c) => c.id === gateActionId(w.service, w.method));
-        if (!action) continue;
-        evaluate(ev, action, { kind: 'service', service: w.service }, contextFor(draft.spec, ev.type));
-      }
-    }
-
+    // A preview of a policy that reaches more people than were checked is a sample, whatever the budget said.
+    if (targeted === null || checkedPrincipals < targeted) truncated = true;
     // (The tokens a user policy reaches are checked too but not counted among the named people.)
     const reach = targeted === null ? null : Math.max(targeted, checkedPrincipals);
     return { evaluated, truncated, principals: { evaluated: checkedPrincipals, targeted: reach }, flips, samples };

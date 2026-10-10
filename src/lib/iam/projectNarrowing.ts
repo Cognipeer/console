@@ -18,9 +18,11 @@
  * Resolving it any other way would let a forged cookie pick which project's
  * narrowing applies while the handler runs in a different one.
  *
- * Shared by enforce mode (iam/enforce.ts) and the shadow evaluation
- * (shadow/evaluate.ts) so the numbers an admin reviews before switching are the
- * numbers enforcement will produce.
+ * Shared by the request gates and the handler-level checks (iam/enforce.ts), the
+ * access check and the principal detail of the Authorization center, and the
+ * impact preview, so what an admin sees there is what the gates decide. The
+ * explicit `none` of project assignments that predate the engine is read as "not
+ * set" (projectLevels.ts).
  */
 
 import { runWithTenantScope } from '@/lib/database';
@@ -35,8 +37,9 @@ import {
   type ServicePermissionLevel,
 } from '@/lib/security/rbac';
 import { SERVICE_IDS, levelSets, type LevelSets, type ProjectDenySets } from './entities';
-import { getPrincipalContext } from './principalCache';
-import { resolveProjectMembershipCached } from './shadow/projectMembership';
+import { getPrincipalContext, type PrincipalContext } from './principalCache';
+import { getProjectLevelsSince } from './projectLevels';
+import { resolveProjectMembership } from './projectMembership';
 
 const DEFAULT_PROJECT_KEY = 'default';
 const DEFAULT_PROJECT_TTL_MS = 60_000;
@@ -104,7 +107,12 @@ export function pickActiveProjectId(input: {
 
 const defaultProjectCache = new Map<string, { id: string | null; expiresAt: number }>();
 
-async function lookupDefaultProjectId(tenantDbName: string, tenantId: string): Promise<string | null> {
+/**
+ * The tenant's default project (cached 60 s), or null when it has none. Throws
+ * when the store cannot be read: the request gates need the answer, and refuse
+ * the request rather than decide as if the workspace had no default project.
+ */
+export async function lookupDefaultProjectId(tenantDbName: string, tenantId: string): Promise<string | null> {
   const hit = defaultProjectCache.get(tenantDbName);
   if (hit && hit.expiresAt > Date.now()) return hit.id;
   const id = await runWithTenantScope(tenantDbName, async (db) => {
@@ -120,9 +128,11 @@ async function lookupDefaultProjectId(tenantDbName: string, tenantId: string): P
 }
 
 /**
- * The tenant's default project (cached 60 s), or null. Owners and admins run in
- * it when they have no active project - which is what a policy that names a
- * project has to see as `context.projectId`.
+ * Like `lookupDefaultProjectId`, but a read error gives null: for the tooling
+ * (access check, previews) that shows what the gate would do, where a missing
+ * default project is a display detail rather than a reason to refuse. Owners and
+ * admins run in the default project when they have no active project - which is
+ * what a policy that names a project has to see as `context.projectId`.
  */
 export async function getDefaultProjectId(tenantDbName: string, tenantId: string): Promise<string | null> {
   try {
@@ -156,6 +166,10 @@ export interface NarrowingInput {
    * resolveProjectContext), narrowing - or not - by the wrong project.
    */
   exactProject?: boolean;
+  /** The principal context, when the caller already has it (with projects): saves a cache lookup. */
+  context?: PrincipalContext;
+  /** The workspace's project-levels activation instant, when the caller already has it (projectLevels.ts). */
+  since?: number;
 }
 
 export interface NarrowingResult {
@@ -166,12 +180,14 @@ export interface NarrowingResult {
 /**
  * The project membership that narrows this request, or null when nothing does
  * (privileged principal, no project, no membership record in that project).
+ * No database round trip when the principal context is cached: the membership
+ * is resolved from the assignment rows it carries.
  */
 export async function resolveNarrowingMembership(input: NarrowingInput): Promise<NarrowingResult | null> {
   if (ownerOrAdmin(input.role)) return null;
   if (input.groupGrants.some((g) => g.tenantRole && ownerOrAdmin(g.tenantRole))) return null;
 
-  const ctx = await getPrincipalContext({
+  const ctx = input.context?.projects ? input.context : await getPrincipalContext({
     tenantDbName: input.tenantDbName,
     tenantId: input.tenantId,
     userId: input.userId,
@@ -187,13 +203,13 @@ export async function resolveNarrowingMembership(input: NarrowingInput): Promise
   const projectId = pickActiveProjectId({ requestedProjectId: requested, defaultProjectId, memberProjectIds });
   if (!projectId) return null;
 
-  const membership = await resolveProjectMembershipCached({
-    tenantDbName: input.tenantDbName,
-    userId: input.userId,
-    userRole: input.role,
+  const membership = resolveProjectMembership({
     projectId,
+    userRole: input.role,
     legacyProjectIds: input.user.projectIds,
-    groupIds: ctx.groupIds,
+    userProjects: ctx.userProjects ?? [],
+    groupProjects: ctx.groupProjects ?? [],
+    since: input.since ?? await getProjectLevelsSince(input.tenantDbName),
   });
   return membership ? { projectId, membership } : null;
 }

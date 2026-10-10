@@ -153,7 +153,7 @@ export async function requireApiTokenFromHeader(
   }
 
   // Network allowlist. Checked on EVERY request (the record may come from the
-  // auth cache, which a token edit invalidates), in every authorization mode,
+  // auth cache, which a token edit invalidates), before the permission gate,
   // and before anything with side effects (tenant binding, default-project
   // creation, the last-used stamp), so a refused call leaves no trace on the
   // token. A token without a list is unrestricted; one with a list and no

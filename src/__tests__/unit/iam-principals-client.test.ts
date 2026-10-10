@@ -154,10 +154,8 @@ describe('principal detail', () => {
         name: 'Deny exports',
         description: 'No exports',
         effect: 'forbid',
-        mode: 'monitor',
         enabled: true,
         spec: { principals: { groups: ['g1'] } },
-        monitorStats: { wouldAllow: 0, wouldDeny: 4, since: '2026-10-01T00:00:00.000Z' },
         updatedAt: '2026-10-02T00:00:00.000Z',
       },
       { name: 'no id' },
@@ -186,11 +184,12 @@ describe('principal detail', () => {
     expect(detail.policies[0]).toMatchObject({
       policyId: 'pol1',
       effect: 'forbid',
-      mode: 'monitor',
       enabled: true,
       principals: { groups: ['g1'], users: [], any: false },
-      monitorStats: { wouldDeny: 4, wouldAllow: 0 },
     });
+    // A policy is enabled or disabled: nothing else about how it is applied is carried.
+    expect(detail.policies[0]).not.toHaveProperty('mode');
+    expect(detail.policies[0]).not.toHaveProperty('monitorStats');
     expect(detail.tokens).toEqual([
       {
         id: 't1',
@@ -234,9 +233,9 @@ describe('principal detail', () => {
     expect(detail.policies).toEqual([]);
   });
 
-  it('keeps unknown policy effects and modes as null and defaults enabled to true', () => {
+  it('keeps unknown policy effects as null and defaults enabled to true', () => {
     const p = parseAttachedPolicy({ policyId: 'x', effect: 'maybe', mode: 'dry', spec: null });
-    expect(p).toMatchObject({ effect: null, mode: null, enabled: true, principals: null, monitorStats: null });
+    expect(p).toMatchObject({ effect: null, enabled: true, principals: null });
     expect(parseAttachedPolicy({ policyId: 'x', enabled: false })?.enabled).toBe(false);
   });
 });
@@ -383,10 +382,8 @@ describe('policyReach', () => {
     name: 'p',
     description: '',
     effect: 'permit',
-    mode: 'enforce',
     enabled: true,
     principals: { any: false, anyUser: false, anyToken: false, users: [], groups: [], tokens: [] },
-    monitorStats: null,
     updatedAt: null,
   };
   const withSpec = (spec: Partial<NonNullable<AttachedPolicy['principals']>>): AttachedPolicy => ({

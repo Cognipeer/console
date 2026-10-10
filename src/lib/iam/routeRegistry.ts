@@ -1,12 +1,13 @@
 /**
  * Registry of every route the API registered and how it is authorized. Filled
- * by the `onRoute` hook of the API plugin (server/api/plugin.ts), read by the
- * authorization settings API to tell an admin, before switching a tenant to
- * enforce mode, whether any route would be refused as undeclared. The CI guard
- * test asserts the list is empty for the community and the enterprise build.
+ * by the `onRoute` hook of the API plugin (server/api/plugin.ts). It tells the
+ * authorization settings API whether any route would be refused as undeclared,
+ * and (gateActions.ts) which gate actions anything in this build asks for. The
+ * CI guard test asserts the undeclared list is empty for the community and the
+ * enterprise build.
  */
 
-import { resolveRouteAuthz } from './routeAuthz';
+import { resolveRouteAuthz, type RouteAuthzLevel } from './routeAuthz';
 
 export interface RegisteredRoute {
   method: string;
@@ -16,6 +17,8 @@ export interface RegisteredRoute {
   /** Whether the kind comes from an explicit config.authz (true) or the ROUTE_PREFIXES map (false). */
   declared: boolean;
   service?: string;
+  /** The level the route declared for itself (`authz.service(svc, level)`); absent = derived from the method. */
+  level?: RouteAuthzLevel;
 }
 
 const routes = new Map<string, RegisteredRoute>();
@@ -29,7 +32,12 @@ export function concretePath(url: string): string {
 export function classifyRoute(url: string, config: unknown): Omit<RegisteredRoute, 'method' | 'url'> {
   const { effective } = resolveRouteAuthz(config, concretePath(url));
   if (effective.kind === 'service') {
-    return { kind: 'service', declared: effective.declared, service: effective.service };
+    return {
+      kind: 'service',
+      declared: effective.declared,
+      service: effective.service,
+      ...(effective.level ? { level: effective.level } : {}),
+    };
   }
   if (effective.kind === 'undeclared') return { kind: 'undeclared', declared: false };
   return { kind: effective.kind, declared: true };

@@ -36,11 +36,13 @@ declare module 'fastify' {
      */
     upstreamStatusForwarded?: boolean;
     /**
-     * Set when enforce mode refused this request (iam/enforce.ts), so the audit
-     * row can carry the decisionId the caller was shown.
+     * Set when the authorization engine refused this request (iam/enforce.ts), so
+     * the audit row can carry the decisionId the caller was shown:
+     * `forbidden` (403, a decision), `route_not_declared` (403) or
+     * `authorization_unavailable` (503, the engine could not decide).
      */
     iamDenial?: {
-      code: 'forbidden' | 'route_not_declared';
+      code: 'forbidden' | 'route_not_declared' | 'authorization_unavailable';
       decisionId?: string;
       service?: string;
       required?: string;
@@ -53,7 +55,7 @@ declare module 'fastify' {
       ip?: string;
     };
     /**
-     * Decision id of an enforce-mode refusal made by a handler-level check
+     * Decision id of a refusal made by a handler-level check
      * (authorizeServiceForRequest). A 403 answer carries it as X-Decision-Id.
      */
     iamDecisionId?: string;

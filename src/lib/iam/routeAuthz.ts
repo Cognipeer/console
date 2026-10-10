@@ -24,10 +24,9 @@
  *
  * Effective declaration of a request = the explicit `config.authz`, else the
  * ROUTE_PREFIXES / resolver mapping of its path (a `service` declaration), else
- * UNDECLARED. In legacy and shadow mode only the service part is enforced
- * (undeclared / authenticated / public / self routes behave exactly as before,
- * except that an explicit `service` declaration is now enforced on routes that
- * ROUTE_PREFIXES does not map). In enforce mode all kinds are honoured and an
+ * UNDECLARED. The gate decides on it: a `service` route goes to the policy
+ * engine, `authenticated` admits any signed-in principal of the tenant,
+ * `public` / `self` skip the gate (the handler is responsible), and an
  * undeclared route is refused with 403 `route_not_declared`.
  *
  * This file is imported by every plugin, so it only depends on rbac.ts (types
@@ -146,12 +145,7 @@ export interface RouteAuthzResolution {
   declaration: RouteAuthz | undefined;
   /** What ROUTE_PREFIXES / resolvers say about the request path. */
   prefixService: PermissionService | null;
-  /**
-   * What the LEGACY gate enforces: an explicit `service` declaration, else the
-   * path map. Everything else is "not a gated surface" there, as before.
-   */
-  legacy: { service: PermissionService; level?: RouteAuthzLevel } | null;
-  /** What ENFORCE mode decides on. */
+  /** What the gate decides on. */
   effective: EffectiveRouteAuthz;
 }
 
@@ -159,15 +153,6 @@ export interface RouteAuthzResolution {
 export function resolveRouteAuthz(config: unknown, pathname: string): RouteAuthzResolution {
   const declaration = readRouteAuthz(config);
   const prefixService = getPermissionServiceForPath(pathname);
-
-  let legacy: RouteAuthzResolution['legacy'] = null;
-  if (declaration?.kind === 'service') {
-    legacy = declaration.level
-      ? { service: declaration.service, level: declaration.level }
-      : { service: declaration.service };
-  } else if (prefixService) {
-    legacy = { service: prefixService };
-  }
 
   let effective: EffectiveRouteAuthz;
   if (declaration?.kind === 'service') {
@@ -186,21 +171,26 @@ export function resolveRouteAuthz(config: unknown, pathname: string): RouteAuthz
   } else {
     effective = { kind: 'undeclared' };
   }
-  return { declaration, prefixService, legacy, effective };
+  return { declaration, prefixService, effective };
 }
 
-/** The permission service of a request for audit/RBAC purposes (declared service wins over the path map). */
+/**
+ * The permission service of a request for audit purposes: an explicit `service`
+ * declaration wins, else the path map. (A route declared `self` / `authenticated`
+ * that sits under a mapped prefix still audits as that service.)
+ */
 export function serviceForRequest(config: unknown, pathname: string): PermissionService | null {
-  return resolveRouteAuthz(config, pathname).legacy?.service ?? null;
+  const { declaration, prefixService } = resolveRouteAuthz(config, pathname);
+  return declaration?.kind === 'service' ? declaration.service : prefixService;
 }
 
 // ── gate marker ──────────────────────────────────────────────────────────────
 
 /**
- * The permission gate (service permissions, enforce-mode undeclared refusal) runs
+ * The permission gate (service permissions, the undeclared-route refusal) runs
  * INSIDE withApiRequestContext / withClientApiRequestContext, not as a Fastify
  * hook. A route that declares `authz.service(...)` (or is prefix-mapped) but is
- * registered with a bare handler is therefore not gated at all, in any mode. The
+ * registered with a bare handler is therefore not gated at all. The
  * wrappers tag the function they return with this marker so the CI guard
  * (unit/iam-route-declarations) can tell, and fail, when such a route is not on
  * its explicit allowlist (routes that authenticate and authorize themselves).

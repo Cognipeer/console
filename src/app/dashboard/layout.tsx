@@ -6,6 +6,7 @@ import { getConfig } from '@/lib/core/config';
 import { getDatabase } from '@/lib/database';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { isSupportEntryPointEnabled } from '@/lib/services/support/supportHandoff';
 
 interface DashboardRouteLayoutProps {
@@ -41,17 +42,11 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
   }
 
   // If a non-admin user has no assigned projects, do not render the dashboard at all.
+  // A project counts however it was given: directly, in the legacy list, or through a group
+  // (the same answer as the session endpoint and the project switcher).
   if (role === 'user' || role === 'project_admin') {
-    const assigned = new Set((user?.projectIds ?? []).map(String).filter(Boolean));
-    const memberships = await db.listUserProjectsByUser(userId);
-
-    for (const membership of memberships) {
-      if (membership.projectId) {
-        assigned.add(String(membership.projectId));
-      }
-    }
-
-    if (assigned.size === 0) {
+    const assigned = await collectAccessibleProjectIds(db, userId, user?.projectIds);
+    if (assigned.length === 0) {
       redirect('/no-project');
     }
   }

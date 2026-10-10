@@ -198,8 +198,11 @@ describe('resources API', () => {
         headers: adminHeaders,
       });
       expect(res.statusCode).toBe(200);
+      // The gate (the caller, the engine's policies) and the listing each open a scope; every one of
+      // them is the session's tenant, none is the one the query asked for.
       const scopeCalls = (runWithTenantScope as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
-      expect(scopeCalls).toEqual(['tenant_acme']);
+      expect(scopeCalls.length).toBeGreaterThan(0);
+      expect(new Set(scopeCalls)).toEqual(new Set(['tenant_acme']));
       expect(res.body).toContain('crn:cpr:tenant-1:');
       expect(res.body).not.toContain('evil');
     });

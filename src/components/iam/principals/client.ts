@@ -313,7 +313,6 @@ function parseProjects(raw: unknown): ProjectRef[] {
 // ── attached policies ─────────────────────────────────────────────────────
 
 export type PolicyEffect = 'permit' | 'forbid' | 'mixed';
-export type PolicyMode = 'monitor' | 'enforce';
 
 /** `PolicySpec.principals`, normalised. */
 export interface PolicyPrincipalsSpec {
@@ -325,23 +324,15 @@ export interface PolicyPrincipalsSpec {
   tokens: string[];
 }
 
-export interface PolicyMonitorStats {
-  wouldAllow: number;
-  wouldDeny: number;
-  since: string | null;
-}
-
 /** The part of a `PolicyRow` the principal drawer needs. */
 export interface AttachedPolicy {
   policyId: string;
   name: string;
   description: string;
   effect: PolicyEffect | null;
-  mode: PolicyMode | null;
   enabled: boolean;
   /** Who the policy targets; null for a raw Cedar policy (no spec). */
   principals: PolicyPrincipalsSpec | null;
-  monitorStats: PolicyMonitorStats | null;
   updatedAt: string | null;
 }
 
@@ -368,23 +359,13 @@ export function parseAttachedPolicy(raw: unknown): AttachedPolicy | null {
   const policyId = asId(r.policyId) ?? asId(r.id);
   if (!policyId) return null;
   const effect = r.effect === 'permit' || r.effect === 'forbid' || r.effect === 'mixed' ? r.effect : null;
-  const mode = r.mode === 'monitor' || r.mode === 'enforce' ? r.mode : null;
-  const stats = r.monitorStats && typeof r.monitorStats === 'object' ? asRecord(r.monitorStats) : null;
   return {
     policyId,
     name: asString(r.name) ?? policyId,
     description: asString(r.description) ?? '',
     effect,
-    mode,
     enabled: r.enabled !== false,
     principals: parsePolicyPrincipals(r.spec),
-    monitorStats: stats
-      ? {
-          wouldAllow: Math.max(0, asNumber(stats.wouldAllow) ?? 0),
-          wouldDeny: Math.max(0, asNumber(stats.wouldDeny) ?? 0),
-          since: asString(stats.since),
-        }
-      : null,
     updatedAt: asString(r.updatedAt),
   };
 }
@@ -593,7 +574,7 @@ export const iamLinks = {
   /** Access check prefilled with a principal (and optionally a catalog action). */
   simulate: (type: SimulatablePrincipalType, id: string, action?: string | null) =>
     checkHref({ principalType: type, principalId: id, action: action ?? undefined }),
-  /** Access check loaded from a recorded enforce decision. */
+  /** Access check loaded from a recorded decision. */
   decision: (decisionId: string) => checkHref({ decisionId }),
   /** Policy editor prefilled for one principal. */
   createPolicy: (type: PrincipalType, id: string) => newPolicyHref({ principalType: type, principalId: id }),

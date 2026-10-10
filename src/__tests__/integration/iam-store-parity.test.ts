@@ -3,7 +3,7 @@
  * (SQLite and MongoDB) — the collections/tables are created lazily and must
  * behave identically.
  */
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/database', async (importOriginal) => {
@@ -63,21 +63,21 @@ describeForEachProvider('IAM document store (raw)', (getDb) => {
 
   it('lists ordered by id with prefix and limit; clear removes only this tenant', async () => {
     const other = `${tenant}_other`;
-    await runWithTenantScope(other, (db) => db.iamDocPut('iam_shadow', 'keep', { v: 1 }));
+    await runWithTenantScope(other, (db) => db.iamDocPut('iam_meta', 'keep', { v: 1 }));
     await runWithTenantScope(tenant, async (db) => {
-      for (const id of ['b:2', 'a:1', 'b:1', 'c']) await db.iamDocPut('iam_shadow', id, { id });
-      expect((await db.iamDocList('iam_shadow')).map((d) => d.id)).toEqual(['a:1', 'b:1', 'b:2', 'c']);
-      expect((await db.iamDocList('iam_shadow', { idPrefix: 'b:' })).map((d) => d.id)).toEqual(['b:1', 'b:2']);
-      expect((await db.iamDocList('iam_shadow', { limit: 2 })).map((d) => d.id)).toEqual(['a:1', 'b:1']);
+      for (const id of ['b:2', 'a:1', 'b:1', 'c']) await db.iamDocPut('iam_meta', id, { id });
+      expect((await db.iamDocList('iam_meta')).map((d) => d.id)).toEqual(['a:1', 'b:1', 'b:2', 'c']);
+      expect((await db.iamDocList('iam_meta', { idPrefix: 'b:' })).map((d) => d.id)).toEqual(['b:1', 'b:2']);
+      expect((await db.iamDocList('iam_meta', { limit: 2 })).map((d) => d.id)).toEqual(['a:1', 'b:1']);
       // regex metacharacters in a prefix are literal
-      await db.iamDocPut('iam_shadow', 'x.y', { id: 'x.y' });
-      await db.iamDocPut('iam_shadow', 'xzy', { id: 'xzy' });
-      expect((await db.iamDocList('iam_shadow', { idPrefix: 'x.' })).map((d) => d.id)).toEqual(['x.y']);
-      expect(await db.iamDocClear('iam_shadow')).toBe(6);
-      expect(await db.iamDocList('iam_shadow')).toEqual([]);
+      await db.iamDocPut('iam_meta', 'x.y', { id: 'x.y' });
+      await db.iamDocPut('iam_meta', 'xzy', { id: 'xzy' });
+      expect((await db.iamDocList('iam_meta', { idPrefix: 'x.' })).map((d) => d.id)).toEqual(['x.y']);
+      expect(await db.iamDocClear('iam_meta')).toBe(6);
+      expect(await db.iamDocList('iam_meta')).toEqual([]);
     });
     await runWithTenantScope(other, async (db) => {
-      expect((await db.iamDocGet('iam_shadow', 'keep'))?.data).toEqual({ v: 1 });
+      expect((await db.iamDocGet('iam_meta', 'keep'))?.data).toEqual({ v: 1 });
     });
   });
 
@@ -141,27 +141,29 @@ describeForEachProvider('Custom policy store', (getDb) => {
     const created = await createPolicy(tenant, { policyId: 'no-agent-delete', name: 'No agent delete', description: 'because', cedar: FORBID_DELETE }, 'u1');
     expect(created).toMatchObject({
       _id: 'no-agent-delete', policyId: 'no-agent-delete', name: 'No agent delete', description: 'because',
-      cedar: FORBID_DELETE, mode: 'enforce', enabled: true, createdBy: 'u1', updatedBy: 'u1',
+      cedar: FORBID_DELETE, enabled: true, createdBy: 'u1', updatedBy: 'u1',
     });
+    expect(created).not.toHaveProperty('mode'); // a policy is enabled or disabled, nothing else
     expect(await getPolicyVersion(tenant)).toBe(1);
     expect(events).toContainEqual({ kind: 'tenant-policies', tenantDbName: tenant });
 
     const got = await getPolicy(tenant, 'no-agent-delete');
-    expect(got).toMatchObject({ policyId: 'no-agent-delete', mode: 'enforce', enabled: true });
+    expect(got).toMatchObject({ policyId: 'no-agent-delete', enabled: true });
     expect(got!.createdAt).toBeInstanceOf(Date);
     expect(got!.updatedAt).toBeInstanceOf(Date);
 
-    const second = await createPolicy(tenant, { name: 'Monitor one', cedar: 'forbid(principal, action == Action::"tools.write", resource is Service);', mode: 'monitor', enabled: false, service: 'tools' }, 'u2');
+    const second = await createPolicy(tenant, { name: 'Disabled one', cedar: 'forbid(principal, action == Action::"tools.write", resource is Service);', enabled: false, service: 'tools' }, 'u2');
     expect(second.policyId).toMatch(/^p-[0-9a-f]{12}$/);
+    expect(second.enabled).toBe(false);
     expect(await getPolicyVersion(tenant)).toBe(2);
 
     expect((await listPolicies(tenant)).map((p) => p.policyId).sort()).toEqual([second.policyId, 'no-agent-delete'].sort());
     expect((await listPolicies(tenant, { enabled: true })).map((p) => p.policyId)).toEqual(['no-agent-delete']);
-    expect((await listPolicies(tenant, { mode: 'monitor' })).map((p) => p.policyId)).toEqual([second.policyId]);
+    expect((await listPolicies(tenant, { enabled: false })).map((p) => p.policyId)).toEqual([second.policyId]);
     expect((await listPolicies(tenant, { service: 'tools' })).map((p) => p.policyId)).toEqual([second.policyId]);
 
-    const updated = await updatePolicy(tenant, 'no-agent-delete', { name: 'Renamed', enabled: false, description: null, mode: 'monitor' }, 'u3');
-    expect(updated).toMatchObject({ name: 'Renamed', enabled: false, mode: 'monitor', updatedBy: 'u3', createdBy: 'u1' });
+    const updated = await updatePolicy(tenant, 'no-agent-delete', { name: 'Renamed', enabled: false, description: null }, 'u3');
+    expect(updated).toMatchObject({ name: 'Renamed', enabled: false, updatedBy: 'u3', createdBy: 'u1' });
     expect(updated.description).toBeUndefined();
     expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(created.updatedAt.getTime());
     expect(await getPolicyVersion(tenant)).toBe(3);
@@ -197,13 +199,77 @@ describeForEachProvider('Custom policy store', (getDb) => {
     }
   });
 
-  it('conflict on duplicate id, not_found on missing update, invalid_input on bad ids/mode/name', async () => {
+  it('conflict on duplicate id, not_found on missing update, invalid_input on bad ids/names', async () => {
     await createPolicy(tenant, { policyId: 'dup', name: 'dup', cedar: FORBID_DELETE }, 'u');
     await expect(createPolicy(tenant, { policyId: 'dup', name: 'dup', cedar: FORBID_DELETE }, 'u')).rejects.toMatchObject({ code: 'conflict' });
     await expect(updatePolicy(tenant, 'missing', { name: 'x' }, 'u')).rejects.toMatchObject({ code: 'not_found' });
     await expect(createPolicy(tenant, { policyId: 'Bad Id!', name: 'x', cedar: FORBID_DELETE }, 'u')).rejects.toMatchObject({ code: 'invalid_input' });
     await expect(createPolicy(tenant, { name: '  ', cedar: FORBID_DELETE }, 'u')).rejects.toMatchObject({ code: 'invalid_input' });
-    await expect(createPolicy(tenant, { name: 'x', cedar: FORBID_DELETE, mode: 'weird' as never }, 'u')).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  describe('the retired mode field', () => {
+    // (what an old client still sends: a body with a `mode` the store no longer knows)
+    type CreateInput = Parameters<typeof createPolicy>[1];
+    const withMode = (mode: unknown): CreateInput => ({ name: 'x', cedar: FORBID_DELETE, mode }) as unknown as CreateInput;
+
+    it('"enforce" is accepted and means a normal policy; nothing is stored for it', async () => {
+      const created = await createPolicy(tenant, { policyId: 'old-client', ...withMode('enforce') }, 'u');
+      expect(created.enabled).toBe(true);
+      const stored = await runWithTenantScope(tenant, (db) => db.iamDocGet('iam_policies', 'old-client'));
+      expect(stored?.data).not.toHaveProperty('mode');
+      expect((await updatePolicy(tenant, 'old-client', { ...withMode('enforce'), enabled: false }, 'u')).enabled).toBe(false);
+    });
+
+    it('"monitor" and anything else is refused as a validation error, on create and on update, and changes nothing', async () => {
+      await createPolicy(tenant, { policyId: 'keep', name: 'keep', cedar: FORBID_DELETE }, 'u');
+      const version = await getPolicyVersion(tenant);
+      for (const mode of ['monitor', 'weird', 5, null]) {
+        await expect(createPolicy(tenant, { policyId: 'new', ...withMode(mode) }, 'u'), String(mode)).rejects.toMatchObject({ name: 'IamPolicyError', code: 'validation' });
+        await expect(updatePolicy(tenant, 'keep', { mode } as never, 'u'), String(mode)).rejects.toMatchObject({ code: 'validation' });
+      }
+      const monitor = await createPolicy(tenant, { policyId: 'new', ...withMode('monitor') }, 'u').catch((e: unknown) => e);
+      expect((monitor as IamPolicyError).message).toMatch(/Monitor mode no longer exists/);
+      expect((monitor as IamPolicyError).details[0].message).toMatch(/enabled or disabled/);
+      expect(await getPolicy(tenant, 'new')).toBeNull();
+      expect(await getPolicyVersion(tenant)).toBe(version);
+      expect((await getPolicy(tenant, 'keep'))!.enabled).toBe(true);
+    });
+
+    it('a policy an earlier build stored in monitor mode reads as disabled and is replaced by the next save', async () => {
+      const now = new Date().toISOString();
+      await runWithTenantScope(tenant, async (db) => {
+        for (const [id, extra] of [['was-monitor', { mode: 'monitor', enabled: true }], ['was-enforce', { mode: 'enforce', enabled: true }], ['no-mode', { enabled: true }], ['was-off', { mode: 'enforce', enabled: false }]] as const) {
+          await db.iamDocPut('iam_policies', id, {
+            _id: id, policyId: id, name: id, cedar: FORBID_DELETE, spec: null, createdBy: 'x', updatedBy: 'x', createdAt: now, updatedAt: now, ...extra,
+          });
+        }
+      });
+      const enabled = (id: string) => getPolicy(tenant, id).then((p) => p?.enabled);
+      expect(await enabled('was-monitor')).toBe(false);
+      expect(await enabled('was-enforce')).toBe(true);
+      expect(await enabled('no-mode')).toBe(true);
+      expect(await enabled('was-off')).toBe(false);
+      expect((await listPolicies(tenant, { enabled: true })).map((p) => p.policyId).sort()).toEqual(['no-mode', 'was-enforce']);
+      expect(await getPolicy(tenant, 'was-monitor')).not.toHaveProperty('mode');
+
+      // enabling it is a deliberate act of its own, and the stored document stops carrying the old field
+      const enabledNow = await updatePolicy(tenant, 'was-monitor', { enabled: true }, 'u');
+      expect(enabledNow.enabled).toBe(true);
+      const stored = await runWithTenantScope(tenant, (db) => db.iamDocGet('iam_policies', 'was-monitor'));
+      expect(stored?.data).not.toHaveProperty('mode');
+      expect(stored?.data.enabled).toBe(true);
+    });
+
+    it('any other save of a monitor-mode policy keeps it disabled', async () => {
+      const now = new Date().toISOString();
+      await runWithTenantScope(tenant, (db) => db.iamDocPut('iam_policies', 'quiet', {
+        _id: 'quiet', policyId: 'quiet', name: 'quiet', cedar: FORBID_DELETE, spec: null, mode: 'monitor', enabled: true,
+        createdBy: 'x', updatedBy: 'x', createdAt: now, updatedAt: now,
+      }));
+      const renamed = await updatePolicy(tenant, 'quiet', { name: 'renamed' }, 'u');
+      expect(renamed.enabled).toBe(false);
+      expect((await runWithTenantScope(tenant, (db) => db.iamDocGet('iam_policies', 'quiet')))?.data.enabled).toBe(false);
+    });
   });
 
   it('keeps tenants separate', async () => {

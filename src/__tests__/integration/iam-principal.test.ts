@@ -1,9 +1,13 @@
 /**
- * Principal context: batched group loading (behaviour-identical to the old
- * N+1 loop), the per-(tenant,user) cache with TTL, explicit invalidation hooks
- * and the provider-level invalidation wiring — on BOTH backends.
+ * Principal context: batched group loading (behaviour-identical to a plain
+ * sequential loop), the per-(tenant,user) cache with TTL that carries the
+ * project assignment rows, explicit invalidation hooks and the provider-level
+ * invalidation wiring - on BOTH backends.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The first decision of a file loads the Cedar WASM module and builds the schema; on a busy machine the default 5 s is too tight.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const hoisted = vi.hoisted(() => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/database', async (importOriginal) => {
@@ -22,22 +26,22 @@ vi.mock('@/lib/database', async (importOriginal) => {
 
 import type { DatabaseProvider, IGroup } from '@/lib/database';
 import { authorizeGate, configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
+import { buildEnforcePrincipal } from '@/lib/iam/enforce';
+import { tokenPrincipal, userPrincipal, type IamPrincipal } from '@/lib/iam/entities';
 import { onIamInvalidation, invalidatePrincipal, invalidateTenantPrincipals, type IamInvalidation } from '@/lib/iam/events';
-import { GROUP_READ_CONCURRENCY, loadGroupGrants, loadUserGroups } from '@/lib/iam/groupGrants';
+import { GROUP_BATCH_SIZE, GROUP_READ_CONCURRENCY, fetchGroupsByIds, grantsOf, listUserGroupIds, loadGroupGrants, loadUserGroups } from '@/lib/iam/groupGrants';
 import {
   PRINCIPAL_CACHE_TTL_MS,
   getPrincipalCacheStats,
   getPrincipalContext,
   resetPrincipalCacheForTests,
-  resolveTokenPrincipal,
-  resolveUserPrincipal,
 } from '@/lib/iam/principalCache';
 import { describeForEachProvider } from './db-parity.helper';
 
 // ── pure: batched loader == the old sequential loop ─────────────────────────
 
-/** The loop fastify-utils used before this change, verbatim. */
-async function legacyLoadGroupTenantGrants(db: any, userId: string) {
+/** The plain sequential loop the batched loader must stay equivalent to. */
+async function sequentialLoadGroupTenantGrants(db: any, userId: string) {
   const memberships = typeof db.listGroupMembersByUser === 'function' ? await db.listGroupMembersByUser(userId) : [];
   if (!Array.isArray(memberships) || memberships.length === 0) return [];
   const grants: any[] = [];
@@ -53,7 +57,7 @@ async function legacyLoadGroupTenantGrants(db: any, userId: string) {
 function fakeGroupDb(groups: Record<string, Partial<IGroup> | null>, memberships: string[] | 'no-fn' | 'not-array') {
   const calls = { find: 0, list: 0 };
   const db: any = {
-    findGroupById: vi.fn(async (id: string) => { calls.find++; return (groups[id] as IGroup) ?? null; }),
+    findGroupById: vi.fn(async (id: string) => { calls.find++; return groups[id] ? ({ _id: id, ...groups[id] } as IGroup) : null; }),
     listGroups: vi.fn(async () => { calls.list++; return Object.entries(groups).filter(([, g]) => g).map(([id, g]) => ({ _id: id, ...g })); }),
   };
   if (memberships !== 'no-fn') {
@@ -62,7 +66,7 @@ function fakeGroupDb(groups: Record<string, Partial<IGroup> | null>, memberships
   return { db, calls };
 }
 
-describe('loadGroupGrants == legacy loop', () => {
+describe('loadGroupGrants == a plain sequential loop', () => {
   const groups = {
     g1: { tenantRole: 'user' as const },
     g2: { servicePermissions: { agents: 'admin' as const } },
@@ -80,7 +84,7 @@ describe('loadGroupGrants == legacy loop', () => {
   ] as const)('%s', async (_label, memberships) => {
     const a = fakeGroupDb(groups, memberships as never);
     const b = fakeGroupDb(groups, memberships as never);
-    expect(await loadGroupGrants(a.db, 'u')).toEqual(await legacyLoadGroupTenantGrants(b.db, 'u'));
+    expect(await loadGroupGrants(a.db, 'u')).toEqual(await sequentialLoadGroupTenantGrants(b.db, 'u'));
   });
 
   it('only ever uses per-membership point reads (never lists the tenant groups) with bounded concurrency', async () => {
@@ -107,12 +111,98 @@ describe('loadGroupGrants == legacy loop', () => {
     expect(big.db.findGroupById).toHaveBeenCalledTimes(ids.length);
     expect(maxInflight).toBeLessThanOrEqual(GROUP_READ_CONCURRENCY);
     expect(result).toHaveLength(ids.length);
-    expect(result).toEqual(await legacyLoadGroupTenantGrants(fakeGroupDb(many, ids).db, 'u'));
+    expect(result).toEqual(await sequentialLoadGroupTenantGrants(fakeGroupDb(many, ids).db, 'u'));
   });
 
   it('keeps membership order and returns whole groups from loadUserGroups', async () => {
     const f = fakeGroupDb(groups, ['g6', 'g1']);
     expect((await loadUserGroups(f.db, 'u')).map((g) => g.tenantRole)).toEqual(['admin', 'user']);
+  });
+});
+
+describe('the batched group fetch', () => {
+  const groups: Record<string, Partial<IGroup>> = {
+    g1: { tenantRole: 'user' },
+    g2: { servicePermissions: { agents: 'admin' } },
+    g3: { description: 'plain' },
+    g6: { tenantRole: 'admin', servicePermissions: { members: 'read' } },
+  };
+
+  /** A provider that can batch: `iamListGroups` answers for one tenant, honouring `ids`. */
+  function batchedDb(memberships: string[], store: Record<string, Partial<IGroup> | null> = groups, tenant = 'tenant-1') {
+    const db = fakeGroupDb(store, memberships).db;
+    db.iamListGroups = vi.fn(async (query: { tenantId: string; ids?: string[]; limit?: number }) => ({
+      items: query.tenantId !== tenant ? [] : (query.ids ?? []).filter((id) => store[id]).map((id) => ({ _id: id, ...store[id] })),
+      hasMore: false,
+    }));
+    return db;
+  }
+
+  it('reads all the groups of a user with ONE query, in membership order, and never reads them one by one', async () => {
+    const db = batchedDb(['g6', 'g1', 'g2']);
+    const loaded = await loadUserGroups(db, 'u', 'tenant-1');
+    expect(loaded.map((g) => String(g._id))).toEqual(['g6', 'g1', 'g2']);
+    expect(db.iamListGroups).toHaveBeenCalledTimes(1);
+    expect(db.iamListGroups).toHaveBeenCalledWith({ tenantId: 'tenant-1', ids: ['g6', 'g1', 'g2'], limit: GROUP_BATCH_SIZE });
+    expect(db.findGroupById).not.toHaveBeenCalled();
+    expect(await loadGroupGrants(batchedDb(['g6', 'g1', 'g2']), 'u', 'tenant-1')).toEqual(await sequentialLoadGroupTenantGrants(fakeGroupDb(groups, ['g6', 'g1', 'g2']).db, 'u'));
+  });
+
+  it('skips a group that no longer exists and a group of another workspace', async () => {
+    const db = batchedDb(['g1', 'gone', 'g2']);
+    expect((await loadUserGroups(db, 'u', 'tenant-1')).map((g) => String(g._id))).toEqual(['g1', 'g2']);
+    const elsewhere = batchedDb(['g1', 'g2'], groups, 'another-tenant');
+    expect(await loadUserGroups(elsewhere, 'u', 'tenant-1')).toEqual([]);
+  });
+
+  it('a user in no group costs one read (the memberships) and no group query', async () => {
+    const db = batchedDb([]);
+    expect(await loadUserGroups(db, 'u', 'tenant-1')).toEqual([]);
+    expect(db.listGroupMembersByUser).toHaveBeenCalledTimes(1);
+    expect(db.iamListGroups).not.toHaveBeenCalled();
+    expect(db.findGroupById).not.toHaveBeenCalled();
+  });
+
+  it('splits a long list of ids into pages of GROUP_BATCH_SIZE and keeps the order across pages', async () => {
+    const many: Record<string, Partial<IGroup>> = {};
+    const ids = Array.from({ length: GROUP_BATCH_SIZE * 2 + 3 }, (_, i) => { many[`m${i}`] = { tenantRole: 'user' }; return `m${i}`; });
+    const db = batchedDb(ids, many);
+    const loaded = await fetchGroupsByIds(db, 'tenant-1', ids);
+    expect(db.iamListGroups).toHaveBeenCalledTimes(3);
+    expect(loaded.map((g) => String(g._id))).toEqual(ids);
+  });
+
+  it('falls back to point reads when the provider cannot batch, or when the batch fails', async () => {
+    const plain = fakeGroupDb(groups, ['g1', 'g2']).db; // no iamListGroups at all
+    expect((await loadUserGroups(plain, 'u', 'tenant-1')).map((g) => String(g._id))).toEqual(['g1', 'g2']);
+    expect(plain.findGroupById).toHaveBeenCalledTimes(2);
+
+    const failing = fakeGroupDb(groups, ['g1', 'g2']).db;
+    failing.iamListGroups = vi.fn(async () => { throw new Error('not supported'); });
+    expect((await loadUserGroups(failing, 'u', 'tenant-1')).map((g) => String(g._id))).toEqual(['g1', 'g2']);
+    expect(failing.findGroupById).toHaveBeenCalledTimes(2);
+
+    const odd = fakeGroupDb(groups, ['g1']).db;
+    odd.iamListGroups = vi.fn(async () => undefined); // an unexpected page shape
+    expect((await loadUserGroups(odd, 'u', 'tenant-1')).map((g) => String(g._id))).toEqual(['g1']);
+  });
+
+  it('without a tenant the batched query is not used (it is tenant-scoped)', async () => {
+    const db = batchedDb(['g1']);
+    await loadUserGroups(db, 'u');
+    expect(db.iamListGroups).not.toHaveBeenCalled();
+    expect(db.findGroupById).toHaveBeenCalledTimes(1);
+  });
+
+  it('listUserGroupIds de-duplicates and keeps the order; grantsOf keeps only groups that carry a grant', async () => {
+    const memberships = ['g2', 'g1', 'g2', 'g3'];
+    const db = fakeGroupDb(groups, memberships).db;
+    expect(await listUserGroupIds(db, 'u')).toEqual(['g2', 'g1', 'g3']);
+    expect(await listUserGroupIds({} as never, 'u')).toEqual([]);
+    expect(grantsOf([groups.g1, groups.g3, groups.g2] as IGroup[])).toEqual([
+      { tenantRole: 'user', servicePermissions: undefined },
+      { tenantRole: undefined, servicePermissions: { agents: 'admin' } },
+    ]);
   });
 });
 
@@ -143,10 +233,21 @@ describeForEachProvider('Principal context + invalidation', (getDb) => {
     off?.();
     off = onIamInvalidation((e) => events.push(e));
   });
-  afterEach(() => off?.());
+  afterEach(() => {
+    off?.();
+    vi.restoreAllMocks();
+  });
 
   const makeGroup = (name: string, extra: Partial<IGroup> = {}) =>
     db.createGroup({ tenantId, name, createdBy: 'test', source: 'local', ...extra } as never);
+
+  /** The principal of a user, built the way the gates build it (without a project). */
+  const principalOf = async (userId: string, extra: { fresh?: boolean; withProjects?: boolean } = {}): Promise<IamPrincipal> => {
+    const ctx = await getPrincipalContext({ tenantDbName: dbName, tenantId, userId, ...extra });
+    return userPrincipal({
+      userId, user: ctx.user, groupGrants: ctx.groupGrants, groupIds: ctx.groupIds, projects: ctx.projects, adminProjects: ctx.adminProjects,
+    });
+  };
 
   it('loads group ids and grants, builds levels with the real rbac functions', async () => {
     const user = await mkUser('a@x.io', 'user', { servicePermissions: { agents: 'none' } });
@@ -155,7 +256,7 @@ describeForEachProvider('Principal context + invalidation', (getDb) => {
     await db.addGroupMember({ groupId: String(raising._id), userId: String(user._id), tenantId, role: 'member' });
     await db.addGroupMember({ groupId: String(plain._id), userId: String(user._id), tenantId, role: 'member' });
 
-    const principal = await resolveUserPrincipal({ tenantDbName: dbName, tenantId, userId: String(user._id) });
+    const principal = await principalOf(String(user._id));
     expect(principal.kind).toBe('user');
     expect(principal.groupIds.sort()).toEqual([String(raising._id), String(plain._id)].sort());
     expect(principal.sets.writeSvcs).toContain('agents');       // group tenantRole raised the explicit 'none'
@@ -165,35 +266,49 @@ describeForEachProvider('Principal context + invalidation', (getDb) => {
     expect(gate.allowed).toBe(true);
   });
 
-  it('token principals: legacy = owner WITHOUT groups, target = owner WITH groups', async () => {
+  it('token principals include the owner\'s groups; the scope still caps them', async () => {
     const user = await mkUser('t@x.io', 'user', { servicePermissions: { agents: 'none' } });
     const g = await makeGroup('raisers', { tenantRole: 'user' });
     await db.addGroupMember({ groupId: String(g._id), userId: String(user._id), tenantId, role: 'member' });
-    const base = { tenantDbName: dbName, tenantId, tokenId: 'tok1', ownerUserId: String(user._id), scope: null };
+    const owner = await principalOf(String(user._id));
+    const mint = (scope: Record<string, 'read' | 'write' | 'admin'> | null) => tokenPrincipal({ tokenId: 'tok1', owner, scope });
 
-    const legacy = await resolveTokenPrincipal(base);
-    const target = await resolveTokenPrincipal({ ...base, includeOwnerGroups: true });
-    expect(legacy.kind).toBe('token');
-    expect(legacy.groupIds).toEqual([]);
-    expect(target.groupIds).toEqual([String(g._id)]);
-    expect((await authorizeGate({ tenant: dbName, principal: legacy, service: 'agents', method: 'POST' })).allowed).toBe(false);
-    expect((await authorizeGate({ tenant: dbName, principal: target, service: 'agents', method: 'POST' })).allowed).toBe(true);
+    const open = mint(null);
+    expect(open.kind).toBe('token');
+    expect(open.groupIds).toEqual([String(g._id)]);
+    expect((await authorizeGate({ tenant: dbName, principal: open, service: 'agents', method: 'POST' })).allowed).toBe(true);
     // scope still narrows after groups are included
-    const narrowed = await resolveTokenPrincipal({ ...base, includeOwnerGroups: true, scope: { agents: 'read' } });
+    const narrowed = mint({ agents: 'read' });
     expect((await authorizeGate({ tenant: dbName, principal: narrowed, service: 'agents', method: 'POST' })).allowed).toBe(false);
     expect((await authorizeGate({ tenant: dbName, principal: narrowed, service: 'agents', method: 'GET' })).allowed).toBe(true);
+
+    // the gate's own builder gives the same principal: the owner's groups, the token's cap
+    const built = await buildEnforcePrincipal({
+      subject: 'token', tenantDbName: dbName, tenantId, requestId: 'r', method: 'POST', route: '/api/agents', userId: String(user._id),
+      user: user as never, tokenId: 'tok1', tokenScope: { agents: 'read' }, service: 'agents',
+    });
+    expect(built).toMatchObject({ kind: 'token', groupIds: [String(g._id)], token: { id: 'tok1', scoped: true, capRead: ['agents'], capWrite: [] } });
+    expect(built.sets.writeSvcs).toContain('agents'); // the owner's level (raised by the group) is what the scope caps
   });
 
-  it('uses caller-supplied user + grants for the levels (exact legacy inputs)', async () => {
+  it('a user row the caller already has is used as it is (no read); so are the groups it already loaded', async () => {
     const user = await mkUser('l@x.io', 'user');
-    const principal = await resolveUserPrincipal({
+    const g = await makeGroup('given', { tenantRole: 'admin' });
+    const findUser = vi.spyOn(db, 'findUserById');
+    const memberships = vi.spyOn(db, 'listGroupMembersByUser');
+    const ctx = await getPrincipalContext({
       tenantDbName: dbName, tenantId, userId: String(user._id),
       user: { role: 'admin', servicePermissions: { agents: 'read' } },
-      groupGrants: [],
+      groups: [g as IGroup],
     });
+    expect(findUser).not.toHaveBeenCalled();
+    expect(memberships).not.toHaveBeenCalled();
+    expect(ctx.user.role).toBe('admin');
+    expect(ctx.groupIds).toEqual([String(g._id)]);
+    expect(ctx.groupGrants).toEqual([expect.objectContaining({ tenantRole: 'admin' })]);
+    const principal = userPrincipal({ userId: String(user._id), user: ctx.user, groupGrants: ctx.groupGrants, groupIds: ctx.groupIds });
     expect(principal.role).toBe('admin');
     expect(principal.sets.readSvcs).toContain('agents');
-    expect(principal.sets.writeSvcs).not.toContain('agents');
     expect(principal.sets.writeSvcs).toContain('models');
   });
 
@@ -205,7 +320,7 @@ describeForEachProvider('Principal context + invalidation', (getDb) => {
     const ids = [p1, p2, p3, p4].map((p) => String(p._id));
 
     const admin = await mkUser('adm@x.io', 'admin');
-    const adm = await resolveUserPrincipal({ tenantDbName: dbName, tenantId, userId: String(admin._id), withProjects: true });
+    const adm = await principalOf(String(admin._id), { withProjects: true });
     expect([...adm.projects].sort()).toEqual([...ids].sort());
     expect([...adm.adminProjects].sort()).toEqual([...ids].sort());
 
@@ -216,7 +331,7 @@ describeForEachProvider('Principal context + invalidation', (getDb) => {
     await db.upsertGroupProject({ tenantId, groupId: String(g._id), projectId: ids[1], role: 'member', servicePermissions: {} });
     await db.upsertGroupProject({ tenantId, groupId: String(g._id), projectId: ids[2], role: 'project_admin', servicePermissions: {} });
 
-    const member = await resolveUserPrincipal({ tenantDbName: dbName, tenantId, userId: String(user._id), withProjects: true, fresh: true });
+    const member = await principalOf(String(user._id), { withProjects: true, fresh: true });
     expect([...member.projects].sort()).toEqual([...ids].sort());
     expect([...member.adminProjects].sort()).toEqual([ids[0], ids[2]].sort());
 
@@ -224,8 +339,90 @@ describeForEachProvider('Principal context + invalidation', (getDb) => {
     const lean = await mkUser('lean@x.io', 'user');
     const leanCtx = await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(lean._id) });
     expect(leanCtx.projects).toBeUndefined();
+    expect(leanCtx.userProjects).toBeUndefined();
     const upgraded = await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(lean._id), withProjects: true });
     expect(upgraded.projects).toEqual([]);
+    expect(upgraded.userProjects).toEqual([]);
+    expect(upgraded.groupProjects).toEqual([]);
+  });
+
+  it('the assignment rows travel with the context: direct and group rows, with their levels and save dates; owners and admins have none', async () => {
+    const pa = String((await db.createProject({ tenantId, key: 'ra', name: 'RA', createdBy: 'x' }))._id);
+    const pb = String((await db.createProject({ tenantId, key: 'rb', name: 'RB', createdBy: 'x' }))._id);
+    const user = await mkUser('rows@x.io');
+    await db.upsertUserProject({ tenantId, userId: String(user._id), projectId: pa, role: 'member', servicePermissions: { agents: 'read' } });
+    const g = await makeGroup('rows-team');
+    await db.addGroupMember({ groupId: String(g._id), userId: String(user._id), tenantId, role: 'member' });
+    await db.upsertGroupProject({ tenantId, groupId: String(g._id), projectId: pb, role: 'project_admin', servicePermissions: { prompts: 'none' } });
+
+    const ctx = await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(user._id), withProjects: true });
+    expect(ctx.userProjects).toEqual([{ projectId: pa, role: 'member', servicePermissions: { agents: 'read' }, updatedAt: expect.any(Date) }]);
+    expect(ctx.groupProjects).toEqual([{ projectId: pb, role: 'project_admin', servicePermissions: { prompts: 'none' }, updatedAt: expect.any(Date), groupId: String(g._id) }]);
+    expect(new Date(ctx.userProjects![0].updatedAt!).getTime()).toBeGreaterThan(Date.now() - 60_000);
+
+    const admin = await mkUser('rows-admin@x.io', 'admin');
+    const adminCtx = await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(admin._id), withProjects: true });
+    expect(adminCtx.userProjects).toEqual([]);
+    expect(adminCtx.groupProjects).toEqual([]);
+    expect([...adminCtx.projects!].sort()).toEqual([pa, pb].sort());
+  });
+
+  it('a cold load of a user in several groups reads the memberships once, the group documents once, and each group\'s projects once', async () => {
+    const user = await mkUser('cold@x.io');
+    const groupIds: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const g = await makeGroup(`cold-${i}`, { tenantRole: 'user' });
+      await db.addGroupMember({ groupId: String(g._id), userId: String(user._id), tenantId, role: 'member' });
+      groupIds.push(String(g._id));
+    }
+    const spies = {
+      memberships: vi.spyOn(db, 'listGroupMembersByUser'),
+      pointReads: vi.spyOn(db, 'findGroupById'),
+      batch: vi.spyOn(db, 'iamListGroups'),
+      direct: vi.spyOn(db, 'listUserProjectsByUser'),
+      viaGroup: vi.spyOn(db, 'listGroupProjectsByGroup'),
+      user: vi.spyOn(db, 'findUserById'),
+    };
+    await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(user._id), withProjects: true });
+    expect(spies.memberships).toHaveBeenCalledTimes(1);
+    expect(spies.batch).toHaveBeenCalledTimes(1);
+    expect(spies.pointReads).not.toHaveBeenCalled();
+    expect(spies.direct).toHaveBeenCalledTimes(1);
+    expect(spies.viaGroup).toHaveBeenCalledTimes(groupIds.length);
+    expect(spies.user).toHaveBeenCalledTimes(1);
+
+    // warm: nothing at all
+    for (const spy of Object.values(spies)) spy.mockClear();
+    await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(user._id), withProjects: true });
+    for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('owners and admins of a workspace share ONE read of its project ids per TTL', async () => {
+    await db.createProject({ tenantId, key: 'shared', name: 'Shared', createdBy: 'x' });
+    const admins = await Promise.all([mkUser('sa1@x.io', 'admin'), mkUser('sa2@x.io', 'admin'), mkUser('so@x.io', 'owner')]);
+    const listProjects = vi.spyOn(db, 'listProjects');
+    for (const a of admins) await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(a._id), withProjects: true });
+    expect(listProjects).toHaveBeenCalledTimes(1);
+    // a change of the workspace's projects drops the shared list
+    invalidateTenantPrincipals(dbName);
+    await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(admins[0]._id), withProjects: true });
+    expect(listProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it('noStore reads through a warm entry but never fills the cache (bulk callers must not push hot entries out)', async () => {
+    const hot = await mkUser('hot@x.io');
+    const bulk = await mkUser('bulk@x.io');
+    const hotCtx = await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(hot._id) });
+    const before = getPrincipalCacheStats();
+    const fromBulk = await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(bulk._id), noStore: true });
+    expect(String(fromBulk.userId)).toBe(String(bulk._id));
+    expect(getPrincipalCacheStats().entries).toBe(before.entries); // nothing added
+    // the warm entry is still served to a noStore caller
+    expect(await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(hot._id), noStore: true })).toBe(hotCtx);
+    // a second noStore load of the cold one loads again
+    const loadsBefore = getPrincipalCacheStats().loads;
+    await getPrincipalContext({ tenantDbName: dbName, tenantId, userId: String(bulk._id), noStore: true });
+    expect(getPrincipalCacheStats().loads).toBe(loadsBefore + 1);
   });
 
   it('caches per (tenant,user): hit, TTL expiry, fresh bypass, and no cached failures', async () => {

@@ -8,26 +8,19 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mockDb = vi.hoisted(() => ({
-  listApiTokens: vi.fn(),
-  listProjectApiTokens: vi.fn(),
-  deleteApiToken: vi.fn(),
-  deleteProjectApiToken: vi.fn(),
-}));
-
 const mockCacheDel = vi.hoisted(() => vi.fn());
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue(mockDb),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/core/cache', () => ({
   getCache: vi.fn().mockResolvedValue({ del: mockCacheDel, get: vi.fn(), set: vi.fn() }),
-}));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn().mockReturnValue(null),
-  authorizeServiceRequest: vi.fn().mockReturnValue({ allowed: true }),
 }));
 
 vi.mock('@/lib/services/projects/projectContext', () => ({
@@ -41,9 +34,11 @@ vi.mock('@/lib/services/projects/projectContext', () => ({
   },
 }));
 
+import { getDatabase } from '@/lib/database';
 import { resolveProjectContext } from '@/lib/services/projects/projectContext';
 import { apiAuthCacheKey } from '@/lib/services/apiTokenAuth';
 import { tokensApiPlugin } from '@/server/api/plugins/tokens';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
 
 const SESSION_HEADERS = {
@@ -64,8 +59,18 @@ async function buildApp() {
   return createFastifyApiTestApp(tokensApiPlugin);
 }
 
+let mockDb: ReturnType<typeof createMockDb>;
+
+/** The signed-in caller the gate loads: the workspace owner unless a test says otherwise. */
+function signedInAs(role: 'owner' | 'user') {
+  mockDb.findUserById.mockResolvedValue({ _id: 'user-1', tenantId: 'tenant-1', role } as never);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  mockDb = createMockDb();
+  mockFn(getDatabase).mockResolvedValue(mockDb);
+  signedInAs('owner');
   mockFn(resolveProjectContext).mockResolvedValue({ projectId: 'proj-1' });
 });
 
@@ -73,7 +78,7 @@ describe('DELETE /api/tokens/:id — invalidates the auth cache entry', () => {
   it('evicts the cache entry for the deleted project-scoped token (admin/owner path)', async () => {
     mockDb.listProjectApiTokens.mockResolvedValue([
       { _id: 'token-1', tenantId: 'tenant-1', projectId: 'proj-1', tokenHash: 'a'.repeat(64) },
-    ]);
+    ] as never);
     mockDb.deleteProjectApiToken.mockResolvedValue(true);
 
     const app = await buildApp();
@@ -90,8 +95,9 @@ describe('DELETE /api/tokens/:id — invalidates the auth cache entry', () => {
   it('evicts the cache entry for a self-owned token (user path)', async () => {
     mockDb.listApiTokens.mockResolvedValue([
       { _id: 'token-2', tenantId: 'tenant-1', projectId: 'proj-1', tokenHash: 'b'.repeat(64) },
-    ]);
+    ] as never);
     mockDb.deleteApiToken.mockResolvedValue(true);
+    signedInAs('user');
 
     const app = await buildApp();
     const res = await app.inject({
@@ -122,7 +128,7 @@ describe('DELETE /api/tokens/:id — invalidates the auth cache entry', () => {
   it('still deletes successfully even if the cache eviction itself fails (best-effort)', async () => {
     mockDb.listProjectApiTokens.mockResolvedValue([
       { _id: 'token-3', tenantId: 'tenant-1', projectId: 'proj-1', tokenHash: 'c'.repeat(64) },
-    ]);
+    ] as never);
     mockDb.deleteProjectApiToken.mockResolvedValue(true);
     mockCacheDel.mockRejectedValueOnce(new Error('cache unavailable'));
 

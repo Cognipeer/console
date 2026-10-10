@@ -28,6 +28,11 @@ const NAMESPACES = {
     'components/iam/principals/EffectivePermissions.tsx',
   ],
   iamAudit: ['components/iam/audit/AuditTab.tsx'],
+  iamOverview: ['components/iam/overview/OverviewTab.tsx'],
+  projectMembers: [
+    'components/projects/ProjectMembersManager.tsx',
+    'components/projects/ProjectPermissionsEditor.tsx',
+  ],
 } as const;
 
 type Namespace = keyof typeof NAMESPACES;
@@ -50,8 +55,8 @@ describe.each(Object.keys(NAMESPACES) as Namespace[])('%s messages', (ns) => {
   });
 
   it('is actually translated (no key is left in English)', () => {
-    // Words that are legitimately the same in both languages.
-    const SAME = /^(API token|Cedar policy|ID|CSV|IP|Token|Politika|LDAP|SSO \((OIDC|SAML)\))$/i;
+    // Words that are legitimately the same in both languages, and templates made of placeholders alone.
+    const SAME = /^(API token|Cedar policy|ID|CSV|IP|Token|Politika|LDAP|SSO \((OIDC|SAML)\)|(\{\w+\}[\s:→-]*)+)$/i;
     const untranslated = [...en(ns)].filter(([key, text]) => tr(ns).get(key) === text && !SAME.test(text));
     expect(untranslated.map(([key]) => key)).toEqual([]);
   });
@@ -73,6 +78,8 @@ describe.each(Object.keys(NAMESPACES) as Namespace[])('%s messages', (ns) => {
 describe('message families built from a value', () => {
   const principals = en('iamPrincipals');
   const audit = en('iamAudit');
+  const overview = en('iamOverview');
+  const members = en('projectMembers');
   const has = (map: Map<string, string>, prefix: string, values: string[]) =>
     values.filter((v) => !map.has(`${prefix}.${v}`)).map((v) => `${prefix}.${v}`);
 
@@ -89,21 +96,47 @@ describe('message families built from a value', () => {
       ...has(principals, 'drawer.sources.kind', ['role', 'direct', 'group', 'token-scope', 'project', 'policy', 'other']),
       ...has(principals, 'drawer.sources.hint', ['role', 'direct', 'group', 'token-scope', 'project', 'policy', 'other']),
       ...has(principals, 'drawer.policies.effect', ['permit', 'forbid', 'mixed']),
-      ...has(principals, 'drawer.policies.mode', ['monitor', 'enforce']),
       ...has(principals, 'drawer.policies.reach', ['everyone', 'anyUser', 'anyToken', 'direct', 'group', 'viaOwner', 'raw']),
       ...has(principals, 'drawer.projects.role', ['project_admin', 'member']),
     ]).toEqual([]);
   });
 
+  it('covers every engine state, refusal reason and alert of the overview', () => {
+    expect([
+      ...has(overview, 'engine.status', ['ok', 'degraded', 'down']),
+      ...has(overview, 'alerts.health.degraded', ['title', 'body']),
+      ...has(overview, 'alerts.health.down', ['title', 'body']),
+      ...has(overview, 'alerts.skipped', ['title', 'body']),
+      ...has(overview, 'alerts.undeclared', ['title', 'body']),
+      ...has(overview, 'alerts.unavailable', ['title', 'body']),
+      ...has(overview, 'unavailableReason', ['engine_unavailable', 'principal_unavailable', 'evaluation_error']),
+      ...has(overview, 'links', ['check.title', 'check.text', 'audit.title', 'audit.text', 'limits.title', 'limits.text', 'tokens.title', 'tokens.text', 'projects.title', 'projects.text']),
+    ]).toEqual([]);
+  });
+
+  it('covers every level choice, workspace role and project role of the project members screen', () => {
+    expect([
+      ...has(members, 'editor.levels', ['inherit', 'none', 'read', 'write', 'admin']),
+      ...has(members, 'tenantRoles', ['owner', 'admin', 'project_admin', 'user']),
+      ...has(members, 'roles', ['member', 'project_admin', 'implicit']),
+    ]).toEqual([]);
+  });
+
+  it('has no trace of the retired modes in the new namespaces', () => {
+    for (const map of [overview, members]) {
+      expect([...map.keys()].filter((k) => /monitor|shadow|legacy|enforcemode/i.test(k))).toEqual([]);
+      expect([...map.values()].filter((v) => /\b(shadow|monitor mode|enforce mode|legacy mode)\b/i.test(v))).toEqual([]);
+    }
+  });
+
   it('covers every audit view, action, code and filter preset', () => {
     expect([
-      ...has(audit, 'segments', ['denials', 'changes', 'monitor']),
-      ...has(audit, 'hint', ['denials', 'changes', 'monitor']),
+      ...has(audit, 'segments', ['denials', 'changes']),
+      ...has(audit, 'hint', ['denials', 'changes']),
       ...has(audit, 'empty.denials', ['title', 'hint']),
       ...has(audit, 'empty.changes', ['title', 'hint']),
-      ...has(audit, 'empty.monitor', ['title', 'hint', 'manageHint']),
       ...has(audit, 'actions', ['read', 'write', 'admin', 'security']),
-      ...has(audit, 'codes', ['forbidden', 'route_not_declared', 'ip_not_allowed']),
+      ...has(audit, 'codes', ['forbidden', 'route_not_declared', 'ip_not_allowed', 'authorization_unavailable']),
       ...has(audit, 'filters.presets', ['today', 'week', 'month']),
     ]).toEqual([]);
   });

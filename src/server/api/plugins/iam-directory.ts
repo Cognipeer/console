@@ -4,7 +4,7 @@
  *
  *   GET /iam/principals?type=user|group|token&q=&limit=&cursor=    paged search
  *   GET /iam/principals/:type/:id?projectId=                        effective permissions, groups, projects, policies
- *   GET /iam/audit?kind=denials|changes|monitor&from&to&principalType&principalId&service&limit&cursor
+ *   GET /iam/audit?kind=denials|changes&from&to&principalType&principalId&service&limit&cursor
  *   GET /iam/audit/export                                           the same filters as CSV
  *   GET /iam/settings, PUT /iam/settings                            tenant token policy
  *

@@ -291,15 +291,15 @@ describe('built-in policy texts', () => {
 // ── spec model ───────────────────────────────────────────────────────────
 
 describe('policy draft <-> spec', () => {
-  it('starts safe: monitor mode, nothing chosen', () => {
+  it('starts empty and enabled: nothing chosen, and no mode to choose', () => {
     const d = emptyDraft();
-    expect(d.mode).toBe('monitor');
+    expect(d).not.toHaveProperty('mode');
     expect(d.enabled).toBe(true);
     expect(validateDraft(d).map((i) => i.code)).toEqual(['name', 'actions', 'who']);
   });
 
   it('round-trips a full spec', () => {
-    const draft = specToDraft(fullSpec, { name: 'n', description: 'd', mode: 'enforce', enabled: true }, { groups: new Map([['g1', 'Sales']]) });
+    const draft = specToDraft(fullSpec, { name: 'n', description: 'd', enabled: true }, { groups: new Map([['g1', 'Sales']]) });
     expect(draft.groups).toEqual([
       { id: 'g1', label: 'Sales' },
       { id: 'g2', label: 'g2' },
@@ -342,15 +342,15 @@ describe('policy draft <-> spec', () => {
       actions: ['Read'],
       resources: { services: ['agents'], projects: ['p1'], resources: [{ type: 'agent', id: 'a1' }] },
     };
-    const draft = specToDraft(spec, { name: 'n', description: '', mode: 'monitor', enabled: true });
+    const draft = specToDraft(spec, { name: 'n', description: '', enabled: true });
     expect(draft.whereMode).toBe('multiple');
     expect(draftToSpec(draft).resources).toEqual(spec.resources);
     expect(summarizeSpec(spec).whereMode).toBe('multiple');
   });
 
   it('turns a raw-Cedar row into a basics-only draft', () => {
-    const row = { name: 'raw', description: 'd', mode: 'monitor', enabled: false, spec: null } as unknown as PolicyRow;
-    expect(draftFromRow(row)).toMatchObject({ name: 'raw', description: 'd', mode: 'monitor', enabled: false, actions: [] });
+    const row = { name: 'raw', description: 'd', enabled: false, spec: null } as unknown as PolicyRow;
+    expect(draftFromRow(row)).toMatchObject({ name: 'raw', description: 'd', enabled: false, actions: [] });
   });
 
   it('prefills the principal from a deep link', () => {

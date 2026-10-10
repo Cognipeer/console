@@ -1,11 +1,13 @@
 'use client';
 
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Alert, Anchor, Badge, Button, Group, Paper, Stack, Text, ThemeIcon, Tooltip } from '@mantine/core';
+import { Alert, Anchor, Badge, Button, Group, Paper, Stack, Text, ThemeIcon } from '@mantine/core';
 import {
   IconAlertTriangle,
   IconArrowRight,
   IconCheck,
+  IconExternalLink,
   IconInfoCircle,
   IconLock,
   IconShieldPlus,
@@ -13,10 +15,11 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import type { SimulateReason, SimulateRequest, SimulateResponse } from '../api';
+import { iamApi, isAbortError, type IamLevel, type SimulateReason, type SimulateRequest, type SimulateResponse } from '../api';
 import { iamHref, newPolicyHref, policyHref } from '../links';
 import { useProjects } from '../pickers/lookups';
 import type { IamLabels } from '../useIamLabels';
+import { hasProjectLimit, parseBuiltInReason, projectLimitFrom, reasonLink, type ReasonLink } from './reasonModel';
 
 interface SimulateResultCardProps {
   request: SimulateRequest;
@@ -26,6 +29,9 @@ interface SimulateResultCardProps {
   principalLabel: string;
   resourceLabel: string;
   canManage: boolean;
+  /** The service the checked action belongs to, and the level it asks for (null for an unknown action). */
+  service?: string | null;
+  level?: 'read' | 'write' | 'admin' | null;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -39,44 +45,150 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function VerdictBadge({ allowed }: { allowed: boolean }) {
+/** Everything a reason needs to be said in plain words. */
+interface ReasonContext {
+  who: { type: 'user' | 'token'; id: string };
+  role: string;
+  service: string | null;
+  level: 'read' | 'write' | 'admin' | null;
+  projectId: string | null;
+  projectName: string | null;
+  tokenScope: Record<string, string> | null;
+  /** The limit the project sets on `service` for this member, once the server has said. */
+  projectLimit: { level: IamLevel; projectName: string } | null;
+}
+
+function ChangeLink({ link }: { link: ReasonLink }) {
   const t = useTranslations('iamCenter');
   return (
-    <Badge variant="light" color={allowed ? 'green' : 'red'}>
-      {allowed ? t('result.allowed') : t('result.denied')}
-    </Badge>
+    <Anchor component={Link} href={link.href} size="xs" data-testid="reason-link">
+      <Group gap={4} wrap="nowrap" component="span">
+        {t(`result.change.${link.labelKey}`)}
+        <IconExternalLink size={12} />
+      </Group>
+    </Anchor>
   );
 }
 
-function ReasonRow({ reason, labels }: { reason: SimulateReason; labels: IamLabels }) {
+function ReasonRow({ reason, labels, ctx }: { reason: SimulateReason; labels: IamLabels; ctx: ReasonContext }) {
   const t = useTranslations('iamCenter');
-  const name = reason.managed ? labels.managedName(reason.cedarId, reason.name) : reason.name;
-  return (
-    <Group gap="xs" wrap="wrap" justify="space-between" align="flex-start">
-      <Group gap="xs" wrap="nowrap" align="flex-start" style={{ minWidth: 0, flex: '1 1 220px' }}>
-        <Badge size="sm" variant="light" color={reason.effect === 'forbid' ? 'red' : 'green'} style={{ flexShrink: 0 }}>
-          {reason.effect === 'forbid' ? t('effects.forbid') : t('effects.permit')}
-        </Badge>
-        {reason.managed ? (
-          <Tooltip label={reason.cedarId}>
-            <Group gap={4} wrap="nowrap" align="flex-start" style={{ minWidth: 0 }}>
-              <IconLock size={13} style={{ flexShrink: 0, marginTop: 3 }} />
-              <Text size="sm">{name}</Text>
-            </Group>
-          </Tooltip>
-        ) : reason.policyId ? (
-          <Anchor component={Link} href={policyHref(reason.policyId)} size="sm">
-            {name}
-          </Anchor>
-        ) : (
-          <Text size="sm">{name}</Text>
-        )}
+  const effectBadge = (
+    <Badge size="sm" variant="light" color={reason.effect === 'forbid' ? 'red' : 'green'} style={{ flexShrink: 0 }}>
+      {reason.effect === 'forbid' ? t('effects.forbid') : t('effects.permit')}
+    </Badge>
+  );
+  const originBadge = (
+    <Badge size="xs" variant="default" style={{ flexShrink: 0 }}>
+      {reason.managed ? t('result.builtIn') : t('result.custom')}
+    </Badge>
+  );
+
+  // A custom policy: its name, and a link to it.
+  if (!reason.managed) {
+    return (
+      <Group gap="xs" wrap="wrap" justify="space-between" align="flex-start">
+        <Group gap="xs" wrap="nowrap" align="flex-start" style={{ minWidth: 0, flex: '1 1 220px' }}>
+          {effectBadge}
+          {reason.policyId ? (
+            <Anchor component={Link} href={policyHref(reason.policyId)} size="sm">
+              {reason.name}
+            </Anchor>
+          ) : (
+            <Text size="sm">{reason.name}</Text>
+          )}
+        </Group>
+        {originBadge}
       </Group>
-      <Badge size="xs" variant="outline" color="gray" style={{ flexShrink: 0 }}>
-        {reason.managed ? t('result.builtIn') : t('result.custom')}
-      </Badge>
+    );
+  }
+
+  const built = parseBuiltInReason(reason.cedarId);
+  const serviceName = ctx.service ? labels.service(ctx.service) : '';
+  const levelWord = (value: string | null) => (value === 'none' ? t('result.noAccess') : value ? labels.level(value) : '');
+  const required = levelWord(built.level ?? ctx.level);
+  const role = labels.lookup(`iamPrincipals.roles.${ctx.role}`) ?? ctx.role;
+  const project = ctx.projectLimit?.projectName || ctx.projectName || '';
+  const link = reasonLink(built.kind, ctx.who, ctx.projectId);
+
+  let title: string;
+  let detail: string | null = null;
+  switch (built.kind) {
+    case 'role':
+      title = t('result.reason.role', { role });
+      detail = t('result.reason.roleDetail', { level: required, service: serviceName });
+      break;
+    case 'tokenOwner':
+      title = t('result.reason.tokenOwner', { role });
+      detail = t('result.reason.tokenOwnerDetail', { level: required, service: serviceName });
+      break;
+    case 'projectLimit': {
+      const limit = ctx.projectLimit ? levelWord(ctx.projectLimit.level) : '';
+      title = limit
+        ? t('result.reason.projectLimit', { project, service: serviceName, limit })
+        : t('result.reason.projectLimitUnknown', { project, service: serviceName });
+      detail = limit
+        ? t('result.reason.projectLimitDetail', { project, service: serviceName, limit, required })
+        : t('result.reason.projectLimitDetailUnknown', { project, service: serviceName, required });
+      break;
+    }
+    case 'tokenScope': {
+      const limit = levelWord(ctx.service ? (ctx.tokenScope?.[ctx.service] ?? 'none') : 'none');
+      title = t('result.reason.tokenScope', { service: serviceName, limit });
+      detail = t('result.reason.tokenScopeDetail', { service: serviceName, limit, required });
+      break;
+    }
+    default:
+      title = labels.managedName(reason.cedarId, reason.name);
+  }
+
+  return (
+    <Group gap="xs" wrap="wrap" justify="space-between" align="flex-start" data-testid="built-in-reason">
+      <Group gap="xs" wrap="nowrap" align="flex-start" style={{ minWidth: 0, flex: '1 1 220px' }}>
+        {effectBadge}
+        <Stack gap={2} style={{ minWidth: 0 }}>
+          <Group gap={4} wrap="nowrap" align="flex-start">
+            <IconLock size={13} style={{ flexShrink: 0, marginTop: 3 }} />
+            <Text size="sm" fw={500}>
+              {title}
+            </Text>
+          </Group>
+          {detail ? (
+            <Text size="xs" c="dimmed">
+              {detail}
+            </Text>
+          ) : null}
+          {link ? <ChangeLink link={link} /> : null}
+        </Stack>
+      </Group>
+      {originBadge}
     </Group>
   );
+}
+
+/** The exact limit a project sets, asked once when a project limit took part in the decision. */
+function useProjectLimit(
+  enabled: boolean,
+  who: { type: 'user' | 'token'; id: string },
+  projectId: string | null,
+  service: string | null,
+): ReasonContext['projectLimit'] {
+  const [limit, setLimit] = useState<ReasonContext['projectLimit']>(null);
+  useEffect(() => {
+    setLimit(null);
+    if (!enabled || !projectId || !service) return;
+    const controller = new AbortController();
+    iamApi
+      .getPrincipal(who.type, who.id, projectId, controller.signal)
+      .then((detail) => {
+        if (!controller.signal.aborted) setLimit(projectLimitFrom(detail.effective, service));
+      })
+      .catch((error: unknown) => {
+        // Without the exact level the reason still reads in full ("limits ... to less than ...").
+        if (!isAbortError(error)) setLimit(null);
+      });
+    return () => controller.abort();
+  }, [enabled, who.type, who.id, projectId, service]);
+  return limit;
 }
 
 export default function SimulateResultCard({
@@ -86,12 +198,29 @@ export default function SimulateResultCard({
   principalLabel,
   resourceLabel,
   canManage,
+  service = null,
+  level = null,
 }: SimulateResultCardProps) {
   const t = useTranslations('iamCenter');
-  const { allowed, reasons, defaultDeny, monitor, legacy, principalSummary: ps, mode, ownerSafety, errors, enforcedAtGate } = result;
+  const { allowed, reasons, defaultDeny, principalSummary: ps, ownerSafety, errors, enforcedAtGate } = result;
   const { projects } = useProjects();
   const projectName = result.projectId ? (projects.find((p) => p.id === result.projectId)?.name ?? result.projectId) : null;
   const principalType = request.principal.type;
+  const who = useMemo(() => ({ type: principalType, id: request.principal.id }), [principalType, request.principal.id]);
+  const projectLimit = useProjectLimit(hasProjectLimit(reasons), who, result.projectId, service);
+
+  const ctx: ReasonContext = {
+    who,
+    role: ps.role,
+    service,
+    level,
+    projectId: result.projectId,
+    projectName,
+    tokenScope: ps.tokenScope,
+    projectLimit,
+  };
+  const role = labels.lookup(`iamPrincipals.roles.${ps.role}`) ?? ps.role;
+  const noRuleLink = principalType === 'user' ? reasonLink('role', who, result.projectId) : null;
 
   return (
     <Paper withBorder radius="md" p="md">
@@ -114,15 +243,12 @@ export default function SimulateResultCard({
           </div>
         </Group>
 
-        <Alert
-          color={mode === 'enforce' && enforcedAtGate ? 'blue' : 'yellow'}
-          variant="light"
-          icon={<IconInfoCircle size={16} />}
-          title={t('result.engineMode', { mode: labels.authzMode(mode) })}
-        >
-          {/* A check about one resource is not what a real request meets: the gates decide whole services. */}
-          {enforcedAtGate ? t(`result.modeNote.${mode}`) : t('result.notEnforcedAtGate')}
-        </Alert>
+        {/* A check about one resource is not what a real request meets: the gates decide whole services. */}
+        {!enforcedAtGate ? (
+          <Alert color="yellow" variant="light" icon={<IconInfoCircle size={16} />}>
+            {t('result.notEnforcedAtGate')}
+          </Alert>
+        ) : null}
 
         <Text size="xs" c="dimmed" data-testid="check-project">
           {projectName ? t('result.projectApplied', { project: projectName }) : t('result.noProject')}
@@ -136,14 +262,25 @@ export default function SimulateResultCard({
 
         <Section title={t('result.decidedBy')}>
           {reasons.length > 0 ? (
-            <Stack gap={6}>
+            <Stack gap={8}>
               {reasons.map((r) => (
-                <ReasonRow key={r.cedarId} reason={r} labels={labels} />
+                <ReasonRow key={r.cedarId} reason={r} labels={labels} ctx={ctx} />
               ))}
             </Stack>
           ) : defaultDeny ? (
-            <Alert color="gray" variant="light">
-              {t('result.defaultDeny')}
+            <Alert color="gray" variant="light" data-testid="default-deny">
+              <Stack gap={4} align="flex-start">
+                <Text size="sm">
+                  {service && level
+                    ? t(principalType === 'token' ? 'result.noRuleToken' : 'result.noRuleUser', {
+                        role,
+                        level: labels.level(level),
+                        service: labels.service(service),
+                      })
+                    : t('result.defaultDeny')}
+                </Text>
+                {noRuleLink && service && level ? <ChangeLink link={noRuleLink} /> : null}
+              </Stack>
             </Alert>
           ) : (
             <Text size="sm" c="dimmed">
@@ -152,54 +289,13 @@ export default function SimulateResultCard({
           )}
         </Section>
 
-        {monitor ? (
-          <Section title={t('result.monitorTitle')}>
-            {monitor.differs ? (
-              <Alert color="yellow" variant="light">
-                <Stack gap={6}>
-                  <Group gap="xs">
-                    <Text size="sm">{t('result.monitorDiffers')}</Text>
-                    <VerdictBadge allowed={monitor.allowed} />
-                  </Group>
-                  {monitor.reasons.map((r) => (
-                    <ReasonRow key={r.cedarId} reason={r} labels={labels} />
-                  ))}
-                </Stack>
-              </Alert>
-            ) : (
-              <Text size="sm" c="dimmed">
-                {t('result.monitorSame')}
-              </Text>
-            )}
-          </Section>
-        ) : null}
-
-        {legacy ? (
-          <Section title={t('result.legacyTitle')}>
-            <Group gap="xs">
-              <VerdictBadge allowed={legacy.allowed} />
-              <Text size="sm" c="dimmed">
-                {t('result.legacyRequires', {
-                  level: labels.level(legacy.required),
-                  service: labels.service(legacy.service),
-                })}
-              </Text>
-            </Group>
-            {legacy.allowed !== allowed ? (
-              <Alert color="orange" variant="light">
-                {t('result.legacyDiffers')}
-              </Alert>
-            ) : null}
-          </Section>
-        ) : null}
-
         <Section title={t('result.principalTitle')}>
           <Stack gap={4}>
             <Group gap="xs">
               <Text size="sm" fw={600}>
                 {ps.label || principalLabel}
               </Text>
-              <Badge size="xs" variant="outline" color="gray">
+              <Badge size="xs" variant="default">
                 {principalType === 'token' ? t('result.typeToken') : t('result.typeUser')}
               </Badge>
               {ps.role && !(principalType === 'user' && ps.role === 'user') ? (
@@ -243,9 +339,9 @@ export default function SimulateResultCard({
                     {t('result.tokenEmptyScope')}
                   </Text>
                 ) : (
-                  Object.entries(ps.tokenScope).map(([service, level]) => (
-                    <Badge key={service} size="sm" variant="outline">
-                      {labels.service(service)} · {labels.level(level)}
+                  Object.entries(ps.tokenScope).map(([scoped, scopedLevel]) => (
+                    <Badge key={scoped} size="sm" variant="default">
+                      {labels.service(scoped)} · {labels.level(scopedLevel)}
                     </Badge>
                   ))
                 )}

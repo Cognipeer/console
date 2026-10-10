@@ -1,6 +1,6 @@
 # Authentication
 
-The gateway supports two authentication mechanisms: JWT-based session auth for the dashboard and API token auth for client APIs.
+The gateway supports two authentication mechanisms: JWT-based session auth for the dashboard and API token auth for client APIs. Authentication says who is calling; what the caller may do is decided by the policy engine, described in [Authorization](/guide/authorization).
 
 ## Authentication Modes
 
@@ -131,6 +131,7 @@ export async function POST(request: NextRequest) {
 8. Fire-and-forget: update `lastUsed` timestamp
 9. Ensure default project exists
 10. Return `ApiTokenContext`
+11. The route's authorization gate decides what the token's owner, scope and project allow (see [Authorization](/guide/authorization))
 
 ### Token Properties
 
@@ -140,7 +141,7 @@ export async function POST(request: NextRequest) {
 | `userId` | Owning user |
 | `tenantId` | Owning tenant |
 | `projectId` | Scoped project (optional) |
-| `servicePermissions` | Least-privilege scope that caps the owner's permissions (optional) |
+| `servicePermissions` | Least-privilege scope that caps the owner's permissions, group grants included (optional) |
 | `expiresAt` | Expiration date (optional) |
 | `allowedIpRanges` | CIDR ranges the token may be used from (optional, see below) |
 | `lastUsed` | Last usage timestamp |
@@ -148,7 +149,7 @@ export async function POST(request: NextRequest) {
 ### Expiry and the tenant token policy
 
 A token may carry an expiry (`expiresAt`). An organization can make that
-mandatory and cap how long a token may live under **Authorization Engine →
+mandatory and cap how long a token may live under **IAM center →
 Settings → API tokens** (the `GET/PUT /api/iam/settings` API):
 
 | Setting | Meaning |
@@ -186,8 +187,8 @@ the regular request row, and takes effect on the very next call.
 
 `allowedIpRanges` is a list of IPv4 / IPv6 ranges in CIDR notation (a bare
 address means a single host; at most 100 entries). A token with a list only
-authenticates from an address inside one of the ranges, in every authorization
-mode (legacy, shadow and enforce). Any other call is refused with:
+authenticates from an address inside one of the ranges. Any other call is
+refused with:
 
 ```json
 { "error": "API token is not allowed from this IP address", "code": "ip_not_allowed" }
@@ -219,16 +220,9 @@ unless it asks for a subset of them.
 ### Permission denials
 
 A call that the permission gate refuses (the caller's level on the route's
-service is below what the route needs) is answered with `403`, and `error` is the
-human-readable reason in every authorization mode:
-
-```json
-{ "error": "Forbidden: mcp requires write permission" }
-```
-
-A tenant in **enforce** mode answers with that same `error` and adds structured
-fields next to it, so a client that only surfaces `body.error` (the SDKs and the
-dashboard do) shows the same reason before and after a tenant flips to enforce:
+service is below what the route needs) is answered with `403`. `error` is the
+human-readable reason, and structured fields sit next to it, so a client that only
+shows `body.error` (the SDKs and the dashboard do) still shows the reason:
 
 ```json
 {
@@ -241,14 +235,19 @@ dashboard do) shows the same reason before and after a tenant flips to enforce:
 }
 ```
 
-`decisionId` identifies this refusal: `GET /api/iam/decisions/:decisionId`
-resolves it to the audit row and a ready-to-run access check (Authorization
-center, **Access check**). In enforce mode a route that carries no authorization
-declaration is refused with `code: "route_not_declared"`, and a token with a
-service scope is refused on the tenant-wide `/metrics` export; both put the reason
-in `error` as well. The OpenAI- and Anthropic-compatible routes keep their own
-error envelopes (the reason is `error.message`; OpenAI routes add `error.code` in
-enforce mode).
+`decisionId` identifies this refusal and is repeated in the `X-Decision-Id`
+header: `GET /api/iam/decisions/:decisionId` resolves it to the audit row and a
+ready-to-run access check (IAM center, **Access check**). A route that carries no
+authorization declaration is refused with `code: "route_not_declared"`, and a
+token with a service scope is refused on the tenant-wide `/api/metrics` export;
+both put the reason in `error` as well. The OpenAI- and Anthropic-compatible
+routes keep their own error envelopes: the reason is `error.message`, OpenAI
+routes add `error.code`, and both carry the decision id as `error.decision_id`.
+
+When the engine cannot decide a request at all, the answer is `503` with
+`code: "authorization_unavailable"` and a `Retry-After` header, never an allow.
+[Authorization](/guide/authorization#when-authorization-is-unavailable) describes
+that case, the readiness check and the owner's safety rule.
 
 ## License-Based Feature Control
 
@@ -295,6 +294,10 @@ The middleware checks these mappings automatically.
 | `project_admin` | Manage assigned projects |
 | `user` | Access assigned projects only |
 
+A role sets the default level of every service; per-user permissions, group
+grants, project member permissions and token scopes refine it. How they combine
+is in [Authorization](/guide/authorization#the-settings-you-maintain).
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -302,4 +305,4 @@ The middleware checks these mappings automatically.
 | `JWT_SECRET` | — | **Required**. Secret for JWT signing |
 | `JWT_EXPIRES_IN` | `7d` | JWT expiration duration |
 | `PROVIDER_ENCRYPTION_SECRET` | `JWT_SECRET` | Encryption key for stored credentials |
-| `TRUSTED_PROXIES` | — (trust every hop) | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Set it whenever the console runs behind one: the client address that token IP allowlists, rate limits and audit logs use depends on it. |
+| `TRUSTED_PROXIES` | — (unset: forwarded headers are not used for authorization) | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Set it whenever the console runs behind one: the client address that token IP allowlists, the IP condition of policies, rate limits and audit logs use depends on it. See [Authorization](/guide/authorization#client-address-and-trusted-proxies). |

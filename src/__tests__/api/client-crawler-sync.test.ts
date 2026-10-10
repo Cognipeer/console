@@ -7,12 +7,14 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn().mockResolvedValue({
-    switchToTenant: vi.fn().mockResolvedValue(undefined),
-    runWithTenant: vi.fn((_db: string, fn: () => unknown) => fn()),
-  }),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/services/apiTokenAuth', () => {
   class ApiTokenAuthError extends Error {
@@ -60,6 +62,8 @@ import {
   runCrawler,
 } from '@/lib/services/crawler';
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
+import { getDatabase } from '@/lib/database';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -94,6 +98,7 @@ const RESULTS = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(createMockDb());
   (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(AUTH_CTX);
   (runCrawler as ReturnType<typeof vi.fn>).mockResolvedValue({ jobId: 'job-1', status: 'queued' });
   (getCrawlJob as ReturnType<typeof vi.fn>).mockResolvedValue(FINISHED_JOB);

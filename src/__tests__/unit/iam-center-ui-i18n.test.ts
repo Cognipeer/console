@@ -89,11 +89,16 @@ describe('iamCenter i18n', () => {
       actionGroups: ['read', 'write', 'admin'],
       channels: ['dashboard', 'api', 'portal'],
       effects: ['permit', 'forbid', 'mixed'],
-      modes: ['monitor', 'enforce'],
-      authzModes: ['legacy', 'shadow', 'enforce'],
       tabs: ['overview', 'policies', 'principals', 'check', 'audit', 'limits', 'settings'],
       'matrix.categories': ['build', 'data', 'operate', 'admin', 'other'],
-      'result.modeNote': ['legacy', 'shadow', 'enforce'],
+      // "Decided by" in plain words: one text and one detail per kind of built-in reason, and where to change it
+      'result.reason': [
+        'role', 'roleDetail', 'tokenOwner', 'tokenOwnerDetail', 'projectLimit', 'projectLimitUnknown',
+        'projectLimitDetail', 'projectLimitDetailUnknown', 'tokenScope', 'tokenScopeDetail',
+      ],
+      'result.change': ['member', 'projectMember', 'project', 'token'],
+      // warnings about a rule no request can match
+      issueCodes: ['not_enforced_actions', 'not_enforced_resources', 'not_enforced_channel', 'not_asked_actions', 'partly_not_asked_actions'],
       // verbs of RESOURCE_CRUD_VERBS and RESOURCE_EXTRA_VERBS in lib/iam/actions.ts
       verbs: ['get', 'list', 'create', 'update', 'delete', 'invoke', 'execute', 'call', 'query', 'infer', 'use'],
     };
@@ -106,6 +111,13 @@ describe('iamCenter i18n', () => {
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  it('has no trace of the retired workspace modes or the per-policy monitor mode', () => {
+    for (const namespace of [enCenter, trCenter]) {
+      const keys = leaves(namespace);
+      expect(keys.filter((k) => /^(modes|authzModes|banner)\./.test(k) || /monitor|promote|demote|legacy|engineMode|modeNote|enforceConfirm|engineNotEnforce/i.test(k))).toEqual([]);
+    }
   });
 
   it('translates the Turkish namespace (no English left over)', () => {

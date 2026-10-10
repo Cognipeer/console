@@ -86,7 +86,6 @@ const DYNAMIC_FAMILIES: Record<string, string[]> = {
     'access.sourceKind.token-scope', 'access.sourceKind.project', 'access.sourceKind.policy',
   ],
   'access.effect.${policy.effect}': ['access.effect.permit', 'access.effect.forbid', 'access.effect.mixed'],
-  'access.mode.${policy.mode}': ['access.mode.monitor', 'access.mode.enforce'],
   'errors.${code}': [
     'errors.token_expiry_required', 'errors.token_expiry_too_long', 'errors.token_expiry_invalid',
     'errors.invalid_ip_ranges', 'errors.invalid_label', 'errors.invalid_body',

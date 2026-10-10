@@ -40,10 +40,31 @@ HTTP 200. The response always includes `uptime` (process uptime in seconds) and
   "timestamp": "2026-03-01T10:00:00.000Z",
   "checks": {
     "mongodb": { "status": "ok", "latencyMs": 5 },
-    "cache": { "status": "ok", "latencyMs": 2, "details": { "provider": "memory" } }
+    "cache": { "status": "ok", "latencyMs": 2, "details": { "provider": "memory" } },
+    "authorization-engine": {
+      "status": "ok",
+      "latencyMs": 1,
+      "details": {
+        "cedar": { "loaded": true, "sdk": "4.13.0", "language": "4.5" },
+        "unavailableRecently": false,
+        "skippedStatements": 0
+      }
+    }
   }
 }
 ```
+
+### The `authorization-engine` check
+
+The policy engine decides every request, so it reports here. The check re-runs a few canned decisions on every call and carries no counters (the endpoint is public; counters are in `GET /api/iam/engine/stats`, behind the session):
+
+| Status | When |
+|--------|------|
+| `ok` | The canned decisions come out right. |
+| `degraded` | Requests were refused with `503 authorization_unavailable` in the last minute, or some custom policy statements could not be loaded and are not applied. The endpoint still answers `200`. |
+| `down` | The canned decisions fail. The endpoint answers `503`. A server whose engine cannot load at boot does not start at all. |
+
+See [Authorization](/guide/authorization#when-authorization-is-unavailable).
 
 ### Unhealthy Response (503)
 

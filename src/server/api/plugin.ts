@@ -215,7 +215,11 @@ function unauthorized(
 function getAuditOutcome(
   statusCode: number,
   upstreamForwarded = false,
+  refusedByAuthorization = false,
 ): 'success' | 'failure' | 'denied' {
+  // A refusal because authorization was unavailable (503) is still a refusal of
+  // the caller by us, however it is worded to the client.
+  if (refusedByAuthorization) return 'denied';
   // `denied` means *we* refused the caller. A 401 forwarded from a model
   // provider says our credentials for that provider are wrong, which is an
   // operational failure, not an authorization event.
@@ -229,7 +233,9 @@ function shouldAuditRequest(request: FastifyRequest, statusCode: number): boolea
   if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
     return true;
   }
-  return statusCode === 401 || statusCode === 403;
+  // A request the engine could not decide is audited whatever its method: the
+  // decision id in the response must lead somewhere.
+  return statusCode === 401 || statusCode === 403 || request.iamDenial?.code === 'authorization_unavailable';
 }
 
 function getHeaderString(request: FastifyRequest, name: string): string | undefined {
@@ -240,13 +246,17 @@ function getHeaderString(request: FastifyRequest, name: string): string | undefi
 }
 
 /**
- * Names an enforce-mode refusal's decision on its 403, whatever the error
- * dialect or the layer (route gate or handler check) that refused (the onSend
- * hook of fastifyApiPlugin); exported for the gate tests.
+ * Names the decision of a refusal on its 403 (or the 503 of an unavailable
+ * authorization), whatever the error dialect or the layer (route gate or
+ * handler check) that refused (the onSend hook of fastifyApiPlugin); exported
+ * for the gate tests.
  */
 export function stampDecisionHeader(request: FastifyRequest, reply: FastifyReply): void {
   const decisionId = request.iamDenial?.decisionId ?? request.iamDecisionId;
-  if (decisionId && reply.statusCode === 403) reply.header('X-Decision-Id', decisionId);
+  if (!decisionId) return;
+  if (reply.statusCode === 403 || (reply.statusCode === 503 && request.iamDenial?.code === 'authorization_unavailable')) {
+    reply.header('X-Decision-Id', decisionId);
+  }
 }
 
 /** The API audit trail writer (the onResponse hook of fastifyApiPlugin); exported for the gate tests. */
@@ -255,7 +265,7 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
   // The service of the matched route: an explicit `config.authz` service
   // declaration, else the path map.
   const denial = request.iamDenial;
-  // An enforce-mode refusal is always audited, also when no service is involved
+  // A refusal of the engine is always audited, also when no service is involved
   // (an undeclared route): it is a security event of the authorization engine.
   const service = serviceForRequest(request.routeOptions?.config, pathname)
     ?? (denial ? 'iam' : null);
@@ -301,7 +311,7 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
       event: `${method} ${pathname}`,
       ipAddress: getClientIp(request),
       method,
-      outcome: getAuditOutcome(statusCode, request.upstreamStatusForwarded),
+      outcome: getAuditOutcome(statusCode, request.upstreamStatusForwarded, denial?.code === 'authorization_unavailable' && statusCode === 503),
       path: pathname,
       projectId: apiToken?.projectId,
       requestId: request.apiRequestId,
@@ -331,7 +341,7 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
 
 export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   // Remember how every route is authorized (diagnostics for the authorization
-  // settings: "would enforce mode refuse any route as undeclared?").
+  // settings: "does any route lack a declaration?").
   app.addHook('onRoute', (route) => {
     recordRegisteredRoute(route.method, route.url, route.config);
   });

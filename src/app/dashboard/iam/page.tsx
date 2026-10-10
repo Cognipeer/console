@@ -16,12 +16,12 @@ import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer'
 import AccessCheckTab from '@/components/iam/check/AccessCheckTab';
 import AuditTab from '@/components/iam/audit/AuditTab';
 import LimitsTab from '@/components/iam/limits/LimitsTab';
+import OverviewTab from '@/components/iam/overview/OverviewTab';
 import PoliciesTab from '@/components/iam/policies/PoliciesTab';
 import PrincipalsTab from '@/components/iam/principals/PrincipalsTab';
 import IamSettingsTab from '@/components/iam/settings/IamSettingsTab';
 import { iamHref, isIamTabId, parseTabId, type IamTabId } from '@/components/iam/links';
 import { useIamCapabilities } from '@/components/iam/useIamCapabilities';
-import AuthorizationEngine from '@/components/settings/AuthorizationEngine';
 import { useTranslations } from '@/lib/i18n';
 
 /**
@@ -77,13 +77,11 @@ function IamCenter() {
         ))}
       </Tabs.List>
 
-      <Tabs.Panel value="overview">
-        <AuthorizationEngine />
-      </Tabs.Panel>
+      <Tabs.Panel value="overview">{body(<OverviewTab canManage={canManage} />)}</Tabs.Panel>
       <Tabs.Panel value="policies">{body(<PoliciesTab canManage={canManage} />)}</Tabs.Panel>
       <Tabs.Panel value="principals">{body(<PrincipalsTab canManage={canManage} />)}</Tabs.Panel>
       <Tabs.Panel value="check">{body(<AccessCheckTab canManage={canManage} />)}</Tabs.Panel>
-      <Tabs.Panel value="audit">{body(<AuditTab canManage={canManage} />)}</Tabs.Panel>
+      <Tabs.Panel value="audit">{body(<AuditTab />)}</Tabs.Panel>
       <Tabs.Panel value="limits">{body(<LimitsTab canManage={canManage} />)}</Tabs.Panel>
       <Tabs.Panel value="settings">{body(<IamSettingsTab canManage={canManage} />)}</Tabs.Panel>
     </Tabs>

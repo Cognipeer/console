@@ -79,9 +79,8 @@ function auditContextFor(request: FastifyRequest, userId: string): McpAuditConte
  * unscoped token inherits the owner's permission unchanged; a token explicitly
  * scoped down to 'mcp: write' stays capped at 'write' even for an admin owner).
  *
- * Decided by `authorizeServiceForRequest`, so it follows the tenant's
- * authorization mode exactly like the dashboard path: rbac.ts in legacy / shadow,
- * the policy engine in enforce (custom forbid policies, the owner's group grants,
+ * Decided by `authorizeServiceForRequest`, so the policy engine decides exactly
+ * like the dashboard path (custom forbid policies, the owner's group grants,
  * the token's project narrowing, and the token scope as a cap). It reads the token
  * from `request.apiTokenContext`, which `withClientApiRequestContext` has set by
  * the time any authoring handler runs.

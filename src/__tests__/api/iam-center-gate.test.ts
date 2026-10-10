@@ -1,9 +1,9 @@
 /**
- * The Authorization center's policies at the REAL request gates (enforce mode,
- * real SQLite database, real engine): request context (IP, channel, project, time,
- * method, path), group policies reaching API tokens, boundaries, owner safety,
- * the denial audit trail -> decision lookup -> access check round trip, and the
- * monitor-mode counts of enforce and shadow tenants.
+ * The Authorization center's policies at the REAL request gates (real SQLite
+ * database, real engine): request context (IP, channel, project, time, method,
+ * path), group policies reaching API tokens, boundaries, owner safety, the denial
+ * audit trail -> decision lookup -> access check round trip, and the retired
+ * monitor state (a policy is enabled or disabled; one stored as monitor is off).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -47,18 +47,10 @@ import type { FastifyInstance } from 'fastify';
 import type { IUser } from '@/lib/database';
 import { configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
 import { resetEnforceStatsForTests } from '@/lib/iam/enforce';
+import { invalidateTenantPolicies } from '@/lib/iam/events';
 import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
 import { resetProjectNarrowingCachesForTests } from '@/lib/iam/projectNarrowing';
 import { authz } from '@/lib/iam/routeAuthz';
-import {
-  drainShadowQueue,
-  flushShadowEvents,
-  resetAuthzModeCacheForTests,
-  resetShadowBufferForTests,
-  getPolicyMonitorTotals,
-} from '@/lib/iam/shadow';
-import { resetProjectMembershipCacheForTests } from '@/lib/iam/shadow/projectMembership';
-import { resetShadowMetricsForTests } from '@/lib/iam/shadow/metrics';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { reloadConfig } from '@/lib/core/config';
 import { enqueueAuditLog } from '@/server/api/plugin';
@@ -78,7 +70,6 @@ let projectId: string;
 let otherProjectId: string;
 let defaultProjectId: string;
 let engGroup: string;
-let savedKillSwitch: string | undefined;
 const created: string[] = [];
 
 const sessionHeaders = (user: IUser) => ({
@@ -111,9 +102,6 @@ const tokenCtx = (user: IUser, scope: Record<string, string> | null, tokenId: st
 });
 
 beforeAll(async () => {
-  savedKillSwitch = process.env.IAM_ENFORCE_DISABLED;
-  delete process.env.IAM_ENFORCE_DISABLED; // __tests__/setup.ts turns enforcement off globally
-
   env = await createIamTestDb('tenant_iam_center_gate');
   hoisted.getDatabase.mockImplementation(async () => env.db);
 
@@ -157,13 +145,13 @@ beforeAll(async () => {
     instance.get('/client/v1/members/probe', withClientApiRequestContext(async (_req, reply) => reply.send({ ok: true })));
     const handlerCheck = async (request: any, reply: any) => {
       const decision = await authorizeServiceForRequest(request, 'agents', { level: 'write' });
-      return reply.send({ allowed: decision.allowed, enforced: decision.enforced });
+      return reply.send({ allowed: decision.allowed });
     };
     instance.get('/handler/check', { config: authz.authenticated() }, withApiRequestContext(handlerCheck));
     // a service-level check on the iam service, as a session and as a token
     const iamCheck = async (request: any, reply: any) => {
       const decision = await authorizeServiceForRequest(request, 'iam', { level: 'admin' });
-      return reply.send({ allowed: decision.allowed, enforced: decision.enforced });
+      return reply.send({ allowed: decision.allowed });
     };
     instance.get('/handler/check-iam', { config: authz.authenticated() }, withApiRequestContext(iamCheck));
     instance.get('/client/v1/handler/check-iam', { config: authz.authenticated() }, withClientApiRequestContext(iamCheck));
@@ -172,18 +160,11 @@ beforeAll(async () => {
     await instance.register(iamApiPlugin);
   });
   await app.ready();
-
-  resetAuthzModeCacheForTests();
-  const mode = await call('PUT', '/api/iam/mode', users.owner, { body: { mode: 'enforce' } });
-  expect(mode.status).toBe(200);
 });
 
 afterAll(async () => {
-  if (savedKillSwitch === undefined) delete process.env.IAM_ENFORCE_DISABLED;
-  else process.env.IAM_ENFORCE_DISABLED = savedKillSwitch;
   await drainPendingTasks();
   await app?.close();
-  resetShadowBufferForTests();
   await env?.cleanup();
 });
 
@@ -191,10 +172,8 @@ beforeEach(() => {
   resetPrincipalCacheForTests();
   resetIamEngineForTests();
   configureIamEngine({ validateRequests: false });
-  resetProjectMembershipCacheForTests();
   resetProjectNarrowingCachesForTests();
   resetEnforceStatsForTests();
-  resetShadowMetricsForTests();
 });
 
 const call = async (
@@ -221,7 +200,7 @@ const call = async (
 
 /** Create a policy through the API (as the owner); removed again by `cleanup`. */
 async function policy(body: Record<string, unknown>) {
-  const res = await call('POST', '/api/iam/policies', users.owner, { body: { enabled: true, mode: 'enforce', ...body } });
+  const res = await call('POST', '/api/iam/policies', users.owner, { body: { enabled: true, ...body } });
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   created.push(res.body.policyId);
   return res.body;
@@ -562,7 +541,8 @@ describe('denials are audited and can be replayed', () => {
       expect(replay.status, JSON.stringify(replay.body)).toBe(200);
       expect(replay.body.allowed).toBe(false);
       expect(replay.body.reasons[0]).toMatchObject({ policyId: forbid.policyId, name: 'No agent writes from the office', effect: 'forbid' });
-      expect(replay.body.mode).toBe('enforce');
+      // one answer: the engine's (no workspace mode, no comparison with another rule set, no monitor verdict)
+      for (const gone of ['mode', 'legacy', 'monitor']) expect(replay.body).not.toHaveProperty(gone);
 
       // ... and the audit tab lists it, with the policy and the principal
       const feed = await call('GET', '/api/iam/audit?kind=denials', users.owner);
@@ -591,53 +571,59 @@ describe('denials are audited and can be replayed', () => {
   });
 });
 
-describe('monitor-mode policies count what they would change', () => {
-  const watch = () => policy({ name: 'Watch agent writes', mode: 'monitor', spec: forbidAgentWrites() });
+describe('a policy is enabled or disabled: the retired monitor state', () => {
+  /** A policy as an earlier build stored it in dry-run (monitor) mode. */
+  async function storeMonitorPolicy(policyId: string) {
+    const now = new Date().toISOString();
+    await env.db.iamDocPut('iam_policies', policyId, {
+      _id: policyId, policyId, name: 'Stored as monitor', description: null, cedar: 'forbid(principal, action == Action::"agents.write", resource);',
+      spec: null, enabled: true, mode: 'monitor', service: null, createdBy: 'old-build', updatedBy: 'old-build', createdAt: now, updatedAt: now,
+    });
+    await env.db.iamDocIncrement('iam_meta', 'policy_version', 'value', 1);
+    invalidateTenantPolicies(env.tenantDbName);
+  }
 
-  it('in an enforce tenant: once per request, never changing the decision', async () => {
-    const watched = await watch();
+  it('a policy stored in monitor mode is read as disabled: listed that way and never applied', async () => {
+    await storeMonitorPolicy('old-watch');
     try {
-      for (let i = 0; i < 3; i++) expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(200);
+      const listed = await call('GET', '/api/iam/policies', users.owner);
+      const row = listed.body.custom.find((p: any) => p.policyId === 'old-watch');
+      expect(row).toMatchObject({ policyId: 'old-watch', enabled: false });
+      for (const gone of ['mode', 'monitorStats']) expect(row).not.toHaveProperty(gone);
+      // it does not forbid anything at the gate ...
+      expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(200);
       expect((await call('POST', '/api/client/v1/agents/probe', null, { token: 'tok-bob' })).status).toBe(200);
-      expect((await call('GET', '/api/agents/probe', users.plain)).status).toBe(200); // not covered by the policy
-      await drainShadowQueue();
-      await flushShadowEvents(env.tenantDbName);
-
-      const totals = (await getPolicyMonitorTotals(env.tenantDbName)).get(watched.policyId);
-      expect(totals).toMatchObject({ wouldDeny: 4, wouldAllow: 0 }); // 3 + 1, not doubled by the shadow trail
-      const row = (await call('GET', `/api/iam/policies/${watched.policyId}`, users.owner)).body;
-      expect(row.monitorStats).toMatchObject({ wouldDeny: 4, wouldAllow: 0 });
-      const feed = await call('GET', '/api/iam/audit?kind=monitor', users.owner);
-      const routes = feed.body.items.filter((i: any) => i.policyId === watched.policyId).map((i: any) => i.route).sort();
-      expect(routes).toEqual(['/agents/probe', '/client/v1/agents/probe'].map((r) => `/api${r}`));
+      // ... and the next save replaces the stored document: enabling it makes it a normal, enforced policy
+      expect((await call('PUT', '/api/iam/policies/old-watch', users.owner, { body: { enabled: true } })).status).toBe(200);
+      expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(403);
     } finally {
-      await cleanup();
+      await call('DELETE', '/api/iam/policies/old-watch', users.owner);
     }
+    expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(200);
   });
 
-  it('in a shadow tenant: recorded by the background evaluation', async () => {
-    const watched = await watch();
-    try {
-      expect((await call('PUT', '/api/iam/mode', users.owner, { body: { mode: 'shadow' } })).status).toBe(200);
-      for (let i = 0; i < 3; i++) expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(200);
-      await drainShadowQueue();
-      await flushShadowEvents(env.tenantDbName);
-      const totals = (await getPolicyMonitorTotals(env.tenantDbName)).get(watched.policyId);
-      expect(totals).toMatchObject({ wouldDeny: 3, wouldAllow: 0 });
-    } finally {
-      await call('PUT', '/api/iam/mode', users.owner, { body: { mode: 'enforce' } });
-      await cleanup();
-    }
+  it('saving a policy in monitor mode is refused: switch it off instead', async () => {
+    const res = await call('POST', '/api/iam/policies', users.owner, {
+      body: { name: 'Watch agent writes', mode: 'monitor', enabled: true, spec: forbidAgentWrites() },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'validation', details: [{ code: 'monitor_removed', field: 'mode' }] });
+    expect((await call('GET', '/api/iam/policies', users.owner)).body.custom.filter((p: any) => p.name === 'Watch agent writes')).toEqual([]);
+    // "enforce" is what every enabled policy is, so it is still accepted (and not stored)
+    const created = await call('POST', '/api/iam/policies', users.owner, {
+      body: { name: 'Enforce spelled out', mode: 'enforce', enabled: false, spec: forbidAgentWrites() },
+    });
+    expect(created.status).toBe(201);
+    expect(created.body).not.toHaveProperty('mode');
+    expect((await call('DELETE', `/api/iam/policies/${created.body.policyId}`, users.owner)).status).toBe(204);
   });
 
-  it('a monitor permit reports what it would newly allow', async () => {
-    const watched = await policy({ name: 'Would open members', mode: 'monitor', spec: { effect: 'permit', principals: { any: true }, actions: ['members.read'], resources: { any: true } } });
-    try {
-      expect((await call('GET', '/api/users/probe', users.plain)).status).toBe(403);
-      await flushShadowEvents(env.tenantDbName);
-      expect((await getPolicyMonitorTotals(env.tenantDbName)).get(watched.policyId)).toMatchObject({ wouldAllow: 1, wouldDeny: 0 });
-    } finally {
-      await cleanup();
-    }
+  it('a disabled policy takes no part in a decision, an enabled one does', async () => {
+    const off = await policy({ name: 'Off', enabled: false, spec: forbidAgentWrites() });
+    expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(200);
+    expect((await call('PUT', `/api/iam/policies/${off.policyId}`, users.owner, { body: { enabled: true } })).status).toBe(200);
+    expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(403);
+    await cleanup();
+    expect((await call('POST', '/api/agents/probe', users.plain)).status).toBe(200);
   });
 });

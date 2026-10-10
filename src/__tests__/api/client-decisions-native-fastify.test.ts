@@ -15,11 +15,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   }
   return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
 });
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 vi.mock('@/lib/services/models/inferenceService', () => {
   class GuardrailBlockError extends Error {
@@ -49,7 +52,6 @@ vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: vi.fn() }));
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { authorizeServiceRequest, getPermissionServiceForPath } from '@/lib/security/rbac';
 import { enforceModelGuardrailChain, GuardrailBlockError } from '@/lib/services/models/inferenceService';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -61,6 +63,7 @@ import {
   OpenAiModelProviderContract,
 } from '@/lib/providers/contracts/modelContracts';
 import { clientDecisionsApiPlugin } from '@/server/api/plugins/client-decisions';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -116,9 +119,7 @@ describe('POST /client/v1/decisions (native)', () => {
     vi.clearAllMocks();
     fetchMock.mockReset();
     fn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    fn(getDatabase).mockResolvedValue({ runWithTenant: <T>(_db: string, op: () => T) => op() });
-    fn(getPermissionServiceForPath).mockReturnValue('models');
-    fn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+    fn(getDatabase).mockResolvedValue(createMockDb());
     fn(getModelByKey).mockResolvedValue(model());
     fn(enforceModelGuardrailChain).mockResolvedValue({ redactedText: undefined, results: [] });
 

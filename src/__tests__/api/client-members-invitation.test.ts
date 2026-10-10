@@ -12,7 +12,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
 });
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }),
 }));

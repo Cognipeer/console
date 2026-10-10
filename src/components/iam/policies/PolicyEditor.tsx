@@ -9,8 +9,6 @@ import {
   IconCheck,
   IconCode,
   IconDeviceFloppy,
-  IconEye,
-  IconPlayerPlay,
   IconShieldCheck,
 } from '@tabler/icons-react';
 import FormShell, {
@@ -24,11 +22,11 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import { useConfirm } from '@/components/common/confirm';
+import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useTranslations } from '@/lib/i18n';
 import {
   IamApiError,
   iamApi,
-  type IamAuthzMode,
   type IamCatalog,
   type IamPrincipalType,
   type PolicyRow,
@@ -64,6 +62,7 @@ import {
   type PolicyDraft,
   type PrincipalRef,
 } from './specModel';
+import { splitWarnings } from './issues';
 import { useCompile } from './useCompile';
 import classes from './policyEditor.module.css';
 
@@ -80,8 +79,6 @@ interface PolicyEditorProps {
   catalog: IamCatalog;
   index: CatalogIndex;
   labels: IamLabels;
-  /** The tenant's engine mode, to explain that policies only decide in Enforce mode. */
-  engineMode: IamAuthzMode | null;
   onClose: () => void;
   onSaved: (row: PolicyRow, kind: PolicyEditorTarget['kind']) => void;
 }
@@ -103,7 +100,8 @@ function initialDraft(target: PolicyEditorTarget, copySuffix: string): PolicyDra
   }
   const draft = draftFromRow(target.policy);
   if (target.kind === 'duplicate') {
-    return { ...draft, name: copyName(draft.name, copySuffix), mode: 'monitor' };
+    // A copy starts disabled: it is a draft until someone looks at it and switches it on.
+    return { ...draft, name: copyName(draft.name, copySuffix), enabled: false };
   }
   return draft;
 }
@@ -117,7 +115,6 @@ export default function PolicyEditor({
   catalog,
   index,
   labels,
-  engineMode,
   onClose,
   onSaved,
 }: PolicyEditorProps) {
@@ -125,6 +122,9 @@ export default function PolicyEditor({
   const { confirm } = useConfirm();
   const errorText = useErrorText();
   const { projects } = useProjects();
+  const shellUser = useDashboardUser();
+  // Only owners and admins can turn on a rule that allows access (the server enforces it; this is the heads-up).
+  const mayEnablePermits = !shellUser?.role || shellUser.role === 'owner' || shellUser.role === 'admin';
 
   const isEdit = target.kind === 'edit' && !!target.policy;
   const policy = target.policy;
@@ -184,6 +184,11 @@ export default function PolicyEditor({
     [raw, specIssues, spec],
   );
   const compile = useCompile(source);
+  const { inert: inertWarnings, other: otherWarnings } = useMemo(() => splitWarnings(compile.warnings), [compile.warnings]);
+  const lineLabel = useCallback(
+    (line: number, col?: number) => (col ? t('editor.lineCol', { line, col }) : t('editor.line', { line })),
+    [t],
+  );
 
   const dirty = `${draftSignature(draft)}|${raw ? raw.text : ''}` !== init.signature;
 
@@ -267,8 +272,6 @@ export default function PolicyEditor({
       const data = await iamApi.previewPolicy({
         ...(isEdit && policy ? { policyId: policy.policyId } : {}),
         ...('spec' in source ? { spec: source.spec } : { cedar: source.cedar }),
-        // Always measured as if enforced: a monitor policy changes nothing, which is exactly why it is worth previewing.
-        mode: 'enforce',
       });
       setPreview({ status: 'done', data, stale: false });
     } catch (err) {
@@ -285,29 +288,41 @@ export default function PolicyEditor({
     }
     setSaveError(null);
 
-    const takesEffectNow =
-      draft.mode === 'enforce' &&
-      draft.enabled &&
-      (!isEdit || policy?.mode !== 'enforce' || !policy?.enabled || dirty);
+    // A rule the engine can never match: say so before it is saved, whatever else is true of it.
+    if (inertWarnings.length > 0) {
+      const ok = await confirm({
+        title: t('editor.inertConfirmTitle'),
+        message: t('editor.inertConfirmMessage'),
+        details: (
+          <IssueList items={inertWarnings} tone="warning" lineLabel={lineLabel} />
+        ),
+        confirmLabel: t('editor.inertConfirmAction'),
+        tone: 'warning',
+      });
+      if (!ok) return;
+    }
+
+    // An enabled policy decides real requests from the moment it is saved.
+    const takesEffectNow = draft.enabled && (!isEdit || !policy?.enabled || dirty);
     if (takesEffectNow) {
       const flips = preview.status === 'done' && !preview.stale ? preview.data.flips : null;
       const sampled = preview.status === 'done' && !preview.stale && coverageKind(preview.data.principals) !== 'all';
       const ok = await confirm({
-        title: t('editor.enforceConfirmTitle'),
-        message: t('editor.enforceConfirmMessage'),
+        title: t('editor.applyConfirmTitle'),
+        message: t('editor.applyConfirmMessage'),
         details: flips ? (
           <Text size="sm">
-            {t('editor.enforceConfirmFlips', { deny: flips.allowToDeny, allow: flips.denyToAllow })}
+            {t('editor.applyConfirmFlips', { deny: flips.allowToDeny, allow: flips.denyToAllow })}
             {sampled && preview.status === 'done'
-              ? ` ${t('editor.enforceConfirmSample', { evaluated: preview.data.principals.evaluated })}`
+              ? ` ${t('editor.applyConfirmSample', { evaluated: preview.data.principals.evaluated })}`
               : ''}
           </Text>
         ) : (
           <Text size="sm" c="dimmed">
-            {t('editor.enforceConfirmNoPreview')}
+            {t('editor.applyConfirmNoPreview')}
           </Text>
         ),
-        confirmLabel: t('editor.enforceConfirmAction'),
+        confirmLabel: t('editor.applyConfirmAction'),
         tone: 'warning',
       });
       if (!ok) return;
@@ -320,7 +335,6 @@ export default function PolicyEditor({
         name: draft.name.trim(),
         // PUT replaces: an empty string clears the description. POST simply omits it.
         ...(isEdit || description ? { description } : {}),
-        mode: draft.mode,
         enabled: draft.enabled,
         ...(raw ? { cedar: raw.text } : { spec: draftToSpec(draft) }),
       };
@@ -338,7 +352,7 @@ export default function PolicyEditor({
     } finally {
       setSaving(false);
     }
-  }, [compile.errors, compile.status, confirm, dirty, draft, errorText, formComplete, isEdit, nameOk, onSaved, policy, preview, raw, t, target.kind]);
+  }, [compile.errors, compile.status, confirm, dirty, draft, errorText, formComplete, inertWarnings, isEdit, lineLabel, nameOk, onSaved, policy, preview, raw, t, target.kind]);
 
   // ── summary pane ───────────────────────────────────────────────────────
 
@@ -358,9 +372,6 @@ export default function PolicyEditor({
     const fromServer = saveError?.details ?? [];
     return compile.errors.length > 0 ? compile.errors : fromServer;
   }, [compile.errors, saveError]);
-
-  const lineLabel = (line: number, col?: number) =>
-    col ? t('editor.lineCol', { line, col }) : t('editor.line', { line });
 
   const cedarStatus =
     compile.status === 'checking' ? (
@@ -391,10 +402,26 @@ export default function PolicyEditor({
         <IssueList items={compile.errors} tone="error" lineLabel={lineLabel} />
       </Alert>
     ) : null;
+  // A rule that can never match is the loudest thing on the page: saving it changes nothing.
+  const inertAlert =
+    inertWarnings.length > 0 ? (
+      <Alert
+        color="orange"
+        variant="light"
+        icon={<IconAlertTriangle size={16} />}
+        title={t('editor.inertTitle')}
+        data-testid="inert-warning"
+      >
+        <Stack gap={4}>
+          <Text size="sm">{t('editor.inertIntro')}</Text>
+          <IssueList items={inertWarnings} tone="warning" lineLabel={lineLabel} />
+        </Stack>
+      </Alert>
+    ) : null;
   const warnings =
-    compile.warnings.length > 0 ? (
+    otherWarnings.length > 0 ? (
       <Alert color="yellow" variant="light" title={t('editor.warnings')}>
-        <IssueList items={compile.warnings} tone="warning" lineLabel={lineLabel} />
+        <IssueList items={otherWarnings} tone="warning" lineLabel={lineLabel} />
       </Alert>
     ) : null;
 
@@ -415,8 +442,7 @@ export default function PolicyEditor({
     <>
       <SummaryGroup title={t('editor.summary.policy')}>
         <SummaryKV label={t('editor.effect')} value={raw ? t('editor.inCedar') : labels.effect(draft.effect)} />
-        <SummaryKV label={t('editor.mode')} value={labels.mode(draft.mode)} />
-        <SummaryKV label={t('editor.status')} value={draft.enabled ? t('editor.active') : t('editor.inactive')} />
+        <SummaryKV label={t('editor.status')} value={draft.enabled ? t('editor.enabled') : t('editor.disabled')} />
       </SummaryGroup>
 
       {lines ? (
@@ -492,12 +518,6 @@ export default function PolicyEditor({
       secondaryAction={{ label: t('common.cancel'), onClick: () => void requestClose() }}
     >
       <Stack gap={0}>
-        {engineMode && engineMode !== 'enforce' ? (
-          <Alert color="blue" variant="light" mb="lg">
-            {t('editor.engineNotEnforce', { mode: labels.authzMode(engineMode) })}
-          </Alert>
-        ) : null}
-
         {saveError ? (
           <Alert
             color="red"
@@ -515,9 +535,10 @@ export default function PolicyEditor({
           </Alert>
         ) : null}
 
-        {!raw && (problems || warnings) ? (
+        {!raw && (problems || inertAlert || warnings) ? (
           <Stack gap="sm" mb="lg">
             {problems}
+            {inertAlert}
             {warnings}
           </Stack>
         ) : null}
@@ -545,30 +566,17 @@ export default function PolicyEditor({
                 maxRows={5}
               />
             </FormField>
-            <FormField label={t('editor.mode')}>
-              <SourceToggle>
-                <SourceCard
-                  selected={draft.mode === 'monitor'}
-                  onClick={() => patch({ mode: 'monitor' })}
-                  icon={<IconEye size={16} />}
-                  title={t('modes.monitor')}
-                  description={t('editor.modeMonitorHelp')}
-                />
-                <SourceCard
-                  selected={draft.mode === 'enforce'}
-                  onClick={() => patch({ mode: 'enforce' })}
-                  icon={<IconPlayerPlay size={16} />}
-                  title={t('modes.enforce')}
-                  description={t('editor.modeEnforceHelp')}
-                />
-              </SourceToggle>
-            </FormField>
             <ToggleRow
-              label={t('editor.activeLabel')}
-              description={t('editor.activeHelp')}
+              label={t('editor.enabledLabel')}
+              description={t('editor.enabledHelp')}
               checked={draft.enabled}
               onChange={(enabled) => patch({ enabled })}
             />
+            {!mayEnablePermits && !raw && draft.effect === 'permit' && draft.enabled ? (
+              <Alert color="blue" variant="light" data-testid="permit-admin-hint">
+                {t('editor.permitNeedsAdmin')}
+              </Alert>
+            ) : null}
           </Stack>
         </FormSection>
 
@@ -597,6 +605,7 @@ export default function PolicyEditor({
                 {t('editor.cedarNoManaged')}
               </Text>
               {problems}
+              {inertAlert}
               {warnings}
             </Stack>
           </FormSection>

@@ -5,6 +5,10 @@
  * page can read (the route needs `iam` read); changing anything needs `iam`
  * admin. The page decides once and hands `canManage` to every tab.
  *
+ * The answer is the engine's own (`effectivePermissions` of the session); when
+ * the session cannot give it, the role, the user's grants and the principal view
+ * (which knows the groups) stand in.
+ *
  * The UI hides controls the user cannot use; it is a courtesy, never the
  * enforcement: every write is checked again by the server.
  */
@@ -45,6 +49,17 @@ export function useIamCapabilities(): IamCapabilities {
     (async () => {
       try {
         const session = await iamLookupApi.getSession();
+        // The workspace owner can always change the Authorization Engine (the engine never locks the owner out of it).
+        if (session.role === 'owner') {
+          if (!cancelled) setState({ canManage: true, resolving: false });
+          return;
+        }
+        // The engine's own answer for this person in the active project (groups, policies and project
+        // limits included): final, no second request needed.
+        if (session.effectivePermissions) {
+          if (!cancelled) setState({ canManage: session.effectivePermissions.iam === 'admin', resolving: false });
+          return;
+        }
         if (iamLevelFromSession(session.role, session.servicePermissions) === 'admin') {
           if (!cancelled) setState({ canManage: true, resolving: false });
           return;

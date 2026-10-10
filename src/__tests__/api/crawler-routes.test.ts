@@ -67,15 +67,6 @@ vi.mock('@/lib/services/projects/projectContext', async () => {
   };
 });
 
-// Bypass RBAC enforcement — the runtime path tries to load a real user.
-vi.mock('@/lib/security/rbac', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/security/rbac')>('@/lib/security/rbac');
-  return {
-    ...actual,
-    getPermissionServiceForPath: () => null,
-  };
-});
-
 import http, { type Server } from 'node:http';
 import { reloadConfig } from '@/lib/core/config';
 import { disconnectDatabase, getDatabase } from '@/lib/database';
@@ -87,7 +78,9 @@ import {
 
 const TENANT_DB_NAME = 'crawler_routes_tenant';
 const TENANT_ID = 'tenant-routes-1';
-const USER_ID = 'user-routes-1';
+// The id of the workspace owner created in beforeAll: the authorization engine
+// decides every request from the user row, so the caller has to exist.
+let USER_ID = 'pending';
 
 const REQUEST_HEADERS = {
   'x-tenant-db-name': TENANT_DB_NAME,
@@ -127,9 +120,20 @@ beforeAll(async () => {
     slug: 'routes-test',
     dbName: TENANT_DB_NAME,
     licenseType: 'FREE',
-    ownerId: USER_ID,
+    ownerId: 'pending',
   });
   await db.switchToTenant(TENANT_DB_NAME);
+  const owner = await db.createUser({
+    tenantId: TENANT_ID,
+    email: 'tester@example.com',
+    name: 'Tester',
+    password: '$2b$10$x',
+    role: 'owner',
+    licenseId: 'FREE',
+    features: [],
+  });
+  USER_ID = String(owner._id);
+  REQUEST_HEADERS['x-user-id'] = USER_ID;
 
   app = await createFastifyApiTestApp(crawlerApiPlugin);
 }, 30_000);

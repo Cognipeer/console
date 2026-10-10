@@ -5,8 +5,8 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError } from '@/components/settings/authorizationEngineData';
 import {
+  ApiError,
   IamApiError,
   buildQuery,
   errorMessage,
@@ -17,6 +17,8 @@ import {
   normalizeCatalog,
   normalizeCompile,
   normalizeDecision,
+  normalizeEngineStats,
+  normalizeLevels,
   normalizePolicyRow,
   normalizePreview,
   normalizePrincipalDetail,
@@ -57,20 +59,19 @@ describe('transport', () => {
     const fetchMock = mockFetch(() =>
       json({
         managed: [{ id: 'managed:rbac:user-read', name: 'User read', description: 'd', cedar: 'permit(...);' }],
-        custom: [{ policyId: 'p1', name: 'Block', effect: 'forbid', mode: 'monitor', enabled: true, cedar: 'forbid(...);' }],
+        custom: [{ policyId: 'p1', name: 'Block', effect: 'forbid', enabled: true, cedar: 'forbid(...);' }],
       }),
     );
     const res = await iamApi.listPolicies();
     expect(fetchMock).toHaveBeenCalledWith('/api/iam/policies', expect.objectContaining({ method: 'GET', cache: 'no-store' }));
     expect(res.managed).toHaveLength(1);
-    expect(res.custom[0]).toMatchObject({ policyId: 'p1', spec: null, monitorStats: null, description: '', statementCount: 1 });
+    expect(res.custom[0]).toMatchObject({ policyId: 'p1', spec: null, description: '', statementCount: 1 });
   });
 
   it('sends JSON for writes and returns the created row', async () => {
-    const fetchMock = mockFetch(() => json({ policyId: 'p9', name: 'n', effect: 'permit', mode: 'monitor', enabled: true, cedar: 'c' }, 201));
+    const fetchMock = mockFetch(() => json({ policyId: 'p9', name: 'n', effect: 'permit', enabled: true, cedar: 'c' }, 201));
     const row = await iamApi.createPolicy({
       name: 'n',
-      mode: 'monitor',
       enabled: true,
       spec: { effect: 'permit', principals: { any: true }, actions: ['Read'], resources: { any: true } },
     });
@@ -79,6 +80,8 @@ describe('transport', () => {
     expect(init?.method).toBe('POST');
     expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/json');
     expect(JSON.parse(init?.body as string)).toMatchObject({ name: 'n', spec: { actions: ['Read'] } });
+    // A policy is enabled or disabled: no mode travels with it any more.
+    expect(JSON.parse(init?.body as string)).not.toHaveProperty('mode');
     expect(row.policyId).toBe('p9');
   });
 
@@ -97,10 +100,10 @@ describe('transport', () => {
       ),
     );
     const error = await iamApi
-      .updatePolicy('p1', { name: 'n', mode: 'enforce', enabled: true, cedar: 'x' })
+      .updatePolicy('p1', { name: 'n', enabled: true, cedar: 'x' })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(IamApiError);
-    expect(error).toBeInstanceOf(ApiError); // keeps the engine page's error handling working
+    expect(error).toBeInstanceOf(ApiError); // the shared base class of the center's errors
     const e = error as IamApiError;
     expect(e.status).toBe(400);
     expect(e.code).toBe('validation');
@@ -152,13 +155,17 @@ describe('transport', () => {
               context: { channel: 'dashboard' },
             },
           })
-        : json({ allowed: false, reasons: [], defaultDeny: true, mode: 'enforce', principalSummary: { type: 'user', id: 'u1', label: 'Ann', role: 'user', groups: [] } }),
+        : json({ allowed: false, reasons: [], defaultDeny: true, principalSummary: { type: 'user', id: 'u1', label: 'Ann', role: 'user', groups: [] } }),
     );
     const decision = await iamApi.getDecision('dec 1');
     expect(fetchMock.mock.calls[0][0]).toBe('/api/iam/decisions/dec%201');
     expect(decision.simulateInput?.action).toBe('agents.write');
     const result = await iamApi.simulate(decision.simulateInput!);
-    expect(result).toMatchObject({ allowed: false, defaultDeny: true, mode: 'enforce', monitor: null, legacy: null });
+    expect(result).toMatchObject({ allowed: false, defaultDeny: true, projectId: null, ownerSafety: false, enforcedAtGate: true });
+    // The retired comparisons are not part of the answer any more.
+    expect(result).not.toHaveProperty('mode');
+    expect(result).not.toHaveProperty('monitor');
+    expect(result).not.toHaveProperty('legacy');
     expect(result.principalSummary.tokenScope).toBeNull();
   });
 
@@ -175,7 +182,77 @@ describe('transport', () => {
       items: [{ type: 'agent', id: 'a1', key: 'support', name: 'Support bot', projectName: 'Alpha' }],
       total: 1,
     });
-    expect(await iamLookupApi.getSession()).toEqual({ userId: 'u1', role: 'admin', servicePermissions: { iam: 'admin' } });
+    expect(await iamLookupApi.getSession()).toEqual({
+      userId: 'u1',
+      role: 'admin',
+      servicePermissions: { iam: 'admin' },
+      effectivePermissions: null,
+      effectiveProjectId: null,
+    });
+  });
+
+  it('reads what the engine allows per service in the active project from the session', async () => {
+    mockFetch(() =>
+      json({
+        userId: 'u1',
+        role: 'user',
+        servicePermissions: {},
+        effectivePermissions: { models: 'read', agents: 'none', iam: 'bogus', ignored: 7 },
+        effectiveProjectId: 'p1',
+      }),
+    );
+    expect(await iamLookupApi.getSession()).toMatchObject({
+      effectivePermissions: { models: 'read', agents: 'none', iam: 'none' },
+      effectiveProjectId: 'p1',
+    });
+    // null (the engine could not answer) is not the same as an empty map
+    expect(normalizeLevels(null)).toBeNull();
+    expect(normalizeLevels({})).toEqual({});
+  });
+
+  it('reads the engine health and this workspace\'s counters', async () => {
+    const fetchMock = mockFetch(() =>
+      json({
+        statsScope: 'tenant',
+        generatedAt: '2026-10-10T10:00:00.000Z',
+        health: { status: 'degraded', message: 'one statement skipped' },
+        policySet: { version: 4, custom: 3, skipped: ['custom:p1#0'] },
+        undeclaredRoutes: { count: 2, sample: [{ method: 'GET', url: '/api/x' }, { nope: 1 }] },
+        engine: { decisions: 9, p50Us: null, p99Us: null, principalCache: { hitRate: null } },
+        enforce: { engineDecisions: 9, engineAllows: 7, engineDenies: 2, unavailable: 1, undeclaredDenies: 0, ownerSafety: 3, lastUnavailableAt: '2026-10-10T09:00:00.000Z', lastUnavailableReason: 'engine_unavailable' },
+      }),
+    );
+    const stats = await iamApi.getEngineStats();
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/iam/engine/stats');
+    expect(stats).toMatchObject({
+      statsScope: 'tenant',
+      health: { status: 'degraded', message: 'one statement skipped' },
+      policySet: { version: 4, custom: 3, skipped: ['custom:p1#0'] },
+      decisions: 9,
+      allows: 7,
+      denies: 2,
+      unavailable: 1,
+      ownerSafety: 3,
+      lastUnavailableReason: 'engine_unavailable',
+      p50Us: null,
+      cacheHitRate: null,
+    });
+    expect(stats.undeclaredRoutes).toEqual({ count: 2, sample: [{ method: 'GET', url: '/api/x' }, { method: '', url: '' }] });
+  });
+
+  it('on a single-organisation server the process figures and the workspace counters both come through', () => {
+    const stats = normalizeEngineStats({
+      statsScope: 'process',
+      health: { status: 'ok' },
+      policySet: null,
+      engine: { decisions: 100, p50Us: 120, p99Us: 900, principalCache: { hitRate: 0.874 } },
+      enforce: { engineDecisions: 100, engineAllows: 90, engineDenies: 10 },
+      tenantEnforce: { engineDecisions: 40, engineAllows: 35, engineDenies: 5, unavailable: 0 },
+    });
+    // The workspace's own counters win over the server-wide ones.
+    expect(stats).toMatchObject({ statsScope: 'process', decisions: 40, allows: 35, denies: 5, p50Us: 120, p99Us: 900, cacheHitRate: 0.874, policySet: null });
+    expect(stats.health).toEqual({ status: 'ok', message: null });
+    expect(normalizeEngineStats('garbage')).toMatchObject({ statsScope: 'process', decisions: 0, health: { status: 'ok' } });
   });
 
   it('recognises an aborted request', () => {
@@ -236,49 +313,39 @@ describe('normalizeSpec / normalizePolicyRow', () => {
   });
 
   it('defaults a row the way the table needs it', () => {
-    const row = normalizePolicyRow({
-      policyId: 'p1',
-      effect: 'something-else',
-      monitorStats: { wouldAllow: 3, wouldDeny: 1, since: '2026-10-01T00:00:00Z' },
-    });
-    expect(row).toMatchObject({
-      name: 'p1',
-      effect: 'mixed',
-      mode: 'enforce',
-      enabled: true,
-      spec: null,
-      monitorStats: { wouldAllow: 3, wouldDeny: 1, since: '2026-10-01T00:00:00Z' },
-    });
-    expect(normalizePolicyRow({ policyId: 'p2', mode: 'monitor', enabled: false, monitorStats: null })).toMatchObject({
-      mode: 'monitor',
-      enabled: false,
-      monitorStats: null,
-    });
+    const row = normalizePolicyRow({ policyId: 'p1', effect: 'something-else' });
+    expect(row).toMatchObject({ name: 'p1', effect: 'mixed', enabled: true, spec: null });
+    expect(normalizePolicyRow({ policyId: 'p2', enabled: false })).toMatchObject({ enabled: false });
+  });
+
+  it('knows nothing of modes: a policy is enabled or disabled', () => {
+    // A server that still sent the retired fields would change nothing about the row.
+    const row = normalizePolicyRow({ policyId: 'p3', mode: 'monitor', enabled: false, monitorStats: { wouldAllow: 3, wouldDeny: 1 } });
+    expect(row.enabled).toBe(false);
+    expect(row).not.toHaveProperty('mode');
+    expect(row).not.toHaveProperty('monitorStats');
   });
 });
 
 describe('normalizeSimulate', () => {
-  it('reads reasons, monitor, legacy and the principal summary', () => {
+  it('reads reasons, the project and the principal summary', () => {
     const r = normalizeSimulate({
       allowed: true,
       reasons: [{ cedarId: 'managed:rbac:user-read', policyId: null, managed: true, name: 'User read', effect: 'permit' }, { cedarId: 'custom:p1', policyId: 'p1', name: 'Mine', effect: 'forbid' }],
       defaultDeny: false,
-      monitor: { allowed: false, differs: true, reasons: [{ cedarId: 'custom:m', policyId: 'm', managed: false, name: 'M', effect: 'forbid' }] },
-      legacy: { allowed: true, service: 'agents', required: 'read' },
       principalSummary: { type: 'token', id: 't1', label: 'ci', role: 'admin', groups: [{ id: 'g1', name: 'Sales' }], tokenScope: { agents: 'read' } },
-      mode: 'shadow',
+      projectId: 'p-alpha',
+      ownerSafety: true,
     });
     expect(r.reasons[1]).toMatchObject({ managed: false, effect: 'forbid', policyId: 'p1' });
     expect(r.reasons[0].managed).toBe(true);
-    expect(r.monitor).toMatchObject({ allowed: false, differs: true });
-    expect(r.legacy).toEqual({ allowed: true, service: 'agents', required: 'read' });
     expect(r.principalSummary).toMatchObject({ groups: [{ id: 'g1', name: 'Sales' }], tokenScope: { agents: 'read' } });
-    expect(r.mode).toBe('shadow');
+    expect(r).toMatchObject({ projectId: 'p-alpha', ownerSafety: true, enforcedAtGate: true, errors: [] });
   });
 
   it('infers managed from the Cedar id when the flag is missing', () => {
     expect(normalizeSimulate({ reasons: [{ cedarId: 'managed:boundary:x' }] }).reasons[0].managed).toBe(true);
-    expect(normalizeSimulate({}).mode).toBe('legacy');
+    expect(normalizeSimulate({})).toMatchObject({ allowed: false, defaultDeny: false, projectId: null });
   });
 
   it('distinguishes an empty token scope from no scope', () => {
@@ -361,10 +428,12 @@ describe('principals / audit / settings', () => {
 
   it('reads audit rows and token settings', () => {
     const a = normalizeAudit({
-      items: [{ id: '1', at: 'now', kind: 'monitor', principal: { type: 'token', id: 't1', label: 'ci' }, service: 'agents', action: 'agents.write', decisionId: 'd1', summary: 's' }, { id: '2', kind: 'bogus' }],
+      items: [{ id: '1', at: 'now', kind: 'changes', principal: { type: 'token', id: 't1', label: 'ci' }, service: 'agents', action: 'agents.write', decisionId: 'd1', summary: 's' }, { id: '2', kind: 'bogus' }, { id: '3', kind: 'monitor' }],
       nextCursor: null,
     });
-    expect(a.items[0]).toMatchObject({ kind: 'monitor', decisionId: 'd1', principal: { id: 't1' } });
+    expect(a.items[0]).toMatchObject({ kind: 'changes', decisionId: 'd1', principal: { id: 't1' } });
+    // The retired monitor rows read as ordinary denials.
+    expect(a.items[2]).toMatchObject({ kind: 'denials' });
     expect(a.items[1]).toMatchObject({ kind: 'denials', principal: null, decisionId: null });
     expect(normalizeSettings({ tokens: { maxLifetimeDays: 90, requireExpiry: true } })).toEqual({ tokens: { maxLifetimeDays: 90, requireExpiry: true } });
     expect(normalizeSettings({ tokens: { maxLifetimeDays: 0 } })).toEqual({ tokens: { maxLifetimeDays: null, requireExpiry: false } });

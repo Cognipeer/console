@@ -2,24 +2,33 @@
  * Authorization engine.
  *
  * `authorize()` evaluates one (principal, action, resource, context) request
- * against the tenant's policy set — the managed RBAC policies plus the tenant's
- * enabled custom policies — and ALWAYS returns a result: any failure (WASM
+ * against the tenant's policy set - the managed RBAC policies plus the tenant's
+ * enabled custom policies - and ALWAYS returns a result: any failure (WASM
  * unavailable, store unreadable, entity build error, Cedar error) becomes
- * `allowed: false` with the reason in `errors`. It never throws.
+ * `allowed: false` with the reason in `errors` and `failed: true`. It never
+ * throws. The request gates answer a `failed` result with 503 "authorization
+ * unavailable" (enforce.ts): a failure is never turned into an allow, and never
+ * into a guess made by some other rule set.
  *
  * Policy sets
  * -----------
  * One preparsed (WASM-side) set per tenant, under a stable id that is simply
  * overwritten when the tenant's policy version changes:
- *   tenant:<tenantDbName>:enforce   managed + enabled `enforce` custom policies
- *   tenant:<tenantDbName>:monitor   the above + enabled `monitor` policies
- *                                   (only built when a monitor policy exists)
+ *   tenant:<tenantDbName>:policies   managed + the tenant's enabled custom policies
  * A tenant without enabled custom policies shares the global `managed:rbac`
  * set, so an idle tenant costs no WASM memory.
  *
+ * A custom statement that no longer loads (it parsed when it was saved, so this
+ * means corrupt data or a Cedar upgrade) is skipped and reported in `skipped`
+ * instead of taking the whole workspace's decisions down with it.
+ *
  * Freshness: the tenant's `policy_version` counter (iam_meta) is compared at
  * most every VERSION_CHECK_MS (5 s) on the hot path, and a local policy write
- * triggers an immediate reload through events.ts.
+ * triggers an immediate reload through events.ts. A load that such a write
+ * overtook (it read its policy list before the write) is thrown away before it
+ * touches the preparsed set - the set lives under one id per workspace, so an
+ * older load that finished last would bring the older rules back for every
+ * decision until the next write - and its callers load again.
  *
  * Boundaries: the managed set also carries the boundary forbids (managedPolicies.ts),
  * so no custom permit can exceed an API token's scope or the project narrowing.
@@ -115,18 +124,11 @@ export interface AuthorizeResult {
   /**
    * True when NO decision could be made (engine/WASM unavailable, policy store
    * unreadable, request could not be built). `allowed` is false then, but the
-   * deny is not a verdict: enforce mode falls back to the legacy decision.
+   * deny is not a verdict: the gates answer 503, not 403.
    */
   failed?: boolean;
   obligations: Record<string, unknown>;
   durationUs: number;
-  /**
-   * Present when the tenant has enabled `monitor`-mode policies: what the
-   * decision WOULD be with them applied. Never affects `allowed`.
-   * `policyIds` are the monitor-mode policies among the deciding ones, i.e. the
-   * policies that caused the difference when `differs` is true.
-   */
-  monitor?: { allowed: boolean; reasons: string[]; differs: boolean; policyIds: string[] };
 }
 
 // ── metrics ──────────────────────────────────────────────────────────────
@@ -166,6 +168,8 @@ export interface IamEngineStats {
   setLoadFailures: number;
   principalCache: ReturnType<typeof getPrincipalCacheStats>;
   tenantsLoaded: number;
+  /** Custom statements, over every loaded workspace, that could not be loaded and are not applied. */
+  skippedStatements: number;
   cedar: { loaded: boolean; sdk?: string; language?: string };
   uptimeMs: number;
   validateRequests: boolean;
@@ -196,6 +200,7 @@ export function getIamEngineStats(): IamEngineStats {
     setLoadFailures: metrics.setLoadFailures,
     principalCache: getPrincipalCacheStats(),
     tenantsLoaded: tenantStates.size,
+    skippedStatements: [...tenantStates.values()].reduce((sum, state) => sum + state.skipped.length, 0),
     cedar: cedarInfo,
     uptimeMs: Date.now() - metrics.startedAt,
     validateRequests: config.validateRequests,
@@ -220,12 +225,9 @@ interface LoadedSet {
 
 interface TenantState {
   version: number;
-  enforce: LoadedSet;
-  monitor: LoadedSet | null;
-  /** Store ids of the enabled monitor-mode policies. */
-  monitorPolicyIds: Set<string>;
-  customEnforce: number;
-  customMonitor: number;
+  set: LoadedSet;
+  /** Custom statements in the loaded set. */
+  custom: number;
   /** Cedar ids of custom statements that failed to load and were skipped. */
   skipped: string[];
   checkedAt: number;
@@ -241,6 +243,15 @@ function ensureManagedSet(): string | null {
   if (!res.ok) return `managed policy set failed to load: ${res.errors.map((e) => e.message).join('; ')}`;
   managedLoaded = true;
   return null;
+}
+
+/**
+ * Load (and cache in the WASM instance) the managed policy set. The boot
+ * self-test calls this so a process that cannot load Cedar never starts serving.
+ */
+export function ensureManagedPolicySet(): { ok: true; setId: string } | { ok: false; error: string } {
+  const error = ensureManagedSet();
+  return error ? { ok: false, error } : { ok: true, setId: MANAGED_SET_ID };
 }
 
 function parseAnnotationValue(raw: string): unknown {
@@ -297,70 +308,85 @@ export function buildPolicyRecord(
   return { record, obligations };
 }
 
-async function buildTenantState(tenantDbName: string): Promise<TenantState> {
+/** Fixed id the statements are probed under one by one (Cedar cannot free a set, so never a fresh id per probe). */
+const PROBE_SET_ID = 'probe:statement';
+
+/**
+ * Preparse the tenant's set. If the whole set does not load, find the
+ * statements that do not (each one alone) and load the rest: one bad statement
+ * must not make every request of the workspace unanswerable.
+ */
+function loadCustomRecord(
+  setId: string,
+  built: { record: Record<string, string>; obligations: Map<string, Record<string, unknown>> },
+  skipped: string[],
+): LoadedSet {
+  const whole = preparsePolicySet(setId, { ...ALL_MANAGED_POLICIES, ...built.record });
+  if (whole.ok) return { setId, obligations: built.obligations };
+
+  const good: Record<string, string> = {};
+  for (const [id, statement] of Object.entries(built.record)) {
+    if (preparsePolicySet(PROBE_SET_ID, { [id]: statement }).ok) good[id] = statement;
+    else skipped.push(id);
+  }
+  const retry = preparsePolicySet(setId, { ...ALL_MANAGED_POLICIES, ...good });
+  if (!retry.ok) {
+    throw new Error(`tenant policy set failed to load: ${retry.errors.map((e) => e.message).join('; ')}`);
+  }
+  logger.error('Custom policy statements could not be loaded and are not applied', { setId, skipped: skipped.slice(0, 20) });
+  const obligations = new Map([...built.obligations].filter(([id]) => id in good));
+  return { setId, obligations };
+}
+
+/** A load that a policy write on this node overtook: nothing of it may be applied, stored or answered with. */
+class StaleLoad extends Error {
+  constructor() {
+    super('policy set load was overtaken by a policy change');
+    this.name = 'StaleLoad';
+  }
+}
+
+/** Attempts a decision makes when the load it waits on keeps being overtaken (a burst of policy writes) before it is refused. */
+const MAX_STALE_LOADS = 5;
+
+async function buildTenantState(tenantDbName: string, isCurrent: () => boolean): Promise<TenantState> {
   const loadError = ensureManagedSet();
   if (loadError) throw new Error(loadError);
 
   const version = await getPolicyVersion(tenantDbName);
   const policies = version === 0 ? [] : (await listPolicies(tenantDbName, { enabled: true }));
-  const enforce = policies.filter((p) => p.mode === 'enforce');
-  const monitor = policies.filter((p) => p.mode === 'monitor');
 
   const skipped: string[] = [];
-  const toRecord = (list: IIamPolicy[]) => buildPolicyRecord(list, (id) => skipped.push(id));
+  const built = buildPolicyRecord(policies, (id) => skipped.push(id));
 
-  const enforceBuilt = toRecord(enforce);
-  const monitorBuilt = toRecord(monitor);
-
-  let enforceSet: LoadedSet = managedSet;
-  if (Object.keys(enforceBuilt.record).length > 0) {
-    const setId = `tenant:${tenantDbName}:enforce`;
-    const res = preparsePolicySet(setId, { ...ALL_MANAGED_POLICIES, ...enforceBuilt.record });
-    if (!res.ok) throw new Error(`tenant policy set failed to load: ${res.errors.map((e) => e.message).join('; ')}`);
-    enforceSet = { setId, obligations: enforceBuilt.obligations };
-  }
-
-  let monitorSet: LoadedSet | null = null;
-  if (Object.keys(monitorBuilt.record).length > 0) {
-    const setId = `tenant:${tenantDbName}:monitor`;
-    const res = preparsePolicySet(setId, {
-      ...ALL_MANAGED_POLICIES,
-      ...enforceBuilt.record,
-      ...monitorBuilt.record,
-    });
-    if (!res.ok) throw new Error(`tenant monitor policy set failed to load: ${res.errors.map((e) => e.message).join('; ')}`);
-    monitorSet = {
-      setId,
-      obligations: new Map([...enforceBuilt.obligations, ...monitorBuilt.obligations]),
-    };
+  let set: LoadedSet = managedSet;
+  let custom = 0;
+  if (Object.keys(built.record).length > 0) {
+    // The preparsed set of a workspace lives under ONE id, so writing it is shared state. Nothing awaits between
+    // this check and the preparse, so a load that passes it is the newest one to write.
+    if (!isCurrent()) throw new StaleLoad();
+    set = loadCustomRecord(`tenant:${tenantDbName}:policies`, built, skipped);
+    custom = Object.keys(built.record).length - skipped.filter((id) => id in built.record).length;
   }
 
   metrics.setReloads++;
-  return {
-    version,
-    enforce: enforceSet,
-    monitor: monitorSet,
-    monitorPolicyIds: new Set(monitor.map((p) => p.policyId)),
-    customEnforce: Object.keys(enforceBuilt.record).length,
-    customMonitor: Object.keys(monitorBuilt.record).length,
-    skipped,
-    checkedAt: Date.now(),
-  };
+  return { version, set, custom, skipped, checkedAt: Date.now() };
 }
 
 const pendingLoads = new Map<string, Promise<TenantState>>();
-/** Bumped by every invalidation; a refresh that started before one must not store its result. */
+/** Bumped by every invalidation; a load that started before one is overtaken and must not be applied or stored. */
 const generations = new Map<string, number>();
 
-/** Resolve (and refresh when due) the tenant's policy sets. Throws only when no set was ever loaded. */
-async function getTenantState(tenantDbName: string): Promise<TenantState> {
+/** One attempt at resolving (and refreshing when due) the tenant's policy sets. Rejects with StaleLoad when a policy write overtook the load. */
+async function loadTenantState(tenantDbName: string): Promise<TenantState> {
   const existing = tenantStates.get(tenantDbName);
   if (existing && Date.now() - existing.checkedAt < config.versionCheckMs) return existing;
   const inflight = pendingLoads.get(tenantDbName);
   if (inflight) return inflight;
 
   const generation = generations.get(tenantDbName) ?? 0;
-  const load = (async (): Promise<TenantState> => {
+  const isCurrent = () => (generations.get(tenantDbName) ?? 0) === generation;
+  const load: Promise<TenantState> = (async () => {
     try {
       if (existing) {
         const version = await getPolicyVersion(tenantDbName);
@@ -369,10 +395,13 @@ async function getTenantState(tenantDbName: string): Promise<TenantState> {
           return existing;
         }
       }
-      const built = await buildTenantState(tenantDbName);
-      if ((generations.get(tenantDbName) ?? 0) === generation) tenantStates.set(tenantDbName, built);
+      const built = await buildTenantState(tenantDbName, isCurrent);
+      if (!isCurrent()) throw new StaleLoad();
+      tenantStates.set(tenantDbName, built);
       return built;
     } catch (error) {
+      // Neither a failure nor a reason to keep serving `existing`: the caller loads again.
+      if (error instanceof StaleLoad) throw error;
       metrics.setLoadFailures++;
       if (existing) {
         // Fail static: keep serving the last good set and retry after the interval.
@@ -384,12 +413,36 @@ async function getTenantState(tenantDbName: string): Promise<TenantState> {
         return existing;
       }
       throw error;
-    } finally {
-      pendingLoads.delete(tenantDbName);
     }
   })();
   pendingLoads.set(tenantDbName, load);
+  // Forget it once it is over - but only its own entry: an invalidation may have replaced it with the load of a
+  // newer policy list. (Registered before anyone else can wait on `load`, so it runs before they continue.)
+  const forget = () => {
+    if (pendingLoads.get(tenantDbName) === load) pendingLoads.delete(tenantDbName);
+  };
+  load.then(forget, forget);
   return load;
+}
+
+/**
+ * Resolve (and refresh when due) the tenant's policy sets. Throws only when no set was ever loaded, or when
+ * the policies changed faster than they could be loaded (see MAX_STALE_LOADS).
+ */
+async function getTenantState(tenantDbName: string): Promise<TenantState> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await loadTenantState(tenantDbName);
+    } catch (error) {
+      if (!(error instanceof StaleLoad)) throw error;
+      // The load this decision waited on was overtaken by a newer policy write: load again (which joins the newer
+      // load when one is already running). Policy writes in a row can overtake it again, but not without end.
+      if (attempt >= MAX_STALE_LOADS) {
+        logger.warn('Policy set kept changing while it was loading', { tenantDbName, attempts: attempt });
+        throw new Error('policy set kept changing while it was loading');
+      }
+    }
+  }
 }
 
 /** Drop a tenant's cached state so the next decision reloads it (policy write on this node). */
@@ -415,18 +468,18 @@ export function resetIamEngineForTests(): void {
 /** Introspection for UIs/tests: what is loaded for a tenant (loads it if needed). */
 export async function describeTenantPolicySet(tenant: IamTenantRef): Promise<{
   version: number;
-  customEnforce: number;
-  customMonitor: number;
+  /** Custom statements in force (0 = the managed rules alone decide). */
+  custom: number;
+  /** Cedar ids of custom statements that could not be loaded and are not applied. */
   skipped: string[];
   setId: string;
 }> {
   const state = await getTenantState(normalizeTenant(tenant));
   return {
     version: state.version,
-    customEnforce: state.customEnforce,
-    customMonitor: state.customMonitor,
+    custom: state.custom,
     skipped: state.skipped,
-    setId: state.enforce.setId,
+    setId: state.set.setId,
   };
 }
 
@@ -521,7 +574,7 @@ export async function authorize(input: AuthorizeInput): Promise<AuthorizeResult>
       };
     }
 
-    const call: CedarAuthorizeInput = { ...baseCall, policySetId: state.enforce.setId };
+    const call: CedarAuthorizeInput = { ...baseCall, policySetId: state.set.setId };
 
     const decision: CedarDecision = statefulIsAuthorized(call);
     if (!decision.ok) return failure(decision.errors, started);
@@ -530,23 +583,9 @@ export async function authorize(input: AuthorizeInput): Promise<AuthorizeResult>
       allowed: decision.allowed,
       reasons: decision.reasons,
       errors: decision.errors,
-      obligations: decision.allowed ? mergeObligations(state.enforce, decision.reasons) : {},
+      obligations: decision.allowed ? mergeObligations(state.set, decision.reasons) : {},
       durationUs: 0,
     };
-
-    if (state.monitor) {
-      const mon = statefulIsAuthorized({ ...call, policySetId: state.monitor.setId });
-      if (mon.ok) {
-        result.monitor = {
-          allowed: mon.allowed,
-          reasons: mon.reasons,
-          differs: mon.allowed !== decision.allowed,
-          policyIds: customPolicyIdsOf(mon.reasons).filter((id) => state.monitorPolicyIds.has(id)),
-        };
-      } else {
-        result.errors.push(...mon.errors.map((e) => `monitor: ${e}`));
-      }
-    }
 
     result.durationUs = Math.round((performance.now() - started) * 1000);
     recordDecision(result.allowed, false, result.durationUs);

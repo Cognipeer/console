@@ -1,10 +1,10 @@
 /**
  * Authorization center API (/api/iam/*) end to end: the REAL plugin, the REAL
- * gate (legacy mode), a real database - on BOTH SQLite and MongoDB.
+ * gate and engine, a real database - on BOTH SQLite and MongoDB.
  *
  *   RBAC (read vs admin)  catalog  policies (CRUD, spec / Cedar, validation, audit)
  *   compile  preview  simulate  decisions  principals  audit (+CSV)  settings
- *   tenant isolation of every endpoint
+ *   the retired workspace mode  tenant isolation of every endpoint
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -23,11 +23,10 @@ vi.mock('@/lib/database', async (importOriginal) => {
 
 import type { FastifyInstance } from 'fastify';
 import type { DatabaseProvider, IUser } from '@/lib/database';
-import { authorizeGate, configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
-import { userPrincipal } from '@/lib/iam/entities';
+import { configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
 import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
-import { recordPolicyMonitor } from '@/lib/iam/shadow/policyMonitor';
-import { flushShadowEvents, resetShadowBufferForTests, resetAuthzModeCacheForTests } from '@/lib/iam/shadow';
+import { primeProjectLevelsForTests } from '@/lib/iam/projectLevels';
+import { recordRegisteredRoute, resetRouteRegistryForTests } from '@/lib/iam/routeRegistry';
 import { resetIamSettingsCacheForTests } from '@/lib/iam/settings';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
 import { enqueueAuditLog } from '@/server/api/plugin';
@@ -118,8 +117,6 @@ describeForEachProvider('IAM center API', (getDb) => {
   }
 
   beforeAll(async () => {
-    delete process.env.IAM_ENFORCE_DISABLED; // gates stay in legacy mode (the stored mode is legacy); this only avoids the global off switch
-    process.env.IAM_ENFORCE_DISABLED = '1';
     hoisted.getDatabase.mockImplementation(async () => getDb());
     db = getDb();
     A = await build('a');
@@ -136,7 +133,6 @@ describeForEachProvider('IAM center API', (getDb) => {
   afterAll(async () => {
     await drainPendingTasks(); // audit rows queued by the last requests must land before the database goes away
     await app?.close();
-    resetShadowBufferForTests();
   });
 
   const memberSpec = (t: Tenant, over: Record<string, unknown> = {}) => ({
@@ -153,7 +149,7 @@ describeForEachProvider('IAM center API', (getDb) => {
     it('refuses a member without the iam service everywhere', async () => {
       for (const [method, url, body] of [
         ['GET', '/api/iam/catalog'], ['GET', '/api/iam/policies'], ['GET', '/api/iam/principals?type=user'],
-        ['GET', '/api/iam/audit'], ['GET', '/api/iam/settings'], ['GET', '/api/iam/decisions/abc-12345678'],
+        ['GET', '/api/iam/audit'], ['GET', '/api/iam/settings'], ['GET', '/api/iam/decisions/abc-12345678'], ['GET', '/api/iam/engine/stats'],
         ['POST', '/api/iam/simulate', {}], ['POST', '/api/iam/policies/compile', {}], ['POST', '/api/iam/policies', {}],
       ] as const) {
         expect((await call(method, url, A, 'plain', body)).status, `${method} ${url}`).toBe(403);
@@ -161,21 +157,21 @@ describeForEachProvider('IAM center API', (getDb) => {
     });
 
     it('lets iam:read view and run the compute-only tools, but not change anything', async () => {
-      for (const url of ['/api/iam/catalog', '/api/iam/policies', '/api/iam/principals?type=user', '/api/iam/audit', '/api/iam/settings']) {
+      for (const url of ['/api/iam/catalog', '/api/iam/policies', '/api/iam/principals?type=user', '/api/iam/audit', '/api/iam/settings', '/api/iam/engine/stats']) {
         expect((await call('GET', url, A, 'reader')).status, url).toBe(200);
       }
       expect((await call('POST', '/api/iam/policies/compile', A, 'reader', { spec: memberSpec(A) })).status).toBe(200);
       expect((await call('POST', '/api/iam/policies/preview', A, 'reader', { spec: memberSpec(A) })).status).toBe(200);
       expect((await call('POST', '/api/iam/simulate', A, 'reader', { principal: { type: 'user', id: String(A.users.alice._id) }, action: 'agents.read', resource: { kind: 'service', service: 'agents' } })).status).toBe(200);
 
-      expect((await call('POST', '/api/iam/policies', A, 'reader', { name: 'x', mode: 'monitor', spec: memberSpec(A) })).status).toBe(403);
+      expect((await call('POST', '/api/iam/policies', A, 'reader', { name: 'x', spec: memberSpec(A) })).status).toBe(403);
       expect((await call('PUT', '/api/iam/policies/p-1', A, 'reader', { name: 'y' })).status).toBe(403);
       expect((await call('DELETE', '/api/iam/policies/p-1', A, 'reader')).status).toBe(403);
       expect((await call('PUT', '/api/iam/settings', A, 'reader', { tokens: { requireExpiry: true } })).status).toBe(403);
     });
 
     it('lets an admin do all of it', async () => {
-      const created = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Admin made', mode: 'monitor', enabled: false, spec: memberSpec(A) });
+      const created = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Admin made', enabled: false, spec: memberSpec(A) });
       expect(created.status).toBe(201);
       expect((await call('DELETE', `/api/iam/policies/${created.body.policyId}`, A, 'admin')).status).toBe(204);
     });
@@ -201,13 +197,15 @@ describeForEachProvider('IAM center API', (getDb) => {
 
   describe('policies', () => {
     it('creates, lists, reads, updates and deletes a spec policy; every write is audited', async () => {
-      const created = await call('POST', '/api/iam/policies', A, 'admin', { name: '  Freeze agents  ', description: 'Nobody in Engineering changes agents', mode: 'monitor', enabled: true, spec: memberSpec(A) });
+      const created = await call('POST', '/api/iam/policies', A, 'admin', { name: '  Freeze agents  ', description: 'Nobody in Engineering changes agents', enabled: true, spec: memberSpec(A) });
       expect(created.status).toBe(201);
       const row = created.body;
       expect(row).toMatchObject({
-        name: 'Freeze agents', description: 'Nobody in Engineering changes agents', effect: 'forbid', mode: 'monitor', enabled: true,
-        statementCount: 1, updatedBy: String(A.users.admin._id), monitorStats: { wouldAllow: 0, wouldDeny: 0, since: null },
+        name: 'Freeze agents', description: 'Nobody in Engineering changes agents', effect: 'forbid', enabled: true,
+        statementCount: 1, updatedBy: String(A.users.admin._id),
       });
+      // a policy is enabled or disabled: there is no mode and no monitor counter any more
+      for (const gone of ['mode', 'monitorStats']) expect(row).not.toHaveProperty(gone);
       expect(row.policyId).toMatch(/^p-[0-9a-f]{12}$/);
       expect(row.spec).toMatchObject({ effect: 'forbid', actions: ['agents.write'] });
       expect(row.cedar).toContain('forbid (');
@@ -224,13 +222,13 @@ describeForEachProvider('IAM center API', (getDb) => {
 
       expect((await call('GET', `/api/iam/policies/${row.policyId}`, A, 'reader')).body.policyId).toBe(row.policyId);
 
-      // update: rename + enforce + new spec
+      // update: rename + new spec
       const updated = await call('PUT', `/api/iam/policies/${row.policyId}`, A, 'admin', {
-        name: 'Freeze agents v2', mode: 'enforce', enabled: true,
+        name: 'Freeze agents v2', enabled: true,
         spec: memberSpec(A, { actions: ['Write'], resources: { services: ['agents', 'models'] } }),
       });
       expect(updated.status).toBe(200);
-      expect(updated.body).toMatchObject({ name: 'Freeze agents v2', mode: 'enforce', monitorStats: null });
+      expect(updated.body).toMatchObject({ name: 'Freeze agents v2', enabled: true });
       expect(updated.body.spec.actions).toEqual(['Write']);
       expect(updated.body.cedar).toContain('["agents", "models"]');
 
@@ -255,22 +253,23 @@ describeForEachProvider('IAM center API', (getDb) => {
       const mine = audit.body.items.filter((i: any) => i.policyId === row.policyId);
       expect(mine.map((i: any) => i.action).sort()).toEqual(['iam.policy.create', 'iam.policy.delete', 'iam.policy.update', 'iam.policy.update', 'iam.policy.update']);
       expect(mine.every((i: any) => i.kind === 'changes' && i.service === 'iam' && i.principal === null)).toBe(true);
-      expect(mine.find((i: any) => i.action === 'iam.policy.create').summary).toMatch(/Created policy "Freeze agents" \(forbid, monitor\)/);
+      expect(mine.find((i: any) => i.action === 'iam.policy.create').summary).toMatch(/Created policy "Freeze agents" \(forbid\)/);
       expect(mine[0].actor).toBe(String(A.users.admin.email));
 
       const rows = await db.iamListAuditEvents({ tenantId: A.id, resourceTypes: ['iam-policy'], limit: 50 });
       const createRow = rows.items.find((r) => r.event === 'iam.policy.create' && r.resourceId === row.policyId)!;
       expect(createRow).toMatchObject({ service: 'iam', action: 'admin', outcome: 'success', resourceType: 'iam-policy' });
-      expect(createRow.metadata).toMatchObject({ policyId: row.policyId, name: 'Freeze agents', mode: 'monitor', effect: 'forbid', statementCount: 1, iamChange: true });
+      expect(createRow.metadata).toMatchObject({ policyId: row.policyId, name: 'Freeze agents', enabled: true, effect: 'forbid', statementCount: 1, iamChange: true });
+      expect(createRow.metadata).not.toHaveProperty('mode');
       expect(String(createRow.metadata!.cedar)).toContain('forbid (');
       expect(Buffer.byteLength(String(createRow.metadata!.cedar))).toBeLessThanOrEqual(4096);
     });
 
     it('stores raw Cedar as is and reports mixed effects', async () => {
       const cedar = 'forbid(principal, action == Action::"models.write", resource is Service);\npermit(principal is User, action == Action::"agents.read", resource is Service);';
-      const res = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Raw', mode: 'enforce', enabled: true, cedar });
+      const res = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Raw', enabled: true, cedar });
       expect(res.status).toBe(201);
-      expect(res.body).toMatchObject({ spec: null, cedar, effect: 'mixed', statementCount: 2, mode: 'enforce', monitorStats: null });
+      expect(res.body).toMatchObject({ spec: null, cedar, effect: 'mixed', statementCount: 2, enabled: true });
       await call('DELETE', `/api/iam/policies/${res.body.policyId}`, A, 'admin');
     });
 
@@ -283,21 +282,33 @@ describeForEachProvider('IAM center API', (getDb) => {
         expect(JSON.stringify(res.body.details)).toMatch(message);
       };
       await bad({}, /name is required/);
-      await bad({ name: 'x', enabled: true, spec: memberSpec(A) }, /mode must be/);
-      await bad({ name: 'x', mode: 'monitor' }, /spec or Cedar/);
-      await bad({ name: 'x', mode: 'monitor', spec: memberSpec(A), cedar: 'permit(principal, action, resource);' }, /not both/);
-      await bad({ name: 'x', mode: 'weird', spec: memberSpec(A) }, /mode must be/);
-      await bad({ name: 'x'.repeat(200), mode: 'monitor', spec: memberSpec(A) }, /at most 120/);
-      await bad({ name: 'x', mode: 'monitor', enabled: 'yes', spec: memberSpec(A) }, /enabled must be/);
-      await bad({ name: 'x', mode: 'monitor', spec: memberSpec(A), surprise: 1 }, /Unknown field/);
-      await bad({ name: 'x', mode: 'monitor', spec: memberSpec(A, { actions: [] }) }, /at least one action/);
-      await bad({ name: 'x', mode: 'monitor', spec: memberSpec(A, { actions: ['nope.nope'] }) }, /not an action/);
+      await bad({ name: 'x' }, /spec or Cedar/);
+      await bad({ name: 'x', spec: memberSpec(A), cedar: 'permit(principal, action, resource);' }, /not both/);
+      await bad({ name: 'x'.repeat(200), spec: memberSpec(A) }, /at most 120/);
+      await bad({ name: 'x', enabled: 'yes', spec: memberSpec(A) }, /enabled must be/);
+      await bad({ name: 'x', spec: memberSpec(A), surprise: 1 }, /Unknown field/);
+      await bad({ name: 'x', spec: memberSpec(A, { actions: [] }) }, /at least one action/);
+      await bad({ name: 'x', spec: memberSpec(A, { actions: ['nope.nope'] }) }, /not an action/);
+      // the retired mode: "enforce" is what an enabled policy is (accepted, ignored); monitor and anything else is refused
+      await bad({ name: 'x', mode: 'weird', spec: memberSpec(A) }, /mode is no longer used/);
+      await bad({ name: 'x', mode: 'monitor', spec: memberSpec(A) }, /Monitor mode no longer exists/);
+      const monitor = await call('POST', '/api/iam/policies', A, 'admin', { name: 'x', mode: 'monitor', spec: memberSpec(A) });
+      expect(monitor.body.details).toEqual([expect.objectContaining({ code: 'monitor_removed', field: 'mode' })]);
+      const enforce = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Spelled out', mode: 'enforce', enabled: false, spec: memberSpec(A) });
+      expect(enforce.status).toBe(201);
+      expect(enforce.body).not.toHaveProperty('mode');
+      // ... on an update as well
+      const retired = await call('PUT', `/api/iam/policies/${enforce.body.policyId}`, A, 'admin', { mode: 'monitor' });
+      expect(retired.status).toBe(400);
+      expect(retired.body.details).toEqual([expect.objectContaining({ code: 'monitor_removed', field: 'mode' })]);
+      expect((await call('PUT', `/api/iam/policies/${enforce.body.policyId}`, A, 'admin', { mode: 'enforce', name: 'Still fine' })).status).toBe(200);
+      await call('DELETE', `/api/iam/policies/${enforce.body.policyId}`, A, 'admin');
       expect((await call('POST', '/api/iam/policies', A, 'admin', undefined)).status).toBe(400);
     });
 
     it('verifies that every id of a spec exists in THIS workspace', async () => {
       const refuse = async (spec: unknown, what: RegExp) => {
-        const res = await call('POST', '/api/iam/policies', A, 'admin', { name: 'x', mode: 'monitor', spec });
+        const res = await call('POST', '/api/iam/policies', A, 'admin', { name: 'x', spec });
         expect(res.status).toBe(400);
         expect(JSON.stringify(res.body.details)).toMatch(what);
       };
@@ -316,7 +327,7 @@ describeForEachProvider('IAM center API', (getDb) => {
 
     it('accepts real users, groups, tokens, projects and resources', async () => {
       const res = await call('POST', '/api/iam/policies', A, 'admin', {
-        name: 'Everything real', mode: 'monitor',
+        name: 'Everything real', enabled: false,
         spec: memberSpec(A, {
           principals: { users: [String(A.users.alice._id)], groups: [A.groups.eng], tokens: [A.tokens.aliceCi] },
           actions: ['agents.write', 'agent.delete'],
@@ -329,7 +340,7 @@ describeForEachProvider('IAM center API', (getDb) => {
 
     it('rejects invalid Cedar with line and column, and the reserved @managed annotation', async () => {
       const res = await call('POST', '/api/iam/policies', A, 'admin', {
-        name: 'Broken', mode: 'monitor',
+        name: 'Broken',
         cedar: 'permit(principal is User, action, resource)\nwhen { principal.nonexistent == "x" };',
       });
       expect(res.status).toBe(400);
@@ -338,11 +349,11 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(res.body.details[0]).toMatchObject({ line: 2 });
       expect(typeof res.body.details[0].col).toBe('number');
 
-      const syntax = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Syntax', mode: 'monitor', cedar: 'permit(principal action resource);' });
+      const syntax = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Syntax', cedar: 'permit(principal action resource);' });
       expect(syntax.status).toBe(400);
       expect(syntax.body.details[0].line).toBe(1);
 
-      const managed = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Sneaky', mode: 'enforce', cedar: '@managed("rbac") permit(principal is User, action, resource);' });
+      const managed = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Sneaky', cedar: '@managed("rbac") permit(principal is User, action, resource);' });
       expect(managed.status).toBe(400);
       expect(JSON.stringify(managed.body.details)).toMatch(/reserved/);
     });
@@ -357,10 +368,10 @@ describeForEachProvider('IAM center API', (getDb) => {
       const tight = await build('limit');
       await db.runWithTenant!(tight.dbName, async () => {
         for (let i = 0; i < 500; i++) {
-          await db.iamDocPut('iam_policies', `bulk-${i}`, { _id: `bulk-${i}`, policyId: `bulk-${i}`, name: 'b', cedar: 'forbid(principal, action == Action::"tool.delete", resource is Tool);', mode: 'monitor', enabled: false, createdBy: 'x', updatedBy: 'x', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+          await db.iamDocPut('iam_policies', `bulk-${i}`, { _id: `bulk-${i}`, policyId: `bulk-${i}`, name: 'b', cedar: 'forbid(principal, action == Action::"tool.delete", resource is Tool);', enabled: false, createdBy: 'x', updatedBy: 'x', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
         }
       });
-      const full = await call('POST', '/api/iam/policies', tight, 'admin', { name: 'one too many', mode: 'monitor', cedar: 'forbid(principal, action, resource);' });
+      const full = await call('POST', '/api/iam/policies', tight, 'admin', { name: 'one too many', cedar: 'forbid(principal, action, resource);' });
       expect(full.status).toBe(409);
       expect(full.body.code).toBe('limit_reached');
     }, 120_000);
@@ -398,6 +409,41 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(bad.body.errors[0]).toMatchObject({ line: 2 });
     });
 
+    it('warns about a rule for an action nothing in the product asks for - read from the registered routes, never an error', async () => {
+      // what the API plugin's onRoute hook records for a booted server: agents are checked for read (GET) and write (POST)
+      recordRegisteredRoute('GET', '/api/agents', undefined);
+      recordRegisteredRoute('POST', '/api/agents', undefined);
+      try {
+        const compile = (body: unknown) => call('POST', '/api/iam/policies/compile', A, 'reader', body);
+        const never = await compile({ spec: memberSpec(A, { actions: ['agents.admin'] }) });
+        expect(never.body.ok).toBe(true);
+        expect(never.body.errors).toEqual([]);
+        expect(never.body.warnings.find((w: any) => w.code === 'not_asked_actions')).toMatchObject({
+          field: 'actions', params: { actions: 'agents.admin', effect: 'forbid' }, message: expect.stringContaining('would never block anything'),
+        });
+        const partly = await compile({ spec: memberSpec(A, { actions: ['agents.write', 'agents.admin'] }) });
+        expect(partly.body.warnings.find((w: any) => w.code === 'partly_not_asked_actions')).toMatchObject({ field: 'actions', params: { actions: 'agents.admin' } });
+        expect(partly.body.warnings.map((w: any) => w.code)).not.toContain('not_asked_actions');
+        // a rule for what IS asked has no such warning; an allow rule says "grant"
+        expect((await compile({ spec: memberSpec(A, { actions: ['agents.write'] }) })).body.warnings.map((w: any) => w.code)).not.toContain('not_asked_actions');
+        const permit = await compile({ spec: { effect: 'permit', principals: { groups: [A.groups.eng] }, actions: ['agents.admin'], resources: { any: true } } });
+        expect(permit.body.warnings.find((w: any) => w.code === 'not_asked_actions').message).toContain('would never grant anything');
+        // raw Cedar gets the same warning as plain text
+        const raw = await compile({ cedar: 'forbid(principal, action == Action::"agents.admin", resource);' });
+        expect(raw.body.ok).toBe(true);
+        expect(raw.body.warnings.map((w: any) => w.message).join(' ')).toMatch(/only names actions that nothing in the product checks yet \(agents\.admin\)/);
+        // and it can still be saved (disabled here, so it does not touch the other tests)
+        const saved = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Unasked', enabled: false, spec: memberSpec(A, { actions: ['agents.admin'] }) });
+        expect(saved.status).toBe(201);
+        await call('DELETE', `/api/iam/policies/${saved.body.policyId}`, A, 'admin');
+      } finally {
+        resetRouteRegistryForTests();
+      }
+      // without any registered route nothing can be said: no warning (unknown is not "asked by nobody")
+      const unknown = await call('POST', '/api/iam/policies/compile', A, 'reader', { spec: memberSpec(A, { actions: ['agents.admin'] }) });
+      expect(unknown.body.warnings.map((w: any) => w.code)).not.toContain('not_asked_actions');
+    });
+
     it('needs exactly one of spec / cedar and never records an audit row for a successful call', async () => {
       expect((await call('POST', '/api/iam/policies/compile', A, 'reader', {})).status).toBe(400);
       expect((await call('POST', '/api/iam/policies/compile', A, 'reader', { spec: memberSpec(A), cedar: 'x' })).status).toBe(400);
@@ -433,7 +479,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(grant.body.flips.denyToAllow).toBeGreaterThan(0);
       expect(grant.body.samples[0]).toMatchObject({ action: 'members.read', before: false, after: true });
 
-      const stored = await call('POST', '/api/iam/policies', A, 'admin', { name: 'To edit', mode: 'enforce', spec: memberSpec(A) });
+      const stored = await call('POST', '/api/iam/policies', A, 'admin', { name: 'To edit', spec: memberSpec(A) });
       try {
         // moving the stored forbid from Engineering to Operations frees Engineering: the preview of an EDIT
         // covers the people of the version being replaced as well as the new one
@@ -468,36 +514,37 @@ describeForEachProvider('IAM center API', (getDb) => {
     const alice = () => ({ type: 'user', id: String(A.users.alice._id) });
     const svc = (service: string) => ({ kind: 'service', service });
 
-    it('answers allowed / denied with the legacy comparison and the principal summary', async () => {
+    it('answers allowed / denied with the principal summary, and nothing but the engine\'s answer', async () => {
       const ok = await call('POST', '/api/iam/simulate', A, 'reader', { principal: alice(), action: 'agents.write', resource: svc('agents') });
       expect(ok.status).toBe(200);
-      expect(ok.body).toMatchObject({ allowed: true, defaultDeny: false, mode: 'legacy', legacy: { allowed: true, service: 'agents', required: 'write' } });
+      expect(ok.body).toMatchObject({ allowed: true, defaultDeny: false, enforcedAtGate: true });
+      // one answer: no workspace mode, no comparison with another rule set, no monitor verdict
+      for (const gone of ['mode', 'legacy', 'monitor']) expect(ok.body).not.toHaveProperty(gone);
       expect(ok.body.reasons[0]).toMatchObject({ managed: true, effect: 'permit', policyId: null });
       expect(ok.body.reasons[0].name).toBeTruthy();
       expect(ok.body.principalSummary).toMatchObject({ type: 'user', id: alice().id, role: 'user' });
       expect(ok.body.principalSummary.groups).toEqual([{ id: A.groups.eng, name: 'Engineering' }]);
 
       const denied = await call('POST', '/api/iam/simulate', A, 'reader', { principal: alice(), action: 'members.write', resource: svc('members') });
-      expect(denied.body).toMatchObject({ allowed: false, defaultDeny: true, reasons: [], legacy: { allowed: false, service: 'members', required: 'admin' } });
+      expect(denied.body).toMatchObject({ allowed: false, defaultDeny: true, reasons: [] });
     });
 
-    it('explains which policy decided, including the monitor difference', async () => {
-      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'No agent writes for Engineering', mode: 'enforce', spec: memberSpec(A) });
-      const monitored = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Watch models', mode: 'monitor', spec: memberSpec(A, { actions: ['models.write'] }) });
+    it('explains which policy decided; a disabled policy takes no part', async () => {
+      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'No agent writes for Engineering', spec: memberSpec(A) });
+      const disabled = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Off: no model writes', enabled: false, spec: memberSpec(A, { actions: ['models.write'] }) });
       try {
         const blocked = await call('POST', '/api/iam/simulate', A, 'reader', { principal: alice(), action: 'agents.write', resource: svc('agents') });
         expect(blocked.body.allowed).toBe(false);
         expect(blocked.body.defaultDeny).toBe(false);
         expect(blocked.body.reasons).toEqual([expect.objectContaining({ policyId: policy.body.policyId, managed: false, name: 'No agent writes for Engineering', effect: 'forbid', cedarId: `custom:${policy.body.policyId}` })]);
-        expect(blocked.body.legacy.allowed).toBe(true); // the current rules still allow it
 
-        const watched = await call('POST', '/api/iam/simulate', A, 'reader', { principal: alice(), action: 'models.write', resource: svc('models') });
-        expect(watched.body.allowed).toBe(true);
-        expect(watched.body.monitor).toMatchObject({ allowed: false, differs: true });
-        expect(watched.body.monitor.reasons[0]).toMatchObject({ policyId: monitored.body.policyId, effect: 'forbid' });
+        const off = await call('POST', '/api/iam/simulate', A, 'reader', { principal: alice(), action: 'models.write', resource: svc('models') });
+        expect(off.body.allowed).toBe(true);
+        expect(off.body.reasons.map((r: any) => r.policyId)).not.toContain(disabled.body.policyId);
+        expect(off.body).not.toHaveProperty('monitor');
       } finally {
         await call('DELETE', `/api/iam/policies/${policy.body.policyId}`, A, 'admin');
-        await call('DELETE', `/api/iam/policies/${monitored.body.policyId}`, A, 'admin');
+        await call('DELETE', `/api/iam/policies/${disabled.body.policyId}`, A, 'admin');
       }
     });
 
@@ -509,7 +556,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       const bobTok = { type: 'token', id: B.tokens.bobScoped };
       expect((await call('POST', '/api/iam/simulate', A, 'reader', { principal: bobTok, action: 'agents.read', resource: svc('agents') })).status).toBe(404); // another workspace's token
 
-      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Eng no writes', mode: 'enforce', spec: memberSpec(A) });
+      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Eng no writes', spec: memberSpec(A) });
       try {
         const viaToken = await call('POST', '/api/iam/simulate', A, 'reader', { principal: scoped, action: 'agents.write', resource: svc('agents') });
         expect(viaToken.body.allowed).toBe(false); // the group forbid reaches the token of a member
@@ -531,7 +578,6 @@ describeForEachProvider('IAM center API', (getDb) => {
       const inPj1 = await call('POST', '/api/iam/simulate', A, 'reader', { principal: dave, action: 'agents.write', resource: { kind: 'project', projectId: A.projects.pj1 } });
       expect(inPj1.body.allowed).toBe(false); // the project says agents: read
       expect(inPj1.body.reasons.map((r: any) => r.cedarId)).toEqual(['managed:boundary:project-write']);
-      expect(inPj1.body.legacy.allowed).toBe(true); // the current rules know nothing of project settings
       const inPj2 = await call('POST', '/api/iam/simulate', A, 'reader', { principal: dave, action: 'agents.write', resource: { kind: 'project', projectId: A.projects.pj2 } });
       expect(inPj2.body.allowed).toBe(true);
       const ctxProject = await call('POST', '/api/iam/simulate', A, 'reader', { principal: dave, action: 'agents.write', resource: svc('agents'), context: { projectId: A.projects.pj1 } });
@@ -553,7 +599,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       const createBlocked = await call('POST', '/api/iam/simulate', A, 'reader', { principal: dave, action: 'agent.create', resource: { kind: 'project', projectId: A.projects.pj1 } });
       expect(createBlocked.body.allowed).toBe(false);
 
-      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Office only', mode: 'enforce', spec: { effect: 'forbid', principals: { any: true }, actions: ['agents.write'], resources: { any: true }, conditions: { ipRanges: ['203.0.113.0/24'], channels: ['dashboard'] } } });
+      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Office only', spec: { effect: 'forbid', principals: { any: true }, actions: ['agents.write'], resources: { any: true }, conditions: { ipRanges: ['203.0.113.0/24'], channels: ['dashboard'] } } });
       try {
         const sim = (ctx: Record<string, unknown>) => call('POST', '/api/iam/simulate', A, 'reader', { principal: alice(), action: 'agents.write', resource: svc('agents'), context: ctx });
         expect((await sim({ ip: '203.0.113.9' })).body.allowed).toBe(false);
@@ -563,6 +609,85 @@ describeForEachProvider('IAM center API', (getDb) => {
       } finally {
         await call('DELETE', `/api/iam/policies/${policy.body.policyId}`, A, 'admin');
       }
+    });
+
+    it('a token without a project runs in the workspace\'s default project, as the token gate does', async () => {
+      const t = await build('defproj');
+      const defaultProject = await db.runWithTenant!(t.dbName, () => db.createProject({ tenantId: t.id, key: 'default', name: 'Default', createdBy: 'x' }));
+      const defaultId = String(defaultProject._id);
+      // dave's settings in the DEFAULT project limit agents to read; his two other projects say nothing about it
+      await db.runWithTenant!(t.dbName, async () => {
+        await db.upsertUserProject({ tenantId: t.id, userId: String(t.users.dave._id), projectId: defaultId, role: 'member', servicePermissions: { agents: 'read' } });
+      });
+      const open = await db.runWithTenant!(t.dbName, () => db.createApiToken({
+        tenantId: t.id, userId: String(t.users.dave._id), label: 'dave-open', tokenHash: `h-def-${Math.random()}`, tokenPrefix: 'cp_dave', createdBy: String(t.users.dave._id),
+      } as never));
+      const token = { type: 'token', id: String(open._id) };
+
+      // no project given: the check runs where the gate would run the token - in the default project
+      const write = await call('POST', '/api/iam/simulate', t, 'reader', { principal: token, action: 'agents.write', resource: svc('agents') });
+      expect(write.status, JSON.stringify(write.body)).toBe(200);
+      expect(write.body.projectId).toBe(defaultId);
+      expect(write.body.allowed).toBe(false);
+      expect(write.body.reasons.map((r: any) => r.cedarId)).toEqual(['managed:boundary:project-write']);
+      expect((await call('POST', '/api/iam/simulate', t, 'reader', { principal: token, action: 'agents.read', resource: svc('agents') })).body.allowed).toBe(true);
+      // an explicit project overrides it
+      const elsewhere = await call('POST', '/api/iam/simulate', t, 'reader', { principal: token, action: 'agents.write', resource: svc('agents'), context: { projectId: t.projects.pj2 } });
+      expect(elsewhere.body).toMatchObject({ allowed: true, projectId: t.projects.pj2 });
+
+      // the principal detail agrees: the token is shown with the default project's limit ...
+      const detail = await call('GET', `/api/iam/principals/token/${open._id}`, t, 'reader');
+      expect(detail.body.effective.find((e: any) => e.service === 'agents').level).toBe('read');
+      // ... where its owner, looked at in the workspace itself, is not limited by any project
+      const owner = await call('GET', `/api/iam/principals/user/${t.users.dave._id}`, t, 'reader');
+      expect(owner.body.effective.find((e: any) => e.service === 'agents').level).toBe('write');
+    });
+
+    it('an explicit "none" saved before the workspace\'s first decision is read as "not set"; one saved after it counts', async () => {
+      const t = await build('levels');
+      const dave = { type: 'user', id: String(t.users.dave._id) };
+      const savePromptsNone = () => db.runWithTenant!(t.dbName, () => db.upsertUserProject({
+        tenantId: t.id, userId: String(t.users.dave._id), projectId: t.projects.pj1, role: 'member', servicePermissions: { agents: 'read', prompts: 'none' },
+      }));
+      const prompts = async () => {
+        const res = await call('POST', '/api/iam/simulate', t, 'reader', { principal: dave, action: 'prompts.write', resource: svc('prompts'), context: { projectId: t.projects.pj1 } });
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+        return res.body;
+      };
+      const agents = async () => (await call('POST', '/api/iam/simulate', t, 'reader', { principal: dave, action: 'agents.write', resource: svc('agents'), context: { projectId: t.projects.pj1 } })).body;
+      await savePromptsNone();
+
+      // the row predates the workspace's activation instant: its none is not a decision somebody took
+      primeProjectLevelsForTests(t.dbName, Date.now() + 3_600_000);
+      expect((await prompts()).allowed).toBe(true);
+      // ... while read / write / admin entries are always honoured
+      expect((await agents()).allowed).toBe(false);
+
+      // the instant is in the past (the row was saved after the workspace's first decision): the none counts
+      primeProjectLevelsForTests(t.dbName, 0);
+      const honoured = await prompts();
+      expect(honoured.allowed).toBe(false);
+      expect(honoured.reasons.map((r: any) => r.cedarId)).toEqual(['managed:boundary:project-write']);
+      const detail = await call('GET', `/api/iam/principals/user/${t.users.dave._id}?projectId=${t.projects.pj1}`, t, 'reader');
+      expect(detail.body.effective.find((e: any) => e.service === 'prompts').level).toBe('none');
+    });
+
+    it('an unrelated later save of an old row makes its old "none" count from then on (documented edge)', async () => {
+      const t = await build('edge');
+      const dave = { type: 'user', id: String(t.users.dave._id) };
+      const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const save = (role: 'member' | 'project_admin') => db.runWithTenant!(t.dbName, () => db.upsertUserProject({
+        tenantId: t.id, userId: String(t.users.dave._id), projectId: t.projects.pj1, role, servicePermissions: { prompts: 'none' },
+      }));
+      const promptsAllowed = async () => (await call('POST', '/api/iam/simulate', t, 'reader', { principal: dave, action: 'prompts.write', resource: svc('prompts'), context: { projectId: t.projects.pj1 } })).body.allowed;
+
+      await save('member');
+      await wait(25);
+      primeProjectLevelsForTests(t.dbName, Date.now()); // the workspace's first decision happens now
+      await wait(25);
+      expect(await promptsAllowed()).toBe(true); // the old none is not read
+      await save('project_admin'); // an unrelated change (the member's project role) saves the row again
+      expect(await promptsAllowed()).toBe(false); // the row was saved after the activation: its none counts
     });
 
     it('finds a resource of the registry', async () => {
@@ -580,15 +705,23 @@ describeForEachProvider('IAM center API', (getDb) => {
     });
 
     it('the workspace owner always reaches the Authorization Engine', async () => {
-      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Lock everyone out', mode: 'enforce', spec: { effect: 'forbid', principals: { any: true }, actions: ['iam.write', 'iam.read'], resources: { any: true } } });
+      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Lock everyone out', spec: { effect: 'forbid', principals: { any: true }, actions: ['iam.write', 'iam.read'], resources: { any: true } } });
       try {
-        const owner = await call('POST', '/api/iam/simulate', A, 'reader', { principal: { type: 'user', id: String(A.users.owner._id) }, action: 'iam.write', resource: svc('iam') });
+        // the policy is in force at the gate: an administrator and a reader are out of the center ...
+        expect((await call('GET', '/api/iam/policies', A, 'admin')).status).toBe(403);
+        expect((await call('GET', '/api/iam/policies', A, 'reader')).status).toBe(403);
+        // ... and only the owner's own session still gets in, so it asks what the policy does to whom
+        const owner = await call('POST', '/api/iam/simulate', A, 'owner', { principal: { type: 'user', id: String(A.users.owner._id) }, action: 'iam.write', resource: svc('iam') });
         expect(owner.body).toMatchObject({ allowed: true, ownerSafety: true });
-        const admin = await call('POST', '/api/iam/simulate', A, 'reader', { principal: { type: 'user', id: String(A.users.admin._id) }, action: 'iam.write', resource: svc('iam') });
+        const admin = await call('POST', '/api/iam/simulate', A, 'owner', { principal: { type: 'user', id: String(A.users.admin._id) }, action: 'iam.write', resource: svc('iam') });
         expect(admin.body.allowed).toBe(false);
+        // the owner's API TOKEN is an ordinary principal: the promise is about the signed-in owner
+        expect(admin.body).not.toHaveProperty('ownerSafety');
       } finally {
-        await call('DELETE', `/api/iam/policies/${policy.body.policyId}`, A, 'admin');
+        // only the owner can repair it
+        expect((await call('DELETE', `/api/iam/policies/${policy.body.policyId}`, A, 'owner')).status).toBe(204);
       }
+      expect((await call('GET', '/api/iam/policies', A, 'admin')).status).toBe(200);
     });
 
     it('rejects malformed requests with details, and unknown principals with 404', async () => {
@@ -716,7 +849,7 @@ describeForEachProvider('IAM center API', (getDb) => {
     });
 
     it('counts the policies that name a principal', async () => {
-      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Names alice', mode: 'monitor', spec: memberSpec(A, { principals: { users: [String(A.users.alice._id)], groups: [A.groups.eng], tokens: [A.tokens.aliceCi] } }) });
+      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Names alice', enabled: false, spec: memberSpec(A, { principals: { users: [String(A.users.alice._id)], groups: [A.groups.eng], tokens: [A.tokens.aliceCi] } }) });
       try {
         expect((await call('GET', '/api/iam/principals?type=user&q=alice', A, 'reader')).body.items[0].policyCount).toBe(1);
         expect((await call('GET', '/api/iam/principals?type=user&q=bob', A, 'reader')).body.items[0].policyCount).toBe(0);
@@ -766,9 +899,9 @@ describeForEachProvider('IAM center API', (getDb) => {
 
     it('shows group grants, the owner path, and the policies that apply (naming it, its groups, or everyone)', async () => {
       const policies = [
-        await call('POST', '/api/iam/policies', A, 'admin', { name: 'Everyone', mode: 'monitor', spec: { effect: 'forbid', principals: { any: true }, actions: ['agents.write'], resources: { any: true } } }),
-        await call('POST', '/api/iam/policies', A, 'admin', { name: 'Engineers', mode: 'monitor', spec: memberSpec(A) }),
-        await call('POST', '/api/iam/policies', A, 'admin', { name: 'Operators', mode: 'monitor', spec: memberSpec(A, { principals: { groups: [A.groups.ops] } }) }),
+        await call('POST', '/api/iam/policies', A, 'admin', { name: 'Everyone', enabled: false, spec: { effect: 'forbid', principals: { any: true }, actions: ['agents.write'], resources: { any: true } } }),
+        await call('POST', '/api/iam/policies', A, 'admin', { name: 'Engineers', enabled: false, spec: memberSpec(A) }),
+        await call('POST', '/api/iam/policies', A, 'admin', { name: 'Operators', enabled: false, spec: memberSpec(A, { principals: { groups: [A.groups.ops] } }) }),
       ];
       try {
         const bob = await call('GET', `/api/iam/principals/user/${A.users.bob._id}`, A, 'reader');
@@ -794,7 +927,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(agents.sources.some((s: any) => s.kind === 'token-scope' && s.level === 'read')).toBe(true);
       expect(detail.body.effective.find((e: any) => e.service === 'models').level).toBe('none'); // outside the scope
 
-      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'No reads of prompts', mode: 'enforce', spec: { effect: 'forbid', principals: { users: [String(A.users.alice._id)] }, actions: ['prompts.read'], resources: { any: true } } });
+      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'No reads of prompts', spec: { effect: 'forbid', principals: { users: [String(A.users.alice._id)] }, actions: ['prompts.read'], resources: { any: true } } });
       try {
         const aliceTok = await call('GET', `/api/iam/principals/token/${A.tokens.aliceCi}`, A, 'reader');
         const prompts = aliceTok.body.effective.find((e: any) => e.service === 'prompts');
@@ -831,7 +964,7 @@ describeForEachProvider('IAM center API', (getDb) => {
   // ── audit ───────────────────────────────────────────────────────────────
 
   describe('audit', () => {
-    it('lists enforce-mode denials with their decision and deciding policy, filtered by principal, service and date', async () => {
+    it('lists denials with their decision and deciding policy, filtered by principal, service and date', async () => {
       const t = await build('audit');
       const at = (ms: number) => new Date(Date.now() - ms);
       const row = (extra: Record<string, unknown>) => ({ tenantId: t.id, actorType: 'user' as const, action: 'write' as const, outcome: 'denied' as const, statusCode: 403, ...extra });
@@ -874,40 +1007,19 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(rest.body.nextCursor).toBeNull();
     });
 
-    it('lists what monitor-mode policies would have changed', async () => {
-      const policy = await call('POST', '/api/iam/policies', A, 'admin', { name: 'Watch agent writes', mode: 'monitor', spec: memberSpec(A) });
-      try {
-        const principal = userPrincipal({ userId: String(A.users.alice._id), user: { role: 'user' }, groupIds: [A.groups.eng] });
-        const result = await authorizeGate({ tenant: A.dbName, principal, service: 'agents', method: 'POST' });
-        expect(result.monitor).toMatchObject({ differs: true, policyIds: [policy.body.policyId] });
-        for (let i = 0; i < 3; i++) {
-          recordPolicyMonitor(A.dbName, result, { service: 'agents', method: 'POST', route: '/api/agents', requestId: `r${i}`, userId: String(A.users.alice._id), role: 'user' });
-        }
-        await flushShadowEvents(A.dbName);
-
-        const feed = await call('GET', '/api/iam/audit?kind=monitor', A, 'reader');
-        expect(feed.status).toBe(200);
-        const item = feed.body.items.find((i: any) => i.policyId === policy.body.policyId);
-        expect(item).toMatchObject({ kind: 'monitor', service: 'agents', method: 'POST', route: '/api/agents', action: 'agents.write', code: 'would_deny', principal: { type: 'user', id: String(A.users.alice._id) } });
-        expect(item.summary).toMatch(/Policy "Watch agent writes" would deny POST \/api\/agents \(3 times/);
-
-        // ... and the policy row carries the counts
-        const row = (await call('GET', `/api/iam/policies/${policy.body.policyId}`, A, 'reader')).body;
-        expect(row.monitorStats).toMatchObject({ wouldDeny: 3, wouldAllow: 0 });
-        expect(typeof row.monitorStats.since).toBe('string');
-
-        // editing the policy resets its counts
-        const edited = await call('PUT', `/api/iam/policies/${policy.body.policyId}`, A, 'admin', { spec: memberSpec(A, { actions: ['Write'] }) });
-        expect(edited.body.monitorStats).toMatchObject({ wouldDeny: 0, wouldAllow: 0, since: null });
-        expect((await call('GET', '/api/iam/audit?kind=monitor', A, 'reader')).body.items.filter((i: any) => i.policyId === policy.body.policyId)).toEqual([]);
-
-        // the engine report (shadow summary) does not mix the policy's counts into its totals
-        const summary = await app.inject({ method: 'GET', url: '/api/iam/shadow/summary', headers: headers(A, A.users.admin) });
-        const body = JSON.parse(summary.body);
-        expect(body.categories.map((c: any) => c.category)).toEqual(['parity-mismatch', 'token-groups', 'project-narrowing', 'unmapped-path']);
-      } finally {
-        await call('DELETE', `/api/iam/policies/${policy.body.policyId}`, A, 'admin');
-      }
+    it('lists a refusal because authorization was unavailable as a denial, with its decision', async () => {
+      const t = await build('unavail');
+      await db.runWithTenant!(t.dbName, () => db.createAuditLog({
+        tenantId: t.id, actorType: 'user', actorUserId: String(t.users.alice._id), service: 'agents', action: 'read', event: 'GET /api/agents', method: 'GET',
+        path: '/api/agents', statusCode: 503, outcome: 'denied',
+        metadata: { iamEnforce: true, code: 'authorization_unavailable', decisionId: 'dec-unavail-0001', deniedService: 'agents', required: 'read' },
+      } as never));
+      const feed = await call('GET', '/api/iam/audit?kind=denials', t, 'reader');
+      expect(feed.status).toBe(200);
+      const item = feed.body.items.find((i: any) => i.decisionId === 'dec-unavail-0001');
+      expect(item).toMatchObject({ kind: 'denials', code: 'authorization_unavailable', service: 'agents', method: 'GET', route: '/api/agents', principal: { type: 'user', id: String(t.users.alice._id) } });
+      expect(item.summary).toMatch(/authorization was temporarily unavailable/);
+      expect(item.text).toEqual({ key: 'unavailable', params: { route: 'GET /api/agents' } });
     });
 
     it('exports CSV with the same filters and neutralises spreadsheet formulas', async () => {
@@ -942,7 +1054,7 @@ describeForEachProvider('IAM center API', (getDb) => {
 
     it('validates its filters', async () => {
       for (const [qs, code] of [
-        ['kind=everything', 'invalid_kind'], ['from=not-a-date', 'invalid_date'], ['to=nope', 'invalid_date'],
+        ['kind=everything', 'invalid_kind'], ['kind=monitor', 'invalid_kind'], ['from=not-a-date', 'invalid_date'], ['to=nope', 'invalid_date'],
         ['principalType=robot&principalId=x', 'invalid_principal'], ['principalType=user', 'invalid_principal'], ['principalId=abc', 'invalid_principal'],
         ['principalType=user&principalId=a%22b', 'invalid_principal'], ['service=spaceship', 'invalid_service'], ['cursor=zzz', 'invalid_cursor'],
       ] as const) {
@@ -986,25 +1098,17 @@ describeForEachProvider('IAM center API', (getDb) => {
     });
   });
 
-  describe('mode changes', () => {
-    it('are audited with the previous and the new mode', async () => {
+  describe('the retired workspace mode', () => {
+    it('has no endpoints and records nothing', async () => {
       const t = await build('mode');
-      resetAuthzModeCacheForTests();
-      const first = await call('PUT', '/api/iam/mode', t, 'owner', { mode: 'shadow' });
-      expect(first.status).toBe(200);
-      // choosing the mode that is already on changes nothing: it is not a row in the change history, and the
-      // "last changed" stamp stays where it was
-      const again = await call('PUT', '/api/iam/mode', t, 'owner', { mode: 'shadow' });
-      expect(again.status).toBe(200);
-      expect(again.body.mode).toBe('shadow');
-      expect(again.body.updatedAt).toBe(first.body.updatedAt);
-      expect((await call('PUT', '/api/iam/mode', t, 'owner', { mode: 'legacy' })).status).toBe(200);
+      for (const [method, url, body] of [
+        ['GET', '/api/iam/mode'], ['PUT', '/api/iam/mode', { mode: 'shadow' }],
+        ['GET', '/api/iam/shadow/summary'], ['GET', '/api/iam/shadow/entries'], ['POST', '/api/iam/shadow/reset'],
+      ] as Array<[string, string, unknown?]>) {
+        expect((await call(method, url, t, 'owner', body)).status, `${method} ${url}`).toBe(404);
+      }
       const changes = await call('GET', '/api/iam/audit?kind=changes', t, 'reader');
-      const modes = changes.body.items.filter((i: any) => i.action === 'iam.mode.change').map((i: any) => i.summary);
-      expect(modes).toHaveLength(2);
-      expect(modes.join(' | ')).toContain('from legacy to shadow');
-      expect(modes.join(' | ')).toContain('from shadow to legacy');
-      expect(modes.join(' | ')).not.toContain('from shadow to shadow');
+      expect(changes.body.items.filter((i: any) => i.action === 'iam.mode.change')).toEqual([]);
     });
   });
 
@@ -1012,7 +1116,7 @@ describeForEachProvider('IAM center API', (getDb) => {
 
   describe('tenant isolation', () => {
     it('keeps every endpoint inside its workspace', async () => {
-      const policyA = await call('POST', '/api/iam/policies', A, 'admin', { name: 'A only', mode: 'enforce', spec: memberSpec(A) });
+      const policyA = await call('POST', '/api/iam/policies', A, 'admin', { name: 'A only', spec: memberSpec(A) });
       try {
         const id = policyA.body.policyId;
         // B does not see, read, change or delete A's policy

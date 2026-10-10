@@ -115,8 +115,7 @@ async function requireStdioSubprocessPermission(
   session: ApiSessionContext,
 ): Promise<boolean> {
   const rbac = await resolveSessionRbacContext(session);
-  // Follows the tenant's authorization mode (rbac.ts in legacy / shadow, the policy
-  // engine with project narrowing and custom policies in enforce).
+  // The policy engine decides, with project narrowing and custom policies.
   return (await authorizeServiceForRequest(request, 'mcp', { level: 'admin', rbac })).allowed;
 }
 

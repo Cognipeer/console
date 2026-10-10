@@ -4,10 +4,11 @@
  * Mirror of the MongoDB mixin: a generic id → JSON document store, one table
  * per collection, created lazily (`CREATE TABLE IF NOT EXISTS`) the first time
  * a given tenant database handle WRITES to it. Reads of a table that does not
- * exist yet return "nothing" without running any DDL, so the always-on mode
- * check of the request gate never creates tables (or takes a schema lock) in a
- * tenant database that never used the policy engine. No migration and no change
- * to the shared tenant schema.
+ * exist yet return "nothing" without running any DDL, so the always-on policy
+ * version check of the request gate never creates tables (or takes a schema lock)
+ * by reading; the first WRITE does - the engine's first evaluation of a workspace
+ * records the project-levels activation instant in `iam_meta`. No migration and
+ * no change to the shared tenant schema.
  */
 
 import type Database from 'better-sqlite3';

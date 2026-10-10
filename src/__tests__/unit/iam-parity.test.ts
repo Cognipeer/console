@@ -1,11 +1,15 @@
 /**
  * Policy engine parity: the managed Cedar policies + entity builder must make
- * EXACTLY the decision rbac.ts makes, for every combination of role, user
- * override, group grant, token scope, service and HTTP verb.
+ * EXACTLY the decision the plain role arithmetic of rbac.ts makes (role default,
+ * user override, group grants that only raise, token scope that only caps), for
+ * every combination of role, user override, group grant, token scope, service and
+ * HTTP verb. The settings stay simple (role, permissions, groups, token scope);
+ * the managed policies are how the engine turns them into decisions, so this is
+ * the invariant that keeps the two readings of the same settings identical.
  *
  * Fuzz: >= 5,000 random decisions per run (IAM_FUZZ_SEED replays a run).
  * Any mismatch is a hard failure — it would mean the engine can silently
- * diverge from the gate it is meant to replace.
+ * diverge from the settings people see.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -26,6 +30,7 @@ vi.mock('@/lib/database', async (importOriginal) => {
 
 import {
   RBAC_SERVICE_DEFINITIONS,
+  authorizeService,
   authorizeServiceRequest,
   getPermissionServiceForPath,
   getRequiredPermissionLevel,
@@ -74,7 +79,7 @@ function makeRandom(seed: number) {
   return { rnd, pick, randomPerms };
 }
 
-function legacyDecision(
+function rbacDecision(
   user: { role?: string; servicePermissions?: UserServicePermissions | null },
   grants: GroupTenantGrant[],
   scope: UserServicePermissions | null | undefined,
@@ -114,19 +119,14 @@ describe('IAM engine parity with rbac.ts', () => {
         const scope: UserServicePermissions | null | undefined =
           rnd() < 0.3 ? null : rnd() < 0.15 ? {} : rnd() < 0.1 ? undefined : randomPerms();
 
-        const owner = userPrincipal({ userId: 'u1', user, groupGrants: kind === 'session' ? grants : [] });
+        // A token acts as its owner, groups included; the scope can only cap that.
+        const owner = userPrincipal({ userId: 'u1', user, groupGrants: grants });
         const principal = kind === 'session' ? owner : tokenPrincipal({ tokenId: 't1', owner, scope });
 
         for (let k = 0; k < 6 && decisions < target; k++) {
           const service = pick(SERVICES);
           const method = pick(METHODS);
-          const expected = legacyDecision(
-            user,
-            kind === 'session' ? grants : [],
-            kind === 'session' ? undefined : scope,
-            service,
-            method,
-          );
+          const expected = rbacDecision(user, grants, kind === 'session' ? undefined : scope, service, method);
           const got = await authorizeGate({ tenant: env.tenantDbName, principal, service, method });
           decisions++;
           if (expected) allows++;
@@ -134,7 +134,7 @@ describe('IAM engine parity with rbac.ts', () => {
             mismatches.push(`ERRORS ${got.errors.join('|')}`);
           }
           if (got.allowed !== expected) {
-            mismatches.push(JSON.stringify({ user, grants: kind === 'session' ? grants : [], scope: kind === 'token' ? scope : 'n/a', kind, service, method, expected, got: got.allowed }));
+            mismatches.push(JSON.stringify({ user, grants, scope: kind === 'token' ? scope : 'n/a', kind, service, method, expected, got: got.allowed }));
           }
         }
       }
@@ -165,13 +165,42 @@ describe('IAM engine parity with rbac.ts', () => {
       }));
       const probe = pick(probes);
       const method = pick(METHODS);
-      const legacy = authorizeServiceRequest(user, method, probe.path, grants);
+      const arithmetic = authorizeServiceRequest(user, method, probe.path, grants);
       const principal = userPrincipal({ userId: 'u1', user, groupGrants: grants });
       const got = await authorizeGate({ tenant: env.tenantDbName, principal, service: probe.service, method });
       n++;
-      expect(got.allowed, JSON.stringify({ user, grants, probe, method })).toBe(legacy.allowed);
+      expect(got.allowed, JSON.stringify({ user, grants, probe, method })).toBe(arithmetic.allowed);
     }
     expect(n).toBe(1500);
+  });
+
+  it('a route that declares its own level (read or admin) is decided like the arithmetic does, for sessions and tokens', async () => {
+    configureIamEngine({ validateRequests: false });
+    const { rnd, pick, randomPerms } = makeRandom(seed ^ 0x2468ace);
+    let n = 0;
+    let allows = 0;
+    for (let i = 0; i < 1500; i++) {
+      const user = { role: pick(ROLES) as string | undefined, servicePermissions: rnd() < 0.5 ? randomPerms() : null };
+      const grants: GroupTenantGrant[] = Array.from({ length: Math.floor(rnd() * 3) }, () => ({
+        tenantRole: pick(['admin', 'user', undefined] as const) as GroupTenantGrant['tenantRole'],
+        servicePermissions: rnd() < 0.5 ? randomPerms() : null,
+      }));
+      const isToken = rnd() < 0.5;
+      const scope: UserServicePermissions | null | undefined = isToken ? (rnd() < 0.3 ? null : rnd() < 0.15 ? {} : randomPerms()) : undefined;
+      const owner = userPrincipal({ userId: 'u1', user, groupGrants: grants });
+      const principal = isToken ? tokenPrincipal({ tokenId: 't1', owner, scope }) : owner;
+      const service = pick(SERVICES);
+      const level = pick(['read', 'admin'] as const); // (Write is not expressible as an override on an administration service)
+      const method = pick(METHODS);
+      const expected = authorizeService(user, method, service, grants, scope, level).allowed;
+      const got = await authorizeGate({ tenant: env.tenantDbName, principal, service, method, level });
+      n++;
+      if (expected) allows++;
+      expect(got.allowed, JSON.stringify({ user, grants, scope, service, level, method })).toBe(expected);
+    }
+    expect(n).toBe(1500);
+    expect(allows).toBeGreaterThan(0);
+    expect(allows).toBeLessThan(n);
   });
 
   describe('named edge cases (rbac-semantics map)', () => {
@@ -224,6 +253,16 @@ describe('IAM engine parity with rbac.ts', () => {
       expect(await gate(user, 'members', 'POST', { scope: { members: 'write' } })).toBe(false);
       expect(await gate(user, 'members', 'POST', { scope: { members: 'admin' } })).toBe(true);
     });
+    it('a token acts as its owner including the owner\'s group grants; the scope still caps them', async () => {
+      const owner = { role: 'user', servicePermissions: { agents: 'none' as const } };
+      const grants: GroupTenantGrant[] = [{ tenantRole: 'user' }];
+      expect(await gate(owner, 'agents', 'POST', { scope: null })).toBe(false); // no groups: the owner's own level
+      expect(await gate(owner, 'agents', 'POST', { grants, scope: null })).toBe(true);
+      expect(await gate(owner, 'agents', 'POST', { grants, scope: { agents: 'write' } })).toBe(true);
+      expect(await gate(owner, 'agents', 'POST', { grants, scope: { agents: 'read' } })).toBe(false);
+      expect(await gate(owner, 'agents', 'GET', { grants, scope: { agents: 'read' } })).toBe(true);
+      expect(await gate(owner, 'agents', 'GET', { grants, scope: {} })).toBe(false);
+    });
     it('HEAD/OPTIONS are reads, lowercase verbs normalised, unknown verbs are mutations', async () => {
       const user = { role: 'user', servicePermissions: { agents: 'read' as const } };
       expect(await gate(user, 'agents', 'HEAD')).toBe(true);
@@ -245,8 +284,8 @@ describe('IAM engine parity with rbac.ts', () => {
       ]);
       expect(read.errors).toEqual([]);
       expect(write.errors).toEqual([]);
-      expect(read.allowed).toBe(legacyDecision(user, [], undefined, 'agents', 'GET'));
-      expect(write.allowed).toBe(legacyDecision(user, [], undefined, 'agents', 'POST'));
+      expect(read.allowed).toBe(rbacDecision(user, [], undefined, 'agents', 'GET'));
+      expect(write.allowed).toBe(rbacDecision(user, [], undefined, 'agents', 'POST'));
     }
     configureIamEngine({ validateRequests: false });
   });

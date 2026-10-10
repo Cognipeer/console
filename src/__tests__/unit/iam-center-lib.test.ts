@@ -25,13 +25,10 @@ import { clipToBytes, deniedActionOf, policyAuditMetadata } from '@/lib/iam/audi
 import { explainReasons } from '@/lib/iam/simulate';
 import { policiesAffecting } from '@/lib/iam/principals';
 import { decodeCursor, encodeCursor, MAX_AUDIT_OFFSET, MAX_DIRECTORY_OFFSET } from '@/server/api/plugins/iam-directory';
-import { foldPolicyMonitorEntries } from '@/lib/iam/shadow/aggregate';
-import { monitorDirection } from '@/lib/iam/shadow/policyMonitor';
 import type { IIamPolicy } from '@/lib/iam/store';
-import type { ShadowEntry } from '@/lib/iam/shadow/types';
 
 const policy = (over: Partial<IIamPolicy> = {}): IIamPolicy => ({
-  _id: 'p1', policyId: 'p1', name: 'P', cedar: 'forbid(principal, action, resource);', spec: null, mode: 'enforce', enabled: true,
+  _id: 'p1', policyId: 'p1', name: 'P', cedar: 'forbid(principal, action, resource);', spec: null, enabled: true,
   createdBy: 'u', updatedBy: 'u', createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-01-02T00:00:00Z'), ...over,
 });
 
@@ -118,15 +115,17 @@ describe('policy rows', () => {
     expect(summarizeEffect('this is not cedar')).toEqual({ effect: 'permit', statementCount: 0 });
   });
 
-  it('builds a row; only a monitor policy has monitor counts', () => {
-    const totals = new Map([['p1', { wouldAllow: 2, wouldDeny: 5, since: '2026-02-01T00:00:00.000Z', lastSeen: '2026-02-02T00:00:00.000Z' }]]);
-    expect(toPolicyRow(policy({ mode: 'monitor', description: undefined }), totals, new Map([['u', 'Una']]))).toMatchObject({
-      policyId: 'p1', description: '', effect: 'forbid', mode: 'monitor', spec: null, statementCount: 1,
+  it('builds a row: enabled or disabled, nothing else', () => {
+    const row = toPolicyRow(policy({ enabled: false, description: undefined }), new Map([['u', 'Una']]));
+    expect(row).toMatchObject({
+      policyId: 'p1', description: '', effect: 'forbid', enabled: false, spec: null, statementCount: 1,
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z', updatedBy: 'u', updatedByLabel: 'Una',
-      monitorStats: { wouldAllow: 2, wouldDeny: 5, since: '2026-02-01T00:00:00.000Z' },
     });
-    expect(toPolicyRow(policy({ mode: 'monitor' })).monitorStats).toEqual({ wouldAllow: 0, wouldDeny: 0, since: null });
-    expect(toPolicyRow(policy({ mode: 'enforce' }), totals).monitorStats).toBeNull();
+    // the dry-run mode and its counters are gone from the row
+    expect(Object.keys(row).sort()).toEqual([
+      'cedar', 'createdAt', 'description', 'effect', 'enabled', 'name', 'policyId', 'spec', 'statementCount', 'updatedAt', 'updatedBy', 'updatedByLabel',
+    ]);
+    expect(toPolicyRow(policy()).enabled).toBe(true);
     expect(toPolicyRow(policy()).updatedByLabel).toBe('u'); // unresolved: the id
   });
 
@@ -222,8 +221,9 @@ describe('audit', () => {
   });
 
   it('describes a policy for the audit row with its Cedar (at most 4 KB)', () => {
-    const small = policyAuditMetadata(policy({ name: 'N', mode: 'monitor' }));
-    expect(small).toMatchObject({ iamChange: true, policyId: 'p1', name: 'N', mode: 'monitor', enabled: true, effect: 'forbid', statementCount: 1, source: 'cedar' });
+    const small = policyAuditMetadata(policy({ name: 'N', enabled: false }));
+    expect(small).toMatchObject({ iamChange: true, policyId: 'p1', name: 'N', enabled: false, effect: 'forbid', statementCount: 1, source: 'cedar' });
+    expect(small).not.toHaveProperty('mode');
     expect(small.cedarTruncated).toBeUndefined();
     const big = policyAuditMetadata(policy({ cedar: `// ${'x'.repeat(10_000)}\nforbid(principal, action, resource);` }));
     expect(Buffer.byteLength(String(big.cedar))).toBeLessThanOrEqual(4096);
@@ -285,29 +285,5 @@ describe('cursors', () => {
       Buffer.from('{"o":"5"}').toString('base64url'), Buffer.from('{"o":99999999999}').toString('base64url'), 'x'.repeat(100), 5 as never]) {
       expect(decodeCursor(bad)).toBe('invalid');
     }
-  });
-});
-
-describe('monitor aggregates', () => {
-  const entry = (over: Partial<ShadowEntry>): ShadowEntry => ({
-    id: 'agg:1', category: 'policy-monitor', service: 'agents', method: 'POST', route: '/api/agents', legacyAllowed: true, targetAllowed: false,
-    policyId: 'p1', count: 1, firstSeen: '2026-02-01T00:00:00.000Z', lastSeen: '2026-02-01T00:00:00.000Z', samples: [], ...over,
-  });
-
-  it('folds entries into per-policy totals and direction counts', () => {
-    const totals = foldPolicyMonitorEntries([
-      entry({ count: 3 }),
-      entry({ id: 'agg:2', route: '/api/agents/:id', count: 2, firstSeen: '2026-01-15T00:00:00.000Z', lastSeen: '2026-03-01T00:00:00.000Z' }),
-      entry({ id: 'agg:3', legacyAllowed: false, targetAllowed: true, count: 4 }),
-      entry({ id: 'agg:4', policyId: 'p2', count: 7 }),
-      entry({ id: 'agg:5', category: 'token-groups', policyId: undefined, count: 100 }),
-      entry({ id: 'agg:6', legacyAllowed: true, targetAllowed: true, count: 9 }), // no change: counts nowhere
-    ]);
-    expect(totals.get('p1')).toEqual({ wouldDeny: 5, wouldAllow: 4, since: '2026-01-15T00:00:00.000Z', lastSeen: '2026-03-01T00:00:00.000Z' });
-    expect(totals.get('p2')).toMatchObject({ wouldDeny: 7, wouldAllow: 0 });
-    expect(totals.size).toBe(2);
-    expect(monitorDirection(true, false)).toBe('allow-to-deny');
-    expect(monitorDirection(false, true)).toBe('deny-to-allow');
-    expect(monitorDirection(true, true)).toBe('none');
   });
 });

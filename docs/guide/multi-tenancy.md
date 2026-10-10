@@ -80,6 +80,8 @@ Members (**Configure → Members**) lists the tenant's users and pending invitat
 
 ![Members](/screenshots/multi-tenancy/02-members.png)
 
+A member's role, their own service permissions, the grants of their groups, the permissions set on them inside a project and the scope of their API tokens together decide what they can do; [Authorization](/guide/authorization) explains how they combine.
+
 ## Database Abstraction
 
 All database access goes through the abstraction layer — never import MongoDB directly:

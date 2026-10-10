@@ -53,7 +53,7 @@ export default function ManagedPolicies({ policies, labels }: ManagedPoliciesPro
             <Text size="sm" fw={500}>
               {name}
             </Text>
-            <Badge size="xs" variant="outline" color="gray">
+            <Badge size="xs" variant="default">
               {t('managed.badge')}
             </Badge>
           </Group>

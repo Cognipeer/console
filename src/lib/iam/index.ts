@@ -1,7 +1,7 @@
 /**
  * Policy engine public surface (SERVER ONLY — loads Cedar WASM lazily).
  *
- *   import { authorize, authorizeGate, resolveUserPrincipal, ... } from '@/lib/iam';
+ *   import { authorize, authorizeGate, ... } from '@/lib/iam';
  *
  * UIs that only need labels/levels import from '@/lib/iam/actions' (pure, no WASM).
  */

@@ -88,12 +88,12 @@ export const SPEC_FORBID_GROUP = {
   conditions: { channels: ['api'] },
 };
 
-export const POLICY_ENFORCED = {
+/** An enabled deny rule. */
+export const POLICY_CONTRACTORS = {
   policyId: 'p-contractors',
   name: 'Contractors cannot write',
   description: 'Contractors may look but not touch',
   effect: 'forbid',
-  mode: 'enforce',
   enabled: true,
   spec: SPEC_FORBID_GROUP,
   cedar: 'forbid (principal in Group::"g-contractors", action in Action::"Write", resource) when { resource.service in ["agents","tools"] };',
@@ -102,15 +102,14 @@ export const POLICY_ENFORCED = {
   updatedAt: '2026-10-08T10:00:00.000Z',
   updatedBy: 'u-admin',
   updatedByLabel: 'Ada Admin',
-  monitorStats: null,
 };
 
-export const POLICY_MONITOR = {
+/** An enabled allow rule. */
+export const POLICY_ANALYSTS = {
   policyId: 'p-analysts',
   name: 'Analysts read cost',
   description: '',
   effect: 'permit',
-  mode: 'monitor',
   enabled: true,
   spec: {
     effect: 'permit',
@@ -123,15 +122,14 @@ export const POLICY_MONITOR = {
   createdAt: '2026-10-02T10:00:00.000Z',
   updatedAt: '2026-10-07T10:00:00.000Z',
   updatedBy: 'u-admin',
-  monitorStats: { wouldAllow: 12, wouldDeny: 3, since: '2026-10-02T10:00:00.000Z' },
 };
 
+/** A disabled rule written as raw Cedar. */
 export const POLICY_RAW = {
   policyId: 'p-raw',
   name: 'Hand written',
   description: '',
   effect: 'mixed',
-  mode: 'monitor',
   enabled: false,
   spec: null,
   cedar: 'permit (principal, action, resource);\nforbid (principal, action, resource);',
@@ -139,7 +137,6 @@ export const POLICY_RAW = {
   createdAt: '2026-10-03T10:00:00.000Z',
   updatedAt: '2026-10-03T10:00:00.000Z',
   updatedBy: 'u-admin',
-  monitorStats: { wouldAllow: 0, wouldDeny: 0, since: null },
 };
 
 export const GROUPS = {
@@ -190,14 +187,13 @@ export function principalDetail(type: string, id: string) {
   };
 }
 
-/** Default routes: a tenant in Shadow mode with three custom policies (a small stateful store). */
+/** Default routes: a workspace with three custom policies (a small stateful store). */
 export function defaultRoutes(): Array<[string, string | RegExp, RouteHandler]> {
-  let custom: Array<Record<string, unknown>> = [POLICY_ENFORCED, POLICY_MONITOR, POLICY_RAW];
+  let custom: Array<Record<string, unknown>> = [POLICY_CONTRACTORS, POLICY_ANALYSTS, POLICY_RAW];
   const idOf = (path: string) => decodeURIComponent(path.split('/').pop() ?? '');
   return [
     ['GET', '/api/iam/catalog', () => CATALOG],
     ['GET', '/api/iam/policies', () => ({ managed: MANAGED, custom })],
-    ['GET', '/api/iam/mode', () => ({ mode: 'shadow', effectiveMode: 'shadow' })],
     ['GET', '/api/projects', () => PROJECTS],
     [
       'GET',
@@ -232,6 +228,7 @@ export function defaultRoutes(): Array<[string, string | RegExp, RouteHandler]> 
       () => ({
         evaluated: 840,
         truncated: false,
+        principals: { evaluated: 120, targeted: 120 },
         flips: { allowToDeny: 4, denyToAllow: 0 },
         samples: [
           { principal: { type: 'user', id: 'u-ann', label: 'Ann Lee' }, action: 'agents.write', resource: { kind: 'service', service: 'agents' }, before: true, after: false },
@@ -242,7 +239,7 @@ export function defaultRoutes(): Array<[string, string | RegExp, RouteHandler]> 
       'POST',
       '/api/iam/policies',
       (c) => {
-        const row = { ...POLICY_ENFORCED, ...(c.body as object), policyId: 'p-new', cedar: 'permit (principal, action, resource);', statementCount: 1, effect: 'permit', monitorStats: null };
+        const row = { ...POLICY_CONTRACTORS, ...(c.body as object), policyId: 'p-new', cedar: 'permit (principal, action, resource);', statementCount: 1, effect: 'permit' };
         custom = [...custom, row];
         return jsonResponse(row, 201);
       },
@@ -251,7 +248,7 @@ export function defaultRoutes(): Array<[string, string | RegExp, RouteHandler]> 
       'PUT',
       /^\/api\/iam\/policies\/[^/]+$/,
       (c) => {
-        const row = { ...POLICY_ENFORCED, ...(c.body as object), policyId: idOf(c.path) };
+        const row = { ...POLICY_CONTRACTORS, ...(c.body as object), policyId: idOf(c.path) };
         custom = custom.map((p) => (p.policyId === row.policyId ? row : p));
         return row;
       },

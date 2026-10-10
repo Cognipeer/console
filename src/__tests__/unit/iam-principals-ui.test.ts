@@ -85,12 +85,10 @@ const detail: PrincipalDetail = parsePrincipalDetail(
         name: 'Block exports',
         description: 'No exports at night',
         effect: 'forbid',
-        mode: 'monitor',
         enabled: true,
         spec: { principals: { groups: ['g1'], users: ['u1'] } },
-        monitorStats: { wouldAllow: 2, wouldDeny: 1280, since: '2026-10-01T08:00:00.000Z' },
       },
-      { policyId: 'pol-2', name: 'Raw rule', effect: 'mixed', mode: 'enforce', enabled: false, spec: null },
+      { policyId: 'pol-2', name: 'Raw rule', effect: 'mixed', enabled: false, spec: null },
     ],
     tokens: [{ type: 'token', id: 't1', label: 'CI pipeline', sublabel: 'cp_8f2a…', status: 'active', policyCount: 1 }],
   },
@@ -244,7 +242,7 @@ describe('PrincipalDetailView for a token and a group', () => {
       },
       effective: [{ service: 'models', level: 'read', sources: [{ kind: 'token-scope', label: 'Token scope', level: 'read' }] }],
       groups: [{ id: 'g1', name: 'Engineering' }],
-      policies: [{ policyId: 'pol-1', name: 'Owner rule', effect: 'forbid', mode: 'enforce', enabled: true, spec: { principals: { users: ['u1'] } } }],
+      policies: [{ policyId: 'pol-1', name: 'Owner rule', effect: 'forbid', enabled: true, spec: { principals: { users: ['u1'] } } }],
       tokens: null,
     },
     'token',
@@ -383,10 +381,8 @@ describe('AttachedPolicies', () => {
     name: 'Policy',
     description: '',
     effect: 'permit',
-    mode: 'enforce',
     enabled: true,
     principals: { any: false, anyUser: false, anyToken: false, users: [], groups: [], tokens: [] },
-    monitorStats: null,
     updatedAt: null,
     ...patch,
   });
@@ -397,7 +393,6 @@ describe('AttachedPolicies', () => {
         policies,
         principal,
         groups: [{ id: 'g1', name: 'Engineering' }],
-        locale: 'en',
         t,
       }),
     );
@@ -412,18 +407,17 @@ describe('AttachedPolicies', () => {
         policyId: 'pol 1',
         name: 'Block exports',
         effect: 'forbid',
-        mode: 'monitor',
         principals: { any: false, anyUser: false, anyToken: false, users: ['u1'], groups: ['g1'], tokens: [] },
-        monitorStats: { wouldAllow: 0, wouldDeny: 1280, since: '2026-10-01T08:00:00.000Z' },
       }),
     ]);
     expect(html).toContain('Block exports');
     expect(html).toContain('Deny');
-    expect(html).toContain('Monitor');
     expect(html).toContain('Named in the policy');
     expect(html).toContain('Via group Engineering');
-    expect(html).toContain('1,280 would be denied');
-    expect(html).not.toContain('would be allowed');
+    // A policy is enabled or disabled: there is no mode badge and no "would deny" counter any more.
+    expect(html).not.toContain('Monitor');
+    expect(html).not.toContain('Enforced');
+    expect(html).not.toContain('would be denied');
     expect(html).toContain('href="/dashboard/iam?tab=policies&amp;policyId=pol+1"');
   });
 
@@ -438,12 +432,6 @@ describe('AttachedPolicies', () => {
     expect(html).toContain('Everyone');
   });
 
-  it('does not show monitor counts for an enforced policy', () => {
-    const html = renderPolicies([
-      policy({ monitorStats: { wouldAllow: 5, wouldDeny: 5, since: null }, mode: 'enforce' }),
-    ]);
-    expect(html).not.toContain('would be denied');
-  });
 });
 
 describe('the tabs render their first frame', () => {
@@ -464,15 +452,16 @@ describe('the tabs render their first frame', () => {
 
   it('Audit: views, filters and the export button, in both languages', async () => {
     const { default: AuditTab } = await import('@/components/iam/audit/AuditTab');
-    const en = render('en', () => React.createElement(AuditTab, { canManage: true }));
+    const en = render('en', () => React.createElement(AuditTab));
     expect(en).toContain('Denials');
     expect(en).toContain('Policy changes');
-    expect(en).toContain('Monitor');
+    // The monitor view is gone ("Model Monitoring" in the service list is a different thing).
+    expect(en).not.toMatch(/>Monitor</);
     expect(en).toContain('Export CSV');
     expect(en).toContain('Date range');
     expect(en).toContain('Last 30 days'); // denials without a date range look 30 days back
     expect(en).toContain('Service');
-    const tr = render('tr', () => React.createElement(AuditTab, { canManage: true }));
+    const tr = render('tr', () => React.createElement(AuditTab));
     expect(tr).toContain('Reddedilenler');
     expect(tr).toContain('CSV olarak dışa aktar');
   });

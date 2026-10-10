@@ -1,21 +1,16 @@
 /**
  * Access check (`POST /api/iam/simulate`): "would this principal be allowed to do
  * this, and why?" - answered by the SAME engine the gate uses, with the same
- * principal construction (groups, project narrowing, token scope), so the answer
- * is what enforce mode would decide for the request.
+ * principal construction (groups, project narrowing, token scope, the default
+ * project of a token that has none), so the answer is what the gate would decide
+ * for the request.
  *
- * Nothing is recorded: a simulation is not traffic, it never touches the shadow
- * aggregates or the audit log.
+ * Nothing is recorded: a simulation is not traffic, it never touches the
+ * decision counters or the audit log.
  */
 
 import { runWithTenantScope } from '@/lib/database';
-import {
-  authorizeService,
-  getServiceDefinition,
-  isPermissionService,
-  type PermissionService,
-  type ServicePermissionLevel,
-} from '@/lib/security/rbac';
+import { isPermissionService } from '@/lib/security/rbac';
 import type { ActionDefinition } from './actions';
 import { IAM_CHANNELS, isIamChannel, normalizeIp, type IamChannel, type IamRequestContext } from './context';
 import { authorize, type AuthorizeResult } from './engine';
@@ -25,7 +20,6 @@ import { describeManagedPolicy, statementInfos } from './policyRows';
 import { isSafeId, type PolicyIssue } from './policySpec';
 import { getIamSchema } from './schemaState';
 import { isManagedPolicyId } from './managedPolicies';
-import { getAuthzMode, type AuthzMode } from './shadow/mode';
 import { listPolicies, policyIdFromCedarId, type IIamPolicy } from './store';
 
 // ── input ────────────────────────────────────────────────────────────────
@@ -247,9 +241,6 @@ export interface SimulateResult {
   reasons: SimulateReason[];
   /** Denied because nothing allowed it (no policy matched), not because a policy forbade it. */
   defaultDeny: boolean;
-  monitor?: { allowed: boolean; differs: boolean; reasons: SimulateReason[] };
-  /** What the current (rbac.ts) rules decide for the same request. */
-  legacy?: { allowed: boolean; service: string; required: string };
   principalSummary: {
     type: 'user' | 'token';
     id: string;
@@ -259,8 +250,6 @@ export interface SimulateResult {
     tokenScope?: Record<string, string> | null;
     status?: string;
   };
-  /** The authorization mode of the workspace (what is actually in force). */
-  mode: AuthzMode;
   /** The project the check ran in (the one given, or the one a request without an active project would run in); null = none. */
   projectId: string | null;
   /** True when the workspace-owner rule (the owner always reaches the Authorization Engine) decided. */
@@ -273,19 +262,6 @@ export interface SimulateResult {
   enforcedAtGate: boolean;
   /** Problems the engine met while evaluating (a policy that errored); the decision above already accounts for them. */
   errors?: string[];
-}
-
-function legacyOf(evaluation: EvaluationPrincipal, action: ActionDefinition) {
-  const service = (action.service ?? '') as PermissionService;
-  if (!isPermissionService(service)) return undefined;
-  // Level the action needs; a mutation on an administration service needs admin, exactly like the gate.
-  const needsAdmin = action.level === 'write' && !!getServiceDefinition(service).adminService;
-  const level: ServicePermissionLevel = needsAdmin ? 'admin' : action.level;
-  const verdict = evaluation.type === 'token'
-    // legacy tokens never saw their owner's group grants
-    ? authorizeService(evaluation.user, 'GET', service, [], evaluation.tokenScope, level)
-    : authorizeService(evaluation.user, 'GET', service, evaluation.groupGrants, undefined, level);
-  return { allowed: verdict.allowed, service, required: level };
 }
 
 export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<SimulateResult> {
@@ -319,24 +295,18 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
     throw new SimulateInputError('engine_unavailable', 'The policy engine is not available on this server', 503);
   }
 
-  const [policies, modeInfo] = await Promise.all([listPolicies(tenant.tenantDbName), getAuthzMode(tenant.tenantDbName)]);
+  const policies = await listPolicies(tenant.tenantDbName);
   const reasons = explainReasons(result.reasons, policies);
-  const legacy = legacyOf(evaluation, input.action);
 
   // The workspace owner can always reach the Authorization Engine, whatever policies say (enforce.ts).
   // (A session promise: a token owned by the owner is an ordinary principal.)
   const ownerSafety = evaluation.type === 'user' && evaluation.role === 'owner' && input.action.service === 'iam' && input.action.kind === 'service';
-  let allowed = result.allowed;
-  if (ownerSafety && legacy) allowed = legacy.allowed;
+  const allowed = ownerSafety ? true : result.allowed;
 
   const out: SimulateResult = {
     allowed,
     reasons,
-    defaultDeny: !allowed && !ownerSafety && result.reasons.length === 0,
-    ...(result.monitor
-      ? { monitor: { allowed: result.monitor.allowed, differs: result.monitor.differs, reasons: explainReasons(result.monitor.reasons, policies) } }
-      : {}),
-    ...(legacy ? { legacy } : {}),
+    defaultDeny: !allowed && result.reasons.length === 0,
     principalSummary: {
       type: evaluation.type,
       id: evaluation.id,
@@ -348,7 +318,6 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
         : {}),
       ...(evaluation.accountDisabled ? { status: 'disabled' } : {}),
     },
-    mode: modeInfo.mode,
     projectId: typeof context.projectId === 'string' && context.projectId ? context.projectId : null,
     ...(ownerSafety ? { ownerSafety: true } : {}),
     enforcedAtGate: input.action.kind !== 'resource',
@@ -356,4 +325,3 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
   };
   return out;
 }
-

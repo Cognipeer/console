@@ -6,8 +6,8 @@
  *   tokens.requireExpiry     every API token must carry an expiry date
  *
  * Where it lives: one small document in the policy engine's own lazily-created
- * `iam_meta` collection/table (id `settings`) in the tenant database - the same
- * place the authorization mode lives, identical on MongoDB and SQLite. Nothing
+ * `iam_meta` collection/table (id `settings`) in the tenant database, identical on
+ * MongoDB and SQLite. Nothing
  * to migrate: a tenant that never saved settings reads the defaults
  * (`null` / `false`), existing tokens are never touched, and a read of a
  * missing collection runs no DDL.

@@ -6,7 +6,7 @@
  *    or the forwarded one only when the immediate peer is a trusted proxy
  *    (TRUSTED_PROXIES); a raw X-Forwarded-For / X-Real-IP header never counts
  *  - a refused call is a 403 `ip_not_allowed` in every error dialect
- *  - it is decided before, and independently of, the authorization mode
+ *  - it is decided before the authorization engine is consulted
  *  - the refusal is audited (throttled), the successful call is untouched
  */
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -20,8 +20,16 @@ const h = vi.hoisted(() => ({
     findUserById: vi.fn(),
     updateTokenLastUsedByHash: vi.fn(),
     runWithTenant: vi.fn(async (_name: string, fn: () => unknown) => fn()),
+    // What the authorization engine reads for a token's owner (nothing stored: no groups,
+    // no projects, no custom policies).
+    iamDocGet: vi.fn(),
+    iamDocPut: vi.fn(),
+    listGroupMembersByUser: vi.fn(),
+    listUserProjectsByUser: vi.fn(),
+    listGroupProjectsByGroup: vi.fn(),
+    listProjects: vi.fn(),
+    findProjectByKey: vi.fn(),
   },
-  resolveEnforcement: vi.fn(),
   recordAuditLog: vi.fn(),
 }));
 
@@ -41,7 +49,6 @@ vi.mock('@/lib/services/projects/projectService', () => ({
   ensureDefaultProject: vi.fn(async () => ({ _id: 'p-default' })),
 }));
 vi.mock('@/lib/services/audit', () => ({ recordAuditLog: h.recordAuditLog }));
-vi.mock('@/lib/iam/shadow/mode', () => ({ resolveEnforcement: h.resolveEnforcement }));
 
 import { reloadConfig } from '@/lib/core/config';
 import { resolveTrustProxyOption } from '@/server/app';
@@ -76,8 +83,8 @@ async function buildApp(trustedProxies: string[]): Promise<FastifyInstance> {
   app.get('/api/client/v1/json', withClientApiRequestContext(ok as never, { rbac: false }));
   app.get('/api/client/v1/openai', withOpenAiApiRequestContext(ok as never, { rbac: false }));
   app.get('/api/client/v1/anthropic', withAnthropicApiRequestContext(ok as never, { rbac: false }));
-  // The RBAC stage is on here: a refused address must never reach it.
-  app.get('/api/client/v1/gated', withClientApiRequestContext(ok as never));
+  // The authorization stage is on here (a mapped path: the Model Hub): a refused address must never reach it.
+  app.get('/api/client/v1/models/gated', withClientApiRequestContext(ok as never));
   // The older per-handler style.
   app.get('/api/client/v1/legacy-style', async (request, reply) => {
     try {
@@ -101,7 +108,13 @@ beforeEach(() => {
   h.db.findTenantById.mockResolvedValue({ _id: 't1', dbName: 'tenant_acme', slug: 'acme', licenseType: 'FREE' });
   h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', tenantId: 't1' });
   h.db.updateTokenLastUsedByHash.mockResolvedValue(undefined);
-  h.resolveEnforcement.mockResolvedValue(false);
+  h.db.iamDocGet.mockResolvedValue(null);
+  h.db.iamDocPut.mockResolvedValue(undefined);
+  h.db.listGroupMembersByUser.mockResolvedValue([]);
+  h.db.listUserProjectsByUser.mockResolvedValue([]);
+  h.db.listGroupProjectsByGroup.mockResolvedValue([]);
+  h.db.listProjects.mockResolvedValue([]);
+  h.db.findProjectByKey.mockResolvedValue(null);
   h.recordAuditLog.mockResolvedValue(undefined);
 });
 
@@ -279,19 +292,28 @@ describe('the refusal in every dialect', () => {
   });
 });
 
-describe('independent of the authorization mode', () => {
-  it.each([[false], [true]])('is refused before the gate is consulted (enforce=%s)', async (enforce) => {
-    h.resolveEnforcement.mockResolvedValue(enforce);
+describe('decided before the authorization engine', () => {
+  it('a refused address is refused before the engine is consulted', async () => {
     app = await buildApp([]);
     const res = await app.inject({
-      method: 'GET', url: '/api/client/v1/gated', remoteAddress: '198.51.100.7', headers,
+      method: 'GET', url: '/api/client/v1/models/gated', remoteAddress: '198.51.100.7', headers,
     });
     expect(res.statusCode).toBe(403);
-    // the same body in every mode, `error` being the reason itself (the legacy contract enforce 403s keep)
+    // `error` is the reason itself, `code` tells it apart from a refusal on merit
     expect(res.json()).toEqual({ error: 'API token is not allowed from this IP address', code: 'ip_not_allowed' });
-    expect(h.resolveEnforcement).not.toHaveBeenCalled();
+    // neither the engine's reads nor the token's owner are touched
+    expect(h.db.iamDocGet).not.toHaveBeenCalled();
     expect(h.db.findUserById).not.toHaveBeenCalled();
     expect(h.db.updateTokenLastUsedByHash).not.toHaveBeenCalled();
+  });
+
+  it('an allowed address does go through the engine', async () => {
+    app = await buildApp([]);
+    const res = await app.inject({
+      method: 'GET', url: '/api/client/v1/models/gated', remoteAddress: '203.0.113.50', headers,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(h.db.iamDocGet).toHaveBeenCalled();
   });
 });
 

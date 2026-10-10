@@ -33,6 +33,7 @@ Community edition is available under AGPL-3.0. Commercial licensing, hosted depl
 - **Inference Monitoring & Alerts** — Real-time monitoring for self-hosted inference servers with rule-based alerting
 
 **Safety & Compliance**
+- **Authorization Engine** — Roles, group grants, project permissions and API token scopes are decided by one policy engine (Cedar) on every request, with custom allow/deny policies, an access check, decision ids on every refusal and an audit trail ([docs](docs/guide/authorization.md))
 - **Guardrails** — PII detection, content moderation, prompt shields, and custom LLM-based evaluators
 - **AI Red-Teaming** — OWASP LLM Top 10 probes, campaigns, and attack runs
 - **Audit Logging** — Tenant-scoped audit trails
@@ -110,6 +111,7 @@ docker run -p 3000:3000 -v ./data:/app/data -e JWT_SECRET=your-secret-here cogni
 - **UI**: Mantine v8 + Tailwind CSS
 - **Database**: SQLite (default, zero-dependency) or MongoDB
 - **Auth**: JWT (jose) + API tokens
+- **Authorization**: Cedar policy engine (WebAssembly) deciding every request
 - **Cache**: None / Memory / Redis
 - **Logging**: Winston with structured context
 
@@ -128,6 +130,7 @@ Key variables:
 | `RATE_LIMIT_PROVIDER` | `mongodb` | Rate limit backend (`mongodb`, `memory`, `redis`) |
 | `BROWSER_BLOCK_PRIVATE_NETWORK` | `true` | Block private-network egress from managed browser sessions |
 | `CORS_ENABLED` | `false` | Enable CORS for client APIs |
+| `TRUSTED_PROXIES` | — | Reverse proxies or load balancers whose `X-Forwarded-For` is trusted; token IP allowlists and IP rules in access policies depend on it |
 
 For the full configuration reference, see the [Configuration Guide](docs/guide/configuration.md).
 
@@ -169,6 +172,7 @@ Full documentation is available in the [docs/](docs/) directory:
 - [Configuration](docs/guide/configuration.md)
 - [Deployment](docs/guide/deployment.md)
 - [Multi-Tenancy](docs/guide/multi-tenancy.md)
+- [Authorization](docs/guide/authorization.md) and [Upgrading to the policy engine](docs/guide/upgrading-to-the-policy-engine.md)
 - [API Reference](docs/api/overview.md)
 - [Licensing](docs/guide/licensing.md)
 - [Security](docs/guide/security.md)

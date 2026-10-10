@@ -904,7 +904,7 @@
       "navLabelKey": "iam",
       "navDescriptionKey": "iamDescription",
       "tags": ["iam", "authorization", "policy", "security"],
-      "searchKeywords": ["iam", "authorization", "policy", "cedar", "shadow", "yetki", "yetki motoru"],
+      "searchKeywords": ["iam", "authorization", "policy", "cedar", "access", "permissions", "yetki", "yetki motoru", "politika"],
       "tenantAdminOnly": true,
       "settings": true
     },

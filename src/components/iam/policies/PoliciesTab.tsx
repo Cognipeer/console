@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
@@ -24,7 +23,6 @@ import { useElementSize, useMediaQuery } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import {
   IconAlertTriangle,
-  IconArrowsExchange,
   IconCopy,
   IconDots,
   IconEdit,
@@ -41,7 +39,6 @@ import { useLocale, useTranslations } from '@/lib/i18n';
 import {
   IamApiError,
   iamApi,
-  type IamAuthzMode,
   type PoliciesResponse,
   type PolicyRow,
   type PolicyWriteBody,
@@ -54,7 +51,7 @@ import { useErrorText } from '../useErrorText';
 import { useIamCatalog } from '../useIamCatalog';
 import { useIamLabels } from '../useIamLabels';
 import ManagedPolicies from './ManagedPolicies';
-import { EffectBadge, ModeBadge } from './PolicyBadges';
+import { EffectBadge } from './PolicyBadges';
 import PolicyDetailDrawer from './PolicyDetailDrawer';
 import PolicyEditor, { type PolicyEditorTarget } from './PolicyEditor';
 import { summarizeSpec } from './specModel';
@@ -64,23 +61,20 @@ interface PoliciesTabProps {
   canManage: boolean;
 }
 
-type ModeFilter = 'all' | 'monitor' | 'enforce';
+type EnabledFilter = 'all' | 'enabled' | 'disabled';
 type EffectFilter = 'all' | 'permit' | 'forbid';
 type SortKey = 'name' | 'updated';
 
 /** Narrowest box the policies table is laid out in; below it the policies are shown as cards. */
-const TABLE_MIN_WIDTH = 980;
+const TABLE_MIN_WIDTH = 860;
 
 /**
  * What a switch in the table sends: only the switch. The server keeps the stored
  * Cedar and spec, so turning a policy off never re-validates (and can never be
  * refused because of) the people and groups it names.
  */
-function bodyOf(change: { mode?: PolicyRow['mode']; enabled?: boolean }): Partial<PolicyWriteBody> {
-  return {
-    ...(change.mode !== undefined ? { mode: change.mode } : {}),
-    ...(change.enabled !== undefined ? { enabled: change.enabled } : {}),
-  };
+function bodyOf(change: { enabled?: boolean }): Partial<PolicyWriteBody> {
+  return change.enabled !== undefined ? { enabled: change.enabled } : {};
 }
 
 export default function PoliciesTab({ canManage }: PoliciesTabProps) {
@@ -105,10 +99,9 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
   const [data, setData] = useState<PoliciesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [engine, setEngine] = useState<{ mode: IamAuthzMode; effectiveMode: IamAuthzMode } | null>(null);
 
   const [search, setSearch] = useState('');
-  const [modeFilter, setModeFilter] = useState<ModeFilter>('all');
+  const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>('all');
   const [effectFilter, setEffectFilter] = useState<EffectFilter>('all');
   const [sortKey, setSortKey] = useState<SortKey>('name');
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
@@ -122,9 +115,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
       if (!quiet) setLoading(true);
       setLoadError(null);
       try {
-        const [policies, mode] = await Promise.all([iamApi.listPolicies(), iamApi.getMode().catch(() => null)]);
-        setData(policies);
-        setEngine(mode);
+        setData(await iamApi.listPolicies());
       } catch (err) {
         setLoadError(
           err instanceof IamApiError && err.status === 403 ? t('errors.forbidden') : errorText(err, t('errors.load')),
@@ -208,7 +199,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (custom ?? [])
-      .filter((p) => modeFilter === 'all' || p.mode === modeFilter)
+      .filter((p) => enabledFilter === 'all' || (enabledFilter === 'enabled' ? p.enabled : !p.enabled))
       .filter((p) => effectFilter === 'all' || p.effect === effectFilter)
       .filter((p) => !q || p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q))
       .sort((a, b) =>
@@ -216,7 +207,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
           ? (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || a.name.localeCompare(b.name)
           : a.name.localeCompare(b.name),
       );
-  }, [custom, search, modeFilter, effectFilter, sortKey]);
+  }, [custom, search, enabledFilter, effectFilter, sortKey]);
 
   const needsGroupNames = useMemo(
     () => (custom ?? []).some((p) => p.spec && summarizeSpec(p.spec).groupIds.length > 0),
@@ -236,7 +227,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
     });
 
   const applyChange = useCallback(
-    async (row: PolicyRow, change: { mode?: PolicyRow['mode']; enabled?: boolean }) => {
+    async (row: PolicyRow, change: { enabled?: boolean }) => {
       setBusyFor(row.policyId, true);
       // Optimistic: the switch follows the click, and snaps back if the server refuses.
       setData((d) =>
@@ -262,41 +253,15 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
 
   const toggleEnabled = useCallback(
     async (row: PolicyRow, enabled: boolean) => {
-      if (row.mode === 'enforce') {
-        const ok = await confirm({
-          title: enabled ? t('table.enableTitle', { name: row.name }) : t('table.disableTitle', { name: row.name }),
-          message: enabled ? t('table.enableMessage') : t('table.disableMessage'),
-          confirmLabel: enabled ? t('table.enable') : t('table.disable'),
-          tone: row.effect === 'forbid' && !enabled ? 'warning' : 'neutral',
-        });
-        if (!ok) return;
-      }
-      await applyChange(row, { enabled });
-    },
-    [applyChange, confirm, t],
-  );
-
-  const switchMode = useCallback(
-    async (row: PolicyRow) => {
-      const next = row.mode === 'monitor' ? 'enforce' : 'monitor';
-      const stats = row.monitorStats;
+      // Every policy decides real requests, so switching one on or off is always confirmed.
       const ok = await confirm({
-        title: next === 'enforce' ? t('table.promoteTitle', { name: row.name }) : t('table.demoteTitle', { name: row.name }),
-        message: next === 'enforce' ? t('table.promoteMessage') : t('table.demoteMessage'),
-        details:
-          next === 'enforce' && stats ? (
-            <Text size="sm">
-              {t('table.promoteStats', {
-                deny: stats.wouldDeny.toLocaleString(),
-                allow: stats.wouldAllow.toLocaleString(),
-              })}
-            </Text>
-          ) : undefined,
-        confirmLabel: next === 'enforce' ? t('table.promote') : t('table.demote'),
-        tone: next === 'enforce' ? 'warning' : 'neutral',
+        title: enabled ? t('table.enableTitle', { name: row.name }) : t('table.disableTitle', { name: row.name }),
+        message: enabled ? t('table.enableMessage') : t('table.disableMessage'),
+        confirmLabel: enabled ? t('table.enable') : t('table.disable'),
+        tone: row.effect === 'forbid' && !enabled ? 'warning' : 'neutral',
       });
       if (!ok) return;
-      await applyChange(row, { mode: next });
+      await applyChange(row, { enabled });
     },
     [applyChange, confirm, t],
   );
@@ -306,7 +271,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
       const done = await deleteResource({
         noun: t('policyNoun'),
         name: row.name,
-        extraWarning: row.mode === 'enforce' && row.enabled ? t('table.deleteEnforcedWarning') : undefined,
+        extraWarning: row.enabled ? t('table.deleteEnabledWarning') : undefined,
         action: async () => {
           await iamApi.deletePolicy(row.policyId);
         },
@@ -337,8 +302,6 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
   );
 
   // ── render ───────────────────────────────────────────────────────────────
-
-  const showEngineBanner = engine !== null && engine.effectiveMode !== 'enforce';
 
   const renderScope = (row: PolicyRow) => {
     if (!row.spec) {
@@ -382,42 +345,6 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
     );
   };
 
-  const renderMonitor = (row: PolicyRow) => {
-    if (row.mode !== 'monitor' || !row.monitorStats) {
-      return (
-        <Text size="xs" c="dimmed">
-          —
-        </Text>
-      );
-    }
-    const { wouldAllow, wouldDeny, since } = row.monitorStats;
-    if (wouldAllow === 0 && wouldDeny === 0) {
-      return (
-        <Tooltip label={since ? t('table.monitorSince', { date: formatDateTime(since, locale) }) : t('table.monitorNone')}>
-          <Text size="xs" c="dimmed">
-            {t('table.monitorNone')}
-          </Text>
-        </Tooltip>
-      );
-    }
-    return (
-      <Tooltip label={since ? t('table.monitorSince', { date: formatDateTime(since, locale) }) : t('table.monitorHelp')}>
-        <Stack gap={2} align="flex-start">
-          {wouldDeny > 0 ? (
-            <Badge size="sm" color="red" variant="light" style={{ minWidth: 'max-content' }}>
-              {t('table.wouldDeny', { count: wouldDeny.toLocaleString() })}
-            </Badge>
-          ) : null}
-          {wouldAllow > 0 ? (
-            <Badge size="sm" color="green" variant="light" style={{ minWidth: 'max-content' }}>
-              {t('table.wouldAllow', { count: wouldAllow.toLocaleString() })}
-            </Badge>
-          ) : null}
-        </Stack>
-      </Tooltip>
-    );
-  };
-
   const openRow = (row: PolicyRow) => (canManage ? openEditor({ kind: 'edit', policy: row }) : setViewing(row));
 
   const renderName = (row: PolicyRow, wrap: boolean) => (
@@ -437,7 +364,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
         </Text>
       ) : null}
       {!row.spec ? (
-        <Badge size="xs" variant="outline" color="gray" mt={2}>
+        <Badge size="xs" variant="default" mt={2}>
           Cedar
         </Badge>
       ) : null}
@@ -482,13 +409,6 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
             <Menu.Item leftSection={<IconCopy size={14} />} onClick={() => openEditor({ kind: 'duplicate', policy: row })}>
               {t('table.duplicate')}
             </Menu.Item>
-            <Menu.Item
-              leftSection={<IconArrowsExchange size={14} />}
-              disabled={busy.has(row.policyId)}
-              onClick={() => void switchMode(row)}
-            >
-              {row.mode === 'monitor' ? t('table.promote') : t('table.demote')}
-            </Menu.Item>
             <Menu.Divider />
             <Menu.Item color="red" leftSection={<IconTrash size={14} />} onClick={() => void removePolicy(row)}>
               {t('table.delete')}
@@ -505,19 +425,6 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
 
   return (
     <Stack gap="lg">
-      {showEngineBanner ? (
-        <Alert color="blue" variant="light" icon={<IconAlertTriangle size={16} />}>
-          <Group justify="space-between" wrap="wrap" gap="xs">
-            <Text size="sm" style={{ flex: 1, minWidth: 220 }}>
-              {t('banner.notEnforce', { mode: labels.authzMode(engine?.effectiveMode ?? 'legacy') })}
-            </Text>
-            <Button component={Link} href={iamHref('overview')} size="xs" variant="light">
-              {t('banner.openOverview')}
-            </Button>
-          </Group>
-        </Alert>
-      ) : null}
-
       {!canManage ? (
         <Alert color="gray" variant="light">
           {t('errors.readOnly')}
@@ -600,12 +507,13 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
               />
               <SegmentedControl
                 size="xs"
-                value={modeFilter}
-                onChange={(v) => setModeFilter(v as ModeFilter)}
+                value={enabledFilter}
+                onChange={(v) => setEnabledFilter(v as EnabledFilter)}
+                aria-label={t('table.colEnabled')}
                 data={[
                   { value: 'all', label: t('policies.filterAll') },
-                  { value: 'monitor', label: t('modes.monitor') },
-                  { value: 'enforce', label: t('modes.enforce') },
+                  { value: 'enabled', label: t('policies.filterEnabled') },
+                  { value: 'disabled', label: t('policies.filterDisabled') },
                 ]}
               />
               <SegmentedControl
@@ -670,11 +578,9 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
                     </Group>
                     <Group gap={6} mt={8}>
                       <EffectBadge effect={row.effect} labels={labels} />
-                      <ModeBadge mode={row.mode} labels={labels} />
                     </Group>
                     <div style={{ marginTop: 8 }}>{renderScope(row)}</div>
-                    <Group justify="space-between" mt={8} gap="xs">
-                      {renderMonitor(row)}
+                    <Group justify="flex-end" mt={8} gap="xs">
                       {renderUpdated(row)}
                     </Group>
                   </Paper>
@@ -687,10 +593,8 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
                   <Table.Tr>
                     <Table.Th miw={180}>{t('table.colName')}</Table.Th>
                     <Table.Th miw={96}>{t('table.colEffect')}</Table.Th>
-                    <Table.Th miw={104}>{t('table.colMode')}</Table.Th>
                     <Table.Th miw={72}>{t('table.colEnabled')}</Table.Th>
                     <Table.Th miw={240}>{t('table.colScope')}</Table.Th>
-                    <Table.Th miw={140}>{t('table.colMonitor')}</Table.Th>
                     <Table.Th miw={120}>{t('table.colUpdated')}</Table.Th>
                     <Table.Th w={44} />
                   </Table.Tr>
@@ -702,12 +606,8 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
                       <Table.Td>
                         <EffectBadge effect={row.effect} labels={labels} />
                       </Table.Td>
-                      <Table.Td>
-                        <ModeBadge mode={row.mode} labels={labels} />
-                      </Table.Td>
                       <Table.Td>{renderSwitch(row)}</Table.Td>
                       <Table.Td maw={340}>{renderScope(row)}</Table.Td>
-                      <Table.Td>{renderMonitor(row)}</Table.Td>
                       <Table.Td>{renderUpdated(row)}</Table.Td>
                       <Table.Td>{renderMenu(row)}</Table.Td>
                     </Table.Tr>
@@ -746,7 +646,6 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
           catalog={catalog}
           index={index}
           labels={labels}
-          engineMode={engine?.effectiveMode ?? null}
           onClose={() => setEditor(null)}
           onSaved={handleSaved}
         />

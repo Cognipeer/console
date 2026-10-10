@@ -150,11 +150,11 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   // adminService on purpose: it deliberately ignores the active project, so it
   // must not default to anyone below owner/admin.
   { id: 'resources', label: 'Resource Registry', description: 'Read-only inventory of every resource in the tenant across all projects. A grant is tenant-wide and cross-service: it lists every resource type and project regardless of the grantee\'s other permissions.', category: 'admin', adminService: true },
-  // Authorization engine administration (C2+): tenant authz mode, shadow-mode
-  // diff reports, engine stats and, later, custom policies. adminService:
-  // changing how access is decided is a tenant-admin decision, so it defaults to
-  // owner/admin only and every mutation needs admin.
-  { id: 'iam', label: 'Authorization Engine', description: 'Authorization engine mode, shadow-mode difference reports, engine statistics and custom access policies.', category: 'admin', adminService: true },
+  // Authorization engine administration: custom access policies, the access check,
+  // the audit of denials and policy changes, token rules and engine health.
+  // adminService: changing how access is decided is a tenant-admin decision, so
+  // it defaults to owner/admin only and every mutation needs admin.
+  { id: 'iam', label: 'Authorization Engine', description: 'Custom access policies, the access check, denial and change history, token rules and engine health.', category: 'admin', adminService: true },
 ];
 
 const SERVICE_IDS = new Set<PermissionService>(RBAC_SERVICE_DEFINITIONS.map((service) => service.id));

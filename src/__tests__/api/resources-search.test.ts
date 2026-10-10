@@ -350,8 +350,11 @@ describe('GET /api/resources/search', () => {
     it('takes the tenant from the session, never from the query', async () => {
       const res = await get('/api/resources/search?types=model&tenantId=evil&tenantDbName=tenant_evil', adminHeaders);
       expect(res.statusCode).toBe(200);
+      // The gate (the caller, the engine's policies) and the search each open a scope; every one of
+      // them is the session's tenant, none is the one the query asked for.
       const scopes = (runWithTenantScope as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
-      expect(scopes).toEqual(['tenant_acme']);
+      expect(scopes.length).toBeGreaterThan(0);
+      expect(new Set(scopes)).toEqual(new Set(['tenant_acme']));
       expect(res.body).not.toContain('evil');
     });
 

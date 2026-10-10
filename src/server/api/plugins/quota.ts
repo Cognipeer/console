@@ -24,6 +24,7 @@ import {
   parseCsvQuery,
   readJsonBody,
   requireSessionContext,
+  sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
 
@@ -91,6 +92,9 @@ export const quotaApiPlugin: FastifyPluginAsync = async (app) => {
       if (error instanceof Error && error.message === 'Unauthorized') {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
+      // The engine could not decide (the handler-level IAM check above): answered as the gate would, with its 503.
+      const refused = sendProjectContextError(reply, error);
+      if (refused) return refused;
       logger.error('List quota policies error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }

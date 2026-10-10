@@ -6,6 +6,7 @@
  */
 
 import { policyAnnotations, policyToJson, splitPolicyText, type CedarMessage } from './cedar';
+import { askedGateActions } from './gateActions';
 import { MANAGED_ANNOTATION } from './managedPolicies';
 import { getIamSchema, validateAgainstSchema } from './schemaState';
 
@@ -41,6 +42,17 @@ interface ScopeJson {
   entity_type?: string;
 }
 
+/** The action ids a statement's action scope names (`== Action::"x"`, `in Action::"x"`, `in [..]`). */
+function namedActions(action: ScopeJson | undefined): string[] {
+  const named: string[] = [];
+  if (action?.op === '==' && action.entity?.id) named.push(action.entity.id);
+  else if (action?.op === 'in') {
+    if (action.entity?.id) named.push(action.entity.id);
+    for (const e of action.entities ?? []) if (e.id) named.push(e.id);
+  }
+  return named;
+}
+
 /**
  * Why the SCOPE of a statement (its `action` and `resource` heads) can never
  * match a decision the server takes, or null. The request gates only ask about
@@ -57,13 +69,7 @@ interface ScopeJson {
  */
 function unreachableScope(json: { action?: ScopeJson; resource?: ScopeJson }): string | null {
   const catalog = new Map(getIamSchema().catalog.map((a) => [a.id, a]));
-  const named: string[] = [];
-  const action = json.action;
-  if (action?.op === '==' && action.entity?.id) named.push(action.entity.id);
-  else if (action?.op === 'in') {
-    if (action.entity?.id) named.push(action.entity.id);
-    for (const e of action.entities ?? []) if (e.id) named.push(e.id);
-  }
+  const named = namedActions(json.action);
   if (named.length > 0 && named.every((id) => catalog.get(id)?.kind === 'resource')) {
     return 'only names actions about individual resources, which the request gates do not check yet';
   }
@@ -75,6 +81,24 @@ function unreachableScope(json: { action?: ScopeJson; resource?: ScopeJson }): s
     return `is limited to ${resource.entity_type} entities, but the request gates only check whole services`;
   }
   return null;
+}
+
+/**
+ * Why a statement whose action scope names only service-level actions can never
+ * apply: nothing in this build asks for any of them (`models.admin` when only
+ * Read and Write are ever checked on `models`). Only a WARNING - what counts as
+ * "asked" is read from the routes the server registered (gateActions.ts), and
+ * is unknown (null) before they are.
+ */
+function unaskedScope(json: { action?: ScopeJson }): string | null {
+  const asked = askedGateActions();
+  if (!asked) return null;
+  const catalog = new Map(getIamSchema().catalog.map((a) => [a.id, a]));
+  const named = namedActions(json.action);
+  if (named.length === 0 || !named.every((id) => catalog.get(id)?.kind === 'service')) return null;
+  if (named.some((id) => asked.has(id))) return null;
+  const list = named.slice(0, 6).join(', ') + (named.length > 6 ? ', ...' : '');
+  return `only names actions that nothing in the product checks yet (${list})`;
 }
 
 /** Validate Cedar text as a custom policy against the generated schema. Pure: touches no store. */
@@ -122,14 +146,26 @@ export function validateCustomPolicyText(cedar: unknown, options: { reachability
   parts.policies.forEach((statement, i) => {
     const json = policyToJson(statement);
     if (!json.ok) return;
-    const why = unreachableScope(json.json as unknown as { action?: ScopeJson; resource?: ScopeJson });
-    if (!why) return;
+    const scope = json.json as unknown as { action?: ScopeJson; resource?: ScopeJson };
     const forbid = json.json.effect === 'forbid';
-    (forbid ? errors : warnings).push({
-      message: `This ${forbid ? 'forbid' : 'permit'} statement ${why}, so it ${forbid ? 'would never block anything' : 'would never grant anything'}.`
-        + (parts.policies.length > 1 ? ` (statement ${i + 1})` : ''),
-      policyId: `candidate#${i}`,
-    });
+    const why = unreachableScope(scope);
+    if (why) {
+      (forbid ? errors : warnings).push({
+        message: `This ${forbid ? 'forbid' : 'permit'} statement ${why}, so it ${forbid ? 'would never block anything' : 'would never grant anything'}.`
+          + (parts.policies.length > 1 ? ` (statement ${i + 1})` : ''),
+        policyId: `candidate#${i}`,
+      });
+      return;
+    }
+    // Not provably unreachable, but nothing asks for its actions: say so, never refuse it.
+    const unasked = unaskedScope(scope);
+    if (unasked) {
+      warnings.push({
+        message: `This ${forbid ? 'forbid' : 'permit'} statement ${unasked}, so it ${forbid ? 'would never block anything' : 'would never grant anything'}.`
+          + (parts.policies.length > 1 ? ` (statement ${i + 1})` : ''),
+        policyId: `candidate#${i}`,
+      });
+    }
   });
   return { valid: errors.length === 0, errors, warnings, statements: parts.policies };
 }

@@ -10,21 +10,21 @@
  *     ROUTE_PREFIXES / the path resolvers (no UNDECLARED route);
  *   - `public` routes are covered by the global public path list (where the
  *     global hook skips authentication, so no gate can run for them anyway);
- *   - `authenticated` routes are not prefix-mapped (that would widen access in
- *     enforce mode) and are not under a public / self-auth prefix;
+ *   - `authenticated` routes are not prefix-mapped (that would widen access: any
+ *     signed-in caller would pass instead of the service's level) and are not under
+ *     a public / self-auth prefix;
  *   - a `service` declaration that disagrees with the prefix map is a conflict;
  *   - routes under a SELF-AUTH prefix (machine endpoints that verify their own
  *     bearer tokens: plugin.ts SELF_AUTH_API_PREFIXES) are declared `self` or
  *     `public`, never left to the prefix map;
- *   - a `public` / `self` declaration on a prefix-mapped path is refused: legacy
- *     gates that path by its service, enforce honours the explicit declaration and
- *     skips the gate, so it would widen access in enforce mode only (machine
- *     endpoints under a self-auth prefix are the legitimate exception: nothing
- *     gates them in any mode);
+ *   - a `public` / `self` declaration on a prefix-mapped path is refused: the gate
+ *     honours the explicit declaration and skips the service check, so it would
+ *     widen access (machine endpoints under a self-auth prefix are the legitimate
+ *     exception: nothing gates them);
  *   - every route that resolves to a SERVICE runs the permission gate, i.e. its
  *     handler comes from withApiRequestContext / withClientApiRequestContext
  *     (tagged with GATED_HANDLER). A service-mapped route registered with a bare
- *     handler is gated in NO mode; the ones that legitimately authenticate and
+ *     handler is decided by nothing; the ones that legitimately authenticate and
  *     authorize themselves are listed in UNGATED_SERVICE_ROUTES with the reason.
  *
  * NOT checked, on purpose: a route that merely resolves through the prefix map
@@ -59,7 +59,7 @@ export const UNGATED_SERVICE_ROUTES: Array<{ match: RegExp; reason: string }> = 
   { match: /^[A-Z]+ \/api\/gpu-fleet\/installer\.sh$/, reason: 'static agent installer script (no tenant data)' },
   { match: /^[A-Z]+ \/api\/gpu-fleet\/agent-bundle/, reason: 'static agent bundle download (no tenant data)' },
   { match: /^[A-Z]+ \/api\/(gpu-fleet|sandbox)\/terminal\/:[A-Za-z]+\/browser$/, reason: 'browser terminal websocket: cookie session + opener-bound token verified by the handler' },
-  { match: /^[A-Z]+ \/api\/client\/v1\/realtime$/, reason: 'realtime websocket: authenticates and authorizes the token / session itself (assertRealtimeRbac, honours the tenant mode)' },
+  { match: /^[A-Z]+ \/api\/client\/v1\/realtime$/, reason: 'realtime websocket: authenticates and authorizes the token / session itself (assertRealtimeRbac, through the policy engine)' },
   { match: /^[A-Z]+ \/api\/client\/v1\/realtime\/twilio\//, reason: 'telephony webhook/stream: Twilio signature + stream token verified by the handler' },
 ];
 
@@ -118,17 +118,17 @@ export function auditRouteDeclarations(routes: CollectedRoute[]): string[] {
       if (!publicPath) problems.push(`${key}: declared public but not covered by the global public path list (plugin.ts PUBLIC_API_PATHS / PUBLIC_API_PREFIXES)`);
     }
     if (declaration?.kind === 'authenticated') {
-      if (prefixService) problems.push(`${key}: declared authenticated but its path is mapped to the "${prefixService}" service (that would widen access in enforce mode)`);
+      if (prefixService) problems.push(`${key}: declared authenticated but its path is mapped to the "${prefixService}" service (that would widen access: any signed-in caller would pass)`);
       if (publicPath || selfAuthPath) problems.push(`${key}: declared authenticated but sits under a public / self-auth prefix, where no session or token is checked`);
     }
     if ((declaration?.kind === 'public' || declaration?.kind === 'self') && prefixService
       && !selfAuthPath && (!publicPath || route.gated === true)) {
-      problems.push(`${key}: declared ${declaration.kind} but its path is mapped to the "${prefixService}" service (legacy gates it, enforce would skip the gate: access widens in enforce mode only)`);
+      problems.push(`${key}: declared ${declaration.kind} but its path is mapped to the "${prefixService}" service (the gate would skip the service check: access widens)`);
     }
     if (effective.kind === 'service' && route.gated === false) {
       const allowed = UNGATED_SERVICE_ROUTES.some((entry) => entry.match.test(key));
       if (!allowed) {
-        problems.push(`${key}: resolves to the "${effective.service}" service but its handler is not wrapped by withApiRequestContext / withClientApiRequestContext, so NO mode gates it (wrap it, or list it in UNGATED_SERVICE_ROUTES with the reason it authorizes itself)`);
+        problems.push(`${key}: resolves to the "${effective.service}" service but its handler is not wrapped by withApiRequestContext / withClientApiRequestContext, so NO gate decides it (wrap it, or list it in UNGATED_SERVICE_ROUTES with the reason it authorizes itself)`);
       }
     }
     if (declaration?.kind === 'service' && prefixService && declaration.service !== prefixService) {

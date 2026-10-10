@@ -20,7 +20,7 @@ function resolved(t: Translate, namespace: string, key: string, values?: Record<
 export function formatAuditText(
   item: Pick<AuditItem, 'summary' | 'text'>,
   t: Translate,
-  /** Translator of the `iamCenter` namespace (effect and mode words). */
+  /** Translator of the `iamCenter` namespace (effect words). */
   tCenter: Translate,
 ): string {
   const text = item.text;
@@ -28,7 +28,7 @@ export function formatAuditText(
   const p = text.params;
   const str = (name: string) => String(p[name] ?? '');
   const num = (name: string) => Number(p[name] ?? 0);
-  /** An effect / mode word in the reader's language (`iamCenter.effects.forbid`...), or the raw value. */
+  /** An effect word in the reader's language (`iamCenter.effects.forbid`...), or the raw value. */
   const word = (group: string, value: string) => (value ? (resolved(tCenter, 'iamCenter', `${group}.${value}`) ?? value) : '');
   const say = (key: string, values: Record<string, string | number> = p): string | null => resolved(t, 'iamAudit', `summaries.${key}`, values);
 
@@ -39,7 +39,7 @@ export function formatAuditText(
     case 'policy.deleted': {
       const base = say(text.key, { name: str('name') });
       if (base && text.key !== 'policy.deleted') {
-        const flags = [word('effects', str('effect')), word('modes', str('mode')), num('enabled') === 0 ? say('disabledFlag', {}) : '']
+        const flags = [word('effects', str('effect')), num('enabled') === 0 ? say('disabledFlag', {}) : '']
           .filter(Boolean).join(', ');
         out = flags ? `${base} (${flags})` : base;
       } else {
@@ -47,9 +47,6 @@ export function formatAuditText(
       }
       break;
     }
-    case 'mode.changed':
-      out = say('mode.changed', { from: word('authzModes', str('from')), to: word('authzModes', str('to')) });
-      break;
     case 'settings.updated': {
       const parts: string[] = [];
       if (num('lifetimeSet')) {
@@ -66,12 +63,6 @@ export function formatAuditText(
       if (num('ipChanged')) parts.push(say('tokenRestrictions.ip', { from: num('ipFrom'), to: num('ipTo') }) ?? '');
       const base = say('token.restrictions', { label: str('label') });
       out = base ? (parts.filter(Boolean).length > 0 ? `${base} (${parts.filter(Boolean).join(', ')})` : base) : null;
-      break;
-    }
-    case 'monitor.would': {
-      out = say(str('would') === 'allow' ? 'monitor.wouldAllow' : 'monitor.wouldDeny', {
-        name: str('name'), route: str('route'), count: num('count'), since: str('since'),
-      });
       break;
     }
     case 'denied.policy':

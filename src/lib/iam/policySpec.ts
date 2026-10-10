@@ -34,9 +34,10 @@
 import { runWithTenantScope } from '@/lib/database';
 import { isPermissionService, RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
 import { isIamChannel, IAM_CHANNELS, parseCidr, toCedarDatetime, type IamChannel } from './context';
-import type { ActionDefinition } from './actions';
+import { serviceActionId, type ActionDefinition } from './actions';
 import type { CedarMessage } from './cedar';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
+import { askedGateActions } from './gateActions';
 import { getIamSchema } from './schemaState';
 import { validateCustomPolicyText } from './policyText';
 
@@ -584,6 +585,13 @@ export interface GateReach {
   /** The only channel is `portal`. */
   portalOnly: boolean;
   hasPortal: boolean;
+  /**
+   * Gate-level actions (of `gateActions`) that nothing in this build ever asks
+   * for - `models.admin` when no route or handler checks Admin on `models`, or a
+   * level group none of whose services is checked at that level. Empty when this
+   * cannot be judged (no routes registered yet, gateActions.ts).
+   */
+  unasked: string[];
 }
 
 export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatalogView()): GateReach {
@@ -599,7 +607,27 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
     hasSpecific,
     portalOnly: channels.length > 0 && channels.every((c) => c === 'portal'),
     hasPortal: channels.includes('portal'),
+    unasked: unaskedGateActions(defs, sel?.services?.length ? sel.services : null),
   };
+}
+
+/** The gate-level actions among `defs` that nothing asks for (see GateReach.unasked). */
+function unaskedGateActions(defs: readonly ActionDefinition[], services: readonly string[] | null): string[] {
+  const asked = askedGateActions();
+  if (!asked) return [];
+  const inScope = services ?? RBAC_SERVICE_DEFINITIONS.filter((d) => !d.deprecated).map((d) => d.id);
+  const out: string[] = [];
+  for (const def of defs) {
+    if (def.kind === 'service') {
+      if (!asked.has(def.id)) out.push(def.id);
+    } else if (def.kind === 'group') {
+      // A level group is checked wherever one of its services is asked at that level.
+      if (!inScope.some((service) => asked.has(serviceActionId(service, def.level)))) {
+        out.push(services ? `${def.id} on ${services.slice(0, 3).join(', ')}${services.length > 3 ? ', ...' : ''}` : def.id);
+      }
+    }
+  }
+  return out;
 }
 
 /** Why a spec can never match a gate decision (empty = it can). */
@@ -642,6 +670,40 @@ export function trustedProxiesWarning(): PolicyIssue {
 
 const ADMIN_SERVICE_IDS: ReadonlySet<string> = new Set(RBAC_SERVICE_DEFINITIONS.filter((d) => d.adminService).map((d) => d.id));
 
+/** Is this `<administration service>.admin`? Those are explained by the `admin_checked_as_write` warning instead. */
+const isAdminServiceAdminAction = (id: string): boolean => {
+  const dot = id.lastIndexOf('.');
+  return dot > 0 && id.slice(dot + 1) === 'admin' && ADMIN_SERVICE_IDS.has(id.slice(0, dot));
+};
+
+/**
+ * Warnings for the actions of a rule that no gate asks for (GateReach.unasked):
+ * `not_asked_actions` when none of the rule's gate actions is ever asked (the
+ * rule would never apply), `partly_not_asked_actions` when only some are.
+ */
+export function unaskedWarnings(spec: Pick<PolicySpec, 'effect'>, reach: GateReach): PolicyIssue[] {
+  if (reach.gateActions === 0 || reach.unasked.length === 0) return [];
+  // For a deny rule on an administration service the admin_checked_as_write warning already says what to do.
+  const named = spec.effect === 'forbid' ? reach.unasked.filter((id) => !isAdminServiceAdminAction(id)) : reach.unasked;
+  if (named.length === 0) return [];
+  const list = named.slice(0, 6).join(', ') + (named.length > 6 ? ', ...' : '');
+  if (reach.unasked.length >= reach.gateActions) {
+    const verb = spec.effect === 'forbid' ? 'block' : 'grant';
+    return [{
+      code: 'not_asked_actions',
+      field: 'actions',
+      params: { actions: list, effect: spec.effect },
+      message: `Nothing in the product checks ${list} yet, so this rule would never ${verb} anything. Services are checked for Read and Write access (changes to administration services need Admin on top of Write): choose Read or Write.`,
+    }];
+  }
+  return [{
+    code: 'partly_not_asked_actions',
+    field: 'actions',
+    params: { actions: list },
+    message: `Nothing in the product checks ${list} yet, so those actions of this rule have no effect. The other actions still apply.`,
+  }];
+}
+
 function warningsFor(spec: PolicySpec, view: SpecCatalogView): PolicyIssue[] {
   const warnings: PolicyIssue[] = [];
   const actions = spec.actions.map((a) => view.actions.get(a)).filter((a): a is ActionDefinition => !!a);
@@ -675,6 +737,10 @@ function warningsFor(spec: PolicySpec, view: SpecCatalogView): PolicyIssue[] {
       });
     }
   }
+
+  // Actions nothing in the product asks for (e.g. Admin on a service that is only checked for Read and Write).
+  // Always a warning: what counts as "asked" is read from the routes this build registered.
+  warnings.push(...unaskedWarnings(spec, reach));
 
   // An address rule is only as useful as the address the server can vouch for.
   if (spec.conditions?.ipRanges?.length && trustsEveryHop()) warnings.push(trustedProxiesWarning());

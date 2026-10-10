@@ -1,6 +1,6 @@
 /**
  * Authorization center persistence and previews on BOTH backends: policies with a
- * spec, the tenant settings, the monitor aggregates and the impact preview.
+ * spec, the tenant settings and the impact preview (its audience, its bounds).
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -20,19 +20,9 @@ vi.mock('@/lib/database', async (importOriginal) => {
 import type { DatabaseProvider } from '@/lib/database';
 import { configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
 import { onIamInvalidation, type IamInvalidation } from '@/lib/iam/events';
-import { previewPolicy, PreviewInputError } from '@/lib/iam/preview';
-import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
+import { DEADLINE_MS, MAX_EVALUATIONS, MAX_PRINCIPALS, holdPreviewForTests, previewPolicy, PreviewInputError } from '@/lib/iam/preview';
+import { getPrincipalCacheStats, resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
 import { compileSpec, compileSpecToCedar, parsePolicySpec, type PolicySpec } from '@/lib/iam/policySpec';
-import {
-  clearPolicyMonitorStats,
-  flushShadowEvents,
-  getPolicyMonitorTotals,
-  listShadowEntries,
-  recordShadowEvent,
-  resetShadowBufferForTests,
-  summarizeShadowEntries,
-} from '@/lib/iam/shadow';
-import { shadowDocId } from '@/lib/iam/shadow/aggregate';
 import { getIamSettings, getIamSettingsRecord, resetIamSettingsCacheForTests, updateIamSettings } from '@/lib/iam/settings';
 import { IamPolicyError, createPolicy, deletePolicy, getPolicy, listPolicies, updatePolicy } from '@/lib/iam/store';
 import { describeForEachProvider } from './db-parity.helper';
@@ -77,7 +67,8 @@ describeForEachProvider('Authorization center persistence', (getDb) => {
       const spec = normalized(specOf({ principals: { groups: [engineering] }, conditions: { channels: ['api'], ipRanges: ['10.0.0.0/8'] } }));
       const out = await compileSpec(spec, { tenantDbName: tenant, tenantId });
       expect(out.ok, JSON.stringify(out.errors)).toBe(true);
-      const created = await createPolicy(tenant, { policyId: 'with-spec', name: 'S', cedar: out.cedar, spec: out.spec!, mode: 'monitor' }, 'u1');
+      const created = await createPolicy(tenant, { policyId: 'with-spec', name: 'S', cedar: out.cedar, spec: out.spec!, enabled: false }, 'u1');
+      expect(created.enabled).toBe(false);
       expect(created.spec).toEqual(spec);
       const read = await getPolicy(tenant, 'with-spec');
       expect(read!.spec).toEqual(spec);
@@ -158,68 +149,6 @@ describeForEachProvider('Authorization center persistence', (getDb) => {
     });
   });
 
-  describe('monitor aggregates', () => {
-    const event = (policyId: string, extra: Record<string, unknown> = {}) => ({
-      category: 'policy-monitor' as const, service: 'agents', method: 'POST', route: '/api/agents', legacyAllowed: true, targetAllowed: false, policyId,
-      sample: { requestId: 'r', userId: 'u', role: 'user', at: new Date().toISOString() }, ...extra,
-    });
-
-    it('count per policy, route and direction, survive a flush, and are cleared per policy', async () => {
-      resetShadowBufferForTests();
-      for (let i = 0; i < 3; i++) recordShadowEvent(tenant, event('pol-a'));
-      recordShadowEvent(tenant, event('pol-a', { route: '/api/agents/:id' }));
-      recordShadowEvent(tenant, event('pol-a', { legacyAllowed: false, targetAllowed: true }));
-      for (let i = 0; i < 2; i++) recordShadowEvent(tenant, event('pol-b'));
-      await flushShadowEvents(tenant);
-
-      let totals = await getPolicyMonitorTotals(tenant);
-      expect(totals.get('pol-a')).toMatchObject({ wouldDeny: 4, wouldAllow: 1 });
-      expect(totals.get('pol-b')).toMatchObject({ wouldDeny: 2, wouldAllow: 0 });
-      const entries = (await listShadowEntries(tenant)).filter((e) => e.category === 'policy-monitor');
-      expect(entries).toHaveLength(4); // a-POST, a-POST-id, a-reverse, b
-      expect(entries.every((e) => typeof e.policyId === 'string')).toBe(true);
-
-      // more events accumulate onto the stored aggregate
-      recordShadowEvent(tenant, event('pol-a'));
-      await flushShadowEvents(tenant);
-      expect((await getPolicyMonitorTotals(tenant)).get('pol-a')).toMatchObject({ wouldDeny: 5 });
-
-      // clearing one policy touches neither the other policy nor pending events of others
-      recordShadowEvent(tenant, event('pol-a')); // still pending
-      recordShadowEvent(tenant, event('pol-b'));
-      expect(await clearPolicyMonitorStats(tenant, 'pol-a')).toBe(3);
-      totals = await getPolicyMonitorTotals(tenant);
-      expect(totals.has('pol-a')).toBe(false);
-      expect(totals.get('pol-b')).toMatchObject({ wouldDeny: 3 });
-      expect(await clearPolicyMonitorStats(tenant, 'pol-a')).toBe(0);
-      await clearPolicyMonitorStats(tenant, 'pol-b');
-    });
-
-    it('stay out of the engine report, and leave the ids of the other categories unchanged', async () => {
-      recordShadowEvent(tenant, event('pol-x'));
-      recordShadowEvent(tenant, {
-        category: 'token-groups', service: 'agents', method: 'GET', route: '/api/agents', legacyAllowed: false, targetAllowed: true,
-        sample: { requestId: 'r', userId: 'u', role: 'user', at: new Date().toISOString() },
-      });
-      await flushShadowEvents(tenant);
-      const entries = await listShadowEntries(tenant);
-      const summary = summarizeShadowEntries(entries);
-      expect(summary.totals.events).toBe(1);
-      expect(summary.categories.map((c) => c.category)).toEqual(['parity-mismatch', 'token-groups', 'project-narrowing', 'unmapped-path']);
-      expect(summary.topRoutes.every((r) => r.category !== 'policy-monitor')).toBe(true);
-      expect(summarizeShadowEntries(entries, { category: 'policy-monitor' }).topRoutes.map((r) => r.policyId)).toEqual(['pol-x']);
-
-      // ids of pre-existing categories do not depend on the new policy field (no re-keying of stored aggregates)
-      const { createHash } = await import('node:crypto');
-      const legacyId = (e: { category: string; service: string; method: string; route: string; legacyAllowed: boolean; targetAllowed: boolean }) =>
-        `agg:${createHash('sha1').update([e.category, e.service, e.method, e.route, e.legacyAllowed ? '1' : '0', e.targetAllowed ? '1' : '0'].join('|')).digest('hex').slice(0, 24)}`;
-      const sample = { category: 'token-groups' as const, service: 'agents', method: 'GET', route: '/api/agents', legacyAllowed: false, targetAllowed: true };
-      expect(shadowDocId(sample)).toBe(legacyId(sample));
-      expect(shadowDocId({ ...sample, category: 'policy-monitor', policyId: 'pol-x' })).not.toBe(shadowDocId({ ...sample, category: 'policy-monitor', policyId: 'pol-y' }));
-      await clearPolicyMonitorStats(tenant, 'pol-x');
-    });
-  });
-
   describe('impact preview', () => {
     const tenantRef = () => ({ tenantDbName: tenant, tenantId });
 
@@ -246,14 +175,15 @@ describeForEachProvider('Authorization center persistence', (getDb) => {
       expect(timed.truncated).toBe(true);
     });
 
-    it('does not change anything: no policy, no audit row, no monitor count, no set leak between previews', async () => {
+    it('does not change anything: no policy, no audit row, nothing in the principal cache', async () => {
       const before = (await listPolicies(tenant)).length;
       const rows = (await db.runWithTenant!(tenant, () => db.iamListAuditEvents({ tenantId, limit: 200 }))).items.length;
-      await previewPolicy(tenantRef(), { spec: specOf() });
+      resetPrincipalCacheForTests();
+      await previewPolicy(tenantRef(), { spec: specOf({ principals: { any: true } }) });
       expect((await listPolicies(tenant)).length).toBe(before);
       expect((await db.runWithTenant!(tenant, () => db.iamListAuditEvents({ tenantId, limit: 200 }))).items.length).toBe(rows);
-      await flushShadowEvents(tenant);
-      expect([...(await getPolicyMonitorTotals(tenant)).keys()]).toEqual([]);
+      // a preview walks many people: it must not push the hot entries of live traffic out of the cache
+      expect(getPrincipalCacheStats().entries).toBe(0);
     });
 
     it('answers previews of different workspaces concurrently and independently', async () => {
@@ -298,18 +228,66 @@ describeForEachProvider('Authorization center persistence', (getDb) => {
       expect(many).toEqual(Array.from({ length: 7 }, (_, i) => [`u${i}`]));
     }, 60_000);
 
-    it('says how many people it looked at, and that a big audience was only sampled', async () => {
+    it('says how many people it looked at: exact for a named audience and for a directory it listed to its end', async () => {
       const group = await previewPolicy(tenantRef(), { spec: specOf({ principals: { groups: [engineering] } }) });
       expect(group.principals).toEqual({ evaluated: 2, targeted: 2 });
       expect(group.truncated).toBe(false);
       const named = await previewPolicy(tenantRef(), { spec: specOf({ principals: { users: [userIds.alice, userIds.bob, userIds.carol] } }) });
       expect(named.principals).toEqual({ evaluated: 3, targeted: 3 });
       expect(named.truncated).toBe(false);
-      // everyone: the policy reaches the whole directory, the preview only a spread of it
+      // everyone, in a workspace the preview can list completely: owner, admin, alice, bob, carol - nobody was left out
       const everyone = await previewPolicy(tenantRef(), { spec: specOf({ principals: { any: true } }) });
-      expect(everyone.principals.targeted).toBeNull();
-      expect(everyone.principals.evaluated).toBeGreaterThan(0);
-      expect(everyone.truncated).toBe(true);
+      expect(everyone.principals).toEqual({ evaluated: 5, targeted: 5 });
+      expect(everyone.truncated).toBe(false);
+      expect(everyone.flips.allowToDeny).toBe(5); // all five can write agents today
+    });
+
+    it('checks the tokens of the people a policy names, and counts a policy about everybody over users and tokens', async () => {
+      const token = await db.runWithTenant!(tenant, () => db.createApiToken({
+        tenantId, userId: userIds.alice, label: 'alice-ci', tokenHash: `h-${Math.random()}`, tokenPrefix: 'cp_test', createdBy: userIds.alice,
+      } as never));
+      try {
+        const named = await previewPolicy(tenantRef(), { spec: specOf({ principals: { users: [userIds.alice] } }) });
+        expect(named.samples.map((s) => `${s.principal.type}:${s.principal.label}`).sort()).toEqual(['token:alice-ci', 'user:alice']);
+        expect(named.principals.evaluated).toBe(2); // the person and the token
+        expect(named.truncated).toBe(false);
+        const everyone = await previewPolicy(tenantRef(), { spec: specOf({ principals: { any: true } }) });
+        expect(everyone.principals).toEqual({ evaluated: 6, targeted: 6 });
+      } finally {
+        await db.runWithTenant!(tenant, () => db.deleteApiToken(String(token._id), userIds.alice));
+      }
+    });
+
+    it('stops at the limits it exports and says it only looked at a sample', async () => {
+      expect({ MAX_PRINCIPALS, MAX_EVALUATIONS, DEADLINE_MS }).toEqual({ MAX_PRINCIPALS: 1000, MAX_EVALUATIONS: 20_000, DEADLINE_MS: 5_000 });
+      // the budget is people x actions: ten evaluations cannot cover five people x three levels
+      const result = await previewPolicy(tenantRef(), { spec: specOf({ actions: ['Read', 'Write', 'Admin'], principals: { any: true } }) }, { maxEvaluations: 10 });
+      expect(result.evaluated).toBeLessThanOrEqual(10);
+      expect(result.truncated).toBe(true);
+      expect(result.principals.targeted).toBe(5);
+      expect(result.principals.evaluated).toBeLessThan(5);
+    });
+
+    it('refuses a second preview of a workspace that already has one running', async () => {
+      const release = holdPreviewForTests(tenant);
+      try {
+        await expect(previewPolicy(tenantRef(), { spec: specOf() })).rejects.toMatchObject({ code: 'rate_limited', status: 429 });
+      } finally {
+        release();
+      }
+      expect((await previewPolicy(tenantRef(), { spec: specOf({ principals: { users: [userIds.carol] } }) })).samples.map((s) => s.principal.label)).toEqual(['carol']);
+    });
+
+    // The access check says the owner's own session keeps the Authorization Engine whatever a rule says (owner safety):
+    // the preview must not list the owner as losing it to a rule on `iam`.
+    it('does not list the workspace owner\'s session as losing the Authorization Engine to a rule on iam (owner safety)', async () => {
+      const result = await previewPolicy(tenantRef(), { spec: specOf({ principals: { any: true }, actions: ['iam.write'] }) });
+      expect(result.principals).toEqual({ evaluated: 5, targeted: 5 });
+      expect(result.flips).toEqual({ allowToDeny: 1, denyToAllow: 0 }); // the admin; the owner keeps the engine, plain members never had it
+      expect(result.samples.map((s) => s.principal.label)).toEqual(['admin']);
+      // any other service is not covered by the promise: the owner is listed there
+      const other = await previewPolicy(tenantRef(), { spec: specOf({ principals: { users: [userIds.owner] }, actions: ['models.write'] }) });
+      expect(other.samples.map((s) => s.principal.label)).toEqual(['owner']);
     });
 
     it('covers the people of the version an edit replaces', async () => {
@@ -335,6 +313,47 @@ describeForEachProvider('Authorization center persistence', (getDb) => {
       await expect(previewPolicy({ tenantDbName: `${tenant}_x`, tenantId: 'someone-else' }, { spec: specOf({ principals: { groups: [engineering] } }) }))
         .rejects.toMatchObject({ code: 'validation' });
     });
+  });
+
+  describe('a directory bigger than the preview looks at', () => {
+    const PEOPLE = MAX_PRINCIPALS + 40;
+    let bigTenant: string;
+    let bigTenantId: string;
+
+    beforeAll(async () => {
+      const slug = `iamcdb-big-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      bigTenant = `tenant_${slug}`;
+      bigTenantId = String((await db.createTenant({ companyName: 'BIG', slug, dbName: bigTenant, licenseType: 'FREE', ownerId: 'x' }))._id);
+      await db.runWithTenant!(bigTenant, async () => {
+        const make = (email: string, role: 'owner' | 'admin' | 'user') =>
+          db.createUser({ tenantId: bigTenantId, email, name: email, password: 'h', role, licenseId: 'FREE', features: [] });
+        await make('boss@big.example', 'owner');
+        for (let i = 0; i < 3; i++) await make(`admin${i}@big.example`, 'admin');
+        for (let i = 0; i < PEOPLE - 4; i++) await make(`user${i}@big.example`, 'user');
+      });
+    }, 120_000);
+
+    it('looks at MAX_PRINCIPALS of them, owners and admins first, and does not claim to know how many it reaches', async () => {
+      // `models.admin` is something only an owner or an admin has, so the flips tell who was looked at.
+      const result = await previewPolicy({ tenantDbName: bigTenant, tenantId: bigTenantId }, { spec: specOf({ actions: ['models.admin'], principals: { any: true } }) });
+      expect(result.principals.evaluated).toBeLessThanOrEqual(MAX_PRINCIPALS);
+      expect(result.principals.evaluated).toBeGreaterThan(100); // (how many more depends on the machine: the preview also has a time budget)
+      expect(result.principals.targeted).toBeNull();
+      expect(result.truncated).toBe(true);
+      expect(result.flips).toEqual({ allowToDeny: 4, denyToAllow: 0 }); // the owner and the three admins, whoever else was left out
+    }, 60_000);
+
+    it('a group of that size is sampled too, but its size is known', async () => {
+      const group = await db.runWithTenant!(bigTenant, async () => {
+        const g = await db.createGroup({ tenantId: bigTenantId, name: 'Everybody', createdBy: 't', source: 'local' } as never);
+        const users = await db.iamListUsers({ tenantId: bigTenantId, roles: ['user'], limit: 200 });
+        for (const u of users.items) await db.addGroupMember({ groupId: String(g._id), userId: String(u._id), tenantId: bigTenantId, role: 'member' });
+        return { id: String(g._id), size: users.items.length };
+      });
+      const result = await previewPolicy({ tenantDbName: bigTenant, tenantId: bigTenantId }, { spec: specOf({ principals: { groups: [group.id] } }) });
+      expect(result.principals).toEqual({ evaluated: group.size, targeted: group.size });
+      expect(result.truncated).toBe(false);
+    }, 60_000);
   });
 
   it('every policy write signals the engine', async () => {

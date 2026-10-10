@@ -1,6 +1,7 @@
 import { headers } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
 import { getDatabase } from '@/lib/database';
+import { findGroupProjectMembership } from '@/lib/services/projects/accessibleProjects';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
 
 export default async function ProjectLayout({
@@ -46,9 +47,14 @@ export default async function ProjectLayout({
 
   const user = await db.findUserById(userId);
   const legacyAllowed = (user?.projectIds ?? []).map(String).includes(String(projectId));
-  if (!legacyAllowed) {
-    notFound();
+  if (legacyAllowed) {
+    return children;
   }
 
-  return children;
+  // A project reached only through a group the member belongs to is still theirs.
+  if (await findGroupProjectMembership(db, userId, projectId)) {
+    return children;
+  }
+
+  notFound();
 }

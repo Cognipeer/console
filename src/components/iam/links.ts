@@ -7,6 +7,9 @@
  *   /dashboard/iam?tab=policies&new=1[&principalType=user|group|token&principalId=<id>]
  *   /dashboard/iam?tab=policies&policyId=<id>          (opens that policy)
  *
+ * and the places OUTSIDE the center where a setting that decides access is
+ * changed (a person's workspace role, a project member's project limits, a token).
+ *
  * Pure module (no React / Next imports).
  */
 
@@ -53,6 +56,25 @@ export function iamHref(tab: IamTabId, params: ParamValues = {}): string {
 }
 
 const nonEmpty = (v: string | null): string | undefined => (v && v.trim() !== '' ? v.trim() : undefined);
+
+// ── Where access settings are changed (outside the center) ────────────────
+
+/** A person's page: workspace role and permissions. */
+export function memberHref(userId: string): string {
+  return `/dashboard/members/${encodeURIComponent(userId)}`;
+}
+
+/**
+ * A project's page, on its Users tab. With `memberId` the project permission
+ * editor of that member opens straight away.
+ */
+export function projectMembersHref(projectId: string, memberId?: string | null): string {
+  const base = `/dashboard/projects/${encodeURIComponent(projectId)}`;
+  return memberId ? `${base}?member=${encodeURIComponent(memberId)}` : base;
+}
+
+/** The API tokens page (scope, expiry and network rules of every token). */
+export const TOKENS_HREF = '/dashboard/tokens';
 
 // ── Access check ─────────────────────────────────────────────────────────
 

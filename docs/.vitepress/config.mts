@@ -123,6 +123,7 @@ export default defineConfig({
           items: [
             { text: 'Multi-Tenancy', link: '/guide/multi-tenancy' },
             { text: 'Authentication', link: '/guide/authentication' },
+            { text: 'Authorization', link: '/guide/authorization' },
             { text: 'Service Catalog', link: '/guide/service-catalog' },
             { text: 'Command Palette', link: '/guide/command-palette' },
             { text: 'Providers', link: '/guide/providers' },
@@ -169,6 +170,7 @@ export default defineConfig({
             { text: 'Deployment', link: '/guide/deployment' },
             { text: 'Cluster', link: '/guide/cluster' },
             { text: 'Monitoring', link: '/guide/monitoring' },
+            { text: 'Upgrading to the Policy Engine', link: '/guide/upgrading-to-the-policy-engine' },
             { text: 'Releasing', link: '/guide/releasing' },
             { text: 'Smoke Testing', link: '/guide/smoke-testing' },
             { text: 'E2E & Load Testing', link: '/guide/e2e-testing' },

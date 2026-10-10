@@ -553,7 +553,6 @@ export function PrincipalDetailView({
               principal={{ type, id }}
               groups={groups}
               ownerId={extras.ownerId}
-              locale={locale}
               t={t}
             />
           </Section>

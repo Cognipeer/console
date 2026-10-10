@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The IAM center page shell: tab routing from `?tab=`, the six fixed tab
- * components, and how `canManage` is decided (iam admin: by role, by the user's
- * own grants, or through a group).
+ * The IAM center page shell: tab routing from `?tab=`, the seven fixed tab
+ * components, and how `canManage` is decided (iam admin: by the engine's own
+ * answer for the session, else by role, by the user's own grants, or through a group).
  */
 
 import { createElement } from 'react';
@@ -46,7 +46,8 @@ vi.mock('@/components/iam/principals/PrincipalsTab', async () => {
 });
 vi.mock('@/components/iam/audit/AuditTab', async () => {
   const { createElement } = await import('react');
-  return { default: (p: { canManage: boolean }) => createElement('div', null, `tab:audit manage=${p.canManage}`) };
+  // The audit trail is readable by everyone who can open the center: nothing in it depends on `canManage`.
+  return { default: () => createElement('div', null, 'tab:audit') };
 });
 vi.mock('@/components/iam/limits/LimitsTab', async () => {
   const { createElement } = await import('react');
@@ -56,9 +57,9 @@ vi.mock('@/components/iam/settings/IamSettingsTab', async () => {
   const { createElement } = await import('react');
   return { default: (p: { canManage: boolean }) => createElement('div', null, `tab:settings manage=${p.canManage}`) };
 });
-vi.mock('@/components/settings/AuthorizationEngine', async () => {
+vi.mock('@/components/iam/overview/OverviewTab', async () => {
   const { createElement } = await import('react');
-  return { default: () => createElement('div', null, 'tab:overview') };
+  return { default: (p: { canManage: boolean }) => createElement('div', null, `tab:overview manage=${p.canManage}`) };
 });
 
 import IamPage from '@/app/dashboard/iam/page';
@@ -120,10 +121,14 @@ describe('IAM center page', () => {
     const labels = qa('[role="tab"]').map((t) => t.textContent?.trim());
     expect(labels).toEqual(['Overview', 'Policies', 'Principals', 'Access check', 'Audit', 'Limits', 'Settings']);
     expect(text()).toContain('IAM center');
-    expect(text()).toContain('tab:overview');
+    expect(text()).toContain('tab:overview manage=true');
+    // the page header keeps its eyebrow; the engine settings page and its mode switch are gone
+    expect(text()).toContain('Settings · Authorization');
+    expect(api.calls.some((c) => c.path === '/api/iam/mode' || c.path.startsWith('/api/iam/shadow'))).toBe(false);
   });
 
   it.each([
+    ['overview', 'tab:overview'],
     ['policies', 'tab:policies'],
     ['principals', 'tab:principals'],
     ['check', 'tab:check'],
@@ -160,6 +165,43 @@ describe('canManage', () => {
   it('is true for the owner whatever the session says about overrides', async () => {
     await renderPage({ search: 'tab=check', role: 'owner' });
     expect(text()).toContain('tab:check manage=true');
+    // even when a policy took the level away: the engine never locks the owner out of the center
+    await mounted.unmount();
+    await renderPage({
+      search: 'tab=check',
+      role: 'owner',
+      session: { userId: 'u-me', role: 'owner', servicePermissions: {}, effectivePermissions: { iam: 'none' } },
+    });
+    expect(text()).toContain('tab:check manage=true');
+  });
+
+  it('takes the engine\'s own answer from the session when it has one (no second request)', async () => {
+    await renderPage({
+      search: 'tab=policies',
+      role: 'user',
+      session: { userId: 'u-me', role: 'user', servicePermissions: {}, effectivePermissions: { iam: 'admin', models: 'read' }, effectiveProjectId: 'p1' },
+    });
+    expect(text()).toContain('tab:policies manage=true');
+    expect(api.to('GET', /principals/)).toHaveLength(0);
+  });
+
+  it('is false when the engine says less than admin, even for a workspace admin by role (a policy or a project limit took it)', async () => {
+    await renderPage({
+      search: 'tab=policies',
+      role: 'user',
+      session: { userId: 'u-me', role: 'admin', servicePermissions: {}, effectivePermissions: { iam: 'read' }, effectiveProjectId: 'p1' },
+    });
+    expect(text()).toContain('tab:policies manage=false');
+    expect(api.to('GET', /principals/)).toHaveLength(0);
+  });
+
+  it('falls back to the role and the principal view when the engine could not answer (effectivePermissions null)', async () => {
+    await renderPage({
+      search: 'tab=policies',
+      role: 'user',
+      session: { userId: 'u-me', role: 'user', servicePermissions: { iam: 'admin' }, effectivePermissions: null },
+    });
+    expect(text()).toContain('tab:policies manage=true');
   });
 
   it('is false for a member who can only read the center', async () => {

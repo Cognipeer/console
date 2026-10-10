@@ -1,7 +1,7 @@
 /**
  * Data layer of the IAM center "Audit" tab: filter model, request URLs and
  * tolerant parsers for
- *   GET /api/iam/audit?kind=denials|changes|monitor&from&to&principalType&principalId&service&limit&cursor
+ *   GET /api/iam/audit?kind=denials|changes&from&to&principalType&principalId&service&limit&cursor
  *   GET /api/iam/audit/export   (same filters, text/csv)
  * Free of React and Next so it runs in the node test environment.
  */
@@ -18,7 +18,7 @@ import {
   type PrincipalType,
 } from '../principals/client';
 
-export const AUDIT_KINDS = ['denials', 'changes', 'monitor'] as const;
+export const AUDIT_KINDS = ['denials', 'changes'] as const;
 export type AuditKind = (typeof AUDIT_KINDS)[number];
 
 export function isAuditKind(v: unknown): v is AuditKind {
@@ -31,10 +31,9 @@ const KIND_ALIASES: Record<string, AuditKind> = {
   denied: 'denials',
   change: 'changes',
   changes: 'changes',
-  monitor: 'monitor',
 };
 
-/** `denials`, `changes`, `monitor` or a singular alias; null for anything else. */
+/** `denials`, `changes` or a singular alias; null for anything else (the retired `monitor` view included). */
 export function parseAuditKind(v: unknown): AuditKind | null {
   return typeof v === 'string' ? (KIND_ALIASES[v.toLowerCase()] ?? null) : null;
 }
@@ -53,13 +52,11 @@ export interface AuditFilters {
 
 /**
  * Who a view can be filtered by. Denials know the acting user or token (and the
- * members of a group); the monitor feed records a sample user or token; for a
- * policy change the principal filter means "who made the change", which is
- * always a user.
+ * members of a group); for a policy change the principal filter means "who made
+ * the change", which is always a user.
  */
 export function auditPrincipalTypes(kind: AuditKind): readonly PrincipalType[] {
   if (kind === 'changes') return ['user'];
-  if (kind === 'monitor') return ['user', 'token'];
   return ['user', 'token', 'group'];
 }
 

@@ -23,14 +23,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   };
 });
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
@@ -52,9 +52,9 @@ vi.mock('@/server/api/plugins/guardrail-bindings', () => ({
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { getPermissionServiceForPath, authorizeServiceRequest } from '@/lib/security/rbac';
 import { getAgentByKey, getConversationById } from '@/lib/services/agents';
 import { clientAssistantsApiPlugin } from '@/server/api/plugins/client-assistants';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
 
 const AUTH_CTX_PROJECT_A = {
@@ -91,9 +91,7 @@ async function buildApp() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX_PROJECT_A);
-  mockFn(getDatabase).mockResolvedValue({ runWithTenant });
-  mockFn(getPermissionServiceForPath).mockReturnValue(null);
-  mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant } as never));
 });
 
 describe('client Assistants API — thread ownership across projects', () => {

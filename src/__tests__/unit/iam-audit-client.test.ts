@@ -32,11 +32,16 @@ import {
 const filters = (patch: Partial<AuditFilters> = {}): AuditFilters => ({ ...emptyAuditFilters('denials'), ...patch });
 
 describe('audit kinds and filters', () => {
-  it('accepts the three kinds and their singular aliases', () => {
+  it('accepts the two kinds and their singular aliases', () => {
     expect(parseAuditKind('denials')).toBe('denials');
     expect(parseAuditKind('Denial')).toBe('denials');
     expect(parseAuditKind('change')).toBe('changes');
-    expect(parseAuditKind('monitor')).toBe('monitor');
+    // The monitor view no longer exists: an old link to it opens the default view instead.
+    expect(parseAuditKind('monitor')).toBeNull();
+    expect(auditFiltersFromParams(new URLSearchParams('tab=audit&kind=monitor&service=models'))).toMatchObject({
+      kind: 'denials',
+      service: 'models',
+    });
     expect(parseAuditKind('nope')).toBeNull();
     expect(parseAuditKind(undefined)).toBeNull();
   });
@@ -67,13 +72,12 @@ describe('audit kinds and filters', () => {
 
   it('offers each view the principals it can be filtered by', () => {
     expect(auditPrincipalTypes('denials')).toEqual(['user', 'token', 'group']);
-    expect(auditPrincipalTypes('monitor')).toEqual(['user', 'token']);
     expect(auditPrincipalTypes('changes')).toEqual(['user']);
 
     const group = (kind: string) =>
       auditFiltersFromParams(new URLSearchParams(`kind=${kind}&principalType=group&principalId=g1`));
     expect(group('denials')).toMatchObject({ principalType: 'group', principalId: 'g1' });
-    expect(group('monitor')).toMatchObject({ principalType: null, principalId: null });
+    expect(group('changes')).toMatchObject({ principalType: null, principalId: null });
     const token = auditFiltersFromParams(new URLSearchParams('kind=changes&principalType=token&principalId=t1'));
     expect(token).toMatchObject({ kind: 'changes', principalType: null, principalId: null });
   });
@@ -87,7 +91,7 @@ describe('audit kinds and filters', () => {
 
   it('knows when a filter is active (the kind is not a filter)', () => {
     expect(hasActiveFilters(filters())).toBe(false);
-    expect(hasActiveFilters(filters({ kind: 'monitor' }))).toBe(false);
+    expect(hasActiveFilters(filters({ kind: 'changes' }))).toBe(false);
     expect(hasActiveFilters(filters({ service: 'models' }))).toBe(true);
     expect(hasActiveFilters(filters({ from: '2026-10-01T00:00:00.000Z' }))).toBe(true);
     expect(hasActiveFilters(filters({ principalType: 'token', principalId: 't' }))).toBe(true);
@@ -112,7 +116,7 @@ describe('audit URLs', () => {
     expect(
       auditListUrl(
         filters({
-          kind: 'monitor',
+          kind: 'changes',
           from: '2026-10-01T00:00:00.000Z',
           to: '2026-10-02T23:59:59.999Z',
           principalType: 'token',
@@ -122,7 +126,7 @@ describe('audit URLs', () => {
         { limit: 50, cursor: 'next/1' },
       ),
     ).toBe(
-      '/api/iam/audit?kind=monitor&from=2026-10-01T00%3A00%3A00.000Z&to=2026-10-02T23%3A59%3A59.999Z&principalType=token&principalId=t+1&service=models&limit=50&cursor=next%2F1',
+      '/api/iam/audit?kind=changes&from=2026-10-01T00%3A00%3A00.000Z&to=2026-10-02T23%3A59%3A59.999Z&principalType=token&principalId=t+1&service=models&limit=50&cursor=next%2F1',
     );
   });
 
@@ -224,9 +228,9 @@ describe('audit items', () => {
     expect(parseAuditItem({ id: 'x', actor: { id: 'u1', label: 'Ada' } }, 0, 'changes').actor).toBe('Ada');
     expect(parseAuditItem({ id: 'x', actor: { email: 'a@b.c' } }, 0, 'changes').actor).toBe('a@b.c');
     expect(parseAuditItem({ id: 'x', actor: 12 }, 0, 'changes').actor).toBeNull();
-    const bare = parseAuditItem({}, 3, 'monitor');
-    expect(bare).toMatchObject({ kind: 'monitor', principal: null, service: '', action: '', summary: '', decisionId: null });
-    expect(bare.id).toBe('monitor::3');
+    const bare = parseAuditItem({}, 3, 'changes');
+    expect(bare).toMatchObject({ kind: 'changes', principal: null, service: '', action: '', summary: '', decisionId: null });
+    expect(bare.id).toBe('changes::3');
   });
 
   it('labels a principal with its id when the label is missing and keeps unknown types', () => {
@@ -252,7 +256,7 @@ describe('audit items', () => {
     // junk and empty objects would render as blank rows: they are dropped; a row without an id gets a stable one
     expect(page.items.map((i) => i.id)).toEqual(['a', 'b', 'denials::6']);
     expect(page.nextCursor).toBe('n');
-    expect(parseAuditPage(undefined, 'monitor')).toEqual({ items: [], nextCursor: null, warnings: [] });
+    expect(parseAuditPage(undefined, 'changes')).toEqual({ items: [], nextCursor: null, warnings: [] });
     // the reasons a page may be incomplete travel along; anything that is not text is dropped
     expect(parseAuditPage({ items: [], warnings: ['group_members_truncated', 5, '', 'paging_capped'] }, 'denials').warnings)
       .toEqual(['group_members_truncated', 'paging_capped']);
@@ -315,8 +319,8 @@ describe('audit requests', () => {
     expect(await named.blob.text()).toBe('a,b\n1,2\n');
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('x', { status: 200 })));
-    const unnamed = await downloadAuditCsv(filters({ kind: 'monitor' }));
-    expect(unnamed.filename).toMatch(/^iam-audit-monitor-\d{4}-\d{2}-\d{2}\.csv$/);
+    const unnamed = await downloadAuditCsv(filters({ kind: 'changes' }));
+    expect(unnamed.filename).toMatch(/^iam-audit-changes-\d{4}-\d{2}-\d{2}\.csv$/);
   });
 
   it('reads Content-Disposition in its plain and extended forms', () => {

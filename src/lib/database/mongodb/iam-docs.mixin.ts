@@ -2,7 +2,8 @@
  * MongoDB Provider – IAM document store mixin.
  *
  * Generic id → JSON document store for the policy engine (custom policies,
- * policy-version counter, shadow-mode aggregates). Collections are created on
+ * policy-version counter, workspace settings, project-levels activation
+ * instant). Collections are created on
  * first write by MongoDB itself; there is no index requirement (documents are
  * addressed by `_id`).
  *

@@ -45,9 +45,8 @@ const DENIED = {
   allowed: false,
   reasons: [],
   defaultDeny: true,
-  legacy: { allowed: true, service: 'agents', required: 'write' },
   principalSummary: { type: 'user', id: 'u-ann', label: 'Ann Lee', role: 'user', groups: [{ id: 'g-sales', name: 'Sales' }] },
-  mode: 'enforce',
+  projectId: null,
 };
 
 function simulateRoutes(result: unknown = DENIED) {
@@ -137,8 +136,12 @@ describe('AccessCheckTab form', () => {
     });
     const t = text();
     expect(t).toContain('Denied');
-    expect(t).toContain('No policy allows this request, so it is denied by default.');
+    // nothing allows it: said with the person's role and the level they lack, with a way to change it
+    expect(t).toContain('No rule allows this. Their workspace access (role User, own permissions and groups) does not include Write on Agents.');
+    expect(qa<HTMLAnchorElement>('a').some((a) => a.getAttribute('href') === '/dashboard/members/u-ann' && a.textContent === 'Change role or permissions')).toBe(true);
     expect(t).toContain('Ann Lee → Agents · Write on Agents');
+    // the engine decides every request: no mode, no comparison with older rules
+    expect(t).not.toMatch(/Engine mode|Shadow|Monitor|legacy|current role rules/i);
   });
 
   it('checks a resource action on an existing resource found in the registry', async () => {
@@ -265,19 +268,23 @@ describe('AccessCheckTab (Turkish)', () => {
     const t = text();
     expect(t).toContain('Erişim testi');
     expect(t).toContain('Reddedildi');
-    expect(t).toContain('Hiçbir politika bu isteğe izin vermiyor');
+    expect(t).toContain('Hiçbir kural buna izin vermiyor');
     expect(t).toContain('Tüm Ajanlar servisi'); // the service name comes from the server's translated labels? no: built-in label
     expect(t).not.toMatch(/iamCenter\.[a-zA-Z]/);
   });
 });
 
 describe('SimulateResultCard', () => {
-  const run = async (result: unknown) => {
-    await render('tab=check&principalType=user&principalId=u-ann&action=agents.write', result);
-    await settle(250);
+  const run = async (result: unknown, extra: Array<['GET' | 'POST', string | RegExp, () => unknown]> = [], search = 'tab=check&principalType=user&principalId=u-ann&action=agents.write') => {
+    nav.search = search;
+    api = installApiMock([...defaultRoutes(), ...simulateRoutes(result), ...(extra as never)]);
+    mounted = await mount(createElement(AccessCheckTab, { canManage: true }));
+    await settle(300);
   };
+  const user = { type: 'user', id: 'u-ann', label: 'Ann Lee', role: 'user', groups: [] };
+  const hrefs = () => qa<HTMLAnchorElement>('a').map((a) => a.getAttribute('href'));
 
-  it('lists the deciding policies: built-in (translated name) and custom (linked)', async () => {
+  it('lists the deciding policies: built-in in plain words, custom by name (linked)', async () => {
     await run({
       allowed: true,
       reasons: [
@@ -285,40 +292,125 @@ describe('SimulateResultCard', () => {
         { cedarId: 'custom:p-analysts', policyId: 'p-analysts', managed: false, name: 'Analysts read cost', effect: 'permit' },
       ],
       defaultDeny: false,
-      principalSummary: { type: 'user', id: 'u-ann', label: 'Ann Lee', role: 'user', groups: [] },
-      mode: 'enforce',
+      principalSummary: user,
     });
     const t = text();
     expect(t).toContain('Allowed');
-    expect(t).toContain('Members can change what their access allows');
+    // the built-in policy is the person's role, not the engine's id or sentence
+    expect(t).toContain('Role: User');
+    expect(t).toContain('Their workspace access (role, own permissions and groups) allows Write on Agents.');
+    expect(t).not.toContain('Members can change what their access allows');
     expect(t).toContain('Built-in');
+    expect(hrefs()).toContain('/dashboard/members/u-ann');
+    // the custom one by its own name, linked to the editor
     const link = qa<HTMLAnchorElement>('a').find((a) => a.textContent === 'Analysts read cost');
     expect(link?.getAttribute('href')).toBe('/dashboard/iam?tab=policies&policyId=p-analysts');
-    expect(t).toContain('The policy engine decides real requests');
+    expect(t).toContain('Custom');
+    // and nothing about a mode or about older rules
+    expect(t).not.toMatch(/Engine mode|Shadow|Monitor|Current role rules/i);
   });
 
-  it('shows the monitor difference, the legacy comparison and the engine mode', async () => {
+  it('says a project limit with the project, the service and the level, and links to the member\'s project permissions', async () => {
+    await run(
+      {
+        allowed: false,
+        reasons: [{ cedarId: 'managed:boundary:project-write', policyId: null, managed: true, name: 'Project limit (change)', effect: 'forbid' }],
+        defaultDeny: false,
+        principalSummary: user,
+        projectId: 'proj-a',
+      },
+      [
+        [
+          'GET',
+          /^\/api\/iam\/principals\/user\/u-ann$/,
+          () => ({
+            principal: { type: 'user', id: 'u-ann', label: 'Ann Lee' },
+            effective: [{ service: 'agents', level: 'read', sources: [{ kind: 'role', label: 'user', level: 'write' }, { kind: 'project', label: 'Alpha', level: 'read' }] }],
+            groups: [],
+            projects: [],
+            policies: [],
+          }),
+        ],
+      ],
+    );
+    const t = text();
+    expect(t).toContain('Denied');
+    // the exact limit is asked of the principal view for that project
+    expect(api.to('GET', '/api/iam/principals/user/u-ann').some((c) => c.query.projectId === 'proj-a')).toBe(true);
+    expect(t).toContain('Project limit: Alpha · Agents = Read');
+    expect(t).toContain('Alpha limits this member to Read on Agents, below the Write this needs.');
+    expect(t).toContain('never widens it');
+    expect(t).not.toContain('managed:boundary');
+    expect(qa<HTMLAnchorElement>('a').some((a) => a.getAttribute('href') === '/dashboard/projects/proj-a?member=u-ann' && a.textContent === 'Change project member permissions')).toBe(true);
+  });
+
+  it('still reads in full when the exact project limit cannot be fetched', async () => {
+    await run(
+      {
+        allowed: false,
+        reasons: [{ cedarId: 'managed:boundary:project-write', policyId: null, managed: true, name: 'Project limit (change)', effect: 'forbid' }],
+        defaultDeny: false,
+        principalSummary: user,
+        projectId: 'proj-a',
+      },
+      [['GET', /^\/api\/iam\/principals\/user\/u-ann$/, () => jsonResponse({ error: 'Forbidden' }, 403) as never]],
+    );
+    const t = text();
+    expect(t).toContain('Project limit: Alpha · Agents');
+    expect(t).not.toContain('Agents =');
+    expect(t).toContain('Alpha limits this member on Agents to less than the Write this needs.');
+  });
+
+  it('says a token scope as the scope it is, for a token', async () => {
+    await run(
+      {
+        allowed: false,
+        reasons: [{ cedarId: 'managed:boundary:token-cap-write', policyId: null, managed: true, name: 'Token scope limit (change)', effect: 'forbid' }],
+        defaultDeny: false,
+        principalSummary: { type: 'token', id: 't-ci', label: 'ci-pipeline', role: 'admin', groups: [], tokenScope: { agents: 'read' } },
+      },
+      [],
+      'tab=check&principalType=token&principalId=t-ci&action=agents.write',
+    );
+    const t = text();
+    expect(t).toContain('Token scope: Agents = Read');
+    expect(t).toContain('The token is scoped to Read on Agents, below the Write this needs.');
+    expect(hrefs()).toContain('/dashboard/tokens');
+    // a service the scope does not name at all reads as no access
+  });
+
+  it('names the owner of a token that is allowed because of what its owner can do', async () => {
+    await run(
+      {
+        allowed: true,
+        reasons: [{ cedarId: 'managed:rbac:token-write', policyId: null, managed: true, name: 'API tokens change what their owner and their scope allow', effect: 'permit' }],
+        defaultDeny: false,
+        principalSummary: { type: 'token', id: 't-ci', label: 'ci-pipeline', role: 'admin', groups: [], tokenScope: null },
+      },
+      [],
+      'tab=check&principalType=token&principalId=t-ci&action=agents.write',
+    );
+    expect(text()).toContain('Token owner: Admin');
+    expect(text()).toContain('A token can do what its owner can, within its scope: Write on Agents.');
+  });
+
+  it('says for a token that its owner lacks the level when nothing allows the request', async () => {
+    await run(
+      { ...DENIED, principalSummary: { type: 'token', id: 't-ci', label: 'ci-pipeline', role: 'user', groups: [], tokenScope: null } },
+      [],
+      'tab=check&principalType=token&principalId=t-ci&action=agents.write',
+    );
+    expect(text()).toContain('No rule allows this. The token owner does not have Write on Agents.');
+  });
+
+  it('keeps a built-in policy it has no words for under the engine\'s own name', async () => {
     await run({
       allowed: true,
-      reasons: [{ cedarId: 'managed:rbac:user-write', policyId: null, managed: true, name: 'Members can change', effect: 'permit' }],
+      reasons: [{ cedarId: 'managed:rbac:something-new', policyId: null, managed: true, name: 'A future built-in rule', effect: 'permit' }],
       defaultDeny: false,
-      monitor: {
-        allowed: false,
-        differs: true,
-        reasons: [{ cedarId: 'custom:p-new', policyId: 'p-new', managed: false, name: 'Block writes (monitor)', effect: 'forbid' }],
-      },
-      legacy: { allowed: false, service: 'agents', required: 'write' },
-      principalSummary: { type: 'user', id: 'u-ann', label: 'Ann Lee', role: 'user', groups: [] },
-      mode: 'shadow',
+      principalSummary: user,
     });
-    const t = text();
-    expect(t).toContain('Engine mode: Shadow');
-    expect(t).toContain('Real requests are still decided by the current role rules');
-    expect(t).toContain('With monitor-mode policies the result would be');
-    expect(t).toContain('Block writes (monitor)');
-    expect(t).toContain('Current role rules (legacy)');
-    expect(t).toContain('needs Write on Agents');
-    expect(t).toContain('The policy engine and the current role rules disagree');
+    expect(text()).toContain('A future built-in rule');
   });
 
   it('shows the owner rule, engine problems, a disabled account and a token scope', async () => {
@@ -335,7 +427,6 @@ describe('SimulateResultCard', () => {
         tokenScope: { agents: 'read', tools: 'write' },
         status: 'disabled',
       },
-      mode: 'enforce',
       ownerSafety: true,
       errors: ['policy custom:p-x failed to evaluate'],
     });
@@ -360,8 +451,59 @@ describe('SimulateResultCard', () => {
 
   it('links to the principal and, for admins, to a prefilled new policy', async () => {
     await run(DENIED);
-    const hrefs = qa<HTMLAnchorElement>('a').map((a) => a.getAttribute('href'));
-    expect(hrefs).toContain('/dashboard/iam?tab=principals&principalType=user&principalId=u-ann');
-    expect(hrefs).toContain('/dashboard/iam?tab=policies&new=1&principalType=user&principalId=u-ann');
+    expect(hrefs()).toContain('/dashboard/iam?tab=principals&principalType=user&principalId=u-ann');
+    expect(hrefs()).toContain('/dashboard/iam?tab=policies&new=1&principalType=user&principalId=u-ann');
+  });
+
+  it('warns that a check about one resource is not what a real request meets', async () => {
+    await run({ ...DENIED, enforcedAtGate: false });
+    expect(text()).toContain('The request gates decide whole services, not individual resources.');
+  });
+});
+
+describe('AccessCheckTab when the engine could not decide', () => {
+  it('renders a 503 as an unavailable engine (not as a failed check or a denial), with a way to look at the engine', async () => {
+    nav.search = 'tab=check&principalType=user&principalId=u-ann&action=agents.write';
+    api = installApiMock([...defaultRoutes(), ...simulateRoutes()]);
+    api.on('POST', '/api/iam/simulate', () =>
+      jsonResponse({ error: 'Authorization is temporarily unavailable', code: 'authorization_unavailable', decisionId: 'dec-503' }, 503),
+    );
+    mounted = await mount(createElement(AccessCheckTab, { canManage: true }));
+    await settle(300);
+    const alert = q('[data-testid="check-unavailable"]')!;
+    expect(alert).not.toBeNull();
+    expect(alert.textContent).toContain('The engine could not decide');
+    expect(alert.textContent).toContain('Authorization is temporarily unavailable, so the request was not decided');
+    expect(q('[data-testid="check-failed"]')).toBeNull();
+    expect(text()).not.toContain('Denied');
+    expect(qa<HTMLAnchorElement>('a').some((a) => a.getAttribute('href') === '/dashboard/iam?tab=overview')).toBe(true);
+  });
+
+  it('a decision id of a 503 says it was not a policy decision, and replays nothing', async () => {
+    nav.search = 'tab=check&decisionId=dec-503';
+    api = installApiMock([...defaultRoutes(), ...simulateRoutes()]);
+    api.on('GET', /^\/api\/iam\/decisions\/[^/]+$/, () => ({
+      decisionId: 'dec-503',
+      at: '2026-10-10T08:00:00.000Z',
+      principal: { type: 'user', id: 'u-ann', label: 'Ann Lee' },
+      service: 'agents',
+      required: 'write',
+      route: '/api/agents',
+      method: 'POST',
+      code: 'authorization_unavailable',
+      simulateInput: null,
+      policyIds: [],
+      reasons: [],
+    }));
+    mounted = await mount(createElement(AccessCheckTab, { canManage: true }));
+    await settle(250);
+    const notice = q('[data-testid="decision-unavailable"]')!;
+    expect(notice).not.toBeNull();
+    expect(notice.textContent).toContain('Not a policy decision');
+    expect(notice.textContent).toContain('No policy denied it, so there is nothing to replay');
+    expect(api.to('POST', '/api/iam/simulate')).toHaveLength(0);
+    // it is not reported as a decision that "cannot be replayed" either
+    expect(text()).not.toContain('That decision cannot be replayed.');
+    expect(text()).toContain('Response: authorization_unavailable');
   });
 });

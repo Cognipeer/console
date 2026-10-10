@@ -1648,12 +1648,13 @@ export interface RealtimeSessionLogDelta {
 
 // ── IAM document store (tenant-scoped, lazily created) ───────────────────
 // A deliberately tiny, generic key → JSON document store used by the policy
-// engine (src/lib/iam): custom policies, the policy-version counter and the
-// shadow-mode diff aggregates. The collections/tables are created on first use
-// (no migration, no index requirement) and behave identically on MongoDB and
-// SQLite. It is NOT a general query surface: documents are addressed by id.
+// engine (src/lib/iam): custom policies, the policy-version counter, the
+// workspace settings and the project-levels activation instant. The
+// collections/tables are created on first use (no migration, no index
+// requirement) and behave identically on MongoDB and SQLite. It is NOT a general
+// query surface: documents are addressed by id.
 
-export const IAM_COLLECTIONS = ['iam_policies', 'iam_meta', 'iam_shadow'] as const;
+export const IAM_COLLECTIONS = ['iam_policies', 'iam_meta'] as const;
 export type IamCollectionName = typeof IAM_COLLECTIONS[number];
 
 export interface IIamDoc {

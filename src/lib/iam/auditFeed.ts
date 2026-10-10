@@ -1,27 +1,22 @@
 /**
  * The audit tab of the Authorization center (`GET /api/iam/audit`):
  *
- *   denials   requests the policy engine refused in enforce mode (audit rows with
- *             `metadata.iamEnforce`, each with the `decisionId` the caller saw)
- *   changes   who changed policies, settings and the mode (audit.ts rows)
- *   monitor   what monitor-mode policies WOULD have changed (the `policy-monitor`
- *             shadow aggregates, one entry per policy x route x direction)
+ *   denials   requests the policy engine refused (audit rows with `outcome: denied`
+ *             and `metadata.iamEnforce`, each with the `decisionId` the caller saw)
+ *   changes   who changed policies and settings (audit.ts rows)
  *
  * Offset-paged. Principals are resolved to display labels in one batched read.
  */
 
 import { RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
 import { runWithTenantScope, type IAuditLog } from '@/lib/database';
-import { gateActionId } from './actions';
 import { deniedActionOf, IAM_CHANGE_RESOURCE_TYPES } from './audit';
 import { resolvePrincipalLabels } from './labels';
 import { listPolicies } from './store';
 import type { IamTenant, PrincipalType } from './principals';
-import { listShadowEntries } from './shadow/aggregate';
-import { POLICY_MONITOR_CATEGORY } from './shadow/types';
 
-export type AuditKind = 'denials' | 'changes' | 'monitor';
-export const AUDIT_KINDS: readonly AuditKind[] = ['denials', 'changes', 'monitor'];
+export type AuditKind = 'denials' | 'changes';
+export const AUDIT_KINDS: readonly AuditKind[] = ['denials', 'changes'];
 
 export interface AuditFeedQuery {
   kind: AuditKind;
@@ -159,6 +154,9 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
     if (code === 'route_not_declared') {
       summary = `Blocked: ${route} has no authorization declaration`;
       text = { key: 'undeclared', params: { route } };
+    } else if (code === 'authorization_unavailable') {
+      summary = `Refused ${route}: authorization was temporarily unavailable`;
+      text = { key: 'unavailable', params: { route } };
     } else if (code === 'ip_not_allowed') {
       const from = row.ipAddress ?? 'this address';
       summary = `Blocked: ${who?.label ?? 'a token'} is not allowed from ${from} (IP allowlist)${row.path ? `: ${route}` : ''}`.replace(/\s+/g, ' ').trim();
@@ -200,17 +198,12 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
 function describeChange(row: IAuditLog): { summary: string; text?: AuditFeedText } {
   const m = row.metadata ?? {};
   const name = str(m.name) ? `"${String(m.name)}"` : '';
-  const flags = [str(m.effect), str(m.mode), m.enabled === false ? 'disabled' : undefined].filter(Boolean).join(', ');
-  const policyParams = { name: str(m.name) ?? '', effect: str(m.effect) ?? '', mode: str(m.mode) ?? '', enabled: m.enabled === false ? 0 : 1 };
+  const flags = [str(m.effect), m.enabled === false ? 'disabled' : undefined].filter(Boolean).join(', ');
+  const policyParams = { name: str(m.name) ?? '', effect: str(m.effect) ?? '', enabled: m.enabled === false ? 0 : 1 };
   switch (row.event) {
     case 'iam.policy.create': return { summary: `Created policy ${name}${flags ? ` (${flags})` : ''}`, text: { key: 'policy.created', params: policyParams } };
     case 'iam.policy.update': return { summary: `Updated policy ${name}${flags ? ` (${flags})` : ''}`, text: { key: 'policy.updated', params: policyParams } };
     case 'iam.policy.delete': return { summary: `Deleted policy ${name}`, text: { key: 'policy.deleted', params: policyParams } };
-    case 'iam.mode.change': {
-      const from = str(m.from) ?? 'unknown';
-      const to = str(m.to) ?? 'unknown';
-      return { summary: `Changed the authorization mode from ${from} to ${to}`, text: { key: 'mode.changed', params: { from, to } } };
-    }
     case TOKEN_RESTRICTIONS_EVENT: {
       const after = (m.after ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
       const before = (m.before ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
@@ -294,65 +287,8 @@ async function changes(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
   return { items, hasMore: page.hasMore };
 }
 
-// ── monitor ──────────────────────────────────────────────────────────────
-
-async function monitor(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedPage> {
-  const [entries, policies] = await Promise.all([listShadowEntries(tenant.tenantDbName), listPolicies(tenant.tenantDbName)]);
-  const policyName = new Map(policies.map((p) => [p.policyId, p.name]));
-  const from = q.from?.toISOString();
-  const to = q.to?.toISOString();
-
-  let rows = entries.filter((e) => e.category === POLICY_MONITOR_CATEGORY);
-  if (q.service) rows = rows.filter((e) => e.service === q.service);
-  if (from) rows = rows.filter((e) => e.lastSeen >= from);
-  if (to) rows = rows.filter((e) => e.firstSeen <= to);
-  if (q.principalId && q.principalType) {
-    rows = rows.filter((e) => e.samples.some((s) => (q.principalType === 'token' ? s.tokenId === q.principalId : s.userId === q.principalId)));
-  }
-  rows.sort((a, b) => (a.lastSeen < b.lastSeen ? 1 : a.lastSeen > b.lastSeen ? -1 : b.count - a.count));
-
-  const window = rows.slice(q.offset, q.offset + q.limit);
-  const labels = await resolvePrincipalLabels(tenant, {
-    users: window.map((e) => e.samples[e.samples.length - 1]?.userId).filter((x): x is string => !!x),
-    tokens: window.map((e) => e.samples[e.samples.length - 1]?.tokenId).filter((x): x is string => !!x),
-  });
-
-  const items = window.map((e): AuditFeedItem => {
-    const sample = e.samples[e.samples.length - 1];
-    const policyId = e.policyId ?? '';
-    const name = policyName.get(policyId) ?? policyId;
-    const would = e.targetAllowed ? 'allow' : 'deny';
-    let action = '';
-    try {
-      action = gateActionId(e.service, e.method);
-    } catch {
-      action = `${e.service}.${e.method.toLowerCase()}`;
-    }
-    return {
-      id: e.id,
-      at: iso(e.lastSeen),
-      kind: 'monitor',
-      principal: sample
-        ? sample.tokenId
-          ? { type: 'token', id: sample.tokenId, label: labels.tokens.get(sample.tokenId) ?? sample.tokenId }
-          : { type: 'user', id: sample.userId, label: labels.users.get(sample.userId) ?? sample.userId }
-        : null,
-      service: e.service,
-      action,
-      route: e.route,
-      method: e.method,
-      code: e.legacyAllowed && !e.targetAllowed ? 'would_deny' : 'would_allow',
-      ...(policyId ? { policyId } : {}),
-      summary: `Policy "${name}" would ${would} ${e.method} ${e.route} (${e.count} time${e.count === 1 ? '' : 's'} since ${iso(e.firstSeen).slice(0, 10)})`,
-      text: { key: 'monitor.would', params: { name, would, route: `${e.method} ${e.route}`, count: e.count, since: iso(e.firstSeen).slice(0, 10) } },
-    };
-  });
-  return { items, hasMore: rows.length > q.offset + q.limit };
-}
-
 export async function listAuditFeed(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedPage> {
   if (q.kind === 'changes') return changes(tenant, q);
-  if (q.kind === 'monitor') return monitor(tenant, q);
   return denials(tenant, q);
 }
 

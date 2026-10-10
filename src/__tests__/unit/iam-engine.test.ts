@@ -1,7 +1,8 @@
 /**
  * Policy engine: custom policies layered on the managed set, hot-swap on
- * policy changes, monitor mode, obligations, failure behaviour (never throws)
- * and a non-gating latency smoke.
+ * policy changes, enabled / disabled policies, obligations, failure behaviour
+ * (never throws; a failure is flagged, never turned into an allow) and a
+ * non-gating latency smoke.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -43,12 +44,12 @@ const tenant = () => env.tenantDbName;
  * anything - so they put the policy in the way another node's write would arrive:
  * straight into the policy collection, then announce it.
  */
-async function putPolicy(policyId: string, cedar: string, mode: 'enforce' | 'monitor' = 'enforce'): Promise<void> {
+async function putPolicy(policyId: string, cedar: string, extra: Record<string, unknown> = {}): Promise<void> {
   const now = new Date().toISOString();
   await env.db.runWithTenant(tenant(), async () => {
     await env.db.iamDocPut('iam_policies', policyId, {
-      _id: policyId, policyId, name: policyId, cedar, spec: null, mode, enabled: true,
-      createdBy: 'tester', updatedBy: 'tester', createdAt: now, updatedAt: now,
+      _id: policyId, policyId, name: policyId, cedar, spec: null, enabled: true,
+      createdBy: 'tester', updatedBy: 'tester', createdAt: now, updatedAt: now, ...extra,
     });
     await env.db.iamDocIncrement('iam_meta', 'policy_version', 'value', 1);
   });
@@ -183,7 +184,7 @@ describe('custom policies on top of the managed set', () => {
     await env.db.runWithTenant(tenant(), async () => {
       await env.db.iamDocPut('iam_policies', 'remote', {
         _id: 'remote', policyId: 'remote', name: 'remote', cedar: 'forbid(principal, action == Action::"agent.get", resource is Agent);',
-        mode: 'enforce', enabled: true, createdBy: 'x', updatedBy: 'x', createdAt: now, updatedAt: now,
+        enabled: true, createdBy: 'x', updatedBy: 'x', createdAt: now, updatedAt: now,
       });
       await env.db.iamDocIncrement('iam_meta', 'policy_version', 'value', 1);
     });
@@ -196,26 +197,163 @@ describe('custom policies on top of the managed set', () => {
   });
 });
 
-describe('monitor mode', () => {
-  it('reports what an enabled monitor policy WOULD do without changing the decision', async () => {
-    await putPolicy('would-block', 'forbid(principal, action == Action::"agent.delete", resource is Agent);', 'monitor');
-    const res = await authorize({ tenant: tenant(), principal: member(), action: 'agent.delete', resource: agentRes });
-    expect(res.allowed).toBe(true);
-    expect(res.monitor).toMatchObject({ allowed: false, differs: true });
-    expect(res.monitor!.reasons).toContain('custom:would-block');
-    const other = await authorize({ tenant: tenant(), principal: member(), action: 'agent.get', resource: agentRes });
-    expect(other.monitor).toMatchObject({ allowed: true, differs: false });
-    // promoting it to enforce makes it real
-    await updatePolicy(tenant(), 'would-block', { mode: 'enforce' }, 't');
-    const enforced = await authorize({ tenant: tenant(), principal: member(), action: 'agent.delete', resource: agentRes });
-    expect(enforced.allowed).toBe(false);
-    expect(enforced.monitor).toBeUndefined();
-    await deletePolicy(tenant(), 'would-block');
+describe('a policy is enabled or disabled - nothing in between', () => {
+  it('a result carries no dry-run verdict, whatever the workspace has stored', async () => {
+    await putPolicy('plain', 'forbid(principal, action == Action::"agent.delete", resource is Agent);');
+    const denied = await authorize({ tenant: tenant(), principal: member(), action: 'agent.delete', resource: agentRes });
+    const allowed = await authorize({ tenant: tenant(), principal: member(), action: 'agent.get', resource: agentRes });
+    expect(denied.allowed).toBe(false);
+    expect(allowed.allowed).toBe(true);
+    expect(denied).not.toHaveProperty('monitor');
+    expect(allowed).not.toHaveProperty('monitor');
+    await deletePolicy(tenant(), 'plain');
   });
 
-  it('tenants without monitor policies get no monitor field', async () => {
-    const res = await authorize({ tenant: tenant(), principal: member(), action: 'agent.get', resource: agentRes });
-    expect(res.monitor).toBeUndefined();
+  it('a policy an earlier build stored in monitor mode is disabled: it neither blocks nor grants, and counts as no custom policy', async () => {
+    await putPolicy('was-dry-run', 'forbid(principal, action == Action::"agent.delete", resource is Agent);', { mode: 'monitor' });
+    await putPolicy('was-dry-run-permit', 'permit(principal is User, action == Action::"agent.invoke", resource is Agent);', { mode: 'monitor' });
+    const noAgents = member({ user: { role: 'user', servicePermissions: { agents: 'none' } } });
+    expect((await authorize({ tenant: tenant(), principal: member(), action: 'agent.delete', resource: agentRes })).allowed).toBe(true);
+    expect((await authorize({ tenant: tenant(), principal: noAgents, action: 'agent.invoke', resource: agentRes })).allowed).toBe(false);
+    expect((await describeTenantPolicySet(tenant())).custom).toBe(0);
+    // enabling it is a deliberate save of its own; from then on it applies
+    await updatePolicy(tenant(), 'was-dry-run', { enabled: true }, 'tester');
+    expect((await authorize({ tenant: tenant(), principal: member(), action: 'agent.delete', resource: agentRes })).allowed).toBe(false);
+    expect((await describeTenantPolicySet(tenant())).custom).toBe(1);
+    await deletePolicy(tenant(), 'was-dry-run');
+    await deletePolicy(tenant(), 'was-dry-run-permit');
+  });
+
+  it('a workspace without enabled custom policies shares the managed set; one with them has a set of its own', async () => {
+    const managed = await describeTenantPolicySet(tenant());
+    expect(managed).toMatchObject({ custom: 0, skipped: [] });
+    expect(managed.setId).not.toContain(tenant());
+    await putPolicy('own-set', 'forbid(principal, action == Action::"agent.delete", resource is Agent);');
+    const own = await describeTenantPolicySet(tenant());
+    expect(own).toMatchObject({ custom: 1, skipped: [], setId: `tenant:${tenant()}:policies` });
+    expect(own.version).toBeGreaterThan(managed.version);
+    // disabling the only custom policy hands the workspace back to the shared set
+    await updatePolicy(tenant(), 'own-set', { enabled: false }, 'tester');
+    expect((await describeTenantPolicySet(tenant())).setId).toBe(managed.setId);
+    await deletePolicy(tenant(), 'own-set');
+  });
+});
+
+/**
+ * The engine keeps ONE preparsed set per workspace under a stable id. A load that
+ * read its policy list before a later policy write must therefore never preparse
+ * it: it would bring the older rules back for every decision until the next write.
+ */
+describe('a policy load that a newer policy write overtook', () => {
+  const FORBID_TOOLS = 'forbid (principal, action, resource) when { resource.service == "tools" };';
+  const FORBID_MODELS = 'forbid (principal, action, resource) when { resource.service == "models" };';
+
+  /** Holds the engine's policy-list reads: a held read returns the list it read, but only once released. */
+  function holdPolicyReads() {
+    const realList = env.db.iamDocList.bind(env.db);
+    const held: Array<() => void> = [];
+    let armed = false;
+    const spy = vi.spyOn(env.db, 'iamDocList').mockImplementation(async (...args: Parameters<typeof realList>) => {
+      const snapshot = await realList(...args);
+      if (armed && args[0] === 'iam_policies') await new Promise<void>((resolve) => held.push(resolve));
+      return snapshot;
+    });
+    return {
+      arm: () => { armed = true; },
+      disarm: () => { armed = false; },
+      reads: () => held.length,
+      release: (index: number) => held[index](),
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  const until = async (condition: () => boolean) => {
+    for (let i = 0; i < 400 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(condition()).toBe(true);
+  };
+  const askModels = () => authorizeGate({ tenant: tenant(), principal: member(), service: 'models', method: 'GET' });
+
+  it('does not bring the older rules back once it finishes', async () => {
+    await putPolicy('older-1', FORBID_TOOLS);
+    expect((await askModels()).allowed).toBe(true);
+
+    const reads = holdPolicyReads();
+    try {
+      // This write makes the next decision reload; that load reads its list and then waits.
+      await putPolicy('older-2', FORBID_TOOLS);
+      reads.arm();
+      const slow = askModels();
+      await until(() => reads.reads() === 1);
+      reads.disarm();
+
+      // A newer write lands while it waits; the next decision loads the newer list.
+      await putPolicy('freeze-models', FORBID_MODELS);
+      expect((await askModels()).allowed).toBe(false);
+
+      // The waiting load finally ends with its older list ...
+      reads.release(0);
+      await slow;
+
+      // ... and the workspace still runs the newer rules, also across version re-checks.
+      expect((await askModels()).allowed).toBe(false);
+      configureIamEngine({ versionCheckMs: 0 });
+      expect((await askModels()).allowed).toBe(false);
+      expect((await askModels()).allowed).toBe(false);
+      expect(await describeTenantPolicySet(tenant())).toMatchObject({ custom: 3, skipped: [] });
+    } finally {
+      reads.restore();
+      for (const id of ['older-1', 'older-2', 'freeze-models']) await deletePolicy(tenant(), id);
+    }
+  });
+
+  it('a decision that was waiting on the older load is answered by the newer rules', async () => {
+    await putPolicy('older-1', FORBID_TOOLS);
+    expect((await askModels()).allowed).toBe(true);
+
+    const reads = holdPolicyReads();
+    try {
+      await putPolicy('older-2', FORBID_TOOLS);
+      reads.arm();
+      const waiting = askModels();
+      await until(() => reads.reads() === 1);
+      reads.disarm();
+      await putPolicy('freeze-models', FORBID_MODELS);
+      reads.release(0);
+      expect((await waiting).allowed).toBe(false);
+    } finally {
+      reads.restore();
+      for (const id of ['older-1', 'older-2', 'freeze-models']) await deletePolicy(tenant(), id);
+    }
+  });
+
+  it('an older load that ends does not drop the pending load of the newer one', async () => {
+    await putPolicy('older-1', FORBID_TOOLS);
+    expect((await askModels()).allowed).toBe(true);
+
+    const reads = holdPolicyReads();
+    try {
+      await putPolicy('older-2', FORBID_TOOLS);
+      reads.arm();
+      const first = askModels();
+      await until(() => reads.reads() === 1);
+      // the newer load starts and waits too
+      await putPolicy('freeze-models', FORBID_MODELS);
+      const second = askModels();
+      await until(() => reads.reads() === 2);
+
+      // the older one ends; a decision that arrives now joins the newer load instead of starting a third
+      reads.release(0);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const third = askModels();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(reads.reads()).toBe(2);
+
+      reads.release(1);
+      expect((await Promise.all([first, second, third])).map((r) => r.allowed)).toEqual([false, false, false]);
+    } finally {
+      reads.restore();
+      for (const id of ['older-1', 'older-2', 'freeze-models']) await deletePolicy(tenant(), id);
+    }
   });
 });
 
@@ -236,11 +374,22 @@ describe('never throws', () => {
     await expect(authorize({ tenant: tenant(), principal: garbagePrincipal, action: 'agents.read', resource: { kind: 'service', service: 'agents' } })).resolves.toMatchObject({ allowed: false });
   });
 
-  it('an unreadable store denies (fresh tenant) with the cause in errors', async () => {
+  it('a malformed method or service at the gate yields a deny with errors, never a throw (a request that cannot even be built is flagged as a failure)', async () => {
+    const principal = userPrincipal({ userId: 'x', user: { role: 'admin' } });
+    const noMethod = await authorizeGate({ tenant: tenant(), principal, service: 'models', method: undefined as unknown as string });
+    expect(noMethod).toMatchObject({ allowed: false, failed: true });
+    expect(noMethod.errors.length).toBeGreaterThan(0);
+    const noService = await authorizeGate({ tenant: tenant(), principal, service: undefined as unknown as string, method: 'GET' });
+    expect(noService.allowed).toBe(false);
+    expect(noService.errors.join(' ')).toMatch(/unknown action/);
+  });
+
+  it('an unreadable store denies (fresh tenant) with the cause in errors, flagged as a failure (the gates answer 503 for it)', async () => {
     resetIamEngineForTests();
     hoisted.getDatabase.mockRejectedValueOnce(new Error('db down'));
     const res = await authorize({ tenant: 'tenant_never_loaded', principal: member(), action: 'agent.get', resource: agentRes });
     expect(res.allowed).toBe(false);
+    expect(res.failed).toBe(true);
     expect(res.errors.join(' ')).toMatch(/db down/);
     expect(getIamEngineStats().failures).toBeGreaterThan(0);
     // and recovers
@@ -264,7 +413,7 @@ describe('never throws', () => {
     const now = new Date().toISOString();
     await env.db.runWithTenant(tenant(), async () => {
       await env.db.iamDocPut('iam_policies', 'broken', {
-        _id: 'broken', policyId: 'broken', name: 'broken', cedar: 'permit(((', mode: 'enforce', enabled: true,
+        _id: 'broken', policyId: 'broken', name: 'broken', cedar: 'permit(((', enabled: true,
         createdBy: 'x', updatedBy: 'x', createdAt: now, updatedAt: now,
       });
       await env.db.iamDocIncrement('iam_meta', 'policy_version', 'value', 1);

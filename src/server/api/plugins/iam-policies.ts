@@ -8,12 +8,16 @@
  *   GET    /iam/policies                   { managed, custom }
  *   GET    /iam/policies/:policyId
  *   POST   /iam/policies                   create (spec | cedar)              admin
- *   PUT    /iam/policies/:policyId         update                             admin
+ *   PUT    /iam/policies/:policyId         update (also enable / disable)     admin
  *   DELETE /iam/policies/:policyId         delete                             admin
  *   POST   /iam/policies/compile           spec | cedar -> Cedar + problems   read (computes only)
  *   POST   /iam/policies/preview           impact of a draft                  read (computes only)
  *   POST   /iam/simulate                   access check                       read (computes only)
  *   GET    /iam/decisions/:decisionId      a denial the caller saw -> access check input
+ *
+ * A policy is either enabled or disabled. The retired `mode` field is still
+ * accepted as `"enforce"` (and ignored); `"monitor"` is refused with a
+ * validation error.
  *
  * Errors are always `{ error, code, details? }`; `code: 'validation'` carries
  * `details: [{ message, line?, col?, field? }]`.
@@ -40,10 +44,8 @@ import {
   listPolicies,
   updatePolicy,
   type IIamPolicy,
-  type IamPolicyMode,
 } from '@/lib/iam/store';
 import { policyAuditMetadata, recordIamChange, type IamActor } from '@/lib/iam/audit';
-import { clearPolicyMonitorStats } from '@/lib/iam/shadow/aggregate';
 import { previewPolicy, PreviewInputError } from '@/lib/iam/preview';
 import { simulate, SimulateInputError } from '@/lib/iam/simulate';
 import { checkRateLimit, type RateLimitConfig } from '@/lib/services/auth/rateLimiter';
@@ -103,24 +105,24 @@ const actorOf = (session: ApiSessionContext): IamActor => ({
  * An allow rule that takes effect GRANTS access, which is permission management:
  * everywhere else in the product that is for workspace owners and admins only (a
  * delegated `iam` admin can restrict, not grant). So a policy that has a permit
- * statement, is enforcing and is enabled may only be saved - or changed while in
- * that state - by an owner or admin. Designing one (monitor mode, or disabled) is
- * open to any iam admin; promoting it is not.
+ * statement and is enabled may only be saved - or changed while in that state -
+ * by an owner or admin. Designing one disabled is open to any iam admin;
+ * enabling it is not.
  */
 function permitNeedsAdmin(
   session: ApiSessionContext,
-  next: { cedar: string; mode: IamPolicyMode; enabled: boolean },
-  previous?: Pick<IIamPolicy, 'cedar' | 'mode' | 'enabled'>,
+  next: { cedar: string; enabled: boolean },
+  previous?: Pick<IIamPolicy, 'cedar' | 'enabled'>,
 ): boolean {
   if (session.userRole === 'owner' || session.userRole === 'admin') return false;
   const grants = (cedar: string) => summarizeEffect(cedar).effect !== 'forbid';
-  const takesEffect = next.mode === 'enforce' && next.enabled && grants(next.cedar);
+  const takesEffect = next.enabled && grants(next.cedar);
   if (!takesEffect) return false;
-  const alreadyEffective = !!previous && previous.mode === 'enforce' && previous.enabled && grants(previous.cedar);
+  const alreadyEffective = !!previous && previous.enabled && grants(previous.cedar);
   return !alreadyEffective || next.cedar !== previous?.cedar;
 }
 
-const PERMIT_NEEDS_ADMIN = 'Only workspace owners and admins can make a rule that allows access take effect. Save it in monitor mode, or ask an owner or admin.';
+const PERMIT_NEEDS_ADMIN = 'Only workspace owners and admins can make a rule that allows access take effect. Save it as disabled, or ask an owner or admin.';
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -129,7 +131,6 @@ const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v =
 interface PolicyBody {
   name?: string;
   description?: string | null;
-  mode?: IamPolicyMode;
   enabled?: boolean;
   spec?: unknown;
   cedar?: string;
@@ -155,9 +156,17 @@ function parsePolicyBody(raw: unknown, creating: boolean): { ok: true; body: Pol
   } else if (raw.description === null) {
     body.description = null;
   }
-  if (raw.mode !== undefined || creating) {
-    if (raw.mode !== 'monitor' && raw.mode !== 'enforce') issues.push({ message: 'mode must be "monitor" or "enforce"', field: 'mode' });
-    else body.mode = raw.mode;
+  if (raw.mode !== undefined) {
+    // The retired dry-run state. "enforce" is what every policy is when it is enabled, so it is still accepted (and ignored).
+    if (raw.mode === 'monitor') {
+      issues.push({
+        message: 'Monitor mode no longer exists: a policy is either enabled or disabled. Save it as disabled to keep it from taking effect.',
+        code: 'monitor_removed',
+        field: 'mode',
+      });
+    } else if (raw.mode !== 'enforce') {
+      issues.push({ message: 'mode is no longer used: send enabled as true or false', field: 'mode' });
+    }
   }
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled !== 'boolean') issues.push({ message: 'enabled must be true or false', field: 'enabled' });
@@ -186,8 +195,8 @@ async function materialize(
 ): Promise<{ ok: true; cedar: string; spec: PolicySpec | null } | { ok: false; details: PolicyIssue[] } | null> {
   if (body.spec !== undefined) {
     // A spec that is exactly the stored one is not re-checked against the directory: the people
-    // and groups it names may have left since, and that must not stop an admin from switching
-    // the policy to monitor or turning it off. Anything that CHANGES is verified in full.
+    // and groups it names may have left since, and that must not stop an admin from turning
+    // the policy off. Anything that CHANGES is verified in full.
     const out = await compileSpec(body.spec, isSameSpec(body.spec, stored) ? undefined : tenantOf(session));
     return out.ok && out.spec ? { ok: true, cedar: out.cedar, spec: out.spec } : { ok: false, details: out.errors };
   }
@@ -275,7 +284,7 @@ export const iamPoliciesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const material = await materialize(session, parsed.body);
       if (!material || !material.ok) return fail(reply, 400, 'validation', 'The policy is not valid', material?.details);
-      if (permitNeedsAdmin(session, { cedar: material.cedar, mode: parsed.body.mode as IamPolicyMode, enabled: parsed.body.enabled !== false })) {
+      if (permitNeedsAdmin(session, { cedar: material.cedar, enabled: parsed.body.enabled !== false })) {
         return fail(reply, 403, 'permit_requires_admin', PERMIT_NEEDS_ADMIN);
       }
 
@@ -284,7 +293,6 @@ export const iamPoliciesApiPlugin: FastifyPluginAsync = async (app) => {
         description: parsed.body.description ?? undefined,
         cedar: material.cedar,
         spec: material.spec,
-        mode: parsed.body.mode,
         enabled: parsed.body.enabled,
       }, session.userId);
 
@@ -314,7 +322,6 @@ export const iamPoliciesApiPlugin: FastifyPluginAsync = async (app) => {
       if (material && !material.ok) return fail(reply, 400, 'validation', 'The policy is not valid', material.details);
       if (permitNeedsAdmin(session, {
         cedar: material?.cedar ?? previous.cedar,
-        mode: parsed.body.mode ?? previous.mode,
         enabled: parsed.body.enabled ?? previous.enabled,
       }, previous)) {
         return fail(reply, 403, 'permit_requires_admin', PERMIT_NEEDS_ADMIN);
@@ -324,19 +331,8 @@ export const iamPoliciesApiPlugin: FastifyPluginAsync = async (app) => {
         name: parsed.body.name,
         description: parsed.body.description,
         ...(material ? { cedar: material.cedar, spec: material.spec } : {}),
-        mode: parsed.body.mode,
         enabled: parsed.body.enabled,
       }, session.userId);
-
-      // The old "would change" counts describe the old text / mode.
-      const behaviourChanged = (material && material.cedar !== previous.cedar)
-        || updated.mode !== previous.mode
-        || updated.enabled !== previous.enabled;
-      if (behaviourChanged) {
-        await clearPolicyMonitorStats(session.tenantDbName, policyId).catch((error: unknown) => {
-          logger.warn('Could not reset the monitor counts of a changed policy', { policyId, error: error instanceof Error ? error.message : String(error) });
-        });
-      }
 
       await recordIamChange(request, actorOf(session), {
         event: 'iam.policy.update',
@@ -344,7 +340,7 @@ export const iamPoliciesApiPlugin: FastifyPluginAsync = async (app) => {
         resourceId: policyId,
         metadata: {
           ...policyAuditMetadata(updated),
-          previous: { name: previous.name, mode: previous.mode, enabled: previous.enabled, cedarChanged: !!material && material.cedar !== previous.cedar },
+          previous: { name: previous.name, enabled: previous.enabled, cedarChanged: !!material && material.cedar !== previous.cedar },
         },
       });
       return reply.send(await rowOf(session, updated));
@@ -360,7 +356,6 @@ export const iamPoliciesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const existing = await getPolicy(session.tenantDbName, policyId);
       if (!existing || !(await deletePolicy(session.tenantDbName, policyId))) return fail(reply, 404, 'not_found', 'Policy not found');
-      await clearPolicyMonitorStats(session.tenantDbName, policyId).catch(() => undefined);
       await recordIamChange(request, actorOf(session), {
         event: 'iam.policy.delete',
         resourceType: 'iam-policy',

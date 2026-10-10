@@ -194,13 +194,17 @@ describe('GET /api/resource-usage/:type/:id', () => {
     expect((await get('/api/resource%2Dusage/tool/t-crm', as('u-retail', 'user'))).statusCode).toBe(200);
   });
 
-  it('the handler re-checks the service even if the route gate saw a different path', async () => {
-    // Directly exercise the authoritative check the handler applies.
-    const { canReadResourceUsage } = await import('@/lib/resources/usageAccess');
-    const denied = { _id: 'x', role: 'user', servicePermissions: { tools: 'none' } } as never;
-    expect(canReadResourceUsage(denied, [], 'tool')).toBe(false);
-    expect(canReadResourceUsage({ _id: 'x', role: 'user' } as never, [], 'tool')).toBe(true);
-    expect(canReadResourceUsage({ _id: 'x', role: 'user' } as never, [], 'bogus')).toBe(false);
+  it('the handler asks the engine about the service that owns the decoded type, and an unknown type needs the inventory', async () => {
+    // The route gate works on the request path; the handler re-checks against the decoded
+    // `:type` param, through the same engine (authorizeServiceForRequest).
+    const { resourceTypeService } = await import('@/lib/resources/usageAccess');
+    expect(resourceTypeService('tool')).toBe('tools');
+    expect(resourceTypeService('bogus')).toBe('resources');
+    users['u-tools-none'] = { _id: 'u-tools-none', role: 'user', tenantId: 'tenant-1', servicePermissions: { tools: 'none' } };
+    expect((await get('/api/resource-usage/tool/t-crm', as('u-tools-none', 'user'))).statusCode).toBe(403);
+    // a plain member has no grant on the inventory, so a type nobody registered is refused
+    expect((await get('/api/resource-usage/bogus/x-1', as('u-retail', 'user'))).statusCode).toBe(403);
+    expect((await get('/api/resource-usage/tool/t-crm', as('u-retail', 'user'))).statusCode).toBe(200);
   });
 
   it('referrers of a type the caller cannot read are counted, not listed', async () => {

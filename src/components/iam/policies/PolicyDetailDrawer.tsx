@@ -9,7 +9,7 @@ import { useGroupLabels } from '../pickers/principalLabels';
 import { formatDateTime } from '../timeFormat';
 import type { IamLabels } from '../useIamLabels';
 import CedarView from './CedarView';
-import { EffectBadge, ModeBadge } from './PolicyBadges';
+import { EffectBadge } from './PolicyBadges';
 import { summarizeSpec } from './specModel';
 import { describeSpec } from './specSummary';
 
@@ -65,12 +65,11 @@ export default function PolicyDetailDrawer({ policy, labels, onClose }: PolicyDe
         <Stack gap="md">
           <Group gap="xs">
             <EffectBadge effect={policy.effect} labels={labels} />
-            <ModeBadge mode={policy.mode} labels={labels} />
             <Badge variant="light" color={policy.enabled ? 'teal' : 'gray'}>
-              {policy.enabled ? t('editor.active') : t('editor.inactive')}
+              {policy.enabled ? t('editor.enabled') : t('editor.disabled')}
             </Badge>
             {!policy.spec ? (
-              <Badge variant="outline" color="gray">
+              <Badge variant="default">
                 Cedar
               </Badge>
             ) : null}
@@ -90,30 +89,6 @@ export default function PolicyDetailDrawer({ policy, labels, onClose }: PolicyDe
               {t('table.rawCedar', { count: policy.statementCount })}
             </Text>
           )}
-
-          {policy.monitorStats ? (
-            <>
-              <Divider />
-              <Stack gap={4}>
-                <Text size="xs" c="dimmed" tt="uppercase" fw={600}>
-                  {t('table.colMonitor')}
-                </Text>
-                <Group gap="xs">
-                  <Badge color="green" variant="light">
-                    {t('table.wouldAllow', { count: policy.monitorStats.wouldAllow.toLocaleString() })}
-                  </Badge>
-                  <Badge color="red" variant="light">
-                    {t('table.wouldDeny', { count: policy.monitorStats.wouldDeny.toLocaleString() })}
-                  </Badge>
-                </Group>
-                {policy.monitorStats.since ? (
-                  <Text size="xs" c="dimmed">
-                    {t('table.monitorSince', { date: formatDateTime(policy.monitorStats.since, locale) })}
-                  </Text>
-                ) : null}
-              </Stack>
-            </>
-          ) : null}
 
           <Divider />
           <CedarView code={policy.cedar} maxHeight={360} />

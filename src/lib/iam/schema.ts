@@ -19,7 +19,7 @@
  * EFFECTIVE level (role default, user override, group grants — computed by the
  * real rbac.ts functions in entities.ts) is >= read / >= write / == admin.
  * They are upward-closed, which is what lets six small managed policies express
- * the whole legacy decision.
+ * the whole role-based decision.
  *
  * `projDenyRead/Write/Admin` are the services the ACTIVE project's explicit
  * settings deny at that level (project narrowing, see projectNarrowing.ts). The

@@ -3,9 +3,9 @@
  *
  * Builds the REAL app (all community plugins; in an enterprise build tree the
  * overlay's registry adds its plugins to the same fastifyApiPlugin) and fails on
- * any undeclared route or contradictory declaration. Enforce mode refuses an
- * undeclared route, so a route that slips through here would be a 403 for every
- * tenant that switches to enforce.
+ * any undeclared route or contradictory declaration. The gate refuses an
+ * undeclared route (403 route_not_declared) in every workspace, so a route that
+ * slips through here would be refused for everybody.
  */
 import { describe, expect, it } from 'vitest';
 import { auditRouteDeclarations, collectApiRoutes, type CollectedRoute } from '../helpers/routeDeclarations';
@@ -66,6 +66,36 @@ describe('route authorization declarations', () => {
   }, 60_000);
 });
 
+describe('the Authorization center API surface', () => {
+  it('has no route left from the retired modes, and keeps the ones the engine-only product uses', async () => {
+    const routes = await collectApiRoutes();
+    const keys = new Set(routes.map((r) => `${r.method} ${r.url}`));
+    for (const gone of [
+      'GET /api/iam/mode', 'PUT /api/iam/mode', 'GET /api/iam/shadow/summary', 'GET /api/iam/shadow/entries', 'POST /api/iam/shadow/reset',
+    ]) {
+      expect(keys.has(gone), gone).toBe(false);
+    }
+    for (const here of [
+      'GET /api/iam/engine/stats', 'GET /api/iam/policies', 'POST /api/iam/policies', 'PUT /api/iam/policies/:policyId', 'DELETE /api/iam/policies/:policyId',
+      'POST /api/iam/policies/compile', 'POST /api/iam/policies/preview', 'POST /api/iam/simulate', 'GET /api/iam/audit', 'GET /api/iam/decisions/:decisionId',
+      'GET /api/iam/principals', 'GET /api/iam/settings', 'PUT /api/iam/settings', 'GET /api/auth/session',
+    ]) {
+      expect(keys.has(here), here).toBe(true);
+    }
+  }, 60_000);
+
+  it('every route of it is gated by the iam service (the session payload is the one that only needs a signed-in caller)', async () => {
+    const routes = await collectApiRoutes();
+    const iamRoutes = routes.filter((r) => r.url.startsWith('/api/iam/') && !r.websocket);
+    expect(iamRoutes.length).toBeGreaterThan(15);
+    for (const route of iamRoutes) {
+      expect(route.kind, `${route.method} ${route.url}`).toBe('service');
+      expect(route.service, `${route.method} ${route.url}`).toBe('iam');
+      expect(route.gated, `${route.method} ${route.url}`).toBe(true);
+    }
+  }, 60_000);
+});
+
 describe('the audit itself', () => {
   const route = (method: string, url: string, declared?: unknown): CollectedRoute => ({
     method, url, kind: 'undeclared', declared: false, authz: declared,
@@ -97,8 +127,8 @@ describe('the audit itself', () => {
     expect(forRoute('GET /api/agents/other')).toContain('maps to "agents"');
     expect(forRoute('GET /api/sandbox/agent/hello')).toContain('self-auth prefix');
     expect(forRoute('POST /api/sandbox/agent/x')).toContain('self-auth prefix');
-    expect(forRoute('GET /api/agents/selfdecl')).toContain('access widens in enforce mode only');
-    expect(forRoute('GET /api/agents/bare')).toContain('NO mode gates it');
+    expect(forRoute('GET /api/agents/selfdecl')).toMatch(/declared self but its path is mapped to the "agents" service/);
+    expect(forRoute('GET /api/agents/bare')).toMatch(/not wrapped by withApiRequestContext/);
     expect(forRoute('GET /api/gpu-fleet/installer.sh')).toBe('');
     expect(forRoute('GET /api/agents/ok')).toBe('');
   });
@@ -140,15 +170,20 @@ describe('authz declaration helpers', () => {
   it('effective declaration = explicit config, else the prefix map, else undeclared', () => {
     const explicit = resolveRouteAuthz(authz.service('ldap'), '/api/zzz');
     expect(explicit.effective).toMatchObject({ kind: 'service', service: 'ldap', declared: true });
-    expect(explicit.legacy).toEqual({ service: 'ldap' });
+    expect(explicit.declaration).toEqual({ kind: 'service', service: 'ldap' });
+    expect(explicit.prefixService).toBeNull();
+    expect(explicit).not.toHaveProperty('legacy');
 
     const mapped = resolveRouteAuthz(undefined, '/api/agents/abc');
     expect(mapped.effective).toMatchObject({ kind: 'service', service: 'agents', declared: false });
+    expect(mapped.prefixService).toBe('agents');
 
     expect(resolveRouteAuthz(undefined, '/api/zzz/abc').effective).toEqual({ kind: 'undeclared' });
 
-    // legacy never gated authenticated/public/self routes that no prefix maps
-    expect(resolveRouteAuthz(authz.authenticated(), '/api/zzz').legacy).toBeNull();
+    // an authenticated route that no prefix maps is not gated by a service
+    expect(resolveRouteAuthz(authz.authenticated(), '/api/zzz').prefixService).toBeNull();
     expect(resolveRouteAuthz(authz.authenticated(), '/api/zzz').effective).toEqual({ kind: 'authenticated', declared: true });
+    // an explicit level travels with the declaration
+    expect(resolveRouteAuthz(authz.service('agents', 'admin'), '/api/zzz').effective).toEqual({ kind: 'service', declared: true, service: 'agents', level: 'admin' });
   });
 });

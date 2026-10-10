@@ -27,17 +27,15 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
 
 vi.mock('@/lib/database', async () => {
   const errors = await import('@/lib/database/provider/errors');
+  const getDatabase = vi.fn();
   return {
-    getDatabase: vi.fn(),
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
     AgentRunConflictError: errors.AgentRunConflictError,
     AgentRunIdempotencyKeyTakenError: errors.AgentRunIdempotencyKeyTakenError,
   };
 });
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
 
 vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
@@ -52,7 +50,6 @@ vi.mock('@/lib/services/agents/agentService', () => ({
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { getPermissionServiceForPath, authorizeServiceRequest } from '@/lib/security/rbac';
 import {
   createConversation,
   executeAgentChat,
@@ -60,6 +57,7 @@ import {
   getConversationById,
 } from '@/lib/services/agents/agentService';
 import { clientA2aApiPlugin } from '@/server/api/plugins/client-a2a';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -102,9 +100,7 @@ beforeEach(() => {
   mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
   createAgentRun.mockImplementation(async (record: Record<string, unknown>) => ({ _id: 'reservation-1', ...record }));
   deleteAgentRun.mockResolvedValue(true);
-  mockFn(getDatabase).mockResolvedValue({ runWithTenant, createAgentRun, deleteAgentRun });
-  mockFn(getPermissionServiceForPath).mockReturnValue(null);
-  mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant, createAgentRun, deleteAgentRun } as never));
   mockFn(getAgentByKey).mockResolvedValue(EXPOSED_AGENT);
 });
 

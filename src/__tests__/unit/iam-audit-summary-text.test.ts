@@ -48,16 +48,25 @@ describe('formatAuditText', () => {
 
   it('blocked rows', () => {
     expect(sentence('tr', item('undeclared', { route: 'GET /api/zz' }))).toBe('Engellendi: GET /api/zz için yetki tanımı yok');
+    // The engine could not decide (HTTP 503): said as such, not as a denial by a rule.
+    expect(sentence('en', item('unavailable', { route: 'GET /api/models' }))).toBe('Refused GET /api/models: authorization was temporarily unavailable');
+    expect(sentence('tr', item('unavailable', { route: 'GET /api/models' }))).toBe('GET /api/models reddedildi: yetkilendirme geçici olarak kullanılamıyordu');
     expect(sentence('en', item('ipNotAllowedAt', { who: 'ci-token', ip: '198.51.100.7', route: 'GET /api/models' })))
       .toBe('Blocked: ci-token is not allowed from 198.51.100.7 (IP allowlist): GET /api/models');
     expect(sentence('tr', item('ipNotAllowed', { who: 'ci-token', ip: '198.51.100.7', route: '' }))).toBe('Engellendi: ci-token, 198.51.100.7 adresinden kullanılamaz (IP izin listesi)');
   });
 
-  it('policy changes, with the effect and mode in the reader\'s words', () => {
-    expect(sentence('en', item('policy.created', { name: 'Freeze', effect: 'forbid', mode: 'monitor', enabled: 1 }))).toBe('Created policy "Freeze" (Deny, Monitor)');
-    expect(sentence('tr', item('policy.updated', { name: 'Freeze', effect: 'forbid', mode: 'enforce', enabled: 0 }))).toBe('"Freeze" politikası güncellendi (Engelle, Zorunlu, kapalı)');
-    expect(sentence('tr', item('policy.deleted', { name: 'Freeze', effect: '', mode: '', enabled: 1 }))).toBe('"Freeze" politikası silindi');
-    expect(sentence('en', item('mode.changed', { from: 'shadow', to: 'enforce' }))).toBe('Changed the authorization mode from Shadow to Enforce');
+  it('policy changes, with the effect in the reader\'s words and a note when switched off', () => {
+    expect(sentence('en', item('policy.created', { name: 'Freeze', effect: 'forbid', enabled: 1 }))).toBe('Created policy "Freeze" (Deny)');
+    expect(sentence('tr', item('policy.updated', { name: 'Freeze', effect: 'forbid', enabled: 0 }))).toBe('"Freeze" politikası güncellendi (Engelle, kapalı)');
+    expect(sentence('tr', item('policy.deleted', { name: 'Freeze', effect: '', enabled: 1 }))).toBe('"Freeze" politikası silindi');
+    // A row written before the monitor mode was removed still carries its `mode`: it is simply not said.
+    expect(sentence('en', item('policy.created', { name: 'Old', effect: 'permit', mode: 'monitor', enabled: 1 }))).toBe('Created policy "Old" (Allow)');
+  });
+
+  it('rows of the removed mode and monitor views fall back to the English sentence', () => {
+    expect(sentence('en', item('mode.changed', { from: 'shadow', to: 'enforce' }, 'Changed the authorization mode from shadow to enforce'))).toBe('Changed the authorization mode from shadow to enforce');
+    expect(sentence('en', item('monitor.would', { name: 'Watch', would: 'deny' }, 'Policy "Watch" would deny'))).toBe('Policy "Watch" would deny');
   });
 
   it('settings and token restrictions list only what changed', () => {
@@ -72,19 +81,13 @@ describe('formatAuditText', () => {
       .toBe('Changed the restrictions of token "ci"');
   });
 
-  it('monitor rows', () => {
-    expect(sentence('en', item('monitor.would', { name: 'Watch', would: 'deny', route: 'POST /api/agents', count: 4, since: '2026-10-01' })))
-      .toBe('Policy "Watch" would deny POST /api/agents (4 times since 2026-10-01)');
-    expect(sentence('tr', item('monitor.would', { name: 'Watch', would: 'allow', route: 'POST /api/agents', count: 1, since: '2026-10-01' }))).toMatch(/izin verirdi/);
-  });
-
   it('every template the formatter can reach exists in both languages', () => {
     const keys = [
-      'disabledFlag', 'undeclared', 'ipNotAllowed', 'ipNotAllowedAt',
+      'disabledFlag', 'undeclared', 'unavailable', 'ipNotAllowed', 'ipNotAllowedAt',
       ...['policy', 'tokenScope', 'project', 'noRule'].flatMap((r) => [`denied.${r}`, `denied.${r}NoLevel`]),
-      'policy.created', 'policy.updated', 'policy.deleted', 'mode.changed',
+      'policy.created', 'policy.updated', 'policy.deleted',
       'settings.updated', 'settings.lifetimeDays', 'settings.lifetimeUnlimited', 'settings.expiryRequired', 'settings.expiryOptional',
-      'token.restrictions', 'tokenRestrictions.expiry', 'tokenRestrictions.ip', 'monitor.wouldAllow', 'monitor.wouldDeny',
+      'token.restrictions', 'tokenRestrictions.expiry', 'tokenRestrictions.ip',
     ];
     for (const locale of ['en', 'tr'] as const) {
       for (const key of keys) expect(lookup(locale, `iamAudit.summaries.${key}`), `${locale} ${key}`).toBeTruthy();

@@ -238,7 +238,7 @@ export interface IApiToken {
    * Optional network allowlist: CIDR ranges (IPv4 / IPv6; a bare address means
    * /32 or /128) the token may authenticate from. `null` / `undefined` / `[]`
    * = unrestricted, which is every token minted before this field existed.
-   * Enforced in token authentication in every authorization mode.
+   * Enforced in token authentication, before anything else is decided.
    */
   allowedIpRanges?: string[] | null;
 }

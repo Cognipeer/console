@@ -1,27 +1,33 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
-import { getDatabase, type IUser } from '@/lib/database';
+import { getDatabase, runWithTenantScope, type IGroup, type IUser } from '@/lib/database';
 import { isShuttingDown } from '@/lib/core/lifecycle';
 import { createLogger } from '@/lib/core/logger';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { patchRequestContext, runWithRequestContext } from '@/lib/core/requestContext';
 import {
-  authorizeService,
-  authorizeServiceRequest,
+  getRequiredPermissionLevel,
   type GroupTenantGrant,
   type PermissionService,
   type ServicePermissionLevel,
-  type UserServicePermissions,
 } from '@/lib/security/rbac';
 import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
-import { serviceDenialReason } from '@/lib/iam/denialReason';
-import { loadGroupGrants } from '@/lib/iam/groupGrants';
+import {
+  decideEnforced,
+  forbiddenBody,
+  recordAuthorizationUnavailable,
+  recordUndeclaredDenial,
+  undeclaredRouteBody,
+  unavailableBody,
+  type EnforceDenial,
+  type EnforceUnavailable,
+  type EnforceUnavailableReason,
+} from '@/lib/iam/enforce';
+import { fetchGroupsByIds, grantsOf, listUserGroupIds } from '@/lib/iam/groupGrants';
 import { markGated, resolveRouteAuthz, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
 import { authorizeServiceAccess, type ServiceAuthzOptions, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
-import { resolveEnforcement } from '@/lib/iam/shadow/mode';
-import { observeGateDecision, observeUnmappedPath } from '@/lib/iam/shadow/observer';
-import { canonicalRoute } from '@/lib/iam/shadow/routePattern';
+import { canonicalRoute } from '@/lib/iam/routePattern';
 import { getUserAuthState, isUserDisabled } from '@/lib/services/users/userAuthState';
 import {
   ApiTokenAuthError,
@@ -50,20 +56,26 @@ export interface ApiSessionContext {
 class RbacAuthorizationError extends Error {
   status: number;
   /**
-   * Structured denial (enforce mode): `{ error, code, ... }`, where `error` is the
-   * same reason sentence legacy mode sends (`error.message` of this error). Session
+   * Structured refusal: `{ error, code, ... }`, where `error` is the same reason
+   * sentence the plain-text clients show (`error.message` of this error). Session
    * routes send it as is; the client-API error styles embed `code` in their
    * envelope and keep `error.message` as the reason.
    */
   body?: Record<string, unknown>;
+  /** Response headers that belong to the refusal (`Retry-After` on a 503). */
+  headers?: Record<string, string>;
 
-  constructor(message: string, status = 403, body?: Record<string, unknown>) {
+  constructor(message: string, status = 403, body?: Record<string, unknown>, headers?: Record<string, string>) {
     super(message);
     this.name = 'RbacAuthorizationError';
     this.status = status;
     this.body = body;
+    this.headers = headers;
   }
 }
+
+/** Seconds a client is told to wait before retrying a request refused because authorization was unavailable. */
+const AUTHORIZATION_RETRY_AFTER_SECONDS = '5';
 
 export function getHeaderValue(
   request: FastifyRequest,
@@ -217,31 +229,50 @@ function getRequestPathname(request: FastifyRequest): string {
   return canonicalizeRequestPathname(request.raw.url);
 }
 
-async function loadRbacUser(session: ApiSessionContext): Promise<IUser> {
-  const db = await getDatabase();
-  await db.switchToTenant(session.tenantDbName);
-  // Defense-in-depth: verify the active tenant context matches the session.
-  // Real providers always implement assertTenantContext; test mocks may not.
-  if (typeof db.assertTenantContext === 'function') {
-    db.assertTenantContext(session.tenantDbName);
-  }
-  const user = await db.findUserById(session.userId);
-  if (!user) {
-    throw new RbacAuthorizationError('Unauthorized', 401);
-  }
-  // Defense-in-depth: ensure the loaded user record actually belongs to the
-  // session's tenant. (DB partitioning already enforces this, but a mis-bound
-  // mock or future refactor could break the invariant — fail loudly here.)
-  if (user.tenantId && String(user.tenantId) !== String(session.tenantId)) {
-    throw new RbacAuthorizationError('Tenant mismatch', 403);
-  }
-  // Defense-in-depth: the global session hook already rejects disabled
-  // accounts, but this is also the entry point for callers that bypass it
-  // (e.g. realtime cookie auth via resolveSessionRbacContext).
-  if (isUserDisabled(user)) {
-    throw new RbacAuthorizationError('Account is disabled', 401);
-  }
-  return user;
+/**
+ * What the gate knows about the signed-in user: the user row and the groups
+ * (with their tenant-level grants), both read fresh for every request so that
+ * a role, permission or membership change applies at once, without a re-login.
+ * Group grants can only ever RAISE a user's access. The groups come with one
+ * batched read (groupGrants.ts) and travel on to the principal load, so a cold
+ * principal does not read them again.
+ *
+ * Bound to the session's tenant with a real scope (never the process-global
+ * binding, which a concurrent request for another tenant can overwrite).
+ */
+async function loadSessionAuthz(
+  session: ApiSessionContext,
+): Promise<{ user: IUser; groups: IGroup[]; groupGrants: GroupTenantGrant[] }> {
+  return runWithTenantScope(session.tenantDbName, async (db) => {
+    // Defense-in-depth: verify the active tenant context matches the session.
+    // Real providers always implement assertTenantContext; test mocks may not.
+    if (typeof db.assertTenantContext === 'function') {
+      db.assertTenantContext(session.tenantDbName);
+    }
+    // The memberships need only the user id the session already carries, so they are
+    // read together with the user row; the group documents follow in ONE batched read.
+    const [user, groupIds] = await Promise.all([
+      db.findUserById(session.userId),
+      listUserGroupIds(db, session.userId),
+    ]);
+    if (!user) {
+      throw new RbacAuthorizationError('Unauthorized', 401);
+    }
+    // Defense-in-depth: ensure the loaded user record actually belongs to the
+    // session's tenant. (DB partitioning already enforces this, but a mis-bound
+    // mock or future refactor could break the invariant - fail loudly here.)
+    if (user.tenantId && String(user.tenantId) !== String(session.tenantId)) {
+      throw new RbacAuthorizationError('Tenant mismatch', 403);
+    }
+    // Defense-in-depth: the global session hook already rejects disabled
+    // accounts, but this is also the entry point for callers that bypass it
+    // (e.g. realtime cookie auth via resolveSessionRbacContext).
+    if (isUserDisabled(user)) {
+      throw new RbacAuthorizationError('Account is disabled', 401);
+    }
+    const groups = await fetchGroupsByIds(db, session.tenantId, groupIds);
+    return { user, groups, groupGrants: grantsOf(groups) };
+  });
 }
 
 /**
@@ -284,69 +315,65 @@ export async function rejectInactiveSessionAccount(
 }
 
 /**
- * Loads the tenant-level grants of every group the user belongs to. These are
- * unioned with the user's own role/permissions at authorization time, so group
- * membership can only ever raise access. Resolved per request (not baked into
- * the session) so group edits take effect immediately without re-login.
- */
-async function loadGroupTenantGrants(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  userId: string,
-): Promise<GroupTenantGrant[]> {
-  // Defensive: a provider without group support (or a partial test double) must
-  // never break the authorization gate — treat a missing/empty result as "no
-  // group grants" rather than throwing. The loader keeps exactly that contract
-  // and the old per-membership point reads (bounded concurrency, same order).
-  return loadGroupGrants(db, userId);
-}
-
-/**
- * Resolves the RBAC user + group grants for routes that are not covered by the
+ * Resolves the user row + group grants for routes that are not covered by the
  * route-prefix map (e.g. /api/dashboard) but still need per-item permission
- * filtering inside the handler. Reuses the exact same loaders as the
- * route-level RBAC gate so both paths can never diverge.
+ * filtering inside the handler. Reuses the exact loader of the route gate, so
+ * both paths can never diverge.
  */
 export async function resolveSessionRbacContext(
   session: ApiSessionContext,
-): Promise<{ user: IUser; groupGrants: GroupTenantGrant[] }> {
-  const user = await loadRbacUser(session);
-  const db = await getDatabase();
-  const groupGrants = await loadGroupTenantGrants(db, String(user._id));
-  return { user, groupGrants };
+): Promise<{ user: IUser; groupGrants: GroupTenantGrant[]; groups: IGroup[] }> {
+  const { user, groups, groupGrants } = await loadSessionAuthz(session);
+  return { user, groupGrants, groups };
 }
 
+/** What a handler-level check may carry along so the user row and the groups are not read twice. */
+type SessionRbacHint = { user: IUser; groupGrants: GroupTenantGrant[]; groups?: IGroup[] };
+
 /**
- * A second, handler-level service check (after the route gate) that follows the
- * tenant's authorization mode: the rbac.ts answer in legacy / shadow, the policy
- * engine's (groups for tokens, project narrowing, custom policies) in enforce.
+ * A second, handler-level service check (after the route gate): the policy
+ * engine decides, exactly as it does for the gate (the owner's group grants for
+ * tokens, the project narrowing, custom policies, the token scope as a cap).
  * Use it instead of calling rbac.ts directly whenever a handler decides on a
  * permission service itself (per-item filtering, an extra "admin only" switch).
  * Works for dashboard sessions and for API-token requests.
+ *
+ * A refusal resolves `{ allowed: false, decisionId }` (the handler's 403 then
+ * carries the decision as X-Decision-Id). When the engine cannot decide at all it
+ * THROWS the 503 `authorization_unavailable` refusal the gate would have sent -
+ * which `withApiRequestContext` / `withClientApiRequestContext` turn into the
+ * response - so a handler that merely tests `.allowed` can never read an outage
+ * as an answer.
  */
 export async function authorizeServiceForRequest(
   request: FastifyRequest,
   service: PermissionService,
-  options: ServiceAuthzOptions & { rbac?: { user: IUser; groupGrants: GroupTenantGrant[] } } = {},
+  options: ServiceAuthzOptions & { rbac?: SessionRbacHint } = {},
 ): Promise<ServiceAuthzResult> {
   const result = await decideServiceForRequest(request, service, options);
-  // A refusal the handler turns into a 403 names its decision (X-Decision-Id).
-  if (!result.allowed && result.decisionId) request.iamDecisionId = result.decisionId;
+  if (!result.allowed && result.decisionId) {
+    if (result.unavailable) {
+      throw unavailableError(request, { decisionId: result.decisionId, service, required: result.required });
+    }
+    // A refusal the handler turns into a 403 names its decision (X-Decision-Id).
+    request.iamDecisionId = result.decisionId;
+  }
   return result;
 }
 
 async function decideServiceForRequest(
   request: FastifyRequest,
   service: PermissionService,
-  options: ServiceAuthzOptions & { rbac?: { user: IUser; groupGrants: GroupTenantGrant[] } },
+  options: ServiceAuthzOptions & { rbac?: SessionRbacHint },
 ): Promise<ServiceAuthzResult> {
   const requestId = request.apiRequestId ?? 'unknown';
   const route = routeLabel(request, getRequestPathname(request));
-  const common = { requestId, route, ...options };
+  const common = { requestId, route, method: options.method, level: options.level };
 
   const tokenContext = request.apiTokenContext;
   if (tokenContext) {
     if (!tokenContext.user) {
-      return { allowed: false, service, required: options.level ?? 'read', enforced: false };
+      return { allowed: false, service, required: options.level ?? 'read' };
     }
     return authorizeServiceAccess({
       subject: 'token',
@@ -363,7 +390,16 @@ async function decideServiceForRequest(
   }
 
   const session = requireSessionContext(request);
-  const rbac = options.rbac ?? await resolveSessionRbacContext(session);
+  let rbac: SessionRbacHint;
+  try {
+    rbac = options.rbac ?? await resolveSessionRbacContext(session);
+  } catch (error) {
+    if (error instanceof RbacAuthorizationError) throw error;
+    throw authorizationUnavailable(request, session.tenantDbName, 'principal_unavailable', error, {
+      service,
+      required: options.level ?? getRequiredPermissionLevel(options.method ?? 'GET', service),
+    });
+  }
   return authorizeServiceAccess({
     subject: 'session',
     tenantDbName: session.tenantDbName,
@@ -371,6 +407,7 @@ async function decideServiceForRequest(
     userId: String(rbac.user._id),
     user: rbac.user,
     groupGrants: rbac.groupGrants,
+    groups: rbac.groups,
     projectId: sessionProject(request).projectId,
     projectFromPath: sessionProject(request).fromPath,
     ip: getAuthzClientIp(request),
@@ -404,165 +441,137 @@ function resolveRequestAuthz(request: FastifyRequest, pathname: string): RouteAu
   return resolveRouteAuthz(request.routeOptions?.config, pathname);
 }
 
-interface LegacyVerdict {
-  allowed: boolean;
-  service: PermissionService;
-  required?: ServicePermissionLevel;
+// ── refusals ─────────────────────────────────────────────────────────────
+
+/**
+ * The 503 refusal for a request the engine could not decide: the audit hook
+ * records it (`request.iamDenial`), the response carries the decision id, and
+ * the client is told when to retry.
+ */
+function unavailableError(
+  request: FastifyRequest,
+  decision: { decisionId: string; service: PermissionService; required: ServicePermissionLevel; projectId?: string | null },
+): RbacAuthorizationError {
+  request.iamDenial = {
+    code: 'authorization_unavailable',
+    decisionId: decision.decisionId,
+    service: decision.service,
+    required: decision.required,
+    action: undefined,
+    projectId: decision.projectId,
+    ip: getAuthzClientIp(request),
+  };
+  const body = unavailableBody(decision.decisionId);
+  return new RbacAuthorizationError(body.error, 503, body, { 'Retry-After': AUTHORIZATION_RETRY_AFTER_SECONDS });
+}
+
+/** Count, log and build the 503 for a failure that happened BEFORE the engine could be asked (loading the caller). */
+function authorizationUnavailable(
+  request: FastifyRequest,
+  tenantDbName: string,
+  reason: EnforceUnavailableReason,
+  error: unknown,
+  info: { service: PermissionService; required: ServicePermissionLevel },
+): RbacAuthorizationError {
+  const decisionId = recordAuthorizationUnavailable(tenantDbName, reason, error, {
+    requestId: request.apiRequestId ?? 'unknown',
+    route: routeLabel(request, getRequestPathname(request)),
+    service: info.service,
+  });
+  return unavailableError(request, { decisionId, ...info });
+}
+
+/** The error that answers a request the engine refused (403) or could not decide (503). */
+function refusalError(request: FastifyRequest, verdict: EnforceDenial | EnforceUnavailable): RbacAuthorizationError {
+  if (verdict.unavailable) return unavailableError(request, verdict);
+  const body = forbiddenBody(verdict);
+  request.iamDenial = {
+    code: 'forbidden',
+    decisionId: verdict.decisionId,
+    service: verdict.service,
+    required: verdict.required,
+    action: verdict.action,
+    projectId: verdict.projectId,
+    reasons: verdict.reasons,
+    policyIds: verdict.policyIds,
+    ip: getAuthzClientIp(request),
+  };
+  return new RbacAuthorizationError(String(body.message), 403, body);
 }
 
 /**
- * The legacy (rbac.ts) decision for a request that resolves to a service. A
- * route that merely falls under a ROUTE_PREFIXES entry goes through
- * authorizeServiceRequest exactly as before; only an explicit `service`
- * declaration (new, may carry a `level`) uses the resolved-service variant.
+ * A request that does not resolve to a service. `public` / `self` /
+ * `authenticated` declarations let it through (the handler, the global hook or
+ * the token wrapper authenticated the caller); an undeclared route is refused
+ * with 403 `route_not_declared`.
  */
-function legacyVerdict(
-  resolution: RouteAuthzResolution,
-  user: IUser,
-  method: string,
-  pathname: string,
-  groupGrants: GroupTenantGrant[],
-  tokenScope: UserServicePermissions | null | undefined,
-  target: { service: PermissionService; level?: 'read' | 'write' | 'admin' },
-): LegacyVerdict {
-  if (resolution.declaration?.kind === 'service') {
-    const d = authorizeService(user, method, target.service, groupGrants, tokenScope, target.level);
-    return { allowed: d.allowed, service: d.service, required: d.required };
-  }
-  const d = authorizeServiceRequest(user, method, pathname, groupGrants, tokenScope);
-  return { allowed: d.allowed, service: d.service ?? target.service, required: d.required };
-}
-
-/**
- * Enforce mode: what to do with a request that does not resolve to a service.
- * `public` / `self` / `authenticated` declarations let it through (the handler,
- * the global hook or the token wrapper authenticated the caller); an undeclared
- * route is refused with 403 `route_not_declared`.
- */
-async function applyNonServiceDeclaration(
+function applyNonServiceDeclaration(
   request: FastifyRequest,
   resolution: RouteAuthzResolution,
   tenantDbName: string,
   log: Record<string, unknown>,
-): Promise<void> {
-  const kind = resolution.effective.kind;
-  if (kind !== 'undeclared') {
+): void {
+  if (resolution.effective.kind !== 'undeclared') {
     // public / self: the handler is responsible. authenticated: the caller is a
     // signed-in principal of the tenant (the global hook / token auth ran).
     return;
   }
-  const { recordUndeclaredDenial, undeclaredRouteBody } = await import('@/lib/iam/enforce');
   recordUndeclaredDenial(tenantDbName, log);
   const body = undeclaredRouteBody();
   request.iamDenial = { code: 'route_not_declared' };
   throw new RbacAuthorizationError(body.message, 403, body);
 }
 
+// ── the gates ────────────────────────────────────────────────────────────
+
 async function enforceSessionRbac(request: FastifyRequest, session: ApiSessionContext): Promise<void> {
   const pathname = getRequestPathname(request);
   const resolution = resolveRequestAuthz(request, pathname);
-  const enforced = await resolveEnforcement(session.tenantDbName);
+  const target = resolution.effective;
 
-  // Not a service route: legacy never gated it. Enforce decides by declaration.
-  const target = enforced
-    ? (resolution.effective.kind === 'service' ? resolution.effective : null)
-    : resolution.legacy;
-
-  if (!target) {
-    if (resolution.effective.kind === 'undeclared') {
-      // Shadow/enforce only: record that an authenticated caller reached a route
-      // nobody declared (enforce refuses it). Synchronous, never throws.
-      observeUnmappedPath(session.tenantDbName, () => ({
-        subject: 'session',
-        tenantDbName: session.tenantDbName,
-        tenantId: session.tenantId,
-        requestId: request.apiRequestId ?? session.requestId,
-        method: request.method,
-        pathname,
-        route: routeLabel(request, pathname),
-        userId: session.userId,
-        role: session.userRole,
-      }));
-    }
-    if (enforced) {
-      await applyNonServiceDeclaration(request, resolution, session.tenantDbName, {
-        subject: 'session',
-        requestId: request.apiRequestId ?? session.requestId,
-        method: request.method,
-        route: routeLabel(request, pathname),
-        userId: session.userId,
-      });
-    }
+  if (target.kind !== 'service') {
+    applyNonServiceDeclaration(request, resolution, session.tenantDbName, {
+      subject: 'session',
+      requestId: request.apiRequestId ?? session.requestId,
+      method: request.method,
+      route: routeLabel(request, pathname),
+      userId: session.userId,
+    });
     return;
   }
 
-  const user = await loadRbacUser(session);
+  let loaded: Awaited<ReturnType<typeof loadSessionAuthz>>;
+  try {
+    loaded = await loadSessionAuthz(session);
+  } catch (error) {
+    if (error instanceof RbacAuthorizationError) throw error;
+    throw authorizationUnavailable(request, session.tenantDbName, 'principal_unavailable', error, {
+      service: target.service,
+      required: target.level ?? getRequiredPermissionLevel(request.method, target.service),
+    });
+  }
+  const { user, groups, groupGrants } = loaded;
   request.rbacUser = user;
-  // db is already switched to the session tenant by loadRbacUser.
-  const db = await getDatabase();
-  const groupGrants = await loadGroupTenantGrants(db, String(user._id));
-  const decision = legacyVerdict(resolution, user, request.method, pathname, groupGrants, undefined, target);
-  // Shadow mode (C2): evaluate the policy engine off the request path against
-  // the decision just computed. Fire-and-forget; see lib/iam/shadow/observer.
-  observeGateDecision(session.tenantDbName, () => ({
+
+  const verdict = await decideEnforced({
     subject: 'session',
     tenantDbName: session.tenantDbName,
     tenantId: session.tenantId,
     requestId: request.apiRequestId ?? session.requestId,
     method: request.method,
-    pathname,
     route: routeLabel(request, pathname),
     userId: String(user._id),
-    role: typeof user.role === 'string' ? user.role : '',
-    user: { role: user.role, servicePermissions: user.servicePermissions, projectIds: user.projectIds },
+    user,
     groupGrants,
-    activeProjectId: sessionProject(request).projectId,
+    groups,
+    requestedProjectId: sessionProject(request).projectId,
     projectFromPath: sessionProject(request).fromPath,
+    service: target.service,
+    level: target.level,
     ip: getAuthzClientIp(request),
-    legacy: { allowed: decision.allowed, service: decision.service, required: decision.required, level: target.level },
-  }));
-
-  if (enforced) {
-    const { decideEnforced, forbiddenBody } = await import('@/lib/iam/enforce');
-    const verdict = await decideEnforced({
-      subject: 'session',
-      tenantDbName: session.tenantDbName,
-      tenantId: session.tenantId,
-      requestId: request.apiRequestId ?? session.requestId,
-      method: request.method,
-      route: routeLabel(request, pathname),
-      userId: String(user._id),
-      user,
-      groupGrants,
-      requestedProjectId: sessionProject(request).projectId,
-      projectFromPath: sessionProject(request).fromPath,
-      service: decision.service,
-      level: target.level,
-      legacyAllowed: decision.allowed,
-      ip: getAuthzClientIp(request),
-      path: pathname,
-    });
-    if (!verdict.allowed) {
-      const body = forbiddenBody(verdict);
-      request.iamDenial = {
-        code: 'forbidden',
-        decisionId: verdict.decisionId,
-        service: verdict.service,
-        required: verdict.required,
-        action: verdict.action,
-        projectId: verdict.projectId,
-        reasons: verdict.reasons,
-        policyIds: verdict.policyIds,
-        ip: getAuthzClientIp(request),
-      };
-      throw new RbacAuthorizationError(String(body.message), 403, body);
-    }
-    return;
-  }
-
-  if (!decision.allowed) {
-    throw new RbacAuthorizationError(serviceDenialReason(decision.service, decision.required), 403);
-  }
+    path: pathname,
+  });
+  if (!verdict.allowed) throw refusalError(request, verdict);
 }
 
 async function enforceApiTokenRbac(
@@ -571,36 +580,16 @@ async function enforceApiTokenRbac(
 ): Promise<void> {
   const pathname = getRequestPathname(request);
   const resolution = resolveRequestAuthz(request, pathname);
-  const enforced = await resolveEnforcement(context.tenantDbName);
+  const target = resolution.effective;
 
-  const target = enforced
-    ? (resolution.effective.kind === 'service' ? resolution.effective : null)
-    : resolution.legacy;
-
-  if (!target) {
-    if (resolution.effective.kind === 'undeclared') {
-      observeUnmappedPath(context.tenantDbName, () => ({
-        subject: 'token',
-        tenantDbName: context.tenantDbName,
-        tenantId: context.tenantId,
-        requestId: request.apiRequestId ?? 'unknown',
-        method: request.method,
-        pathname,
-        route: routeLabel(request, pathname),
-        userId: String(context.tokenRecord.userId ?? ''),
-        role: typeof context.user?.role === 'string' ? context.user.role : '',
-        tokenId: context.tokenRecord._id ? String(context.tokenRecord._id) : undefined,
-      }));
-    }
-    if (enforced) {
-      await applyNonServiceDeclaration(request, resolution, context.tenantDbName, {
-        subject: 'token',
-        requestId: request.apiRequestId ?? 'unknown',
-        method: request.method,
-        route: routeLabel(request, pathname),
-        tokenId: context.tokenRecord._id ? String(context.tokenRecord._id) : undefined,
-      });
-    }
+  if (target.kind !== 'service') {
+    applyNonServiceDeclaration(request, resolution, context.tenantDbName, {
+      subject: 'token',
+      requestId: request.apiRequestId ?? 'unknown',
+      method: request.method,
+      route: routeLabel(request, pathname),
+      tokenId: context.tokenRecord._id ? String(context.tokenRecord._id) : undefined,
+    });
     return;
   }
 
@@ -610,80 +599,28 @@ async function enforceApiTokenRbac(
 
   request.rbacUser = context.user;
   const owner = context.user;
-  const decision = legacyVerdict(
-    resolution,
-    owner,
-    request.method,
-    pathname,
-    [],
-    // Least-privilege token scope: when the token carries its own
-    // servicePermissions allowlist, cap the owner-derived permission at it.
-    // Unscoped tokens (null) inherit the owner's permissions unchanged.
-    context.tokenRecord.servicePermissions,
-    target,
-  );
-  observeGateDecision(context.tenantDbName, () => ({
+  const verdict = await decideEnforced({
     subject: 'token',
     tenantDbName: context.tenantDbName,
     tenantId: context.tenantId,
     requestId: request.apiRequestId ?? 'unknown',
     method: request.method,
-    pathname,
     route: routeLabel(request, pathname),
     userId: String(owner._id),
-    role: typeof owner.role === 'string' ? owner.role : '',
+    user: owner,
     tokenId: context.tokenRecord._id ? String(context.tokenRecord._id) : undefined,
-    user: { role: owner.role, servicePermissions: owner.servicePermissions, projectIds: owner.projectIds },
-    groupGrants: [],
+    // Least-privilege token scope: when the token carries its own
+    // servicePermissions allowlist, it caps the owner-derived permission.
+    // Unscoped tokens (null) inherit the owner's permissions unchanged.
     tokenScope: context.tokenRecord.servicePermissions,
     // The project the handler will run in (the token's own, else the default one).
-    activeProjectId: context.projectId ? String(context.projectId) : null,
+    requestedProjectId: context.projectId ? String(context.projectId) : null,
+    service: target.service,
+    level: target.level,
     ip: getAuthzClientIp(request),
-    legacy: { allowed: decision.allowed, service: decision.service, required: decision.required, level: target.level },
-  }));
-
-  if (enforced) {
-    const { decideEnforced, forbiddenBody } = await import('@/lib/iam/enforce');
-    const verdict = await decideEnforced({
-      subject: 'token',
-      tenantDbName: context.tenantDbName,
-      tenantId: context.tenantId,
-      requestId: request.apiRequestId ?? 'unknown',
-      method: request.method,
-      route: routeLabel(request, pathname),
-      userId: String(owner._id),
-      user: owner,
-      groupGrants: [],
-      tokenId: context.tokenRecord._id ? String(context.tokenRecord._id) : undefined,
-      tokenScope: context.tokenRecord.servicePermissions,
-      requestedProjectId: context.projectId ? String(context.projectId) : null,
-      service: decision.service,
-      level: target.level,
-      legacyAllowed: decision.allowed,
-      ip: getAuthzClientIp(request),
-      path: pathname,
-    });
-    if (!verdict.allowed) {
-      const body = forbiddenBody(verdict);
-      request.iamDenial = {
-        code: 'forbidden',
-        decisionId: verdict.decisionId,
-        service: verdict.service,
-        required: verdict.required,
-        action: verdict.action,
-        projectId: verdict.projectId,
-        reasons: verdict.reasons,
-        policyIds: verdict.policyIds,
-        ip: getAuthzClientIp(request),
-      };
-      throw new RbacAuthorizationError(String(body.message), 403, body);
-    }
-    return;
-  }
-
-  if (!decision.allowed) {
-    throw new RbacAuthorizationError(serviceDenialReason(decision.service, decision.required), 403);
-  }
+    path: pathname,
+  });
+  if (!verdict.allowed) throw refusalError(request, verdict);
 }
 
 export function sendProjectContextError(
@@ -698,11 +635,15 @@ export function sendProjectContextError(
     return reply.code(401).send({ error: 'Unauthorized' });
   }
 
-  return null;
+  // A handler-level authorization check (authorizeServiceForRequest) refuses by
+  // throwing - the 503 when the engine could not decide: the handlers that catch
+  // broadly and end here answer it as the gate would.
+  return sendRbacError(reply, error);
 }
 
 function sendRbacError(reply: FastifyReply, error: unknown) {
   if (error instanceof RbacAuthorizationError) {
+    for (const [name, value] of Object.entries(error.headers ?? {})) reply.header(name, value);
     return reply.code(error.status).send(error.body ?? { error: error.message });
   }
   return null;
@@ -767,8 +708,15 @@ export function withApiRequestContext<
       if (session) {
         await enforceSessionRbac(request, session);
       }
+    } catch (error) {
+      return sendRbacError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Internal server error',
+        });
+    }
 
-      return runWithRequestContext(
+    try {
+      return await runWithRequestContext(
         {
           requestId: request.apiRequestId,
           tenantId: session?.tenantId,
@@ -795,10 +743,12 @@ export function withApiRequestContext<
         },
       );
     } catch (error) {
-      return sendRbacError(reply, error)
-        ?? reply.code(500).send({
-          error: error instanceof Error ? error.message : 'Internal server error',
-        });
+      // A handler-level authorization check (authorizeServiceForRequest) refuses
+      // by throwing, exactly as the gate does; anything else is the handler's own
+      // error and goes to the framework's error handler, as it always did.
+      const refused = sendRbacError(reply, error);
+      if (refused) return refused;
+      throw error;
     }
   });
 }
@@ -930,16 +880,20 @@ function sendClientApiError(
 
   if (error instanceof RbacAuthorizationError) {
     const code = typeof error.body?.code === 'string' ? error.body.code : undefined;
-    // An enforce-mode refusal names its decision in every dialect, so an API
-    // caller can hand it to IAM center > Access check like a dashboard user can.
+    // A refusal names its decision in every dialect, so an API caller can hand it to
+    // IAM center > Access check (403) or to support (503) like a dashboard user can.
     const decisionId = typeof error.body?.decisionId === 'string' ? error.body.decisionId : undefined;
     const extra = decisionId ? { decision_id: decisionId } : {};
+    // 503 = authorization was unavailable (nobody was refused on merit): a server
+    // error in every dialect, one the SDKs retry - not a permission error.
+    const unavailable = error.status === 503;
+    for (const [name, value] of Object.entries(error.headers ?? {})) reply.header(name, value);
     if (style === 'anthropic') {
-      const envelope = anthropicErrorEnvelope(error.message, 'permission_error');
+      const envelope = anthropicErrorEnvelope(error.message, unavailable ? 'api_error' : 'permission_error');
       return reply.code(error.status).send({ ...envelope, error: { ...envelope.error, ...extra } });
     }
     if (style === 'openai') {
-      const body = openAiErrorBody(error.message, 'permission_error');
+      const body = openAiErrorBody(error.message, unavailable ? 'server_error' : 'permission_error');
       return reply.code(error.status).send({ error: { ...body.error, ...(code ? { code } : {}), ...extra } });
     }
     return reply.code(error.status).send(error.body ?? { error: error.message });

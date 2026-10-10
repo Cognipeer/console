@@ -7,6 +7,13 @@
  *   iam_policies  one document per custom policy, keyed by `policyId`
  *   iam_meta      { id: 'policy_version', value: <counter> } — bumped on every
  *                 policy write; other nodes notice a change by polling it
+ *                 (the same collection holds the workspace settings and the
+ *                 project-levels activation instant)
+ *
+ * A policy is either enabled or disabled. Policies stored by an earlier build
+ * with `mode: 'monitor'` (a dry-run state that no longer exists) read as DISABLED:
+ * they are never enforced, and the next save of the policy replaces the stored
+ * document.
  *
  * Writes validate the Cedar text against the generated schema FIRST and refuse
  * anything with parse errors or validation errors (Cedar's `validate` answers
@@ -44,8 +51,6 @@ export {
   type PolicyValidation,
 } from './policyText';
 
-export type IamPolicyMode = 'enforce' | 'monitor';
-
 export interface IIamPolicy {
   /** Stable record id (same value as `policyId`; kept for API symmetry with other stores). */
   _id: string;
@@ -57,8 +62,7 @@ export interface IIamPolicy {
   cedar: string;
   /** The structured form the visual editor wrote (`cedar` is its compilation); null = raw Cedar. */
   spec: PolicySpec | null;
-  /** `monitor` policies are evaluated but never change a decision. */
-  mode: IamPolicyMode;
+  /** Only an enabled policy takes part in decisions. */
   enabled: boolean;
   /** Reserved for per-service set splitting: the service the policy is scoped to. */
   service?: string;
@@ -115,7 +119,6 @@ function toDoc(policy: IIamPolicy): Record<string, unknown> {
     description: policy.description ?? null,
     cedar: policy.cedar,
     spec: policy.spec ?? null,
-    mode: policy.mode,
     enabled: policy.enabled,
     service: policy.service ?? null,
     createdBy: policy.createdBy,
@@ -135,8 +138,8 @@ function fromDoc(data: Record<string, unknown>): IIamPolicy {
     cedar: String(data.cedar ?? ''),
     // Old rows have no `spec`; anything that is not an object reads as raw Cedar.
     spec: data.spec && typeof data.spec === 'object' && !Array.isArray(data.spec) ? (data.spec as PolicySpec) : null,
-    mode: data.mode === 'monitor' ? 'monitor' : 'enforce',
-    enabled: data.enabled !== false,
+    // A policy saved in the retired `monitor` mode was never enforced: it stays that way (disabled).
+    enabled: data.mode !== 'monitor' && data.enabled !== false,
     service: typeof data.service === 'string' ? data.service : undefined,
     createdBy: String(data.createdBy ?? ''),
     updatedBy: String(data.updatedBy ?? data.createdBy ?? ''),
@@ -168,7 +171,6 @@ async function bumpPolicyVersion(tenantDbName: string): Promise<number> {
 
 export interface ListPoliciesOptions {
   enabled?: boolean;
-  mode?: IamPolicyMode;
   service?: string;
 }
 
@@ -180,7 +182,6 @@ export async function listPolicies(
   return docs
     .map((d) => fromDoc(d.data))
     .filter((p) => options.enabled === undefined || p.enabled === options.enabled)
-    .filter((p) => !options.mode || p.mode === options.mode)
     .filter((p) => !options.service || p.service === options.service);
 }
 
@@ -197,7 +198,6 @@ export interface CreatePolicyInput {
   cedar: string;
   /** The spec `cedar` was compiled from (visual editor); omit for raw Cedar. */
   spec?: PolicySpec | null;
-  mode?: IamPolicyMode;
   enabled?: boolean;
   service?: string;
 }
@@ -214,6 +214,20 @@ function assertSpecMatches(spec: PolicySpec | null | undefined, cedar: string): 
   if (expected !== cedar) {
     throw new IamPolicyError('invalid_input', 'The stored Cedar does not match the policy spec it claims to come from');
   }
+}
+
+/**
+ * The retired `mode` field. A caller that still sends `"enforce"` means "a normal
+ * policy", which is what every policy is now; `"monitor"` (a dry run) no longer
+ * exists and is refused - never silently stored as a live policy.
+ */
+function assertNoRetiredMode(input: object): void {
+  const mode = (input as { mode?: unknown }).mode;
+  if (mode === undefined || mode === 'enforce') return;
+  const message = mode === 'monitor'
+    ? 'Monitor mode no longer exists: a policy is either enabled or disabled. Save it as disabled to keep it from taking effect.'
+    : 'mode is no longer used: send enabled as true or false';
+  throw new IamPolicyError('validation', message, [{ message }]);
 }
 
 function assertValid(cedar: string): PolicyValidation {
@@ -260,8 +274,8 @@ function totalsOf(policies: readonly IIamPolicy[]): PolicyTotals {
 /**
  * Refuse a write that would push the tenant's policy set past the aggregate
  * caps (MAX_POLICIES_PER_TENANT, MAX_STATEMENTS_PER_TENANT,
- * MAX_TENANT_POLICY_BYTES). Disabled and monitor policies count: they are
- * parsed, evaluated (monitor) and listed all the same. A write that does not
+ * MAX_TENANT_POLICY_BYTES). Disabled policies count: they are stored, parsed
+ * and listed all the same. A write that does not
  * grow the set (an edit that shrinks a policy, in a tenant that is already over
  * a cap) is always allowed, so nobody is locked out of cleaning up.
  */
@@ -303,14 +317,12 @@ export async function createPolicy(
   input: CreatePolicyInput,
   actor: string,
 ): Promise<IIamPolicy> {
+  assertNoRetiredMode(input);
   const name = typeof input.name === 'string' ? input.name.trim() : '';
   if (!name) throw new IamPolicyError('invalid_input', 'Policy name is required');
   const policyId = input.policyId ?? `p-${randomBytes(6).toString('hex')}`;
   if (!POLICY_ID_RE.test(policyId)) {
     throw new IamPolicyError('invalid_input', 'policyId must match [a-z0-9][a-z0-9._-]{0,62}');
-  }
-  if (input.mode && input.mode !== 'enforce' && input.mode !== 'monitor') {
-    throw new IamPolicyError('invalid_input', 'mode must be "enforce" or "monitor"');
   }
   const validation = assertValid(input.cedar);
   assertSpecMatches(input.spec, input.cedar);
@@ -324,7 +336,6 @@ export async function createPolicy(
     description: input.description,
     cedar: input.cedar,
     spec: input.spec ?? null,
-    mode: input.mode ?? 'enforce',
     enabled: input.enabled ?? true,
     service: input.service,
     createdBy: actor,
@@ -352,7 +363,6 @@ export interface UpdatePolicyInput {
    * spec makes the policy raw (the editor can no longer show it as a form).
    */
   spec?: PolicySpec | null;
-  mode?: IamPolicyMode;
   enabled?: boolean;
   service?: string | null;
 }
@@ -363,15 +373,13 @@ export async function updatePolicy(
   patch: UpdatePolicyInput,
   actor: string,
 ): Promise<IIamPolicy> {
+  assertNoRetiredMode(patch);
   if (patch.cedar !== undefined) {
     const validation = assertValid(patch.cedar);
     assertSpecMatches(patch.spec, patch.cedar);
     await assertWithinTenantBounds(tenantDbName, policyId, { cedar: patch.cedar, statements: validation.statements.length }, false);
   } else if (patch.spec !== undefined && patch.spec !== null) {
     throw new IamPolicyError('invalid_input', 'A spec can only be replaced together with its Cedar');
-  }
-  if (patch.mode !== undefined && patch.mode !== 'enforce' && patch.mode !== 'monitor') {
-    throw new IamPolicyError('invalid_input', 'mode must be "enforce" or "monitor"');
   }
   if (patch.name !== undefined && !patch.name.trim()) {
     throw new IamPolicyError('invalid_input', 'Policy name must not be empty');
@@ -388,7 +396,6 @@ export async function updatePolicy(
       cedar: patch.cedar ?? current.cedar,
       // New Cedar without a spec = raw; otherwise keep (or replace) the spec.
       spec: patch.cedar !== undefined ? (patch.spec ?? null) : current.spec,
-      mode: patch.mode ?? current.mode,
       enabled: patch.enabled ?? current.enabled,
       service: patch.service === undefined ? current.service : (patch.service ?? undefined),
       updatedBy: actor,

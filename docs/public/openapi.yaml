@@ -18,6 +18,8 @@ info:
     - Errors return `{ "error": "..." }` (string or object).
     - Requests may include an optional `request_id` for correlation.
     - `POST /messages` speaks the Anthropic Messages dialect: its errors use `{ "type": "error", "error": { "type", "message" } }` instead of `{ "error": ... }`.
+    - A `403` because the token's owner, scope or project does not allow the call carries `code: "forbidden"`, `service`, `required` and a `decisionId` (also in the `X-Decision-Id` response header); OpenAI- and Anthropic-compatible endpoints carry it as `error.decision_id`. A route without an authorization declaration is refused with `code: "route_not_declared"`.
+    - When authorization itself cannot be decided the answer is `503` with `code: "authorization_unavailable"`, a `decisionId` and a `Retry-After` header: retry the request. A call is never allowed because authorization was unavailable.
 
     ## Official SDK
     For TypeScript/JavaScript integrations, use the official [Cognipeer Console SDK](https://cognipeer.github.io/console-sdk/).
@@ -15761,6 +15763,27 @@ components:
                 code:
                   type: string
                   nullable: true
+                decision_id:
+                  type: string
+                  format: uuid
+                  description: On a refusal by the permission gate in the OpenAI- or Anthropic-compatible dialect — the decision id.
+        code:
+          type: string
+          description: "Machine-readable reason on a refusal: `forbidden`, `route_not_declared`, `authorization_unavailable`, `ip_not_allowed`."
+        message:
+          type: string
+          description: Repeats `error` on a refusal by the permission gate.
+        service:
+          type: string
+          description: The permission service that refused the call (`models`, `prompts`, ...).
+        required:
+          type: string
+          enum: [read, write, admin]
+          description: The level the route needed on `service`.
+        decisionId:
+          type: string
+          format: uuid
+          description: Identifies the refusal (also the `X-Decision-Id` header).
     EvalItemScore:
       type: object
       description: One scorer's result for a single item.
@@ -22185,13 +22208,51 @@ components:
           example:
             error: Invalid API token
     Forbidden:
-      description: Forbidden — the feature is not enabled for this token, project, or license tier.
+      description: "Forbidden — the token's owner, scope or project does not allow the call, the route has no authorization declaration, the call comes from an address the token does not allow, or the feature is not enabled for this license tier. A refusal by the permission gate carries `code`, `service`, `required` and `decisionId`, and the `X-Decision-Id` header."
+      headers:
+        X-Decision-Id:
+          description: Identifies the refusal. Resolve it in the IAM center (Access check) or with `GET /api/iam/decisions/{decisionId}`. Present on refusals by the permission gate.
+          schema:
+            type: string
+            format: uuid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            permission:
+              summary: The token's owner lacks the level the route needs
+              value:
+                error: "Forbidden: models requires write permission"
+                message: "Forbidden: models requires write permission"
+                code: forbidden
+                service: models
+                required: write
+                decisionId: 7c0f6b2e-5d1a-4c1e-9a53-0d9b8a1f2e44
+            license:
+              summary: The feature is not part of the license
+              value:
+                error: This feature is not available in your license
+    AuthorizationUnavailable:
+      description: "Service unavailable — authorization could not be decided, so the call was refused (never allowed). Retry after the `Retry-After` delay."
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+        X-Decision-Id:
+          description: Identifies the refusal for support.
+          schema:
+            type: string
+            format: uuid
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
           example:
-            error: This feature is not available in your license
+            error: Authorization is temporarily unavailable
+            code: authorization_unavailable
+            decisionId: 0b6f2c3e-8d41-4f0a-b7c2-6a1d9e5f3c70
     NotFound:
       description: The requested resource was not found.
       content:

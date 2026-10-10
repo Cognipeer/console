@@ -5,11 +5,11 @@
  * Written rows (service `iam`, action `admin`, outcome `success`):
  *   iam.policy.create | iam.policy.update | iam.policy.delete   resourceType iam-policy
  *   iam.settings.update                                         resourceType iam-settings
- *   iam.mode.change                                             resourceType iam-mode
- * `metadata` carries `iamChange: true` plus, for a policy: policyId, name, mode,
+ * `metadata` carries `iamChange: true` plus, for a policy: policyId, name,
  * enabled, effect, statementCount and the new Cedar (at most 4 KB, `cedarTruncated`
- * says when it was cut). Enforce-mode denials are written by the request gate
- * (server/api/plugin.ts) with `metadata.iamEnforce` and a `decisionId`.
+ * says when it was cut). Denials of the engine are written by the request gate
+ * (server/api/plugin.ts) with `metadata.iamEnforce` and a `decisionId`; so is
+ * an "authorization unavailable" refusal (`metadata.code`).
  *
  * Writing is awaited and never throws: a policy change must not fail because its
  * audit row could not be stored, but the failure is logged at error level.
@@ -25,15 +25,14 @@ const logger = createLogger('iam:audit');
 
 export const MAX_AUDITED_CEDAR_BYTES = 4 * 1024;
 
-export const IAM_CHANGE_RESOURCE_TYPES = ['iam-policy', 'iam-settings', 'iam-mode'] as const;
+export const IAM_CHANGE_RESOURCE_TYPES = ['iam-policy', 'iam-settings'] as const;
 export type IamChangeResourceType = typeof IAM_CHANGE_RESOURCE_TYPES[number];
 
 export type IamChangeEvent =
   | 'iam.policy.create'
   | 'iam.policy.update'
   | 'iam.policy.delete'
-  | 'iam.settings.update'
-  | 'iam.mode.change';
+  | 'iam.settings.update';
 
 export interface IamActor {
   tenantDbName: string;
@@ -53,14 +52,13 @@ export function clipToBytes(text: string, maxBytes: number): { text: string; tru
 }
 
 /** The metadata that describes a policy in an audit row. */
-export function policyAuditMetadata(policy: Pick<IIamPolicy, 'policyId' | 'name' | 'mode' | 'enabled' | 'cedar' | 'spec'>): Record<string, unknown> {
+export function policyAuditMetadata(policy: Pick<IIamPolicy, 'policyId' | 'name' | 'enabled' | 'cedar' | 'spec'>): Record<string, unknown> {
   const { effect, statementCount } = summarizeEffect(policy.cedar);
   const cedar = clipToBytes(policy.cedar, MAX_AUDITED_CEDAR_BYTES);
   return {
     iamChange: true,
     policyId: policy.policyId,
     name: policy.name.slice(0, 200),
-    mode: policy.mode,
     enabled: policy.enabled,
     effect,
     statementCount,

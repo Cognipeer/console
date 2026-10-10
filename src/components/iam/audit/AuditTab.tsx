@@ -85,8 +85,8 @@ const CODE_COLOR: Record<string, string> = {
   forbidden: 'red',
   route_not_declared: 'orange',
   ip_not_allowed: 'orange',
-  would_deny: 'red',
-  would_allow: 'green',
+  // The engine could not decide (HTTP 503): not a policy answer, so it is not red like a denial.
+  authorization_unavailable: 'yellow',
 };
 
 function describeError(err: unknown, t: Translate): string {
@@ -238,7 +238,7 @@ function SummaryCell({ text }: { text: string }) {
 
 // ── tab ───────────────────────────────────────────────────────────────────
 
-export default function AuditTab({ canManage }: { canManage: boolean }) {
+export default function AuditTab() {
   const t = useTranslations(NS);
   const tCenter = useTranslations('iamCenter');
   const locale = useLocale();
@@ -408,7 +408,6 @@ export default function AuditTab({ canManage }: { canManage: boolean }) {
     };
 
     if (filters.kind === 'changes') return [time, actor, event, policy, summary];
-    if (filters.kind === 'monitor') return [time, policy, service, request, principal, summary];
     return [time, principal, service, request, decision, summary];
   }, [filters.kind, labelOf, locale, t, tCenter]);
 
@@ -428,9 +427,7 @@ export default function AuditTab({ canManage }: { canManage: boolean }) {
       ? { title: t('empty.filteredTitle'), description: t('empty.filteredHint') }
       : {
           title: t(`empty.${filters.kind}.title`),
-          description:
-            t(`empty.${filters.kind}.hint`) +
-            (filters.kind === 'monitor' && canManage ? ` ${t('empty.monitor.manageHint')}` : ''),
+          description: t(`empty.${filters.kind}.hint`),
         };
 
   return (

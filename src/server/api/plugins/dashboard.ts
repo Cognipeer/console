@@ -4,7 +4,6 @@ import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { authz } from '@/lib/iam/routeAuthz';
-import { resolveEnforcement } from '@/lib/iam/shadow/mode';
 import { getDashboardData } from '@/lib/services/dashboard/dashboardService';
 import {
   GuardrailBlockError,
@@ -30,17 +29,18 @@ import {
   authorizeServiceForRequest,
   readJsonBody,
   requireProjectContextForRequest,
+  resolveSessionRbacContext,
   sendProjectContextError,
   withApiRequestContext,
+  type ApiSessionContext,
 } from '../fastify-utils';
 
 const logger = createLogger('api:dashboard');
 
 // The overview is a per-project summary for any member of the project (the
-// project context already limits what it shows). In enforce mode the handler
-// drops the sections whose service the caller cannot read (models, vector,
-// tracing), so project narrowing / custom policies / token scopes apply to the
-// numbers too.
+// project context already limits what it shows). The handler drops the sections
+// whose service the caller cannot read (models, vector, tracing), so project
+// narrowing / custom policies / token scopes apply to the numbers too.
 const OVERVIEW_AUTHZ = authz.authenticated();
 // The playgrounds invoke a model of the tenant on the caller's behalf, i.e. the
 // same capability as the token API's chat / audio / images / embeddings / ocr
@@ -78,19 +78,19 @@ function sanitize(value: unknown, max = 20000) {
 }
 
 /**
- * Enforce mode only: blank the overview sections of services the caller cannot
- * read (the engine decides, with project narrowing and the token cap). Legacy
- * and shadow tenants keep the unfiltered overview, as before.
+ * Blank the overview sections of services the caller cannot read (the policy
+ * engine decides, with project narrowing and the token cap). The caller's user
+ * row and groups are loaded once and handed to the three checks.
  */
 export async function hideUnreadableOverviewSections(
   request: FastifyRequest,
-  tenantDbName: string,
+  session: ApiSessionContext,
   data: Awaited<ReturnType<typeof getDashboardData>>,
 ): Promise<void> {
-  if (!(await resolveEnforcement(tenantDbName))) return;
+  const rbac = await resolveSessionRbacContext(session);
   const [models, vector, tracing] = await Promise.all(
     (['models', 'vector', 'tracing'] as const).map((service) =>
-      authorizeServiceForRequest(request, service, { level: 'read' })),
+      authorizeServiceForRequest(request, service, { level: 'read', rbac })),
   );
   if (!models.allowed) data.stats.models = { total: 0, llm: 0, embedding: 0 };
   if (!vector.allowed) data.stats.vectors = { providers: 0, indexes: 0 };
@@ -120,7 +120,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
           to: filter.to,
         },
       );
-      await hideUnreadableOverviewSections(request, session.tenantDbName, data);
+      await hideUnreadableOverviewSections(request, session, data);
 
       return reply.code(200).send({
         ...data,

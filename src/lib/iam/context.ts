@@ -18,10 +18,9 @@
  * Why the care around `ip` and `now`: Cedar evaluates a request atomically. A
  * context attribute that does not parse (`ip("unknown")`, an IPv4-mapped IPv6
  * address, a malformed date) does not just fail one policy, it fails the whole
- * authorization call - which the enforce gate treats as "engine unavailable"
- * and answers with the LEGACY decision, i.e. a hostile or odd `X-Forwarded-For`
- * could switch every custom policy off. So every value is parsed here first and
- * an unusable one is simply left out of the context.
+ * authorization call, which the gate would answer with 503 "authorization
+ * unavailable". So every value is parsed here first and an unusable one (an odd
+ * forwarded address, say) is simply left out of the context.
  */
 
 import { isIP } from 'node:net';

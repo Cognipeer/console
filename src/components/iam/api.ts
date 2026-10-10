@@ -9,21 +9,28 @@
  *
  * Errors: every non-2xx answer is thrown as `IamApiError` carrying the HTTP
  * status, the contract's `code` and `details` (`[{ message, line?, col? }]` for
- * `validation`). `IamApiError` extends the engine page's `ApiError`, so
- * `instanceof ApiError` checks keep working for either.
+ * `validation`). `IamApiError` extends `ApiError`, so `instanceof ApiError`
+ * checks keep working for either.
  */
 
-import { ApiError } from '@/components/settings/authorizationEngineData';
+/** The error `code` and message of a failed API call (`{ error, code }` bodies). */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+  ) {
+    super(message);
+  }
+}
 
 // ── primitives ───────────────────────────────────────────────────────────
 
 export type IamEffect = 'permit' | 'forbid';
 export type IamPolicyEffect = IamEffect | 'mixed';
-export type IamPolicyMode = 'monitor' | 'enforce';
 export type IamChannel = 'dashboard' | 'api' | 'portal';
 export type IamPrincipalType = 'user' | 'group' | 'token';
 export type IamLevel = 'none' | 'read' | 'write' | 'admin';
-export type IamAuthzMode = 'legacy' | 'shadow' | 'enforce';
 
 export const IAM_CHANNELS: readonly IamChannel[] = ['dashboard', 'api', 'portal'];
 
@@ -119,18 +126,12 @@ export interface ManagedPolicy {
   cedar: string;
 }
 
-export interface PolicyMonitorStats {
-  wouldAllow: number;
-  wouldDeny: number;
-  since: string | null;
-}
-
 export interface PolicyRow {
   policyId: string;
   name: string;
   description: string;
   effect: IamPolicyEffect;
-  mode: IamPolicyMode;
+  /** A policy is simply enabled or disabled; a disabled one is kept but never applied. */
   enabled: boolean;
   /** `null` = the policy was written as raw Cedar. */
   spec: PolicySpec | null;
@@ -141,7 +142,6 @@ export interface PolicyRow {
   updatedBy: string;
   /** Name or email of the last editor (the id when they no longer exist). */
   updatedByLabel: string;
-  monitorStats: PolicyMonitorStats | null;
 }
 
 export interface PoliciesResponse {
@@ -153,7 +153,6 @@ export interface PoliciesResponse {
 export interface PolicyWriteBody {
   name: string;
   description?: string;
-  mode: IamPolicyMode;
   enabled: boolean;
   spec?: PolicySpec;
   cedar?: string;
@@ -184,7 +183,6 @@ export interface PreviewRequest {
   policyId?: string;
   spec?: PolicySpec;
   cedar?: string;
-  mode?: IamPolicyMode;
 }
 
 export interface PrincipalRefView {
@@ -208,7 +206,8 @@ export interface PreviewResponse {
   truncated: boolean;
   /**
    * How many people / tokens the draft was checked for, out of how many it reaches
-   * (`targeted` null = "everyone": the number is the directory's, not known here).
+   * (`targeted` is exact when the audience is named or the whole directory was
+   * listed; null = the audience is larger than what was listed).
    */
   principals: { evaluated: number; targeted: number | null };
   flips: { allowToDeny: number; denyToAllow: number };
@@ -249,8 +248,6 @@ export interface SimulateResponse {
   allowed: boolean;
   reasons: SimulateReason[];
   defaultDeny: boolean;
-  monitor: { allowed: boolean; differs: boolean; reasons: SimulateReason[] } | null;
-  legacy: { allowed: boolean; service: string; required: string } | null;
   principalSummary: {
     type: string;
     id: string;
@@ -261,7 +258,6 @@ export interface SimulateResponse {
     /** `disabled` for a disabled account. */
     status: string | null;
   };
-  mode: IamAuthzMode;
   /** The project the check ran in; null = none applied. */
   projectId: string | null;
   /** The workspace owner always reaches the Authorization Engine: this decision came from that rule. */
@@ -335,7 +331,7 @@ export interface PrincipalDetail {
 
 // ── audit ────────────────────────────────────────────────────────────────
 
-export type AuditKind = 'denials' | 'changes' | 'monitor';
+export type AuditKind = 'denials' | 'changes';
 
 export interface AuditParams {
   kind: AuditKind;
@@ -375,6 +371,42 @@ export interface IamSettings {
   tokens: { maxLifetimeDays: number | null; requireExpiry: boolean };
 }
 
+// ── engine health ────────────────────────────────────────────────────────
+
+export type EngineStatus = 'ok' | 'degraded' | 'down';
+export type EngineUnavailableReason = 'engine_unavailable' | 'principal_unavailable' | 'evaluation_error';
+
+/**
+ * `GET /api/iam/engine/stats`: whether the engine is deciding, how many
+ * decisions this workspace has had and what went wrong. The latency and cache
+ * figures are per server process and only exist on single-organisation
+ * deployments (`null` on a shared platform).
+ */
+export interface EngineStats {
+  /** `process`: the figures describe this whole server; `tenant`: this workspace only. */
+  statsScope: 'process' | 'tenant';
+  generatedAt: string | null;
+  health: { status: EngineStatus; message: string | null };
+  /** This workspace's policy set; `null` when it could not be read. */
+  policySet: { version: number; custom: number; skipped: string[] } | null;
+  /** Routes the gate would refuse because they carry no authorization declaration (none in a healthy build). */
+  undeclaredRoutes: { count: number; sample: Array<{ method: string; url: string }> };
+  /** This workspace's counters since the server process started. */
+  decisions: number;
+  allows: number;
+  denies: number;
+  /** Requests refused with 503 because the engine could not decide. */
+  unavailable: number;
+  undeclaredDenies: number;
+  ownerSafety: number;
+  lastUnavailableAt: string | null;
+  lastUnavailableReason: EngineUnavailableReason | null;
+  p50Us: number | null;
+  p99Us: number | null;
+  /** 0..1 */
+  cacheHitRate: number | null;
+}
+
 // ── projects / resources (outside /api/iam) ──────────────────────────────
 
 export interface ProjectOption {
@@ -406,6 +438,13 @@ export interface SessionInfo {
   userId: string;
   role: string;
   servicePermissions: Record<string, string>;
+  /**
+   * What the engine allows this person per service in the active project (groups,
+   * policies and project limits included), `null` when the engine could not say.
+   */
+  effectivePermissions: Record<string, IamLevel> | null;
+  /** The project those levels were computed for; null = none. */
+  effectiveProjectId: string | null;
 }
 
 // ── errors ───────────────────────────────────────────────────────────────
@@ -444,10 +483,6 @@ const num = (v: unknown, fallback = 0): number =>
 const bool = (v: unknown, fallback = false): boolean => (typeof v === 'boolean' ? v : fallback);
 const strings = (v: unknown): string[] =>
   asArray(v).filter((x): x is string => typeof x === 'string');
-
-function toAuthzMode(v: unknown): IamAuthzMode {
-  return v === 'shadow' || v === 'enforce' ? v : 'legacy';
-}
 
 function toEffect(v: unknown): IamEffect {
   return v === 'forbid' ? 'forbid' : 'permit';
@@ -555,15 +590,13 @@ export function normalizeSpec(raw: unknown): PolicySpec | null {
 
 export function normalizePolicyRow(raw: unknown): PolicyRow {
   const o = asRecord(raw);
-  const stats = asRecord(o.monitorStats);
-  const hasStats = o.monitorStats !== null && o.monitorStats !== undefined && Object.keys(stats).length > 0;
   const effect = o.effect === 'permit' || o.effect === 'forbid' ? o.effect : 'mixed';
   return {
     policyId: str(o.policyId),
     name: str(o.name, str(o.policyId)),
     description: str(o.description),
     effect,
-    mode: o.mode === 'monitor' ? 'monitor' : 'enforce',
+    // A policy is enabled or disabled. (An older server may still send `mode`; it is not read.)
     enabled: bool(o.enabled, true),
     spec: normalizeSpec(o.spec),
     cedar: str(o.cedar),
@@ -572,13 +605,6 @@ export function normalizePolicyRow(raw: unknown): PolicyRow {
     updatedAt: str(o.updatedAt),
     updatedBy: str(o.updatedBy),
     updatedByLabel: str(o.updatedByLabel, str(o.updatedBy)),
-    monitorStats: hasStats
-      ? {
-          wouldAllow: num(stats.wouldAllow),
-          wouldDeny: num(stats.wouldDeny),
-          since: nullableStr(stats.since),
-        }
-      : null,
   };
 }
 
@@ -650,8 +676,6 @@ function normalizeReason(raw: unknown): SimulateReason {
 
 export function normalizeSimulate(raw: unknown): SimulateResponse {
   const o = asRecord(raw);
-  const monitor = asRecord(o.monitor);
-  const legacy = asRecord(o.legacy);
   const ps = asRecord(o.principalSummary);
   const scope = asRecord(ps.tokenScope);
   const hasScope = !!ps.tokenScope && typeof ps.tokenScope === 'object' && !Array.isArray(ps.tokenScope);
@@ -661,18 +685,6 @@ export function normalizeSimulate(raw: unknown): SimulateResponse {
     allowed: bool(o.allowed),
     reasons: asArray(o.reasons).map(normalizeReason),
     defaultDeny: bool(o.defaultDeny),
-    monitor:
-      o.monitor && typeof o.monitor === 'object'
-        ? {
-            allowed: bool(monitor.allowed),
-            differs: bool(monitor.differs),
-            reasons: asArray(monitor.reasons).map(normalizeReason),
-          }
-        : null,
-    legacy:
-      o.legacy && typeof o.legacy === 'object'
-        ? { allowed: bool(legacy.allowed), service: str(legacy.service), required: str(legacy.required) }
-        : null,
     principalSummary: {
       type: str(ps.type),
       id: str(ps.id),
@@ -685,7 +697,6 @@ export function normalizeSimulate(raw: unknown): SimulateResponse {
       tokenScope: hasScope ? tokenScope : null,
       status: nullableStr(ps.status),
     },
-    mode: toAuthzMode(o.mode),
     projectId: nullableStr(o.projectId),
     ownerSafety: bool(o.ownerSafety),
     // Older servers do not say: they only ever evaluated what the gates evaluate.
@@ -799,10 +810,6 @@ export function normalizePrincipalList(raw: unknown): PrincipalListResponse {
   };
 }
 
-function toLevel(v: unknown): IamLevel {
-  return v === 'read' || v === 'write' || v === 'admin' ? v : 'none';
-}
-
 export function normalizePrincipalDetail(raw: unknown): PrincipalDetail {
   const o = asRecord(raw);
   const principal = asRecord(o.principal);
@@ -841,7 +848,7 @@ export function normalizeAudit(raw: unknown): AuditResponse {
   return {
     items: asArray(o.items).map((entry): AuditItem => {
       const r = asRecord(entry);
-      const kind: AuditKind = r.kind === 'changes' || r.kind === 'monitor' ? r.kind : 'denials';
+      const kind: AuditKind = r.kind === 'changes' ? 'changes' : 'denials';
       return {
         id: str(r.id),
         at: str(r.at),
@@ -870,6 +877,63 @@ export function normalizeSettings(raw: unknown): IamSettings {
       maxLifetimeDays: typeof days === 'number' && Number.isFinite(days) && days > 0 ? days : null,
       requireExpiry: bool(tokens.requireExpiry),
     },
+  };
+}
+
+const numOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+function toLevel(v: unknown): IamLevel {
+  return v === 'read' || v === 'write' || v === 'admin' ? v : 'none';
+}
+
+/** `{ service: level }` for the services the server named; `null` when the map is absent (the engine could not answer). */
+export function normalizeLevels(raw: unknown): Record<string, IamLevel> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out: Record<string, IamLevel> = {};
+  for (const [service, level] of Object.entries(raw as Rec)) {
+    if (typeof level === 'string') out[service] = toLevel(level);
+  }
+  return out;
+}
+
+export function normalizeEngineStats(raw: unknown): EngineStats {
+  const o = asRecord(raw);
+  const scope = o.statsScope === 'tenant' ? 'tenant' : 'process';
+  const health = asRecord(o.health);
+  const status: EngineStatus = health.status === 'degraded' || health.status === 'down' ? health.status : 'ok';
+  const policySet = asRecord(o.policySet);
+  const hasPolicySet = o.policySet !== null && typeof o.policySet === 'object' && !Array.isArray(o.policySet);
+  const undeclared = asRecord(o.undeclaredRoutes);
+  // In process scope `enforce` counts the whole server; this workspace's own figures are `tenantEnforce`.
+  const own = asRecord(o.tenantEnforce && typeof o.tenantEnforce === 'object' ? o.tenantEnforce : o.enforce);
+  const engine = asRecord(o.engine);
+  const reason = own.lastUnavailableReason;
+  return {
+    statsScope: scope,
+    generatedAt: nullableStr(o.generatedAt),
+    health: { status, message: nullableStr(health.message) },
+    policySet: hasPolicySet
+      ? { version: num(policySet.version), custom: num(policySet.custom), skipped: strings(policySet.skipped) }
+      : null,
+    undeclaredRoutes: {
+      count: num(undeclared.count),
+      sample: asArray(undeclared.sample).map((entry) => {
+        const r = asRecord(entry);
+        return { method: str(r.method), url: str(r.url) };
+      }),
+    },
+    decisions: num(own.engineDecisions),
+    allows: num(own.engineAllows),
+    denies: num(own.engineDenies),
+    unavailable: num(own.unavailable),
+    undeclaredDenies: num(own.undeclaredDenies),
+    ownerSafety: num(own.ownerSafety),
+    lastUnavailableAt: nullableStr(own.lastUnavailableAt),
+    lastUnavailableReason:
+      reason === 'engine_unavailable' || reason === 'principal_unavailable' || reason === 'evaluation_error' ? reason : null,
+    p50Us: scope === 'process' ? numOrNull(engine.p50Us) : null,
+    p99Us: scope === 'process' ? numOrNull(engine.p99Us) : null,
+    cacheHitRate: scope === 'process' ? numOrNull(asRecord(engine.principalCache).hitRate) : null,
   };
 }
 
@@ -1034,11 +1098,9 @@ export const iamApi = {
     return normalizeSettings(await request('PUT', '/api/iam/settings', { body: settings }));
   },
 
-  /** The engine mode (an endpoint that predates the center; only the fields the center needs). */
-  async getMode(signal?: AbortSignal): Promise<{ mode: IamAuthzMode; effectiveMode: IamAuthzMode }> {
-    const o = asRecord(await request('GET', '/api/iam/mode', { signal }));
-    const mode = toAuthzMode(o.mode);
-    return { mode, effectiveMode: o.effectiveMode === undefined ? mode : toAuthzMode(o.effectiveMode) };
+  /** Engine health and counters (`GET /api/iam/engine/stats`). */
+  async getEngineStats(signal?: AbortSignal): Promise<EngineStats> {
+    return normalizeEngineStats(await request('GET', '/api/iam/engine/stats', { signal }));
   },
 };
 
@@ -1101,7 +1163,13 @@ export const iamLookupApi = {
     for (const [k, v] of Object.entries(asRecord(o.servicePermissions))) {
       if (typeof v === 'string') perms[k] = v;
     }
-    return { userId: str(o.userId), role: str(o.role), servicePermissions: perms };
+    return {
+      userId: str(o.userId),
+      role: str(o.role),
+      servicePermissions: perms,
+      effectivePermissions: normalizeLevels(o.effectivePermissions),
+      effectiveProjectId: nullableStr(o.effectiveProjectId),
+    };
   },
 };
 

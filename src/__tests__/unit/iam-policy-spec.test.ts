@@ -32,7 +32,7 @@ import {
   type PolicySpec,
 } from '@/lib/iam/policySpec';
 import { reloadConfig } from '@/lib/core/config';
-import { createPolicy, deletePolicy, listPolicies } from '@/lib/iam/store';
+import { createPolicy, deletePolicy, listPolicies, updatePolicy } from '@/lib/iam/store';
 import { createIamTestDb, mulberry32, type IamTestDb } from '../helpers/iamTestDb';
 
 let env: IamTestDb;
@@ -60,11 +60,11 @@ const base = (over: Partial<PolicySpec> = {}): PolicySpec => ({
   ...over,
 });
 
-async function install(spec: PolicySpec, mode: 'enforce' | 'monitor' = 'enforce', id?: string) {
+async function install(spec: PolicySpec, id?: string) {
   const out = await compileSpec(spec);
   expect(out.errors, JSON.stringify(out.errors)).toEqual([]);
   expect(out.ok).toBe(true);
-  return createPolicy(tenant(), { policyId: id, name: 'spec', cedar: out.cedar, spec: out.spec!, mode }, 'tester');
+  return createPolicy(tenant(), { policyId: id, name: 'spec', cedar: out.cedar, spec: out.spec! }, 'tester');
 }
 
 const member = (userId = 'u1', groupIds: string[] = [], role = 'user'): IamPrincipal =>
@@ -273,15 +273,15 @@ describe('principals', () => {
   it('anyUser means sessions only, anyToken tokens only, any everyone', async () => {
     const owner = member('u1');
     const tok = tokenOf('t1', owner);
-    await install(base({ principals: { anyUser: true } }), 'enforce', 'p-any-user');
+    await install(base({ principals: { anyUser: true } }), 'p-any-user');
     expect([(await gate(owner, 'agents', 'POST')).allowed, (await gate(tok, 'agents', 'POST')).allowed]).toEqual([false, true]);
     await deletePolicy(tenant(), 'p-any-user');
 
-    await install(base({ principals: { anyToken: true } }), 'enforce', 'p-any-token');
+    await install(base({ principals: { anyToken: true } }), 'p-any-token');
     expect([(await gate(owner, 'agents', 'POST')).allowed, (await gate(tok, 'agents', 'POST')).allowed]).toEqual([true, false]);
     await deletePolicy(tenant(), 'p-any-token');
 
-    await install(base({ principals: { any: true } }), 'enforce', 'p-any');
+    await install(base({ principals: { any: true } }), 'p-any');
     expect([(await gate(owner, 'agents', 'POST')).allowed, (await gate(tok, 'agents', 'POST')).allowed]).toEqual([false, false]);
   });
 
@@ -409,12 +409,12 @@ describe('conditions', () => {
   });
 
   it('either bound alone works, and "now" defaults to the real time', async () => {
-    await install(base({ conditions: { validFrom: '2999-01-01T00:00:00Z' } }), 'enforce', 'future-only');
+    await install(base({ conditions: { validFrom: '2999-01-01T00:00:00Z' } }), 'future-only');
     expect((await gate(member(), 'agents', 'POST')).allowed).toBe(true); // not valid yet
     expect((await gate(member(), 'agents', 'POST', at('3000-01-01T00:00:00Z'))).allowed).toBe(false);
     await deletePolicy(tenant(), 'future-only');
 
-    await install(base({ conditions: { validUntil: '2999-01-01T00:00:00Z' } }), 'enforce', 'until-only');
+    await install(base({ conditions: { validUntil: '2999-01-01T00:00:00Z' } }), 'until-only');
     expect((await gate(member(), 'agents', 'POST')).allowed).toBe(false); // still in force today
     expect((await gate(member(), 'agents', 'POST', at('3000-01-01T00:00:00Z'))).allowed).toBe(true);
   });
@@ -452,7 +452,7 @@ describe('conditions', () => {
   });
 });
 
-describe('permits and monitor mode', () => {
+describe('permits and disabled policies', () => {
   it('a permit grants what RBAC does not', async () => {
     await install(base({ effect: 'permit', principals: { users: ['u1'] }, actions: ['members.read'] }));
     expect((await gate(member('u1'), 'members', 'GET')).allowed).toBe(true);
@@ -461,13 +461,14 @@ describe('permits and monitor mode', () => {
     expect((await gate(member('u1'), 'members', 'POST')).allowed).toBe(false);
   });
 
-  it('a monitor-mode spec policy reports what it would change without changing the decision', async () => {
-    await install(base({ principals: { users: ['u1'] } }), 'monitor', 'watch');
-    const res = await authorizeGate({ tenant: tenant(), principal: member('u1'), service: 'agents', method: 'POST' });
-    expect(res.allowed).toBe(true);
-    expect(res.monitor).toMatchObject({ allowed: false, differs: true, policyIds: ['watch'] });
-    const unaffected = await authorizeGate({ tenant: tenant(), principal: member('u2'), service: 'agents', method: 'POST' });
-    expect(unaffected.monitor).toMatchObject({ differs: false, policyIds: [] });
+  it('a disabled spec policy changes nothing, an enabled one does', async () => {
+    const policy = await install(base({ principals: { users: ['u1'] } }), 'toggle');
+    expect((await gate(member('u1'), 'agents', 'POST')).allowed).toBe(false);
+    await updatePolicy(tenant(), policy.policyId, { enabled: false }, 'tester');
+    expect((await gate(member('u1'), 'agents', 'POST')).allowed).toBe(true);
+    await updatePolicy(tenant(), policy.policyId, { enabled: true }, 'tester');
+    expect((await gate(member('u1'), 'agents', 'POST')).allowed).toBe(false);
+    expect((await gate(member('u2'), 'agents', 'POST')).allowed).toBe(true);
   });
 });
 

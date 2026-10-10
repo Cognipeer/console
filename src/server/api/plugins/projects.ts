@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+import { getProjectLevelsSince, ignoredProjectLevels } from '@/lib/iam/projectLevels';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
@@ -410,11 +411,16 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           role: u.role as string,
           projectRole: null as ProjectRole | null,
           servicePermissions: null,
+          ignoredServices: [] as string[],
           implicit: true,
         }));
 
-      // Explicit members via UserProject records
+      // Explicit members via UserProject records. The engine reads a stored "no access" of a row that
+      // predates the workspace's activation instant as not set (projectLevels.ts): the row names those
+      // services so the screens do not show them as live limits (and a save does not turn them into
+      // fresh ones).
       const memberships = await access.db.listUserProjectsByProject(projectId);
+      const since = await getProjectLevelsSince(session.tenantDbName);
       const explicit = memberships
         .map((m) => {
           const user = userById.get(m.userId);
@@ -426,6 +432,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
             role: user.role as string,
             projectRole: m.role,
             servicePermissions: m.servicePermissions ?? null,
+            ignoredServices: ignoredProjectLevels(m, since),
             implicit: false,
           };
         })
@@ -433,6 +440,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           userId: string;
           email: string;
           implicit: boolean;
+          ignoredServices: string[];
           name: string;
           projectRole: ProjectRole;
           role: string;
@@ -452,6 +460,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           projectRole: user.role === 'project_admin' ? 'project_admin' : 'member',
           role: user.role as string,
           servicePermissions: null,
+          ignoredServices: [] as string[],
         }));
 
       // Deduplicate: privileged users already covered above

@@ -52,8 +52,23 @@ import type { FastifyInstance } from 'fastify';
  *     `IRealtimeSessionLog.turnCount` is now required. A seam-4 overlay no
  *     longer compiles against this tree, and a seam-5 overlay not against a
  *     seam-4 one.
+ * 6 — engine-only authorization. Every workspace is decided by the policy
+ *     engine from the first request; the legacy rbac.ts decision, the workspace
+ *     modes (legacy / shadow / enforce) and the shadow recorder, the kill
+ *     switches and the per-policy monitor mode are gone. The registry's own
+ *     shape is unchanged; the community contract the overlay compiles against
+ *     changed in both directions. Removed: `ServiceAuthzOptions.legacy` and
+ *     `ServiceAuthzResult.enforced` (`@/lib/iam/requestAuthz`) and the whole
+ *     `@/lib/iam/shadow` tree. Added: `ServiceAuthzResult.unavailable` (an engine
+ *     that cannot decide refuses with 503 `authorization_unavailable`, which a
+ *     handler-level check must map instead of reading as an answer),
+ *     `ServiceAuthzPrincipal.groups`, the `groups` that `resolveSessionRbacContext`
+ *     returns, and `registerGateAction` (`@/lib/iam/gateActions`). A seam-5
+ *     overlay no longer compiles against this tree (`legacy` / `enforced`), and
+ *     a seam-6 overlay not against a seam-5 one (`unavailable`, `groups`,
+ *     `registerGateAction`).
  */
-export const SEAM_CONTRACT_VERSION = 5;
+export const SEAM_CONTRACT_VERSION = 6;
 
 
 

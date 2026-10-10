@@ -40,6 +40,7 @@ import platformServicesJson from '@/config/platform-services.json';
 import {
   getEffectiveServicePermission,
   type PermissionService,
+  type ServicePermissionLevel,
   type UserRole,
   type UserServicePermissions,
 } from '@/lib/security/rbac';
@@ -190,6 +191,14 @@ type DashboardServicesOptions = {
   role?: UserRole;
   servicesHomeOnly?: boolean;
   servicePermissions?: UserServicePermissions;
+  /**
+   * What the policy engine allows the person per service in the ACTIVE project
+   * (groups, policies and project limits included; `GET /api/auth/session`).
+   * A service named here is judged by this level; a service the map does not
+   * name, or no map at all (loading, or the engine could not answer), falls back
+   * to the role-based level.
+   */
+  effectivePermissions?: Partial<Record<string, ServicePermissionLevel>> | null;
   /** Current deployment mode. Services marked `requiresOnPrem` are hidden entirely when false. */
   isOnPrem?: boolean;
 };
@@ -202,26 +211,25 @@ export function getDashboardServices(
     role = 'user',
     servicesHomeOnly = false,
     servicePermissions = {},
+    effectivePermissions = null,
     isOnPrem = false,
   } = options;
+
+  const levelOf = (id: PermissionService): ServicePermissionLevel =>
+    effectivePermissions?.[id] ?? getEffectiveServicePermission({ role, servicePermissions }, id);
 
   return DASHBOARD_SERVICE_DEFINITIONS.filter((service) => {
     if (service.requiresOnPrem && !isOnPrem) return false;
 
     if (service.id !== 'services-home') {
-      const level = getEffectiveServicePermission(
-        { role, servicePermissions },
-        service.id,
-      );
-      if (level === 'none') return false;
+      if (levelOf(service.id) === 'none') return false;
     }
 
     if (
       service.tenantAdminOnly &&
       !isTenantAdmin &&
       service.id !== 'services-home' &&
-      getEffectiveServicePermission({ role, servicePermissions }, service.id) !==
-        'admin'
+      levelOf(service.id) !== 'admin'
     ) {
       return false;
     }

@@ -136,7 +136,7 @@ export default function TokenAccessSection({ tokenId }: { tokenId: string }) {
                     <Table.Td>
                       <Group gap={4}>
                         {row.sources.map((source, index) => (
-                          <Badge key={`${source.kind}:${source.label}:${index}`} size="xs" variant="outline" color="gray" tt="none">
+                          <Badge key={`${source.kind}:${source.label}:${index}`} size="xs" variant="default" tt="none">
                             {`${t(`access.sourceKind.${source.kind}`)}: ${source.label}`}
                           </Badge>
                         ))}
@@ -176,11 +176,8 @@ export default function TokenAccessSection({ tokenId }: { tokenId: string }) {
                 <Badge size="xs" variant="light" color={policy.effect === 'forbid' ? 'red' : policy.effect === 'permit' ? 'teal' : 'gray'}>
                   {t(`access.effect.${policy.effect}`)}
                 </Badge>
-                <Badge size="xs" variant="outline" color="gray">
-                  {t(`access.mode.${policy.mode}`)}
-                </Badge>
                 {!policy.enabled ? (
-                  <Badge size="xs" variant="outline" color="gray">
+                  <Badge size="xs" variant="default">
                     {t('access.disabled')}
                   </Badge>
                 ) : null}

@@ -23,9 +23,8 @@ import type { FastifyInstance } from 'fastify';
 import type { DatabaseProvider, IUser } from '@/lib/database';
 import { configureIamEngine, resetIamEngineForTests } from '@/lib/iam/engine';
 import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
-import { resetShadowBufferForTests } from '@/lib/iam/shadow';
 import { drainPendingTasks } from '@/lib/core/asyncTask';
-import { holdPreviewForTests } from '@/lib/iam/preview';
+import { holdPreviewForTests, MAX_PRINCIPALS as MAX_PREVIEW_PRINCIPALS } from '@/lib/iam/preview';
 import { encodeCursor, MAX_AUDIT_OFFSET, MAX_DIRECTORY_OFFSET } from '@/server/api/plugins/iam-directory';
 import { enqueueAuditLog } from '@/server/api/plugin';
 import { iamApiPlugin } from '@/server/api/plugins/iam';
@@ -105,7 +104,6 @@ describeForEachProvider('IAM center hardening', (getDb) => {
   }
 
   beforeAll(async () => {
-    process.env.IAM_ENFORCE_DISABLED = '1';
     hoisted.getDatabase.mockImplementation(async () => getDb());
     db = getDb();
     A = await build('a');
@@ -121,7 +119,6 @@ describeForEachProvider('IAM center hardening', (getDb) => {
   afterAll(async () => {
     await drainPendingTasks();
     await app?.close();
-    resetShadowBufferForTests();
   });
 
   const forbidSpec = (over: Record<string, unknown> = {}) => ({
@@ -137,35 +134,35 @@ describeForEachProvider('IAM center hardening', (getDb) => {
 
   describe('an allow rule that takes effect grants access: owners and admins only', () => {
     it('lets a delegated iam administrator restrict and design, not grant', async () => {
-      // a deny rule: allowed, even enforcing
-      const forbid = await create('delegate', { name: 'Deny', mode: 'enforce', enabled: true, spec: forbidSpec() });
+      // a deny rule: allowed, even in effect
+      const forbid = await create('delegate', { name: 'Deny', enabled: true, spec: forbidSpec() });
       expect(forbid.status, JSON.stringify(forbid.body)).toBe(201);
-      // an allow rule that takes effect: refused
-      const refused = await create('delegate', { name: 'Grant', mode: 'enforce', enabled: true, spec: permitSpec() });
+      // an allow rule that takes effect: refused, with the way out in the message
+      const refused = await create('delegate', { name: 'Grant', enabled: true, spec: permitSpec() });
       expect(refused.status).toBe(403);
       expect(refused.body.code).toBe('permit_requires_admin');
-      // ... but it may be designed: monitor mode, or switched off
-      const monitor = await create('delegate', { name: 'Grant (monitor)', mode: 'monitor', enabled: true, spec: permitSpec() });
-      expect(monitor.status).toBe(201);
-      const disabled = await create('delegate', { name: 'Grant (off)', mode: 'enforce', enabled: false, spec: permitSpec() });
+      expect(refused.body.error).toMatch(/disabled/i);
+      expect(refused.body.error).not.toMatch(/monitor/i);
+      // ... but it may be designed and kept switched off
+      const disabled = await create('delegate', { name: 'Grant (off)', enabled: false, spec: permitSpec() });
       expect(disabled.status).toBe(201);
+      expect(disabled.body).toMatchObject({ enabled: false });
       // raw Cedar with a permit statement counts the same
-      const rawMixed = await create('delegate', { name: 'Raw', mode: 'enforce', enabled: true, cedar: 'forbid(principal, action == Action::"models.write", resource);\npermit(principal is User, action == Action::"agents.read", resource);' });
+      const rawMixed = await create('delegate', { name: 'Raw', enabled: true, cedar: 'forbid(principal, action == Action::"models.write", resource);\npermit(principal is User, action == Action::"agents.read", resource);' });
       expect(rawMixed.status).toBe(403);
 
-      // promoting or enabling it is the same act as creating it enforcing
-      expect((await call('PUT', `/api/iam/policies/${monitor.body.policyId}`, A, 'delegate', { mode: 'enforce' })).status).toBe(403);
+      // enabling it is the same act as creating it in effect
       expect((await call('PUT', `/api/iam/policies/${disabled.body.policyId}`, A, 'delegate', { enabled: true })).status).toBe(403);
+      const enabledByAdmin = await call('PUT', `/api/iam/policies/${disabled.body.policyId}`, A, 'admin', { enabled: true });
+      expect(enabledByAdmin.status).toBe(200);
       // ... and so is changing what an effective grant says
-      const promoted = await call('PUT', `/api/iam/policies/${monitor.body.policyId}`, A, 'admin', { mode: 'enforce' });
-      expect(promoted.status).toBe(200);
-      expect((await call('PUT', `/api/iam/policies/${monitor.body.policyId}`, A, 'delegate', { spec: permitSpec({ actions: ['agents.write'] }) })).status).toBe(403);
-      // taking a grant away (monitor / off) and deleting one are always open
-      expect((await call('PUT', `/api/iam/policies/${monitor.body.policyId}`, A, 'delegate', { enabled: false })).status).toBe(200);
-      expect((await call('PUT', `/api/iam/policies/${monitor.body.policyId}`, A, 'delegate', { name: 'renamed' })).status).toBe(200);
+      expect((await call('PUT', `/api/iam/policies/${disabled.body.policyId}`, A, 'delegate', { spec: permitSpec({ actions: ['agents.write'] }) })).status).toBe(403);
+      // taking a grant away (off) and deleting one are always open
+      expect((await call('PUT', `/api/iam/policies/${disabled.body.policyId}`, A, 'delegate', { enabled: false })).status).toBe(200);
+      expect((await call('PUT', `/api/iam/policies/${disabled.body.policyId}`, A, 'delegate', { name: 'renamed' })).status).toBe(200);
 
       // the owner and an admin may do all of it
-      expect((await create('owner', { name: 'Owner grant', mode: 'enforce', enabled: true, spec: permitSpec() })).status).toBe(201);
+      expect((await create('owner', { name: 'Owner grant', enabled: true, spec: permitSpec() })).status).toBe(201);
       for (const p of (await call('GET', '/api/iam/policies', A, 'reader')).body.custom) await remove(p.policyId);
     });
   });
@@ -175,18 +172,18 @@ describeForEachProvider('IAM center hardening', (getDb) => {
   describe('a deny rule no request gate can match is refused instead of looking like protection', () => {
     it('refuses it with the reasons, in both forms; an allow rule is saved with a warning', async () => {
       const resourceOnly = await create('admin', {
-        name: 'Lock one agent', mode: 'enforce', enabled: true,
+        name: 'Lock one agent', enabled: true,
         spec: forbidSpec({ actions: ['agent.delete'], resources: { resources: [{ type: 'agent', id: A.agentId }] } }),
       });
       expect(resourceOnly.status).toBe(400);
       expect(resourceOnly.body.code).toBe('validation');
       expect(resourceOnly.body.details.map((d: any) => d.code).sort()).toEqual(['not_enforced_actions', 'not_enforced_resources']);
 
-      const portalOnly = await create('admin', { name: 'Portal', mode: 'monitor', enabled: true, spec: forbidSpec({ conditions: { channels: ['portal'] } }) });
+      const portalOnly = await create('admin', { name: 'Portal', enabled: true, spec: forbidSpec({ conditions: { channels: ['portal'] } }) });
       expect(portalOnly.status).toBe(400);
       expect(portalOnly.body.details[0].code).toBe('not_enforced_channel');
 
-      const raw = await create('admin', { name: 'Raw', mode: 'monitor', enabled: true, cedar: `forbid(principal, action == Action::"agent.delete", resource == Agent::"${A.agentId}");` });
+      const raw = await create('admin', { name: 'Raw', enabled: true, cedar: `forbid(principal, action == Action::"agent.delete", resource == Agent::"${A.agentId}");` });
       expect(raw.status).toBe(400);
 
       const compile = await call('POST', '/api/iam/policies/compile', A, 'reader', {
@@ -288,28 +285,43 @@ describeForEachProvider('IAM center hardening', (getDb) => {
       // alice and bob, plus alice's API token (a group policy reaches the tokens its members own)
       expect(res.body.principals).toEqual({ evaluated: 3, targeted: 3 });
       expect(res.body.truncated).toBe(false);
+      // a policy that names nobody lists the whole directory: when it fits, the audience is exact (9 active people + 1 token)
       const everyone = await call('POST', '/api/iam/policies/preview', A, 'admin', { spec: forbidSpec({ principals: { any: true } }) });
-      expect(everyone.body.principals.targeted).toBeNull();
-      expect(everyone.body.truncated).toBe(true);
+      expect(everyone.body.principals).toEqual({ evaluated: 10, targeted: 10 });
+      expect(everyone.body.truncated).toBe(false);
     });
+
+    it('a directory bigger than the cap is sampled: at most 1000 people are checked, the size is unknown and the result says so', async () => {
+      const big = await build('big');
+      await db.runWithTenant!(big.dbName, async () => {
+        for (let i = 0; i < 1010; i++) {
+          await db.createUser({ tenantId: big.id, email: `crowd${i}@big.example`, name: `Crowd ${i}`, password: '$2b$10$x', role: 'user', licenseId: 'FREE', features: [] });
+        }
+      });
+      const res = await call('POST', '/api/iam/policies/preview', big, 'admin', { spec: { effect: 'forbid', principals: { any: true }, actions: ['agents.write'], resources: { any: true } } });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.principals.targeted).toBeNull();
+      expect(res.body.principals.evaluated).toBeGreaterThan(0);
+      expect(res.body.principals.evaluated).toBeLessThanOrEqual(MAX_PREVIEW_PRINCIPALS);
+      expect(res.body.truncated).toBe(true);
+    }, 60_000);
   });
 
   // ── switches never re-validate who the policy names ─────────────────────
 
-  describe('turning a policy off or to monitor does not depend on the people it names still existing', () => {
+  describe('turning a policy off does not depend on the people it names still existing', () => {
     it('keeps working after a group the policy names is deleted; a CHANGED spec is still verified in full', async () => {
       const group = await db.runWithTenant!(A.dbName, () => db.createGroup({ tenantId: A.id, name: 'Leavers', createdBy: 't', source: 'local' } as never));
       const groupId = String(group._id);
       const spec = forbidSpec({ principals: { groups: [groupId] } });
-      const made = await create('admin', { name: 'Leavers freeze', mode: 'enforce', enabled: true, spec });
+      const made = await create('admin', { name: 'Leavers freeze', enabled: true, spec });
       expect(made.status, JSON.stringify(made.body)).toBe(201);
       await db.runWithTenant!(A.dbName, () => db.deleteGroup(groupId));
 
-      // the switches alone: always fine
+      // the switch alone: always fine
       expect((await call('PUT', `/api/iam/policies/${made.body.policyId}`, A, 'admin', { enabled: false })).status).toBe(200);
-      expect((await call('PUT', `/api/iam/policies/${made.body.policyId}`, A, 'admin', { mode: 'monitor' })).status).toBe(200);
       // the editor re-sends the whole policy on save: the unchanged spec is not re-verified either
-      const resent = await call('PUT', `/api/iam/policies/${made.body.policyId}`, A, 'admin', { name: 'Leavers freeze (off)', mode: 'monitor', enabled: false, spec });
+      const resent = await call('PUT', `/api/iam/policies/${made.body.policyId}`, A, 'admin', { name: 'Leavers freeze (off)', enabled: false, spec });
       expect(resent.status, JSON.stringify(resent.body)).toBe(200);
       // a spec that CHANGES is verified: naming the deleted group anew, or another one that is not there, is refused
       const changed = await call('PUT', `/api/iam/policies/${made.body.policyId}`, A, 'admin', { spec: forbidSpec({ principals: { groups: [groupId] }, actions: ['models.write'] }) });
@@ -348,20 +360,17 @@ describeForEachProvider('IAM center hardening', (getDb) => {
   // ── audit: no duplicates, and every refusal / edit shows up ─────────────
 
   describe('audit', () => {
-    it('writes ONE row per policy / settings / mode change: the detailed one', async () => {
-      const made = await create('admin', { name: 'Audit me', mode: 'monitor', enabled: true, spec: forbidSpec() });
+    it('writes ONE row per policy / settings change: the detailed one, and none for a workspace mode', async () => {
+      const made = await create('admin', { name: 'Audit me', enabled: false, spec: forbidSpec() });
       expect(made.status).toBe(201);
       await call('PUT', `/api/iam/policies/${made.body.policyId}`, A, 'admin', { name: 'Audit me 2' });
       await call('PUT', '/api/iam/settings', A, 'admin', { tokens: { requireExpiry: true } });
       await call('PUT', '/api/iam/settings', A, 'admin', { tokens: { requireExpiry: false } });
-      // the tenant starts in legacy: shadow is a real change, shadow again is NOT (no "from shadow to shadow" row), and
-      // the way back to legacy is a second real change
-      expect((await call('PUT', '/api/iam/mode', A, 'admin', { mode: 'shadow' })).status).toBe(200);
-      expect((await call('PUT', '/api/iam/mode', A, 'admin', { mode: 'shadow' })).status).toBe(200);
-      expect((await call('PUT', '/api/iam/mode', A, 'admin', { mode: 'legacy' })).status).toBe(200);
+      // there is no workspace mode to switch any more: the endpoint is gone and nothing is recorded as a mode change
+      expect((await call('PUT', '/api/iam/mode', A, 'admin', { mode: 'shadow' })).status).toBe(404);
       await remove(made.body.policyId);
       // a REFUSED call is still audited as the request it was (made here, so the test does not lean on an earlier one)
-      expect((await call('POST', '/api/iam/policies', A, 'reader', { name: 'Not allowed', mode: 'monitor', enabled: true, spec: forbidSpec() })).status).toBe(403);
+      expect((await call('POST', '/api/iam/policies', A, 'reader', { name: 'Not allowed', enabled: true, spec: forbidSpec() })).status).toBe(403);
       await drainPendingTasks();
 
       // a wide window: the tests before this one leave refused calls of their own in the trail
@@ -369,11 +378,11 @@ describeForEachProvider('IAM center hardening', (getDb) => {
       const count = (event: string) => rows.filter((r) => r.event === event).length;
       expect(count('iam.policy.create')).toBeGreaterThanOrEqual(1);
       expect(count('iam.settings.update')).toBe(2);
-      expect(count('iam.mode.change')).toBe(2);
+      expect(count('iam.mode.change')).toBe(0);
       // the generic request rows ("POST /api/iam/policies") that used to repeat each of them are gone for a successful
       // call (a REFUSED call - 403, 400 - is still audited as the request it was)
       const succeeded = rows.filter((r) => (r.statusCode ?? 0) < 400);
-      for (const duplicate of ['POST /api/iam/policies', 'PUT /api/iam/settings', 'PUT /api/iam/mode']) {
+      for (const duplicate of ['POST /api/iam/policies', 'PUT /api/iam/settings']) {
         expect(succeeded.filter((r) => r.event === duplicate).length, duplicate).toBe(0);
       }
       expect(succeeded.some((r) => /^(PUT|DELETE) \/api\/iam\/policies\//.test(r.event ?? ''))).toBe(false);

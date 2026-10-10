@@ -12,7 +12,7 @@ import {
   type PolicyReach,
   type PrincipalType,
 } from './client';
-import { formatDateTime, type Translate } from './format';
+import type { Translate } from './format';
 import styles from './PrincipalDetail.module.css';
 
 const EFFECT_COLOR = { permit: 'green', forbid: 'red', mixed: 'yellow' } as const;
@@ -28,16 +28,13 @@ function reachLabel(reach: PolicyReach, groups: Map<string, string>, t: Translat
 
 /**
  * The custom policies that apply to one principal: what each does, whether it
- * is enforced or only monitored, and why it reaches this principal (named, via
- * a group, everyone...). A monitored policy shows how many requests it would
- * have changed.
+ * is enabled, and why it reaches this principal (named, via a group, everyone...).
  */
 export default function AttachedPolicies({
   policies,
   principal,
   groups,
   ownerId,
-  locale,
   t,
 }: {
   policies: AttachedPolicy[];
@@ -46,7 +43,6 @@ export default function AttachedPolicies({
   groups: GroupRef[];
   /** The user who owns the token, when the principal is a token. */
   ownerId?: string | null;
-  locale: string;
   t: Translate;
 }) {
   const groupNames = useMemo(() => new Map(groups.map((g) => [g.id, g.name])), [groups]);
@@ -64,7 +60,6 @@ export default function AttachedPolicies({
     <div className={styles.bordered}>
       {policies.map((policy) => {
         const reach = policyReach(policy, principal, groupIds, ownerId);
-        const stats = policy.mode === 'monitor' ? policy.monitorStats : null;
         return (
           <div key={policy.policyId} className={styles.listRow}>
             <div style={{ minWidth: 0, flex: 1 }}>
@@ -75,15 +70,6 @@ export default function AttachedPolicies({
                 {policy.effect ? (
                   <Badge size="sm" variant="light" color={EFFECT_COLOR[policy.effect]}>
                     {t(`drawer.policies.effect.${policy.effect}`)}
-                  </Badge>
-                ) : null}
-                {policy.mode ? (
-                  <Badge
-                    size="sm"
-                    variant={policy.mode === 'monitor' ? 'outline' : 'light'}
-                    color={policy.mode === 'monitor' ? 'blue' : 'dark'}
-                  >
-                    {t(`drawer.policies.mode.${policy.mode}`)}
                   </Badge>
                 ) : null}
                 {!policy.enabled ? (
@@ -107,25 +93,6 @@ export default function AttachedPolicies({
                       {reachLabel(r, groupNames, t)}
                     </Badge>
                   ))}
-                </Group>
-              ) : null}
-              {stats && (stats.wouldDeny > 0 || stats.wouldAllow > 0) ? (
-                <Group gap={6} mt={6} wrap="wrap">
-                  {stats.wouldDeny > 0 ? (
-                    <Badge size="xs" variant="light" color="red" tt="none">
-                      {t('drawer.policies.wouldDeny', { count: stats.wouldDeny.toLocaleString() })}
-                    </Badge>
-                  ) : null}
-                  {stats.wouldAllow > 0 ? (
-                    <Badge size="xs" variant="light" color="green" tt="none">
-                      {t('drawer.policies.wouldAllow', { count: stats.wouldAllow.toLocaleString() })}
-                    </Badge>
-                  ) : null}
-                  {stats.since ? (
-                    <Text size="xs" c="dimmed">
-                      {t('drawer.policies.since', { date: formatDateTime(stats.since, locale) })}
-                    </Text>
-                  ) : null}
                 </Group>
               ) : null}
             </div>

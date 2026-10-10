@@ -5,13 +5,7 @@
  * unregistered type falls back to `resources` (owner/admin, or an explicit
  * grant), so probing type names never grants more than the inventory does.
  */
-import {
-  authorizeServiceRequest,
-  getEffectiveServicePermissionWithGroups,
-  registerPathServiceResolver,
-  type GroupTenantGrant,
-  type PermissionService,
-} from '@/lib/security/rbac';
+import { registerPathServiceResolver, type PermissionService } from '@/lib/security/rbac';
 import { getResourceTypeDefinition, listResourceTypeDefinitions } from './registry';
 import { ensureCommunityResourceTypesRegistered } from './providers';
 
@@ -44,28 +38,6 @@ export function registerResourceUsageAccess(): void {
   registerPathServiceResolver(RESOURCE_USAGE_PATH_PREFIX, resolveResourceUsageService);
 }
 
-type RbacUser = Parameters<typeof authorizeServiceRequest>[0];
-
-/**
- * Authoritative check for the usage route, from the decoded `:type` param (the
- * route gate works on the request path). Same rule as the gate: read on the
- * service that owns the type, `resources` for an unknown one.
- */
-export function canReadResourceUsage(user: RbacUser, groupGrants: GroupTenantGrant[], type: string): boolean {
-  const path = `${RESOURCE_USAGE_PATH_PREFIX}${encodeURIComponent(type)}/x`;
-  return authorizeServiceRequest(user, 'GET', path, groupGrants).allowed;
-}
-
-/**
- * Whether the caller may read resources of `type` at all (read on the owning
- * service). Used to decide which referrers of a usage answer are listed.
- */
-export function canReadResourceType(user: RbacUser, groupGrants: GroupTenantGrant[], type: string): boolean {
-  const service = resolveResourceUsageService(`${RESOURCE_USAGE_PATH_PREFIX}${encodeURIComponent(type)}/x`);
-  const level = getEffectiveServicePermissionWithGroups(user, groupGrants, service);
-  return level !== 'none';
-}
-
 /** The permission service that owns resources of `type` (`resources` for an unknown one). */
 export function resourceTypeService(type: string): PermissionService {
   return resolveResourceUsageService(`${RESOURCE_USAGE_PATH_PREFIX}${encodeURIComponent(type)}/x`);
@@ -73,9 +45,9 @@ export function resourceTypeService(type: string): PermissionService {
 
 /**
  * A synchronous "may the caller read resources of this type" predicate built
- * from an asynchronous per-service decision (enforce mode asks the policy
- * engine, which is async). Every registered type is resolved up front; an
- * unknown type is judged by the `resources` service, like the route gate.
+ * from an asynchronous per-service decision (the policy engine is async). Every
+ * registered type is resolved up front; an unknown type is judged by the
+ * `resources` service, like the route gate.
  */
 export async function buildReferrerTypeAccess(
   mayRead: (service: PermissionService) => Promise<boolean>,

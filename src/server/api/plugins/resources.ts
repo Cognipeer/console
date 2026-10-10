@@ -35,7 +35,7 @@ import { buildReferrerTypeAccess, registerResourceUsageAccess, resourceTypeServi
 import { runWithTenantScope } from '@/lib/database';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import type { HealthIssueKind, HealthSeverity } from '@/lib/resources/types';
-import { authorizeServiceForRequest, requireSessionContext, resolveSessionRbacContext, withApiRequestContext } from '../fastify-utils';
+import { authorizeServiceForRequest, requireSessionContext, resolveSessionRbacContext, sendProjectContextError, withApiRequestContext } from '../fastify-utils';
 
 const logger = createLogger('api:resources');
 
@@ -213,8 +213,7 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
       // The route gate already checked this, but it works on the request path;
       // authorise again here from the decoded params so the decision can never
       // depend on how the URL happened to be spelled.
-      // Follows the tenant's authorization mode (rbac.ts in legacy / shadow, the
-      // policy engine with project narrowing in enforce).
+      // The policy engine decides (with project narrowing and custom policies).
       const { user, groupGrants } = await resolveSessionRbacContext(session);
       const rbac = { user, groupGrants };
       const mayRead = async (service: ReturnType<typeof resourceTypeService>) =>
@@ -248,6 +247,9 @@ export const resourcesApiPlugin: FastifyPluginAsync = async (app) => {
       if (!usage) return reply.code(404).send({ error: 'Resource not found' });
       return reply.code(200).send(usage);
     } catch (error) {
+      // The engine could not decide (the handler-level checks above): answered as the gate would, with its 503.
+      const refused = sendProjectContextError(reply, error);
+      if (refused) return refused;
       logger.error('Get resource usage error', { error });
       return reply.code(500).send({ error: 'Failed to load resource usage' });
     }

@@ -9,7 +9,7 @@
 
 import { useMemo } from 'react';
 import { useTranslations } from '@/lib/i18n';
-import type { IamAuthzMode, IamCatalog, IamPolicyEffect, IamPolicyMode } from './api';
+import type { IamCatalog, IamPolicyEffect } from './api';
 import { rbacServiceLabel } from './catalogModel';
 
 type Values = Record<string, string | number | undefined | null>;
@@ -28,8 +28,6 @@ export interface IamLabels {
   verb(verb: string): string;
   channel(channel: string): string;
   effect(effect: IamPolicyEffect): string;
-  mode(mode: IamPolicyMode): string;
-  authzMode(mode: IamAuthzMode): string;
   /** A short description of whatever the server sent as a resource reference. */
   resource(resource: unknown): string;
 }
@@ -85,8 +83,6 @@ export function buildLabels(t: TranslateFn, root: TranslateFn, catalog: IamCatal
     },
     channel: (c) => own(`channels.${c}`) ?? titleCase(c),
     effect: (e) => own(`effects.${e}`) ?? e,
-    mode: (m) => own(`modes.${m}`) ?? m,
-    authzMode: (m) => own(`authzModes.${m}`) ?? m,
     resource(resource) {
       if (typeof resource === 'string') return resource;
       if (!resource || typeof resource !== 'object') return '—';

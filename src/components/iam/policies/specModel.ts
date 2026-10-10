@@ -19,7 +19,6 @@
 import type {
   IamChannel,
   IamEffect,
-  IamPolicyMode,
   IamPrincipalType,
   PolicyRow,
   PolicySpec,
@@ -45,7 +44,7 @@ export type WhereMode = 'any' | 'services' | 'projects' | 'resources' | 'multipl
 export interface PolicyDraft {
   name: string;
   description: string;
-  mode: IamPolicyMode;
+  /** A policy is enabled or disabled; a disabled one is kept but never applied. */
   enabled: boolean;
   effect: IamEffect;
   /** Principals `{ any: true }`: every user and every token. */
@@ -70,12 +69,11 @@ export interface PolicyDraft {
 export const NAME_MAX_LENGTH = 120;
 export const DESCRIPTION_MAX_LENGTH = 500;
 
-/** A new policy starts in monitor mode: it is measured before it can change a decision. */
+/** A new policy starts enabled: the editor previews its impact before it is saved, and asks before enabling it. */
 export function emptyDraft(): PolicyDraft {
   return {
     name: '',
     description: '',
-    mode: 'monitor',
     enabled: true,
     effect: 'permit',
     whoAny: false,
@@ -174,14 +172,13 @@ export interface DraftLabels {
 
 export function specToDraft(
   spec: PolicySpec,
-  meta: { name: string; description: string; mode: IamPolicyMode; enabled: boolean },
+  meta: { name: string; description: string; enabled: boolean },
   labels: DraftLabels = {},
 ): PolicyDraft {
   const s = summarizeSpec(spec);
   return {
     name: meta.name,
     description: meta.description,
-    mode: meta.mode,
     enabled: meta.enabled,
     effect: spec.effect,
     whoAny: s.whoAny,
@@ -208,7 +205,7 @@ export function specToDraft(
 
 /** A draft for a raw-Cedar policy or a new copy: only the basics carry over. */
 export function draftFromRow(row: PolicyRow, labels: DraftLabels = {}): PolicyDraft {
-  const meta = { name: row.name, description: row.description, mode: row.mode, enabled: row.enabled };
+  const meta = { name: row.name, description: row.description, enabled: row.enabled };
   if (row.spec) return specToDraft(row.spec, meta, labels);
   return { ...emptyDraft(), ...meta };
 }
@@ -357,7 +354,6 @@ export function draftSignature(draft: PolicyDraft): string {
   return JSON.stringify({
     n: draft.name.trim(),
     d: draft.description.trim(),
-    m: draft.mode,
     e: draft.enabled,
     f: draft.effect,
     wa: draft.whoAny,

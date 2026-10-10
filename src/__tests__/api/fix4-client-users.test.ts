@@ -21,13 +21,16 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   }
   return { ApiTokenAuthError, requireApiTokenFromHeader: vi.fn() };
 });
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-  // The tenant token policy is read from the IAM settings through this; no
-  // stored document means the defaults (no maximum lifetime, expiry optional).
-  runWithTenantScope: vi.fn(async (_dbName: string, fn: (db: unknown) => unknown) =>
-    fn({ iamDocGet: async () => null })),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies), and the tenant token
+    // policy is read from the IAM settings, through this; no stored document means
+    // the defaults (no maximum lifetime, expiry optional, no custom policies).
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 vi.mock('@/lib/quota/quotaGuard', () => ({
   checkResourceQuota: vi.fn().mockResolvedValue({ allowed: true }),

@@ -22,7 +22,7 @@ import {
   type ApiMock,
   type Mounted,
 } from '../helpers/iamCenterUi';
-import { defaultRoutes, POLICY_ENFORCED } from '../helpers/iamCenterFixtures';
+import { defaultRoutes, POLICY_CONTRACTORS } from '../helpers/iamCenterFixtures';
 
 const nav = vi.hoisted(() => ({ search: '', cache: new Map<string, URLSearchParams>() }));
 vi.mock('next/navigation', () => ({
@@ -34,6 +34,7 @@ vi.mock('next/navigation', () => ({
   usePathname: () => '/dashboard/iam',
 }));
 
+import { DashboardUserProvider } from '@/components/layout/DashboardUserContext';
 import PoliciesTab from '@/components/iam/policies/PoliciesTab';
 
 let api: ApiMock;
@@ -59,7 +60,7 @@ afterEach(async () => {
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 describe('PoliciesTab (list)', () => {
-  it('lists the custom policies with effect, mode, scope and monitor results', async () => {
+  it('lists the custom policies with effect, scope and an enabled switch', async () => {
     await render();
     const t = text();
     expect(t).toContain('Contractors cannot write');
@@ -68,11 +69,31 @@ describe('PoliciesTab (list)', () => {
     // names of the groups the specs refer to (resolved through the principals API)
     expect(t).toContain('Groups: Contractors');
     expect(t).toContain('Groups: Analysts');
-    // monitor results of the monitor-mode policy
-    expect(t).toContain('would block 3');
-    expect(t).toContain('would allow 12');
     // a raw Cedar policy is labelled as such
     expect(t).toContain('Cedar policy · 2 statement(s)');
+    // a policy is enabled or disabled: one switch per row, on for the first two and off for the raw one
+    const switches = qa('tr').filter((r) => r.querySelector('input[type="checkbox"]'));
+    const state = Object.fromEntries(
+      switches.map((r) => [r.textContent?.includes('Hand written') ? 'raw' : r.textContent?.includes('Analysts') ? 'analysts' : 'contractors', r.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked]),
+    );
+    expect(state).toEqual({ contractors: true, analysts: true, raw: false });
+  });
+
+  it('knows nothing of modes: no mode column, no monitor results, no promote or demote', async () => {
+    await render();
+    const headers = qa('th').map((h) => h.textContent?.trim());
+    expect(headers).toContain('Enabled');
+    expect(headers).not.toContain('Mode');
+    expect(headers).not.toContain('Monitor result');
+    const t = text();
+    expect(t).not.toMatch(/would block|would allow|Monitor|Shadow/);
+    const row = qa('tr').find((r) => r.textContent?.includes('Analysts read cost'))!;
+    await click(row.querySelector('button[aria-label="Actions"]'));
+    const items = qa('[role="menuitem"]').map((m) => m.textContent);
+    expect(items).toEqual(expect.arrayContaining(['Edit', 'Duplicate', 'Delete']));
+    expect(items.join(' ')).not.toMatch(/Enforce|Monitor/);
+    // and the page never asks for the retired mode endpoint
+    expect(api.calls.some((c) => c.path === '/api/iam/mode')).toBe(false);
   });
 
   it('explains the built-in policies in plain language, boundaries included', async () => {
@@ -91,20 +112,6 @@ describe('PoliciesTab (list)', () => {
     expect(t.indexOf('Token scope limit (change)')).toBeGreaterThan(t.indexOf('Boundaries'));
   });
 
-  it('warns that policies do not decide yet while the engine is not enforcing', async () => {
-    await render();
-    expect(text()).toContain('authorization engine is in Shadow mode');
-  });
-
-  it('shows no banner once the engine enforces', async () => {
-    nav.search = '';
-    api = installApiMock(defaultRoutes());
-    api.on('GET', '/api/iam/mode', () => ({ mode: 'enforce', effectiveMode: 'enforce' }));
-    mounted = await mount(createElement(PoliciesTab, { canManage: true }));
-    await settle(150);
-    expect(text()).not.toContain('authorization engine is in');
-  });
-
   it('is read-only without admin access: no create, no switches, rows open a drawer', async () => {
     await render(false);
     expect(buttonByText('Create policy')).toBeUndefined();
@@ -115,25 +122,38 @@ describe('PoliciesTab (list)', () => {
     expect(q('.form-overlay')).toBeNull();
   });
 
-  it('filters by name and by mode', async () => {
+  it('filters by name, by effect and by whether the policy is enabled', async () => {
     await render();
     const search = q<HTMLInputElement>('input[placeholder="Search policies"]')!;
     await setInput(search, 'analysts');
     expect(text()).toContain('Analysts read cost');
     expect(text()).not.toContain('Contractors cannot write');
     await setInput(search, '');
-    const enforceFilter = qa<HTMLLabelElement>('label').find((l) => l.textContent === 'Enforce');
-    await click(enforceFilter);
-    expect(text()).toContain('Contractors cannot write');
+    // disabled policies only: the raw one
+    await click(qa<HTMLLabelElement>('label').find((l) => l.textContent === 'Disabled'));
+    expect(text()).toContain('Hand written');
+    expect(text()).not.toContain('Contractors cannot write');
     expect(text()).not.toContain('Analysts read cost');
+    // enabled ones
+    await click(qa<HTMLLabelElement>('label').find((l) => l.textContent === 'Enabled'));
+    expect(text()).toContain('Contractors cannot write');
+    expect(text()).toContain('Analysts read cost');
+    expect(text()).not.toContain('Hand written');
+    // allow rules only (the deny rule goes)
+    await click(qa<HTMLLabelElement>('label').find((l) => l.textContent === 'Allow'));
+    expect(text()).toContain('Analysts read cost');
+    expect(text()).not.toContain('Contractors cannot write');
   });
 });
 
 describe('PoliciesTab (changes)', () => {
-  it('turning a monitor policy off sends only the switch (the server keeps the Cedar and spec)', async () => {
+  it('turning a policy off asks first, then sends only the switch (the server keeps the Cedar and spec)', async () => {
     await render();
     const row = qa('tr').find((r) => r.textContent?.includes('Analysts read cost'))!;
     await click(row.querySelector('input[type="checkbox"]'));
+    await wait(0);
+    expect(q('[role="dialog"]')!.textContent).toContain('Disable "Analysts read cost"?');
+    await click(buttonByText('Disable', q('[role="dialog"]')!));
     await settle(50);
     const puts = api.to('PUT', '/api/iam/policies/p-analysts');
     expect(puts).toHaveLength(1);
@@ -142,7 +162,22 @@ describe('PoliciesTab (changes)', () => {
     expect(puts[0].body).toEqual({ enabled: false });
   });
 
-  it('asks before switching an enforcing policy off, and does nothing if declined', async () => {
+  it('turning a disabled policy on asks first as well, and sends only the switch', async () => {
+    await render();
+    const row = qa('tr').find((r) => r.textContent?.includes('Hand written'))!;
+    await click(row.querySelector('input[type="checkbox"]'));
+    await wait(0);
+    const dialog = q('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Enable "Hand written"?');
+    expect(dialog.textContent).toContain('starts deciding access right away');
+    await click(buttonByText('Enable', dialog));
+    await settle(50);
+    const puts = api.to('PUT', '/api/iam/policies/p-raw');
+    expect(puts).toHaveLength(1);
+    expect(puts[0].body).toEqual({ enabled: true });
+  });
+
+  it('asks before switching a policy off, and does nothing if declined', async () => {
     await render();
     const row = qa('tr').find((r) => r.textContent?.includes('Contractors cannot write'))!;
     await click(row.querySelector('input[type="checkbox"]'));
@@ -160,8 +195,25 @@ describe('PoliciesTab (changes)', () => {
     api.on('PUT', /^\/api\/iam\/policies\/[^/]+$/, () => jsonResponse({ error: 'nope', code: 'validation' }, 400));
     const row = qa('tr').find((r) => r.textContent?.includes('Analysts read cost'))!;
     await click(row.querySelector('input[type="checkbox"]'));
+    await wait(0);
+    await click(buttonByText('Disable', q('[role="dialog"]')!));
     await settle(50);
+    expect(api.to('PUT', /policies/)).toHaveLength(1);
     expect(row.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
+  });
+
+  it('puts the switch back when the server says only an owner or admin may turn an allow rule on', async () => {
+    await render();
+    api.on('PUT', /^\/api\/iam\/policies\/[^/]+$/, () =>
+      jsonResponse({ error: 'x', code: 'permit_requires_admin' }, 403),
+    );
+    const row = qa('tr').find((r) => r.textContent?.includes('Hand written'))!;
+    await click(row.querySelector('input[type="checkbox"]'));
+    await wait(0);
+    await click(buttonByText('Enable', q('[role="dialog"]')!));
+    await settle(60);
+    expect(api.to('PUT', '/api/iam/policies/p-raw')).toHaveLength(1);
+    expect(row.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(false);
   });
 
   it('deletes through the shared confirm dialog', async () => {
@@ -173,6 +225,8 @@ describe('PoliciesTab (changes)', () => {
     expect(text()).toContain('Analysts read cost');
     const dialog = q('[role="dialog"]')!;
     expect(dialog.textContent).toContain('Delete');
+    // an enabled policy says that deleting it changes access at once
+    expect(dialog.textContent).toContain('It is an enabled policy');
     await click(qa<HTMLButtonElement>('button', dialog).find((b) => b.textContent === 'Delete'));
     await settle(50);
     expect(api.to('DELETE', '/api/iam/policies/p-analysts')).toHaveLength(1);
@@ -181,7 +235,7 @@ describe('PoliciesTab (changes)', () => {
 });
 
 describe('PolicyEditor', () => {
-  it('creates a policy for everyone from the guided form, in Monitor mode', async () => {
+  it('creates a policy for everyone from the guided form, after asking to apply it', async () => {
     await render();
     await click(buttonByText('Create policy'));
     await settle(50);
@@ -205,18 +259,91 @@ describe('PolicyEditor', () => {
     });
     expect(q('.form-overlay')!.textContent).toContain('Valid');
 
+    // an enabled policy decides real requests from the moment it is saved: the editor asks first
     await click(buttonByText('Create policy', q('.form-footer')!));
+    await wait(0);
+    const dialog = q('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Save and apply this policy?');
+    expect(dialog.textContent).toContain('You have not previewed the impact of this version.');
+    expect(api.to('POST', '/api/iam/policies')).toHaveLength(0);
+    await click(buttonByText('Save and apply', dialog));
     await settle(100);
     const posts = api.to('POST', '/api/iam/policies');
     expect(posts).toHaveLength(1);
+    // no mode travels with a policy: it is enabled or disabled
     expect(posts[0].body).toEqual({
       name: 'Everyone reads',
-      mode: 'monitor',
       enabled: true,
       spec: { effect: 'permit', principals: { any: true }, actions: ['Read'], resources: { any: true } },
     });
     // the editor closed and the list refreshed
     expect(q('.form-overlay')).toBeNull();
+  });
+
+  it('has an Enabled switch instead of a mode, and a policy saved as disabled applies nothing right away', async () => {
+    await render();
+    await click(buttonByText('Create policy'));
+    await settle(50);
+    const form = q('.form-overlay')!.textContent ?? '';
+    expect(form).toContain('Enabled');
+    expect(form).not.toMatch(/Monitor|Enforce/);
+    expect(qa('.form-overlay .form-source-card').map((c) => c.textContent)).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('Monitor')]),
+    );
+    await setInput(q<HTMLInputElement>('.form-overlay input[placeholder^="For example"]')!, 'Drafted');
+    await click(qa('.form-overlay .form-source-card').find((c) => c.textContent?.startsWith('Everyone')));
+    const allRow = qa('.form-overlay').flatMap((o) => qa('div', o)).find((d) => d.textContent?.startsWith('Every serviceShortcut'));
+    await click(qa<HTMLButtonElement>('button', allRow!.parentElement!).find((b) => b.textContent === 'Read'));
+    await settle(700);
+    // switch it off
+    const toggle = q<HTMLInputElement>('.form-overlay .form-toggle-row input[type="checkbox"]')!;
+    expect(toggle.checked).toBe(true);
+    await click(toggle);
+    await click(buttonByText('Create policy', q('.form-footer')!));
+    await settle(100);
+    // saved as disabled: nothing to confirm
+    expect(q('[role="dialog"]')).toBeNull();
+    expect(api.to('POST', '/api/iam/policies')[0].body).toMatchObject({ name: 'Drafted', enabled: false });
+  });
+
+  it('warns loudly about a rule that can never match, and asks before saving it', async () => {
+    await render();
+    api.on('POST', '/api/iam/policies/compile', () => ({
+      cedar: 'permit (principal, action, resource);',
+      ok: true,
+      errors: [],
+      warnings: [
+        { code: 'not_asked_actions', field: 'actions', params: { actions: 'models.admin', effect: 'permit' }, message: 'English fallback' },
+        { code: 'trusted_proxies_unset', field: 'conditions.ipRanges', message: 'English fallback 2' },
+      ],
+    }));
+    await click(buttonByText('Create policy'));
+    await settle(50);
+    await setInput(q<HTMLInputElement>('.form-overlay input[placeholder^="For example"]')!, 'Inert');
+    await click(qa('.form-overlay .form-source-card').find((c) => c.textContent?.startsWith('Everyone')));
+    const allRow = qa('.form-overlay').flatMap((o) => qa('div', o)).find((d) => d.textContent?.startsWith('Every serviceShortcut'));
+    await click(qa<HTMLButtonElement>('button', allRow!.parentElement!).find((b) => b.textContent === 'Read'));
+    await settle(700);
+
+    const inert = q('[data-testid="inert-warning"]')!;
+    expect(inert).not.toBeNull();
+    expect(inert.textContent).toContain('This rule would not do anything');
+    // the warning is worded from its code and parameters, in the user's language
+    expect(inert.textContent).toContain('Nothing in the product checks models.admin yet');
+    expect(inert.textContent).not.toContain('English fallback');
+    // the other warning stays an ordinary heads-up, listed separately
+    expect(inert.textContent).not.toContain('TRUSTED_PROXIES');
+    expect(q('.form-overlay')!.textContent).toContain('TRUSTED_PROXIES is not set');
+
+    await click(buttonByText('Create policy', q('.form-footer')!));
+    await wait(0);
+    const dialog = q('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Save a rule that does nothing?');
+    expect(api.to('POST', '/api/iam/policies')).toHaveLength(0);
+    await click(buttonByText('Save anyway', dialog));
+    await wait(0);
+    // after the inert-rule question comes the usual "apply it?" one
+    expect(q('[role="dialog"]')!.textContent).toContain('Save and apply this policy?');
   });
 
   it('shows what is missing instead of sending an incomplete policy', async () => {
@@ -241,22 +368,22 @@ describe('PolicyEditor', () => {
     expect(q<HTMLInputElement>('.form-overlay input[placeholder^="For example"]')!.value).toBe('Contractors cannot write');
     // the group id was resolved to its name
     expect(overlay.textContent).toContain('Contractors');
-    // an enforcing policy asks for confirmation when it is changed
+    // an enabled policy asks for confirmation when it is changed
     await setInput(q<HTMLInputElement>('.form-overlay input[placeholder^="For example"]')!, 'Contractors cannot write (v2)');
     await click(buttonByText('Save changes', q('.form-footer')!));
     await wait(0);
-    expect(text()).toContain('Save as an enforcing policy?');
-    await click(buttonByText('Save and enforce', q('[role="dialog"]')!));
+    expect(text()).toContain('Save and apply this policy?');
+    await click(buttonByText('Save and apply', q('[role="dialog"]')!));
     await settle(100);
     const puts = api.to('PUT', '/api/iam/policies/p-contractors');
     expect(puts).toHaveLength(1);
     expect(puts[0].body).toMatchObject({
       name: 'Contractors cannot write (v2)',
       description: 'Contractors may look but not touch',
-      mode: 'enforce',
       enabled: true,
-      spec: POLICY_ENFORCED.spec,
+      spec: POLICY_CONTRACTORS.spec,
     });
+    expect(puts[0].body).not.toHaveProperty('mode');
   });
 
   it('shows the server validation errors with line and column', async () => {
@@ -275,6 +402,8 @@ describe('PolicyEditor', () => {
     await click(qa<HTMLButtonElement>('button', allRow!.parentElement!).find((b) => b.textContent === 'Write'));
     await settle(600);
     await click(buttonByText('Create policy', q('.form-footer')!));
+    await wait(0);
+    await click(buttonByText('Save and apply', q('[role="dialog"]')!));
     await settle(100);
     const overlay = q('.form-overlay')!;
     expect(overlay.textContent).toContain('The policy could not be saved');
@@ -311,7 +440,9 @@ describe('PolicyEditor', () => {
     await settle(100);
     const calls = api.to('POST', '/api/iam/policies/preview');
     expect(calls).toHaveLength(1);
-    expect(calls[0].body).toMatchObject({ policyId: 'p-contractors', mode: 'enforce', spec: POLICY_ENFORCED.spec });
+    expect(calls[0].body).toMatchObject({ policyId: 'p-contractors', spec: POLICY_CONTRACTORS.spec });
+    // what would change is always measured as if the policy were applied: there is no mode to send
+    expect(calls[0].body).not.toHaveProperty('mode');
     const overlay = q('.form-overlay')!.textContent ?? '';
     expect(overlay).toContain('Newly denied');
     expect(overlay).toContain('840 access checks compared');
@@ -419,10 +550,11 @@ describe('PolicyEditor (every section)', () => {
     expect(pane).toContain('Services: Agents, Agent Tools');
 
     await click(buttonByText('Create policy', q('.form-footer')!));
+    await wait(0);
+    await click(buttonByText('Save and apply', q('[role="dialog"]')!));
     await settle(100);
     expect(api.to('POST', '/api/iam/policies')[0].body).toMatchObject({
       name: 'Block writes',
-      mode: 'monitor',
       enabled: true,
       spec: lastCompile(api).spec,
     });
@@ -481,7 +613,7 @@ describe('PolicyEditor (every section)', () => {
     expect(lastCompile(api).spec).toMatchObject({ resources: { projects: ['proj-b'] } });
   });
 
-  it('duplicates a policy as a new monitor-mode copy', async () => {
+  it('duplicates a policy as a new copy that starts disabled', async () => {
     await render();
     const row = qa('tr').find((r) => r.textContent?.includes('Contractors cannot write'))!;
     await click(row.querySelector('button[aria-label="Actions"]'));
@@ -494,26 +626,13 @@ describe('PolicyEditor (every section)', () => {
     await settle(100);
     const posts = api.to('POST', '/api/iam/policies');
     expect(posts).toHaveLength(1);
+    // a copy is a draft until somebody looks at it and switches it on: nothing to confirm either
+    expect(q('[role="dialog"]')).toBeNull();
     expect(posts[0].body).toMatchObject({
       name: 'Contractors cannot write (copy)',
-      mode: 'monitor',
-      enabled: true,
-      spec: POLICY_ENFORCED.spec,
+      enabled: false,
+      spec: POLICY_CONTRACTORS.spec,
     });
-  });
-
-  it('moves a monitored policy to enforce after showing what it measured', async () => {
-    await render();
-    const row = qa('tr').find((r) => r.textContent?.includes('Analysts read cost'))!;
-    await click(row.querySelector('button[aria-label="Actions"]'));
-    await click(qa('[role="menuitem"]').find((m) => m.textContent === 'Switch to Enforce'));
-    await wait(0);
-    const dialog = q('[role="dialog"]')!;
-    expect(dialog.textContent).toContain('Enforce "Analysts read cost"?');
-    expect(dialog.textContent).toContain('would have blocked 3 and newly allowed 12');
-    await click(buttonByText('Switch to Enforce', dialog));
-    await settle(60);
-    expect(api.to('PUT', '/api/iam/policies/p-analysts')[0].body).toEqual({ mode: 'enforce' });
   });
 
   it('opens an existing policy written as Cedar straight in Cedar mode', async () => {
@@ -578,6 +697,39 @@ describe('PolicyEditor (Escape)', () => {
     await settle(60);
     expect(qa('[role="dialog"]').filter((d) => d.textContent?.includes('Discard your changes?'))).toHaveLength(0);
     expect(q('.form-overlay')).not.toBeNull();
+  });
+});
+
+describe('PolicyEditor (who may turn an allow rule on)', () => {
+  const renderAs = async (role: 'owner' | 'admin' | 'user') => {
+    nav.search = '';
+    api = installApiMock(defaultRoutes());
+    mounted = await mount(
+      createElement(
+        DashboardUserProvider as never,
+        { value: { name: 'me', email: 'me@example.com', licenseType: 'ee', role } } as never,
+        createElement(PoliciesTab, { canManage: true }),
+      ),
+    );
+    await settle(150);
+    await click(buttonByText('Create policy'));
+    await settle(60);
+  };
+
+  it('tells a delegated admin that only owners and admins can enable a rule that allows access', async () => {
+    await renderAs('user');
+    // a new policy is an allow rule and enabled: the heads-up is there before anything is typed
+    const hint = q('[data-testid="permit-admin-hint"]');
+    expect(hint).not.toBeNull();
+    expect(hint!.textContent).toContain('Only workspace owners and admins can turn on a rule that allows access');
+    // a deny rule is theirs to enable: no heads-up
+    await click(qa('.form-overlay .form-source-card').find((c) => c.textContent?.startsWith('Deny')));
+    expect(q('[data-testid="permit-admin-hint"]')).toBeNull();
+  });
+
+  it.each(['owner', 'admin'] as const)('does not say it to a workspace %s', async (role) => {
+    await renderAs(role);
+    expect(q('[data-testid="permit-admin-hint"]')).toBeNull();
   });
 });
 

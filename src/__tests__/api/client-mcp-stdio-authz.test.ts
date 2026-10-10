@@ -5,9 +5,8 @@
  * route's write level, and that extra decision is made the way the dashboard
  * makes it (authorizeServiceForRequest):
  *
- *   - legacy / shadow tenants: rbac.ts, the token scope is a cap (unchanged),
- *   - enforce tenants: the policy engine, i.e. custom forbid policies, the owner's
- *     group grants, the token's project narrowing and the token scope as a cap.
+ * The policy engine decides, i.e. custom forbid policies, the owner's group
+ * grants, the token's project narrowing and the token scope as a cap.
  *
  * Real gates, real SQLite database, real engine; only the MCP service calls that
  * would discover tools (and spawn the package) are stubbed.
@@ -71,15 +70,6 @@ import { resetEnforceStatsForTests } from '@/lib/iam/enforce';
 import { resetPrincipalCacheForTests } from '@/lib/iam/principalCache';
 import { resetProjectNarrowingCachesForTests } from '@/lib/iam/projectNarrowing';
 import { createPolicy, deletePolicy } from '@/lib/iam/store';
-import {
-  drainShadowQueue,
-  resetAuthzModeCacheForTests,
-  resetShadowBufferForTests,
-  setAuthzMode,
-  type AuthzMode,
-} from '@/lib/iam/shadow';
-import { resetProjectMembershipCacheForTests } from '@/lib/iam/shadow/projectMembership';
-import { resetShadowMetricsForTests } from '@/lib/iam/shadow/metrics';
 import { clientMcpApiPlugin } from '@/server/api/plugins/client-mcp';
 import { mcpApiPlugin } from '@/server/api/plugins/mcp';
 import { createIamTestDb, type IamTestDb } from '../helpers/iamTestDb';
@@ -88,7 +78,6 @@ import { createFastifyApiTestApp } from '../helpers/fastify-api';
 let env: IamTestDb;
 let app: FastifyInstance;
 let projectId: string;
-let savedKillSwitch: string | undefined;
 const users: Record<string, IUser> = {};
 
 const mkUser = async (name: string, role: 'owner' | 'admin' | 'user', extra: Record<string, unknown> = {}) => {
@@ -111,9 +100,6 @@ const tokenCtx = (user: IUser, scope: Record<string, string> | null, tokenId: st
 });
 
 beforeAll(async () => {
-  savedKillSwitch = process.env.IAM_ENFORCE_DISABLED;
-  delete process.env.IAM_ENFORCE_DISABLED; // __tests__/setup.ts turns enforcement off globally
-
   env = await createIamTestDb('tenant_client_mcp_authz');
   hoisted.getDatabase.mockImplementation(async () => env.db);
 
@@ -157,23 +143,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (savedKillSwitch === undefined) delete process.env.IAM_ENFORCE_DISABLED;
-  else process.env.IAM_ENFORCE_DISABLED = savedKillSwitch;
   await app?.close();
-  await drainShadowQueue(); // the shadow tenant's gate decisions are evaluated in the background
-  resetShadowBufferForTests();
   await env?.cleanup();
 });
 
 beforeEach(() => {
-  delete process.env.IAM_ENFORCE_DISABLED;
   resetPrincipalCacheForTests();
   resetIamEngineForTests();
   configureIamEngine({ validateRequests: false });
-  resetProjectMembershipCacheForTests();
   resetProjectNarrowingCachesForTests();
   resetEnforceStatsForTests();
-  resetShadowMetricsForTests();
   hoisted.createMcpServer.mockReset().mockImplementation(async (_db, _tenant, _user, _project, input: { name: string; key?: string }) => ({
     _id: 'srv-new', key: input.key ?? 'created', name: input.name, sourceType: 'x', status: 'active',
   }));
@@ -261,64 +240,9 @@ const expectOtherSourcesUnaffected = async (token: string) => {
   expect(hoisted.updateMcpServer).toHaveBeenCalledTimes(1);
 };
 
-const setMode = async (mode: AuthzMode) => {
-  resetAuthzModeCacheForTests();
-  await setAuthzMode(env.tenantDbName, mode, 'test');
-};
+// ── the policy engine decides ────────────────────────────────────────────
 
-// ── the decision follows the tenant's mode ───────────────────────────────
-
-describe.each(['legacy', 'shadow'] as const)('%s tenant: rbac.ts decides, the token scope caps', (mode) => {
-  beforeAll(async () => {
-    await setMode(mode);
-  });
-
-  it('an admin-capable token (owner or admin, unscoped or scoped to mcp:admin) may create and edit a subprocess server', async () => {
-    for (const token of ['tok-owner', 'tok-admin', 'tok-admin-scope-admin']) {
-      hoisted.createMcpServer.mockClear();
-      hoisted.updateMcpServer.mockClear();
-      await expectAllowed(token);
-    }
-  });
-
-  it('a write-only token is refused (403) on create and on edit, and nothing is created', async () => {
-    await expectRefused('tok-plain');
-  });
-
-  it('a token scoped down to mcp:write is refused although its owner is an admin', async () => {
-    await expectRefused('tok-admin-scope-write');
-  });
-
-  it('a scope cannot raise its owner: a write-only owner with an mcp:admin scope is still refused', async () => {
-    await expectRefused('tok-plain-scope-admin');
-  });
-
-  it('a scope without mcp is stopped by the route gate before the handler decides anything', async () => {
-    const created = await post('tok-admin-scope-other', createSubprocess());
-    expect(created.status).toBe(403);
-    expect(created.body).toEqual({ error: 'Forbidden: mcp requires write permission' });
-    expect(hoisted.createMcpServer).not.toHaveBeenCalled();
-  });
-
-  it('legacy rules apply to tokens as they always did: project settings and group grants are not consulted', async () => {
-    // lead: explicit tenant-level mcp:admin, mcp:write inside pj (ignored here)
-    await expectAllowed('tok-lead-pj');
-    hoisted.createMcpServer.mockClear();
-    hoisted.updateMcpServer.mockClear();
-    // grouped: mcp:admin only through a group, which tokens do not inherit here
-    await expectRefused('tok-grouped');
-  });
-
-  it('every other source type stays available to a write-level token', async () => {
-    await expectOtherSourcesUnaffected('tok-plain');
-  });
-});
-
-describe('enforce tenant: the policy engine decides, the token scope still caps', () => {
-  beforeAll(async () => {
-    await setMode('enforce');
-  });
-
+describe('the policy engine decides, the token scope still caps', () => {
   it('an admin-capable token may create and edit a subprocess server', async () => {
     for (const token of ['tok-owner', 'tok-admin', 'tok-admin-scope-admin']) {
       hoisted.createMcpServer.mockClear();
@@ -339,7 +263,7 @@ describe('enforce tenant: the policy engine decides, the token scope still caps'
     await expectRefused('tok-plain-scope-admin');
   });
 
-  it('a scope without mcp is stopped by the route gate, with the enforce body that keeps the legacy `error`', async () => {
+  it('a scope without mcp is stopped by the route gate, with the denial body (the reason in `error`, the structured fields next to it)', async () => {
     const created = await post('tok-admin-scope-other', createSubprocess());
     expect(created.status).toBe(403);
     expect(created.body).toMatchObject({
@@ -383,24 +307,11 @@ describe('enforce tenant: the policy engine decides, the token scope still caps'
   it('every other source type stays available to a write-level token', async () => {
     await expectOtherSourcesUnaffected('tok-plain');
   });
-
-  it('IAM_ENFORCE_DISABLED=1 puts the tenant back on the legacy answer for the handler check as well', async () => {
-    process.env.IAM_ENFORCE_DISABLED = '1';
-    try {
-      // legacy ignores the project narrowing and the group grant ...
-      await expectAllowed('tok-lead-pj');
-      hoisted.createMcpServer.mockClear();
-      hoisted.updateMcpServer.mockClear();
-      await expectRefused('tok-grouped');
-    } finally {
-      delete process.env.IAM_ENFORCE_DISABLED;
-    }
-  });
 });
 
 // ── the dashboard path decides the same way ──────────────────────────────
 
-describe('enforce tenant: the dashboard and the token API give the same answer for the same person', () => {
+describe('the dashboard and the token API give the same answer for the same person', () => {
   const sessionPost = async (user: IUser, body: unknown) => {
     const res = await app.inject({
       method: 'POST',
@@ -419,10 +330,6 @@ describe('enforce tenant: the dashboard and the token API give the same answer f
     });
     return { status: res.statusCode, body: res.json() as Record<string, unknown> };
   };
-
-  beforeAll(async () => {
-    await setMode('enforce');
-  });
 
   // person, their dashboard session, their token, what both must answer
   const people: Array<[string, () => IUser, string, 201 | 403]> = [
