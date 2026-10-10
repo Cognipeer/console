@@ -13,6 +13,8 @@ import StatusBadge from '@/components/common/ui/StatusBadge';
 import DashboardDateFilter, { useDashboardDateFilterState } from '@/components/layout/DashboardDateFilter';
 import CreateFileBucketModal from '@/components/files/CreateFileBucketModal';
 import { ApiError, apiRequest } from '@/lib/api/client';
+import { useTranslations } from '@/lib/i18n';
+import { bucketRefusalMessage } from '@/components/files/fileBrowse';
 import type { FileBucketView } from '@/lib/services/files';
 import {
   buildDashboardDateSearchParams,
@@ -33,6 +35,7 @@ function formatDate(value?: Date | string | null) {
 }
 
 export default function FilesDashboardPage() {
+  const t = useTranslations('files');
   const router = useRouter();
   const queryClient = useQueryClient();
   const [dashboardData, setDashboardData] = useState<FilesDashboardData | null>(null);
@@ -93,11 +96,14 @@ export default function FilesDashboardPage() {
       setDeleteTarget(null);
     },
     onError: (error) => {
+      // A bucket an agent stores its session files in is refused with the agents named; keep that on screen long enough to read.
       notifications.show({
         color: 'red',
-        title: 'Unable to delete bucket',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        title: t('bucket.refusalTitleDelete'),
+        message: bucketRefusalMessage(error),
+        autoClose: 12000,
       });
+      setDeleteTarget(null);
     },
   });
 
@@ -126,8 +132,9 @@ export default function FilesDashboardPage() {
     onError: (error) => {
       notifications.show({
         color: 'red',
-        title: 'Unable to update bucket',
-        message: error instanceof Error ? error.message : 'Unexpected error',
+        title: t('bucket.refusalTitleUpdate'),
+        message: bucketRefusalMessage(error),
+        autoClose: 12000,
       });
     },
   });

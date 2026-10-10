@@ -7,6 +7,8 @@ import type {
   GuardrailType,
   IAgent,
   IAgentConversation,
+  IAgentConversationListItem,
+  AgentSessionRuntimeStatus,
   IAgentConversationState,
   IAgentPendingAction,
   IAgentSessionEvent,
@@ -50,6 +52,8 @@ import type {
   IConfigItem,
   IFileBucketRecord,
   IFileRecord,
+  IFileEntriesPage,
+  FileListPurpose,
   IGuardrail,
   IGuardrailEvalAggregate,
   IGuardrailEvaluationLog,
@@ -591,9 +595,28 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     bucketKey: string;
     projectId?: string;
     search?: string;
+    /** Only keys under this prefix, however deep (a flat, recursive listing). */
+    prefix?: string;
+    purpose?: FileListPurpose;
     limit?: number;
     cursor?: string;
   }): Promise<{ items: IFileRecord[]; nextCursor?: string }>;
+  /**
+   * A bucket as folders, like an object store listing with a `/` delimiter:
+   * the sub-folders under `prefix` (a folder path, `''` = the bucket root) and
+   * the files directly in it, in key order. The folders are derived from the keys
+   * — walking the key index, one probe per entry returned, never a scan of the
+   * whole bucket. `cursor` is the path of the last entry of the previous page.
+   */
+  listFileEntries(filters: {
+    providerKey: string;
+    bucketKey: string;
+    projectId?: string;
+    prefix: string;
+    purpose?: FileListPurpose;
+    limit?: number;
+    cursor?: string;
+  }): Promise<IFileEntriesPage>;
 
   /** Every file of an agent session (`purpose: 'conversation'`), oldest first. */
   listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]>;
@@ -1397,6 +1420,19 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     agentKey: string,
     filters?: { projectId?: string; limit?: number; skip?: number },
   ): Promise<IAgentConversation[]>;
+  /**
+   * A page of a project's conversations, newest created first (`createdAt`, then
+   * id), without their transcripts. `runtimeStatus: 'idle'` also matches a
+   * conversation that has never run. `after` is the keyset of the last row of the
+   * previous page.
+   */
+  listAgentConversationPage(filters: {
+    projectId: string;
+    agentKey?: string;
+    runtimeStatus?: AgentSessionRuntimeStatus;
+    limit: number;
+    after?: { createdAt: Date; id: string };
+  }): Promise<IAgentConversationListItem[]>;
   /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
   findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
   /** Upsert by `conversationId`. */

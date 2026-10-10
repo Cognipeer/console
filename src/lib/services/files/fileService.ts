@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileRecord, type IProviderRecord } from '@/lib/database';
+import { normalizeFolderPrefix } from '@/lib/database/fileEntryWalk';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
@@ -304,7 +305,8 @@ function assertUploadAllowed(request: UploadFileRequest, fileBuffer: Buffer): vo
     }
 }
 
-function generateRelativeKey(fileName: string): string {
+/** A unique object key (relative to the bucket) for a file name: `<slug>-<timestamp>-<id>.<ext>`. */
+export function generateFileRelativeKey(fileName: string): string {
     const normalized = normalizeFileName(fileName);
     const extension = path.extname(normalized);
     const baseName = normalized.slice(0, normalized.length - extension.length) || 'file';
@@ -313,6 +315,19 @@ function generateRelativeKey(fileName: string): string {
         .replace(/[^a-z0-9-_]+/g, '-')
         .replace(/^-+|-+$/g, '') || 'file';
     return `${safeBase}-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`;
+}
+
+/**
+ * The object key (relative to the bucket) an upload is stored under. No hint =
+ * a generated unique name. A hint that ends with `/` names a folder: the file
+ * lands in it under the generated name (the Document Store uploads from inside a
+ * folder this way). Any other hint is the whole key.
+ */
+export function chooseRelativeFileKey(keyHint: string | undefined, fileName: string): string {
+    const hint = keyHint?.trim().replace(/^\/+/, '');
+    if (!hint) return generateFileRelativeKey(fileName);
+    if (!hint.endsWith('/')) return hint;
+    return `${hint.replace(/\/{2,}/g, '/')}${generateFileRelativeKey(fileName)}`;
 }
 
 function decodeData(payload: Buffer | string): Buffer {
@@ -605,11 +620,34 @@ export async function listFiles(
     }
 
     const db = await withTenantDb(tenantDbName);
+
+    // A folder, not a search: its files and its sub-folders, derived from the keys.
+    if (request.prefix !== undefined && !request.search) {
+        const prefix = normalizeFolderPrefix(request.prefix);
+        const page = await db.listFileEntries({
+            providerKey: bucket.providerKey,
+            bucketKey: bucket.key,
+            projectId,
+            prefix,
+            purpose: request.purpose,
+            limit: request.limit,
+            cursor: request.cursor,
+        });
+        return {
+            items: page.items.map(serializeFileRecord) as FileRecordListItem[],
+            folders: page.folders,
+            prefix,
+            nextCursor: page.nextCursor,
+        };
+    }
+
     const { items, nextCursor } = await db.listFileRecords({
         providerKey: bucket.providerKey,
         bucketKey: bucket.key,
         projectId,
         search: request.search,
+        ...(request.prefix ? { prefix: normalizeFolderPrefix(request.prefix) } : {}),
+        purpose: request.purpose,
         limit: request.limit,
         cursor: request.cursor,
     });
@@ -737,10 +775,7 @@ export async function uploadFile(
     const fileBuffer = decodeData(request.data);
     assertUploadAllowed(request, fileBuffer);
     const fileName = normalizeFileName(request.fileName);
-    const relativeKeyHint = request.keyHint?.trim().replace(/^\/+/, '');
-    const chosenRelativeKey = relativeKeyHint && relativeKeyHint.length > 0
-        ? relativeKeyHint
-        : generateRelativeKey(fileName);
+    const chosenRelativeKey = chooseRelativeFileKey(request.keyHint, fileName);
 
     const providerObjectKey = composeProviderObjectKey(
         bucket,

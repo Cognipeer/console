@@ -311,25 +311,21 @@ describe('Configure → Approvals & questions', () => {
 
 describe('Configure → Execution, in Turkish', () => {
   const panel = (locale: 'en' | 'tr') => render(h(AgentExecutionPanel, {
-    value: { sessionBudget: { maxCostUsd: 5, onReach: 'pause' } }, onChange: noop, attachments: undefined, onAttachmentsChange: noop,
+    value: { sessionBudget: { maxCostUsd: 5, onReach: 'pause' } }, onChange: noop,
   }), locale);
 
-  it('translates the Session budget and Attachments blocks', () => {
+  it('translates the Session budget block, and no longer carries the file settings', () => {
     const html = panel('tr');
-    for (const text of ['Oturum bütçesi', 'Oturum başına bütçe (USD)', 'Duraklat ve bekle', 'Ekler', 'Eklenen dosyaları kabul et',
-      'Oturum başına dosya sayısı', 'İzin verilen dosya türleri', 'Bütçeye ulaşıldığında']) {
+    for (const text of ['Oturum bütçesi', 'Oturum başına bütçe (USD)', 'Duraklat ve bekle', 'Bütçeye ulaşıldığında']) {
       expect(html).toContain(text);
     }
-    for (const text of ['Session budget', 'Budget per session', 'Accept attached files', 'Allowed file types', 'Storage bucket']) {
+    for (const text of ['Session budget', 'Budget per session']) {
       expect(html).not.toContain(text);
     }
-  });
-
-  it('describes the inline rule as all-or-nothing, as the guide does', () => {
-    expect(panel('en')).toContain('is added up');
-    expect(panel('en')).toContain('none of it is');
-    expect(panel('en')).not.toContain('files that fit');
-    expect(panel('tr')).toContain('hiçbiri konmaz');
+    // The file settings moved to their own Configure section (agent-files-ui.test.ts).
+    for (const text of ['Ekler', 'Eklenen dosyaları kabul et', 'Oturum başına dosya sayısı', 'Accept attached files']) {
+      expect(html).not.toContain(text);
+    }
   });
 });
 
@@ -402,6 +398,9 @@ describe('keys the components ask for', () => {
       'components/agents/session/SessionStatusBadge.tsx',
       'components/agents/session/StopNotice.tsx',
       'components/agents/studio/AgentExecutionPanel.tsx',
+      'components/agents/studio/AgentFilesPanel.tsx',
+      'components/agents/session/SessionFilesPanel.tsx',
+      'components/agents/session/SessionAttachments.tsx',
       'components/agents/studio/SessionDetailDrawer.tsx',
     ];
     const missing: string[] = [];

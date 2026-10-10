@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Configure → Execution → Attachments → "Allowed file types", driven the way a
- * person drives it: typed key by key. The field keeps what is typed (the comma
- * and the space that start the next type), hands the parsed list up as it goes,
- * and tidies the text when it loses focus.
+ * Configure → Files → "Allowed file types", driven the way a person drives it:
+ * typed into the field, a comma or Enter finishing a type. Each finished type
+ * becomes a tag and the list is handed up as the setting; emptying the list
+ * clears it, so an agent that never restricts types stores nothing.
  * (createElement, not JSX: the suite only collects `.test.ts`.)
  */
 
@@ -12,9 +12,8 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MantineProvider } from '@mantine/core';
-import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel';
-import { parseMimeTypes } from '@/components/agents/session/sessionAttachmentsUi';
-import type { IAgentAttachmentsConfig } from '@/lib/database/provider/types.domain';
+import { AgentFilesPanelView } from '@/components/agents/studio/AgentFilesPanel';
+import type { AttachmentBucketOption, AttachmentsSettings } from '@/components/agents/studio/filesSettings';
 
 (globalThis as { React?: typeof React }).React = React;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -27,8 +26,6 @@ beforeAll(() => {
     addEventListener: () => undefined, removeEventListener: () => undefined, dispatchEvent: () => false,
   }) as unknown as MediaQueryList);
   (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-  // The panel asks for the server's ceilings on mount.
-  (globalThis as { fetch?: unknown }).fetch = () => Promise.resolve({ ok: false, json: async () => null });
 });
 
 let root: Root | undefined;
@@ -40,6 +37,11 @@ afterEach(() => {
   container = undefined;
 });
 
+const bucket: AttachmentBucketOption = {
+  key: 'docs', name: 'Docs', providerKey: 'builtin', providerLabel: 'Built-in', driver: 's3',
+  bucketStatus: 'active', providerStatus: 'active', usable: true, localDisk: false,
+};
+
 /** Sets an input's value the way the browser does, so React sees the change. */
 function type(input: HTMLInputElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
@@ -49,68 +51,52 @@ function type(input: HTMLInputElement, value: string) {
   });
 }
 
-function mount(initial?: IAgentAttachmentsConfig) {
-  const seen: Array<IAgentAttachmentsConfig | undefined> = [];
+/** Presses a key in an input — Mantine's tags input finishes a tag on a key, not on the typed character. */
+function press(input: HTMLInputElement, key: string) {
+  act(() => {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+  });
+}
+
+function mount(initial?: AttachmentsSettings) {
+  const seen: Array<AttachmentsSettings | undefined> = [];
   function Harness() {
-    const [attachments, setAttachments] = useState<IAgentAttachmentsConfig | undefined>(initial);
-    return h(MantineProvider, null, h(AgentExecutionPanel, {
-      value: undefined,
-      onChange: () => undefined,
-      attachments,
-      onAttachmentsChange: (next) => { seen.push(next); setAttachments(next); },
+    const [value, setValue] = useState<AttachmentsSettings | undefined>(initial ?? { enabled: true, bucketKey: 'docs' });
+    return h(MantineProvider, null, h(AgentFilesPanelView, {
+      value,
+      onChange: (next: AttachmentsSettings | undefined) => { seen.push(next); setValue(next); },
+      agentKey: 'support',
+      buckets: { status: 'ready', buckets: [bucket] },
     }));
   }
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => root!.render(h(Harness)));
-  const field = () => container!.querySelector<HTMLInputElement>('input[placeholder="application/pdf, image/*"]')!;
+  const field = () => container!.querySelector<HTMLInputElement>('input.mantine-TagsInput-inputField')!;
   return { field, seen };
 }
 
-describe('Allowed file types, typed key by key', () => {
-  it('keeps the comma and the space, so a second type can be typed', () => {
+describe('Allowed file types, typed into the Files section', () => {
+  it('turns each finished type into a tag, keeps the earlier ones, and clears the setting with the last tag', () => {
     const { field, seen } = mount();
-    let text = '';
-    for (const char of 'application/pdf, image/*') {
-      text += char;
-      type(field(), text);
-      // What is on screen is what was typed — the separator is not swallowed.
-      expect(field().value).toBe(text);
-    }
-    expect(seen.at(-1)?.allowedMimeTypes).toEqual(['application/pdf', 'image/*']);
-  });
+    expect(field()).not.toBeNull();
 
-  it('stores the list as it is typed, with a trailing separator ignored', () => {
-    const { field, seen } = mount();
-    type(field(), 'application/pdf, ');
-    expect(field().value).toBe('application/pdf, ');
+    type(field(), 'application/pdf');
+    press(field(), ',');
     expect(seen.at(-1)?.allowedMimeTypes).toEqual(['application/pdf']);
-  });
+    expect(container!.textContent).toContain('application/pdf');
 
-  it('tidies the text when the field loses focus', () => {
-    const { field } = mount();
-    type(field(), ' image/* ,application/pdf ,, ');
-    act(() => { field().dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
-    expect(field().value).toBe('image/*, application/pdf');
-  });
+    type(field(), 'image/*');
+    press(field(), 'Enter');
+    expect(seen.at(-1)?.allowedMimeTypes).toEqual(['application/pdf', 'image/*']);
 
-  it('starts from what is stored', () => {
-    const { field } = mount({ allowedMimeTypes: ['image/*', 'application/pdf'] });
-    expect(field().value).toBe('image/*, application/pdf');
-  });
-
-  it('clears the setting when the field is emptied', () => {
-    const { field, seen } = mount({ allowedMimeTypes: ['image/*'] });
-    type(field(), '');
-    expect(seen.at(-1)).toBeUndefined();
-  });
-});
-
-describe('parseMimeTypes', () => {
-  it('splits on commas, trims and drops blanks', () => {
-    expect(parseMimeTypes('application/pdf, image/*')).toEqual(['application/pdf', 'image/*']);
-    expect(parseMimeTypes(' a ,, b , ')).toEqual(['a', 'b']);
-    expect(parseMimeTypes('')).toEqual([]);
+    const removes = () => Array.from(container!.querySelectorAll<HTMLElement>('.mantine-Pill-remove'));
+    expect(removes()).toHaveLength(2);
+    act(() => { removes()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(seen.at(-1)?.allowedMimeTypes).toEqual(['image/*']);
+    act(() => { removes()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    // Nothing restricted = nothing stored for it.
+    expect(seen.at(-1)).toEqual({ enabled: true, bucketKey: 'docs' });
   });
 });

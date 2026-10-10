@@ -12,6 +12,7 @@ import {
   Group,
   Loader,
   Modal,
+  SegmentedControl,
   Stack,
   Table,
   Text,
@@ -24,11 +25,12 @@ import {
   IconCloudDownload,
   IconFileCheck,
   IconFileDownload,
+  IconFolder,
   IconRefresh,
   IconTrash,
   IconUpload,
 } from '@tabler/icons-react';
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   FileBucketView,
   FileRecordView,
@@ -36,6 +38,16 @@ import type {
   UploadFileResponse,
 } from '@/lib/services/files';
 import { ApiError, apiRequest } from '@/lib/api/client';
+import { useLocale, useTranslations } from '@/lib/i18n';
+import { FolderPath, SessionFileCells } from './FileBrowseParts';
+import {
+  applySessionFilter,
+  filesInFolder,
+  isSessionFile,
+  objectsUrl,
+  subFolders,
+  type SessionFileFilter,
+} from './fileBrowse';
 
 interface FileObjectManagerProps {
   bucket?: FileBucketView | null;
@@ -96,9 +108,20 @@ async function fileToDataUrl(file: File): Promise<string> {
 }
 
 export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
+  const t = useTranslations('files');
+  const locale = useLocale();
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  // The folder being viewed (`''` = the bucket root) and which files it lists.
+  const [prefix, setPrefix] = useState('');
+  const [filter, setFilter] = useState<SessionFileFilter>('all');
   const queryClient = useQueryClient();
   const bucketKey = bucket?.key ?? null;
+
+  // Another bucket opens at its root.
+  useEffect(() => {
+    setPrefix('');
+    setFilter('all');
+  }, [bucketKey]);
 
   const form = useForm<UploadFormValues>({
     initialValues: {
@@ -113,28 +136,23 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
     },
   });
 
-  type FilesPage = { items: FileRecordView[]; nextCursor?: string };
+  type FilesPage = { items: FileRecordView[]; folders: string[]; nextCursor?: string };
 
   const filesQuery = useInfiniteQuery<FilesPage, ApiError>({
-    queryKey: ['file-objects', bucketKey],
+    queryKey: ['file-objects', bucketKey, prefix, filter],
     enabled: Boolean(bucketKey),
     queryFn: async ({ pageParam }) => {
       if (!bucketKey) {
-        return { items: [], nextCursor: undefined };
+        return { items: [], folders: [], nextCursor: undefined };
       }
 
-      const params = new URLSearchParams();
-      params.set('limit', '50');
-      if (pageParam) {
-        params.set('cursor', String(pageParam));
-      }
-
-      const response = await apiRequest<ListFilesResponse>(
-        `/api/files/buckets/${encodeURIComponent(bucketKey)}/objects?${params.toString()}`,
+      const response = await apiRequest<ListFilesResponse & { folders?: string[] }>(
+        objectsUrl(bucketKey, { prefix, filter, cursor: pageParam ? String(pageParam) : undefined }),
       );
 
       return {
         items: response.items ?? [],
+        folders: Array.isArray(response.folders) ? response.folders : [],
         nextCursor: response.nextCursor,
       };
     },
@@ -157,13 +175,34 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
     });
   }, [filesQuery.isError, filesQuery.error]);
 
-  const records = useMemo(() => {
-    if (!filesQuery.data) {
-      return [] as FileRecordView[];
-    }
-    return filesQuery.data.pages.flatMap((page) => page.items ?? []);
-  }, [filesQuery.data]);
+  const pages = filesQuery.data?.pages;
+  // The files directly in this folder (a page may carry nested keys too), the
+  // session/other filter applied again here in case the server ignored it, and
+  // the sub-folders the server named or the keys imply.
+  const records = useMemo(
+    () => filesInFolder(prefix, applySessionFilter((pages ?? []).flatMap((page) => page.items ?? []), filter)),
+    [pages, prefix, filter],
+  );
+  const folders = useMemo(
+    () => subFolders(prefix, (pages ?? []).flatMap((page) => page.folders), (pages ?? []).flatMap((page) => page.items ?? [])),
+    [pages, prefix],
+  );
   const recordCount = bucket ? records.length : 0;
+  const showSessionColumns = filter === 'session' || records.some(isSessionFile);
+
+  // Which agent a session file's session belongs to is only known by key; the
+  // session page is addressed by the agent's id.
+  const agentsQuery = useQuery<Map<string, string>>({
+    queryKey: ['agents-by-key'],
+    enabled: showSessionColumns,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const response = await apiRequest<{ agents?: Array<{ _id: string; key: string }> }>('/api/agents');
+      return new Map((response.agents ?? []).map((agent) => [agent.key, String(agent._id)] as const));
+    },
+  });
+  const agentIds = agentsQuery.data;
+  const now = new Date();
   const isInitialLoading = filesQuery.isPending && Boolean(bucketKey);
   const isRefetching = filesQuery.isRefetching;
   const isFetchingNextPage = filesQuery.isFetchingNextPage;
@@ -190,6 +229,8 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
           lastModified: file.lastModified,
         },
         bucketKey,
+        // Viewing a folder: the file goes into it (a trailing `/` = "this folder").
+        ...(prefix ? { keyHint: prefix } : {}),
       };
 
       const response = await apiRequest<UploadFileResponse>(
@@ -339,6 +380,7 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
         })}
       >
         <Stack gap="md">
+          {prefix ? <Text size="xs" c="dimmed">{t('browse.uploadsTo', { path: prefix })}</Text> : null}
           {(() => {
             const fileInputProps = form.getInputProps('file');
             return (
@@ -492,6 +534,23 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
           {controls}
         </Group>
 
+        {bucket ? (
+          <Group justify="space-between" align="center" gap="sm">
+            <FolderPath prefix={prefix} onOpen={setPrefix} />
+            <SegmentedControl
+              size="xs"
+              aria-label={t('filter.label')}
+              value={filter}
+              onChange={(value) => setFilter(value as SessionFileFilter)}
+              data={[
+                { value: 'all', label: t('filter.all') },
+                { value: 'session', label: t('filter.session') },
+                { value: 'other', label: t('filter.other') },
+              ]}
+            />
+          </Group>
+        ) : null}
+
         {!bucket ? (
           <Center py="lg">
             <Text c="dimmed">Select a bucket to view its files.</Text>
@@ -500,23 +559,27 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
           <Center py="lg">
             <Loader size="sm" />
           </Center>
-        ) : recordCount === 0 ? (
+        ) : recordCount === 0 && folders.length === 0 ? (
           <Center py="xl">
             <Stack gap="sm" align="center">
               <Text size="sm" c="dimmed">
-                No files uploaded yet. Use the upload action to add your first file.
+                {prefix || filter !== 'all'
+                  ? t('browse.emptyFolder')
+                  : 'No files uploaded yet. Use the upload action to add your first file.'}
               </Text>
-              <Button
-                onClick={() => setUploadModalOpen(true)}
-                leftSection={<IconUpload size={16} />}
-                disabled={!bucketKey}
-              >
-                Upload file
-              </Button>
+              {!prefix && filter === 'all' ? (
+                <Button
+                  onClick={() => setUploadModalOpen(true)}
+                  leftSection={<IconUpload size={16} />}
+                  disabled={!bucketKey}
+                >
+                  Upload file
+                </Button>
+              ) : null}
             </Stack>
           </Center>
         ) : (
-          <Table.ScrollContainer minWidth={720} type="native">
+          <Table.ScrollContainer minWidth={showSessionColumns ? 1040 : 720} type="native">
             <Table highlightOnHover striped>
               <Table.Thead>
                 <Table.Tr>
@@ -524,11 +587,41 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
                   <Table.Th>Key</Table.Th>
                   <Table.Th>Size</Table.Th>
                   <Table.Th>Markdown</Table.Th>
+                  {showSessionColumns ? (
+                    <>
+                      <Table.Th>{t('columns.session')}</Table.Th>
+                      <Table.Th>{t('columns.expires')}</Table.Th>
+                      <Table.Th>{t('columns.uploadedBy')}</Table.Th>
+                    </>
+                  ) : null}
                   <Table.Th>Updated</Table.Th>
                   <Table.Th style={{ width: 160 }}>Actions</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
+                {folders.map((folder) => (
+                  <Table.Tr
+                    key={`folder-${folder.path}`}
+                    onClick={() => setPrefix(folder.path)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        setPrefix(folder.path);
+                      }
+                    }}
+                    tabIndex={0}
+                    style={{ cursor: 'pointer' }}
+                    aria-label={t('browse.openFolder', { name: folder.name })}
+                  >
+                    <Table.Td colSpan={showSessionColumns ? 9 : 6}>
+                      <Group gap="xs" wrap="nowrap">
+                        <IconFolder size={16} />
+                        <Text fw={600}>{folder.name}</Text>
+                        <Badge size="xs" variant="light" color="gray">{t('browse.folderRow')}</Badge>
+                      </Group>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
                 {records.map((record) => (
                   <Table.Tr key={record.key}>
                     <Table.Td>
@@ -563,6 +656,14 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
                         ) : null}
                       </Group>
                     </Table.Td>
+                    {showSessionColumns ? (
+                      <SessionFileCells
+                        record={record}
+                        agentId={record.agentKey ? agentIds?.get(record.agentKey) : undefined}
+                        now={now}
+                        locale={locale}
+                      />
+                    ) : null}
                     <Table.Td>{formatDate(record.updatedAt ?? record.createdAt)}</Table.Td>
                     <Table.Td>
                       <Group gap="xs" justify="flex-end">

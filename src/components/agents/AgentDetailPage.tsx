@@ -68,6 +68,9 @@ import SessionList, { type SessionListItem } from './studio/SessionList';
 import StartSessionModal from './studio/StartSessionModal';
 import SessionDetailDrawer from './studio/SessionDetailDrawer';
 import AgentExecutionPanel from './studio/AgentExecutionPanel';
+import AgentFilesPanel from './studio/AgentFilesPanel';
+import { filesEnabled, filesSaveErrors, MAX_FOLDER_LENGTH, type AttachmentsSettings } from './studio/filesSettings';
+import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
 import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
@@ -85,7 +88,6 @@ import type {
   IAgentSandboxConfig,
   IAgentExecutionConfig,
   IAgentHumanInTheLoopConfig,
-  IAgentAttachmentsConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
   IAgentStructuredOutput,
@@ -190,6 +192,8 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   memory: { top: 'configure', sub: 'memory' },
   sandbox: { top: 'configure', sub: 'sandbox' },
   execution: { top: 'configure', sub: 'execution' },
+  files: { top: 'configure', sub: 'files' },
+  attachments: { top: 'configure', sub: 'files' },
   hitl: { top: 'configure', sub: 'hitl' },
   approvals: { top: 'configure', sub: 'hitl' },
   advanced: { top: 'configure', sub: 'advanced' },
@@ -266,7 +270,9 @@ export default function AgentDetailPage() {
   const [sandboxConfig, setSandboxConfig] = useState<IAgentSandboxConfig | undefined>(undefined);
   const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
-  const [attachmentsConfig, setAttachmentsConfig] = useState<IAgentAttachmentsConfig | undefined>(undefined);
+  const [attachmentsConfig, setAttachmentsConfig] = useState<AttachmentsSettings | undefined>(undefined);
+  // A save was refused because Files is on without a bucket: the field shows its error from then on.
+  const [filesSaveRefused, setFilesSaveRefused] = useState(false);
   // Build page: the published snapshot, to flag changed sections.
   const [publishedConfig, setPublishedConfig] = useState<Record<string, unknown> | null>(null);
   const [onlyChanged, setOnlyChanged] = useState(false);
@@ -363,6 +369,7 @@ export default function AgentDetailPage() {
         setExecutionConfig(cfg.execution);
         setHitlConfig(cfg.humanInTheLoop);
         setAttachmentsConfig(cfg.attachments);
+        setFilesSaveRefused(false);
 
         // An array — even an empty one — means the operator has already moved
         // to the list, and "bound to nothing" is a real decision, so it must not
@@ -603,7 +610,7 @@ export default function AgentDetailPage() {
     // Absent stays absent: an agent that never opened Approvals & questions
     // (every agent from before it existed) must keep never pausing.
     nextConfig.humanInTheLoop = hitlConfig && Object.keys(hitlConfig).length > 0 ? hitlConfig : undefined;
-    // Absent = attachments accepted with the defaults.
+    // Absent = files off.
     nextConfig.attachments = attachmentsConfig && Object.keys(attachmentsConfig).length > 0 ? attachmentsConfig : undefined;
 
     if (values.promptMode === 'custom') {
@@ -617,10 +624,47 @@ export default function AgentDetailPage() {
     return nextConfig;
   };
 
+  /** The sentence for a Files problem that blocks a save (the server words the rest). */
+  const filesErrorMessage = (code: ReturnType<typeof filesSaveErrors>[number]['code']): string =>
+    code === 'bucket_required' ? t('attachments.bucketRequired')
+      : code === 'invalid_chars' ? t('attachments.folderInvalidChars')
+        : code === 'dot_dot' ? t('attachments.folderDotDot')
+          : t('attachments.folderTooLong', { max: MAX_FOLDER_LENGTH });
+
+  /** An edit in Files. Once the problem that refused the last save is fixed, its message goes away with it. */
+  const handleFilesChange = (next: AttachmentsSettings | undefined) => {
+    setAttachmentsConfig(next);
+    if (!filesSaveRefused || filesSaveErrors(next).length > 0) return;
+    setFilesSaveRefused(false);
+    setConfigIssues((current) => (current && current.errors.length > 0 && current.errors.every((issue) => issue.field.startsWith('attachments.'))
+      ? null
+      : current));
+  };
+
   const saveAgentConfig = async (
     options: { notify?: boolean; bindings?: ToolBinding[] } = {},
   ): Promise<boolean> => {
     const notify = options.notify ?? true;
+
+    // Files on without a bucket (or a folder the server would refuse) is not
+    // sent at all: the field says what to fix instead of a round trip doing it.
+    const filesErrors = filesSaveErrors(attachmentsConfig);
+    if (filesErrors.length > 0) {
+      setFilesSaveRefused(true);
+      setConfigIssues({
+        errors: filesErrors.map((error) => ({ field: error.field, message: filesErrorMessage(error.code) })),
+        warnings: [],
+      });
+      if (notify) {
+        notifications.show({
+          title: t('notifications.error'),
+          message: filesErrorMessage(filesErrors[0].code),
+          color: 'red',
+        });
+        document.getElementById('config-files')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return false;
+    }
 
     try {
       const res = await fetch(`/api/agents/${agentId}`, {
@@ -652,6 +696,7 @@ export default function AgentDetailPage() {
 
       const data = await res.json();
       setAgent(data.agent);
+      setFilesSaveRefused(false);
       setConfigIssues(Array.isArray(data.warnings) && data.warnings.length > 0
         ? { errors: [], warnings: data.warnings }
         : null);
@@ -1187,12 +1232,30 @@ export default function AgentDetailPage() {
               <AgentExecutionPanel
                 value={executionConfig}
                 onChange={setExecutionConfig}
-                attachments={attachmentsConfig}
-                onAttachmentsChange={setAttachmentsConfig}
               />,
               executionConfig?.defaultMode === 'background' ? (
                 <Badge size="xs" color="indigo" variant="light" w="fit-content">background by default</Badge>
               ) : null,
+            )}
+            {buildSection(
+              'files',
+              t('attachments.sectionDescription'),
+              <AgentFilesPanel
+                value={attachmentsConfig}
+                onChange={handleFilesChange}
+                agentKey={agent.key}
+                showErrors={filesSaveRefused}
+              />,
+              filesEnabled(attachmentsConfig) ? (
+                <Badge size="xs" color="teal" variant="light" w="fit-content">
+                  {t('attachments.badgeOn', {
+                    files: attachmentsConfig?.maxFiles ?? SESSION_FILES_DEFAULTS.maxFiles,
+                    days: attachmentsConfig?.retentionDays ?? SESSION_FILES_DEFAULTS.retentionDays,
+                  })}
+                </Badge>
+              ) : (
+                <Badge size="xs" color="gray" variant="light" w="fit-content">{t('attachments.badgeOff')}</Badge>
+              ),
             )}
             {buildSection(
               'hitl',

@@ -130,6 +130,7 @@ export default defineConfig({
             { text: 'Model Inference', link: '/guide/inference' },
             { text: 'Agent Background Execution', link: '/guide/agent-background-execution' },
             { text: 'Approvals & Questions', link: '/guide/agent-approvals' },
+            { text: 'Agent Sessions API', link: '/guide/agent-sessions' },
             { text: 'Session Events', link: '/guide/agent-session-events' },
             { text: 'Session Budgets', link: '/guide/agent-session-budgets' },
             { text: 'Webhooks', link: '/guide/webhooks' },

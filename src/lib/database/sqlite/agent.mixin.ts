@@ -7,7 +7,9 @@
 import type {
   IAgent,
   AgentStatus,
+  AgentSessionRuntimeStatus,
   IAgentConversation,
+  IAgentConversationListItem,
   IAgentConversationState,
   IAgentPendingAction,
   IAgentSessionEvent,
@@ -375,6 +377,46 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
       const rows = db.prepare(sql).all(params) as SqliteRow[];
       return rows.map((r) => this.mapConversation(r));
+    }
+
+    async listAgentConversationPage(filters: {
+      projectId: string;
+      agentKey?: string;
+      runtimeStatus?: AgentSessionRuntimeStatus;
+      limit: number;
+      after?: { createdAt: Date; id: string };
+    }): Promise<IAgentConversationListItem[]> {
+      const db = this.getTenantDb();
+      const conditions: string[] = ['projectId = @projectId'];
+      const params: Record<string, unknown> = { projectId: filters.projectId, limit: filters.limit };
+      if (filters.agentKey) { conditions.push('agentKey = @agentKey'); params.agentKey = filters.agentKey; }
+      if (filters.runtimeStatus === 'idle') {
+        conditions.push("(runtimeStatus IS NULL OR runtimeStatus = 'idle')");
+      } else if (filters.runtimeStatus) {
+        conditions.push('runtimeStatus = @runtimeStatus');
+        params.runtimeStatus = filters.runtimeStatus;
+      }
+      if (filters.after) {
+        // Keyset on (createdAt, id), newest first: the rows strictly after the last one of the previous page.
+        conditions.push('(createdAt < @afterCreatedAt OR (createdAt = @afterCreatedAt AND id < @afterId))');
+        params.afterCreatedAt = filters.after.createdAt.toISOString();
+        params.afterId = filters.after.id;
+      }
+      // No `messages` column: the transcript is the heavy part, and a list only needs how many there are.
+      const rows = db.prepare(`
+        SELECT id, tenantId, projectId, agentKey, title, metadata, createdBy, createdAt, updatedAt,
+               runtimeStatus, stopReason, pendingActionIds, lastEventSeq, budget, spentUsd,
+               json_array_length(messages) AS messageCount
+        FROM ${TABLES.agentConversations}
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY createdAt DESC, id DESC
+        LIMIT @limit
+      `).all(params) as SqliteRow[];
+      return rows.map((row) => {
+        const { messages: _messages, ...conversation } = this.mapConversation(row);
+        void _messages;
+        return { ...conversation, messageCount: Number(row.messageCount ?? 0) };
+      });
     }
 
     // ── Agent session event log ──────────────────────────────────

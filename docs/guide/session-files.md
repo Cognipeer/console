@@ -2,34 +2,69 @@
 
 People can attach documents and images to a session. The agent reads them in the turn, or, when they are long, page by page with two read-only tools. Files belong to one session, live for a set number of days and go when the session is deleted.
 
+A session file is an ordinary file in a **bucket of your project** (the Document Store). You choose the bucket; nothing is stored anywhere you did not choose, and **nothing is written to the server's disk** unless the bucket you pick is on a local-disk provider on purpose.
+
 ## In Studio
 
-The paperclip in the session composer attaches files. Each file appears as a chip with its size; a chip in orange means no text could be extracted from it, so the agent can only see that it exists. Attached files are shown on the message they were sent with. Send the message and the chips go with it.
+The paperclip in the session composer attaches files. Each file appears as a chip with its size; a chip in orange means no text could be extracted from it, so the agent can only see that it exists. Attached files are shown on the message they were sent with. Send the message and the chips go with it. The paperclip is only there when the agent has files switched on and a bucket chosen; if that bucket later stops working, the upload says which one.
 
 ## Settings
 
-**Configure → Execution → Attachments**, per agent. Every field is optional; an empty field uses the default shown.
+**Configure → Files**, per agent. Files are **off** until you switch them on and choose a bucket.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Accept attached files | on | Off: the agent takes no attachments. A connected (external) agent never does. |
+| Let people attach files | off | Off: the agent takes no attachments. A connected (external) agent never does. |
+| Bucket | none | **Required when on.** A bucket of the agent's project that is active and whose provider is active and assigned to the project. Saving is refused otherwise. |
+| Folder | `agent-sessions` | Root folder inside the bucket. A file is stored at `<folder>/<agentKey>/<sessionId>/<unique name>`. Letters, digits and `. _ - /` only (at most 200 characters). |
 | Files per session | 10 | A session holds at most this many files. |
 | Largest file (MB) | 20 | Larger uploads are refused (413). The platform's `FILE_UPLOAD_MAX_MB` is the ceiling. |
+| Allowed file types | any | MIME types; `image/*` works. |
 | Put in the message up to (tokens) | 30000 | See below. Estimated as characters / 4. |
 | Page size when reading (characters) | 20000 | Size of a page of `session_files_read`. |
 | Keep files for (days) | 30 | The file is deleted this long after upload. |
-| Allowed file types | any | Comma-separated MIME types; `image/*` works. |
-| Storage bucket | system | Empty: the project's `conversation-files` bucket on the built-in storage, created the first time it is needed. |
+| Attach new uploads to the next message | on | Files uploaded to a session that no message has carried yet go with the next message. |
 
-An agent saved before this existed accepts attachments with the defaults.
+An agent saved before files had a bucket setting, or with files switched on but no bucket, **takes no attachments**: the paperclip is hidden and an upload is refused with `403 attachments_disabled` ("Files are not set up for this agent").
+
+### Where the files are
+
+They are normal Document Store files (**Files** in the sidebar): same drivers (S3 and compatible, or local disk), same markdown conversion, same project file quotas. In the bucket, **Session files** are told apart from the rest, and a session file shows the session it belongs to, when it expires and who uploaded it. Open the bucket's folders to see `agent-sessions/<agent>/<session>/…`.
+
+A bucket an agent keeps session files in **cannot be deleted or disabled** (409) until you choose another bucket for that agent. If the bucket or its provider stops working later, an upload is refused with `409 storage_unavailable`, naming the bucket; the retention cleanup drops the record of an expired file whose bucket is gone for good (and logs `session_file_orphaned` for the object left behind) instead of retrying it every hour. Changing the agent's bucket affects new files only; earlier files stay readable in the bucket they were stored in.
 
 ## What the agent sees
 
 - **Documents.** The file is converted to markdown (the original is kept). If the text of all the files attached to a message is at most the inline limit, it goes in the user turn as `<document name="…" id="…">…</document>` blocks. If not, the turn carries a short note listing the files and their page counts, and the agent reads them with `session_files_read({ fileId, page })`, which returns `{ text, page, pages }`.
-- **Images.** Sent to the model as images when the model accepts image input (set on the model: its input modalities, or "multimodal"). Otherwise the turn says an image was attached that the model cannot read.
+- **Images.** Sent to the model as images when the model accepts image input; otherwise the turn says an image was attached that the model cannot read. A chat model accepts images when its **input modalities** say so (Model Hub → the model → input modalities). A model with nothing stored for it is taken to accept images when its id belongs to a known vision family (GPT-4o/4.1/5 and later, o-series except `o1-mini` and `o3-mini`, Claude 3 and later, Gemini, Llama 3.2 Vision and 4, Qwen-VL, Pixtral, Grok vision, Nova, …); a choice you store on the model — including "text only" — always wins over the id.
+- **Files nobody has sent yet.** A file uploaded to the session before the first message, or since the last one, goes with the next message — you do not have to name it. That is how "create a session, upload, ask" works from the API. (The agent's *Attach new uploads to the next message* setting turns this off; the files are then only reachable with the two tools below.)
 - **Earlier uploads.** `session_files_list` and `session_files_read` are offered whenever the session holds a file, so a later message can ask about an earlier upload. Both only read, so tool approvals never ask about them.
 
 ## API
+
+### Create a session, upload, ask
+
+```http
+POST /api/client/v1/agents/sessions
+Authorization: Bearer <token>
+
+{ "agent": "support-bot" }
+```
+```json
+{ "id": "6f1c…", "object": "agent.session", "agent": "support-bot", "runtime_status": "idle", … }
+```
+
+Upload to it (below), then ask — naming the session, not the files:
+
+```http
+POST /api/client/v1/agents/responses
+
+{ "model": "support-bot", "session_id": "6f1c…", "input": "Summarise the contract" }
+```
+
+The file goes with that first message, and the user message records it in `attachments`. See [Agent sessions](/guide/agent-sessions) for the session calls.
+
+### Upload
 
 Upload the file as the raw request body, with its MIME type as `Content-Type` and its name in `?name=`:
 
@@ -45,7 +80,7 @@ A small file can go as JSON instead: `{ "name": "notes.txt", "content_type": "te
 
 | Call | |
 | --- | --- |
-| `POST …/files?name=` | Upload. 201 with the file; 413 too large, 415 type not accepted, 409 too many files, 429 quota, 403 attachments off. |
+| `POST …/files?name=` | Upload. 201 with the file; 413 too large, 415 type not accepted, 409 too many files, 409 `storage_unavailable` (the agent's bucket cannot take a file now), 429 quota, 403 attachments off or not set up. |
 | `GET …/files` | The session's files: `{ "object": "list", "data": [...] }`. |
 | `DELETE …/files/{fileId}` | Delete one. |
 
@@ -56,9 +91,12 @@ A file, as the client API returns it (the dashboard's calls use `camelCase`):
   "id": "6710…", "object": "agent.session.file", "session_id": "6f1c…",
   "name": "contract.pdf", "mime_type": "application/pdf", "size": 183422,
   "conversion_status": "succeeded",
+  "bucket_key": "uploads", "path": "agent-sessions/support-bot/6f1c…/contract-1727…-ab12cd34.pdf",
   "created_at": "2026-10-01T12:00:00.000Z", "expires_at": "2026-10-31T12:00:00.000Z"
 }
 ```
+
+`bucket_key` and `path` say where the file is stored: the bucket in the Document Store and the object's path inside it.
 
 `conversion_status` is `succeeded` when the text could be read, `pending` while it converts, and `failed` or `skipped` when only the original exists (`conversion_error` says why); the agent then knows the file is there but cannot read it. `{conversationId}` is the id inside `resp_{conversationId}`.
 
@@ -73,7 +111,7 @@ Name the files a message uses in the chat body: `attachments: ["<fileId>", …]`
 ```json
 {
   "model": "my-agent",
-  "previous_response_id": "resp_…",
+  "session_id": "6f1c…",
   "input": [{ "role": "user", "content": [
     { "type": "input_text", "text": "Compare these" },
     { "type": "input_file", "file_id": "…" },
@@ -84,10 +122,10 @@ Name the files a message uses in the chat body: `attachments: ["<fileId>", …]`
 }
 ```
 
-- `file_id` is a file already uploaded to the session you continue with `previous_response_id`.
+- `file_id` is a file already uploaded to the session you continue — with `session_id`, its alias `conversation` (a string or `{ "id": … }`), or `previous_response_id`.
 - `file_data` and a `data:` image are decoded and uploaded to the session first. An `https` image URL is fetched (private addresses are refused) within the agent's size limit and uploaded, provided the server answers with an `image/*` `Content-Type`; any other answer (JSON, HTML, no type) is refused with `415 unsupported_file_type` and nothing is stored. To give the agent a document, send it as `input_file` instead.
 - With `background: true`, the run carries the attachments. For `Idempotency-Key`, only the file ids you named identify the request: a file sent inline is stored under a new id each time.
 
 ## Cleanup
 
-Files past their retention are removed by the hourly cleanup (object, markdown and record). Deleting a session removes its files at once; one that cannot be removed then is retried by the cleanup when it expires.
+Files past their retention are removed by the hourly cleanup (object, markdown and record). Deleting a session removes its files at once; one that cannot be removed then is retried by the cleanup when it expires. A file that keeps failing does not hold the cleanup up: each sweep goes on to the files behind it. Changing *Keep files for* affects new files only.

@@ -109,10 +109,13 @@ import { toClientPendingAction, type ClientPendingAction } from './clientWire';
 import {
     agentTakesAttachments,
     assembleTurnAttachments,
+    attachmentsAvailability,
+    attachmentsUnavailableMessage,
     buildSessionFileTools,
     buildUserTurnContent,
     conversationHasFiles,
     deleteConversationFiles,
+    findUnsentSessionFiles,
     resolveAttachmentsConfig,
     resolveTurnAttachments,
     sessionFileToolDefinitions,
@@ -3457,9 +3460,34 @@ export function agentMayStreamAnswer(config: GuardrailBindingSource): boolean {
 }
 
 /**
+ * The runtime context a turn runs with: the session's own (`metadata.runtimeContext`,
+ * entered once when the session was started) UNDER the caller's, so a
+ * per-message value still wins. Headers and metadata merge key by key.
+ */
+function mergeSessionRuntimeContext(
+    conversation: Pick<IAgentConversation, 'metadata'> | null | undefined,
+    requestContext: AgentRuntimeContext | undefined,
+): AgentRuntimeContext | undefined {
+    const sessionContext = conversation?.metadata?.runtimeContext as AgentRuntimeContext | undefined;
+    if (!sessionContext) return requestContext;
+    return {
+        ...sessionContext,
+        ...requestContext,
+        headers: { ...sessionContext.headers, ...requestContext?.headers },
+        metadata: { ...sessionContext.metadata, ...requestContext?.metadata },
+    };
+}
+
+/**
  * The files a message attaches, checked against the session BEFORE anything
  * runs (a refusal must not mark the session running or leave tools open).
  * Throws `AgentAttachmentError`; empty when the message attaches nothing.
+ *
+ * That is the files it names, plus — when the agent's `attachNewUploads` is on
+ * (the default) — the files uploaded to the session that no message has carried
+ * yet. Every channel that starts a turn gets that here, so "create a session,
+ * upload, ask" works the same from the dashboard, the Responses API, a
+ * background run or a portal.
  */
 async function resolveMessageAttachments(input: {
     tenantDbName: string;
@@ -3469,18 +3497,28 @@ async function resolveMessageAttachments(input: {
     config: IAgentConfig;
     fileIds: string[] | undefined;
 }): Promise<IFileRecord[]> {
-    if (!input.fileIds || input.fileIds.length === 0) return [];
-    if (!input.conversation) {
-        throw new AgentAttachmentError(400, 'attachment_not_found', 'Attachments belong to a session; start one and upload the files to it first.');
+    const named = input.fileIds ?? [];
+    const availability = attachmentsAvailability(input.config);
+    if (named.length > 0) {
+        if (!input.conversation) {
+            throw new AgentAttachmentError(400, 'attachment_not_found', 'Attachments belong to a session; start one and upload the files to it first.');
+        }
+        if (!availability.available) {
+            throw new AgentAttachmentError(403, 'attachments_disabled', attachmentsUnavailableMessage(availability.reason));
+        }
     }
-    if (!agentTakesAttachments(input.config)) {
-        throw new AgentAttachmentError(403, 'attachments_disabled', 'This agent does not take attachments.');
+    const scope = { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId };
+    const records = input.conversation && named.length > 0
+        ? await resolveTurnAttachments(scope, String(input.conversation._id), named)
+        : [];
+
+    if (input.conversation && availability.available && availability.cfg.attachNewUploads) {
+        const carried = new Set(records.map((record) => String(record._id)));
+        for (const record of await findUnsentSessionFiles(scope, input.conversation)) {
+            if (!carried.has(String(record._id))) records.push(record);
+        }
     }
-    return resolveTurnAttachments(
-        { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId },
-        String(input.conversation._id),
-        input.fileIds,
-    );
+    return records;
 }
 
 /**
@@ -3678,6 +3716,9 @@ async function runAgentChatTurn(
         tenantDbName, tenantId, projectId, conversation, config, fileIds: request.attachments,
     });
 
+    // A context given when the session was created (`POST /client/v1/agents/sessions`) applies to its API turns too.
+    const turnRuntimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
+
     // The session's own budget and the tenant's spend limit, for a turn that
     // calls a model (a connected agent spends nothing here). Refused before the
     // event log opens, like the check above.
@@ -3733,7 +3774,7 @@ async function runAgentChatTurn(
             connection: config.connection,
             history: (conversation.messages || []).map((m) => ({ role: m.role, content: m.content })),
             userMessage,
-            runtimeContext: request.runtimeContext,
+            runtimeContext: turnRuntimeContext,
             source: 'agent',
             onTextChunk,
             signal: request.signal,
@@ -3787,7 +3828,7 @@ async function runAgentChatTurn(
         agentKey,
         agent,
         config,
-        runtimeContext: request.runtimeContext,
+        runtimeContext: turnRuntimeContext,
         actorId: request.userId,
         source: 'agent',
         route: 'agent.chat',
@@ -4371,15 +4412,7 @@ async function runPlaygroundChatTurn(
     // Merged UNDER the request's own context so a per-message override still
     // wins — and merged per-key rather than wholesale, or setting one header on
     // one turn would silently drop the session's whole context for that turn.
-    const sessionContext = sessionConversation?.metadata?.runtimeContext as AgentRuntimeContext | undefined;
-    const runtimeContext: AgentRuntimeContext | undefined = sessionContext
-        ? {
-            ...sessionContext,
-            ...request.runtimeContext,
-            headers: { ...sessionContext.headers, ...request.runtimeContext?.headers },
-            metadata: { ...sessionContext.metadata, ...request.runtimeContext?.metadata },
-        }
-        : request.runtimeContext;
+    const runtimeContext = mergeSessionRuntimeContext(sessionConversation, request.runtimeContext);
 
     // Connected (external) agent — see `runExternalAgentTurn`. `content` is
     // the guarded answer: the only copy for a stateless call, and what a
@@ -4993,15 +5026,7 @@ async function runAgentResumeTurn(
     if (spend) await assertAgentTurnSpendAllowed(spend, config);
 
     // Same merge as a playground turn: the session's context under the caller's.
-    const sessionContext = conversation.metadata?.runtimeContext as AgentRuntimeContext | undefined;
-    const runtimeContext: AgentRuntimeContext | undefined = sessionContext
-        ? {
-            ...sessionContext,
-            ...request.runtimeContext,
-            headers: { ...sessionContext.headers, ...request.runtimeContext?.headers },
-            metadata: { ...sessionContext.metadata, ...request.runtimeContext?.metadata },
-        }
-        : request.runtimeContext;
+    const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
 
     const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
         db,

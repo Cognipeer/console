@@ -9,7 +9,9 @@ import { ObjectId, type Db } from 'mongodb';
 import type {
   IAgent,
   AgentStatus,
+  AgentSessionRuntimeStatus,
   IAgentConversation,
+  IAgentConversationListItem,
   IAgentConversationState,
   IAgentPendingAction,
   IAgentSessionEvent,
@@ -180,10 +182,32 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     // ── Agent Conversation operations ────────────────────────────
 
+    /** Per-process memo: the session-list indexes are ensured on the first conversation written per tenant DB. */
+    private conversationListIndexesReady = new Set<string>();
+
+    /**
+     * The client API's session list (a project's sessions newest first, optionally
+     * one agent's or one status). Ensured on the write path as well as in the boot
+     * manifest, for a tenant whose first conversation is created after it was bound.
+     * Names/keys are IDENTICAL to the manifest's.
+     */
+    private async ensureConversationListIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.conversationListIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.agentConversations);
+      await Promise.all([
+        coll.createIndex({ projectId: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_createdAt' }),
+        coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_agent_createdAt' }),
+        coll.createIndex({ projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_status_createdAt' }),
+      ]);
+      this.conversationListIndexesReady.add(dbName);
+    }
+
     async createAgentConversation(
       conversation: Omit<IAgentConversation, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IAgentConversation> {
       const db = this.getTenantDb();
+      await this.ensureConversationListIndexes(db).catch(() => undefined);
       const now = new Date();
       const doc = { ...conversation, createdAt: now, updatedAt: now };
       const result = await db
@@ -316,6 +340,42 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       if (filters?.limit) cursor = cursor.limit(filters.limit);
       const docs = await cursor.toArray();
       return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as IAgentConversation[];
+    }
+
+    async listAgentConversationPage(filters: {
+      projectId: string;
+      agentKey?: string;
+      runtimeStatus?: AgentSessionRuntimeStatus;
+      limit: number;
+      after?: { createdAt: Date; id: string };
+    }): Promise<IAgentConversationListItem[]> {
+      const db = this.getTenantDb();
+      const match: Record<string, unknown> = { projectId: filters.projectId };
+      if (filters.agentKey) match.agentKey = filters.agentKey;
+      // A conversation that never ran has no status: "idle" covers it.
+      if (filters.runtimeStatus === 'idle') match.runtimeStatus = { $in: [null, 'idle'] };
+      else if (filters.runtimeStatus) match.runtimeStatus = filters.runtimeStatus;
+      if (filters.after) {
+        // Keyset on (createdAt, _id), newest first.
+        match.$or = ObjectId.isValid(filters.after.id)
+          ? [
+            { createdAt: { $lt: filters.after.createdAt } },
+            { createdAt: filters.after.createdAt, _id: { $lt: new ObjectId(filters.after.id) } },
+          ]
+          : [{ createdAt: { $lt: filters.after.createdAt } }];
+      }
+      // Sorted and limited BEFORE the transcript is touched; it is only counted, never returned.
+      const docs = await db
+        .collection(COLLECTIONS.agentConversations)
+        .aggregate([
+          { $match: match },
+          { $sort: { createdAt: -1, _id: -1 } },
+          { $limit: filters.limit },
+          { $addFields: { messageCount: { $cond: [{ $isArray: '$messages' }, { $size: '$messages' }, 0] } } },
+          { $project: { messages: 0 } },
+        ])
+        .toArray();
+      return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() })) as unknown as IAgentConversationListItem[];
     }
 
     // ── Agent session event log ──────────────────────────────────

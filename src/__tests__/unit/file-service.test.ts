@@ -43,6 +43,7 @@ import {
   createFileBucket,
   getFileBucket,
   deleteFileBucket,
+  chooseRelativeFileKey,
 } from '@/lib/services/files/fileService';
 import type { IFileBucketRecord } from '@/lib/database';
 
@@ -291,5 +292,22 @@ describe('deleteFileBucket', () => {
     });
 
     expect(result).toBe(true);
+  });
+});
+
+describe('chooseRelativeFileKey', () => {
+  it('generates a unique name when there is no hint', () => {
+    expect(chooseRelativeFileKey(undefined, 'Report Q1.pdf')).toMatch(/^report-q1-\d+-[0-9a-f]{8}\.pdf$/);
+    expect(chooseRelativeFileKey('  ', 'a.txt')).toMatch(/^a-\d+-[0-9a-f]{8}\.txt$/);
+  });
+
+  it('uses a hint that names a file as the whole key', () => {
+    expect(chooseRelativeFileKey('reports/2026/q1.pdf', 'ignored.pdf')).toBe('reports/2026/q1.pdf');
+    expect(chooseRelativeFileKey('/leading/slash.txt', 'x.txt')).toBe('leading/slash.txt');
+  });
+
+  it('puts the file in a folder when the hint ends with a slash', () => {
+    expect(chooseRelativeFileKey('reports/2026/', 'Q1 report.pdf')).toMatch(/^reports\/2026\/q1-report-\d+-[0-9a-f]{8}\.pdf$/);
+    expect(chooseRelativeFileKey('/reports//2026//', 'a.txt')).toMatch(/^reports\/2026\/a-\d+-[0-9a-f]{8}\.txt$/);
   });
 });

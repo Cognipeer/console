@@ -8,8 +8,9 @@
  */
 
 import { useRef } from 'react';
-import { ActionIcon, Badge, CloseButton, Group, Loader, Text, Tooltip } from '@mantine/core';
-import { IconFile, IconPaperclip, IconPhoto } from '@tabler/icons-react';
+import Link from 'next/link';
+import { ActionIcon, Anchor, Badge, CloseButton, Group, Loader, Stack, Text, Tooltip } from '@mantine/core';
+import { IconAlertTriangle, IconFile, IconPaperclip, IconPhoto } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import type { IAgentMessageAttachment } from '@/lib/database/provider/types.domain';
 import {
@@ -69,38 +70,57 @@ export interface AttachmentChipsProps {
     uploading: string[];
     disabled?: boolean;
     onRemove: (fileId: string) => void;
+    /** The agent's model cannot be sent images: its name and where its input types are set. Images then wear a warning. */
+    textOnlyModel?: { name: string; href: string } | null;
 }
 
 /** The files waiting to be sent, each with its conversion status. */
-export function AttachmentChips({ files, uploading, disabled, onRemove }: AttachmentChipsProps) {
+export function AttachmentChips({ files, uploading, disabled, onRemove, textOnlyModel }: AttachmentChipsProps) {
     const t = useTranslations('agents.attachments');
     if (files.length === 0 && uploading.length === 0) return null;
+    // An image the model cannot take is not sent; the turn only records a note about it.
+    const unsent = (file: PendingAttachment) => Boolean(textOnlyModel) && isImageAttachment(file);
+    const warning = textOnlyModel && files.some(unsent) ? textOnlyModel : null;
     return (
-        <Group gap={6} mb={6} wrap="wrap" data-testid="attachment-chips">
-            {files.map((file) => (
-                <Badge
-                    key={file.fileId}
-                    variant="light"
-                    color={lacksReadableText(file) ? 'orange' : 'gray'}
-                    size="lg"
-                    radius="sm"
-                    leftSection={<FileIcon file={file} />}
-                    rightSection={
-                        <CloseButton size="xs" aria-label={t('remove')} disabled={disabled} onClick={() => onRemove(file.fileId)} />
-                    }
-                    styles={{ label: { textTransform: 'none', fontWeight: 500 } }}
-                >
-                    <Tooltip label={lacksReadableText(file) ? t('noText') : `${file.mimeType} · ${formatFileSize(file.size)}`} withArrow>
-                        <span>{file.name} <Text span size="10px" c="dimmed">{formatFileSize(file.size)}</Text></span>
-                    </Tooltip>
-                </Badge>
-            ))}
-            {uploading.map((name) => (
-                <Badge key={`up-${name}`} variant="outline" color="gray" size="lg" radius="sm" leftSection={<Loader size={10} />} styles={{ label: { textTransform: 'none' } }}>
-                    {name}
-                </Badge>
-            ))}
-        </Group>
+        <Stack gap={4} mb={6} data-testid="attachment-chips">
+            <Group gap={6} wrap="wrap">
+                {files.map((file) => (
+                    <Badge
+                        key={file.fileId}
+                        variant="light"
+                        color={unsent(file) || lacksReadableText(file) ? 'orange' : 'gray'}
+                        size="lg"
+                        radius="sm"
+                        leftSection={unsent(file) ? <IconAlertTriangle size={12} /> : <FileIcon file={file} />}
+                        rightSection={
+                            <CloseButton size="xs" aria-label={t('remove')} disabled={disabled} onClick={() => onRemove(file.fileId)} />
+                        }
+                        styles={{ label: { textTransform: 'none', fontWeight: 500 } }}
+                    >
+                        <Tooltip
+                            label={unsent(file)
+                                ? t('imageTextOnly', { model: textOnlyModel!.name })
+                                : lacksReadableText(file) ? t('noText') : `${file.mimeType} · ${formatFileSize(file.size)}`}
+                            withArrow
+                        >
+                            <span>{file.name} <Text span size="10px" c="dimmed">{formatFileSize(file.size)}</Text></span>
+                        </Tooltip>
+                    </Badge>
+                ))}
+                {uploading.map((name) => (
+                    <Badge key={`up-${name}`} variant="outline" color="gray" size="lg" radius="sm" leftSection={<Loader size={10} />} styles={{ label: { textTransform: 'none' } }}>
+                        {name}
+                    </Badge>
+                ))}
+            </Group>
+            {warning ? (
+                <Group gap={6} wrap="wrap" role="alert" data-testid="image-warning">
+                    <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />
+                    <Text size="xs" c="orange.7">{t('imageTextOnly', { model: warning.name })}</Text>
+                    <Anchor component={Link} href={warning.href} size="xs">{t('imageChangeInModels')}</Anchor>
+                </Group>
+            ) : null}
+        </Stack>
     );
 }
 

@@ -3,10 +3,12 @@
  *
  * A session file is an ordinary file record (`IFileRecord`) tagged
  * `purpose: 'conversation'` and the conversation it belongs to, stored in the
- * project's system `conversation-files` bucket on the built-in storage (or the
- * bucket the agent's `attachments.bucketKey` names). The original is kept and
- * converted to markdown by the same file service every other upload uses, so
- * the quota checks, the provider drivers and the Files screens all apply.
+ * bucket the agent's `attachments.bucketKey` names, at
+ * `<folder>/<agentKey>/<sessionId>/<unique name>`. There is no built-in
+ * fallback storage: an agent without a usable bucket takes no files
+ * (`sessionFilesBucket.ts`). The original is kept and converted to markdown by
+ * the same file service every other upload uses, so the quota checks, the
+ * provider drivers and the Files screens all apply.
  *
  * Using the files in a turn (`assembleTurnAttachments`):
  *  - The markdown of the files attached to THIS message is put in the user turn
@@ -18,6 +20,8 @@
  *  - Everything added to the user text sits after `ATTACHMENT_BLOCK_MARKER`, so
  *    the transcript can persist the text the person typed
  *    (`stripAttachmentBlock`) while the model works from the full turn.
+ *  - Files uploaded to the session that no message has carried yet ride along
+ *    with the next message (`findUnsentSessionFiles`, `attachNewUploads`).
  *
  * The two tools are present whenever the conversation has files — a later turn
  * can read an earlier upload — and both are read-only (`HITL_READ_ONLY_TOOLS`).
@@ -38,12 +42,11 @@ import {
 } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import {
-    createFileBucket,
     deleteFile,
     downloadFile,
+    generateFileRelativeKey,
     uploadFile,
 } from '@/lib/services/files';
-import { BUILTIN_FILE_PROVIDER_KEY, ensureBuiltinProviders } from '@/lib/services/providers/builtinProviders';
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
@@ -53,11 +56,19 @@ import {
     SESSION_FILES_LIST_TOOL,
     SESSION_FILES_READ_TOOL,
     agentTakesAttachments,
+    attachmentsAvailability,
+    attachmentsUnavailableMessage,
     isImageMime,
     isMimeAllowed,
     resolveAttachmentsConfig,
     type ResolvedAttachmentsConfig,
 } from './sessionFilesConfig';
+import {
+    inspectFileBucket,
+    sessionFileObjectKey,
+    storageNotConfiguredError,
+    storageUnavailableError,
+} from './sessionFilesBucket';
 
 /**
  * Everything the turn adds to the person's text starts here. The transcript
@@ -71,6 +82,8 @@ export {
     SESSION_FILES_LIST_TOOL,
     SESSION_FILES_READ_TOOL,
     agentTakesAttachments,
+    attachmentsAvailability,
+    attachmentsUnavailableMessage,
     isImageMime,
     isMimeAllowed,
     resolveAttachmentsConfig,
@@ -78,9 +91,6 @@ export {
 };
 
 const logger = createLogger('agent-session-files');
-
-/** Key of the per-project system bucket session files are stored in. */
-export const CONVERSATION_FILES_BUCKET_KEY = 'conversation-files';
 
 export interface SessionFileScope {
     tenantDbName: string;
@@ -104,6 +114,9 @@ export interface SessionFileView {
     /** `succeeded` = readable as text; `failed` / `skipped` = only the original exists; `pending` = converting. */
     conversionStatus: IFileRecord['markdownStatus'];
     conversionError?: string;
+    /** Where it is stored: the bucket (Document Store key) and the object's path inside it. */
+    bucketKey: string;
+    path: string;
     createdAt?: Date;
     expiresAt?: Date | null;
     uploadedBy?: string;
@@ -111,7 +124,7 @@ export interface SessionFileView {
 
 export function toSessionFileView(record: Pick<
     IFileRecord,
-    '_id' | 'name' | 'contentType' | 'size' | 'markdownStatus' | 'markdownError' | 'createdAt' | 'expiresAt' | 'uploadedBy'
+    '_id' | 'name' | 'contentType' | 'size' | 'markdownStatus' | 'markdownError' | 'bucketKey' | 'key' | 'createdAt' | 'expiresAt' | 'uploadedBy'
 > & { id?: string }): SessionFileView {
     return {
         id: record.id ?? String(record._id),
@@ -120,6 +133,8 @@ export function toSessionFileView(record: Pick<
         size: record.size,
         conversionStatus: record.markdownStatus,
         ...(record.markdownError ? { conversionError: record.markdownError } : {}),
+        bucketKey: record.bucketKey,
+        path: record.key,
         ...(record.createdAt ? { createdAt: record.createdAt } : {}),
         ...(record.expiresAt !== undefined ? { expiresAt: record.expiresAt } : {}),
         ...(record.uploadedBy ? { uploadedBy: record.uploadedBy } : {}),
@@ -202,39 +217,22 @@ async function tenantDb(tenantDbName: string): Promise<DatabaseProvider> {
     return db;
 }
 
-function isAlreadyExistsError(error: unknown): boolean {
-    return error instanceof Error && /already exists/i.test(error.message);
-}
-
 /**
  * The bucket new session files go to: the agent's own `attachments.bucketKey`,
- * else the project's system `conversation-files` bucket — created on the
- * built-in storage the first time it is needed.
+ * checked to be usable now (it exists in the project, is active, and its
+ * provider exists, is assigned to the project and is active). Refusals are typed
+ * and tell the operator which bucket: `409 storage_not_configured` (no bucket
+ * named — older data) and `409 storage_unavailable` (the named one cannot take a file).
  */
 export async function resolveSessionFilesBucket(
     scope: SessionFileScope,
     cfg: ResolvedAttachmentsConfig,
-    userId: string,
 ): Promise<string> {
-    if (cfg.bucketKey) return cfg.bucketKey;
+    if (!cfg.bucketKey) throw storageNotConfiguredError();
     const db = await tenantDb(scope.tenantDbName);
-    const existing = await db.findFileBucketByKey(scope.tenantId, CONVERSATION_FILES_BUCKET_KEY, scope.projectId);
-    if (existing) return CONVERSATION_FILES_BUCKET_KEY;
-
-    await ensureBuiltinProviders(scope.tenantDbName, scope.tenantId, scope.projectId, userId);
-    try {
-        await createFileBucket(scope.tenantDbName, scope.tenantId, scope.projectId, {
-            key: CONVERSATION_FILES_BUCKET_KEY,
-            name: 'Conversation files',
-            providerKey: BUILTIN_FILE_PROVIDER_KEY,
-            description: 'Files attached to agent sessions. Managed by the platform; expired files are removed automatically.',
-            metadata: { system: true },
-            createdBy: userId,
-        });
-    } catch (error) {
-        if (!isAlreadyExistsError(error)) throw error;
-    }
-    return CONVERSATION_FILES_BUCKET_KEY;
+    const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, cfg.bucketKey);
+    if (!inspection.usable) throw storageUnavailableError(inspection);
+    return cfg.bucketKey;
 }
 
 function decodeBase64(data: string): Buffer {
@@ -269,10 +267,11 @@ export interface UploadSessionFileInput {
  */
 export async function uploadSessionFile(input: UploadSessionFileInput): Promise<SessionFileView> {
     const { scope, conversation, agentConfig, actor } = input;
-    const cfg = resolveAttachmentsConfig(agentConfig?.attachments);
-    if (!agentTakesAttachments(agentConfig)) {
-        throw new AgentAttachmentError(403, 'attachments_disabled', 'This agent does not take attachments.');
+    const availability = attachmentsAvailability(agentConfig);
+    if (!availability.available) {
+        throw new AgentAttachmentError(403, 'attachments_disabled', attachmentsUnavailableMessage(availability.reason));
     }
+    const cfg = availability.cfg;
 
     const maxBytes = Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
     const declaredBytes = typeof input.data === 'string' ? estimateBase64Size(input.data) : input.data.length;
@@ -295,7 +294,7 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
         throw new AgentAttachmentError(409, 'too_many_files', `A session holds at most ${cfg.maxFiles} files. Delete one to attach another.`);
     }
 
-    const bucketKey = await resolveSessionFilesBucket(scope, cfg, actor.userId);
+    const bucketKey = await resolveSessionFilesBucket(scope, cfg);
 
     const quotaContext = {
         domain: 'file' as const,
@@ -341,6 +340,13 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
         createdBy: actor.userId,
         // An image has no text to convert; the model reads the original.
         convertToMarkdown: !isImageMime(mimeType),
+        // <folder>/<agentKey>/<sessionId>/<unique name>; the file service puts the bucket's own prefix in front.
+        keyHint: sessionFileObjectKey({
+            folder: cfg.folder,
+            agentKey: conversation.agentKey,
+            conversationId,
+            uniqueName: generateFileRelativeKey(input.fileName),
+        }),
         recordExtras: {
             purpose: 'conversation',
             conversationId,
@@ -378,13 +384,45 @@ async function findSessionFile(
     return record;
 }
 
-async function removeFileRecord(scope: SessionFileScope, record: IFileRecord, deletedBy: string): Promise<boolean> {
+/**
+ * Removes a file (object, markdown, row).
+ *
+ * A bucket or provider that is gone altogether leaves nothing to delete the
+ * object from: the row is dropped and the orphaned object logged
+ * (`session_file_orphaned`) so the operator can find it. One that is only
+ * switched off or unreachable (disabled bucket, inactive or unassigned provider)
+ * may come back, so:
+ *  - `strict` (a person deleting the file, a session going away) refuses with
+ *    `409 storage_unavailable` — the file stays until storage is fixed;
+ *  - `sweep` (the retention cleanup) drops it too: retrying every hour would
+ *    keep an expired file for ever.
+ */
+async function removeFileRecord(
+    scope: SessionFileScope,
+    record: IFileRecord,
+    deletedBy: string,
+    mode: 'strict' | 'sweep' = 'strict',
+): Promise<boolean> {
+    const db = await tenantDb(scope.tenantDbName);
+    const inspection = await inspectFileBucket(db, scope.tenantId, scope.projectId, record.bucketKey);
+    if (!inspection.usable) {
+        const gone = inspection.issue === 'bucket_missing' || inspection.issue === 'provider_missing';
+        if (!gone && mode === 'strict') throw storageUnavailableError(inspection);
+        logger.warn('Dropped a session file whose storage is unavailable; its object is left behind', {
+            code: 'session_file_orphaned',
+            fileId: String(record._id),
+            bucketKey: record.bucketKey,
+            providerKey: record.providerKey,
+            objectKey: record.key,
+            reason: inspection.issue,
+        });
+        return db.deleteFileRecord(String(record._id));
+    }
     try {
         return await deleteFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key, deletedBy);
     } catch (error) {
-        // The bucket or provider is gone: nothing left to delete the object from.
+        // The record or its object is already gone: nothing left to delete.
         if (error instanceof Error && /not found/i.test(error.message)) {
-            const db = await tenantDb(scope.tenantDbName);
             return db.deleteFileRecord(String(record._id));
         }
         throw error;
@@ -437,8 +475,12 @@ export async function deleteConversationFiles(
 
 /**
  * Deletes session files past their `expiresAt` (object + markdown + row), a
- * batch at a time. Returns how many it deleted. A file that cannot be deleted is
- * logged and tried again on the next sweep.
+ * batch at a time. Returns how many it deleted. A file that cannot be deleted
+ * is logged and tried again on the next sweep — but it does not hold the sweep
+ * up: the batches of one sweep skip what already failed (each batch asks for
+ * that many more rows), so a hundred stuck files at the head of the queue never
+ * keep the ones behind them from being reached. A file whose storage is gone for
+ * good is dropped (`removeFileRecord` in sweep mode).
  */
 export async function cleanupExpiredSessionFiles(
     db: DatabaseProvider,
@@ -447,24 +489,52 @@ export async function cleanupExpiredSessionFiles(
     options: { batchSize?: number; maxBatches?: number } = {},
 ): Promise<number> {
     const batchSize = options.batchSize ?? 200;
+    const failed = new Set<string>();
     let deleted = 0;
     for (let batch = 0; batch < (options.maxBatches ?? 5); batch += 1) {
-        const expired = await db.listExpiredConversationFiles(now, batchSize);
-        for (const record of expired) {
-            if (!record.projectId) continue;
+        const asked = batchSize + failed.size;
+        const fetched = await db.listExpiredConversationFiles(now, asked);
+        for (const record of fetched) {
+            const id = String(record._id);
+            if (failed.has(id)) continue;
+            if (!record.projectId) {
+                failed.add(id); // not scoped to a project: nothing to resolve its storage with
+                continue;
+            }
             try {
                 const scope = { tenantDbName, tenantId: record.tenantId, projectId: record.projectId };
-                if (await removeFileRecord(scope, record, 'system')) deleted += 1;
+                if (await removeFileRecord(scope, record, 'system', 'sweep')) deleted += 1;
             } catch (error) {
+                failed.add(id);
                 logger.warn('Could not delete an expired session file', {
-                    fileId: String(record._id),
+                    fileId: id,
                     error: error instanceof Error ? error.message : String(error),
                 });
             }
         }
-        if (expired.length < batchSize) break;
+        if (fetched.length < asked) break;
     }
     return deleted;
+}
+
+/**
+ * The files of a session that no message has carried yet, oldest first: what
+ * `attachNewUploads` puts on the next message. "Carried" = named in the
+ * `attachments` of a message the session already holds.
+ */
+export async function findUnsentSessionFiles(
+    scope: SessionFileScope,
+    conversation: Pick<IAgentConversation, '_id' | 'messages'>,
+): Promise<IFileRecord[]> {
+    const db = await tenantDb(scope.tenantDbName);
+    const carried = new Set<string>();
+    for (const message of conversation.messages ?? []) {
+        for (const attachment of message.attachments ?? []) carried.add(attachment.fileId);
+    }
+    const files = await db.listFileRecordsByConversation(String(conversation._id));
+    return files.filter((record) => record.purpose === 'conversation'
+        && record.projectId === scope.projectId
+        && !carried.has(String(record._id)));
 }
 
 /** Whether a conversation holds any file — decides whether the read tools are offered. */

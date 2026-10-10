@@ -182,7 +182,13 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   ],
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
-  agent_conversations: [{ key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } }],
+  agent_conversations: [
+    { key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } },
+    // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
+    { key: { projectId: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_createdAt' } },
+    { key: { projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_agent_createdAt' } },
+    { key: { projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_status_createdAt' } },
+  ],
   agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
   // Append-only session event log. The unique pair is the sequence guard; the
   // TTL index (expireAfterSeconds 0 = "at expiresAt") is the retention. The

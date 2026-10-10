@@ -22,6 +22,7 @@ const hoisted = vi.hoisted(() => ({
   recordAuditLog: vi.fn(),
   db: { current: null as unknown },
   blobs: new Map<string, Buffer>(),
+  counter: { n: 0 },
   fileOps: {} as Record<string, (...args: never[]) => unknown>,
 }));
 
@@ -35,15 +36,11 @@ vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
   destroyConversationSandbox: vi.fn(),
   resolveSandboxAvailability: vi.fn(),
 }));
-vi.mock('@/lib/services/providers/builtinProviders', () => ({
-  BUILTIN_FILE_PROVIDER_KEY: 'builtin-files',
-  ensureBuiltinProviders: vi.fn(async () => undefined),
-}));
 vi.mock('@/lib/services/files', () => ({
   uploadFile: (...args: unknown[]) => (hoisted.fileOps.uploadFile as (...a: unknown[]) => unknown)(...args),
   downloadFile: (...args: unknown[]) => (hoisted.fileOps.downloadFile as (...a: unknown[]) => unknown)(...args),
   deleteFile: (...args: unknown[]) => (hoisted.fileOps.deleteFile as (...a: unknown[]) => unknown)(...args),
-  createFileBucket: (...args: unknown[]) => (hoisted.fileOps.createFileBucket as (...a: unknown[]) => unknown)(...args),
+  generateFileRelativeKey: (name: string) => `${name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${Date.now()}-u${(hoisted.counter.n += 1)}`,
 }));
 vi.mock('@/lib/database', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/database')>();
@@ -66,7 +63,6 @@ import {
 } from '@/lib/services/agents/agentService';
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import {
-  CONVERSATION_FILES_BUCKET_KEY,
   cleanupExpiredSessionFiles,
   deleteSessionFile,
   listSessionFiles,
@@ -76,6 +72,9 @@ import { destroyCache } from '@/lib/core/cache';
 
 const DB_NAME = 'tenant_files';
 const PROJECT_ID = 'proj-1';
+// Files live in a bucket the agent names; the tests configure one explicitly, as an operator would.
+const BUCKET = 'test-bucket';
+const PROVIDER = 'test-files';
 const AGENT_KEY = 'doc-agent';
 const OWNER = 'user-1';
 
@@ -127,9 +126,15 @@ function setModel(extra: Record<string, unknown> = {}) {
   });
 }
 
+/** An agent that takes files: switched on, with the test bucket, plus whatever the test overrides. */
+const withFiles = (config: Partial<IAgentConfig> = {}): Partial<IAgentConfig> => ({
+  ...config,
+  attachments: { enabled: true, bucketKey: BUCKET, ...config.attachments },
+});
+
 async function createAgent(config: Partial<IAgentConfig> = {}) {
   await db.createAgent({
-    tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Docs', config: { modelKey: 'gpt-4o', ...config },
+    tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Docs', config: { modelKey: 'gpt-4o', ...withFiles(config) },
     status: 'active', createdBy: OWNER,
   });
   return (await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!;
@@ -182,6 +187,12 @@ beforeEach(async () => {
   });
   tenantId = String(tenant._id);
   await db.switchToTenant(DB_NAME);
+  // The storage a project has to set up: a file provider and a bucket on it.
+  await db.createProvider({
+    tenantId, projectId: PROJECT_ID, key: PROVIDER, type: 'file', driver: 'local-filesystem', label: 'Test disk',
+    status: 'active', credentialsEnc: '', settings: {}, createdBy: OWNER,
+  });
+  await db.createFileBucket({ tenantId, projectId: PROJECT_ID, key: BUCKET, name: 'Test bucket', providerKey: PROVIDER, status: 'active', createdBy: OWNER });
   setModel();
   hoisted.publish.mockResolvedValue(undefined);
   hoisted.getUserAuthState.mockResolvedValue('active');
@@ -193,16 +204,16 @@ beforeEach(async () => {
   keySeq = 0;
   hoisted.fileOps.uploadFile = (async (_db: string, tId: string, pId: string, request: {
     bucketKey: string; fileName: string; contentType?: string; data: Buffer; createdBy: string;
-    convertToMarkdown?: boolean; recordExtras?: Partial<IFileRecord>;
+    convertToMarkdown?: boolean; keyHint?: string; recordExtras?: Partial<IFileRecord>;
   }) => {
     keySeq += 1;
-    const key = `obj-${keySeq}`;
+    const key = request.keyHint ?? `obj-${keySeq}`;
     hoisted.blobs.set(`${request.bucketKey}/${key}`, request.data);
     const isText = request.contentType?.startsWith('text/') ?? false;
     const converted = request.convertToMarkdown !== false;
     if (converted && isText) hoisted.blobs.set(`${request.bucketKey}/${key}.md`, request.data);
     const record = await db.createFileRecord({
-      tenantId: tId, projectId: pId, providerKey: 'builtin-files', bucketKey: request.bucketKey, key,
+      tenantId: tId, projectId: pId, providerKey: PROVIDER, bucketKey: request.bucketKey, key,
       name: request.fileName, size: request.data.length, contentType: request.contentType,
       markdownStatus: !converted ? 'skipped' : isText ? 'succeeded' : 'failed',
       ...(converted && isText ? { markdownKey: `${key}.md`, markdownSize: request.data.length } : {}),
@@ -219,11 +230,8 @@ beforeEach(async () => {
   hoisted.fileOps.deleteFile = (async (_db: string, _t: string, _p: string, bucketKey: string, key: string) => {
     hoisted.blobs.delete(`${bucketKey}/${key}`);
     hoisted.blobs.delete(`${bucketKey}/${key}.md`);
-    const record = await db.findFileRecordByKey('builtin-files', bucketKey, key, PROJECT_ID);
+    const record = await db.findFileRecordByKey(PROVIDER, bucketKey, key, PROJECT_ID);
     return record ? db.deleteFileRecord(String(record._id)) : false;
-  }) as never;
-  hoisted.fileOps.createFileBucket = (async (_db: string, tId: string, pId: string, input: { key: string; name: string; providerKey: string; createdBy: string }) => {
-    return db.createFileBucket({ tenantId: tId, projectId: pId, status: 'active', ...input });
   }) as never;
 });
 
@@ -234,33 +242,58 @@ afterEach(async () => {
 });
 
 describe('uploading to a session', () => {
-  it('stores the file in the system conversation-files bucket, tagged with its session and an expiry', async () => {
+  it('stores the file in the bucket the agent names, under <folder>/<agentKey>/<sessionId>/, tagged with its session and an expiry', async () => {
     await createAgent({ attachments: { retentionDays: 7 } });
     const conversation = await newConversation();
 
     const view = await attach(conversation, 'notes.txt', 'hello notes', 'text/plain');
 
-    expect(view).toMatchObject({ name: 'notes.txt', mimeType: 'text/plain', size: 11, conversionStatus: 'succeeded' });
+    expect(view).toMatchObject({ name: 'notes.txt', mimeType: 'text/plain', size: 11, conversionStatus: 'succeeded', bucketKey: BUCKET });
     const [record] = await db.listFileRecordsByConversation(String(conversation._id));
     expect(record).toMatchObject({
-      bucketKey: CONVERSATION_FILES_BUCKET_KEY, purpose: 'conversation', conversationId: String(conversation._id),
+      bucketKey: BUCKET, providerKey: PROVIDER, purpose: 'conversation', conversationId: String(conversation._id),
       agentKey: AGENT_KEY, uploadedBy: OWNER, projectId: PROJECT_ID,
     });
+    expect(record.key).toMatch(new RegExp(`^agent-sessions/${AGENT_KEY}/${String(conversation._id)}/notes-txt-`));
+    expect(view.path).toBe(record.key);
     // retentionDays is the agent's own setting.
     expect(record.expiresAt!.getTime() - Date.now()).toBeGreaterThan(6.9 * 86_400_000);
     expect(record.expiresAt!.getTime() - Date.now()).toBeLessThan(7.1 * 86_400_000);
-    // The bucket was created on first use, on the built-in provider.
-    expect(await db.findFileBucketByKey(tenantId, CONVERSATION_FILES_BUCKET_KEY, PROJECT_ID)).toMatchObject({ providerKey: 'builtin-files' });
+    // Nothing is created on the side: no system bucket, no built-in provider.
+    expect((await db.listFileBuckets(tenantId, PROJECT_ID)).map((bucket) => bucket.key)).toEqual([BUCKET]);
+    expect((await db.listProviders(tenantId, { type: 'file' })).map((provider) => provider.key)).toEqual([PROVIDER]);
     expect((await listSessionFiles(scope(), String(conversation._id))).map((f) => f.name)).toEqual(['notes.txt']);
   });
 
-  it('uses the bucket the agent names instead of the system one', async () => {
-    await createAgent({ attachments: { bucketKey: 'my-bucket' } });
+  it('the folder is the agent’s own setting', async () => {
+    await createAgent({ attachments: { folder: '/exports//q1/' } });
     const conversation = await newConversation();
     await attach(conversation, 'a.txt', 'a', 'text/plain');
     const [record] = await db.listFileRecordsByConversation(String(conversation._id));
-    expect(record.bucketKey).toBe('my-bucket');
-    expect(await db.findFileBucketByKey(tenantId, CONVERSATION_FILES_BUCKET_KEY, PROJECT_ID)).toBeNull();
+    expect(record.key).toMatch(new RegExp(`^exports/q1/${AGENT_KEY}/${String(conversation._id)}/`));
+  });
+
+  it('uses the bucket the agent names, and nothing else — a missing, disabled or provider-less bucket is a typed 409', async () => {
+    await createAgent({ attachments: { bucketKey: 'ghost' } });
+    const conversation = await newConversation();
+    const refusal = async () => classifyAgentRunError(await attach(conversation, 'a.txt', 'a', 'text/plain').catch((e) => e));
+
+    expect(await refusal()).toMatchObject({ status: 409, error: { code: 'storage_unavailable', message: expect.stringContaining('the bucket "ghost" does not exist') } });
+    expect(await db.findFileBucketByKey(tenantId, 'ghost', PROJECT_ID)).toBeNull();
+    expect(await db.findFileBucketByKey(tenantId, 'conversation-files', PROJECT_ID)).toBeNull();
+
+    const bucket = (await db.findFileBucketByKey(tenantId, BUCKET, PROJECT_ID))!;
+    await db.updateAgent((await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!._id as string, { config: { modelKey: 'gpt-4o', attachments: { enabled: true, bucketKey: BUCKET } } });
+    await db.updateFileBucket(String(bucket._id), { status: 'disabled' });
+    expect(await refusal()).toMatchObject({ status: 409, error: { code: 'storage_unavailable', message: expect.stringContaining('the bucket "test-bucket" is disabled') } });
+
+    await db.updateFileBucket(String(bucket._id), { status: 'active' });
+    const provider = (await db.findProviderByKey(tenantId, PROVIDER, PROJECT_ID))!;
+    await db.updateProvider(String(provider._id), { status: 'disabled' });
+    expect(await refusal()).toMatchObject({ status: 409, error: { code: 'storage_unavailable', message: expect.stringContaining('is not active') } });
+
+    await db.updateProvider(String(provider._id), { status: 'active' });
+    await expect(attach(conversation, 'a.txt', 'a', 'text/plain')).resolves.toMatchObject({ bucketKey: BUCKET });
   });
 
   it('refuses by the agent’s own limits: size, count, type, empty and switched off', async () => {
@@ -278,7 +311,7 @@ describe('uploading to a session', () => {
     await attach(conversation, 'pic.png', Buffer.from([1, 2, 3]), 'image/png'); // image/* wildcard
     expect(await refusal('three.txt', 'three', 'text/plain')).toMatchObject({ status: 409, error: { code: 'too_many_files' } });
 
-    const off = await createAgentWithKey('off-agent', { attachments: { enabled: false } });
+    const off = await createAgentWithKey('off-agent', { attachments: { enabled: false, bucketKey: BUCKET } });
     expect(classifyAgentRunError(
       await uploadSessionFile({ scope: scope(), conversation, agentConfig: off.config, fileName: 'a.txt', contentType: 'text/plain', data: Buffer.from('a'), actor: { userId: OWNER, licenseType: 'FREE' } }).catch((e) => e),
     )).toMatchObject({ status: 403, error: { code: 'attachments_disabled' } });
@@ -307,7 +340,7 @@ describe('uploading to a session', () => {
 
 async function createAgentWithKey(key: string, config: Partial<IAgentConfig>) {
   const created = await db.createAgent({
-    tenantId, projectId: PROJECT_ID, key, name: key, config: { modelKey: 'gpt-4o', ...config }, status: 'active', createdBy: OWNER,
+    tenantId, projectId: PROJECT_ID, key, name: key, config: { modelKey: 'gpt-4o', ...(config.attachments ? config : withFiles(config)) }, status: 'active', createdBy: OWNER,
   });
   return created;
 }
@@ -453,6 +486,111 @@ describe('a turn with attachments', () => {
   });
 });
 
+describe('files nobody has sent yet (attachNewUploads)', () => {
+  it('ride along with the first message: create a session, upload, ask — no ids named', async () => {
+    await createAgent();
+    const model = scriptModel(() => answer('It says hello.'));
+    const conversation = await newConversation();
+    const id = String(conversation._id);
+    const file = await attach(conversation, 'notes.txt', 'Quarterly notes: revenue up.', 'text/plain');
+
+    const response = await chat(id, 'What do the notes say?'); // no attachments named
+
+    expect(response.status).toBe('completed');
+    const shown = userTurn(model.seen[0]).content as string;
+    expect(shown).toContain('What do the notes say?');
+    expect(shown).toContain(`<document name="notes.txt" id="${file.id}">`);
+    expect(shown).toContain('Quarterly notes: revenue up.');
+    // Recorded on the message that carried it, like a file named by id.
+    expect((await stored(id)).messages[0]).toMatchObject({
+      role: 'user', content: 'What do the notes say?', attachments: [{ fileId: file.id, name: 'notes.txt', mimeType: 'text/plain' }],
+    });
+  });
+
+  it('are carried once: the next message does not repeat them, and one uploaded since rides along', async () => {
+    await createAgent();
+    const model = scriptModel(() => answer());
+    const conversation = await newConversation();
+    const id = String(conversation._id);
+    await attach(conversation, 'first.txt', 'first-file-text', 'text/plain');
+    await chat(id, 'one');
+    await attach(conversation, 'second.txt', 'second-file-text', 'text/plain');
+    await chat(id, 'two');
+    await chat(id, 'three');
+
+    expect(userTurn(model.seen[0]).content).toContain('first-file-text');
+    const second = String(userTurn(model.seen[1]).content);
+    expect(second).toContain('second-file-text');
+    expect(second).not.toContain('first-file-text');
+    // The third message attaches nothing new.
+    expect(userTurn(model.seen[2]).content).toBe('three');
+    const after = await stored(id);
+    expect(after.messages[0]).toHaveProperty('attachments');
+    expect(after.messages[2]).toHaveProperty('attachments');
+    expect(after.messages[4]).not.toHaveProperty('attachments');
+  });
+
+  it('go with the ones the message names, once each, and follow the same inline / paged rule', async () => {
+    await createAgent({ attachments: { inlineMaxTokens: 100, readPageChars: 500 } });
+    const model = scriptModel(() => answer());
+    const conversation = await newConversation();
+    const id = String(conversation._id);
+    const named = await attach(conversation, 'named.txt', 'word '.repeat(40), 'text/plain'); // ~50 tokens
+    const implicit = await attach(conversation, 'implicit.txt', 'line '.repeat(60), 'text/plain'); // ~75 tokens: together they are over 100
+
+    await chat(id, 'read both', [named.id]);
+
+    const shown = String(userTurn(model.seen[0]).content);
+    expect(shown).toContain('too long to include');
+    expect(shown).toContain(`id ${named.id}`);
+    expect(shown).toContain(`id ${implicit.id}`);
+    expect((await stored(id)).messages[0].attachments?.map((a) => a.fileId)).toEqual([named.id, implicit.id]);
+  });
+
+  it('are left alone when the agent turns the setting off — they stay readable with the tools', async () => {
+    await createAgent({ attachments: { attachNewUploads: false } });
+    const model = scriptModel(() => answer());
+    const conversation = await newConversation();
+    const id = String(conversation._id);
+    await attach(conversation, 'kept.txt', 'kept-text', 'text/plain');
+
+    await chat(id, 'hello');
+
+    expect(userTurn(model.seen[0]).content).toBe('hello');
+    expect(model.toolNames).toEqual(expect.arrayContaining(['session_files_list', 'session_files_read']));
+    expect((await stored(id)).messages[0]).not.toHaveProperty('attachments');
+  });
+
+  it('do the same on the dashboard (playground) path', async () => {
+    await createAgent();
+    const model = scriptModel(() => answer('ok'));
+    const conversation = await newConversation();
+    const id = String(conversation._id);
+    await attach(conversation, 'p.txt', 'playground text', 'text/plain');
+
+    await executePlaygroundChatLocal({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, userMessage: 'read it',
+    });
+
+    expect(userTurn(model.seen[0]).content).toContain('playground text');
+    expect((await stored(id)).messages[0]).toMatchObject({ role: 'user', content: 'read it', attachments: [{ name: 'p.txt' }] });
+  });
+
+  it('never reach a session whose agent takes no files, and never a stateless call', async () => {
+    await createAgent({ attachments: { enabled: false } });
+    const model = scriptModel(() => answer());
+    const conversation = await newConversation();
+    // Uploaded while the agent still took files; the agent was switched off since.
+    await db.createFileRecord({
+      tenantId, projectId: PROJECT_ID, providerKey: PROVIDER, bucketKey: BUCKET, key: 'x/old.txt', name: 'old.txt', size: 3,
+      contentType: 'text/plain', markdownStatus: 'skipped', purpose: 'conversation', conversationId: String(conversation._id),
+      agentKey: AGENT_KEY, createdBy: OWNER,
+    });
+    await chat(String(conversation._id), 'hi');
+    expect(userTurn(model.seen[0]).content).toBe('hi');
+  });
+});
+
 describe('images', () => {
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
 
@@ -478,8 +616,7 @@ describe('images', () => {
     expect((await stored(id)).messages[0]).toMatchObject({ content: 'what is this?', attachments: [{ name: 'cat.png', mimeType: 'image/png' }] });
   });
 
-  it('become a text note when the model cannot read images', async () => {
-    setModel({ isMultimodal: false });
+  const noteForTextOnlyModel = async () => {
     await createAgent();
     const model = scriptModel(() => answer('cannot see'));
     const conversation = await newConversation();
@@ -492,6 +629,64 @@ describe('images', () => {
     expect(content).toContain('cannot read images');
     expect(content).toContain('cat.png');
     expect(JSON.stringify(model.seen[0])).not.toContain('image_url');
+  };
+
+  it('become a text note when the model is set to text only — an explicit setting wins over its name', async () => {
+    // gpt-4o is a vision family; the stored "text" choice is what counts.
+    setModel({ isMultimodal: false, metadata: { capabilities: { inputModalities: ['text'] } } });
+    await noteForTextOnlyModel();
+  });
+
+  it('become a text note for a model nobody knows to read images', async () => {
+    setModel({ isMultimodal: false, modelId: 'in-house-llm-7b' });
+    await noteForTextOnlyModel();
+  });
+
+  it('become image parts for a model of a known vision family with nothing stored for it', async () => {
+    // No isMultimodal flag, no capabilities: the model id alone says it reads images.
+    setModel({ isMultimodal: false, modelId: 'gpt-4o' });
+    await createAgent();
+    const model = scriptModel(() => answer('a cat'));
+    const conversation = await newConversation();
+    const file = await attach(conversation, 'cat.png', png, 'image/png');
+
+    await chat(String(conversation._id), 'what is this?', [file.id]);
+
+    const content = userTurn(model.seen[0]).content as Array<Record<string, unknown>>;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content.some((part) => part.type === 'image_url')).toBe(true);
+  });
+});
+
+describe('the context a session was created with', () => {
+  const systemOf = (messages: Seen) => String(messages.find((m) => m.role === 'system')?.content ?? '');
+
+  it('reaches the turns of an API session, under the caller’s own context', async () => {
+    await createAgent({ systemPrompt: 'Customer tier: {{tier}}.', promptVariables: { tier: 'basic' } });
+    const model = scriptModel(() => answer());
+    const conversation = await db.createAgentConversation({
+      tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, title: 'New conversation', messages: [], createdBy: OWNER,
+      metadata: { source: 'api', runtimeContext: { source: 'api', userId: OWNER, metadata: { tier: 'gold' } } },
+    });
+    const id = String(conversation._id);
+
+    await chat(id, 'one');
+    // A value the turn itself sends wins over the session's.
+    await executeAgentChatLocal({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, userMessage: 'two', userId: OWNER,
+      runtimeContext: { source: 'api', metadata: { tier: 'platinum' } },
+    });
+
+    expect(systemOf(model.seen[0])).toContain('Customer tier: gold.');
+    expect(systemOf(model.seen[1])).toContain('Customer tier: platinum.');
+  });
+
+  it('a session without one runs exactly as before', async () => {
+    await createAgent({ systemPrompt: 'Customer tier: {{tier}}.', promptVariables: { tier: 'basic' } });
+    const model = scriptModel(() => answer());
+    const conversation = await newConversation();
+    await chat(String(conversation._id), 'one');
+    expect(systemOf(model.seen[0])).toContain('Customer tier: basic.');
   });
 });
 
@@ -512,11 +707,24 @@ describe('back-compat: no attachments', () => {
     expect(after.messages[0].content).toBe('hello there');
   });
 
-  it('an agent saved before attachments existed accepts them with the defaults', async () => {
-    const agent = await createAgent();
-    expect(agent.config.attachments).toBeUndefined();
+  it('an agent saved before attachments existed takes none — there is no bucket for the files', async () => {
+    await db.createAgent({ tenantId, projectId: PROJECT_ID, key: 'old-agent', name: 'Old', config: { modelKey: 'gpt-4o' }, status: 'active', createdBy: OWNER });
+    const old = (await db.findAgentByKey('old-agent', PROJECT_ID))!;
+    expect(old.config.attachments).toBeUndefined();
     const conversation = await newConversation();
-    await expect(attach(conversation, 'a.txt', 'a', 'text/plain')).resolves.toMatchObject({ name: 'a.txt' });
+    const refused = await uploadSessionFile({
+      scope: scope(), conversation, agentConfig: old.config, fileName: 'a.txt', contentType: 'text/plain', data: Buffer.from('a'), actor: { userId: OWNER, licenseType: 'FREE' },
+    }).catch((e) => e);
+    expect(classifyAgentRunError(refused)).toMatchObject({ status: 403, error: { code: 'attachments_disabled' } });
+  });
+
+  it('switched on without a bucket (older data) is off too, and says files are not set up', async () => {
+    const config = (await createAgentWithKey('half-agent', { attachments: { enabled: true } })).config;
+    const conversation = await newConversation();
+    const refused = await uploadSessionFile({
+      scope: scope(), conversation, agentConfig: config, fileName: 'a.txt', contentType: 'text/plain', data: Buffer.from('a'), actor: { userId: OWNER, licenseType: 'FREE' },
+    }).catch((e) => e);
+    expect(classifyAgentRunError(refused)).toMatchObject({ status: 403, error: { code: 'attachments_disabled', message: 'Files are not set up for this agent.' } });
   });
 });
 
@@ -550,7 +758,8 @@ describe('retention and deletion', () => {
     expect(deleted).toBe(1);
     expect((await listSessionFiles(scope(), String(conversation._id))).map((f) => f.id)).toEqual([kept.id]);
     // old.txt's object and its markdown are gone; new.txt's remain.
-    expect([...hoisted.blobs.keys()].sort()).toEqual([`${CONVERSATION_FILES_BUCKET_KEY}/obj-2`, `${CONVERSATION_FILES_BUCKET_KEY}/obj-2.md`]);
+    const keptRecord = (await db.findFileRecordById(kept.id))!;
+    expect([...hoisted.blobs.keys()].sort()).toEqual([`${BUCKET}/${keptRecord.key}`, `${BUCKET}/${keptRecord.key}.md`]);
   });
 
   it('keeps going past a file that cannot be deleted, and tries it again next time', async () => {
@@ -585,7 +794,90 @@ describe('retention and deletion', () => {
 
     expect(await db.listFileRecordsByConversation(String(gone._id))).toHaveLength(0);
     expect(await db.listFileRecordsByConversation(String(kept._id))).toHaveLength(1);
-    expect([...hoisted.blobs.keys()].every((key) => key.startsWith(`${CONVERSATION_FILES_BUCKET_KEY}/obj-1`))).toBe(true);
+    // Only the kept session's object (and its markdown) is left.
+    expect([...hoisted.blobs.keys()].every((key) => key.includes(`/${String(kept._id)}/`))).toBe(true);
+    expect(hoisted.blobs.size).toBe(2);
+  });
+
+  it('drops, instead of retrying for ever, an expired file whose storage is gone for good — and says so', async () => {
+    await createAgent();
+    const conversation = await newConversation();
+    const files = [
+      await attach(conversation, 'a.txt', 'a', 'text/plain'),
+      await attach(conversation, 'b.txt', 'b', 'text/plain'),
+    ];
+    for (const file of files) await db.updateFileRecord(file.id, { expiresAt: new Date(Date.now() - 1000) });
+    const bucket = (await db.findFileBucketByKey(tenantId, BUCKET, PROJECT_ID))!;
+    const provider = (await db.findProviderByKey(tenantId, PROVIDER, PROJECT_ID))!;
+    const deleteFile = vi.fn(hoisted.fileOps.deleteFile as never);
+    hoisted.fileOps.deleteFile = deleteFile as never;
+
+    // A disabled bucket will not come back by retrying every hour.
+    await db.updateFileBucket(String(bucket._id), { status: 'disabled' });
+    expect(await cleanupExpiredSessionFiles(db, DB_NAME, new Date())).toBe(2);
+    expect(await db.listFileRecordsByConversation(String(conversation._id))).toHaveLength(0);
+    expect(deleteFile).not.toHaveBeenCalled(); // the object cannot be reached; the row is gone, the object is logged as an orphan
+
+    // Same for an inactive provider, and for a provider that is not assigned to the project.
+    await db.updateFileBucket(String(bucket._id), { status: 'active' });
+    const second = await attach(conversation, 'c.txt', 'c', 'text/plain').catch(() => null);
+    expect(second).not.toBeNull();
+    await db.updateFileRecord(second!.id, { expiresAt: new Date(Date.now() - 1000) });
+    await db.updateProvider(String(provider._id), { status: 'disabled' });
+    expect(await cleanupExpiredSessionFiles(db, DB_NAME, new Date())).toBe(1);
+
+    await db.updateProvider(String(provider._id), { status: 'active', projectId: 'another-project', projectIds: [] });
+    const third = await db.createFileRecord({
+      tenantId, projectId: PROJECT_ID, providerKey: PROVIDER, bucketKey: BUCKET, key: 'x/d.txt', name: 'd.txt', size: 1, contentType: 'text/plain',
+      markdownStatus: 'skipped', purpose: 'conversation', conversationId: String(conversation._id), agentKey: AGENT_KEY,
+      expiresAt: new Date(Date.now() - 1000), createdBy: OWNER,
+    });
+    expect(await cleanupExpiredSessionFiles(db, DB_NAME, new Date())).toBe(1);
+    expect(await db.findFileRecordById(String(third._id))).toBeNull();
+  });
+
+  it('does not starve on failing files: more of them than a batch must not hide the ones behind them', async () => {
+    await createAgent();
+    const conversation = await newConversation();
+    const old: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const file = await db.createFileRecord({
+        tenantId, projectId: PROJECT_ID, providerKey: PROVIDER, bucketKey: BUCKET, key: `x/stuck-${i}.txt`, name: `stuck-${i}.txt`, size: 1,
+        contentType: 'text/plain', markdownStatus: 'skipped', purpose: 'conversation', conversationId: String(conversation._id), agentKey: AGENT_KEY,
+        expiresAt: new Date(Date.now() - 10_000 + i), createdBy: OWNER,
+      });
+      old.push(String(file._id));
+    }
+    const fine = await attach(conversation, 'fine.txt', 'f', 'text/plain');
+    await db.updateFileRecord(fine.id, { expiresAt: new Date(Date.now() - 1000) });
+    const realDelete = hoisted.fileOps.deleteFile;
+    // The five oldest fail every time (the provider is down for them); the batch is two.
+    hoisted.fileOps.deleteFile = (async (...args: never[]) => {
+      const key = String(args[4]);
+      if (key.startsWith('x/stuck-')) throw new Error('storage unavailable');
+      return (realDelete as (...a: never[]) => unknown)(...args);
+    }) as never;
+
+    expect(await cleanupExpiredSessionFiles(db, DB_NAME, new Date(), { batchSize: 2, maxBatches: 4 })).toBe(1);
+    expect(await db.findFileRecordById(fine.id)).toBeNull();
+    for (const id of old) expect(await db.findFileRecordById(id)).not.toBeNull(); // still there, tried again next sweep
+  });
+
+  it('refuses to delete a file by hand while its bucket is switched off, but drops one whose bucket is gone', async () => {
+    await createAgent();
+    const conversation = await newConversation();
+    const a = await attach(conversation, 'a.txt', 'a', 'text/plain');
+    const b = await attach(conversation, 'b.txt', 'b', 'text/plain');
+    const bucket = (await db.findFileBucketByKey(tenantId, BUCKET, PROJECT_ID))!;
+
+    await db.updateFileBucket(String(bucket._id), { status: 'disabled' });
+    const refused = await deleteSessionFile(scope(), String(conversation._id), a.id, OWNER).catch((e) => e);
+    expect(classifyAgentRunError(refused)).toMatchObject({ status: 409, error: { code: 'storage_unavailable' } });
+    expect(await db.findFileRecordById(a.id)).not.toBeNull();
+
+    await db.deleteFileBucket(String(bucket._id));
+    expect(await deleteSessionFile(scope(), String(conversation._id), b.id, OWNER)).toBe(true);
+    expect(await db.findFileRecordById(b.id)).toBeNull();
   });
 
   it('createConversation + upload round trip works for a fresh session id', async () => {

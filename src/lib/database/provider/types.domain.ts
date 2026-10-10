@@ -2373,12 +2373,15 @@ export interface IAgentExecutionConfig {
 /**
  * Files a user attaches to a session (the composer's paperclip, the client
  * API's `input_file` / `input_image`). Every field is a stored setting; absent
- * fields take the defaults in `SESSION_FILES_DEFAULTS` (sessionFiles.ts), and
- * an agent with no `attachments` at all accepts attachments with those
- * defaults — they were impossible before, so enabling them breaks nothing.
+ * limits take the defaults in `SESSION_FILES_DEFAULTS` (sessionFilesConfig.ts).
+ *
+ * Off unless switched on, and on only with a bucket to keep the files in: the
+ * files are ordinary Document Store files in the bucket the agent names — there
+ * is no built-in fallback storage, and nothing is ever written to the server's
+ * own disk unless the operator chose a local-disk bucket on purpose.
  */
 export interface IAgentAttachmentsConfig {
-  /** false = the agent takes no attachments. Default true. */
+  /** true = the agent takes attachments (needs `bucketKey`). Default false. */
   enabled?: boolean;
   /** Most files one session may hold. Default 10. */
   maxFiles?: number;
@@ -2392,8 +2395,12 @@ export interface IAgentAttachmentsConfig {
   readPageChars?: number;
   /** Days a file lives after upload before the cleanup removes it. Default 30. */
   retentionDays?: number;
-  /** Bucket the files are stored in. Absent = the project's system `conversation-files` bucket on the built-in storage. */
+  /** Bucket of the agent's project the files are stored in. Required when `enabled`. */
   bucketKey?: string;
+  /** Root folder inside the bucket; a file lands in `<folder>/<agentKey>/<sessionId>/…`. Default `agent-sessions`. */
+  folder?: string;
+  /** Files uploaded to a session that no message has carried yet ride along with the next message. Default true. */
+  attachNewUploads?: boolean;
 }
 
 export interface IAgentConfig {
@@ -2473,7 +2480,7 @@ export interface IAgentConfig {
    * agent created before this existed) = nothing ever pauses.
    */
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
-  /** Files users may attach to a session. Absent = accepted with the defaults. */
+  /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
 }
 
@@ -2948,6 +2955,9 @@ export interface IAgentConversation {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** A conversation as a list shows it: no transcript, just how many messages it holds. */
+export type IAgentConversationListItem = Omit<IAgentConversation, 'messages'> & { messageCount: number };
 
 /**
  * The agent runtime's own state for a conversation, carried between turns.

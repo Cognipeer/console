@@ -5,31 +5,33 @@
  */
 
 import { ObjectId, type Db } from 'mongodb';
-import type { IFileRecord, IFileBucketRecord } from '../provider.interface';
+import type { IFileRecord, IFileBucketRecord, IFileEntriesPage, FileListPurpose } from '../provider.interface';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS, logger } from './base';
+import { keyPrefixUpperBound, walkFileEntries, type KeyRange } from '../fileEntryWalk';
 
 export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
-    /** Per-process memo: the session-file indexes are ensured on the first conversation file per tenant DB. */
-    private conversationFileIndexesReady = new Set<string>();
+    /** Per-process memo: the file indexes are ensured on the first file written per tenant DB. */
+    private fileIndexesReady = new Set<string>();
 
     /**
      * Ensured on the write path as well as in the boot manifest: the manifest
      * only indexes collections that exist when a tenant DB is first bound, so a
-     * tenant whose first file is a session file would otherwise run the
-     * retention sweep and the per-session listing unindexed until a restart.
-     * Names/keys are IDENTICAL to the manifest's.
+     * tenant whose first file is written later would otherwise run the object
+     * lookup, the folder listing, the retention sweep and the per-session listing
+     * unindexed until a restart. Names/keys are IDENTICAL to the manifest's.
      */
-    private async ensureConversationFileIndexes(db: Db): Promise<void> {
+    private async ensureFileIndexes(db: Db): Promise<void> {
       const dbName = db.databaseName;
-      if (this.conversationFileIndexesReady.has(dbName)) return;
+      if (this.fileIndexesReady.has(dbName)) return;
       const coll = db.collection(COLLECTIONS.files);
       await Promise.all([
+        coll.createIndex({ providerKey: 1, bucketKey: 1, key: 1 }, { name: 'idx_provider_bucket_key' }),
         coll.createIndex({ purpose: 1, expiresAt: 1 }, { name: 'idx_purpose_expiresAt' }),
         coll.createIndex({ conversationId: 1 }, { name: 'idx_conversationId' }),
       ]);
-      this.conversationFileIndexesReady.add(dbName);
+      this.fileIndexesReady.add(dbName);
     }
 
     // ── File records ─────────────────────────────────────────────────
@@ -38,7 +40,7 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       record: Omit<IFileRecord, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IFileRecord> {
       const db = this.getTenantDb();
-      if (record.conversationId || record.purpose) await this.ensureConversationFileIndexes(db).catch(() => undefined);
+      await this.ensureFileIndexes(db).catch(() => undefined);
       const now = new Date();
       const document: Omit<IFileRecord, '_id'> & {
         createdAt: Date;
@@ -151,11 +153,20 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
       };
     }
 
+    /** `purpose` as a filter: session files, or everything that is not one (a missing field counts as "other"). */
+    protected filePurposeFilter(purpose: FileListPurpose | undefined): Record<string, unknown> {
+      if (purpose === 'conversation') return { purpose: 'conversation' };
+      if (purpose === 'other') return { purpose: { $ne: 'conversation' } };
+      return {};
+    }
+
     async listFileRecords(filters: {
       providerKey: string;
       bucketKey: string;
       projectId?: string;
       search?: string;
+      prefix?: string;
+      purpose?: FileListPurpose;
       limit?: number;
       cursor?: string;
     }): Promise<{ items: IFileRecord[]; nextCursor?: string }> {
@@ -169,10 +180,19 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
         query.projectId = filters.projectId;
       }
 
+      Object.assign(query, this.filePurposeFilter(filters.purpose));
+      const conditions: Record<string, unknown>[] = [];
+      if (filters.prefix) {
+        // A key range, exact and served by the (providerKey, bucketKey, key) index.
+        const upper = keyPrefixUpperBound(filters.prefix);
+        conditions.push({ key: { $gte: filters.prefix, ...(upper !== undefined ? { $lt: upper } : {}) } });
+      }
+
       if (filters.search) {
         const regex = new RegExp(this.escapeRegex(filters.search), 'i');
-        query.$or = [{ key: regex }, { name: regex }];
+        conditions.push({ $or: [{ key: regex }, { name: regex }] });
       }
+      if (conditions.length > 0) query.$and = conditions;
 
       if (filters.cursor) {
         try {
@@ -203,6 +223,42 @@ export function FileMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: 
         items,
         nextCursor,
       };
+    }
+
+    async listFileEntries(filters: {
+      providerKey: string;
+      bucketKey: string;
+      projectId?: string;
+      prefix: string;
+      purpose?: FileListPurpose;
+      limit?: number;
+      cursor?: string;
+    }): Promise<IFileEntriesPage> {
+      const db = this.getTenantDb();
+      const probe = async (range: KeyRange, limit: number): Promise<IFileRecord[]> => {
+        const keyRange: Record<string, string> = {};
+        if (range.gte !== undefined) keyRange.$gte = range.gte;
+        if (range.gt !== undefined) keyRange.$gt = range.gt;
+        if (range.lt !== undefined) keyRange.$lt = range.lt;
+        const documents = await db
+          .collection<IFileRecord>(COLLECTIONS.files)
+          .find({
+            providerKey: filters.providerKey,
+            bucketKey: filters.bucketKey,
+            ...(filters.projectId ? { projectId: filters.projectId } : {}),
+            ...(Object.keys(keyRange).length > 0 ? { key: keyRange } : {}),
+            ...this.filePurposeFilter(filters.purpose),
+          })
+          .sort({ key: 1 })
+          .limit(limit)
+          .toArray();
+        return documents.map((record) => ({ ...record, _id: record._id?.toString() }));
+      };
+      return walkFileEntries(probe, {
+        prefix: filters.prefix,
+        limit: Math.min(Math.max(filters.limit ?? 50, 1), 200),
+        cursor: filters.cursor,
+      });
     }
 
     async listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]> {

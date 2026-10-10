@@ -3,6 +3,8 @@
  * (`/agents/:agentId/sessions/:sessionId/files`) and the client API
  * (`/client/v1/agents/sessions/:conversationId/files`).
  *
+ * `GET /agents/attachments/buckets` is the Configure → Files bucket picker.
+ *
  * An upload is a raw body: `Content-Type: <the file's mime type>` and
  * `?name=<filename>` — no multipart dependency. A JSON body
  * `{ name, content_type, data: <base64> }` (`contentType` too) is accepted for small files; for that
@@ -24,6 +26,7 @@ import { getAgentByKey, getConversationById } from '@/lib/services/agents';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
+import { listAttachmentBuckets } from '@/lib/services/agents/sessionFilesBucket';
 import {
   deleteSessionFile,
   listSessionFiles,
@@ -31,7 +34,13 @@ import {
   type SessionFileView,
 } from '@/lib/services/agents/sessionFiles';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
-import { readJsonBody, sendProjectContextError, withApiRequestContext, withClientApiRequestContext } from '../fastify-utils';
+import {
+  readJsonBody,
+  requireProjectContextForRequest,
+  sendProjectContextError,
+  withApiRequestContext,
+  withClientApiRequestContext,
+} from '../fastify-utils';
 import { requireScopedSession } from './agents';
 
 const logger = createLogger('api:agent-session-files');
@@ -95,6 +104,8 @@ function clientFile(file: SessionFileView, conversationId: string) {
     size: file.size,
     conversion_status: file.conversionStatus,
     ...(file.conversionError ? { conversion_error: file.conversionError } : {}),
+    bucket_key: file.bucketKey,
+    path: file.path,
     ...(file.createdAt ? { created_at: new Date(file.createdAt).toISOString() } : {}),
     ...(file.expiresAt ? { expires_at: new Date(file.expiresAt).toISOString() } : {}),
   };
@@ -118,6 +129,18 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
     logger.error(logMessage, { error });
     return sendProjectContextError(reply, error) ?? reply.code(500).send({ error: message });
   }
+
+  // The buckets an agent can keep its session files in, each with whether it can take a file now.
+  // Read-only, under `agents` (not `files`) so whoever edits an agent can see them.
+  app.get('/agents/attachments/buckets', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const buckets = await listAttachmentBuckets(session.tenantDbName, session.tenantId, projectId);
+      return reply.code(200).send({ buckets });
+    } catch (error) {
+      return sendDashboardError(reply, error, 'List attachment buckets error', 'Failed to list the buckets');
+    }
+  }));
 
   app.post('/agents/:agentId/sessions/:sessionId/files', { bodyLimit }, withApiRequestContext(async (request, reply) => {
     try {

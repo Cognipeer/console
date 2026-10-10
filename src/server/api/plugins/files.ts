@@ -30,6 +30,10 @@ import {
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
 import {
+  bucketInUseBody,
+  findAgentsUsingBucket,
+} from '@/lib/services/agents/sessionFilesBucket';
+import {
   readJsonBody,
   requireProjectContextForRequest,
   sendProjectContextError,
@@ -47,6 +51,8 @@ type FileObjectsQuery = {
   cursor?: string;
   download?: string;
   limit?: string;
+  prefix?: string;
+  purpose?: string;
   search?: string;
   variant?: string;
 };
@@ -72,6 +78,11 @@ function estimateBase64Bytes(input: unknown): number | undefined {
   const padding = paddingMatch ? paddingMatch[0].length : 0;
   const bytes = Math.floor((normalized.length * 3) / 4) - padding;
   return bytes > 0 ? bytes : 0;
+}
+
+/** A missing bucket is the handlers' 404; the in-use guard only speaks for one that exists. */
+async function bucketExists(tenantDbName: string, tenantId: string, projectId: string, bucketKey: string): Promise<boolean> {
+  return getFileBucket(tenantDbName, tenantId, projectId, bucketKey).then(() => true, () => false);
 }
 
 function normalizeObjectKey(wildcard: string | undefined): string | null {
@@ -342,6 +353,13 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         updates.status = body.status;
       }
 
+      // Agents keep their session files in the bucket they name: switching it
+      // off would make every upload to those sessions fail.
+      if (updates.status === 'disabled' && await bucketExists(session.tenantDbName, session.tenantId, projectId, bucketKey)) {
+        const inUse = await findAgentsUsingBucket(session.tenantDbName, projectId, bucketKey);
+        if (inUse.length > 0) return reply.code(409).send(bucketInUseBody(bucketKey, inUse, 'disable'));
+      }
+
       const bucket = await updateFileBucket(
         session.tenantDbName,
         session.tenantId,
@@ -367,6 +385,12 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { bucketKey } = request.params as { bucketKey: string };
       const query = (request.query ?? {}) as { force?: string };
       const { projectId, session } = await requireProjectContextForRequest(request);
+
+      // Not even with `force`: the agent would keep pointing at a bucket that is gone.
+      if (await bucketExists(session.tenantDbName, session.tenantId, projectId, bucketKey)) {
+        const inUse = await findAgentsUsingBucket(session.tenantDbName, projectId, bucketKey);
+        if (inUse.length > 0) return reply.code(409).send(bucketInUseBody(bucketKey, inUse, 'delete'));
+      }
 
       const deleted = await deleteFileBucket(
         session.tenantDbName,
@@ -401,15 +425,19 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as FileObjectsQuery;
 
+      // `prefix` (even empty) = list one folder: its files, and its sub-folders in `folders`.
       const scoped = await listFiles(session.tenantDbName, session.tenantId, projectId, {
         bucketKey,
         cursor: query.cursor || undefined,
         limit: parseLimit(query.limit) ?? 50,
         search: query.search || undefined,
+        ...(typeof query.prefix === 'string' ? { prefix: query.prefix } : {}),
+        ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
       });
 
       return reply.code(200).send({
         items: scoped.items,
+        ...(scoped.folders ? { folders: scoped.folders, prefix: scoped.prefix } : {}),
         nextCursor: scoped.nextCursor,
       });
     } catch (error) {

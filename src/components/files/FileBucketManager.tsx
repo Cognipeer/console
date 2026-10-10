@@ -20,6 +20,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import CreateFileBucketModal from '@/components/files/CreateFileBucketModal';
 import type { FileBucketView } from '@/lib/services/files';
 import { ApiError, apiRequest } from '@/lib/api/client';
+import { useTranslations } from '@/lib/i18n';
+import { bucketRefusalMessage } from './fileBrowse';
 
 function formatDate(value?: Date | string | null) {
   if (!value) {
@@ -47,6 +49,7 @@ export default function FileBucketManager({
   showRefreshButton = true,
   onCreateBucketRequest,
 }: FileBucketManagerProps) {
+  const t = useTranslations('files');
   const [modalOpen, setModalOpen] = useState(false);
   const queryClient = useQueryClient();
 
@@ -109,16 +112,11 @@ export default function FileBucketManager({
     },
     onError: (error, bucket) => {
       console.error(error);
-      const message =
-        error instanceof ApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : 'Unexpected error';
       notifications.show({
         color: 'red',
-        title: 'Unable to delete bucket',
-        message,
+        title: t('bucket.refusalTitleDelete'),
+        message: bucketRefusalMessage(error),
+        autoClose: 12000,
       });
       if (bucket) {
         // Ensure stale data gets refreshed on failure

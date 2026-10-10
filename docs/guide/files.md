@@ -68,6 +68,18 @@ GET /api/client/v1/files/buckets/:bucketKey/objects
 Authorization: Bearer <token>
 ```
 
+Without further parameters this is the flat list of every file in the bucket. Add `prefix` to list **one folder**, the way an object store does with a `/` delimiter:
+
+```
+GET /api/client/v1/files/buckets/:bucketKey/objects?prefix=agent-sessions/support-bot/
+```
+
+The answer then holds the files directly in that folder (`files`) and its sub-folders (`folders`, each a full path ending in `/`), found from the file keys; `prefix=` (empty) is the bucket root. Page with `nextCursor` (pass it as `cursor`). `purpose=conversation` keeps only [session files](/guide/session-files), `purpose=other` only the rest. With `search`, `prefix` just narrows the search to everything under it, however deep. The Document Store screens show buckets this way, with a breadcrumb.
+
+### Session files
+
+Files attached to agent sessions are ordinary files in the bucket the agent names (**Configure → Files**), under `<folder>/<agentKey>/<sessionId>/`; they carry `purpose: "conversation"`, the session they belong to, when they expire and who uploaded them. A bucket an agent keeps session files in cannot be deleted or disabled until the agent uses another one (`409 bucket_in_use`, naming the agents).
+
 ## Markdown Conversion
 
 When a file is uploaded, the gateway can automatically convert it to Markdown using `@cognipeer/to-markdown`. This is used by the Knowledge Engine pipeline for document ingestion.

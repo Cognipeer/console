@@ -114,6 +114,8 @@ import {
     uploadContentType,
     type PendingAttachment,
 } from './sessionAttachmentsUi';
+import { sessionFilesUrl, sessionFileUrl, type SessionFileItem } from './sessionFilesUi';
+import { useAgentModelVision } from './agentModelVision';
 import type { AgentToolConfig } from './sessionTools';
 import {
     stepFailed, type ChatMessage, type PlaygroundStep, type SessionRecord, type TurnCompaction,
@@ -126,7 +128,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: AgentToolConfig & { kind?: 'native' | 'external'; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig };
+    config?: AgentToolConfig & { kind?: 'native' | 'external'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig };
 }
 
 interface VersionOption {
@@ -255,6 +257,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // Files uploaded to the session and waiting to go with the next message.
     const [attached, setAttached] = useState<PendingAttachment[]>([]);
     const [uploadingNames, setUploadingNames] = useState<string[]>([]);
+    // The files the session holds, as the server lists them (null until the first list arrives).
+    const [sessionFiles, setSessionFiles] = useState<SessionFileItem[] | null>(null);
+    const [sessionFilesFailed, setSessionFilesFailed] = useState(false);
+    const [deletingFiles, setDeletingFiles] = useState<string[]>([]);
     const budgetBlocked = Boolean(budgetView?.exhausted);
     // The banner under the transcript that raises the budget or removes it.
     const budgetBannerShown = Boolean(budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly);
@@ -278,13 +284,51 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
     const isConnected = agent?.config?.kind === 'external';
     const attachmentsConfig = useMemo(() => resolveAttachmentsConfig(agent?.config?.attachments), [agent?.config?.attachments]);
-    const takesAttachments = !readOnly && !isConnected
-        && agentTakesAttachments({ attachments: agent?.config?.attachments } as IAgentConfig);
+    // The agent has files set up (on, with a bucket); a read-only session cannot add to them.
+    const filesConfigured = !isConnected && agentTakesAttachments({ attachments: agent?.config?.attachments } as IAgentConfig);
+    const takesAttachments = !readOnly && filesConfigured;
+
+    // A text-only model drops the images a person attaches; say so on the chip. A session pinned to a published
+    // version runs that version's model, so the pinned snapshot is asked for it.
+    const [pinnedModelKey, setPinnedModelKey] = useState<string | undefined>(undefined);
+    useEffect(() => {
+        if (!pinnedVersion || isConnected) {
+            setPinnedModelKey(undefined);
+            return;
+        }
+        let cancelled = false;
+        fetch(`/api/agents/${agentId}/versions?version=${encodeURIComponent(pinnedVersion)}`, { cache: 'no-store' })
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data: { version?: { snapshot?: { config?: { modelKey?: string } } } } | null) => {
+                if (!cancelled) setPinnedModelKey(data?.version?.snapshot?.config?.modelKey);
+            })
+            .catch(() => { if (!cancelled) setPinnedModelKey(undefined); });
+        return () => { cancelled = true; };
+    }, [agentId, pinnedVersion, isConnected]);
+    const modelVision = useAgentModelVision(pinnedModelKey ?? agent?.config?.modelKey, takesAttachments);
+    const textOnlyModel = modelVision && !modelVision.acceptsImages ? { name: modelVision.name, href: modelVision.href } : null;
+
+    /** Re-reads the session's files. A failure keeps the list on screen and only flags it. */
+    const loadSessionFiles = useCallback(async () => {
+        try {
+            const res = await fetch(sessionFilesUrl(agentId, sessionId), { cache: 'no-store' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            setSessionFiles(Array.isArray(data.files) ? (data.files as SessionFileItem[]) : []);
+            setSessionFilesFailed(false);
+        } catch {
+            setSessionFilesFailed(true);
+        }
+    }, [agentId, sessionId]);
+
+    useEffect(() => {
+        if (!loading && agent && !isConnected) void loadSessionFiles();
+    }, [loading, agent, isConnected, loadSessionFiles]);
 
     /** Uploads picked files to the session, one by one; each becomes a chip. */
     const uploadFiles = async (files: File[]) => {
         for (const file of files) {
-            const refusal = checkAttachmentCandidate(file, attachmentsConfig, heldFileCount(messages, attached));
+            const refusal = checkAttachmentCandidate(file, attachmentsConfig, heldFileCount(messages, attached, sessionFiles));
             if (refusal) {
                 const message = refusal.code === 'too_many_files'
                     ? ta('tooManyFiles', { max: refusal.max })
@@ -311,6 +355,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     size: stored.size,
                     conversionStatus: stored.conversionStatus,
                 }]);
+                void loadSessionFiles();
             } catch (err) {
                 notifications.show({
                     title: ta('uploadFailed', { name: file.name }),
@@ -326,7 +371,32 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     /** Drops a file waiting to be sent — from the chips and from the session. */
     const removeAttachment = async (fileId: string) => {
         setAttached((current) => current.filter((file) => file.fileId !== fileId));
-        await fetch(`/api/agents/${agentId}/sessions/${sessionId}/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' }).catch(() => undefined);
+        await fetch(sessionFileUrl(agentId, sessionId, fileId), { method: 'DELETE' }).catch(() => undefined);
+        void loadSessionFiles();
+    };
+
+    /** Deletes a file from the Files tab: the object, its text and the record go, and a chip waiting for it too. */
+    const deleteSessionFile = async (file: SessionFileItem) => {
+        if (!window.confirm(ta('filesDeleteConfirm', { name: file.name }))) return;
+        setDeletingFiles((ids) => [...ids, file.id]);
+        try {
+            const res = await fetch(sessionFileUrl(agentId, sessionId, file.id), { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
+            setAttached((current) => current.filter((item) => item.fileId !== file.id));
+            setSessionFiles((current) => (current ? current.filter((item) => item.id !== file.id) : current));
+            notifications.show({ title: ta('filesDeleted', { name: file.name }), message: '', color: 'teal' });
+        } catch (err) {
+            notifications.show({
+                title: ta('filesDeleteFailed', { name: file.name }),
+                message: err instanceof Error ? err.message : String(err),
+                color: 'red',
+            });
+        } finally {
+            setDeletingFiles((ids) => ids.filter((id) => id !== file.id));
+        }
     };
 
     const load = useCallback(async () => {
@@ -411,6 +481,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         // A session with a budget may have stopped on it (`budget_paused`): the
         // server knows, and its status is written before the result is sent.
         if (budgetView) void refreshSessionMeta();
+        // The turn may have used, or an expiry removed, files the tab lists.
+        if (!isConnected) void loadSessionFiles();
     };
 
     /**
@@ -1117,6 +1189,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 uploading={uploadingNames}
                                 disabled={liveActive}
                                 onRemove={(fileId) => void removeAttachment(fileId)}
+                                textOnlyModel={textOnlyModel}
                             />
                             <Textarea
                                 ref={composerRef}
@@ -1208,6 +1281,16 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         agentConfig={agent.config}
                         messages={messages}
                         onGoToTurn={goToTurn}
+                        // The tab is for agents with files, and for any session that holds some (an API upload, or files from before the setting was turned off).
+                        files={isConnected || !(filesConfigured || (sessionFiles?.length ?? 0) > 0) ? undefined : {
+                            items: sessionFiles,
+                            failed: sessionFilesFailed,
+                            maxFiles: filesConfigured ? attachmentsConfig.maxFiles : undefined,
+                            readOnly,
+                            deleting: deletingFiles,
+                            onDelete: (file) => void deleteSessionFile(file),
+                            onRetry: () => void loadSessionFiles(),
+                        }}
                     />
                 </Paper>
             </Group>
