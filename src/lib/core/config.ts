@@ -361,6 +361,8 @@ export interface AppConfig {
     backgroundMaxConcurrentRunsPerTenant: number;
     /** Retention TTL for AgentRun records (§12.10), following the tracing-retention precedent. */
     runRetentionDays: number;
+    /** Retention TTL for `agent_session_events` (the append-only session event log). */
+    sessionEventRetentionDays: number;
     /** How often a background worker writes heartbeatAt while a run is `running`. */
     runHeartbeatIntervalMs: number;
     /** A `running` run whose heartbeat is older than this is considered orphaned by the reconciler (§7.1). */
@@ -698,6 +700,7 @@ function buildConfig(source: ConfigSource): AppConfig {
         10,
       ),
       runRetentionDays: Math.max(int(source, 'AGENT_RUN_RETENTION_DAYS', 30), 1),
+      sessionEventRetentionDays: Math.max(int(source, 'AGENT_SESSION_EVENT_RETENTION_DAYS', 30), 1),
       ...boundedAgentRunConfig(source),
     },
   };

@@ -227,6 +227,9 @@ export function requireSessionContext(
 }
 
 function getRequestPathname(request: FastifyRequest): string {
+  // RBAC must map the path the router actually matched: Fastify decodes
+  // percent-escapes, so the raw '/api/to%6Fls' reaches the /api/tools handler
+  // while mapping to no service (= no authorization).
   return canonicalizeRequestPathname(request.raw.url);
 }
 

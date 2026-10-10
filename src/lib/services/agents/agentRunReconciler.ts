@@ -34,6 +34,7 @@ import { createLogger } from '@/lib/core/logger';
 import { getCache } from '@/lib/core/cache';
 import { getConfig } from '@/lib/core/config';
 import { fireAgentRunCallback, isAbandonedSyncReservation, publishAgentRunJob, runWithTenantDb } from './agentRunService';
+import { sweepExpiredPendingActions } from './agentActionResolution';
 
 const logger = createLogger('agent-run:reconcile');
 
@@ -58,9 +59,13 @@ interface SweepResult {
   deletedSyncRuns: number;
   requeuedRuns: number;
   retentionDeleted: number;
+  /** Pending approvals / questions whose time ran out (dropped, or denied and continued). */
+  expiredActions: number;
 }
 
-const EMPTY_SWEEP: SweepResult = { tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, retentionDeleted: 0 };
+const EMPTY_SWEEP: SweepResult = {
+  tenantsScanned: 0, failedRunningRuns: 0, deletedSyncRuns: 0, requeuedRuns: 0, retentionDeleted: 0, expiredActions: 0,
+};
 
 /**
  * One pass over every tenant:
@@ -71,6 +76,8 @@ const EMPTY_SWEEP: SweepResult = { tenantsScanned: 0, failedRunningRuns: 0, dele
  *  - `queued` runs older than `runRequeueAfterMs` → republished (a lost queue
  *    message, a memory queue on a pod that died). Safe: the claim is a CAS,
  *    a duplicate delivery just no-ops;
+ *  - pending approvals / questions past their `expiresAt` → the agent's own
+ *    `onTimeout` (drop them, or deny and let the agent continue as a job);
  *  - hourly, retention.
  */
 async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean } = {}): Promise<SweepResult> {
@@ -90,6 +97,7 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
   let deletedSyncRuns = 0;
   let requeuedRuns = 0;
   let retentionDeleted = 0;
+  let expiredActions = 0;
 
   for (const tenant of tenants) {
     if (!tenant.dbName || !tenant._id) continue;
@@ -143,9 +151,17 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
           }
         }
 
+        const timedOut = await sweepExpiredPendingActions(tenantDb, tenant.dbName!, new Date(now));
+        expiredActions += timedOut.expired + timedOut.denied;
+
         if (doRetention) {
           const { deletedCount } = await tenantDb.cleanupAgentRunRetention({ olderThan: new Date(now), batchSize: 1000 });
           retentionDeleted += deletedCount;
+          // The session event log keeps its own, separate retention (each row
+          // carries the `expiresAt` it was written with). Mongo also has a TTL
+          // index; SQLite has only this sweep.
+          const events = await tenantDb.cleanupAgentSessionEventRetention({ olderThan: new Date(now), batchSize: 1000 });
+          retentionDeleted += events.deletedCount;
         }
       });
     } catch (error) {
@@ -157,7 +173,7 @@ async function sweepStaleRunningAgentRuns(options: { requeueAllQueued?: boolean 
     }
   }
 
-  return { tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, retentionDeleted };
+  return { tenantsScanned, failedRunningRuns, deletedSyncRuns, requeuedRuns, retentionDeleted, expiredActions };
 }
 
 /**
@@ -171,7 +187,7 @@ export async function reconcileOrphanedAgentRuns(): Promise<SweepResult> {
   // At boot every queued run is republished, not just old ones: an in-memory
   // queue lost them all with the previous process.
   const sweep = await sweepStaleRunningAgentRuns({ requeueAllQueued: true });
-  if (sweep.failedRunningRuns > 0 || sweep.deletedSyncRuns > 0 || sweep.requeuedRuns > 0) {
+  if (sweep.failedRunningRuns > 0 || sweep.deletedSyncRuns > 0 || sweep.requeuedRuns > 0 || sweep.expiredActions > 0) {
     logger.info('Reconciled orphaned agent runs at boot', { ...sweep });
   }
   return sweep;
@@ -194,7 +210,7 @@ async function runOnce(): Promise<SweepResult> {
     }
 
     const result = await sweepStaleRunningAgentRuns();
-    if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0 || result.requeuedRuns > 0) {
+    if (result.failedRunningRuns > 0 || result.deletedSyncRuns > 0 || result.requeuedRuns > 0 || result.expiredActions > 0) {
       logger.info('Reconciled orphaned agent runs', result);
     }
     return result;

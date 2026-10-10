@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import vm from 'node:vm';
 import type {
   DynamicPoolPolicy,
+  IDynamicComplexityConfig,
   IDynamicDeciderConfig,
   IDynamicDeciderLabel,
   IDynamicPoolEstimate,
@@ -26,6 +27,11 @@ import type {
   IModel,
   IModelPricing,
 } from '@/lib/database';
+import type {
+  DecisionAnswer,
+  DecisionChoiceQuestion,
+  DecisionScoreQuestion,
+} from '@/lib/providers';
 import type { ResolvedModelCapabilities } from './modelCapabilities';
 import { createLogger } from '@/lib/core/logger';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
@@ -42,9 +48,6 @@ export interface RoutingSignals {
   hasTools: boolean;
   hasResponseFormat: boolean;
   hasImages: boolean;
-  /** Estimated request cost in USD priced at the router's default model.
-   *  Only computed when a rule references it (needs a pricing lookup). */
-  estimatedCostUsd?: number;
   /** Realized spend of this conversation through the router so far. Lazy. */
   conversationCostUsd?: number;
   /** Share of `guards.budget.limitUsd` spent in its window. Lazy. */
@@ -55,6 +58,8 @@ export interface RoutingSignals {
   ioRatio?: number;
   /** Caller's `max_tokens` / `max_completion_tokens`, when set. */
   maxOutputTokens?: number;
+  /** Expected level index from the router's `complexity` decision model. Lazy. */
+  complexityScore?: number;
   /** Latest user message text — used for keyword conditions and decider input. */
   lastUserText: string;
 }
@@ -81,7 +86,7 @@ export function publicSignals(signals: RoutingSignals): Record<string, unknown> 
 /** Numeric signals that need a lookup (pricing, history, counters) and are
  *  therefore only computed when a rule references them. */
 export const LAZY_NUMERIC_SIGNALS = [
-  'estimatedCostUsd',
+  'complexityScore',
   'conversationCostUsd',
   'budgetUsedPct',
   'predictedOutputTokens',
@@ -189,6 +194,18 @@ const NUMERIC_SIGNALS = new Set<string>([
   ...LAZY_NUMERIC_SIGNALS,
 ]);
 const BOOLEAN_SIGNALS = new Set(['hasTools', 'hasResponseFormat', 'hasImages']);
+
+/** Every signal a rule condition may reference. */
+export const KNOWN_RULE_SIGNALS = new Set<string>([
+  'inputTokensEst',
+  'messageCount',
+  'lastUserLength',
+  'hasTools',
+  'hasResponseFormat',
+  'hasImages',
+  'keyword',
+  ...LAZY_NUMERIC_SIGNALS,
+]);
 
 /** True when any rule condition references the given signal. */
 export function rulesReferenceSignal(
@@ -385,6 +402,71 @@ export function buildDeciderMessages(
     { role: 'system', content: system },
     { role: 'user', content: signals.lastUserText || '(empty request)' },
   ];
+}
+
+// ── Decision-model deciders ─────────────────────────────────────────────
+// A `decision`-category decider is asked one closed `choice` question whose
+// choices are the router's labels, and answers with a probability per label —
+// no free text to parse, and a confidence the router can threshold on.
+
+export const DECIDER_QUESTION_ID = 'route';
+export const COMPLEXITY_QUESTION_ID = 'complexity';
+
+const DEFAULT_DECIDER_INSTRUCTIONS =
+  'Route the request: pick the single category that best fits the user request.';
+const DEFAULT_COMPLEXITY_INSTRUCTIONS =
+  'Rate how demanding the user request is for a language model to answer well.';
+
+/** The `choice` question a decision decider answers. */
+export function buildDeciderQuestion(decider: IDynamicDeciderConfig): DecisionChoiceQuestion {
+  return {
+    type: 'choice',
+    instructions: decider.promptOverride?.trim() || DEFAULT_DECIDER_INSTRUCTIONS,
+    choices: Object.fromEntries(decider.labels.map((label) => [label.label, label.description || label.label])),
+  };
+}
+
+/** The `score` question behind the `complexityScore` signal. */
+export function buildComplexityQuestion(complexity: IDynamicComplexityConfig): DecisionScoreQuestion {
+  return {
+    type: 'score',
+    instructions: complexity.instructions?.trim() || DEFAULT_COMPLEXITY_INSTRUCTIONS,
+    levels: complexity.levels,
+  };
+}
+
+export interface DecisionLabelPick {
+  label: IDynamicDeciderLabel | null;
+  probability?: number;
+  confidence?: number;
+  /** Winning probability minus the runner-up's. */
+  margin?: number;
+  /** True when `minConfidence` is set and the answer fell short of it. */
+  belowThreshold: boolean;
+}
+
+/**
+ * Reads a decision answer back into a configured label and applies the
+ * confidence floor. `confidence` is used when the backend reports one;
+ * otherwise the winning probability stands in for it.
+ */
+export function pickDecisionLabel(
+  answer: DecisionAnswer | undefined,
+  decider: IDynamicDeciderConfig,
+): DecisionLabelPick {
+  if (!answer || answer.type !== 'choice') return { label: null, belowThreshold: false };
+  const label = decider.labels.find((l) => l.label === answer.choice) ?? null;
+  if (!label) return { label: null, belowThreshold: false };
+  const probability = answer.probabilities?.[answer.choice];
+  const others = Object.entries(answer.probabilities ?? {})
+    .filter(([key]) => key !== answer.choice)
+    .map(([, p]) => p);
+  const margin =
+    probability !== undefined && others.length > 0 ? probability - Math.max(...others) : undefined;
+  const strength = answer.confidence ?? probability;
+  const belowThreshold =
+    decider.minConfidence !== undefined && (strength === undefined || strength < decider.minConfidence);
+  return { label, probability, confidence: answer.confidence, margin, belowThreshold };
 }
 
 /** Matches the decider's free-text answer back to a configured label. */
@@ -750,5 +832,8 @@ export function configModelKeys(config: IDynamicRoutingConfig): string[] {
   if (config.defaultTarget) targetModelKeys(normalizeTarget({ target: config.defaultTarget })).forEach(add);
   for (const rule of config.rules ?? []) targetModelKeys(normalizeTarget(rule)).forEach(add);
   for (const label of config.decider?.labels ?? []) targetModelKeys(normalizeTarget(label)).forEach(add);
+  if (config.decider?.belowConfidence) {
+    targetModelKeys(normalizeTarget({ target: config.decider.belowConfidence })).forEach(add);
+  }
   return [...keys];
 }

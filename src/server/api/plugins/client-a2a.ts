@@ -153,6 +153,38 @@ function completedTask(
   };
 }
 
+/**
+ * A task paused for an approval or a question: A2A's `input-required`. The
+ * actions to resolve ride in `metadata.pendingActions` (resolve them through
+ * the session actions endpoint; the task then continues).
+ */
+function inputRequiredTask(
+    id: string,
+    contextId: string,
+    assistantText: string,
+    pendingActions: unknown[],
+): Record<string, unknown> {
+    return {
+        kind: 'task',
+        id,
+        contextId,
+        status: {
+            state: 'input-required',
+            timestamp: new Date().toISOString(),
+            message: {
+                kind: 'message',
+                role: 'agent',
+                messageId: `${id}_status`,
+                parts: [{ kind: 'text', text: assistantText || 'Waiting for an approval or an answer.' }],
+            },
+        },
+        metadata: { stopReason: 'requires_action', pendingActions },
+        artifacts: assistantText
+            ? [{ artifactId: `${id}_artifact`, name: 'response', parts: [{ kind: 'text', text: assistantText }] }]
+            : [],
+    };
+}
+
 export function externalBaseUrl(request: FastifyRequest): string {
   const forwardedProto = request.headers['x-forwarded-proto'];
   const protocol = typeof forwardedProto === 'string' && forwardedProto.length > 0
@@ -287,6 +319,13 @@ export async function handleA2aRpc(
         .join('');
       const messageIndex = (result._conversation_messages?.length ?? 1) - 1;
 
+      if (result.status === 'requires_action') {
+        return reply.code(200).send(jsonRpcOk(
+          rpcId,
+          inputRequiredTask(taskId(conversationId, messageIndex), conversationId, assistantText, result.required_action?.actions ?? []),
+        ));
+      }
+
       return reply.code(200).send(jsonRpcOk(
         rpcId,
         completedTask(
@@ -312,6 +351,12 @@ export async function handleA2aRpc(
         : undefined;
       if (!message || message.role !== 'assistant') {
         return reply.code(200).send(jsonRpcError(rpcId, ERR_TASK_NOT_FOUND, 'Task not found'));
+      }
+      if (message.pendingActions?.some((action) => action.status === 'pending')) {
+        return reply.code(200).send(jsonRpcOk(
+          rpcId,
+          inputRequiredTask(requestedId, parsed.conversationId, message.content, message.pendingActions),
+        ));
       }
       return reply.code(200).send(jsonRpcOk(
         rpcId,

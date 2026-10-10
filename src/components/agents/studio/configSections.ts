@@ -17,6 +17,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
     memory: 'Memory',
     sandbox: 'Sandbox',
     execution: 'Execution',
+    hitl: 'Approvals & questions',
     advanced: 'Runtime',
     output: 'Structured output',
 };
@@ -29,6 +30,7 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     memory: ['memory'],
     sandbox: ['sandbox'],
     execution: ['execution'],
+    hitl: ['humanInTheLoop'],
     advanced: ['runtime'],
     output: ['structuredOutput'],
 };

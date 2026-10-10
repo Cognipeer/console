@@ -2429,6 +2429,52 @@ export interface IAgentConfig {
    * value is min(env ceiling, tenant quota, this).
    */
   execution?: IAgentExecutionConfig;
+  /**
+   * Human in the loop: tool approvals and questions to the user. Absent (every
+   * agent created before this existed) = nothing ever pauses.
+   */
+  humanInTheLoop?: IAgentHumanInTheLoopConfig;
+}
+
+/** Whether a tool call waits for a person first. */
+export type AgentToolApprovalPolicy = 'always' | 'never';
+
+/**
+ * What an approval-gated tool call or an ask-user question does on a run that
+ * has no interactive user (a schedule, an evaluation or red-team case, an
+ * OpenAI-shaped or Assistants client):
+ *  - `deny` (default): the call returns an error result to the model and never
+ *    runs; the run continues. The ask-user tool is not offered.
+ *  - `pause`: behaves as an attended run — the turn stops and the request waits
+ *    for someone to answer it from Studio.
+ *  - `allow`: the call runs without approval. An explicit owner opt-in only.
+ */
+export type AgentHitlUnattendedPolicy = 'deny' | 'pause' | 'allow';
+
+/**
+ * Human-in-the-loop settings of an agent. Every behaviour choice is a stored
+ * setting (the Configure → "Approvals & questions" section), never a constant.
+ */
+export interface IAgentHumanInTheLoopConfig {
+  /** Let the model ask the user a structured question mid-run. */
+  askUser?: { enabled: boolean; /** Default true. */ allowFreeText?: boolean };
+  toolApproval?: {
+    enabled: boolean;
+    /** Policy for every tool not named in `tools` and not read-only. Default `always`. */
+    defaultPolicy?: AgentToolApprovalPolicy;
+    /** Per-tool override; the key is the tool name as the model sees it. */
+    tools?: Record<string, AgentToolApprovalPolicy>;
+  };
+  /** Minutes a request waits before `onTimeout` applies. Default 1440; 0 = never expires. */
+  timeoutMinutes?: number;
+  /** What a timeout does. `deny` (default) denies and lets the agent continue; `cancel` drops the request. */
+  onTimeout?: 'deny' | 'cancel';
+  /** Who may answer. Default `owner_or_admin`. */
+  approvers?: 'owner' | 'owner_or_admin' | 'project_members';
+  /** A new message while a request is open. `reject` (default) answers 409; `cancel_pending` cancels the request and proceeds. */
+  onUserMessageWhilePending?: 'reject' | 'cancel_pending';
+  /** Runs with nobody to answer (schedules, API bridges, evaluations). Default `deny`. */
+  unattended?: AgentHitlUnattendedPolicy;
 }
 
 /**
@@ -2664,6 +2710,12 @@ export interface IAgentConversationMessage {
   stopReason?: 'limit' | 'cancelled' | 'paused';
   /** The runtime's wording, e.g. "maxWallClockMs (30000ms) exceeded". */
   stopDetail?: string;
+  /**
+   * Snapshot of the approvals / questions a paused turn is waiting on, kept on
+   * the message so history can render them. `status` / `resolution` are updated
+   * in place when the action is resolved — the live record is `IAgentPendingAction`.
+   */
+  pendingActions?: IAgentMessagePendingAction[];
   /** Context summarizations that ran during this turn — see `IAgentTurnCompaction`. */
   compactions?: IAgentTurnCompaction[];
   /** The tool results those summarizations replaced with a placeholder. */
@@ -2699,6 +2751,105 @@ export interface IAgentTurnCompaction {
   failed?: boolean;
 }
 
+/** Why a turn stopped, as the session API reports it (conversation + events). */
+export type AgentSessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'cancelled' | 'error';
+
+/** What the conversation is doing right now. Absent = idle (every pre-existing row). */
+export type AgentSessionRuntimeStatus = 'idle' | 'running' | 'requires_action';
+
+export type AgentPendingActionKind = 'tool_approval' | 'user_question';
+export type AgentPendingActionStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
+
+/** One question of an `ask user` pause — mirrors the agent-sdk `UserQuestionItem`. */
+export interface IAgentUserQuestion {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  placeholder?: string;
+  required?: boolean;
+  options?: Array<{ label: string; value?: string; description?: string }>;
+}
+
+/** How a pending action was answered. */
+export interface IAgentPendingActionResolution {
+  decision?: 'allow' | 'deny';
+  comment?: string;
+  approvedArgs?: Record<string, unknown>;
+  answers?: Record<string, string | string[]>;
+  cancelled?: boolean;
+  rememberForSession?: boolean;
+}
+
+/** The copy of a pending action carried on the assistant message — see `IAgentConversationMessage.pendingActions`. */
+export interface IAgentMessagePendingAction {
+  id: string;
+  kind: AgentPendingActionKind;
+  toolName?: string;
+  args?: unknown;
+  questions?: IAgentUserQuestion[];
+  allowFreeText?: boolean;
+  status: AgentPendingActionStatus;
+  resolution?: IAgentPendingActionResolution;
+}
+
+/**
+ * A tool approval or a question the agent paused on (`agent_pending_actions`).
+ * One row per pending SDK approval / question; resolved through
+ * `resolveAgentPendingAction`.
+ */
+export interface IAgentPendingAction {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  conversationId: string;
+  runId?: string;
+  kind: AgentPendingActionKind;
+  /** The SDK's own approval / question id. */
+  sdkId: string;
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  questions?: IAgentUserQuestion[];
+  allowFreeText?: boolean;
+  status: AgentPendingActionStatus;
+  requestedAt: Date;
+  expiresAt?: Date | null;
+  resolvedAt?: Date | null;
+  resolvedBy?: string;
+  resolution?: IAgentPendingActionResolution;
+  /** The config the paused turn ran with, so the continuation rebuilds the same agent. */
+  agentVersion?: number | null;
+  usePublished?: boolean;
+  /** Who started the paused turn. */
+  createdBy?: string;
+}
+
+/**
+ * One entry of the append-only session event log (`agent_session_events`).
+ * `seq` is dense and increasing per conversation; `(conversationId, seq)` is unique.
+ */
+export interface IAgentSessionEvent {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  conversationId: string;
+  seq: number;
+  type: string;
+  data: Record<string, unknown>;
+  runId?: string;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+/**
+ * An event as handed to `appendAgentSessionEvents`. A caller that sets `_id`
+ * keeps it stable across retries, which is how it recognises what an earlier,
+ * partly-failed attempt already stored (see `AgentSessionEventSeqConflictError`).
+ */
+export type NewAgentSessionEvent = Omit<IAgentSessionEvent, '_id'> & { _id?: string };
+
 export interface IAgentConversation {
   _id?: ObjectId | string;
   tenantId: string;
@@ -2706,6 +2857,14 @@ export interface IAgentConversation {
   agentKey: string;
   title?: string;
   messages: IAgentConversationMessage[];
+  /** What the conversation is doing now; absent = idle. */
+  runtimeStatus?: AgentSessionRuntimeStatus;
+  /** Why the last turn stopped. */
+  stopReason?: AgentSessionStopReason;
+  /** Ids (`act_…`) of the actions the conversation is waiting on while `requires_action`. */
+  pendingActionIds?: string[];
+  /** Highest `agent_session_events.seq` written for this conversation. */
+  lastEventSeq?: number;
   /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a
@@ -2739,6 +2898,13 @@ export interface IAgentConversationState {
   agentKey: string;
   /** `JSON.stringify` of the agent-sdk `AgentSnapshot`. */
   snapshot: string;
+  /**
+   * The FULL resumable SDK state at a pause (messages as the SDK left them,
+   * pending approvals / questions, resume ctx keys). Present only while the
+   * conversation `requires_action`; `snapshot` above is the normal repaired
+   * state used when the pending actions are cancelled.
+   */
+  pausedSnapshot?: string;
   /**
    * `conversation.messages.length` right after the turn that produced the
    * snapshot. A mismatch at load time means the transcript was written by
@@ -3663,6 +3829,12 @@ export type AgentRunMode = 'sync' | 'background';
 export type AgentRunStatus =
   | 'queued'
   | 'running'
+  /**
+   * Non-terminal: the turn paused for an approval or a question. Not an active
+   * status (it does not hold the conversation's run slot); a resolution moves
+   * it back to `queued`.
+   */
+  | 'requires_action'
   | 'succeeded'
   | 'failed'
   | 'canceled';
@@ -3720,6 +3892,16 @@ export interface IAgentRun extends IUsageAttributionFields {
   idempotencyRequestHash?: string | null;
   status: AgentRunStatus;
   errorReason?: AgentRunErrorReason;
+  /**
+   * How the agent turn ended (a `succeeded` run can still be `limit`). Absent on
+   * rows from before this field and on non-terminal / failed runs.
+   */
+  stopReason?: AgentSessionStopReason | null;
+  /**
+   * Set while the run is queued to CONTINUE a paused turn (the pending actions
+   * it resolves) rather than to start from `userMessage`.
+   */
+  resumeActionIds?: string[] | null;
   /** The same response payload a synchronous call would have returned. */
   result?: Record<string, unknown> | null;
   errorMessage?: string | null;

@@ -50,6 +50,7 @@ import {
     IconX,
 } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
+import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import classes from './SessionList.module.css';
@@ -57,7 +58,7 @@ import classes from './SessionList.module.css';
 
 type WindowFilter = 'all' | '24h' | '7d' | '30d' | 'custom';
 type ActivityFilter = 'all' | 'used' | 'empty' | 'unpriced';
-type StatusFilter = 'all' | 'success' | 'error' | 'stopped';
+type StatusFilter = 'all' | 'success' | 'error' | 'stopped' | 'waiting';
 type DateRange = [Date | null, Date | null];
 type SortColumn = 'title' | 'turns' | 'totalTokens' | 'costUsd' | 'activeMs' | 'updatedAt';
 interface SortState {
@@ -150,6 +151,8 @@ export interface SessionListItem {
     status?: 'success' | 'error' | 'stopped' | 'empty';
     /** Where the session came from (`metadata.source`) — see AgentConversationSource. */
     source?: string;
+    /** `requires_action`: the agent is waiting for an approval or an answer. */
+    runtimeStatus?: 'idle' | 'running' | 'requires_action';
     hasContext?: boolean;
 }
 
@@ -207,6 +210,7 @@ export default function SessionList({
     refreshing,
     tracesHref,
 }: SessionListProps) {
+    const t = useTranslations('agents.hitl');
     const [query, setQuery] = useState('');
     // Not named `window`: that shadows the global inside this component,
     // which is a trap waiting for the first line that needs the real one.
@@ -238,7 +242,9 @@ export default function SessionList({
                 if (from !== undefined && when < from) return false;
                 if (to !== undefined && when > to) return false;
             }
-            if (status !== 'all' && session.status !== status) return false;
+            if (status === 'waiting') {
+                if (session.runtimeStatus !== 'requires_action') return false;
+            } else if (status !== 'all' && session.status !== status) return false;
             if (source !== 'all' && (session.source ?? 'unknown') !== source) return false;
             if (activity === 'used' && (session.turns ?? 0) === 0) return false;
             if (activity === 'empty' && (session.turns ?? 0) > 0) return false;
@@ -345,6 +351,7 @@ export default function SessionList({
                             { value: 'success', label: 'Completed' },
                             { value: 'error', label: 'Has errors' },
                             { value: 'stopped', label: 'Stopped early' },
+                            { value: 'waiting', label: t('waitingFilter') },
                         ]}
                         value={status}
                         onChange={(next) => setStatus((next as StatusFilter) ?? 'all')}
@@ -464,6 +471,13 @@ export default function SessionList({
                                                     {session.title || 'New session'}
                                                 </Text>
                                             </UnstyledButton>
+                                            {session.runtimeStatus === 'requires_action' ? (
+                                                <Tooltip label={t('waitingTooltip')} withArrow>
+                                                    <Badge size="xs" variant="light" color="orange" leftSection={<IconHandStop size={10} />}>
+                                                        {t('waitingBadge')}
+                                                    </Badge>
+                                                </Tooltip>
+                                            ) : null}
                                             {session.status === 'error' ? (
                                                 <Tooltip
                                                     label={session.failedCalls
@@ -473,7 +487,7 @@ export default function SessionList({
                                                 >
                                                     <IconAlertTriangle size={14} color="var(--ds-err)" aria-label="Has errors" />
                                                 </Tooltip>
-                                            ) : session.status === 'stopped' ? (
+                                            ) : session.status === 'stopped' && session.runtimeStatus !== 'requires_action' ? (
                                                 <Tooltip label="A turn stopped early (limit, cancel or pause)" withArrow>
                                                     <IconHandStop size={14} color="var(--ds-warn)" aria-label="Stopped early" />
                                                 </Tooltip>

@@ -4,8 +4,19 @@
  * Includes agent CRUD and conversation management.
  */
 
-import { ObjectId } from 'mongodb';
-import type { IAgent, AgentStatus, IAgentConversation, IAgentConversationState, IAgentVersion } from '../provider.interface';
+import { randomUUID } from 'node:crypto';
+import { ObjectId, type Db } from 'mongodb';
+import type {
+  IAgent,
+  AgentStatus,
+  IAgentConversation,
+  IAgentConversationState,
+  IAgentPendingAction,
+  IAgentSessionEvent,
+  IAgentVersion,
+  NewAgentSessionEvent,
+} from '../provider.interface';
+import { AgentSessionEventSeqConflictError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
@@ -199,9 +210,26 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       return { ...result, _id: result._id?.toString() } as IAgentConversation;
     }
 
+    async updateAgentConversationRuntime(
+      id: string,
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq'>>,
+    ): Promise<void> {
+      const set: Record<string, unknown> = {};
+      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq'] as const) {
+        if (patch[key] !== undefined) set[key] = patch[key];
+      }
+      if (Object.keys(set).length === 0) return;
+      await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .updateOne({ _id: new ObjectId(id) }, { $set: set });
+    }
+
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       await db.collection(COLLECTIONS.agentConversationStates).deleteOne({ conversationId: id });
+      // The session's event log and pending approvals die with it.
+      await db.collection(COLLECTIONS.agentSessionEvents).deleteMany({ conversationId: id });
+      await db.collection(COLLECTIONS.agentPendingActions).deleteMany({ conversationId: id });
       const result = await db
         .collection(COLLECTIONS.agentConversations)
         .deleteOne({ _id: new ObjectId(id) });
@@ -222,9 +250,15 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     ): Promise<void> {
       const db = this.getTenantDb();
       const now = new Date();
+      // A save without `pausedSnapshot` clears one left by an earlier pause.
+      const { pausedSnapshot, ...rest } = state;
       await db.collection(COLLECTIONS.agentConversationStates).updateOne(
         { conversationId: state.conversationId },
-        { $set: { ...state, updatedAt: now }, $setOnInsert: { createdAt: now } },
+        {
+          $set: { ...rest, ...(pausedSnapshot !== undefined ? { pausedSnapshot } : {}), updatedAt: now },
+          ...(pausedSnapshot === undefined ? { $unset: { pausedSnapshot: '' } } : {}),
+          $setOnInsert: { createdAt: now },
+        },
         { upsert: true },
       );
     }
@@ -261,6 +295,174 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       if (filters?.limit) cursor = cursor.limit(filters.limit);
       const docs = await cursor.toArray();
       return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as IAgentConversation[];
+    }
+
+    // ── Agent session event log ──────────────────────────────────
+
+    /** Per-process memo: the unique/TTL indexes are ensured on the first write per tenant DB. */
+    private sessionEventIndexesReady = new Set<string>();
+    private sessionEventIndexInit = new Map<string, Promise<void>>();
+
+    /**
+     * Ensured on the WRITE path as well as in the boot manifest: the manifest is
+     * existence-guarded, so a collection created after the tenant's first bind
+     * would stay without its unique (conversationId, seq) guard until a restart.
+     */
+    private async ensureSessionEventIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.sessionEventIndexesReady.has(dbName)) return;
+      const existing = this.sessionEventIndexInit.get(dbName);
+      if (existing) {
+        await existing;
+        return;
+      }
+      const coll = db.collection(COLLECTIONS.agentSessionEvents);
+      const setup = Promise.all([
+        coll.createIndex({ conversationId: 1, seq: 1 }, { name: 'uniq_conversation_seq', unique: true }),
+        coll.createIndex({ expiresAt: 1 }, { name: 'ttl_expiresAt', expireAfterSeconds: 0 }),
+      ])
+        .then(() => {
+          this.sessionEventIndexesReady.add(dbName);
+        })
+        .finally(() => {
+          this.sessionEventIndexInit.delete(dbName);
+        });
+      this.sessionEventIndexInit.set(dbName, setup);
+      await setup;
+    }
+
+    async appendAgentSessionEvents(events: NewAgentSessionEvent[]): Promise<void> {
+      if (events.length === 0) return;
+      const db = this.getTenantDb();
+      await this.ensureSessionEventIndexes(db);
+      const docs = events.map((event) => ({ ...event, _id: event._id ?? `sevt_${randomUUID().replace(/-/g, '').slice(0, 24)}` }));
+      const collection = db.collection(COLLECTIONS.agentSessionEvents);
+      try {
+        await collection.insertMany(docs as never[], { ordered: true });
+      } catch (error) {
+        if ((error as { code?: number } | null)?.code === 11000) {
+          // An ordered insert keeps the documents before the one that failed.
+          // Say which, by what is actually stored (a primary-key lookup) rather
+          // than by what the driver reports, which differs between backends:
+          // the caller must not store them a second time under new seq numbers.
+          const ids = docs.map((doc) => doc._id);
+          const stored = await collection
+            .find({ _id: { $in: ids } } as never)
+            .project({ _id: 1 })
+            .toArray()
+            .catch(() => []);
+          const storedIds = new Set(stored.map((doc) => String(doc._id)));
+          throw new AgentSessionEventSeqConflictError(
+            events[0].conversationId,
+            ids.filter((id) => storedIds.has(id)),
+          );
+        }
+        throw error;
+      }
+    }
+
+    async listAgentSessionEvents(
+      conversationId: string,
+      options?: { afterSeq?: number; types?: string[]; limit?: number },
+    ): Promise<IAgentSessionEvent[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { conversationId };
+      if (options?.afterSeq !== undefined && options.afterSeq > 0) filter.seq = { $gt: options.afterSeq };
+      if (options?.types && options.types.length > 0) filter.type = { $in: options.types };
+      let cursor = db.collection(COLLECTIONS.agentSessionEvents).find(filter).sort({ seq: 1 });
+      if (options?.limit) cursor = cursor.limit(options.limit);
+      const docs = await cursor.toArray();
+      return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as IAgentSessionEvent[];
+    }
+
+    async getAgentSessionMaxSeq(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const doc = await db
+        .collection(COLLECTIONS.agentSessionEvents)
+        .find({ conversationId })
+        .sort({ seq: -1 })
+        .limit(1)
+        .project({ seq: 1 })
+        .next();
+      return typeof doc?.seq === 'number' ? doc.seq : 0;
+    }
+
+    async deleteAgentSessionEvents(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db.collection(COLLECTIONS.agentSessionEvents).deleteMany({ conversationId });
+      return result.deletedCount ?? 0;
+    }
+
+    async cleanupAgentSessionEventRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }> {
+      // The TTL index normally does this; the sweep covers a deployment whose
+      // TTL monitor is off (some Cosmos tiers) and costs one indexed delete.
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.agentSessionEvents)
+        .deleteMany({ expiresAt: { $lt: options.olderThan } });
+      return { deletedCount: result.deletedCount ?? 0 };
+    }
+
+    // ── Agent pending actions ────────────────────────────────────
+
+    async createAgentPendingActions(
+      actions: Array<Omit<IAgentPendingAction, '_id'>>,
+    ): Promise<IAgentPendingAction[]> {
+      if (actions.length === 0) return [];
+      const db = this.getTenantDb();
+      const docs = actions.map((action) => ({ ...action, _id: `act_${randomUUID().replace(/-/g, '').slice(0, 24)}` }));
+      await db.collection(COLLECTIONS.agentPendingActions).insertMany(docs as never[]);
+      return docs as unknown as IAgentPendingAction[];
+    }
+
+    async findAgentPendingActionById(id: string): Promise<IAgentPendingAction | null> {
+      const db = this.getTenantDb();
+      const doc = await db.collection(COLLECTIONS.agentPendingActions).findOne({ _id: id as never });
+      return doc ? ({ ...doc, _id: String(doc._id) } as unknown as IAgentPendingAction) : null;
+    }
+
+    async listAgentPendingActions(
+      conversationId: string,
+      options?: { status?: IAgentPendingAction['status'] },
+    ): Promise<IAgentPendingAction[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { conversationId };
+      if (options?.status) filter.status = options.status;
+      const docs = await db.collection(COLLECTIONS.agentPendingActions).find(filter).sort({ requestedAt: 1 }).toArray();
+      return docs.map((d) => ({ ...d, _id: String(d._id) })) as unknown as IAgentPendingAction[];
+    }
+
+    async updateAgentPendingAction(
+      id: string,
+      data: Partial<Omit<IAgentPendingAction, '_id' | 'tenantId' | 'projectId' | 'conversationId'>>,
+      options?: { onlyIfStatus?: IAgentPendingAction['status'] },
+    ): Promise<IAgentPendingAction | null> {
+      const db = this.getTenantDb();
+      const set: Record<string, unknown> = { ...data };
+      delete set._id;
+      const doc = await db.collection(COLLECTIONS.agentPendingActions).findOneAndUpdate(
+        { _id: id as never, status: options?.onlyIfStatus ?? 'pending' },
+        { $set: set },
+        { returnDocument: 'after' },
+      );
+      return doc ? ({ ...doc, _id: String(doc._id) } as unknown as IAgentPendingAction) : null;
+    }
+
+    async listExpiredAgentPendingActions(now: Date, limit = 100): Promise<IAgentPendingAction[]> {
+      const db = this.getTenantDb();
+      const docs = await db
+        .collection(COLLECTIONS.agentPendingActions)
+        .find({ status: 'pending', expiresAt: { $lt: now } })
+        .sort({ expiresAt: 1 })
+        .limit(limit)
+        .toArray();
+      return docs.map((d) => ({ ...d, _id: String(d._id) })) as unknown as IAgentPendingAction[];
+    }
+
+    async deleteAgentPendingActions(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db.collection(COLLECTIONS.agentPendingActions).deleteMany({ conversationId });
+      return result.deletedCount ?? 0;
     }
   };
 }

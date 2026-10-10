@@ -33,4 +33,8 @@ export interface SessionRecord {
     createdBy?: string;
     messages?: ChatMessage[];
     metadata?: Record<string, unknown>;
+    /** What the session is doing now; absent = idle. `requires_action` = waiting on an approval or an answer. */
+    runtimeStatus?: 'idle' | 'running' | 'requires_action';
+    /** Highest event-log seq written when the last turn ended — where a follower resumes from. */
+    lastEventSeq?: number;
 }

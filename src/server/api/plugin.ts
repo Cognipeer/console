@@ -23,6 +23,7 @@ import { authApiPlugin } from './plugins/auth';
 import { clientA2aApiPlugin } from './plugins/client-a2a';
 import { clientAgentsApiPlugin } from './plugins/client-agents';
 import { clientAgentRunsApiPlugin } from './plugins/client-agent-runs';
+import { clientAgentSessionsApiPlugin } from './plugins/client-agent-sessions';
 import { clientAssistantsApiPlugin } from './plugins/client-assistants';
 import { clientAnalyticsApiPlugin } from './plugins/client-analytics';
 import { clientAuditApiPlugin } from './plugins/client-audit';
@@ -152,6 +153,8 @@ export function isSelfAuthApiPath(pathname: string): boolean {
 }
 
 function getPathname(url: string | undefined): string {
+  // The canonical form the router matches; the raw form lets /api/to%6Fls
+  // skip the licence guard and audit mapping (see requestPath.ts).
   return canonicalizeRequestPathname(url);
 }
 
@@ -483,6 +486,7 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
   await app.register(clientA2aApiPlugin);
   await app.register(clientAgentsApiPlugin);
   await app.register(clientAgentRunsApiPlugin);
+  await app.register(clientAgentSessionsApiPlugin);
   await app.register(clientAssistantsApiPlugin);
   await app.register(clientAnalyticsApiPlugin);
   await app.register(clientAuditApiPlugin);

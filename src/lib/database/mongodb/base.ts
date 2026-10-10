@@ -79,6 +79,8 @@ export const COLLECTIONS = {
   agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
   agentConversationStates: 'agent_conversation_states',
+  agentSessionEvents: 'agent_session_events',
+  agentPendingActions: 'agent_pending_actions',
   agentSkills: 'agent_skills',
   tenants: 'tenants',
   users: 'users',

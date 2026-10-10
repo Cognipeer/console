@@ -1,0 +1,644 @@
+/**
+ * Answering a pending action — and what follows from it.
+ *
+ * `resolveAgentPendingAction` is the one entry point the dashboard and the
+ * client API both call. It checks who may answer, records the answer, and —
+ * once every action of the pause is answered — continues the SAME turn: the
+ * agent is rebuilt, the stored state restored, the answers applied with the SDK
+ * and the loop invoked again (`executeAgentResumeLocal`). The continuation can
+ * finish, or pause again.
+ *
+ * `sweepExpiredPendingActions` is the timeout side: the reconciler calls it,
+ * and an agent's `onTimeout` decides between dropping the request and denying
+ * it so the agent carries on (as a background job — nobody is waiting on it).
+ */
+
+import { isDeepStrictEqual } from 'node:util';
+import { resolveUserQuestionState } from '@cognipeer/agent-sdk';
+import { criticalFireAndForget } from '@/lib/core/asyncTask';
+import { createLogger } from '@/lib/core/logger';
+import { runWithTenantScope } from '@/lib/database';
+import type {
+    DatabaseProvider,
+    IAgentConfig,
+    IAgentConversation,
+    IAgentPendingAction,
+    IAgentPendingActionResolution,
+    IAgentRun,
+} from '@/lib/database';
+import { recordAuditLog } from '@/lib/services/audit/auditService';
+import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
+import {
+    executeAgentResumeLocal,
+    validateApprovedArgs,
+    type AgentChatResponse,
+    type AgentPlaygroundChatResult,
+    type AgentResumeResult,
+    type AgentRunCancellationCell,
+    type AgentToolCallEvent,
+} from './agentService';
+import {
+    RESUME_TIMEOUT_ACTOR,
+    queueAgentRunResume,
+    reserveConversationForSyncTurn,
+    runWithTenantDb,
+    settlePausedAgentRuns,
+} from './agentRunService';
+import { resolveHitlConfig, type ResolvedHitlConfig } from './agentHumanInTheLoop';
+import {
+    actionResolvedEventData,
+    AgentResumeError,
+    blockingPendingActions,
+    dropPausedSnapshot,
+    toPublicPendingAction,
+    toSdkAnswerSet,
+    updateMessageSnapshots,
+    type PublicPendingAction,
+} from './agentPendingActions';
+import { createSessionEventWriter, type SessionStopReason } from './sessionEvents';
+import type { IAgentTurnCompaction } from '@/lib/database';
+
+const logger = createLogger('agents:action-resolution');
+
+// ── Who is answering ───────────────────────────────────────────────────
+
+export interface ResolveActor {
+    userId: string;
+    /** Owner / admin of the tenant, or admin of the project. */
+    isAdmin: boolean;
+    channel: 'dashboard' | 'api';
+    email?: string;
+    role?: string;
+    apiTokenId?: string;
+}
+
+export interface ResolveAgentActionInput {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    conversationId: string;
+    actionId: string;
+    /** When the route names the agent, the action must belong to it. */
+    agentKey?: string;
+    /** The request body: `{decision, comment?, approvedArgs?, rememberForSession?}` or `{answers, cancelled?}`. */
+    body: Record<string, unknown>;
+    actor: ResolveActor;
+    /** `background`: queue the continuation as a run instead of running it inline. */
+    mode: 'sync' | 'background';
+    runtimeContext?: AgentRuntimeContext;
+    /** Live callbacks for `?stream=1`. */
+    stream?: {
+        onToolEvent?: (event: AgentToolCallEvent) => void;
+        onTextChunk?: (text: string) => void;
+        onCompaction?: (compaction: IAgentTurnCompaction) => void;
+        signal?: AbortSignal;
+    };
+    /** Deadline / cancel reference for a continuation that runs under a ceiling. */
+    cancellationCell?: AgentRunCancellationCell;
+    audit?: { ipAddress?: string; userAgent?: string; requestId?: string };
+}
+
+export type ResolveOutcome =
+    | { kind: 'not_found' }
+    | { kind: 'not_pending'; status: IAgentPendingAction['status'] }
+    | { kind: 'expired' }
+    | { kind: 'forbidden'; message: string }
+    | { kind: 'invalid'; message: string }
+    | { kind: 'busy' }
+    /** Recorded; other requests of the same pause are still open. */
+    | { kind: 'pending'; pendingActions: PublicPendingAction[] }
+    /** Recorded, and the turn continued inline. */
+    | { kind: 'resumed'; result: AgentPlaygroundChatResult; response: AgentChatResponse; stopReason: SessionStopReason }
+    /** Recorded, and the continuation is queued as a background run. */
+    | { kind: 'queued'; run: IAgentRun };
+
+/** Is `actor` allowed to answer, under the agent's `approvers` setting? */
+export function mayResolve(
+    approvers: ResolvedHitlConfig['approvers'],
+    actor: Pick<ResolveActor, 'userId' | 'isAdmin'>,
+    conversation: Pick<IAgentConversation, 'createdBy'>,
+    action: Pick<IAgentPendingAction, 'createdBy'>,
+): boolean {
+    // Whoever may see the agent in this project (the routes have checked that).
+    if (approvers === 'project_members') return true;
+    const isOwner = Boolean(actor.userId)
+        && (actor.userId === String(conversation.createdBy) || actor.userId === action.createdBy);
+    if (approvers === 'owner') return isOwner;
+    return isOwner || actor.isAdmin;
+}
+
+// ── Reading the request ───────────────────────────────────────────────
+
+type Parsed =
+    | { ok: true; resolution: IAgentPendingActionResolution }
+    | { ok: false; message: string };
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The request body as a resolution — or the 400 message. */
+export function parseResolution(action: IAgentPendingAction, body: Record<string, unknown>): Parsed {
+    if (action.kind === 'tool_approval') {
+        const decision = body.decision;
+        if (decision !== 'allow' && decision !== 'deny') return { ok: false, message: '`decision` must be "allow" or "deny"' };
+        if (body.comment !== undefined && typeof body.comment !== 'string') return { ok: false, message: '`comment` must be a string' };
+        if (body.rememberForSession !== undefined && typeof body.rememberForSession !== 'boolean') {
+            return { ok: false, message: '`rememberForSession` must be a boolean' };
+        }
+        if (body.approvedArgs !== undefined) {
+            if (!isPlainObject(body.approvedArgs)) return { ok: false, message: '`approvedArgs` must be a JSON object' };
+            if (decision === 'deny') return { ok: false, message: '`approvedArgs` only applies to an approval' };
+        }
+        return {
+            ok: true,
+            resolution: {
+                decision,
+                ...(typeof body.comment === 'string' && body.comment ? { comment: body.comment } : {}),
+                ...(isPlainObject(body.approvedArgs) ? { approvedArgs: body.approvedArgs } : {}),
+                ...(body.rememberForSession === true && decision === 'allow' ? { rememberForSession: true } : {}),
+            },
+        };
+    }
+
+    const cancelled = body.cancelled === true;
+    if (body.cancelled !== undefined && typeof body.cancelled !== 'boolean') return { ok: false, message: '`cancelled` must be a boolean' };
+    if (cancelled) return { ok: true, resolution: { cancelled: true } };
+    if (!isPlainObject(body.answers)) return { ok: false, message: '`answers` must be an object keyed by question' };
+    const answers: Record<string, string | string[]> = {};
+    for (const [question, value] of Object.entries(body.answers)) {
+        if (typeof value === 'string') answers[question] = value;
+        else if (Array.isArray(value) && value.every((entry) => typeof entry === 'string')) answers[question] = value as string[];
+        else return { ok: false, message: `The answer to "${question}" must be a string or a list of strings` };
+    }
+    return { ok: true, resolution: { answers } };
+}
+
+/** Would the SDK accept these answers? Checked here so a bad answer is a 400, not a failed resume. */
+function checkAnswers(action: IAgentPendingAction, resolution: IAgentPendingActionResolution): string | null {
+    if (action.kind !== 'user_question' || resolution.cancelled) return null;
+    try {
+        resolveUserQuestionState(
+            {
+                messages: [],
+                pendingUserQuestions: [{
+                    id: action.sdkId,
+                    toolCallId: action.toolCallId ?? action.sdkId,
+                    toolName: 'ask_user_question',
+                    questions: (action.questions ?? []) as never,
+                    status: 'pending',
+                    requestedAt: new Date(action.requestedAt).toISOString(),
+                    allowFreeText: action.allowFreeText !== false,
+                }],
+            },
+            {
+                id: action.sdkId,
+                answers: toSdkAnswerSet((action.questions ?? []) as never, resolution.answers),
+            },
+        );
+        return null;
+    } catch (error) {
+        return error instanceof Error ? error.message : 'The answers are not valid';
+    }
+}
+
+// ── Shared bookkeeping ───────────────────────────────────────────────
+
+/** The settings of the config the paused turn ran with. */
+async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendingAction): Promise<ResolvedHitlConfig> {
+    const agent = await db.findAgentByKey(action.agentKey, action.projectId);
+    let config: IAgentConfig | undefined = agent?.config;
+    if (agent && action.agentVersion != null) {
+        const snapshot = await db.findAgentVersion(String(agent._id), action.agentVersion);
+        if (snapshot) config = snapshot.snapshot.config;
+    }
+    return resolveHitlConfig(config?.humanInTheLoop);
+}
+
+/** Writes events to the conversation's log and waits until they are stored (and published). */
+async function writeSessionEvents(
+    db: DatabaseProvider,
+    scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string },
+    events: Array<{ type: 'action.resolved' | 'session.status_idle'; data: Record<string, unknown> }>,
+): Promise<void> {
+    if (events.length === 0) return;
+    const writer = createSessionEventWriter({ db, ...scope });
+    for (const event of events) writer.emit(event.type, event.data);
+    await writer.close();
+}
+
+function auditResolution(
+    input: ResolveAgentActionInput,
+    action: IAgentPendingAction,
+    resolution: IAgentPendingActionResolution,
+    edited: boolean,
+): void {
+    const { actor } = input;
+    criticalFireAndForget('agent-action-audit', () => runWithTenantScope(input.tenantDbName, () => recordAuditLog(
+        { tenantDbName: input.tenantDbName, tenantId: input.tenantId },
+        {
+            projectId: input.projectId,
+            action: 'write',
+            actorType: actor.apiTokenId ? 'api_token' : 'user',
+            actorUserId: actor.userId,
+            actorEmail: actor.email,
+            actorRole: actor.role,
+            apiTokenId: actor.apiTokenId,
+            event: action.kind === 'tool_approval' ? 'agent.tool_approval.resolve' : 'agent.question.resolve',
+            ipAddress: input.audit?.ipAddress,
+            userAgent: input.audit?.userAgent,
+            requestId: input.audit?.requestId,
+            outcome: 'success',
+            resourceType: 'agent_pending_action',
+            resourceId: String(action._id),
+            service: 'agents',
+            metadata: {
+                agentKey: action.agentKey,
+                conversationId: action.conversationId,
+                kind: action.kind,
+                toolName: action.toolName ?? null,
+                decision: resolution.decision ?? null,
+                cancelled: resolution.cancelled === true,
+                argumentsEdited: edited,
+                rememberForSession: resolution.rememberForSession === true,
+                channel: actor.channel,
+            },
+        },
+    )));
+}
+
+/** Puts a just-recorded answer back to `pending` (the continuation could not start). */
+async function undoResolution(
+    db: DatabaseProvider,
+    action: IAgentPendingAction,
+    conversation: IAgentConversation,
+): Promise<void> {
+    await db.updateAgentPendingAction(String(action._id), {
+        status: 'pending',
+        resolvedAt: null,
+        // null, not undefined: both providers skip or null-coerce undefined differently.
+        resolvedBy: null as unknown as undefined,
+        resolution: null as unknown as undefined,
+    }, { onlyIfStatus: 'resolved' }).catch(() => undefined);
+    // The message copy was updated with the answer; restore the original wording.
+    const messages = updateMessageSnapshots(conversation.messages ?? [], new Map([[String(action._id), { status: 'pending' as const }]]));
+    await db.updateAgentConversation(String(conversation._id), { messages }).catch(() => undefined);
+}
+
+// ── A new message while something is open ──────────────────────────────
+
+/**
+ * The ids of the requests that stop a new message from being accepted, or null
+ * when it may go ahead. Lets a route answer 409 before it reserves the session;
+ * the turn itself enforces the same rule (`assertNoBlockingPending`).
+ */
+export async function pendingActionsBlockingMessage(
+    tenantDbName: string,
+    conversation: Pick<IAgentConversation, '_id' | 'runtimeStatus'> | null | undefined,
+    config: IAgentConfig | undefined,
+): Promise<string[] | null> {
+    if (!conversation || conversation.runtimeStatus !== 'requires_action') return null;
+    if (resolveHitlConfig(config?.humanInTheLoop).onUserMessageWhilePending !== 'reject') return null;
+    const open = await runWithTenantDb(tenantDbName, (db) => blockingPendingActions(db, conversation));
+    return open.length > 0 ? open.map((action) => String(action._id)) : null;
+}
+
+// ── The resolve flow ─────────────────────────────────────────────────
+
+export async function resolveAgentPendingAction(input: ResolveAgentActionInput): Promise<ResolveOutcome> {
+    const { tenantDbName, tenantId, projectId, conversationId, actor } = input;
+    return runWithTenantDb(tenantDbName, async (db) => {
+        // 1. Is there such an action, here, still open?
+        const action = await db.findAgentPendingActionById(input.actionId).catch(() => null);
+        if (!action
+            || action.tenantId !== tenantId
+            || action.projectId !== projectId
+            || action.conversationId !== conversationId
+            || (input.agentKey !== undefined && action.agentKey !== input.agentKey)) {
+            return { kind: 'not_found' };
+        }
+        if (action.status === 'expired') return { kind: 'expired' };
+        if (action.status !== 'pending') return { kind: 'not_pending', status: action.status };
+        if (action.expiresAt && new Date(action.expiresAt).getTime() <= Date.now()) return { kind: 'expired' };
+
+        const conversation = await db.findAgentConversationById(conversationId);
+        if (!conversation || conversation.projectId !== projectId) return { kind: 'not_found' };
+
+        // 2. Who may answer.
+        const hitl = await hitlSettingsFor(db, action);
+        if (!mayResolve(hitl.approvers, actor, conversation, action)) {
+            return { kind: 'forbidden', message: 'You are not allowed to answer this request.' };
+        }
+
+        // 3. What they answered.
+        const parsed = parseResolution(action, input.body);
+        if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
+        const { resolution } = parsed;
+        const answersProblem = checkAnswers(action, resolution);
+        if (answersProblem) return { kind: 'invalid', message: answersProblem };
+        const edited = Boolean(resolution.approvedArgs && !isDeepStrictEqual(resolution.approvedArgs, action.args));
+        if (edited && action.toolName) {
+            const checked = await validateApprovedArgs({
+                tenantDbName,
+                tenantId,
+                projectId,
+                agentKey: action.agentKey,
+                conversationId,
+                userId: actor.userId,
+                toolName: action.toolName,
+                approvedArgs: resolution.approvedArgs!,
+            });
+            if (!checked.ok) return { kind: 'invalid', message: `The edited arguments are not valid: ${checked.message}` };
+        }
+
+        // 4. The conversation's slot, for an inline continuation. A background
+        // continuation takes it when it is queued.
+        const reservation = input.mode === 'sync'
+            ? await reserveConversationForSyncTurn(db, {
+                tenantId,
+                tenantDbName,
+                projectId,
+                agentKey: action.agentKey,
+                conversationId,
+                userMessage: '',
+                userId: actor.userId,
+            })
+            : undefined;
+        if (reservation === null) return { kind: 'busy' };
+
+        try {
+            // 5. Record the answer (compare-and-set: two reviewers cannot both win).
+            const recorded = await db.updateAgentPendingAction(String(action._id), {
+                status: 'resolved',
+                resolvedAt: new Date(),
+                resolvedBy: actor.userId,
+                resolution,
+            });
+            if (!recorded) {
+                const current = await db.findAgentPendingActionById(String(action._id));
+                return { kind: 'not_pending', status: current?.status ?? 'resolved' };
+            }
+
+            const snapshots = new Map([[String(action._id), { status: 'resolved' as const, resolution }]]);
+            const metadata = resolution.rememberForSession && action.toolName
+                ? {
+                    ...(conversation.metadata ?? {}),
+                    hitlAllowedTools: [...new Set([
+                        ...(Array.isArray(conversation.metadata?.hitlAllowedTools) ? conversation.metadata.hitlAllowedTools as string[] : []),
+                        action.toolName,
+                    ])],
+                }
+                : undefined;
+            const messages = updateMessageSnapshots(conversation.messages ?? [], snapshots);
+            await db.updateAgentConversation(conversationId, { messages, ...(metadata ? { metadata } : {}) });
+
+            await writeSessionEvents(db, { tenantId, projectId, agentKey: action.agentKey, conversationId }, [{
+                type: 'action.resolved',
+                data: actionResolvedEventData(action, {
+                    ...(resolution.decision ? { decision: resolution.decision } : {}),
+                    ...(resolution.cancelled ? { cancelled: true } : {}),
+                    resolvedBy: actor.userId,
+                    channel: actor.channel,
+                }),
+            }]);
+            auditResolution(input, action, resolution, edited);
+
+            // 6. Other requests of the same pause still open: wait for them.
+            const open = await db.listAgentPendingActions(conversationId, { status: 'pending' });
+            if (open.length > 0) {
+                await db.updateAgentConversationRuntime(conversationId, {
+                    pendingActionIds: open.map((entry) => String(entry._id)),
+                }).catch(() => undefined);
+                return { kind: 'pending', pendingActions: open.map(toPublicPendingAction) };
+            }
+
+            // 7. Everything is answered: continue the turn.
+            if (input.mode === 'background') {
+                const queued = await queueAgentRunResume({
+                    tenantDbName,
+                    tenantId,
+                    projectId,
+                    agentKey: action.agentKey,
+                    conversationId,
+                    userId: actor.userId,
+                    resumeActionIds: await answeredActionIds(db, conversationId),
+                    ...(actor.apiTokenId ? { apiTokenId: actor.apiTokenId } : {}),
+                    actorType: actor.apiTokenId ? 'api_token' : 'user',
+                });
+                if (queued.kind === 'conflict') {
+                    await undoResolution(db, action, { ...conversation, messages });
+                    return { kind: 'busy' };
+                }
+                return { kind: 'queued', run: queued.run };
+            }
+
+            // Once the SDK invoke starts, the approval is spent; a failure before
+            // that (agent or model missing, a transient 5xx) re-opens the answers
+            // so the reviewer can retry instead of getting 409 not_pending.
+            let invoking = false;
+            let resumed: AgentResumeResult;
+            try {
+                resumed = await executeAgentResumeLocal({
+                    tenantDbName,
+                    tenantId,
+                    projectId,
+                    agentKey: action.agentKey,
+                    conversationId,
+                    userId: actor.userId,
+                    trigger: 'resume',
+                    runtimeContext: input.runtimeContext,
+                    ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
+                    ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
+                    ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),
+                    ...(input.stream?.onCompaction ? { onCompaction: input.stream.onCompaction } : {}),
+                    ...(input.stream?.signal ? { signal: input.stream.signal } : {}),
+                    onInvokeStart: () => { invoking = true; },
+                });
+            } catch (error) {
+                const stateLost = error instanceof AgentResumeError && error.stateLost;
+                if (!invoking && !stateLost) await reopenAnsweredActions(db, conversationId);
+                throw error;
+            }
+            // A background run that was paused on this turn is settled by it.
+            await settlePausedAgentRuns(tenantDbName, { tenantId, projectId, conversationId }, resumed.response)
+                .catch((error) => {
+                    logger.warn('Could not settle the paused run after an inline continuation', {
+                        conversationId,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                });
+            return { kind: 'resumed', result: resumed.result, response: resumed.response, stopReason: resumed.stopReason };
+        } finally {
+            await reservation?.release();
+        }
+    });
+}
+
+/** Puts every answered action of the current pause back to `pending`. */
+async function reopenAnsweredActions(db: DatabaseProvider, conversationId: string): Promise<void> {
+    try {
+        const answered = await db.listAgentPendingActions(conversationId, { status: 'resolved' });
+        for (const entry of answered) {
+            const conversation = await db.findAgentConversationById(conversationId);
+            if (!conversation) return;
+            await undoResolution(db, entry, conversation);
+        }
+    } catch (error) {
+        logger.warn('Could not re-open the answers of a continuation that failed to start', {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+}
+
+/** The answered actions of the conversation's current pause. */
+async function answeredActionIds(db: DatabaseProvider, conversationId: string): Promise<string[]> {
+    const all = await db.listAgentPendingActions(conversationId, { status: 'resolved' });
+    return all.map((entry) => String(entry._id));
+}
+
+// ── Timeouts ─────────────────────────────────────────────────────────
+
+export interface ExpiredSweepResult {
+    expired: number;
+    denied: number;
+    continued: number;
+}
+
+/**
+ * Handles the requests whose time ran out (`status = pending AND expiresAt <
+ * now`), per the agent's `onTimeout`:
+ *  - `cancel`: the request expires; the session is idle again.
+ *  - `deny`: the request is answered as a refusal and, once nothing else is
+ *    open, the agent continues — as a background job, nobody is waiting on it.
+ */
+export async function sweepExpiredPendingActions(
+    db: DatabaseProvider,
+    tenantDbName: string,
+    now: Date,
+    limit = 100,
+): Promise<ExpiredSweepResult> {
+    const result: ExpiredSweepResult = { expired: 0, denied: 0, continued: 0 };
+    const due = await db.listExpiredAgentPendingActions(now, limit);
+    const byConversation = new Map<string, IAgentPendingAction[]>();
+    for (const action of due) {
+        const list = byConversation.get(action.conversationId) ?? [];
+        list.push(action);
+        byConversation.set(action.conversationId, list);
+    }
+
+    for (const [conversationId, actions] of byConversation) {
+        try {
+            const first = actions[0];
+            const conversation = await db.findAgentConversationById(conversationId);
+            if (!conversation || conversation.runtimeStatus !== 'requires_action') {
+                // The session moved on (a new message cancelled it, or it was deleted).
+                for (const action of actions) {
+                    await db.updateAgentPendingAction(String(action._id), { status: 'cancelled', resolvedAt: now, resolvedBy: 'system:timeout' });
+                }
+                continue;
+            }
+            const hitl = await hitlSettingsFor(db, first);
+            const scope = { tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId };
+            const events: Array<{ type: 'action.resolved' | 'session.status_idle'; data: Record<string, unknown> }> = [];
+            const snapshots = new Map<string, { status: IAgentPendingAction['status']; resolution?: IAgentPendingActionResolution }>();
+
+            for (const action of actions) {
+                if (hitl.onTimeout === 'cancel') {
+                    const updated = await db.updateAgentPendingAction(String(action._id), {
+                        status: 'expired', resolvedAt: now, resolvedBy: 'system:timeout', resolution: { cancelled: true },
+                    });
+                    if (!updated) continue;
+                    result.expired += 1;
+                    snapshots.set(String(action._id), { status: 'expired', resolution: { cancelled: true } });
+                    events.push({
+                        type: 'action.resolved',
+                        data: actionResolvedEventData(action, { expired: true, cancelled: true, resolvedBy: 'system:timeout', channel: 'timeout' }),
+                    });
+                    continue;
+                }
+                const resolution: IAgentPendingActionResolution = action.kind === 'tool_approval'
+                    ? { decision: 'deny', comment: 'timed out' }
+                    : { cancelled: true };
+                const updated = await db.updateAgentPendingAction(String(action._id), {
+                    status: 'resolved', resolvedAt: now, resolvedBy: 'system:timeout', resolution,
+                });
+                if (!updated) continue;
+                result.denied += 1;
+                snapshots.set(String(action._id), { status: 'resolved', resolution });
+                events.push({
+                    type: 'action.resolved',
+                    data: actionResolvedEventData(action, {
+                        ...(resolution.decision ? { decision: resolution.decision } : {}),
+                        ...(resolution.cancelled ? { cancelled: true } : {}),
+                        expired: true,
+                        resolvedBy: 'system:timeout',
+                        channel: 'timeout',
+                    }),
+                });
+            }
+            if (snapshots.size === 0) continue;
+
+            const messages = updateMessageSnapshots(conversation.messages ?? [], snapshots);
+            await db.updateAgentConversation(conversationId, { messages });
+
+            const open = await db.listAgentPendingActions(conversationId, { status: 'pending' });
+            if (open.length > 0) {
+                await db.updateAgentConversationRuntime(conversationId, { pendingActionIds: open.map((entry) => String(entry._id)) });
+                await writeSessionEvents(db, scope, events);
+                continue;
+            }
+
+            if (hitl.onTimeout === 'cancel') {
+                await dropPausedSnapshot(db, conversationId);
+                await db.updateAgentConversationRuntime(conversationId, {
+                    runtimeStatus: 'idle', stopReason: 'cancelled', pendingActionIds: [],
+                });
+                events.push({ type: 'session.status_idle', data: { stopReason: 'cancelled' } });
+                await writeSessionEvents(db, scope, events);
+                await closePausedRuns(db, first);
+                continue;
+            }
+
+            await writeSessionEvents(db, scope, events);
+            const queued = await queueAgentRunResume({
+                tenantDbName,
+                tenantId: first.tenantId,
+                projectId: first.projectId,
+                agentKey: first.agentKey,
+                conversationId,
+                userId: RESUME_TIMEOUT_ACTOR,
+                resumeActionIds: await answeredActionIds(db, conversationId),
+                actorType: 'system',
+            });
+            if (queued.kind === 'queued') result.continued += 1;
+            else logger.warn('Could not continue a timed-out turn: the conversation is busy', { conversationId });
+        } catch (error) {
+            logger.warn('Could not handle an expired pending action', {
+                conversationId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+    return result;
+}
+
+/** A timeout cancelled the request: a background run waiting on it ends as cancelled. */
+async function closePausedRuns(db: DatabaseProvider, action: IAgentPendingAction): Promise<void> {
+    const paused = await db.listAgentRuns({
+        tenantId: action.tenantId,
+        projectId: action.projectId,
+        conversationId: action.conversationId,
+        status: ['requires_action'],
+        limit: 5,
+    });
+    for (const run of paused) {
+        await db.finalizeAgentRun(String(run._id), action.tenantId, {
+            status: 'canceled',
+            errorReason: 'canceled_by_caller',
+            stopReason: 'cancelled',
+            completedAt: new Date(),
+            runtimeContext: null,
+        });
+    }
+}

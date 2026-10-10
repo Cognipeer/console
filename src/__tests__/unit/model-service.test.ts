@@ -312,6 +312,7 @@ describe('validateDynamicConfigReferences', () => {
     small: makeModel({ key: 'small' }),
     big: makeModel({ key: 'big' }),
     embed: makeModel({ key: 'embed', category: 'embedding' }),
+    judge: makeModel({ key: 'judge', category: 'decision' }),
   };
 
   beforeEach(() => {
@@ -351,5 +352,41 @@ describe('validateDynamicConfigReferences', () => {
     await expect(
       validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, config({ fallbackModelKey: 'router' }), 'router'),
     ).rejects.toThrow(/cannot route to itself/);
+  });
+
+  const modelBased = (decider: { modelKey: string }, extra: object = {}) => ({
+    strategy: 'model-based' as const,
+    defaultModelKey: 'small',
+    decider: { labels: [{ label: 'hard', description: 'hard', targetModelKey: 'big' }], ...decider },
+    ...extra,
+  });
+
+  it('accepts a decision model as the decider and as the complexity scorer', async () => {
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, modelBased({ modelKey: 'judge' }), 'router'),
+    ).resolves.toBeUndefined();
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, config({ complexity: { modelKey: 'judge', levels: ['a', 'b'] } }), 'router'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects a new chat (llm) decider but keeps one the config already had', async () => {
+    const chat = modelBased({ modelKey: 'small' });
+    await expect(validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, chat, 'router')).rejects.toThrow(
+      /not a decision model and cannot be the decider/,
+    );
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, chat, 'router', modelBased({ modelKey: 'small' })),
+    ).resolves.toBeUndefined();
+    // Swapping to a different chat model is a new attachment.
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, modelBased({ modelKey: 'big' }), 'router', modelBased({ modelKey: 'small' })),
+    ).rejects.toThrow(/not a decision model/);
+  });
+
+  it('rejects a chat model as the complexity scorer, always', async () => {
+    await expect(
+      validateDynamicConfigReferences(TENANT_DB, PROJECT_ID, config({ complexity: { modelKey: 'small', levels: ['a', 'b'] } }), 'router'),
+    ).rejects.toThrow(/complexity scorer/);
   });
 });

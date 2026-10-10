@@ -43,7 +43,10 @@ import {
   type AgentChatRequest,
   type AgentChatResponse,
   type AgentRunCancellationCell,
+  executeAgentResumeLocal,
 } from './agentService';
+import { toSessionStopReason } from './sessionEvents';
+import { cancelPendingForNewMessage } from './agentPendingActions';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 
 const logger = createLogger('agent-run');
@@ -141,9 +144,15 @@ export function serializeAgentRun(run: IAgentRun) {
     id: publicAgentRunId(run),
     object: 'agent.run' as const,
     status: run.status,
+    // How the agent turn ended (`end_turn` / `limit` / `requires_action` /
+    // `cancelled` / `error`). Null while the run is active and on rows from
+    // before the field existed.
+    stop_reason: run.stopReason ?? null,
     agent: run.agentKey,
     conversation_id: run.conversationId,
-    result: run.status === 'succeeded' ? run.result ?? null : null,
+    // A paused run's result is the Responses-shaped `requires_action` body: the
+    // actions to resolve ride in its `required_action`.
+    result: run.status === 'succeeded' || run.status === 'requires_action' ? run.result ?? null : null,
     error: run.status === 'failed' || run.status === 'canceled'
       ? { type: run.errorReason ?? 'agent_error', message: run.errorMessage ?? null }
       : null,
@@ -471,6 +480,127 @@ export async function runSyncAgentTurn(input: RunSyncAgentTurnInput): Promise<Sy
   });
 }
 
+// ── Continuing a paused turn in the background ───────────────────────────
+
+/** The run owner of a continuation the timeout sweep starts — a synthetic actor, like the scheduler's. */
+export const RESUME_TIMEOUT_ACTOR = 'system:agent-timeout';
+
+export type QueueAgentRunResumeOutcome =
+  | { kind: 'queued'; run: IAgentRun }
+  | { kind: 'conflict' };
+
+/**
+ * Queues a background run that continues a paused turn (every action it waited
+ * on is answered). A paused background run is put back in the queue under its
+ * own id; a turn that paused inside a synchronous call has no run, so a new
+ * one is created for it. `conflict` = another run holds the conversation.
+ */
+export async function queueAgentRunResume(input: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  conversationId: string;
+  userId: string;
+  resumeActionIds: string[];
+  apiTokenId?: string;
+  actorType?: IAgentRun['actorType'];
+}): Promise<QueueAgentRunResumeOutcome> {
+  const db = await withTenantDb(input.tenantDbName);
+  const cfg = getConfig();
+  let run: IAgentRun | null = null;
+  try {
+    const [paused] = await db.listAgentRuns({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      status: ['requires_action'],
+      mode: 'background',
+      limit: 1,
+    });
+    if (paused) run = await db.requeueAgentRunForResume(String(paused._id), input.tenantId, input.resumeActionIds);
+    if (!run) {
+      run = await db.createAgentRun({
+        mode: 'background',
+        tenantId: input.tenantId,
+        tenantDbName: input.tenantDbName,
+        projectId: input.projectId,
+        agentKey: input.agentKey,
+        conversationId: input.conversationId,
+        // The turn continues from its stored state; there is no new message.
+        userMessage: '',
+        resumeActionIds: input.resumeActionIds,
+        status: 'queued',
+        callbackAttempts: 0,
+        maxDurationMs: cfg.agent.backgroundMaxDurationMs,
+        userId: input.userId,
+        ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
+        actorType: input.actorType ?? (input.userId.startsWith('system:') ? 'system' : 'user'),
+        expiresAt: new Date(Date.now() + cfg.agent.runRetentionDays * 86_400_000),
+      });
+    }
+  } catch (error) {
+    if (error instanceof AgentRunConflictError) return { kind: 'conflict' };
+    throw error;
+  }
+  await publishAgentRunJob(run);
+  return { kind: 'queued', run };
+}
+
+/**
+ * A continuation ran inline (the dashboard answered while a background run was
+ * paused): settle that run's row. Still waiting → it keeps `requires_action`
+ * with the fresh actions; otherwise it ends `succeeded` like any finished run.
+ */
+export async function settlePausedAgentRuns(
+  tenantDbName: string,
+  scope: { tenantId: string; projectId: string; conversationId: string },
+  response: AgentChatResponse,
+): Promise<void> {
+  const db = await withTenantDb(tenantDbName);
+  const paused = await db.listAgentRuns({ ...scope, status: ['requires_action'], mode: 'background', limit: 5 });
+  const { _conversation_messages: _omitted, ...body } = response;
+  void _omitted;
+  for (const run of paused) {
+    const runId = String(run._id);
+    const result = { ...body, id: `resp_${runId}` } as unknown as Record<string, unknown>;
+    if (response.status === 'requires_action') {
+      await db.finalizeAgentRun(runId, scope.tenantId, { status: 'requires_action', result, stopReason: 'requires_action' });
+      continue;
+    }
+    const finalized = await db.finalizeAgentRun(runId, scope.tenantId, {
+      status: 'succeeded',
+      result,
+      stopReason: toSessionStopReason(response.stop_reason),
+      completedAt: new Date(),
+      runtimeContext: null,
+    });
+    if (finalized) {
+      await fireAgentRunCallback(finalized, 'succeeded', { result }).catch((error) => {
+        logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+      });
+    }
+  }
+}
+
+/** A paused run is cancelled: its open requests are cancelled and the conversation is idle again. */
+async function dropPausedConversation(db: DatabaseProvider, run: IAgentRun): Promise<void> {
+  const conversation = await db.findAgentConversationById(run.conversationId);
+  if (conversation) {
+    await cancelPendingForNewMessage(db, conversation).catch((error) => {
+      logger.warn('Could not cancel the open requests of a cancelled run', {
+        runId: String(run._id),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  await db.updateAgentConversationRuntime(run.conversationId, {
+    runtimeStatus: 'idle',
+    stopReason: 'cancelled',
+    pendingActionIds: [],
+  }).catch(() => undefined);
+}
+
 // ── §7: background execution ─────────────────────────────────────────────
 
 export interface CreateBackgroundAgentRunInput {
@@ -717,6 +847,23 @@ export async function requestAgentRunCancellation(
   const db = await withTenantDb(tenantDbName);
   const owned = await db.getAgentRunById(runId, tenantId, projectId);
   if (!owned || owned.mode !== 'background') return { kind: 'not_found' };
+  if (owned.status === 'requires_action') {
+    // Paused for a person: nothing is executing, so cancelling settles the run
+    // and drops the open requests.
+    const cancelled = await db.finalizeAgentRun(runId, tenantId, {
+      status: 'canceled',
+      errorReason: 'canceled_by_caller',
+      stopReason: 'cancelled',
+      completedAt: new Date(),
+      runtimeContext: null,
+    });
+    if (!cancelled) return { kind: 'already_terminal', run: owned };
+    await dropPausedConversation(db, owned);
+    await fireAgentRunCallback(cancelled, 'canceled', {}).catch((error) => {
+      logger.warn('Could not queue the canceled callback', { runId, error: error instanceof Error ? error.message : String(error) });
+    });
+    return { kind: 'accepted', run: cancelled };
+  }
   if (owned.status !== 'queued' && owned.status !== 'running') {
     return { kind: 'already_terminal', run: owned };
   }
@@ -743,6 +890,7 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     usePublished: run.usePublished,
     runtimeContext: openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed),
     cancellationCell,
+    runId: String(run._id),
   };
 }
 
@@ -802,11 +950,30 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
 
     const finalize = async (
       status: 'succeeded' | 'failed' | 'canceled',
-      data: Pick<IAgentRun, 'errorReason' | 'errorMessage' | 'result'>,
+      data: Pick<IAgentRun, 'errorReason' | 'errorMessage' | 'result' | 'stopReason'>,
       callbackData: Record<string, unknown> = {},
     ) => {
+      // A failed / canceled run says so; a succeeded one passes how its turn ended.
+      const stopReason = data.stopReason
+        ?? (status === 'failed' ? 'error' : status === 'canceled' ? 'cancelled' : undefined);
       // The sealed caller headers are only needed while the turn runs.
-      const finalized = await db.finalizeAgentRun(runId, tenantId, { ...data, status, completedAt: new Date(), runtimeContext: null });
+      const finalized = await db.finalizeAgentRun(runId, tenantId, {
+        ...data,
+        ...(stopReason ? { stopReason } : {}),
+        status,
+        completedAt: new Date(),
+        runtimeContext: null,
+        resumeActionIds: null,
+      });
+      // A continuation that died leaves the conversation marked as waiting;
+      // its requests are answered, so there is nothing left to wait for.
+      if (finalized && status !== 'succeeded' && claimed.resumeActionIds?.length) {
+        await db.updateAgentConversationRuntime(claimed.conversationId, {
+          runtimeStatus: 'idle',
+          stopReason: status === 'canceled' ? 'cancelled' : 'error',
+          pendingActionIds: [],
+        }).catch(() => undefined);
+      }
       if (finalized) {
         await fireAgentRunCallback(finalized, status, callbackData).catch((error) => {
           logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
@@ -926,6 +1093,7 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
       // Attribution: usage recorded by the turn reads the request context,
       // which a queue worker otherwise has none of. A rejection settles as a
       // value, so the race can finalize it instead of throwing past the timers.
+      const resuming = Boolean(claimed.resumeActionIds?.length);
       const invokePromise = runWithUsageSink(usage, () => runWithRequestContext(
         {
           tenantId: claimed.tenantId,
@@ -935,7 +1103,23 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
           actorType: claimed.actorType ?? 'api_token',
           source: 'api',
         },
-        () => executeAgentChatLocal(request),
+        // A run queued to continue a paused turn picks that turn up where it
+        // stopped; everything around it (heartbeat, ceiling, cancel, finalize,
+        // callback) is the same.
+        () => resuming
+          ? executeAgentResumeLocal({
+            tenantDbName: request.tenantDbName,
+            tenantId: request.tenantId,
+            projectId: request.projectId,
+            agentKey: request.agentKey,
+            conversationId: request.conversationId,
+            userId: request.userId,
+            trigger: request.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume',
+            runId,
+            runtimeContext: request.runtimeContext,
+            cancellationCell,
+          }).then((resumed) => resumed.response)
+          : executeAgentChatLocal(request),
       )).then(
         (response) => ({ ok: true as const, response }),
         (error: unknown) => ({ ok: false as const, error }),
@@ -978,7 +1162,26 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
 
       const { _conversation_messages: _omitted, ...responseWithoutTranscript } = raced.response;
       const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}` };
-      await finalize('succeeded', { result: responseWithRunId as unknown as Record<string, unknown> }, { result: responseWithRunId });
+      if (responseWithRunId.status === 'requires_action') {
+        // Paused for a person: not terminal. The run waits as `requires_action`
+        // (the conversation's slot is free) until the actions are resolved.
+        const paused = await db.finalizeAgentRun(runId, tenantId, {
+          status: 'requires_action',
+          result: responseWithRunId as unknown as Record<string, unknown>,
+          stopReason: 'requires_action',
+          resumeActionIds: null,
+        });
+        if (paused) {
+          await fireAgentRunCallback(paused, 'requires_action', { result: responseWithRunId }).catch((error) => {
+            logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+          });
+        }
+        return;
+      }
+      await finalize('succeeded', {
+        result: responseWithRunId as unknown as Record<string, unknown>,
+        stopReason: toSessionStopReason(responseWithRunId.stop_reason),
+      }, { result: responseWithRunId });
     } catch (error) {
       stopAllTimers();
       logger.error('Agent run worker failed unexpectedly', {
@@ -1006,7 +1209,7 @@ interface AgentRunCallbackJobPayload extends QueuePayload {
   projectId: string;
   conversationId: string;
   callbackUrl: string;
-  event: 'succeeded' | 'failed' | 'canceled';
+  event: 'succeeded' | 'failed' | 'canceled' | 'requires_action';
   data: Record<string, unknown>;
 }
 
@@ -1018,7 +1221,7 @@ export function signAgentRunCallback(secret: string, body: string, timestamp = M
 
 export async function fireAgentRunCallback(
   run: IAgentRun,
-  event: 'succeeded' | 'failed' | 'canceled',
+  event: 'succeeded' | 'failed' | 'canceled' | 'requires_action',
   data: Record<string, unknown>,
 ): Promise<void> {
   if (!run.callbackUrl) return;
@@ -1104,7 +1307,9 @@ export async function deliverAgentRunCallbackJob(
 /** Queues a run's job — at submit, and again from the reconciler for a queued run no worker picked up. */
 export async function publishAgentRunJob(run: IAgentRun): Promise<void> {
   const queue = await getQueue();
-  await queue.publish(AGENT_RUN_QUEUE, 'run', {
+  // A run queued to continue a paused turn is a `resume` job; the worker
+  // dispatches on the row either way, so a requeue by the reconciler stays right.
+  await queue.publish(AGENT_RUN_QUEUE, run.resumeActionIds?.length ? 'resume' : 'run', {
     runId: String(run._id),
     tenantId: run.tenantId,
     tenantDbName: run.tenantDbName,
