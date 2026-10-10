@@ -105,6 +105,7 @@ export default function SessionSidePanel({
     const tb = useTranslations('agents.budget');
     const ta = useTranslations('agents.activity');
     const tf = useTranslations('agents.attachments');
+    const tp = useTranslations('agents.sessionPage');
     const [tab, setTab] = useState<string | null>('session');
     const statusLabel = status === 'running'
         ? th('running')
@@ -223,15 +224,15 @@ export default function SessionSidePanel({
             </Box>
 
             <Tabs.List grow>
-                <Tabs.Tab value="session">Session</Tabs.Tab>
+                <Tabs.Tab value="session">{tp('tabSession')}</Tabs.Tab>
                 <Tabs.Tab value="events">
-                    Events{events.length > 0 ? <span className={classes.tabCount}>{events.length}</span> : null}
+                    {tp('tabEvents')}{events.length > 0 ? <span className={classes.tabCount}>{events.length}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="tools">
-                    Tools{tools.length > 0 ? <span className={classes.tabCount}>{tools.length}</span> : null}
+                    {tp('tabTools')}{tools.length > 0 ? <span className={classes.tabCount}>{tools.length}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="context">
-                    Context{compactions.length > 0 ? <span className={classes.tabCount}>{compactions.length}</span> : null}
+                    {tp('tabContext')}{compactions.length > 0 ? <span className={classes.tabCount}>{compactions.length}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="activity">{ta('tabLabel')}</Tabs.Tab>
                 {files ? (
@@ -445,6 +446,8 @@ export default function SessionSidePanel({
                 {files ? (
                     <Tabs.Panel value="files" p="md">
                         <SessionFilesPanel
+                            agentId={agentId}
+                            sessionId={sessionId}
                             files={files.items}
                             failed={files.failed}
                             maxFiles={files.maxFiles}

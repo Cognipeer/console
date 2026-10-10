@@ -23,7 +23,7 @@ import {
   roundUsd,
   sessionSpentUsd,
   withSessionSpend,
-  type SessionBudgetPlan,
+  type SessionSpendAccount,
 } from './sessionBudget';
 
 const logger = createLogger('agents:session-budget');
@@ -97,9 +97,10 @@ export async function updateSessionBudget(input: {
 
 /**
  * Adds what a turn spent to the session's running total — whether or not the
- * turn was persisted. A turn the caller aborted, the sync ceiling or a cancel
- * superseded, or an error cut short still billed its model requests, so its
- * spend must count against the budget.
+ * turn was persisted, and whether or not the session has a budget. A turn the
+ * caller aborted, the sync ceiling or a cancel superseded, or an error cut short
+ * still billed its model requests, so its spend must count: against the budget,
+ * and in the total the API reports as `spent_usd`.
  *
  * `spentUsd` is the turn's spend so far; only the part the plan has not yet
  * accounted for is added, so a turn is counted exactly once however many times
@@ -112,7 +113,7 @@ export async function updateSessionBudget(input: {
 export async function addSessionTurnSpend(input: {
   db: Pick<DatabaseProvider, 'addAgentConversationSpend'>;
   conversationId: string;
-  plan: SessionBudgetPlan | null;
+  plan: SessionSpendAccount | null;
   spentUsd: number;
 }): Promise<void> {
   const { plan } = input;
@@ -141,7 +142,7 @@ export async function addSessionTurnSpend(input: {
 export async function recordSessionTurnSpend(input: {
   db: Pick<DatabaseProvider, 'addAgentConversationSpend'>;
   conversationId: string;
-  plan: SessionBudgetPlan | null;
+  plan: SessionSpendAccount | null;
   tappedUsd: number;
 }): Promise<void> {
   await addSessionTurnSpend({ db: input.db, conversationId: input.conversationId, plan: input.plan, spentUsd: input.tappedUsd });

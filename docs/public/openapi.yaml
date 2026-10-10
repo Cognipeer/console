@@ -796,13 +796,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: "Someone already answered it (`action_not_pending`, with `action_status`), or another run is active for the conversation (`agent_run_conflict`)."
+          description: "Someone already answered it (`action_not_pending`, with `action_status`), it was cancelled meanwhile — by a new message, a cancelled run or the timeout policy (`action_cancelled`) — or another run is active for the conversation (`agent_run_conflict`)."
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "410":
-          description: The request ran out of time (`action_expired`).
+          description: The request ran out of time (`action_expired`), including one that was already swept as expired.
           content:
             application/json:
               schema:
@@ -956,6 +956,84 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/files/{fileId}/content:
+    get:
+      tags:
+        - Agent Sessions
+      summary: Read a session file
+      description: >-
+        Returns the file's bytes: the original, or the markdown the platform converted it to
+        (`variant=markdown`, only for a file whose `conversion_status` is `succeeded`). The response
+        carries the file's own `Content-Type` and a sanitised `Content-Disposition`; pictures open in
+        place (`inline`), everything else is offered as a download (`attachment`). SVG, HTML and other
+        active types are always a download, whatever `disposition` asks. The response is
+        `Cache-Control: private` with `X-Content-Type-Options: nosniff`. A file of another session is not found.
+      operationId: getAgentSessionFileContent
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: fileId
+          in: path
+          required: true
+          description: The id of the file.
+          schema:
+            type: string
+        - name: variant
+          in: query
+          required: false
+          description: "`original` (default), or `markdown` for the text version."
+          schema:
+            type: string
+            enum:
+              - original
+              - markdown
+        - name: disposition
+          in: query
+          required: false
+          description: "`inline` to open in place or `attachment` to download. Defaults to `inline` for pictures and `attachment` for everything else; a type that could run code in the browser is always `attachment`."
+          schema:
+            type: string
+            enum:
+              - inline
+              - attachment
+      responses:
+        "200":
+          description: The file's bytes.
+          headers:
+            Content-Disposition:
+              description: "`inline` or `attachment`, with a sanitised `filename` and the real name in `filename*`."
+              schema:
+                type: string
+            Cache-Control:
+              description: "`private, max-age=60`."
+              schema:
+                type: string
+            X-Content-Type-Options:
+              description: "`nosniff`."
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: "`variant` or `disposition` is not one of the allowed values."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "The file has no text version (`markdown_unavailable`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/{agentKey}:
@@ -13667,6 +13745,9 @@ components:
           type: string
           format: date-time
           description: When the file is deleted (the agent's `attachments.retentionDays`).
+        content_url:
+          type: string
+          description: "Where the file's bytes are served (`GET /agents/sessions/{conversationId}/files/{fileId}/content`), as a path on the API's origin (it starts with `/api/client/v1`)."
     AgentSessionFileJsonUpload:
       type: object
       description: A small file as JSON.
@@ -17254,7 +17335,7 @@ components:
                   description: "`budget_reached` only: the session's budget."
                 action_status:
                   type: string
-                  description: "`action_not_pending` only: the state the request is in (`resolved`, `expired`, `cancelled`)."
+                  description: "`action_not_pending`, `action_cancelled` and `action_expired` only: the state the request is in (`resolved`, `expired`, `cancelled`)."
     EvalItemScore:
       type: object
       description: One scorer's result for a single item.

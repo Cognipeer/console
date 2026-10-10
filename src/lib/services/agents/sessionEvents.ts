@@ -307,6 +307,12 @@ export interface SessionEventWriter {
   /** Flush and stop; later `emit`s are ignored. Idempotent. */
   close(): Promise<void>;
   /**
+   * Stop WITHOUT writing what is still buffered: the turn that owned this writer
+   * was overtaken by a newer one, so its last events would only interleave with
+   * the newer turn's. Events already written stay. Idempotent.
+   */
+  abandon(): void;
+  /**
    * The seq of the last event persisted so far (the conversation's earlier max
    * once the first flush has seeded it, 0 before). The caller stamps it on the
    * conversation as `lastEventSeq`.
@@ -553,6 +559,16 @@ export function createSessionEventWriter(options: SessionEventWriterOptions): Se
       flushDeltas();
       closed = true;
       await chain;
+    },
+
+    abandon() {
+      if (closed) return;
+      closed = true;
+      clearTimer();
+      buffer = [];
+      deltaText = '';
+      if (deltaTimer) clearTimeout(deltaTimer);
+      deltaTimer = null;
     },
 
     lastSeq: () => nextSeq - 1,

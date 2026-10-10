@@ -10,15 +10,28 @@
  * Presentational — `AgentSessionView` owns the fetch and the delete.
  */
 
+import { useState } from 'react';
 import Link from 'next/link';
 import { ActionIcon, Alert, Anchor, Badge, Box, Button, Group, Loader, Stack, Text, Tooltip } from '@mantine/core';
-import { IconAlertTriangle, IconFile, IconPhoto, IconTrash } from '@tabler/icons-react';
+import { IconAlertTriangle, IconDownload, IconFileText, IconTrash } from '@tabler/icons-react';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { expiryLabel } from '@/components/files/fileBrowse';
-import { formatFileSize } from './sessionAttachmentsUi';
-import { bucketHref, conversionBadge, fileLocation, type SessionFileItem } from './sessionFilesUi';
+import { AttachmentIcon, AttachmentPreviewModal, AttachmentThumb } from './SessionAttachments';
+import { formatFileSize, isImageAttachment } from './sessionAttachmentsUi';
+import {
+    bucketHref,
+    conversionBadge,
+    fileLocation,
+    sessionFileContentUrl,
+    sessionFileLinks,
+    type AttachmentView,
+    type SessionFileItem,
+} from './sessionFilesUi';
 
 export interface SessionFilesPanelProps {
+    /** The session the files belong to; with both, each file can be opened and saved from here. */
+    agentId?: string;
+    sessionId?: string;
     /** null until the first list has arrived. */
     files: SessionFileItem[] | null;
     /** The list could not be loaded. */
@@ -36,6 +49,8 @@ export interface SessionFilesPanelProps {
 }
 
 export default function SessionFilesPanel({
+    agentId,
+    sessionId,
     files,
     failed,
     maxFiles,
@@ -48,6 +63,8 @@ export default function SessionFilesPanel({
     const t = useTranslations('agents.attachments');
     const locale = useLocale();
     const clock = now ?? new Date();
+    const [preview, setPreview] = useState<AttachmentView | null>(null);
+    const linkable = Boolean(agentId && sessionId);
 
     if (failed && !files) {
         return (
@@ -86,11 +103,21 @@ export default function SessionFilesPanel({
                         const badge = conversionBadge(file);
                         const expiry = expiryLabel(file.expiresAt, clock, locale);
                         const busy = deleting.includes(file.id);
+                        // The original is shown (an image) or saved from the session's content route; a converted file also has its text.
+                        // A file past its expiry is gone for the server too, so there is nothing to open.
+                        const links = linkable && expiry.kind !== 'expired' ? sessionFileLinks(agentId!, sessionId!, file.id) : null;
+                        const view: AttachmentView = { fileId: file.id, name: file.name, mimeType: file.mimeType, size: file.size, ...links };
+                        const picture = Boolean(links) && isImageAttachment(file);
+                        const textUrl = links && file.conversionStatus === 'succeeded' && !isImageAttachment(file)
+                            ? sessionFileContentUrl(agentId!, sessionId!, file.id, { variant: 'markdown', disposition: 'attachment' })
+                            : null;
                         return (
                             <Box key={file.id} p="xs" style={{ border: '1px solid var(--mantine-color-default-border)', borderRadius: 'var(--mantine-radius-sm)' }}>
                                 <Group gap="xs" wrap="nowrap" align="flex-start" justify="space-between">
                                     <Group gap={6} wrap="nowrap" style={{ minWidth: 0, flex: 1 }} align="flex-start">
-                                        {file.mimeType.toLowerCase().startsWith('image/') ? <IconPhoto size={14} style={{ marginTop: 2, flexShrink: 0 }} /> : <IconFile size={14} style={{ marginTop: 2, flexShrink: 0 }} />}
+                                        {picture
+                                            ? <AttachmentThumb file={view} size={32} onOpen={() => setPreview(view)} />
+                                            : <Box style={{ marginTop: 2, flexShrink: 0, display: 'flex' }}><AttachmentIcon file={file} size={14} /></Box>}
                                         <Box style={{ minWidth: 0 }}>
                                             <Text size="xs" fw={600} truncate title={file.name}>{file.name}</Text>
                                             <Group gap={6} wrap="wrap">
@@ -103,21 +130,37 @@ export default function SessionFilesPanel({
                                             </Group>
                                         </Box>
                                     </Group>
-                                    {readOnly ? null : (
-                                        <Tooltip label={t('filesDelete')} withArrow>
-                                            <ActionIcon
-                                                size="sm"
-                                                variant="subtle"
-                                                color="red"
-                                                aria-label={t('filesDelete')}
-                                                loading={busy}
-                                                disabled={busy}
-                                                onClick={() => onDelete(file)}
-                                            >
-                                                <IconTrash size={13} />
-                                            </ActionIcon>
-                                        </Tooltip>
-                                    )}
+                                    <Group gap={2} wrap="nowrap">
+                                        {links ? (
+                                            <Tooltip label={t('download')} withArrow>
+                                                <ActionIcon component="a" href={links.downloadUrl} download={file.name} size="sm" variant="subtle" color="gray" aria-label={t('downloadFile', { name: file.name })}>
+                                                    <IconDownload size={13} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        ) : null}
+                                        {textUrl ? (
+                                            <Tooltip label={t('downloadText')} withArrow>
+                                                <ActionIcon component="a" href={textUrl} size="sm" variant="subtle" color="gray" aria-label={t('downloadText')}>
+                                                    <IconFileText size={13} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        ) : null}
+                                        {readOnly ? null : (
+                                            <Tooltip label={t('filesDelete')} withArrow>
+                                                <ActionIcon
+                                                    size="sm"
+                                                    variant="subtle"
+                                                    color="red"
+                                                    aria-label={t('filesDelete')}
+                                                    loading={busy}
+                                                    disabled={busy}
+                                                    onClick={() => onDelete(file)}
+                                                >
+                                                    <IconTrash size={13} />
+                                                </ActionIcon>
+                                            </Tooltip>
+                                        )}
+                                    </Group>
                                 </Group>
 
                                 <Stack gap={2} mt={6}>
@@ -147,6 +190,7 @@ export default function SessionFilesPanel({
                     })}
                 </Stack>
             )}
+            <AttachmentPreviewModal file={preview} onClose={() => setPreview(null)} />
         </Stack>
     );
 }

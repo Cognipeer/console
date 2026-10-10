@@ -207,6 +207,17 @@ export function filesSaveErrors(value: AttachmentsSettings | undefined): FilesSa
     return errors;
 }
 
+/** The image-bytes budget is stored in bytes and edited in megabytes (decimal, like the file-size limit's MB). */
+export const BYTES_PER_MB = 1_000_000;
+
+export function bytesToMb(bytes: number | undefined): number | undefined {
+    return typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0 ? bytes / BYTES_PER_MB : undefined;
+}
+
+export function mbToBytes(mb: number | string | undefined): number | undefined {
+    return typeof mb === 'number' && Number.isFinite(mb) && mb > 0 ? Math.round(mb * BYTES_PER_MB) : undefined;
+}
+
 /** The numbers the section shows, with the stored value or the default. */
 export function effectiveRetentionDays(value: AttachmentsSettings | undefined): number {
     const days = value?.retentionDays;

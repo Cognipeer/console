@@ -20,6 +20,7 @@ import type { IAgentConfig } from '@/lib/database';
 import { SQLiteProvider } from '@/lib/database/sqlite.provider';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
 import {
+  bucketInUseBody,
   findAgentsUsingBucket,
   inspectFileBucket,
   listAttachmentBuckets,
@@ -107,6 +108,39 @@ describe('which agents use a bucket', () => {
     expect(await findAgentsUsingBucket(DB_NAME, PROJECT, 'uploads')).toEqual([{ key: 'a', name: 'Agent a' }, { key: 'b', name: 'Agent b' }]);
     expect(await findAgentsUsingBucket(DB_NAME, PROJECT, 'nobody')).toEqual([]);
     expect(await findAgentsUsingBucket(DB_NAME, OTHER_PROJECT, 'uploads')).toEqual([{ key: 'e', name: 'Agent e' }]);
+  });
+
+  it('also names an agent whose draft moved on but whose PUBLISHED version still keeps its files there', async () => {
+    const make = (key: string, config: IAgentConfig) => db.createAgent({
+      tenantId, projectId: PROJECT, key, name: `Agent ${key}`, config, status: 'active', createdBy: 'u1',
+    });
+    const publish = async (agentId: string, key: string, config: IAgentConfig, version: number) => {
+      await db.createAgentVersion({
+        tenantId, projectId: PROJECT, agentId, agentKey: key, version,
+        snapshot: { name: key, config, status: 'active' }, publishedBy: 'u1',
+      } as never);
+      await db.updateAgent(agentId, { publishedVersion: version });
+    };
+    const onUploads: IAgentConfig = { modelKey: 'm', attachments: { enabled: true, bucketKey: 'uploads' } };
+    const onScratch: IAgentConfig = { modelKey: 'm', attachments: { enabled: true, bucketKey: 'scratch' } };
+
+    // Draft moved to `scratch`, version 1 (the one callers run) is still on `uploads`.
+    const moved = await make('moved', onScratch);
+    await publish(String(moved._id), 'moved', onUploads, 1);
+    // Draft and published both on `uploads`: named once, as a plain use.
+    const both = await make('both', onUploads);
+    await publish(String(both._id), 'both', onUploads, 1);
+    // A newer published version moved off; only an older, no longer published one named `uploads`.
+    const left = await make('left', onScratch);
+    await db.createAgentVersion({ tenantId, projectId: PROJECT, agentId: String(left._id), agentKey: 'left', version: 1, snapshot: { name: 'left', config: onUploads, status: 'active' }, publishedBy: 'u1' } as never);
+    await publish(String(left._id), 'left', onScratch, 2);
+
+    expect(await findAgentsUsingBucket(DB_NAME, PROJECT, 'uploads')).toEqual([
+      { key: 'both', name: 'Agent both' },
+      { key: 'moved', name: 'Agent moved', publishedOnly: true },
+    ]);
+    expect(bucketInUseBody('uploads', await findAgentsUsingBucket(DB_NAME, PROJECT, 'uploads'), 'delete').error)
+      .toContain('Agent moved (its published version)');
   });
 });
 

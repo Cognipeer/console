@@ -30,7 +30,7 @@ import {
   IconTrash,
   IconUpload,
 } from '@tabler/icons-react';
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   FileBucketView,
   FileRecordView,
@@ -190,18 +190,6 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
   const recordCount = bucket ? records.length : 0;
   const showSessionColumns = filter === 'session' || records.some(isSessionFile);
 
-  // Which agent a session file's session belongs to is only known by key; the
-  // session page is addressed by the agent's id.
-  const agentsQuery = useQuery<Map<string, string>>({
-    queryKey: ['agents-by-key'],
-    enabled: showSessionColumns,
-    staleTime: 60_000,
-    queryFn: async () => {
-      const response = await apiRequest<{ agents?: Array<{ _id: string; key: string }> }>('/api/agents');
-      return new Map((response.agents ?? []).map((agent) => [agent.key, String(agent._id)] as const));
-    },
-  });
-  const agentIds = agentsQuery.data;
   const now = new Date();
   const isInitialLoading = filesQuery.isPending && Boolean(bucketKey);
   const isRefetching = filesQuery.isRefetching;
@@ -659,7 +647,7 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
                     {showSessionColumns ? (
                       <SessionFileCells
                         record={record}
-                        agentId={record.agentKey ? agentIds?.get(record.agentKey) : undefined}
+                        agentId={record.agentId}
                         now={now}
                         locale={locale}
                       />

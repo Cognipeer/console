@@ -251,6 +251,41 @@ export const SETTINGS_NAV_SECTION: DashboardServiceDefinition = {
   searchKeywords: [],
 };
 
+/**
+ * A page that lives inside another service's sub-nav instead of being a service
+ * of its own — searchable from the command palette, but with no launcher tile,
+ * rail icon or path ownership (the section it sits in owns the path).
+ */
+export interface DashboardSubpage {
+  id: string;
+  /** The service whose sub-nav it is in. */
+  parent: DashboardServiceDefinition['id'];
+  /** The RBAC service that gates the page. */
+  service: PermissionService;
+  href: string;
+  icon: Icon;
+  navLabelKey: string;
+  navDescriptionKey: string;
+  tags: string[];
+  searchKeywords: string[];
+}
+
+export const DASHBOARD_SUBPAGES: ReadonlyArray<DashboardSubpage> = [
+  {
+    // Project / tenant level, not per agent: what it announces is agent activity,
+    // so it lives in the Agents menu (it used to be a Settings page).
+    id: 'webhooks',
+    parent: 'agents',
+    service: 'webhooks',
+    href: '/dashboard/agents/webhooks',
+    icon: IconWebhook,
+    navLabelKey: 'webhooks',
+    navDescriptionKey: 'webhooksDescription',
+    tags: ['webhooks', 'events', 'notifications', 'agents'],
+    searchKeywords: ['webhook', 'event', 'callback', 'notification', 'olay', 'bildirim'],
+  },
+];
+
 /** All known service definitions (does not honor permissions). */
 export const ALL_DASHBOARD_SERVICES: ReadonlyArray<DashboardServiceDefinition> =
   DASHBOARD_SERVICE_DEFINITIONS;

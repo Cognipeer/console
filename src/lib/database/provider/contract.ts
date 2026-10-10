@@ -1401,11 +1401,19 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * session event recorder calls this around every turn, so it stays much
    * cheaper than `updateAgentConversation` and cannot be mistaken for a
    * transcript write.
+   *
+   * `runtimeTurnId` names the turn that owns the fields (a turn writes it when it
+   * starts). With `options.onlyIfTurn` the write is conditional on that: it
+   * happens only when the stored owner is that turn or nobody (a session from
+   * before owners were recorded), and the result says whether it did — `false`
+   * means a newer turn has taken over and the caller must not report its own end
+   * (anything else — `true`, or nothing from a minimal implementation — means written).
    */
   updateAgentConversationRuntime(
     id: string,
-    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
-  ): Promise<void>;
+    patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+    options?: { onlyIfTurn?: string },
+  ): Promise<boolean | void>;
   /**
    * Atomically moves the session's running spend total (`spentUsd`): first up to
    * `atLeastUsd` when it is below that (a missing total counts as 0), then by

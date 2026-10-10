@@ -58,6 +58,7 @@ import {
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
+import { tokenHasFilesPermission } from './files-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 
 const logger = createLogger('api:client-agents');
@@ -548,7 +549,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
+        canWriteFiles: async () => tokenHasFilesPermission(ctx, 'write'),
       });
+      if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
 
       const agent = await createAgentRecord(
@@ -615,7 +618,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
-          });
+            canWriteFiles: async () => tokenHasFilesPermission(ctx, 'write'),
+          }, existing.config);
+          if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
         }
       }

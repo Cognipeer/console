@@ -3,6 +3,12 @@
  * (`/agents/:agentId/sessions/:sessionId/files`) and the client API
  * (`/client/v1/agents/sessions/:conversationId/files`).
  *
+ * `GET …/files/:fileId/content` serves a file's bytes (the original, or the markdown
+ * it was converted to) for the session views and the client API: `Content-Type` of
+ * the file, a sanitised `Content-Disposition` (pictures open in place, everything
+ * else downloads; SVG and HTML always download), `Cache-Control: private` and
+ * `X-Content-Type-Options: nosniff`. Same session checks as the other file routes.
+ *
  * `GET /agents/attachments/buckets` is the Configure → Files bucket picker.
  *
  * An upload is a raw body: `Content-Type: <the file's mime type>` and
@@ -30,7 +36,11 @@ import { listAttachmentBuckets } from '@/lib/services/agents/sessionFilesBucket'
 import {
   deleteSessionFile,
   listSessionFiles,
+  readSessionFileContent,
   uploadSessionFile,
+  type SessionFileContent,
+  type SessionFileDisposition,
+  type SessionFileVariant,
   type SessionFileView,
 } from '@/lib/services/agents/sessionFiles';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
@@ -42,6 +52,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { requireScopedSession } from './agents';
+import { FILES_READ_REQUIRED_MESSAGE, sessionHasFilesPermission } from './files-permission';
 
 const logger = createLogger('api:agent-session-files');
 
@@ -88,6 +99,33 @@ function readUploadPayload(request: FastifyRequest): UploadPayload | string {
   return { fileName: name, ...(contentType ? { contentType } : {}), data: request.body };
 }
 
+/** `?variant=original|markdown&disposition=inline|attachment`; a string is the refusal. */
+function readContentQuery(request: FastifyRequest): { variant?: SessionFileVariant; disposition?: SessionFileDisposition } | string {
+  const query = (request.query ?? {}) as Record<string, unknown>;
+  const out: { variant?: SessionFileVariant; disposition?: SessionFileDisposition } = {};
+  if (query.variant !== undefined) {
+    if (query.variant !== 'original' && query.variant !== 'markdown') return 'variant must be "original" or "markdown".';
+    out.variant = query.variant;
+  }
+  if (query.disposition !== undefined) {
+    if (query.disposition !== 'inline' && query.disposition !== 'attachment') return 'disposition must be "inline" or "attachment".';
+    out.disposition = query.disposition;
+  }
+  return out;
+}
+
+/** The bytes with the headers that make serving an uploaded file from our own origin safe. */
+function sendFileContent(reply: FastifyReply, content: SessionFileContent) {
+  return reply
+    .code(200)
+    .header('Content-Type', content.contentType)
+    .header('Content-Length', String(content.size))
+    .header('Content-Disposition', content.contentDisposition)
+    .header('Cache-Control', 'private, max-age=60')
+    .header('X-Content-Type-Options', 'nosniff')
+    .send(content.data);
+}
+
 /** The dashboard's view of a file. */
 function dashboardFile(file: SessionFileView) {
   return file;
@@ -108,6 +146,8 @@ function clientFile(file: SessionFileView, conversationId: string) {
     path: file.path,
     ...(file.createdAt ? { created_at: new Date(file.createdAt).toISOString() } : {}),
     ...(file.expiresAt ? { expires_at: new Date(file.expiresAt).toISOString() } : {}),
+    // The bytes: `?variant=markdown` for the converted text, `?disposition=inline|attachment`.
+    content_url: `/api/client/v1/agents/sessions/${encodeURIComponent(conversationId)}/files/${encodeURIComponent(file.id)}/content`,
   };
 }
 
@@ -131,10 +171,15 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
   }
 
   // The buckets an agent can keep its session files in, each with whether it can take a file now.
-  // Read-only, under `agents` (not `files`) so whoever edits an agent can see them.
+  // Read-only. The route sits under `agents` (whoever edits an agent reaches it), but the list is
+  // the project's buckets: a caller without read access to Files is told so, in words the
+  // Configure → Files section shows, instead of getting a list they could not open elsewhere.
   app.get('/agents/attachments/buckets', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
+      if (!(await sessionHasFilesPermission(session, 'read'))) {
+        return reply.code(403).send({ error: FILES_READ_REQUIRED_MESSAGE, type: 'files_read_required', code: 'files_read_required' });
+      }
       const buckets = await listAttachmentBuckets(session.tenantDbName, session.tenantId, projectId);
       return reply.code(200).send({ buckets });
     } catch (error) {
@@ -177,6 +222,26 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ files: files.map(dashboardFile) });
     } catch (error) {
       return sendDashboardError(reply, error, 'List session files error', 'Failed to list the files');
+    }
+  }));
+
+  app.get('/agents/:agentId/sessions/:sessionId/files/:fileId/content', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply);
+      if (!scoped) return reply;
+      const query = readContentQuery(request);
+      if (typeof query === 'string') return reply.code(400).send({ error: query });
+      const { fileId } = request.params as { fileId: string };
+      const content = await readSessionFileContent(
+        { tenantDbName: scoped.session.tenantDbName, tenantId: scoped.session.tenantId, projectId: scoped.projectId },
+        String(scoped.conversation._id),
+        fileId,
+        query,
+      );
+      if (!content) return reply.code(404).send({ error: 'File not found' });
+      return sendFileContent(reply, content);
+    } catch (error) {
+      return sendDashboardError(reply, error, 'Read session file error', 'Failed to read the file');
     }
   }));
 
@@ -272,6 +337,21 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ object: 'list', data: files.map((file) => clientFile(file, String(conversation._id))) });
     } catch (error) {
       return sendClientError(reply, error, 'Client list session files error');
+    }
+  }));
+
+  app.get('/client/v1/agents/sessions/:conversationId/files/:fileId/content', withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const conversation = await requireClientSession(request, reply, ctx);
+      if (!conversation) return reply;
+      const query = readContentQuery(request);
+      if (typeof query === 'string') return reply.code(400).send(apiErrorBody('invalid_request_error', query, 'invalid_request'));
+      const { fileId } = request.params as { fileId: string };
+      const content = await readSessionFileContent(clientScope(ctx), String(conversation._id), fileId, query);
+      if (!content) return reply.code(404).send(apiErrorBody('not_found_error', 'File not found', 'file_not_found'));
+      return sendFileContent(reply, content);
+    } catch (error) {
+      return sendClientError(reply, error, 'Client read session file error');
     }
   }));
 

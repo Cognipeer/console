@@ -23,6 +23,7 @@ import MobileNavDrawer from './launcher/MobileNavDrawer';
 import ServiceSubNav, {
   SUBNAV_CONFIG,
   findServiceForPath,
+  visibleSubNavItems,
   type SubNavItem,
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
@@ -39,7 +40,7 @@ import {
   getDashboardServices,
   SETTINGS_NAV_SECTION,
 } from '@/lib/utils/dashboardServices';
-import type { UserServicePermissions } from '@/lib/security/rbac';
+import { getEffectiveServicePermission, type UserServicePermissions } from '@/lib/security/rbac';
 
 /** Display order of the Settings section items in the left nav. */
 const SETTINGS_NAV_ORDER: string[] = [
@@ -47,7 +48,6 @@ const SETTINGS_NAV_ORDER: string[] = [
   'providers',
   'members',
   'tokens',
-  'webhooks',
   'audit',
   'license',
   'sso',
@@ -225,6 +225,23 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   }, [activeService, recordVisit]);
 
   const isSettingsActive = Boolean(activeService?.isSettings);
+
+  // A sub-nav entry can belong to another service than the section it sits in
+  // (Webhooks, in Agents): it is left out for someone who has no access to that service.
+  const serviceSubnavItems = useMemo(
+    () =>
+      activeService && !isSettingsActive
+        ? visibleSubNavItems(
+            SUBNAV_CONFIG[activeService.id],
+            (service) =>
+              getEffectiveServicePermission(
+                { role: defaultUser.role, servicePermissions: defaultUser.servicePermissions },
+                service,
+              ) !== 'none',
+          )
+        : undefined,
+    [activeService, isSettingsActive, defaultUser.role, defaultUser.servicePermissions],
+  );
   const hasSubnav = Boolean(
     activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),
   );
@@ -367,7 +384,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                 isPinned={pinned.has(activeService.id)}
                 onTogglePin={() => togglePin(activeService.id)}
                 onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
-                items={isSettingsActive ? settingsNavItems : undefined}
+                items={isSettingsActive ? settingsNavItems : serviceSubnavItems}
                 hidePin={isSettingsActive}
               />
             ) : null}
@@ -405,7 +422,9 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               subnavOverride={
                 isSettingsActive
                   ? { title: tNavigation('settings'), items: settingsNavItems }
-                  : null
+                  : activeService && serviceSubnavItems
+                    ? { title: tNavigation(activeService.navLabelKey), items: serviceSubnavItems }
+                    : null
               }
               settingsHref={settingsHref}
               settingsActive={isSettingsActive}

@@ -22,6 +22,13 @@ import { AgentSessionEventSeqConflictError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 
+/** A conversation as the rest of the app sees it: without the internal turn-owner marker. */
+function withoutTurnOwner<T extends object>(conversation: T): Omit<T, 'runtimeTurnId'> {
+  const { runtimeTurnId: _owner, ...rest } = conversation as T & { runtimeTurnId?: unknown };
+  void _owner;
+  return rest;
+}
+
 export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AgentOps extends Base {
     // ── Agent CRUD ───────────────────────────────────────────────
@@ -231,21 +238,28 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
           { returnDocument: 'after' },
         );
       if (!result) return null;
-      return { ...result, _id: result._id?.toString() } as IAgentConversation;
+      return withoutTurnOwner({ ...result, _id: result._id?.toString() }) as IAgentConversation;
     }
 
     async updateAgentConversationRuntime(
       id: string,
-      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
-    ): Promise<void> {
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+      options?: { onlyIfTurn?: string },
+    ): Promise<boolean> {
       const set: Record<string, unknown> = {};
-      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq', 'budget', 'spentUsd'] as const) {
+      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq', 'budget', 'spentUsd', 'runtimeTurnId'] as const) {
         if (patch[key] !== undefined) set[key] = patch[key];
       }
-      if (Object.keys(set).length === 0) return;
-      await this.getTenantDb()
+      if (Object.keys(set).length === 0) return true;
+      // The condition is part of the filter, so "is it still my turn?" and the write are one atomic step.
+      const filter: Record<string, unknown> = { _id: new ObjectId(id) };
+      if (options?.onlyIfTurn !== undefined) {
+        filter.$or = [{ runtimeTurnId: options.onlyIfTurn }, { runtimeTurnId: null }];
+      }
+      const result = await this.getTenantDb()
         .collection(COLLECTIONS.agentConversations)
-        .updateOne({ _id: new ObjectId(id) }, { $set: set });
+        .updateOne(filter, { $set: set });
+      return result.matchedCount > 0;
     }
 
     async addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void> {
@@ -322,7 +336,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
         .collection(COLLECTIONS.agentConversations)
         .findOne({ _id: new ObjectId(id) });
       if (!doc) return null;
-      return { ...doc, _id: doc._id?.toString() } as unknown as IAgentConversation;
+      return withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as unknown as IAgentConversation;
     }
 
     async listAgentConversations(
@@ -339,7 +353,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       if (filters?.skip) cursor = cursor.skip(filters.skip);
       if (filters?.limit) cursor = cursor.limit(filters.limit);
       const docs = await cursor.toArray();
-      return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as IAgentConversation[];
+      return docs.map((d) => withoutTurnOwner({ ...d, _id: d._id?.toString() })) as unknown as IAgentConversation[];
     }
 
     async listAgentConversationPage(filters: {
@@ -372,7 +386,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
           { $sort: { createdAt: -1, _id: -1 } },
           { $limit: filters.limit },
           { $addFields: { messageCount: { $cond: [{ $isArray: '$messages' }, { $size: '$messages' }, 0] } } },
-          { $project: { messages: 0 } },
+          { $project: { messages: 0, runtimeTurnId: 0 } },
         ])
         .toArray();
       return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() })) as unknown as IAgentConversationListItem[];

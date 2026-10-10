@@ -212,6 +212,8 @@ describe('client: answering a pending action', () => {
   it.each([
     [{ kind: 'not_found' }, 404, 'action_not_found'],
     [{ kind: 'not_pending', status: 'resolved' }, 409, 'action_not_pending'],
+    [{ kind: 'not_pending', status: 'cancelled' }, 409, 'action_cancelled'],
+    [{ kind: 'not_pending', status: 'expired' }, 410, 'action_expired'],
     [{ kind: 'expired' }, 410, 'action_expired'],
     [{ kind: 'forbidden', message: 'no' }, 403, 'action_forbidden'],
     [{ kind: 'invalid', message: 'bad' }, 400, 'invalid_resolution'],

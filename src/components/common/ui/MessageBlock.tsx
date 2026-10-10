@@ -1,6 +1,6 @@
 'use client';
 
-import { ReactNode } from 'react';
+import { Children, ReactNode } from 'react';
 import { Stack, Text } from '@mantine/core';
 import CollapsibleText from './CollapsibleText';
 
@@ -48,6 +48,8 @@ export interface MessageBlockProps {
   messageRole: string;
   content: unknown;
   roleLabel?: ReactNode;
+  /** Drawn under the text — the files or pictures the message carries. A message with only these still shows. */
+  children?: ReactNode;
 }
 
 /**
@@ -55,16 +57,18 @@ export interface MessageBlockProps {
  * plus its content, collapsed past a few lines. Shared by the Model Hub log
  * modal and the Agent Observability event panel's message-kind sections.
  */
-export default function MessageBlock({ messageRole, content, roleLabel }: MessageBlockProps) {
+export default function MessageBlock({ messageRole, content, roleLabel, children }: MessageBlockProps) {
   const text = messageContentToText(content);
-  if (!text.trim()) return null;
+  const hasText = text.trim().length > 0;
+  if (!hasText && Children.count(children) === 0) return null;
   const label = roleLabel ?? ROLE_LABELS[messageRole.toLowerCase()] ?? messageRole;
   return (
     <Stack gap={6}>
       <Text size="sm" fw={700}>
         {label}
       </Text>
-      <CollapsibleText>{text}</CollapsibleText>
+      {hasText ? <CollapsibleText>{text}</CollapsibleText> : null}
+      {children}
     </Stack>
   );
 }

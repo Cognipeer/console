@@ -102,6 +102,8 @@ function delaySentinel<T>(ms: number, sentinel: T): { promise: Promise<T>; clear
 const TIMEOUT_SENTINEL = Symbol('agent-run-deadline-timeout');
 /** Wins the race the instant a cancel request is OBSERVED (tight poll), not when `invoke()` settles. */
 const CANCEL_SENTINEL = Symbol('agent-run-cancel-observed');
+/** The turn stopped on its own while the worker waited for it. */
+const TURN_SETTLED = Symbol('agent-run-turn-settled');
 
 /**
  * How often the worker checks `cancelRequestedAt`, independent of the slower
@@ -1213,7 +1215,9 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
         // ceiling bounds the wait, so a hung call cannot hold the slot for good.
         if (cancelRequestedByCaller) {
           clearInterval(cancelPollTimer);
-          await Promise.race([invokePromise, deadlineTimer.promise]);
+          const waited = await Promise.race([invokePromise.then(() => TURN_SETTLED), deadlineTimer.promise]);
+          // The ceiling won: the slot is given up with the turn still hanging.
+          if (waited !== TURN_SETTLED) cancellationCell.abandoned = true;
         }
         stopAllTimers();
         await finalize('canceled', { errorReason: 'canceled_by_caller' });
@@ -1223,6 +1227,9 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
 
       if (raced === TIMEOUT_SENTINEL) {
         cancellationCell.cancelled = true;
+        // Finalized without waiting: the turn may still be inside a call and must not
+        // write over whatever starts on the freed conversation.
+        cancellationCell.abandoned = true;
         const minutes = Math.round(maxDurationMs / 60_000);
         await finalize('failed', {
           errorReason: 'max_duration_exceeded',

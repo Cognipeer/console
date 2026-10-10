@@ -155,9 +155,21 @@ export function sessionFileObjectKey(input: {
 export interface BucketAgentUse {
     key: string;
     name: string;
+    /**
+     * Only the agent's PUBLISHED version still names the bucket (its draft has moved on):
+     * API callers and portals keep running that version, so files still land here.
+     */
+    publishedOnly?: true;
 }
 
-/** The agents of a project whose `attachments.bucketKey` names this bucket. */
+const bucketOf = (config: IAgent['config'] | undefined): string => config?.attachments?.bucketKey?.trim() ?? '';
+
+/**
+ * The agents of a project that keep session files in this bucket: those whose
+ * draft `attachments.bucketKey` names it, and those whose PUBLISHED version does —
+ * an agent can have moved its draft to another bucket while the version everyone
+ * calls still uses this one.
+ */
 export async function findAgentsUsingBucket(
     tenantDbName: string,
     projectId: string,
@@ -166,17 +178,26 @@ export async function findAgentsUsingBucket(
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
     const agents: IAgent[] = await db.listAgents({ projectId });
+    const uses: BucketAgentUse[] = [];
+    for (const agent of agents) {
+        if (bucketOf(agent.config) === bucketKey) {
+            uses.push({ key: agent.key, name: agent.name });
+            continue;
+        }
+        if (typeof agent.publishedVersion !== 'number') continue;
+        const published = await db.findAgentVersion(String(agent._id), agent.publishedVersion).catch(() => null);
+        if (bucketOf(published?.snapshot?.config) === bucketKey) {
+            uses.push({ key: agent.key, name: agent.name, publishedOnly: true });
+        }
+    }
     // By name, then key: agents created in the same instant come back in no fixed order from the
     // database, and the 409 message names them in this order.
-    return agents
-        .filter((agent) => agent.config?.attachments?.bucketKey?.trim() === bucketKey)
-        .map((agent) => ({ key: agent.key, name: agent.name }))
-        .sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+    return uses.sort((a, b) => a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
 }
 
 /** The 409 body for deleting or disabling a bucket that agents still keep session files in. */
 export function bucketInUseBody(bucketKey: string, agents: BucketAgentUse[], action: 'delete' | 'disable') {
-    const names = agents.map((agent) => agent.name || agent.key).join(', ');
+    const names = agents.map((agent) => `${agent.name || agent.key}${agent.publishedOnly ? ' (its published version)' : ''}`).join(', ');
     return {
         error: `The bucket "${bucketKey}" is where ${agents.length === 1 ? 'this agent keeps' : 'these agents keep'} session files: ${names}. `
             + `Choose another bucket in ${agents.length === 1 ? 'its' : 'their'} Files settings before you ${action} it.`,

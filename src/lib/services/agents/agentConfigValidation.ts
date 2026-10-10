@@ -229,6 +229,9 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         checkNumber(issues, 'attachments.inlineMaxTokens', attachments.inlineMaxTokens, { min: 100, integer: true });
         checkNumber(issues, 'attachments.readPageChars', attachments.readPageChars, { min: 500, max: 200_000, integer: true });
         checkNumber(issues, 'attachments.retentionDays', attachments.retentionDays, { min: 1, max: 3650 });
+        checkNumber(issues, 'attachments.maxImages', attachments.maxImages, { min: 1, max: 50, integer: true });
+        checkNumber(issues, 'attachments.maxBytes', attachments.maxBytes, { min: 100_000, max: 200_000_000, integer: true });
+        checkNumber(issues, 'attachments.carryRecentImages', attachments.carryRecentImages, { min: 0, max: 20, integer: true });
         if (attachments.allowedMimeTypes !== undefined
             && (!Array.isArray(attachments.allowedMimeTypes) || attachments.allowedMimeTypes.some((entry) => typeof entry !== 'string'))) {
             issues.errors.push({ field: 'attachments.allowedMimeTypes', message: 'must be a list of MIME types (image/* is allowed)' });

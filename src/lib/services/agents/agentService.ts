@@ -102,6 +102,8 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
+import { createImageAwareTokenCounter } from './imageTokenCounter';
+import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
@@ -113,7 +115,8 @@ import {
     attachmentsUnavailableMessage,
     buildSessionFileTools,
     buildUserTurnContent,
-    conversationHasFiles,
+    conversationFileFacts,
+    createSessionImageSource,
     deleteConversationFiles,
     findUnsentSessionFiles,
     resolveAttachmentsConfig,
@@ -138,6 +141,7 @@ import {
     isSessionBudgetBreach,
     planSessionBudget,
     sessionBudgetInvokeOptions,
+    startSessionSpendAccount,
     withSessionSpend,
     settleSessionBudget,
     type SessionBudgetPlan,
@@ -1455,6 +1459,8 @@ type BuildSubagentsInput = {
     runtimeContext?: AgentRuntimeContext;
     /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
     spend?: AgentSpendScope;
+    /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
+    images?: SessionImagesOptions;
 };
 
 /**
@@ -1555,7 +1561,7 @@ async function buildAgentSubagents(
 
         let childModel: unknown;
         if (modelKey) {
-            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend);
+            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images);
         }
 
         subagents.push({
@@ -1608,6 +1614,7 @@ async function buildSubagentModel(
     projectId: string,
     modelKey: string,
     spend?: AgentSpendScope,
+    images?: SessionImagesOptions,
 ): Promise<unknown> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
@@ -1621,12 +1628,14 @@ async function buildSubagentModel(
             options: agentChatModelOptions(model),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        const tapped = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
             tenantDbName,
             model,
             route: 'agent.subagent',
             ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
         });
+        // A sub-agent can be handed the parent's context, image references included.
+        return images ? withSessionImages(tapped, images) : tapped;
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
             modelKey,
@@ -2655,6 +2664,13 @@ export interface AgentRunCancellationCell {
     deadlineAt?: number;
     /** Flipped to `true` asynchronously by an external caller (e.g. a background worker's cancel poll). */
     cancelled: boolean;
+    /**
+     * Set when the run was finalized WITHOUT waiting for this turn to stop (its
+     * ceiling passed while a call hung): the conversation is free for a newer turn
+     * and this one is only running out. It writes nothing mid-turn from then on, and
+     * its end is recorded only if no newer turn took the session (`runtimeTurnId`).
+     */
+    abandoned?: boolean;
 }
 
 /** True once a deadline has passed or an explicit cancel has been recorded. */
@@ -3301,19 +3317,39 @@ async function buildLocalAgentRun(input: {
 
     // Files attached to the session: the agent can list them and read them page
     // by page — for what was too long to put in the turn, and for earlier
-    // uploads. Offered whenever the conversation holds a file.
-    if (agentTakesAttachments(config) && input.conversation
-        && await conversationHasFiles(db, String(input.conversation._id))) {
-        const readPageChars = resolveAttachmentsConfig(config.attachments).readPageChars;
-        tools.push(...buildSessionFileTools({
-            createToolFn: createTool,
-            zod: z,
-            guard: toolGuard,
-            scope: { tenantDbName, tenantId, projectId },
-            conversationId: String(input.conversation._id),
-            readPageChars,
-        }));
-        toolDefinitions.push(...sessionFileToolDefinitions(readPageChars));
+    // uploads. Offered whenever the conversation holds a file. While it holds an
+    // image and the model takes images, the agent can also look at the image
+    // again (`session_files_view_image`).
+    const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
+    const filesCfg = resolveAttachmentsConfig(config.attachments);
+    const sessionFilesScope = { tenantDbName, tenantId, projectId };
+    let sessionImages: SessionImagesOptions | undefined;
+    if (input.conversation) {
+        const conversationId = String(input.conversation._id);
+        const facts = agentTakesAttachments(config)
+            ? await conversationFileFacts(db, conversationId)
+            : { any: false, images: false };
+        const viewImage = facts.images && modelTakesImages;
+        if (facts.any) {
+            tools.push(...buildSessionFileTools({
+                createToolFn: createTool,
+                zod: z,
+                guard: toolGuard,
+                scope: sessionFilesScope,
+                conversationId,
+                readPageChars: filesCfg.readPageChars,
+                viewImage,
+            }));
+            toolDefinitions.push(...sessionFileToolDefinitions(filesCfg.readPageChars, { viewImage }));
+        }
+        // Images in this session's context are references; the bytes are read at the model call.
+        // Wrapped even for an agent that no longer takes files: its saved state can still hold references.
+        sessionImages = {
+            source: createSessionImageSource(sessionFilesScope, conversationId),
+            maxImages: filesCfg.maxImages,
+            maxBytes: filesCfg.maxBytes,
+            viewImageTool: viewImage,
+        };
     }
 
     // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
@@ -3339,13 +3375,16 @@ async function buildLocalAgentRun(input: {
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+    const tappedModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
         tenantDbName,
         model,
         route: input.route,
         agentKey,
         ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
     });
+    // Outermost: whatever the SDK sends the model passes through the image resolver first
+    // (sessionImages.ts), so the SDK, the saved state and the traces only ever see references.
+    const sdkModel = sessionImages ? withSessionImages(tappedModel, sessionImages) : tappedModel;
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
     const { subagents, cleanupTasks: subagentCleanupTasks } = await buildAgentSubagents({
@@ -3358,6 +3397,7 @@ async function buildLocalAgentRun(input: {
         guard: toolGuard,
         runtimeContext,
         ...(spend ? { spend } : {}),
+        ...(sessionImages ? { images: sessionImages } : {}),
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
@@ -3408,6 +3448,9 @@ async function buildLocalAgentRun(input: {
         ...(memory ? { memory } : {}),
         ...(costEstimator ? { costEstimator } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
+        // An image counts as an image, not as the characters of its bytes — the SDK would
+        // otherwise compact a conversation on the strength of one photo.
+        tokenCounter: createImageAwareTokenCounter(),
         tracing: {
             enabled: true,
             mode: 'batched',
@@ -3544,6 +3587,35 @@ async function assembleMessageAttachments(input: {
     });
     for (const warning of assembled.warnings) input.warnings.add(warning);
     return assembled;
+}
+
+/**
+ * How the files of EARLIER messages reach the model again (`buildTurnInputState`):
+ * a transcript replay rebuilds each message with its attachments, and the last
+ * `attachments.carryRecentImages` messages with images are shown again when the
+ * agent's own context no longer holds them. Absent for a stateless call, which
+ * has no session and so no files.
+ */
+async function earlierAttachments(input: {
+    db: Awaited<ReturnType<typeof getDatabase>>;
+    conversation: IAgentConversation | null;
+    config: IAgentConfig;
+    model: Parameters<typeof resolveModelCapabilities>[0];
+}): Promise<NonNullable<Parameters<typeof buildTurnInputState>[0]['attachments']> | undefined> {
+    if (!input.conversation) return undefined;
+    const cfg = resolveAttachmentsConfig(input.config.attachments);
+    const supportsVision = resolveModelCapabilities(input.model).inputModalities.includes('image');
+    const carryRecentImages = supportsVision && agentTakesAttachments(input.config) ? cfg.carryRecentImages : 0;
+    let availableFileIds: Set<string> | undefined;
+    if (carryRecentImages > 0 && input.conversation.messages?.some((message) => message.attachments?.length)) {
+        try {
+            const records = await input.db.listFileRecordsByConversation(String(input.conversation._id));
+            availableFileIds = new Set(records.map((record) => String(record._id)));
+        } catch (error) {
+            logger.debug('Could not list the session files to carry images from', { error: error instanceof Error ? error.message : String(error) });
+        }
+    }
+    return { supportsVision, carryRecentImages, ...(availableFileIds ? { availableFileIds } : {}) };
 }
 
 /** The first exchange of a "New conversation" names it after what was asked. */
@@ -3724,6 +3796,8 @@ async function runAgentChatTurn(
     // event log opens, like the check above.
     const callsModel = !(config.kind === 'external' && config.connection);
     const budgetPlan = callsModel ? planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd) : null;
+    // Every turn adds its spend to the session's total — with a budget or without one.
+    const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
     const spend = callsModel && config.modelKey
         ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.userId })
         : undefined;
@@ -3743,6 +3817,7 @@ async function runAgentChatTurn(
         ...(request.runId ? { runId: request.runId } : {}),
         userMessage: () => rewriteLedger.resolve(userMessage),
         trigger: 'message',
+        superseded: () => request.cancellationCell?.abandoned === true,
     });
     scope.events = turnEvents;
     if (hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
@@ -3855,6 +3930,7 @@ async function runAgentChatTurn(
         transcript: conversation.messages || [],
         userMessage,
         userContent: buildUserTurnContent(userMessage, attached),
+        attachments: await earlierAttachments({ db, conversation, config, model }),
     });
     const userTurnIndex = inputState.messages.length - 1;
     // Tool calls the carried state already holds belong to earlier turns.
@@ -4032,7 +4108,7 @@ async function runAgentChatTurn(
             });
             // The turn's cost joins the session total; added, not set, so a turn
             // that overlaps this one cannot erase it (see `addSessionTurnSpend`).
-            if (budget) await addSessionTurnSpend({ db, conversationId, plan: budgetPlan, spentUsd: budget.turnCostUsd });
+            await addSessionTurnSpend({ db, conversationId, plan: spendAccount, spentUsd: budget?.turnCostUsd ?? turnCostUsd ?? 0 });
             await saveConversationState(db, {
                 conversationId,
                 tenantId,
@@ -4081,7 +4157,7 @@ async function runAgentChatTurn(
             ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
         });
     } finally {
-        await recordSessionTurnSpend({ db, conversationId, plan: budgetPlan, tappedUsd: tappedUsd() });
+        await recordSessionTurnSpend({ db, conversationId, plan: spendAccount, tappedUsd: tappedUsd() });
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
     }
 }
@@ -4148,6 +4224,15 @@ export function extractPlaygroundSteps(
     const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
     if (!Array.isArray(history)) return [];
 
+    // Calls an approval answered "deny" (the SDK marks the approval `rejected` and the call
+    // `rejected` too): a decision, not a failure. A call a guardrail blocked is also `rejected`
+    // in the history but has no approval behind it.
+    const deniedCallIds = new Set<string>();
+    const approvals = (result.state as { pendingApprovals?: Array<{ toolCallId?: unknown; metadata?: { resolution?: unknown } }> } | undefined)?.pendingApprovals;
+    for (const approval of Array.isArray(approvals) ? approvals : []) {
+        if (approval?.metadata?.resolution === 'rejected' && typeof approval.toolCallId === 'string') deniedCallIds.add(approval.toolCallId);
+    }
+
     // tool_call_id → the text of the assistant message that issued it.
     const narrations = new Map<string, string>();
     const messages = (result.state as { messages?: unknown[] } | undefined)?.messages;
@@ -4181,7 +4266,12 @@ export function extractPlaygroundSteps(
             ? output as Record<string, unknown>
             : undefined;
         const sniffedError = Boolean(record?.error) || record?.ok === false;
-        const failed = status === 'error' || status === 'rejected' || sniffedError;
+        const deniedByUser = status === 'rejected' && (
+            (typeof entry.tool_call_id === 'string' && deniedCallIds.has(entry.tool_call_id))
+            // The SDK words a reviewer's refusal `Rejected: <comment>`; a policy block carries its own reason.
+            || (typeof output === 'string' && output.startsWith('Rejected: ') && entry.rawOutput === null)
+        );
+        const failed = !deniedByUser && (status === 'error' || status === 'rejected' || sniffedError);
         const errorText = failed
             ? (status === 'rejected' ? 'Blocked before the tool ran.' : undefined)
                 ?? (record?.error ? String(record.error) : undefined)
@@ -4203,6 +4293,7 @@ export function extractPlaygroundSteps(
             // so the transcript, the Events tab and the per-tool failure
             // count all agree with the error text above.
             ...(failed ? { status: 'error' as const } : status ? { status } : {}),
+            ...(deniedByUser ? { deniedByUser: true } : {}),
             ...(entry.fromCache === true ? { fromCache: true } : {}),
             ...(entry.summarized === true ? { summarized: true } : {}),
             ...(typeof entry.originalTokenCount === 'number'
@@ -4369,6 +4460,8 @@ async function runPlaygroundChatTurn(
     const budgetPlan = callsModel && sessionConversation
         ? planSessionBudget(sessionConversation, config.runtime?.limits?.maxCostUsd)
         : null;
+    // Every turn of a Session adds its spend to the session's total — with a budget or without one.
+    const spendAccount = sessionConversation ? (budgetPlan ?? startSessionSpendAccount(sessionConversation)) : null;
     const spend = callsModel && config.modelKey
         ? await resolveAgentSpendScope({
             tenantDbName, tenantId, projectId,
@@ -4376,8 +4469,13 @@ async function runPlaygroundChatTurn(
         })
         : undefined;
     if (spend) await assertAgentTurnSpendAllowed(spend, config);
+    // Keeps each message's `attachments`: a replay of the transcript shows the model the files again.
     const history = sessionConversation
-        ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
+        ? sessionConversation.messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+        }))
         : request.history;
     // Only a persisted Session has an event log; a stateless call has nowhere to put one.
     const turnEvents = sessionConversation
@@ -4492,6 +4590,7 @@ async function runPlaygroundChatTurn(
         userMessage,
         userContent: buildUserTurnContent(userMessage, attached),
         systemPrompt,
+        attachments: await earlierAttachments({ db, conversation: sessionConversation, config, model }),
     });
     const priorExecutionIds = new Set(
         (carried?.toolHistory ?? [])
@@ -4659,9 +4758,9 @@ async function runPlaygroundChatTurn(
             }
             const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult, attached.attachments);
             if (messageCount !== undefined) {
-                if (budget) {
-                    await addSessionTurnSpend({ db, conversationId: String(sessionConversation._id), plan: budgetPlan, spentUsd: budget.turnCostUsd });
-                }
+                await addSessionTurnSpend({
+                    db, conversationId: String(sessionConversation._id), plan: spendAccount, spentUsd: budget?.turnCostUsd ?? costUsd ?? 0,
+                });
                 await saveConversationState(db, {
                     conversationId: String(sessionConversation._id),
                     tenantId,
@@ -4687,7 +4786,7 @@ async function runPlaygroundChatTurn(
         return playgroundResult;
     } finally {
         if (sessionConversation) {
-            await recordSessionTurnSpend({ db, conversationId: String(sessionConversation._id), plan: budgetPlan, tappedUsd: tappedUsd() });
+            await recordSessionTurnSpend({ db, conversationId: String(sessionConversation._id), plan: spendAccount, tappedUsd: tappedUsd() });
         }
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
     }
@@ -5016,6 +5115,7 @@ async function runAgentResumeTurn(
     // called. A refusal here comes before `onInvokeStart`, so a pause's answers
     // are not spent and can be given again once the limit is lifted.
     const budgetPlan = planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd);
+    const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
     // A continued pause is the spend of whoever started the turn, not of the approver.
     const anchorAction = bySdkId.get(approvals[0]?.id ?? questions[0]?.id ?? '');
     const spend = config.modelKey
@@ -5058,6 +5158,7 @@ async function runAgentResumeTurn(
             conversationId,
             ...(request.runId ? { runId: request.runId } : {}),
             trigger: request.trigger,
+            superseded: () => request.cancellationCell?.abandoned === true,
         });
         scope.events = turnEvents;
         const onTextChunk = request.onTextChunk
@@ -5241,7 +5342,7 @@ async function runAgentResumeTurn(
 
         if (!superseded) {
             await db.updateAgentConversation(conversationId, { messages });
-            if (budget) await addSessionTurnSpend({ db, conversationId, plan: budgetPlan, spentUsd: budget.turnCostUsd });
+            await addSessionTurnSpend({ db, conversationId, plan: spendAccount, spentUsd: budget?.turnCostUsd ?? costUsd ?? 0 });
             await saveConversationState(db, {
                 conversationId,
                 tenantId,
@@ -5292,7 +5393,7 @@ async function runAgentResumeTurn(
             stopReason,
         };
     } finally {
-        await recordSessionTurnSpend({ db, conversationId, plan: budgetPlan, tappedUsd: tappedUsd() });
+        await recordSessionTurnSpend({ db, conversationId, plan: spendAccount, tappedUsd: tappedUsd() });
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: source === 'agent' ? 'chat' : 'playground' });
     }
 }

@@ -16,15 +16,22 @@
  *    `inlineMaxTokens` (estimated chars / 4). Otherwise the turn carries a short
  *    note listing the files and the agent reads them in pages with
  *    `session_files_list` / `session_files_read`.
+ *  - The block opens with a line naming EVERY attachment by kind (documents to
+ *    read, images shown), whatever mix the message carries.
  *  - Images become image parts when the model accepts images, else a text note.
+ *    An image part is a REFERENCE (`session-file://<id>`) with a text handle in
+ *    front of it; the bytes are read from the bucket at the model call
+ *    (`sessionImages.ts`), so the saved state and the traces carry no base64.
  *  - Everything added to the user text sits after `ATTACHMENT_BLOCK_MARKER`, so
  *    the transcript can persist the text the person typed
  *    (`stripAttachmentBlock`) while the model works from the full turn.
  *  - Files uploaded to the session that no message has carried yet ride along
  *    with the next message (`findUnsentSessionFiles`, `attachNewUploads`).
  *
- * The two tools are present whenever the conversation has files — a later turn
- * can read an earlier upload — and both are read-only (`HITL_READ_ONLY_TOOLS`).
+ * The tools are present whenever the conversation has files — a later turn can
+ * read an earlier upload — and all are read-only (`HITL_READ_ONLY_TOOLS`):
+ * `session_files_list`, `session_files_read` and, while the session holds an
+ * image and the model takes images, `session_files_view_image`.
  *
  * Every limit is a stored setting of the agent (`IAgentConfig.attachments`);
  * `SESSION_FILES_DEFAULTS` is only what an unset field falls back to.
@@ -55,6 +62,7 @@ import {
     SESSION_FILES_DEFAULTS,
     SESSION_FILES_LIST_TOOL,
     SESSION_FILES_READ_TOOL,
+    SESSION_FILES_VIEW_IMAGE_TOOL,
     agentTakesAttachments,
     attachmentsAvailability,
     attachmentsUnavailableMessage,
@@ -69,18 +77,27 @@ import {
     storageNotConfiguredError,
     storageUnavailableError,
 } from './sessionFilesBucket';
+import {
+    ATTACHMENT_BLOCK_MARKER,
+    attachmentSummaryLine,
+    escapeAttribute,
+    imageAnchorText,
+    imageReferencePart,
+    stripAttachmentBlock,
+    viewImageToolResult,
+    wrapAttachmentBlock,
+    type ContentPart,
+    type ImageReferencePart,
+} from './sessionAttachmentText';
+import type { SessionImageSource } from './sessionImages';
 
-/**
- * Everything the turn adds to the person's text starts here. The transcript
- * keeps only what came before it (`stripAttachmentBlock`).
- */
-export const ATTACHMENT_BLOCK_MARKER = '\n\n<attachments source="session-files">\n';
-const ATTACHMENT_BLOCK_END = '\n</attachments>';
+export { ATTACHMENT_BLOCK_MARKER, stripAttachmentBlock };
 
 export {
     SESSION_FILES_DEFAULTS,
     SESSION_FILES_LIST_TOOL,
     SESSION_FILES_READ_TOOL,
+    SESSION_FILES_VIEW_IMAGE_TOOL,
     agentTakesAttachments,
     attachmentsAvailability,
     attachmentsUnavailableMessage,
@@ -366,7 +383,7 @@ export async function listSessionFiles(scope: SessionFileScope, conversationId: 
 }
 
 /** The record of a file that belongs to this conversation, else null. */
-async function findSessionFile(
+export async function findSessionFileRecord(
     scope: SessionFileScope,
     conversationId: string,
     fileId: string,
@@ -436,7 +453,7 @@ export async function deleteSessionFile(
     fileId: string,
     deletedBy: string,
 ): Promise<boolean> {
-    const record = await findSessionFile(scope, conversationId, fileId);
+    const record = await findSessionFileRecord(scope, conversationId, fileId);
     if (!record) return false;
     return removeFileRecord(scope, record, deletedBy);
 }
@@ -537,15 +554,112 @@ export async function findUnsentSessionFiles(
         && !carried.has(String(record._id)));
 }
 
-/** Whether a conversation holds any file — decides whether the read tools are offered. */
-export async function conversationHasFiles(db: DatabaseProvider, conversationId: string | undefined): Promise<boolean> {
-    if (!conversationId) return false;
+/** What a conversation holds, for deciding which read tools are offered. */
+export interface SessionFileFacts {
+    /** Holds at least one file. */
+    any: boolean;
+    /** Holds at least one image. */
+    images: boolean;
+}
+
+export async function conversationFileFacts(db: DatabaseProvider, conversationId: string | undefined): Promise<SessionFileFacts> {
+    if (!conversationId) return { any: false, images: false };
     try {
-        return (await db.listFileRecordsByConversation(conversationId)).length > 0;
+        const records = await db.listFileRecordsByConversation(conversationId);
+        return { any: records.length > 0, images: records.some((record) => isImageMime(record.contentType)) };
     } catch (error) {
         logger.debug('Could not look up session files', { error: error instanceof Error ? error.message : String(error) });
-        return false;
+        return { any: false, images: false };
     }
+}
+
+/** Whether a conversation holds any file — decides whether the read tools are offered. */
+export async function conversationHasFiles(db: DatabaseProvider, conversationId: string | undefined): Promise<boolean> {
+    return (await conversationFileFacts(db, conversationId)).any;
+}
+
+// ── Serving a file's bytes ──────────────────────────────────────────────────
+
+export type SessionFileVariant = 'original' | 'markdown';
+export type SessionFileDisposition = 'inline' | 'attachment';
+
+/** Types a browser may show in place when asked to. Everything else is offered as a download. */
+const INLINE_SAFE_TYPES = [
+    /^image\/(png|jpe?g|gif|webp|avif|bmp)$/,
+    /^application\/pdf$/,
+    /^text\/(plain|markdown|csv)$/,
+    /^application\/json$/,
+];
+
+function baseType(contentType: string): string {
+    return contentType.split(';')[0]!.trim().toLowerCase();
+}
+
+/**
+ * How a file is offered: pictures open in place, everything else downloads
+ * unless the caller asks for `inline` AND the type is one a browser shows
+ * without running anything. SVG, HTML and the other active types always
+ * download — an uploaded file is served from the console's own origin.
+ */
+export function sessionFileDisposition(contentType: string, requested?: SessionFileDisposition): SessionFileDisposition {
+    const type = baseType(contentType);
+    const safe = INLINE_SAFE_TYPES.some((pattern) => pattern.test(type));
+    if (!safe) return 'attachment';
+    if (requested) return requested;
+    return type.startsWith('image/') ? 'inline' : 'attachment';
+}
+
+/**
+ * `Content-Disposition` for a file name from the outside: control characters,
+ * quotes, slashes and `;` out of the plain `filename`, non-ASCII kept in the
+ * RFC 5987 `filename*` form.
+ */
+export function contentDispositionHeader(disposition: SessionFileDisposition, fileName: string): string {
+    const cleaned = fileName.replace(/[\u0000-\u001f\u007f]/g, '').replace(/[\\/]/g, '_').trim().slice(0, 180) || 'file';
+    const ascii = cleaned.replace(/[^\x20-\x7e]/g, '_').replace(/["%;]/g, '_');
+    const encoded = encodeURIComponent(cleaned).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+export interface SessionFileContent {
+    data: Buffer;
+    contentType: string;
+    disposition: SessionFileDisposition;
+    /** The `Content-Disposition` header value. */
+    contentDisposition: string;
+    size: number;
+}
+
+/**
+ * A file of the session read from its bucket, ready to send: the original, or
+ * the markdown it was converted to. Null when the file is not on this session.
+ * `409 markdown_unavailable` for a markdown variant that does not exist.
+ */
+export async function readSessionFileContent(
+    scope: SessionFileScope,
+    conversationId: string,
+    fileId: string,
+    options: { variant?: SessionFileVariant; disposition?: SessionFileDisposition } = {},
+): Promise<SessionFileContent | null> {
+    const record = await findSessionFileRecord(scope, conversationId, fileId);
+    if (!record) return null;
+    const variant = options.variant ?? 'original';
+    if (variant === 'markdown' && !(record.markdownStatus === 'succeeded' && record.markdownKey)) {
+        throw new AgentAttachmentError(409, 'markdown_unavailable', 'This file has no text version.');
+    }
+    const result = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key, { variant });
+    const data = Buffer.from(result.data as Uint8Array);
+    const contentType = variant === 'markdown'
+        ? 'text/markdown; charset=utf-8'
+        : (record.contentType || result.contentType || 'application/octet-stream');
+    const disposition = sessionFileDisposition(contentType, options.disposition);
+    return {
+        data,
+        contentType,
+        disposition,
+        contentDisposition: contentDispositionHeader(disposition, variant === 'markdown' ? (result.fileName || record.name) : record.name),
+        size: data.length,
+    };
 }
 
 // ── Reading ─────────────────────────────────────────────────────────────────
@@ -564,23 +678,58 @@ async function readFileText(scope: SessionFileScope, record: IFileRecord): Promi
     return null;
 }
 
-/**
- * The image as the SDK's `{ base64, media_type }` part. Not a `data:` URL: the
- * SDK renders a URL image as text wherever it measures or logs content
- * (`[image:<url>]`), which for a data URL would be the whole file; this form
- * stays `[image:unknown]` and is turned into the provider's data URL only at the
- * model call.
- */
-async function readImagePart(scope: SessionFileScope, record: IFileRecord): Promise<ImagePart> {
-    const original = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key);
-    return { type: 'image_url', image_url: { base64: original.data.toString('base64'), media_type: record.contentType ?? 'image/png' } };
+/** An image of the session read from its bucket, ready for the model call. */
+export interface SessionImageBytes {
+    base64: string;
+    mediaType: string;
+    /** Size of the original, before base64. */
+    bytes: number;
 }
 
-export type ImagePart = { type: 'image_url'; image_url: { base64: string; media_type: string } };
+/**
+ * The image's bytes, read only at the model call (`sessionImages.ts`). The SDK
+ * takes them as `{ base64, media_type }` and renders the provider's data URL —
+ * a plain `data:` URL part would be measured and logged as text by the SDK.
+ */
+export async function readSessionImage(scope: SessionFileScope, record: IFileRecord): Promise<SessionImageBytes> {
+    const original = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key);
+    return {
+        base64: original.data.toString('base64'),
+        mediaType: record.contentType ?? 'image/png',
+        bytes: original.data.length,
+    };
+}
+
+/**
+ * The model wrapper's view of a session's images (`sessionImages.ts`): a file
+ * is an image of THIS session or it does not exist for the model, and the bytes
+ * come from the bucket the moment the model is called.
+ */
+export function createSessionImageSource(scope: SessionFileScope, conversationId: string): SessionImageSource {
+    const records = new Map<string, IFileRecord>();
+    return {
+        async find(fileId) {
+            const record = await findSessionFileRecord(scope, conversationId, fileId);
+            if (!record || !isImageMime(record.contentType)) return null;
+            records.set(fileId, record);
+            return { name: record.name, size: record.size };
+        },
+        async read(fileId) {
+            const record = records.get(fileId) ?? await findSessionFileRecord(scope, conversationId, fileId);
+            if (!record) throw new Error(`Image "${fileId}" is not a file of this session.`);
+            const image = await readSessionImage(scope, record);
+            return { base64: image.base64, mediaType: image.mediaType };
+        },
+    };
+}
+
+/** An image in the user turn: a reference, never the bytes (see `sessionAttachmentText.ts`). */
+export type ImagePart = ImageReferencePart;
 
 export interface AssembledAttachments {
     /** Text appended to the person's message (starts with `ATTACHMENT_BLOCK_MARKER`); '' when there is nothing to add. */
     block: string;
+    /** The images the model is shown, as references. */
     images: ImagePart[];
     /** What the user message persists. */
     attachments: IAgentMessageAttachment[];
@@ -590,10 +739,6 @@ export interface AssembledAttachments {
 }
 
 export const NO_ATTACHMENTS: AssembledAttachments = { block: '', images: [], attachments: [], mode: 'none', warnings: [] };
-
-function escapeAttribute(value: string): string {
-    return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
 
 /**
  * The records a message attaches, checked to be files of THIS session. Throws
@@ -606,7 +751,7 @@ export async function resolveTurnAttachments(
 ): Promise<IFileRecord[]> {
     const records: IFileRecord[] = [];
     for (const fileId of [...new Set(fileIds)]) {
-        const record = await findSessionFile(scope, conversationId, fileId);
+        const record = await findSessionFileRecord(scope, conversationId, fileId);
         if (!record) {
             throw new AgentAttachmentError(404, 'attachment_not_found', `Attachment "${fileId}" is not a file of this session. Upload it to the session first.`);
         }
@@ -617,8 +762,9 @@ export async function resolveTurnAttachments(
 
 /**
  * The user turn's attachments, ready for the model — see the file header for the
- * inline / paged / image rules. A file that cannot be read is reported in the
- * turn and in `warnings`; it never fails the turn.
+ * inline / paged / image rules. A document that cannot be read is reported in
+ * the turn and in `warnings`; it never fails the turn. Images are not read here
+ * at all: they are references, read when the model is called.
  */
 export async function assembleTurnAttachments(input: {
     scope: SessionFileScope;
@@ -631,7 +777,7 @@ export async function assembleTurnAttachments(input: {
     if (records.length === 0) return NO_ATTACHMENTS;
 
     const warnings: string[] = [];
-    const notes: string[] = [];
+    const imageNotes: string[] = [];
     const images: ImagePart[] = [];
     const documents: Array<{ record: IFileRecord; id: string; text: string | null }> = [];
 
@@ -639,16 +785,10 @@ export async function assembleTurnAttachments(input: {
         const id = String(record._id);
         if (isImageMime(record.contentType)) {
             if (!input.supportsVision) {
-                notes.push(`[Image "${escapeAttribute(record.name)}" (id ${id}) is attached, but this model cannot read images.]`);
+                imageNotes.push(`[Image "${escapeAttribute(record.name)}" (id ${id}) is attached, but this model cannot read images.]`);
                 continue;
             }
-            try {
-                images.push(await readImagePart(scope, record));
-            } catch (error) {
-                warnings.push(`Image "${record.name}" could not be read.`);
-                notes.push(`[Image "${escapeAttribute(record.name)}" (id ${id}) is attached but could not be read.]`);
-                logger.warn('Could not read a session image', { fileId: id, error: error instanceof Error ? error.message : String(error) });
-            }
+            images.push(imageReferencePart(id, record.name));
             continue;
         }
         let text: string | null = null;
@@ -662,29 +802,37 @@ export async function assembleTurnAttachments(input: {
     }
 
     const readable = documents.filter((doc): doc is typeof doc & { text: string } => doc.text !== null);
+    const unreadable = documents.filter((doc) => doc.text === null);
     const totalTokens = estimateTokens(readable.reduce((sum, doc) => sum + doc.text.length, 0));
     const inline = readable.length > 0 && totalTokens <= cfg.inlineMaxTokens;
 
-    const blocks: string[] = [];
+    // The first line names every attachment by kind, whatever the mix — also a message of images only.
+    const lines: string[] = [attachmentSummaryLine({
+        documentsInline: inline ? readable.length : 0,
+        documentsPaged: inline ? 0 : readable.length,
+        documentsUnreadable: unreadable.length,
+        imagesShown: images.length,
+        imagesHidden: imageNotes.length,
+    })];
     if (inline) {
         for (const doc of readable) {
-            blocks.push(`<document name="${escapeAttribute(doc.record.name)}" id="${doc.id}">\n${doc.text}\n</document>`);
+            lines.push(`<document name="${escapeAttribute(doc.record.name)}" id="${doc.id}">\n${doc.text}\n</document>`);
         }
     } else if (readable.length > 0) {
-        blocks.push(
+        lines.push(
             `The person attached ${readable.length} file${readable.length === 1 ? '' : 's'} that ${readable.length === 1 ? 'is' : 'are'} too long to include here`
             + ` (about ${totalTokens} tokens; the limit for inlining is ${cfg.inlineMaxTokens}). Read ${readable.length === 1 ? 'it' : 'them'} with`
             + ` ${SESSION_FILES_LIST_TOOL} and ${SESSION_FILES_READ_TOOL}({ fileId, page }):`,
             ...readable.map((doc) => `- "${escapeAttribute(doc.record.name)}" (id ${doc.id}, ${pageCount(doc.text.length, cfg.readPageChars)} page${pageCount(doc.text.length, cfg.readPageChars) === 1 ? '' : 's'})`),
         );
     }
-    for (const doc of documents.filter((entry) => entry.text === null)) {
-        blocks.push(`[File "${escapeAttribute(doc.record.name)}" (id ${doc.id}) is attached, but its text could not be extracted (${doc.record.markdownStatus}).]`);
+    for (const doc of unreadable) {
+        lines.push(`[File "${escapeAttribute(doc.record.name)}" (id ${doc.id}) is attached, but its text could not be extracted (${doc.record.markdownStatus}).]`);
     }
-    blocks.push(...notes);
+    lines.push(...imageNotes);
 
     return {
-        block: blocks.length > 0 ? `${ATTACHMENT_BLOCK_MARKER}${blocks.join('\n')}${ATTACHMENT_BLOCK_END}` : '',
+        block: wrapAttachmentBlock(lines),
         images,
         attachments: records.map(toMessageAttachment),
         mode: readable.length === 0 ? 'none' : inline ? 'inline' : 'paged',
@@ -692,16 +840,21 @@ export async function assembleTurnAttachments(input: {
     };
 }
 
-/** What the person typed: the user turn without the block `assembleTurnAttachments` added. */
-export function stripAttachmentBlock(text: string): string {
-    const at = text.indexOf(ATTACHMENT_BLOCK_MARKER);
-    return at >= 0 ? text.slice(0, at) : text;
-}
-
-/** The content of the user turn: the text alone (unchanged) or text with image parts. */
-export function buildUserTurnContent(userMessage: string, assembled: AssembledAttachments): string | Array<{ type: string; [key: string]: unknown }> {
+/**
+ * The content of the user turn: the text alone (unchanged) or the text followed
+ * by each image's handle and reference — the handle is what the model, and the
+ * summary of a long conversation, can name the picture by.
+ */
+export function buildUserTurnContent(userMessage: string, assembled: AssembledAttachments): string | ContentPart[] {
     const text = `${userMessage}${assembled.block}`;
-    return assembled.images.length > 0 ? [{ type: 'text', text }, ...assembled.images] : text;
+    if (assembled.images.length === 0) return text;
+    return [
+        { type: 'text', text },
+        ...assembled.images.flatMap((image): ContentPart[] => [
+            { type: 'text', text: imageAnchorText(image.name, image.fileId) },
+            image,
+        ]),
+    ];
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────
@@ -718,12 +871,15 @@ export interface SessionFileToolDeps {
     scope: SessionFileScope;
     conversationId: string;
     readPageChars: number;
+    /** Offer `session_files_view_image`: the session holds an image and the model takes images. */
+    viewImage?: boolean;
 }
 
 /**
  * `session_files_list` and `session_files_read` — the only way the agent reads
- * a file too long to be in the turn, and a way back to an earlier upload.
- * Read-only, and scoped to this conversation's files.
+ * a file too long to be in the turn, and a way back to an earlier upload — and,
+ * when images can be looked at, `session_files_view_image`. Read-only, and
+ * scoped to this conversation's files.
  */
 export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolInterface[] {
     const { createToolFn, zod, guard, scope, conversationId, readPageChars } = deps;
@@ -743,6 +899,7 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
                     mimeType: file.mimeType,
                     size: file.size,
                     readable: file.conversionStatus === 'succeeded' && !isImageMime(file.mimeType),
+                    ...(isImageMime(file.mimeType) ? { image: true } : {}),
                 })));
             },
         ),
@@ -762,7 +919,7 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
             { name: 'agent.session_files.read', requestedName: SESSION_FILES_READ_TOOL },
             async (args: { fileId?: string; page?: number }) => {
                 const fileId = typeof args.fileId === 'string' ? args.fileId : '';
-                const record = fileId ? await findSessionFile(scope, conversationId, fileId) : null;
+                const record = fileId ? await findSessionFileRecord(scope, conversationId, fileId) : null;
                 if (!record) return `File "${fileId}" is not attached to this conversation. Use ${SESSION_FILES_LIST_TOOL} to see the files.`;
                 let text: string | null;
                 try {
@@ -772,9 +929,12 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
                     return 'The file could not be read right now.';
                 }
                 if (text === null) {
-                    return isImageMime(record.contentType)
-                        ? 'This file is an image; it has no text to read.'
-                        : 'This file has no readable text (it could not be converted).';
+                    if (isImageMime(record.contentType)) {
+                        return deps.viewImage
+                            ? `This file is an image; it has no text to read. Use ${SESSION_FILES_VIEW_IMAGE_TOOL} to look at it.`
+                            : 'This file is an image; it has no text to read.';
+                    }
+                    return 'This file has no readable text (it could not be converted).';
                 }
                 const page = pageText(text, args.page ?? 1, readPageChars);
                 if (!page) return JSON.stringify({ error: `Page ${args.page} is out of range.`, pages: pageCount(text.length, readPageChars) });
@@ -783,10 +943,38 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
         ),
     }) as AgentSdkToolInterface;
 
-    return [list, read];
+    const tools = [list, read];
+    if (deps.viewImage) {
+        // The result only names the image; the model wrapper (`sessionImages.ts`) puts the
+        // picture itself in front of the model in a message that follows it — a tool result
+        // can only be text on the providers' wire.
+        tools.push(createToolFn({
+            name: SESSION_FILES_VIEW_IMAGE_TOOL,
+            description: [
+                'Look at an image attached to this conversation again. The image is shown to you in the message that follows the result.',
+                'Use it when an earlier image is no longer visible to you, or to check a detail you are unsure of.',
+            ].join(' '),
+            schema: zod.object({
+                fileId: zod.string().describe('The image file id, from session_files_list or the [Attached image: …] handle.'),
+            }),
+            func: guard.protect(
+                { name: 'agent.session_files.view_image', requestedName: SESSION_FILES_VIEW_IMAGE_TOOL },
+                async (args: { fileId?: string }) => {
+                    const fileId = typeof args.fileId === 'string' ? args.fileId : '';
+                    const record = fileId ? await findSessionFileRecord(scope, conversationId, fileId) : null;
+                    if (!record) return `File "${fileId}" is not attached to this conversation. Use ${SESSION_FILES_LIST_TOOL} to see the files.`;
+                    if (!isImageMime(record.contentType)) {
+                        return `"${record.name}" is not an image. Use ${SESSION_FILES_READ_TOOL} to read it.`;
+                    }
+                    return viewImageToolResult(String(record._id), record.name);
+                },
+            ),
+        }) as AgentSdkToolInterface);
+    }
+    return tools;
 }
 
-export function sessionFileToolDefinitions(readPageChars: number): TraceToolDefinition[] {
+export function sessionFileToolDefinitions(readPageChars: number, options: { viewImage?: boolean } = {}): TraceToolDefinition[] {
     return [
         {
             name: SESSION_FILES_LIST_TOOL,
@@ -805,5 +993,16 @@ export function sessionFileToolDefinitions(readPageChars: number): TraceToolDefi
                 required: ['fileId'],
             },
         },
+        ...(options.viewImage
+            ? [{
+                name: SESSION_FILES_VIEW_IMAGE_TOOL,
+                description: 'Look at an attached image again; the image is shown in the message that follows.',
+                parameters: {
+                    type: 'object',
+                    properties: { fileId: { type: 'string', description: 'The image file id.' } },
+                    required: ['fileId'],
+                },
+            }]
+            : []),
     ];
 }

@@ -847,7 +847,8 @@ function sectionsToItems(sections: SectionEntry[], includeOther: boolean): LlmRe
         const tool = typeof section.tool === 'string' ? section.tool : (typeof section.toolName === 'string' ? section.toolName : undefined);
 
         if (kind === 'message' && role) {
-            items.push({ itemType: 'message', role, content: messageContentToText(section.content) });
+            // The content goes in as it came: a part that is an image is drawn by the inspector, which flattens the rest to text itself.
+            items.push({ itemType: 'message', role, content: section.content });
         } else if (kind === 'tool_call') {
             const raw = section.content;
             let args: unknown = raw;

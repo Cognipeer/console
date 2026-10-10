@@ -121,17 +121,15 @@ export function withSessionSpend<T extends Pick<IAgentConversation, 'budget' | '
   return { ...conversation, spentUsd: sessionSpentUsd(conversation) };
 }
 
-/** What a turn needs to know about the session budget. */
-export interface SessionBudgetPlan {
-  budget: IAgentSessionBudget;
+/**
+ * How one turn's spend is added to the session's running total. EVERY turn has
+ * one — with or without a budget — so a turn that is cancelled, cut off by a
+ * deadline or never persisted still lands in `spentUsd`, and the total equals
+ * the sum of what the turns cost.
+ */
+export interface SessionSpendAccount {
   /** Spent before this turn. */
   spentBefore: number;
-  /** What was left at the start (> 0). */
-  remaining: number;
-  /** The per-turn cost cap to give the SDK: min(the agent's own, `remaining`). */
-  turnCapUsd: number;
-  /** The session budget — not the agent's per-turn limit — is the tighter of the two. */
-  sessionBinds: boolean;
   /**
    * What of this turn's spend has been added to the session's stored total so
    * far (`addSessionTurnSpend` keeps it). Starts at 0; the turn's persist and the
@@ -139,6 +137,24 @@ export interface SessionBudgetPlan {
    * so the turn is counted exactly once however it ends.
    */
   accountedUsd: number;
+}
+
+/** The account for a turn that starts now on a session with no budget (a budgeted one has `planSessionBudget`). */
+export function startSessionSpendAccount(
+  conversation: Pick<IAgentConversation, 'spentUsd' | 'messages'>,
+): SessionSpendAccount {
+  return { spentBefore: sessionSpentUsd(conversation), accountedUsd: 0 };
+}
+
+/** What a turn needs to know about the session budget. */
+export interface SessionBudgetPlan extends SessionSpendAccount {
+  budget: IAgentSessionBudget;
+  /** What was left at the start (> 0). */
+  remaining: number;
+  /** The per-turn cost cap to give the SDK: min(the agent's own, `remaining`). */
+  turnCapUsd: number;
+  /** The session budget — not the agent's per-turn limit — is the tighter of the two. */
+  sessionBinds: boolean;
 }
 
 /**

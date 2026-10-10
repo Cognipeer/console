@@ -264,8 +264,9 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async updateAgentConversationRuntime(
       id: string,
-      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd'>>,
-    ): Promise<void> {
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+      options?: { onlyIfTurn?: string },
+    ): Promise<boolean> {
       const sets: string[] = [];
       const params: Record<string, unknown> = { id };
       if (patch.runtimeStatus !== undefined) { sets.push('runtimeStatus = @runtimeStatus'); params.runtimeStatus = patch.runtimeStatus; }
@@ -274,8 +275,16 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       if (patch.lastEventSeq !== undefined) { sets.push('lastEventSeq = @lastEventSeq'); params.lastEventSeq = patch.lastEventSeq; }
       if (patch.budget !== undefined) { sets.push('budget = @budget'); params.budget = patch.budget ? this.toJson(patch.budget) : null; }
       if (patch.spentUsd !== undefined) { sets.push('spentUsd = @spentUsd'); params.spentUsd = patch.spentUsd; }
-      if (sets.length === 0) return;
-      this.getTenantDb().prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      if (patch.runtimeTurnId !== undefined) { sets.push('runtimeTurnId = @runtimeTurnId'); params.runtimeTurnId = patch.runtimeTurnId; }
+      if (sets.length === 0) return true;
+      // One statement, so "is it still my turn?" and the write cannot be separated by another writer.
+      let where = 'id = @id';
+      if (options?.onlyIfTurn !== undefined) {
+        where += ' AND (runtimeTurnId IS NULL OR runtimeTurnId = @onlyIfTurn)';
+        params.onlyIfTurn = options.onlyIfTurn;
+      }
+      const result = this.getTenantDb().prepare(`UPDATE ${TABLES.agentConversations} SET ${sets.join(', ')} WHERE ${where}`).run(params);
+      return result.changes > 0;
     }
 
     async addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void> {

@@ -330,6 +330,42 @@ export function chooseRelativeFileKey(keyHint: string | undefined, fileName: str
     return `${hint.replace(/\/{2,}/g, '/')}${generateFileRelativeKey(fileName)}`;
 }
 
+/**
+ * The `keyHint` for an upload that names a destination folder (`folder`, or its
+ * alias `prefix`): the Document Store uploads from inside the folder it is
+ * showing. With a folder alone the file lands in it under a generated unique name;
+ * with a `keyHint` too, the hint is the file's name inside the folder. A segment
+ * that climbs out (`..`) or a path that is not text is refused. Neither given =
+ * no hint (a generated name at the bucket root, as before).
+ */
+export function composeUploadKeyHint(input: { folder?: unknown; keyHint?: unknown }): { keyHint?: string } | { error: string } {
+    const MAX = 512;
+    const clean = (value: unknown, field: string): { value: string } | { error: string } => {
+        if (typeof value !== 'string') return { error: `${field} must be text.` };
+        const slashed = value.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+        if (slashed.length > MAX) return { error: `${field} must be at most ${MAX} characters.` };
+        if (slashed.split('/').some((segment) => segment === '..' || segment === '.')) {
+            return { error: `${field} cannot contain "." or ".." segments.` };
+        }
+        if (/[\u0000-\u001f]/.test(slashed)) return { error: `${field} cannot contain control characters.` };
+        return { value: slashed };
+    };
+    const hasFolder = input.folder !== undefined && input.folder !== null && input.folder !== '';
+    const hasHint = input.keyHint !== undefined && input.keyHint !== null && input.keyHint !== '';
+    if (!hasFolder) {
+        if (!hasHint) return {};
+        const hint = clean(input.keyHint, 'keyHint');
+        return 'error' in hint ? hint : { keyHint: hint.value };
+    }
+    const folder = clean(input.folder, 'folder');
+    if ('error' in folder) return folder;
+    const root = normalizeFolderPrefix(folder.value);
+    if (!hasHint) return root ? { keyHint: root } : {};
+    const hint = clean(input.keyHint, 'keyHint');
+    if ('error' in hint) return hint;
+    return { keyHint: `${root}${hint.value.replace(/^\/+/, '')}` };
+}
+
 function decodeData(payload: Buffer | string): Buffer {
     if (Buffer.isBuffer(payload)) {
         return payload;

@@ -54,6 +54,7 @@ import {
   attachmentsAvailability,
   cleanupExpiredSessionFiles,
   buildUserTurnContent,
+  contentDispositionHeader,
   estimateBase64Size,
   estimateTokens,
   findUnsentSessionFiles,
@@ -64,6 +65,7 @@ import {
   resolveAttachmentsConfig,
   resolveSessionFilesBucket,
   resolveUploadMimeType,
+  sessionFileDisposition,
   stripAttachmentBlock,
   toSessionFileView,
   uploadSessionFile,
@@ -92,21 +94,24 @@ describe('the settings and their defaults', () => {
   it('an agent with no attachments config gets the documented defaults — and files are OFF', () => {
     expect(resolveAttachmentsConfig(undefined)).toEqual({
       enabled: false, maxFiles: 10, maxFileSizeMb: 20, allowedMimeTypes: [], inlineMaxTokens: 30_000, readPageChars: 20_000, retentionDays: 30,
-      folder: 'agent-sessions', attachNewUploads: true,
+      folder: 'agent-sessions', attachNewUploads: true, maxImages: 6, maxBytes: 12_000_000, carryRecentImages: 2,
     });
     expect(SESSION_FILES_DEFAULTS).toMatchObject({
       enabled: false, maxFiles: 10, maxFileSizeMb: 20, inlineMaxTokens: 30_000, readPageChars: 20_000, retentionDays: 30,
-      folder: 'agent-sessions', attachNewUploads: true,
+      folder: 'agent-sessions', attachNewUploads: true, maxImages: 6, maxBytes: 12_000_000, carryRecentImages: 2,
     });
   });
 
   it('takes a stored value over the default, and ignores values that make no sense', () => {
-    expect(resolveAttachmentsConfig({ enabled: true, maxFiles: 3, maxFileSizeMb: 1.5, inlineMaxTokens: 500, readPageChars: 1000, retentionDays: 2, allowedMimeTypes: ['image/*', ' '], bucketKey: ' mine ', folder: '/uploads//2024/', attachNewUploads: false }))
+    expect(resolveAttachmentsConfig({ enabled: true, maxFiles: 3, maxFileSizeMb: 1.5, inlineMaxTokens: 500, readPageChars: 1000, retentionDays: 2, allowedMimeTypes: ['image/*', ' '], bucketKey: ' mine ', folder: '/uploads//2024/', attachNewUploads: false, maxImages: 3, maxBytes: 5_000_000, carryRecentImages: 0 }))
       .toEqual({
         enabled: true, maxFiles: 3, maxFileSizeMb: 1.5, allowedMimeTypes: ['image/*'], inlineMaxTokens: 500, readPageChars: 1000, retentionDays: 2,
-        bucketKey: 'mine', folder: 'uploads/2024', attachNewUploads: false,
+        bucketKey: 'mine', folder: 'uploads/2024', attachNewUploads: false, maxImages: 3, maxBytes: 5_000_000, carryRecentImages: 0,
       });
-    expect(resolveAttachmentsConfig({ maxFiles: -1, maxFileSizeMb: 0, readPageChars: Number.NaN })).toMatchObject({ maxFiles: 10, maxFileSizeMb: 20, readPageChars: 20_000 });
+    expect(resolveAttachmentsConfig({ maxFiles: -1, maxFileSizeMb: 0, readPageChars: Number.NaN, maxImages: 0, maxBytes: -5, carryRecentImages: -1 }))
+      .toMatchObject({ maxFiles: 10, maxFileSizeMb: 20, readPageChars: 20_000, maxImages: 6, maxBytes: 12_000_000, carryRecentImages: 2 });
+    // 0 is a real choice for "never re-attach", unlike the limits above.
+    expect(resolveAttachmentsConfig({ carryRecentImages: 0 }).carryRecentImages).toBe(0);
   });
 
   it('only "on, with a bucket" takes attachments — not by default, not without a bucket, not a connected agent', () => {
@@ -193,8 +198,13 @@ describe('the transcript marker', () => {
     expect(buildUserTurnContent('hello', none)).toBe('hello');
     const withBlock = { ...none, block: `${ATTACHMENT_BLOCK_MARKER}note\n</attachments>`, mode: 'inline' as const };
     expect(buildUserTurnContent('hello', withBlock)).toBe(`hello${ATTACHMENT_BLOCK_MARKER}note\n</attachments>`);
-    const image = { type: 'image_url' as const, image_url: { base64: 'AA==', media_type: 'image/png' } };
-    expect(buildUserTurnContent('look', { ...none, images: [image] })).toEqual([{ type: 'text', text: 'look' }, image]);
+    const image = { type: 'image_url' as const, image_url: { url: 'session-file://pic' }, fileId: 'pic', name: 'cat "1".png' };
+    // Each image is a reference with a text handle in front of it that names the file.
+    expect(buildUserTurnContent('look', { ...none, images: [image] })).toEqual([
+      { type: 'text', text: 'look' },
+      { type: 'text', text: '[Attached image: "cat &quot;1&quot;.png" (id pic)]' },
+      image,
+    ]);
   });
 });
 
@@ -257,12 +267,16 @@ describe('inline or paged', () => {
     hoisted.downloads.set('pic', 'PNGBYTES');
     const image = fileRecord('pic', { name: 'pic.png', contentType: 'image/png', markdownStatus: 'skipped', markdownKey: undefined });
     const withVision = await assembleTurnAttachments({ scope, records: [image], cfg: cfg(1), supportsVision: true });
-    expect(withVision.images).toEqual([{ type: 'image_url', image_url: { base64: Buffer.from('PNGBYTES').toString('base64'), media_type: 'image/png' } }]);
-    expect(withVision.block).toBe('');
+    // A reference, not the bytes: nothing was read from the bucket to build the turn.
+    expect(withVision.images).toEqual([{ type: 'image_url', image_url: { url: 'session-file://pic' }, fileId: 'pic', name: 'pic.png' }]);
+    expect(JSON.stringify(withVision)).not.toContain(Buffer.from('PNGBYTES').toString('base64'));
+    // The block names the attachment even when it is the only one.
+    expect(withVision.block).toBe(`${ATTACHMENT_BLOCK_MARKER}The person attached 1 file: 1 image shown below.\n</attachments>`);
     expect(withVision.attachments[0]).toMatchObject({ name: 'pic.png', mimeType: 'image/png' });
 
     const without = await assembleTurnAttachments({ scope, records: [image], cfg: cfg(1), supportsVision: false });
     expect(without.images).toEqual([]);
+    expect(without.block).toContain('The person attached 1 file: 1 image not shown.');
     expect(without.block).toContain('cannot read images');
   });
 
@@ -542,21 +556,54 @@ describe('the Responses input', () => {
 });
 
 describe('the saved state', () => {
-  it('drops the images of an oversized state, keeps them when it fits, and keeps everything else', () => {
-    const image = { type: 'image_url', image_url: { base64: 'A'.repeat(MAX_STATE_BYTES), media_type: 'image/png' } };
-    const messages = [
-      { role: 'user', content: [{ type: 'text', text: 'look at this' }, image] },
-      { role: 'assistant', content: 'a cat' },
-    ];
-    const small = serializeForStorage({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { base64: 'AA==', media_type: 'image/png' } }] }] } as never);
-    expect(small).toContain('image_url');
-
-    const text = serializeForStorage({ messages } as never)!;
-    expect(text).not.toBeNull();
-    expect(text.length).toBeLessThan(MAX_STATE_BYTES);
-    expect(text).not.toContain('image_url');
+  it('holds an image as a short reference, so it never decides whether a state fits', () => {
+    const reference = { type: 'image_url', image_url: { url: 'session-file://pic' }, fileId: 'pic', name: 'cat.png' };
+    const text = serializeForStorage({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'look at this' }, reference] },
+        { role: 'assistant', content: 'a cat' },
+      ],
+    } as never)!;
+    expect(text).toContain('session-file://pic');
     expect(text).toContain('look at this');
-    expect(text).toContain('a cat');
+    expect(text.length).toBeLessThan(400);
+  });
+
+  it('no longer rewrites image parts to fit: bytes that cannot shrink mean no stored state (the transcript replay takes over)', () => {
+    const inline = { type: 'image_url', image_url: { base64: 'A'.repeat(MAX_STATE_BYTES), media_type: 'image/png' } };
+    expect(serializeForStorage({ messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, inline] }] } as never)).toBeNull();
+  });
+});
+
+describe('serving a file’s bytes', () => {
+  it('pictures open in place; everything else downloads unless an inline-safe type is asked to open', () => {
+    expect(sessionFileDisposition('image/png')).toBe('inline');
+    expect(sessionFileDisposition('image/jpeg; charset=binary')).toBe('inline');
+    expect(sessionFileDisposition('image/png', 'attachment')).toBe('attachment');
+    expect(sessionFileDisposition('application/pdf')).toBe('attachment');
+    expect(sessionFileDisposition('application/pdf', 'inline')).toBe('inline');
+    expect(sessionFileDisposition('text/markdown; charset=utf-8', 'inline')).toBe('inline');
+    expect(sessionFileDisposition('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'inline')).toBe('attachment');
+  });
+
+  it('SVG, HTML and the other active types always download, whatever is asked', () => {
+    for (const type of ['image/svg+xml', 'text/html', 'TEXT/HTML; charset=utf-8', 'application/xhtml+xml', 'text/xml', 'application/xml', 'text/javascript', 'application/javascript', 'text/css']) {
+      expect(sessionFileDisposition(type, 'inline'), type).toBe('attachment');
+      expect(sessionFileDisposition(type), type).toBe('attachment');
+    }
+  });
+
+  it('puts only a safe file name in Content-Disposition, and keeps the real one in filename*', () => {
+    expect(contentDispositionHeader('inline', 'cat.png')).toBe('inline; filename="cat.png"; filename*=UTF-8\'\'cat.png');
+    const header = contentDispositionHeader('attachment', 'a"b;c\r\nX-Evil: 1/../../etc\\passwd.txt');
+    expect(header).not.toMatch(/[\r\n]/);
+    expect(header).toContain('filename="a_b_cX-Evil: 1_.._.._etc_passwd.txt"');
+    expect(header.split('filename="')[1]!.split('"')[0]).not.toMatch(/["/\\;%]/);
+    const turkish = contentDispositionHeader('attachment', 'Çeviri özeti (1).pdf');
+    expect(turkish).toContain('filename="_eviri _zeti (1).pdf"');
+    expect(turkish).toContain("filename*=UTF-8''%C3%87eviri%20%C3%B6zeti%20%281%29.pdf");
+    expect(contentDispositionHeader('attachment', '  \u0000 ')).toContain('filename="file"');
+    expect(contentDispositionHeader('attachment', 'x'.repeat(500)).length).toBeLessThan(500);
   });
 });
 

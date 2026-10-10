@@ -21,6 +21,7 @@ import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel'
 import AgentHumanInTheLoopPanel from '@/components/agents/studio/AgentHumanInTheLoopPanel';
 import {
   answerRestriction,
+  isStaleActionRefusal,
   type PendingActionView,
 } from '@/components/agents/session/pendingActions';
 import {
@@ -34,7 +35,7 @@ import {
   type SessionStatusKind,
 } from '@/components/agents/session/sessionActivityUi';
 import { budgetStopAmounts, isBudgetStop } from '@/components/agents/session/sessionBudgetUi';
-import type { ChatMessage } from '@/components/agents/session/sessionTypes';
+import { BLOCKED_BEFORE_RUN_ERROR, stepBlockedBeforeRun, stepFailed, type ChatMessage } from '@/components/agents/session/sessionTypes';
 import { failedTurnFlags } from '@/components/agents/session/turnTimelineLayout';
 import { CONFIG_SECTION_TITLES, configSectionTitle } from '@/components/agents/studio/configSections';
 import { en } from '@/lib/i18n/messages/en';
@@ -203,6 +204,17 @@ describe('a stop on the session budget', () => {
     expect(html).not.toContain('Configure');
   });
 
+  it('a budget that stops the session says a message goes on, not that the turn carries on', () => {
+    const html = render(h(StopNotice, { message: stopped(), budgetBannerShown: true, budgetStops: true }));
+    expect(html).toContain('then send a message to go on');
+    expect(html).not.toContain('to carry on');
+    const paused = render(h(StopNotice, { message: stopped(), budgetBannerShown: true, budgetStops: false }));
+    expect(paused).toContain('to carry on');
+    expect(paused).not.toContain('send a message');
+    // ...and in Turkish.
+    expect(render(h(StopNotice, { message: stopped(), budgetBannerShown: true, budgetStops: true }), 'tr')).toContain('bir mesaj gönderin');
+  });
+
   it('keeps the per-turn hint for a per-turn limit', () => {
     const html = render(h(StopNotice, { message: stopped({ stopDetail: 'maxWallClockMs (30000ms) exceeded' }), budgetBannerShown: true }));
     expect(html).toContain('Stopped by a run limit');
@@ -214,6 +226,31 @@ describe('a stop on the session budget', () => {
     const html = render(h(StopNotice, { message: stopped(), budgetBannerShown: true }), 'tr');
     expect(html).toContain('Oturum bütçesinde durdu');
     expect(html).not.toContain('Stopped by');
+  });
+});
+
+describe('a request that is no longer open', () => {
+  it('is told from the refusals a person can act on: answered elsewhere, cancelled, timed out', () => {
+    expect(isStaleActionRefusal(409, { code: 'action_not_pending' })).toBe(true);
+    expect(isStaleActionRefusal(409, { type: 'action_not_pending' })).toBe(true);
+    expect(isStaleActionRefusal(409, { code: 'action_cancelled', type: 'action_cancelled' })).toBe(true);
+    expect(isStaleActionRefusal(410, { code: 'action_expired' })).toBe(true);
+    expect(isStaleActionRefusal(410, null)).toBe(true);
+  });
+
+  it('is not any other failure', () => {
+    expect(isStaleActionRefusal(409, { code: 'conversation_busy' })).toBe(false);
+    expect(isStaleActionRefusal(409, undefined)).toBe(false);
+    expect(isStaleActionRefusal(403, { code: 'action_cancelled' })).toBe(false);
+    expect(isStaleActionRefusal(500, { code: 'action_not_pending' })).toBe(false);
+  });
+
+  it('both places that answer requests reload the session on one', () => {
+    for (const file of ['agents/session/AgentSessionView.tsx', 'agents/studio/SessionDetailDrawer.tsx']) {
+      const source = readFileSync(join(__dirname, '../../components', file), 'utf8');
+      expect(source, file).toContain('isStaleActionRefusal(res.status, err)');
+      expect(source, file).not.toContain("err.code === 'action_not_pending'");
+    }
   });
 });
 
@@ -282,6 +319,71 @@ describe('the turn strip', () => {
     expect(failedTurnFlags([rejected])).toEqual([true]);
     // A denial of another tool does not excuse it.
     expect(failedTurnFlags([turn({ stopReason: 'paused', pendingActions: [{ ...denied, toolName: 'other' }] }), rejected])).toEqual([false, true]);
+  });
+
+  it('reads a denied call the way turns stored before `rejected` existed wrote it: an error saying it was blocked before it ran', () => {
+    const denied: PendingActionView = { id: 'a', kind: 'tool_approval', toolName: 'echo_note', status: 'resolved', resolution: { decision: 'deny' } };
+    const paused = turn({ stopReason: 'paused', pendingActions: [denied] });
+    const old = turn({ steps: [{ name: 'echo_note', status: 'error', error: BLOCKED_BEFORE_RUN_ERROR }] });
+    expect(stepBlockedBeforeRun(old.steps![0])).toBe(true);
+    expect(stepBlockedBeforeRun({ name: 'x', status: 'rejected' })).toBe(true);
+    expect(failedTurnFlags([paused, old])).toEqual([false, false]);
+    // The same text with no denial before it is still a block by something other than the person.
+    expect(failedTurnFlags([old])).toEqual([true]);
+    // A call that really failed, whatever it is called, is never excused by a denial of the same tool.
+    const crashed = turn({ steps: [{ name: 'echo_note', status: 'error', error: 'connect ECONNREFUSED' }] });
+    expect(stepBlockedBeforeRun(crashed.steps![0])).toBe(false);
+    expect(failedTurnFlags([paused, crashed])).toEqual([false, true]);
+  });
+
+  it('does not draw a call flagged as denied by the person as a failure, with or without the pause before it', () => {
+    const flagged = turn({ steps: [{ name: 'echo_note', status: 'rejected', deniedByUser: true }] });
+    expect(failedTurnFlags([flagged])).toEqual([false]);
+    expect(stepFailed(flagged.steps![0])).toBe(false);
+    expect(stepFailed({ name: 'echo_note', status: 'rejected' })).toBe(true);
+  });
+
+  it('keeps a turn paused for a person, or cancelled, out of the failures even when its calls were stopped', () => {
+    const paused = turn({ stopReason: 'paused', steps: [{ name: 'a', status: 'success' }] });
+    expect(failedTurnFlags([paused, turn({ stopReason: 'cancelled', steps: [{ name: 'b', status: 'success' }] })])).toEqual([false, false]);
+  });
+});
+
+describe('the session page’s own labels', () => {
+  const tpKeys = ['compare', 'continue', 'delete', 'tabSession', 'tabEvents', 'tabTools', 'tabContext', 'enterToSend', 'contextOverride', 'contextOverrideHint'] as const;
+
+  it('are in both languages, translated', () => {
+    for (const key of tpKeys) {
+      expect(en.agents.sessionPage[key], key).toBeTruthy();
+      expect(tr.agents.sessionPage[key], key).toBeTruthy();
+      expect(tr.agents.sessionPage[key], key).not.toBe(en.agents.sessionPage[key]);
+    }
+    expect(Object.keys(tr.agents.sessionPage).sort()).toEqual(Object.keys(en.agents.sessionPage).sort());
+  });
+
+  it('are what the session page draws, not English written into the markup', () => {
+    const source = readFileSync(join(__dirname, '../../components/agents/session/AgentSessionView.tsx'), 'utf8');
+    for (const key of ['compare', 'continue', 'delete', 'enterToSend', 'contextOverride', 'contextOverrideHint']) {
+      expect(source, key).toContain(`tp('${key}')`);
+    }
+    for (const literal of ['>Compare<', 'Enter to send', '>Context override<', 'Applies to the next message only']) {
+      expect(source, literal).not.toContain(literal);
+    }
+    expect(source).not.toMatch(/^\s+(?:Compare|Continue|Delete)\s*$/m);
+  });
+
+  it('turn the side panel’s tabs Turkish: Oturum, Olaylar, Araçlar, Bağlam', () => {
+    const html = render(h(SessionSidePanel, {
+      agentId: 'a1', sessionId: 's1', status: 'idle', activityKey: '0', agentName: 'Agent', agentKey: 'agent',
+      pinnedVersion: '', messages: [], onGoToTurn: noop,
+    }), 'tr');
+    for (const label of ['Oturum', 'Olaylar', 'Araçlar', 'Bağlam']) expect(html).toContain(label);
+    expect(html).not.toContain('>Events<');
+    const english = render(h(SessionSidePanel, {
+      agentId: 'a1', sessionId: 's1', status: 'idle', activityKey: '0', agentName: 'Agent', agentKey: 'agent',
+      pinnedVersion: '', messages: [], onGoToTurn: noop,
+    }));
+    expect(english).toContain('Events');
   });
 });
 

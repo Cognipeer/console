@@ -19,6 +19,7 @@ import {
   listFiles,
   updateFileBucket,
   uploadFile,
+  composeUploadKeyHint,
 } from '@/lib/services/files';
 import {
   isDateInDashboardRange,
@@ -41,6 +42,36 @@ import {
 } from '../fastify-utils';
 
 const logger = createLogger('api:files');
+
+/**
+ * Session files name their agent by key; the page of a session is addressed by the
+ * agent's `_id`. Each distinct key is looked up once. A lookup that fails, or an
+ * agent that is gone, leaves the row without `agentId` — the listing never fails
+ * for it.
+ */
+async function withAgentIds<T extends { purpose?: string; agentKey?: string }>(
+  tenantDbName: string,
+  projectId: string,
+  records: T[],
+): Promise<Array<T & { agentId?: string }>> {
+  const keys = [...new Set(records.filter((record) => record.purpose === 'conversation' && record.agentKey).map((record) => record.agentKey!))];
+  if (keys.length === 0) return records;
+  const ids = new Map<string, string>();
+  try {
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+    for (const key of keys) {
+      const agent = await db.findAgentByKey(key, projectId);
+      if (agent) ids.set(key, String(agent._id));
+    }
+  } catch (error) {
+    logger.warn('Could not resolve the agents of session files', { error: error instanceof Error ? error.message : String(error) });
+  }
+  return records.map((record) => {
+    const agentId = record.purpose === 'conversation' && record.agentKey ? ids.get(record.agentKey) : undefined;
+    return agentId ? { ...record, agentId } : record;
+  });
+}
 
 type FileProviderQuery = {
   driver?: string;
@@ -436,7 +467,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       });
 
       return reply.code(200).send({
-        items: scoped.items,
+        items: await withAgentIds(session.tenantDbName, projectId, scoped.items),
         ...(scoped.folders ? { folders: scoped.folders, prefix: scoped.prefix } : {}),
         nextCursor: scoped.nextCursor,
       });
@@ -464,6 +495,9 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       if (!body.data || typeof body.data !== 'string') {
         return reply.code(400).send({ error: 'data is required' });
       }
+      // `folder` (alias `prefix`) = upload into that folder; `keyHint` is then the file's name in it.
+      const destination = composeUploadKeyHint({ folder: body.folder ?? body.prefix, keyHint: body.keyHint });
+      if ('error' in destination) return reply.code(400).send({ error: destination.error });
 
       const estimatedFileBytes = estimateBase64Bytes(body.data) ?? 0;
       const quotaContext = {
@@ -529,7 +563,7 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         createdBy: session.userId,
         data: body.data as string,
         fileName: body.fileName as string,
-        keyHint: body.keyHint as string | undefined,
+        ...(destination.keyHint ? { keyHint: destination.keyHint } : {}),
         metadata: body.metadata as Record<string, unknown> | undefined,
         providerKey: (body.providerKey as string | undefined) ?? undefined,
       });
@@ -598,7 +632,8 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         key,
       );
 
-      return reply.code(200).send({ record });
+      const [withAgent] = await withAgentIds(session.tenantDbName, projectId, [record]);
+      return reply.code(200).send({ record: withAgent });
     } catch (error) {
       if (
         error instanceof Error

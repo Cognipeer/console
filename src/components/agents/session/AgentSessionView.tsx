@@ -95,6 +95,7 @@ import {
     applyLocalResolution,
     cancelOpenActions,
     composerGate,
+    isStaleActionRefusal,
     openActionsOf,
     type AnswerRestriction,
     type ResolveBody,
@@ -104,7 +105,7 @@ import { useViewer } from './useViewer';
 import { interpretSessionEvent } from './sessionFollow';
 import ContextCompactionCard from './ContextCompactionCard';
 import { BudgetBanner, BudgetMeter } from './SessionBudgetControls';
-import { budgetPatchBody, sessionBudgetView } from './sessionBudgetUi';
+import { budgetPatchBody, sessionBudgetView, shouldContinueAfterBudgetChange } from './sessionBudgetUi';
 import { AttachButton, AttachmentChips, MessageAttachments } from './SessionAttachments';
 import {
     attachmentIds,
@@ -114,7 +115,7 @@ import {
     uploadContentType,
     type PendingAttachment,
 } from './sessionAttachmentsUi';
-import { sessionFilesUrl, sessionFileUrl, type SessionFileItem } from './sessionFilesUi';
+import { sessionFileLinks, sessionFilesUrl, sessionFileUrl, toAttachmentViews, type SessionFileItem } from './sessionFilesUi';
 import { useAgentModelVision } from './agentModelVision';
 import type { AgentToolConfig } from './sessionTools';
 import {
@@ -204,6 +205,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const t = useTranslations('agents.hitl');
     const tb = useTranslations('agents.budget');
     const ta = useTranslations('agents.attachments');
+    const tp = useTranslations('agents.sessionPage');
     const router = useRouter();
     const searchParams = useSearchParams();
 
@@ -264,6 +266,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const budgetBlocked = Boolean(budgetView?.exhausted);
     // The banner under the transcript that raises the budget or removes it.
     const budgetBannerShown = Boolean(budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly);
+    // A budget that stops (rather than pauses) does not carry the turn on once raised: a new message does.
+    const budgetStops = budgetView?.budget.onReach === 'stop';
     // What the composer does while the agent waits for an approval or an answer.
     const gate = composerGate(openActions.length, agent?.config?.humanInTheLoop?.onUserMessageWhilePending);
 
@@ -680,8 +684,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 const err = await res.json().catch(() => ({}));
                 // The request was answered elsewhere or timed out while this
                 // page was open: show how it really ended instead of a stale card.
-                if ((res.status === 409 && (err.type === 'action_not_pending' || err.code === 'action_not_pending'))
-                    || res.status === 410) {
+                if (isStaleActionRefusal(res.status, err)) {
                     notifications.show({ title: t('resolveFailed'), message: t('resolveStateChanged'), color: 'orange' });
                     await refreshSession();
                     return;
@@ -728,8 +731,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
-    /** Adds, changes or removes the session's budget. True once the server has stored it. */
-    const patchBudget = async (budget: IAgentSessionBudget | null): Promise<boolean> => {
+    /** Adds, changes or removes the session's budget. The session as the server stored it, or null when it was refused. */
+    const patchBudget = async (budget: IAgentSessionBudget | null): Promise<{ session: SessionRecord; continuable?: boolean } | null> => {
         setBudgetBusy(true);
         try {
             const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}`, {
@@ -744,14 +747,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             const data = await res.json();
             // Keep the transcript on screen: only the session's own fields changed.
             setSession((current) => ({ ...(data.session as SessionRecord), messages: current?.messages }));
-            return true;
+            return { session: data.session as SessionRecord, ...(typeof data.continuable === 'boolean' ? { continuable: data.continuable } : {}) };
         } catch (err) {
             notifications.show({
                 title: tb('saveFailed'),
                 message: err instanceof Error ? err.message : String(err),
                 color: 'red',
             });
-            return false;
+            return null;
         } finally {
             setBudgetBusy(false);
         }
@@ -798,10 +801,15 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
-    /** Banner / meter action: change the budget, then carry on if the session was stopped on it. */
+    /**
+     * Banner / meter action: change the budget, then carry on if the session was stopped on it. What the
+     * server answers decides: a session whose turn had finished when it crossed the budget is idle again
+     * after the raise, and asking it to continue would only be refused.
+     */
     const changeBudget = async (budget: IAgentSessionBudget | null) => {
-        const carryOn = Boolean(budgetView?.continuable);
-        if (await patchBudget(budget) && carryOn) await continueBudgetSession();
+        const wasContinuable = Boolean(budgetView?.continuable);
+        const stored = await patchBudget(budget);
+        if (shouldContinueAfterBudgetChange(wasContinuable, stored?.session, stored?.continuable)) await continueBudgetSession();
     };
 
     // A session opened while a turn is still running (started elsewhere, or
@@ -971,7 +979,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             leftSection={<IconArrowsLeftRight size={14} />}
                             onClick={() => setCompareOpen(true)}
                         >
-                            Compare
+                            {tp('compare')}
                         </Button>
                     ) : null}
                     {/*
@@ -987,7 +995,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         onClick={continueSession}
                         disabled={liveActive}
                     >
-                        Continue
+                        {tp('continue')}
                     </Button>
                     <Button
                         size="xs"
@@ -997,7 +1005,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         loading={deleting}
                         onClick={() => void deleteSession()}
                     >
-                        Delete
+                        {tp('delete')}
                     </Button>
                 </>
             }
@@ -1100,11 +1108,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 onResolve={(actionId, body) => void resolveAction(actionId, body)}
                                                                 restriction={restriction}
                                                                 budgetBannerShown={budgetBannerShown}
+                                                                budgetStops={budgetStops}
                                                             />
                                                         ) : (
                                                             <>
                                                                 <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
-                                                                <MessageAttachments attachments={msg.attachments} />
+                                                                <MessageAttachments attachments={toAttachmentViews(msg.attachments, { agentId, sessionId, files: sessionFiles })} />
                                                             </>
                                                         )}
                                                     </>
@@ -1190,6 +1199,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 disabled={liveActive}
                                 onRemove={(fileId) => void removeAttachment(fileId)}
                                 textOnlyModel={textOnlyModel}
+                                linksFor={(file) => sessionFileLinks(agentId, sessionId, file.fileId)}
                             />
                             <Textarea
                                 ref={composerRef}
@@ -1243,10 +1253,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 </Alert>
                             ) : null}
                             <Group justify="space-between" mt={6}>
-                                <Text size="10px" c="dimmed">Enter to send · Shift+Enter for a new line</Text>
+                                <Text size="10px" c="dimmed">{tp('enterToSend')}</Text>
                                 <UnstyledButton onClick={() => setOverrideOpen((value) => !value)}>
                                     <Group gap={3}>
-                                        <Text size="10px" c="dimmed">Context override</Text>
+                                        <Text size="10px" c="dimmed">{tp('contextOverride')}</Text>
                                         {overrideOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
                                     </Group>
                                 </UnstyledButton>
@@ -1254,7 +1264,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             <Collapse in={overrideOpen}>
                                 <Box mt="xs">
                                     <Text size="10px" c="dimmed" mb={4}>
-                                        Applies to the next message only, merged over the session context.
+                                        {tp('contextOverrideHint')}
                                     </Text>
                                     <RuntimeContextEditor value={runtimeContextJson} onChange={setRuntimeContextJson} />
                                 </Box>
@@ -1380,6 +1390,7 @@ function AssistantTurn({
     onResolve,
     restriction,
     budgetBannerShown,
+    budgetStops,
 }: {
     message: ChatMessage;
     busy: boolean;
@@ -1387,6 +1398,8 @@ function AssistantTurn({
     onResolve: (actionId: string, body: ResolveBody) => void;
     restriction: AnswerRestriction | null;
     budgetBannerShown: boolean;
+    /** The session budget stops the session instead of pausing it. */
+    budgetStops: boolean;
 }) {
     return (
         <Box className={classes.chatMarkdown}>
@@ -1405,7 +1418,7 @@ function AssistantTurn({
             ))}
             {/* A pause with cards says what it waits for on the cards themselves. */}
             {message.stopReason && !(message.stopReason === 'paused' && message.pendingActions?.length)
-                ? <StopNotice message={message} budgetBannerShown={budgetBannerShown} />
+                ? <StopNotice message={message} budgetBannerShown={budgetBannerShown} budgetStops={budgetStops} />
                 : null}
             <Markdown text={message.content} />
             {message.pendingActions?.length ? (

@@ -9,7 +9,7 @@
 
 import React, { createElement as h, type ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider, Table } from '@mantine/core';
@@ -18,6 +18,7 @@ import { AgentFilesPanelView, type BucketsState } from '@/components/agents/stud
 import {
   attachesNewUploads,
   bucketPickerItems,
+  bytesToMb,
   bucketProblem,
   bucketUnusableReason,
   compactAttachments,
@@ -25,6 +26,7 @@ import {
   filesSaveErrors,
   folderIssue,
   folderPreview,
+  mbToBytes,
   normalizeFolder,
   patchAttachments,
   type AttachmentBucketOption,
@@ -59,6 +61,7 @@ import {
   toggleInputModality,
 } from '@/components/models/inputModalities';
 import { ApiError } from '@/lib/api/client';
+import { getDefaultModelInputModalities } from '@/lib/services/models/modelCapabilities';
 import { en } from '@/lib/i18n/messages/en';
 import { tr } from '@/lib/i18n/messages/tr';
 
@@ -241,6 +244,29 @@ describe('Configure → Files', () => {
     expect(html).toContain('none is');
   });
 
+  it('keeps the image budget editable: images per request, megabytes per request, and how many recent ones are shown again', () => {
+    const html = panel({ enabled: true, bucketKey: 'docs' }, ready(docs));
+    for (const text of ['Images per model request', 'Image size per request (MB)', 'Show recent images again (messages)']) expect(html).toContain(text);
+    for (const placeholder of ['placeholder="6"', 'placeholder="12"', 'placeholder="2"']) expect(html).toContain(placeholder);
+
+    const stored = panel({ enabled: true, bucketKey: 'docs', maxImages: 4, maxBytes: 8_500_000, carryRecentImages: 0 }, ready(docs));
+    expect(stored).toContain('value="4"');
+    expect(stored).toContain('value="8.5"');
+    // 0 is a real choice (“never”), not an empty box.
+    expect(stored).toContain('value="0"');
+    expect(panel({ enabled: true, bucketKey: 'docs' }, ready(docs), {}, 'tr')).toContain('Model isteği başına görsel sayısı');
+  });
+
+  it('stores the image size in bytes and shows it in megabytes', () => {
+    expect(bytesToMb(12_000_000)).toBe(12);
+    expect(bytesToMb(undefined)).toBeUndefined();
+    expect(bytesToMb(0)).toBeUndefined();
+    expect(mbToBytes(8.5)).toBe(8_500_000);
+    expect(mbToBytes(0.1)).toBe(100_000);
+    expect(mbToBytes('')).toBeUndefined();
+    expect(patchAttachments({ enabled: true, bucketKey: 'docs' }, { carryRecentImages: 0 })).toEqual({ enabled: true, bucketKey: 'docs', carryRecentImages: 0 });
+  });
+
   it('shows the stored limits and a custom folder', () => {
     const html = panel({ enabled: true, bucketKey: 'docs', maxFiles: 4, maxFileSizeMb: 8, folder: 'uploads/2026', allowedMimeTypes: ['image/*', 'application/pdf'] }, ready(docs));
     expect(html).toContain('value="4"');
@@ -279,6 +305,37 @@ describe('Configure → Files', () => {
   it('warns that a server-disk bucket lives on one server', () => {
     expect(panel({ enabled: true, bucketKey: 'scratch' }, ready(docs, disk))).toContain('disk of the server running Console');
     expect(panel({ enabled: true, bucketKey: 'docs' }, ready(docs, disk))).not.toContain('disk of the server running Console');
+  });
+
+  it('calls a server-disk bucket single-node storage, and says portal users get the published version', () => {
+    const html = panel({ enabled: true, bucketKey: 'scratch' }, ready(docs, disk));
+    expect(html).toContain('single-node storage');
+    expect(html).toContain('Portal users get the settings of the published version, not of the draft.');
+    const turkish = panel({ enabled: true, bucketKey: 'scratch' }, ready(docs, disk), {}, 'tr');
+    expect(turkish).toContain('tek düğümlü depolama');
+    expect(turkish).toContain('yayımlanmış sürümün ayarlarını');
+  });
+
+  it('explains, instead of showing an outage, that the viewer may not list buckets — in the server’s words when it gave them', () => {
+    const forbidden = panel({ enabled: true, bucketKey: 'docs' }, { status: 'forbidden', message: 'Listing buckets needs the Document Store: ask an admin.' });
+    expect(forbidden).toContain('data-testid="buckets-forbidden"');
+    expect(forbidden).toContain('You cannot choose a bucket');
+    expect(forbidden).toContain('Listing buckets needs the Document Store: ask an admin.');
+    expect(forbidden).not.toContain('Could not load the buckets of this project.');
+    expect(forbidden).not.toContain('Manage buckets');
+    // The saved bucket is shown as it is, and cannot be changed from here.
+    expect((forbidden.match(/<input[^>]*>/g) ?? []).some((tag) => tag.includes('value="docs"') && tag.includes('disabled'))).toBe(true);
+
+    const plain = panel({ enabled: true, bucketKey: 'docs' }, { status: 'forbidden' });
+    expect(plain).toContain('Choosing where files are stored needs access to the Document Store.');
+    expect(panel({ enabled: true, bucketKey: 'docs' }, { status: 'forbidden' }, {}, 'tr')).toContain('Bucket seçemezsiniz');
+  });
+
+  it('asks the picker endpoint and reads a 403 as “forbidden”, anything else as an outage', () => {
+    const source = readFileSync(join(__dirname, '../../components/agents/studio/AgentFilesPanel.tsx'), 'utf8');
+    expect(source).toContain('res.status === 403');
+    expect(source).toContain("status: 'forbidden'");
+    expect(source).toContain("'/api/agents/attachments/buckets'");
   });
 
   it('shows a loading list and a failed one with a way to retry', () => {
@@ -371,6 +428,13 @@ describe('session files in the bucket view', () => {
     expect(html).not.toContain('href=');
     expect(html).toContain('gone · conv1');
     expect(html).toContain('Does not expire');
+  });
+
+  it('takes the agent’s id from the row the server sent, not from a second request for every agent', () => {
+    const source = readFileSync(join(__dirname, '../../components/files/FileObjectManager.tsx'), 'utf8');
+    expect(source).toContain('agentId={record.agentId}');
+    expect(source).not.toContain("'/api/agents'");
+    expect(source).not.toContain('agents-by-key');
   });
 
   it('marks an expired file', () => {
@@ -560,6 +624,39 @@ describe('a model’s input types in the forms', () => {
     expect(isMultimodalFor(['text', 'file'])).toBe(false);
     expect(isMultimodalFor(['text', 'image'])).toBe(true);
     expect(isMultimodalFor(['audio'])).toBe(true);
+  });
+
+  it('prefills from the very function the gateway resolves a model’s input types with', () => {
+    const cases: Array<[Parameters<typeof inferredInputModalities>[0], boolean, string]> = [
+      ['llm', false, 'gpt-4o'], ['llm', false, 'gpt-6-luna'], ['llm', false, 'plain-model'], ['llm', true, 'plain-model'],
+      ['stt', false, 'whisper'], ['ocr', false, 'ocr-1'], ['embedding', false, 'embed-1'], ['llm', false, ''],
+    ];
+    for (const [category, multimodal, modelId] of cases) {
+      expect(inferredInputModalities(category, modelId, multimodal), `${category}/${modelId}`)
+        .toEqual(getDefaultModelInputModalities(category, multimodal, modelId || undefined));
+    }
+  });
+
+  it('is never written back as a default: no form calls the category default, and both save only an explicit choice', () => {
+    const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(dir, entry.name);
+      return entry.isDirectory() ? walk(path) : /\.(?:ts|tsx)$/.test(entry.name) ? [path] : [];
+    });
+    const root = join(__dirname, '../..');
+    const offenders = [...walk(join(root, 'components')), ...walk(join(root, 'app/dashboard'))]
+      .filter((file) => {
+        const source = readFileSync(file, 'utf8');
+        return source.includes('getDefaultModelInputModalities') || /inputModalities:\s*\[\s*['"]text['"]\s*\]/.test(source);
+      })
+      .map((file) => file.slice(root.length + 1));
+    expect(offenders).toEqual([]);
+
+    for (const file of ['components/models/CreateModelModal.tsx', 'app/dashboard/models/[id]/edit/page.tsx']) {
+      const source = readFileSync(join(root, file), 'utf8');
+      expect(source, file).toContain('inputModalitiesPayload(');
+    }
+    // The old page that posts a model without capabilities leaves the input types to the detection as well.
+    expect(readFileSync(join(root, 'app/dashboard/models/new/page.tsx'), 'utf8')).not.toContain('inputModalities');
   });
 
   const checkboxes = (html: string) => html.match(/<input[^>]*type="checkbox"[^>]*>/g) ?? [];

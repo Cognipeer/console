@@ -16,6 +16,9 @@ export const SESSION_FILES_DEFAULTS = {
     retentionDays: 30,
     folder: 'agent-sessions',
     attachNewUploads: true,
+    maxImages: 6,
+    maxBytes: 12_000_000,
+    carryRecentImages: 2,
 } as const;
 
 /** Longest `attachments.folder` (after normalising). */
@@ -24,6 +27,8 @@ export const SESSION_FILES_FOLDER_MAX_LENGTH = 200;
 /** Names of the two read-only tools, in one place for the tool list and the approval exemption. */
 export const SESSION_FILES_LIST_TOOL = 'session_files_list';
 export const SESSION_FILES_READ_TOOL = 'session_files_read';
+/** Looks at an image of the session again; offered while the session holds an image and the model takes images. */
+export const SESSION_FILES_VIEW_IMAGE_TOOL = 'session_files_view_image';
 
 export interface ResolvedAttachmentsConfig {
     /** The switch as the agent's owner set it; whether files are really usable also needs a bucket (`attachmentsAvailability`). */
@@ -38,11 +43,22 @@ export interface ResolvedAttachmentsConfig {
     folder: string;
     /** Files nobody has sent yet ride along with the next message. */
     attachNewUploads: boolean;
+    /** Images one model request carries at most (oldest become a text placeholder). */
+    maxImages: number;
+    /** Image bytes one model request carries at most. */
+    maxBytes: number;
+    /** Recent image-bearing messages shown again when they fell out of the agent's context. 0 = off. */
+    carryRecentImages: number;
     bucketKey?: string;
 }
 
 function positive(value: unknown, fallback: number): number {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** A whole number >= 0 (0 is a real choice here: "never"). */
+function nonNegativeInt(value: unknown, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
 const FOLDER_CHARS = /^[A-Za-z0-9._\-/]*$/;
@@ -82,6 +98,9 @@ export function resolveAttachmentsConfig(raw?: IAgentAttachmentsConfig | null): 
         retentionDays: positive(raw?.retentionDays, SESSION_FILES_DEFAULTS.retentionDays),
         folder,
         attachNewUploads: raw?.attachNewUploads !== false,
+        maxImages: Math.floor(positive(raw?.maxImages, SESSION_FILES_DEFAULTS.maxImages)),
+        maxBytes: Math.floor(positive(raw?.maxBytes, SESSION_FILES_DEFAULTS.maxBytes)),
+        carryRecentImages: nonNegativeInt(raw?.carryRecentImages, SESSION_FILES_DEFAULTS.carryRecentImages),
         ...(typeof raw?.bucketKey === 'string' && raw.bucketKey.trim() ? { bucketKey: raw.bucketKey.trim() } : {}),
     };
 }

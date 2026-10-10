@@ -29,6 +29,7 @@ import {
 } from '@tabler/icons-react';
 import {
   ALL_DASHBOARD_SERVICES,
+  DASHBOARD_SUBPAGES,
   type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
@@ -415,10 +416,15 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
   /* ── Static service items ────────────────────────────────────────── */
 
   const services = useMemo<ResultItem[]>(() => {
-    return ALL_DASHBOARD_SERVICES.filter(
-      (s: DashboardServiceDefinition) =>
-        !s.tenantAdminOnly || isTenantAdmin,
-    ).map((s: DashboardServiceDefinition) => {
+    const entries = [
+      ...ALL_DASHBOARD_SERVICES.filter(
+        (s: DashboardServiceDefinition) =>
+          !s.tenantAdminOnly || isTenantAdmin,
+      ),
+      // Pages that sit inside another service's sub-nav (Agents → Webhooks) are found by name too.
+      ...DASHBOARD_SUBPAGES,
+    ];
+    return entries.map((s) => {
       const ServiceIcon = s.icon;
       const label = tNav(s.navLabelKey);
       const description = tNav(s.navDescriptionKey);

@@ -104,7 +104,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const stored = async (id: string) => (await db.findAgentConversationById(id))!;
 const logged = async (id: string) => db.listAgentSessionEvents(id);
 
-async function newSession(): Promise<IAgentConversation> {
+async function newSession(withBudget = true): Promise<IAgentConversation> {
   return db.createAgentConversation({
     tenantId,
     projectId: PROJECT_ID,
@@ -113,8 +113,7 @@ async function newSession(): Promise<IAgentConversation> {
     messages: [],
     metadata: { source: 'console' },
     createdBy: OWNER,
-    budget: { maxCostUsd: 1, onReach: 'pause' },
-    spentUsd: 0,
+    ...(withBudget ? { budget: { maxCostUsd: 1, onReach: 'pause' as const }, spentUsd: 0 } : {}),
   });
 }
 
@@ -267,5 +266,76 @@ describe('cancelling a background run that is inside a tool call', () => {
     expect(run.status).toBe('canceled');
     releaseTool(); // let the abandoned turn end
     await delay(100);
+  }, 20_000);
+
+  it('a turn abandoned at the ceiling that ends late writes nothing over the turn that followed it', async () => {
+    const id = String((await newSession())._id);
+    const created = await createBackgroundAgentRun({
+      tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+      conversationId: id, userMessage: 'first', userId: OWNER,
+      limits: { backgroundMaxDurationMs: 2_500, maxConcurrentRunsPerTenant: 0, maxConcurrentRunsPerProject: 0 },
+    });
+    if (created.kind !== 'created') throw new Error(created.kind);
+    const runId = String(created.run._id);
+    const job = runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+    await toolStarted;
+    await requestAgentRunCancellation(DB_NAME, tenantId, PROJECT_ID, runId);
+    await job; // the ceiling gave the slot up with the tool call still hanging
+
+    // The conversation is free: a newer turn runs and finishes.
+    const second = await executeAgentChatLocal({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, userMessage: 'second', userId: OWNER,
+    });
+    expect(second.status).toBe('completed');
+    const afterSecond = await stored(id);
+    expect(afterSecond).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
+    const eventsAfterSecond = await logged(id);
+
+    // The abandoned turn finally ends. Its end is not written over the newer turn's.
+    releaseTool();
+    await delay(500);
+    const final = await stored(id);
+    expect(final).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
+    expect(final.lastEventSeq).toBe(afterSecond.lastEventSeq);
+    const events = await logged(id);
+    // No `session.status_idle(cancelled)` / `agent.message` of the old turn after the newer turn's idle.
+    expect(events.slice(eventsAfterSecond.length)).toEqual([]);
+    expect(events.at(-1)!.type).toBe('session.work_done');
+    // Both turns' spend still lands: one request each.
+    expect(final.spentUsd).toBeCloseTo(2 * REQUEST_COST, 8);
+  }, 20_000);
+
+  it('a cancelled turn\'s spend is on the session even when the session has no budget', async () => {
+    const id = String((await newSession(false))._id);
+    const created = await createBackgroundAgentRun({
+      tenantId, tenantDbName: DB_NAME, projectId: PROJECT_ID, agentKey: AGENT_KEY,
+      conversationId: id, userMessage: 'first', userId: OWNER,
+    });
+    if (created.kind !== 'created') throw new Error(created.kind);
+    const runId = String(created.run._id);
+    const job = runAgentJobLocal({ runId, tenantId, tenantDbName: DB_NAME });
+    await toolStarted;
+    await requestAgentRunCancellation(DB_NAME, tenantId, PROJECT_ID, runId);
+    await delay(1400);
+    releaseTool();
+    await job;
+
+    const afterCancel = await stored(id);
+    expect(afterCancel.budget).toBeUndefined();
+    // A cancelled turn is not written to the transcript, but its one model request was billed.
+    expect(afterCancel.messages).toHaveLength(0);
+    expect(afterCancel.spentUsd).toBeCloseTo(REQUEST_COST, 8);
+
+    const second = await executeAgentChatLocal({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, conversationId: id, userMessage: 'second', userId: OWNER,
+    });
+    expect(second.status).toBe('completed');
+    const final = await stored(id);
+    // spent_usd == the sum of what the turns cost: the cancelled turn's request plus the second turn's.
+    const events = await logged(id);
+    const reported = events.filter((e) => e.type === 'agent.message')
+      .reduce((sum, e) => sum + ((e.data.usage as { costUsd?: number } | undefined)?.costUsd ?? 0), 0);
+    expect(final.spentUsd).toBeCloseTo(2 * REQUEST_COST, 8);
+    expect(final.spentUsd).toBeGreaterThanOrEqual(reported - 1e-9);
   }, 20_000);
 });

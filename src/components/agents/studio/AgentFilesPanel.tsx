@@ -40,6 +40,7 @@ import { ConfigBlock } from './ConfigSection';
 import {
     attachesNewUploads,
     bucketPickerItems,
+    bytesToMb,
     bucketProblem,
     bucketUnusableReason,
     DEFAULT_FILES_FOLDER,
@@ -49,6 +50,7 @@ import {
     folderPreview,
     MAX_FOLDER_LENGTH,
     MIME_TYPE_SUGGESTIONS,
+    mbToBytes,
     normalizeFolder,
     patchAttachments,
     type AttachmentBucketOption,
@@ -61,6 +63,8 @@ import {
 export type BucketsState =
     | { status: 'loading' }
     | { status: 'error' }
+    /** The viewer may not list buckets (no access to the Document Store); `message` is the server's explanation. */
+    | { status: 'forbidden'; message?: string }
     | { status: 'ready'; buckets: AttachmentBucketOption[] };
 
 export interface AgentFilesPanelViewProps {
@@ -84,8 +88,15 @@ export function useAttachmentBuckets(enabled: boolean): { state: BucketsState; r
         let cancelled = false;
         setState({ status: 'loading' });
         fetch('/api/agents/attachments/buckets', { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-            .then((data: { buckets?: AttachmentBucketOption[] }) => {
+            .then(async (res) => {
+                if (res.status === 403) {
+                    // Not an outage: the viewer has no access to the Document Store. The server says why.
+                    const body = await res.json().catch(() => ({})) as { error?: unknown };
+                    if (!cancelled) setState({ status: 'forbidden', ...(typeof body.error === 'string' && body.error ? { message: body.error } : {}) });
+                    return;
+                }
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json() as { buckets?: AttachmentBucketOption[] };
                 if (!cancelled) setState({ status: 'ready', buckets: Array.isArray(data.buckets) ? data.buckets : [] });
             })
             .catch(() => { if (!cancelled) setState({ status: 'error' }); });
@@ -204,6 +215,12 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                                 </Alert>
                             ) : null}
 
+                            {buckets.status === 'forbidden' ? (
+                                <Alert variant="light" color="yellow" icon={<IconInfoCircle size={16} />} p="sm" title={t('bucketForbiddenTitle')} data-testid="buckets-forbidden">
+                                    <Text size="sm">{buckets.message ?? t('bucketForbidden')}</Text>
+                                </Alert>
+                            ) : null}
+
                             {emptyProject ? (
                                 <Alert variant="light" color="yellow" icon={<IconInfoCircle size={16} />} p="sm" title={t('bucketEmptyTitle')}>
                                     <Stack gap="xs">
@@ -230,13 +247,15 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                                     set({ bucketKey: next ?? undefined });
                                 }}
                                 renderOption={renderBucketOption}
+                                // Without access to the Document Store the saved bucket stays as it is; it cannot be changed from here.
+                                disabled={buckets.status === 'forbidden'}
                                 rightSection={buckets.status === 'loading' ? <Loader size={14} /> : undefined}
                                 error={bucketError}
                                 withAsterisk
                                 maw={480}
                             />
 
-                            {!emptyProject ? (
+                            {!emptyProject && buckets.status !== 'forbidden' ? (
                                 <Group>
                                     <Button component={Link} href="/dashboard/files" size="compact-xs" variant="subtle" color="gray">
                                         {t('bucketManage')}
@@ -336,6 +355,43 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
                                 checked={attachesNewUploads(value)}
                                 onChange={(event) => set({ attachNewUploads: event.currentTarget.checked ? undefined : false })}
                             />
+                        </Stack>
+                    </ConfigBlock>
+
+                    <ConfigBlock title={t('imagesTitle')}>
+                        <Stack gap="sm">
+                            <SimpleGrid cols={{ base: 1, md: 3 }} spacing="sm">
+                                <NumberInput
+                                    label={t('cfgMaxImages')}
+                                    description={t('cfgMaxImagesDescription')}
+                                    placeholder={String(SESSION_FILES_DEFAULTS.maxImages)}
+                                    min={1}
+                                    max={50}
+                                    allowDecimal={false}
+                                    value={current.maxImages ?? ''}
+                                    onChange={(v) => set({ maxImages: typeof v === 'number' ? v : undefined })}
+                                />
+                                <NumberInput
+                                    label={t('cfgMaxImageMb')}
+                                    description={t('cfgMaxImageMbDescription')}
+                                    placeholder={String(SESSION_FILES_DEFAULTS.maxBytes / 1_000_000)}
+                                    min={0.1}
+                                    max={200}
+                                    decimalScale={1}
+                                    value={bytesToMb(current.maxBytes) ?? ''}
+                                    onChange={(v) => set({ maxBytes: mbToBytes(v) })}
+                                />
+                                <NumberInput
+                                    label={t('cfgCarryImages')}
+                                    description={t('cfgCarryImagesDescription')}
+                                    placeholder={String(SESSION_FILES_DEFAULTS.carryRecentImages)}
+                                    min={0}
+                                    max={20}
+                                    allowDecimal={false}
+                                    value={current.carryRecentImages ?? ''}
+                                    onChange={(v) => set({ carryRecentImages: typeof v === 'number' ? v : undefined })}
+                                />
+                            </SimpleGrid>
                         </Stack>
                     </ConfigBlock>
 

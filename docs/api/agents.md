@@ -227,7 +227,7 @@ The conversation a response belongs to is a session. Besides the Responses call,
 | `GET /agents/sessions/{conversationId}/events` | The [event log](/guide/agent-session-events) (poll) |
 | `GET /agents/sessions/{conversationId}/events/stream` | The event log as Server-Sent Events, resumable with `Last-Event-ID` |
 | `POST /agents/sessions/{conversationId}/actions/{actionId}` | Answer an [approval or question](/guide/agent-approvals) |
-| `POST`, `GET /agents/sessions/{conversationId}/files`, `DELETE …/files/{fileId}` | [Session files](/guide/session-files) |
+| `POST`, `GET /agents/sessions/{conversationId}/files`, `GET …/files/{fileId}/content`, `DELETE …/files/{fileId}` | [Session files](/guide/session-files) |
 
 [Webhooks](/guide/webhooks) (`/webhooks`) notify your service when a session goes idle, needs an answer or reaches its budget. Field names of these endpoints are `snake_case`. The full request and response shapes are in the [OpenAPI spec](/api/openapi).
 

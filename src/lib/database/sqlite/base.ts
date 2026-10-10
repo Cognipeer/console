@@ -1057,6 +1057,7 @@ export class SQLiteProviderBase {
     // Session spend budget (JSON) and the running total of what the session's turns cost.
     this.ensureTableColumn(db, TABLES.agentConversations, 'budget', 'budget TEXT');
     this.ensureTableColumn(db, TABLES.agentConversations, 'spentUsd', 'spentUsd REAL');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);

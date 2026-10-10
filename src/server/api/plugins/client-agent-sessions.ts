@@ -543,6 +543,14 @@ function clientRefusal(outcome: ResolveOutcome): { status: number; body: unknown
     case 'not_found':
       return { status: 404, body: apiErrorBody('not_found_error', 'Request not found', 'action_not_found') };
     case 'not_pending':
+      // Told apart so a client can say what happened to it: answered elsewhere, cancelled (a new
+      // message, a run cancel, the timeout policy), or timed out.
+      if (outcome.status === 'cancelled') {
+        return { status: 409, body: apiErrorBody('invalid_request_error', 'This request was cancelled', 'action_cancelled', { action_status: outcome.status }) };
+      }
+      if (outcome.status === 'expired') {
+        return { status: 410, body: apiErrorBody('invalid_request_error', 'This request has expired', 'action_expired', { action_status: outcome.status }) };
+      }
       return {
         status: 409,
         body: apiErrorBody('invalid_request_error', 'This request is no longer open', 'action_not_pending', { action_status: outcome.status }),

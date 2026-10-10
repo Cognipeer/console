@@ -13,6 +13,13 @@ export interface FileBucketView extends Omit<IFileBucketRecord, '_id'> {
 
 export interface FileRecordView extends Omit<IFileRecord, '_id'> {
   id: string;
+  /**
+   * A session file (`purpose: 'conversation'`): the `_id` of the agent that owns
+   * the session, for the Session link — `agentKey` alone cannot build the page's
+   * URL. Set by the Document Store routes when they list or read a record; absent
+   * when the agent no longer exists.
+   */
+  agentId?: string;
 }
 
 export type FileRecordListItem = FileRecordView;

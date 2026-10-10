@@ -251,6 +251,35 @@ describeForEachProvider('Agent session events / pending actions', (getDb) => {
     expect(await spent()).toBeCloseTo(3, 8);
   });
 
+  it('writes the runtime fields conditionally on the owning turn, and says whether it did', async () => {
+    const db = getDb();
+    const conv = await db.createAgentConversation({ tenantId, projectId, agentKey, messages: [], createdBy: 'u1' });
+    const id = String(conv._id);
+
+    // A session from before owners were recorded accepts a conditional write.
+    expect(await db.updateAgentConversationRuntime(id, { runtimeStatus: 'idle', stopReason: 'error' }, { onlyIfTurn: 'any' })).toBe(true);
+
+    // A turn takes the session; its own end lands.
+    expect(await db.updateAgentConversationRuntime(id, { runtimeStatus: 'running', runtimeTurnId: 't1' })).toBe(true);
+    expect(await db.updateAgentConversationRuntime(id, { runtimeStatus: 'idle', stopReason: 'end_turn' }, { onlyIfTurn: 't1' })).toBe(true);
+    expect(await db.findAgentConversationById(id)).toMatchObject({ runtimeStatus: 'idle', stopReason: 'end_turn' });
+
+    // A newer turn took it: the older one's end is refused and changes nothing.
+    await db.updateAgentConversationRuntime(id, { runtimeStatus: 'running', runtimeTurnId: 't2' });
+    expect(await db.updateAgentConversationRuntime(id, { runtimeStatus: 'idle', stopReason: 'cancelled', lastEventSeq: 99 }, { onlyIfTurn: 't1' })).toBe(false);
+    const found = (await db.findAgentConversationById(id))!;
+    expect(found).toMatchObject({ runtimeStatus: 'running', stopReason: 'end_turn' });
+    expect(found.lastEventSeq).toBeUndefined();
+    // The owner marker is internal: no read returns it.
+    expect(found).not.toHaveProperty('runtimeTurnId');
+    expect((await db.listAgentConversations(agentKey, { projectId }))[0]).not.toHaveProperty('runtimeTurnId');
+    expect((await db.listAgentConversationPage({ projectId, limit: 5 }))[0]).not.toHaveProperty('runtimeTurnId');
+
+    // The owner can still write, and a plain (unconditional) write is untouched by the condition.
+    expect(await db.updateAgentConversationRuntime(id, { runtimeStatus: 'idle', stopReason: 'end_turn' }, { onlyIfTurn: 't2' })).toBe(true);
+    expect(await db.updateAgentConversationRuntime(id, { stopReason: 'error' })).toBe(true);
+  });
+
   it('persists stopReason on a finalized agent run', async () => {
     const db = getDb();
     const conv = `c-${Math.random().toString(36).slice(2, 8)}`;

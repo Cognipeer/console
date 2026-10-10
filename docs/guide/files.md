@@ -78,7 +78,7 @@ The answer then holds the files directly in that folder (`files`) and its sub-fo
 
 ### Session files
 
-Files attached to agent sessions are ordinary files in the bucket the agent names (**Configure → Files**), under `<folder>/<agentKey>/<sessionId>/`; they carry `purpose: "conversation"`, the session they belong to, when they expire and who uploaded them. A bucket an agent keeps session files in cannot be deleted or disabled until the agent uses another one (`409 bucket_in_use`, naming the agents).
+Files attached to agent sessions are ordinary files in the bucket the agent names (**Configure → Files**), under `<folder>/<agentKey>/<sessionId>/`; they carry `purpose: "conversation"`, the session they belong to, when they expire and who uploaded them. A bucket an agent keeps session files in cannot be deleted or disabled until the agent uses another one (`409 bucket_in_use`, naming the agents — also an agent whose *published* version still uses it). A session file's row carries `agentId`, the `_id` of its agent, so a Session link can be built. Uploading from inside a folder: add `folder` (alias `prefix`) to the upload body — the file lands in it under a generated name, or under `keyHint` taken as its name in the folder; a `..` or `.` segment is refused.
 
 ## Markdown Conversion
 

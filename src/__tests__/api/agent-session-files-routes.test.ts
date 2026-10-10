@@ -80,6 +80,13 @@ vi.mock('@/lib/services/agents/agentActionResolution', () => ({
 vi.mock('@/lib/services/agents/agentSpendLimits', () => ({ assertQueuedTurnSpendAllowed: vi.fn() }));
 vi.mock('@/lib/services/agents/agentAttachmentInfo', () => ({ describeAgentAttachments: vi.fn() }));
 vi.mock('@/lib/services/agents/sessionBudgetService', () => ({ updateSessionBudget: vi.fn() }));
+// Reading the bucket list needs read access to Files; granted here (the rule itself is covered in agent-files-bucket-permission.test.ts).
+vi.mock('@/server/api/plugins/files-permission', () => ({
+  sessionHasFilesPermission: vi.fn(async () => true),
+  tokenHasFilesPermission: vi.fn(() => true),
+  FILES_READ_REQUIRED_MESSAGE: 'read',
+  FILES_WRITE_REQUIRED_MESSAGE: 'write',
+}));
 vi.mock('@/lib/services/agents/sessionFiles', async () => {
   const config = await import('@/lib/services/agents/sessionFilesConfig');
   return {
@@ -87,6 +94,7 @@ vi.mock('@/lib/services/agents/sessionFiles', async () => {
     uploadSessionFile: vi.fn(),
     listSessionFiles: vi.fn(),
     deleteSessionFile: vi.fn(),
+    readSessionFileContent: vi.fn(),
   };
 });
 vi.mock('@/lib/services/agents/responseInputFiles', async () => {
@@ -127,7 +135,7 @@ import {
 } from '@/lib/services/agents';
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
-import { deleteSessionFile, listSessionFiles, uploadSessionFile } from '@/lib/services/agents/sessionFiles';
+import { deleteSessionFile, listSessionFiles, readSessionFileContent, uploadSessionFile } from '@/lib/services/agents/sessionFiles';
 import { storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
 import { resolveAgentExecutionLimits, validateCallbackRequest } from '@/lib/services/agents/agentRunService';
@@ -294,6 +302,83 @@ describe('dashboard: list and delete', () => {
   });
 });
 
+const CONTENT = {
+  data: Buffer.from('hello'), contentType: 'text/plain', disposition: 'attachment', size: 5,
+  contentDisposition: 'attachment; filename="notes.txt"; filename*=UTF-8\'\'notes.txt',
+};
+
+describe('dashboard: file content', () => {
+  it('serves the bytes with the type of the file, a sanitised disposition and the headers that make it safe from our origin', async () => {
+    mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
+    const res = await app.inject({ method: 'GET', url: `${DASH_URL}/f1/content`, headers: dashHeaders });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('hello');
+    expect(res.headers).toMatchObject({
+      'content-type': 'text/plain',
+      'content-length': '5',
+      'content-disposition': CONTENT.contentDisposition,
+      'cache-control': 'private, max-age=60',
+      'x-content-type-options': 'nosniff',
+    });
+    expect(readSessionFileContent).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1' }, 'conv-1', 'f1', {});
+  });
+
+  it('passes ?variant and ?disposition on, and refuses values it does not know', async () => {
+    mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
+    await app.inject({ method: 'GET', url: `${DASH_URL}/f1/content?variant=markdown&disposition=inline`, headers: dashHeaders });
+    expect(mockFn(readSessionFileContent).mock.calls[0]![3]).toEqual({ variant: 'markdown', disposition: 'inline' });
+    mockFn(readSessionFileContent).mockClear();
+    for (const bad of ['variant=text', 'disposition=download']) {
+      const res = await app.inject({ method: 'GET', url: `${DASH_URL}/f1/content?${bad}`, headers: dashHeaders });
+      expect(res.statusCode, bad).toBe(400);
+    }
+    expect(readSessionFileContent).not.toHaveBeenCalled();
+  });
+
+  it('404s a file that is not on this session, answers a missing text version as 409, and checks the session first', async () => {
+    mockFn(readSessionFileContent).mockResolvedValue(null);
+    expect((await app.inject({ method: 'GET', url: `${DASH_URL}/zzz/content`, headers: dashHeaders })).statusCode).toBe(404);
+    mockFn(readSessionFileContent).mockRejectedValue(new AgentAttachmentError(409, 'markdown_unavailable', 'This file has no text version.'));
+    const res = await app.inject({ method: 'GET', url: `${DASH_URL}/f1/content?variant=markdown`, headers: dashHeaders });
+    expect(res.statusCode).toBe(409);
+    expect(parseJsonBody<Record<string, unknown>>(res.body)).toMatchObject({ code: 'markdown_unavailable' });
+
+    mockFn(readSessionFileContent).mockClear();
+    mockFn(getConversationById).mockResolvedValue(conversation({ agentKey: 'someone-else' }));
+    expect((await app.inject({ method: 'GET', url: `${DASH_URL}/f1/content`, headers: dashHeaders })).statusCode).toBe(404);
+    // A session that came in over the API is readable (it is only read-only for uploads and deletes).
+    mockFn(getConversationById).mockResolvedValue(conversation({ metadata: { source: 'api' } }));
+    mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
+    expect((await app.inject({ method: 'GET', url: `${DASH_URL}/f1/content`, headers: dashHeaders })).statusCode).toBe(200);
+  });
+});
+
+describe('client API: file content', () => {
+  it('serves the same bytes and headers, in the token’s project only', async () => {
+    mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
+    const res = await app.inject({ method: 'GET', url: `${CLIENT_URL}/f1/content`, headers: clientHeaders });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('hello');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['cache-control']).toBe('private, max-age=60');
+    expect(res.headers['content-disposition']).toBe(CONTENT.contentDisposition);
+    expect(readSessionFileContent).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1' }, 'conv-1', 'f1', {});
+
+    mockFn(getConversationById).mockResolvedValue(conversation({ projectId: 'proj-2' }));
+    expect((await app.inject({ method: 'GET', url: `${CLIENT_URL}/f1/content`, headers: clientHeaders })).statusCode).toBe(404);
+  });
+
+  it('answers a file that is not on the session as an error envelope, and bad query values as 400', async () => {
+    mockFn(readSessionFileContent).mockResolvedValue(null);
+    const missing = await app.inject({ method: 'GET', url: `${CLIENT_URL}/zzz/content`, headers: clientHeaders });
+    expect(missing.statusCode).toBe(404);
+    expect(parseJsonBody<{ error: { code: string } }>(missing.body).error.code).toBe('file_not_found');
+    const bad = await app.inject({ method: 'GET', url: `${CLIENT_URL}/f1/content?variant=pdf`, headers: clientHeaders });
+    expect(bad.statusCode).toBe(400);
+  });
+});
+
 describe('client API: upload, list, delete', () => {
   it('uploads a raw body and answers the file resource in snake_case', async () => {
     const bytes = Buffer.from('%PDF-1.4 ...');
@@ -305,6 +390,7 @@ describe('client API: upload, list, delete', () => {
       id: 'f1', object: 'agent.session.file', session_id: 'conv-1', name: 'notes.txt', mime_type: 'text/plain', size: 5,
       conversion_status: 'succeeded', bucket_key: 'docs', path: 'agent-sessions/field-ops/conv-1/notes-1.txt',
       created_at: '2026-01-01T00:00:00.000Z', expires_at: '2026-01-31T00:00:00.000Z',
+      content_url: '/api/client/v1/agents/sessions/conv-1/files/f1/content',
     });
     const call = mockFn(uploadSessionFile).mock.calls[0]![0];
     expect(call).toMatchObject({
