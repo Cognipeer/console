@@ -87,7 +87,7 @@ Newest first:
 }
 ```
 
-A row is the session without its transcript (`message_count` instead) and without `pending_actions` — fetch one session to see those. The cursor marks the last row you read, so a session created while you page never shifts a row into or out of a page you already have. Which sessions a token sees follows the project, as for every other session call - and, when a rule of the workspace stops the token's owner from viewing sessions that other people started (see [Who sees a session](#who-sees-a-session)), only the sessions the owner started: the rows are cut before the page, so `limit` and `has_more` are about what the caller may see.
+A row is the session without its transcript (`message_count` instead) and without `pending_actions` — fetch one session to see those. A row's `spent_usd` is the session's stored running total; it is `null` for a session that last ran before the total was kept (a list does not load transcripts to add the turns up), and the single session has the figure. The cursor marks the last row you read, so a session created while you page never shifts a row into or out of a page you already have. Which sessions a token sees follows the project, as for every other session call - and, when a rule of the workspace stops the token's owner from viewing sessions that other people started (see [Who sees a session](#who-sees-a-session)), only the sessions the owner started: the rows are cut before the page, so `limit` and `has_more` are about what the caller may see.
 
 ## Get, update, delete
 

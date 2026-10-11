@@ -112,6 +112,7 @@ import {
     attachmentIds,
     checkAttachmentCandidate,
     heldFileCount,
+    removeSessionFile,
     sessionFileUploadUrl,
     uploadContentType,
     type PendingAttachment,
@@ -263,6 +264,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [sessionFiles, setSessionFiles] = useState<SessionFileItem[] | null>(null);
     const [sessionFilesFailed, setSessionFilesFailed] = useState(false);
     const [deletingFiles, setDeletingFiles] = useState<string[]>([]);
+    /** Chips whose delete is still on its way: Send waits for them, or the file would go with the message. */
+    const [removingFiles, setRemovingFiles] = useState<string[]>([]);
     const budgetBlocked = Boolean(budgetView?.exhausted);
     // The banner under the transcript that raises the budget or removes it.
     const budgetBannerShown = Boolean(budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly);
@@ -374,9 +377,20 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
     /** Drops a file waiting to be sent — from the chips and from the session. */
     const removeAttachment = async (fileId: string) => {
-        setAttached((current) => current.filter((file) => file.fileId !== fileId));
-        await fetch(sessionFileUrl(agentId, sessionId, fileId), { method: 'DELETE' }).catch(() => undefined);
-        void loadSessionFiles();
+        const file = attached.find((entry) => entry.fileId === fileId);
+        setRemovingFiles((ids) => [...ids, fileId]);
+        try {
+            const outcome = await removeSessionFile(sessionFileUrl(agentId, sessionId, fileId));
+            if (outcome.removed) {
+                setAttached((current) => current.filter((entry) => entry.fileId !== fileId));
+            } else {
+                // Still on the session: the chip stays, so what goes with the message is what the person sees.
+                notifications.show({ title: ta('filesDeleteFailed', { name: file?.name ?? fileId }), message: outcome.message, color: 'red' });
+            }
+        } finally {
+            setRemovingFiles((ids) => ids.filter((id) => id !== fileId));
+            void loadSessionFiles();
+        }
     };
 
     /** Deletes a file from the Files tab: the object, its text and the record go, and a chip waiting for it too. */
@@ -548,7 +562,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
      * a message is a breakage, and the two should not be the same failure.
      */
     const sendMessage = async () => {
-        if ((!input.trim() && attached.length === 0) || uploadingNames.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked) return;
+        if ((!input.trim() && attached.length === 0) || uploadingNames.length > 0 || removingFiles.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked) return;
         const message = input.trim();
         const sentFiles = attached;
         const startedAt = Date.now();
@@ -1246,7 +1260,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                         size="sm"
                                         variant="filled"
                                         onClick={() => void sendMessage()}
-                                        disabled={(!input.trim() && attached.length === 0) || uploadingNames.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked}
+                                        disabled={(!input.trim() && attached.length === 0) || uploadingNames.length > 0 || removingFiles.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked}
                                     >
                                         <IconSend size={14} />
                                     </ActionIcon>

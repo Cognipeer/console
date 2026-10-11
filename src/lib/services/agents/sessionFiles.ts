@@ -66,9 +66,13 @@ import {
     agentTakesAttachments,
     attachmentsAvailability,
     attachmentsUnavailableMessage,
+    fileTooLargeMessage,
     isImageMime,
     isMimeAllowed,
+    isSendableImageMime,
+    maxUploadBytes,
     resolveAttachmentsConfig,
+    sendableImageType,
     type ResolvedAttachmentsConfig,
 } from './sessionFilesConfig';
 import {
@@ -84,6 +88,7 @@ import {
     imageAnchorText,
     imageReferencePart,
     stripAttachmentBlock,
+    unsupportedImageNote,
     viewImageToolResult,
     wrapAttachmentBlock,
     type ContentPart,
@@ -103,6 +108,7 @@ export {
     attachmentsUnavailableMessage,
     isImageMime,
     isMimeAllowed,
+    isSendableImageMime,
     resolveAttachmentsConfig,
     type ResolvedAttachmentsConfig,
 };
@@ -290,16 +296,17 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
     }
     const cfg = availability.cfg;
 
-    const maxBytes = Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
+    const mimeType = resolveUploadMimeType(input.contentType, input.fileName);
+    // A picture is also held to what one model request carries: past that it could never be shown.
+    const maxBytes = maxUploadBytes(cfg, mimeType);
     const declaredBytes = typeof input.data === 'string' ? estimateBase64Size(input.data) : input.data.length;
     if (declaredBytes > maxBytes) {
-        throw new AgentAttachmentError(413, 'file_too_large', `File exceeds the ${cfg.maxFileSizeMb} MB limit of this agent.`);
+        throw new AgentAttachmentError(413, 'file_too_large', fileTooLargeMessage(cfg, mimeType));
     }
     if (declaredBytes === 0) {
         throw new AgentAttachmentError(400, 'empty_file', 'The file is empty.');
     }
 
-    const mimeType = resolveUploadMimeType(input.contentType, input.fileName);
     if (!isMimeAllowed(mimeType, cfg.allowedMimeTypes)) {
         throw new AgentAttachmentError(415, 'unsupported_file_type', `Files of type "${mimeType}" are not accepted by this agent.`);
     }
@@ -346,7 +353,7 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
     const buffer = typeof input.data === 'string' ? decodeBase64(input.data) : input.data;
     // The estimate above is for a string; the decoded size is what is stored.
     if (buffer.length > maxBytes) {
-        throw new AgentAttachmentError(413, 'file_too_large', `File exceeds the ${cfg.maxFileSizeMb} MB limit of this agent.`);
+        throw new AgentAttachmentError(413, 'file_too_large', fileTooLargeMessage(cfg, mimeType));
     }
 
     const result = await uploadFile(scope.tenantDbName, scope.tenantId, scope.projectId, {
@@ -558,7 +565,7 @@ export async function findUnsentSessionFiles(
 export interface SessionFileFacts {
     /** Holds at least one file. */
     any: boolean;
-    /** Holds at least one image. */
+    /** Holds at least one image a model request can carry (`isSendableImageMime`). */
     images: boolean;
 }
 
@@ -566,7 +573,7 @@ export async function conversationFileFacts(db: DatabaseProvider, conversationId
     if (!conversationId) return { any: false, images: false };
     try {
         const records = await db.listFileRecordsByConversation(conversationId);
-        return { any: records.length > 0, images: records.some((record) => isImageMime(record.contentType)) };
+        return { any: records.length > 0, images: records.some((record) => isSendableImageMime(record.contentType)) };
     } catch (error) {
         logger.debug('Could not look up session files', { error: error instanceof Error ? error.message : String(error) });
         return { any: false, images: false };
@@ -692,10 +699,13 @@ export interface SessionImageBytes {
  * a plain `data:` URL part would be measured and logged as text by the SDK.
  */
 export async function readSessionImage(scope: SessionFileScope, record: IFileRecord): Promise<SessionImageBytes> {
+    // Only a format the providers accept goes out as a media type; anything else would fail the request.
+    const mediaType = sendableImageType(record.contentType);
+    if (!mediaType) throw new Error(`"${record.name}" is not an image format the model can be shown.`);
     const original = await downloadFile(scope.tenantDbName, scope.tenantId, scope.projectId, record.bucketKey, record.key);
     return {
         base64: original.data.toString('base64'),
-        mediaType: record.contentType ?? 'image/png',
+        mediaType,
         bytes: original.data.length,
     };
 }
@@ -710,7 +720,7 @@ export function createSessionImageSource(scope: SessionFileScope, conversationId
     return {
         async find(fileId) {
             const record = await findSessionFileRecord(scope, conversationId, fileId);
-            if (!record || !isImageMime(record.contentType)) return null;
+            if (!record || !isSendableImageMime(record.contentType)) return null;
             records.set(fileId, record);
             return { name: record.name, size: record.size };
         },
@@ -778,17 +788,23 @@ export async function assembleTurnAttachments(input: {
 
     const warnings: string[] = [];
     const imageNotes: string[] = [];
+    const unsupportedNotes: string[] = [];
     const images: ImagePart[] = [];
     const documents: Array<{ record: IFileRecord; id: string; text: string | null }> = [];
 
     for (const record of records) {
         const id = String(record._id);
-        if (isImageMime(record.contentType)) {
+        if (isSendableImageMime(record.contentType)) {
             if (!input.supportsVision) {
                 imageNotes.push(`[Image "${escapeAttribute(record.name)}" (id ${id}) is attached, but this model cannot read images.]`);
                 continue;
             }
             images.push(imageReferencePart(id, record.name));
+            continue;
+        }
+        if (isImageMime(record.contentType)) {
+            // A picture in a format no provider takes (tiff, svg, heic, ...): kept as a file with no text.
+            unsupportedNotes.push(unsupportedImageNote({ name: record.name, fileId: id, mimeType: record.contentType ?? 'image' }));
             continue;
         }
         let text: string | null = null;
@@ -813,6 +829,7 @@ export async function assembleTurnAttachments(input: {
         documentsUnreadable: unreadable.length,
         imagesShown: images.length,
         imagesHidden: imageNotes.length,
+        imagesUnsupported: unsupportedNotes.length,
     })];
     if (inline) {
         for (const doc of readable) {
@@ -829,7 +846,7 @@ export async function assembleTurnAttachments(input: {
     for (const doc of unreadable) {
         lines.push(`[File "${escapeAttribute(doc.record.name)}" (id ${doc.id}) is attached, but its text could not be extracted (${doc.record.markdownStatus}).]`);
     }
-    lines.push(...imageNotes);
+    lines.push(...imageNotes, ...unsupportedNotes);
 
     return {
         block: wrapAttachmentBlock(lines),
@@ -899,7 +916,7 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
                     mimeType: file.mimeType,
                     size: file.size,
                     readable: file.conversionStatus === 'succeeded' && !isImageMime(file.mimeType),
-                    ...(isImageMime(file.mimeType) ? { image: true } : {}),
+                    ...(isSendableImageMime(file.mimeType) ? { image: true } : {}),
                 })));
             },
         ),
@@ -929,10 +946,13 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
                     return 'The file could not be read right now.';
                 }
                 if (text === null) {
-                    if (isImageMime(record.contentType)) {
+                    if (isSendableImageMime(record.contentType)) {
                         return deps.viewImage
                             ? `This file is an image; it has no text to read. Use ${SESSION_FILES_VIEW_IMAGE_TOOL} to look at it.`
                             : 'This file is an image; it has no text to read.';
+                    }
+                    if (isImageMime(record.contentType)) {
+                        return 'This file is an image in a format the model cannot be shown; it has no text to read.';
                     }
                     return 'This file has no readable text (it could not be converted).';
                 }
@@ -963,8 +983,10 @@ export function buildSessionFileTools(deps: SessionFileToolDeps): AgentSdkToolIn
                     const fileId = typeof args.fileId === 'string' ? args.fileId : '';
                     const record = fileId ? await findSessionFileRecord(scope, conversationId, fileId) : null;
                     if (!record) return `File "${fileId}" is not attached to this conversation. Use ${SESSION_FILES_LIST_TOOL} to see the files.`;
-                    if (!isImageMime(record.contentType)) {
-                        return `"${record.name}" is not an image. Use ${SESSION_FILES_READ_TOOL} to read it.`;
+                    if (!isSendableImageMime(record.contentType)) {
+                        return isImageMime(record.contentType)
+                            ? `"${record.name}" is an image in a format the model cannot be shown.`
+                            : `"${record.name}" is not an image. Use ${SESSION_FILES_READ_TOOL} to read it.`;
                     }
                     return viewImageToolResult(String(record._id), record.name);
                 },

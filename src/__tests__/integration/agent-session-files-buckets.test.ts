@@ -191,7 +191,7 @@ describe('what a client is told about an agent’s attachments', () => {
   });
 
   it('an explicit "text only" on the model beats its name', async () => {
-    await model('gpt-4o', { metadata: { capabilities: { inputModalities: ['text'] } } });
+    await model('gpt-4o', { metadata: { capabilities: { inputModalities: ['text'], inputModalitiesExplicit: true } } });
     expect((await describeFor({ modelKey: 'main' })).acceptsImages).toBe(false);
   });
 

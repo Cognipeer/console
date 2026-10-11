@@ -27,15 +27,28 @@ import {
     SESSION_FILES_READ_TOOL,
     SESSION_FILES_VIEW_IMAGE_TOOL,
     isImageMime,
+    isSendableImageMime,
 } from './sessionFilesConfig';
 
-export const ATTACHMENT_BLOCK_MARKER = '\n\n<attachments source="session-files">\n';
+const ATTACHMENT_BLOCK_TAG = '<attachments source="session-files">';
+export const ATTACHMENT_BLOCK_MARKER = `\n\n${ATTACHMENT_BLOCK_TAG}\n`;
 export const ATTACHMENT_BLOCK_END = '\n</attachments>';
 
 /** What the person typed: the user turn without the block the assembler added. */
 export function stripAttachmentBlock(text: string): string {
     const at = text.indexOf(ATTACHMENT_BLOCK_MARKER);
     return at >= 0 ? text.slice(0, at) : text;
+}
+
+/**
+ * The person's own text with the block's opening tag made harmless. The tag is
+ * what `stripAttachmentBlock` cuts at, so a person who typed it would have the
+ * rest of their message dropped from the transcript while the model read it.
+ * Applied to the text a turn starts from, so the model, the transcript and the
+ * event log all carry the same words.
+ */
+export function neutralizeAttachmentMarker(text: string): string {
+    return text.includes(ATTACHMENT_BLOCK_TAG) ? text.split(ATTACHMENT_BLOCK_TAG).join(`&lt;${ATTACHMENT_BLOCK_TAG.slice(1)}`) : text;
 }
 
 export function escapeAttribute(value: string): string {
@@ -107,6 +120,8 @@ export interface AttachmentCounts {
     imagesShown: number;
     /** Images the model is not shown, and why (`cannot read images` / `could not be read`). */
     imagesHidden: number;
+    /** Pictures in a format a model request cannot carry (tiff, svg, ...): kept as files, never shown. */
+    imagesUnsupported?: number;
 }
 
 /**
@@ -116,7 +131,8 @@ export interface AttachmentCounts {
  * documents to read with the tools, 1 image shown below."
  */
 export function attachmentSummaryLine(counts: AttachmentCounts): string {
-    const total = counts.documentsInline + counts.documentsPaged + counts.documentsUnreadable + counts.imagesShown + counts.imagesHidden;
+    const unsupported = counts.imagesUnsupported ?? 0;
+    const total = counts.documentsInline + counts.documentsPaged + counts.documentsUnreadable + counts.imagesShown + counts.imagesHidden + unsupported;
     const parts: string[] = [];
     if (counts.documentsInline > 0) parts.push(`${plural(counts.documentsInline, 'document')} included below`);
     if (counts.documentsPaged > 0) {
@@ -125,11 +141,17 @@ export function attachmentSummaryLine(counts: AttachmentCounts): string {
     if (counts.documentsUnreadable > 0) parts.push(`${plural(counts.documentsUnreadable, 'document')} whose text could not be extracted`);
     if (counts.imagesShown > 0) parts.push(`${plural(counts.imagesShown, 'image')} shown below`);
     if (counts.imagesHidden > 0) parts.push(`${plural(counts.imagesHidden, 'image')} not shown`);
+    if (unsupported > 0) parts.push(`${plural(unsupported, 'image')} in a format the model does not support`);
     return `The person attached ${plural(total, 'file')}: ${parts.join(', ')}.`;
 }
 
 export function wrapAttachmentBlock(lines: string[]): string {
     return lines.length > 0 ? `${ATTACHMENT_BLOCK_MARKER}${lines.join('\n')}${ATTACHMENT_BLOCK_END}` : '';
+}
+
+/** The line for a picture whose format a model request cannot carry: it exists, and the model cannot see it. */
+export function unsupportedImageNote(file: { name: string; fileId: string; mimeType: string }, tense: 'is' | 'was' = 'is'): string {
+    return `[Image "${escapeAttribute(file.name)}" (id ${file.fileId}) ${tense} attached, but its format (${escapeAttribute(file.mimeType)}) is not supported by the model.]`;
 }
 
 // ── Earlier turns (transcript fallback, re-attached images) ─────────────────
@@ -152,7 +174,8 @@ export function rebuildUserTurn(
     if (!attachments || attachments.length === 0) return text;
 
     const documents = attachments.filter((entry) => !isImageMime(entry.mimeType));
-    const images = attachments.filter((entry) => isImageMime(entry.mimeType));
+    const images = attachments.filter((entry) => isSendableImageMime(entry.mimeType));
+    const unsupported = attachments.filter((entry) => isImageMime(entry.mimeType) && !isSendableImageMime(entry.mimeType));
     const shown = options.supportsVision ? images : [];
     const hidden = options.supportsVision ? [] : images;
 
@@ -163,9 +186,11 @@ export function rebuildUserTurn(
             documentsUnreadable: 0,
             imagesShown: shown.length,
             imagesHidden: hidden.length,
+            imagesUnsupported: unsupported.length,
         }),
         ...documents.map((entry) => `- "${escapeAttribute(entry.name)}" (id ${entry.fileId})`),
         ...hidden.map((entry) => `[Image "${escapeAttribute(entry.name)}" (id ${entry.fileId}) was attached, but this model cannot read images.]`),
+        ...unsupported.map((entry) => unsupportedImageNote(entry, 'was')),
     ];
     const block = wrapAttachmentBlock(lines);
     if (shown.length === 0) return `${text}${block}`;
@@ -226,19 +251,36 @@ export function recentImageAttachments(
     for (let i = history.length - 1; i >= 0 && picked.length < turns; i -= 1) {
         const message = history[i]!;
         if (message.role !== 'user') continue;
-        const images = (message.attachments ?? []).filter((entry) => isImageMime(entry.mimeType));
+        const images = (message.attachments ?? []).filter((entry) => isSendableImageMime(entry.mimeType));
         if (images.length > 0) picked.unshift(images);
     }
     return picked.flat();
 }
 
-/** A user turn with images of earlier messages shown again after it. */
+/** What the block that introduces re-shown pictures says (the turn itself attached nothing). */
+const EARLIER_IMAGES_LINE = 'Pictures from earlier messages of this session are shown again below.';
+
+/**
+ * A user turn with images of earlier messages shown again after it.
+ *
+ * Their handles sit AFTER the attachment block marker — the turn's own block
+ * when it has one, else a short one of their own — so the transcript keeps only
+ * what the person typed (`stripAttachmentBlock`) and the handles never show up
+ * as if the person had written them.
+ */
 export function withEarlierImages(
     content: string | ContentPart[],
     images: ReadonlyArray<{ fileId: string; name: string }>,
 ): string | ContentPart[] {
     if (images.length === 0) return content;
     const parts: ContentPart[] = typeof content === 'string' ? [{ type: 'text', text: content }] : [...content];
+    const firstText = parts.findIndex((part) => part.type === 'text' && typeof (part as TextPart).text === 'string');
+    const hasBlock = parts.some((part) => part.type === 'text' && typeof (part as TextPart).text === 'string' && (part as TextPart).text.includes(ATTACHMENT_BLOCK_MARKER));
+    if (!hasBlock) {
+        const block = wrapAttachmentBlock([EARLIER_IMAGES_LINE]);
+        if (firstText >= 0) parts[firstText] = { type: 'text', text: `${(parts[firstText] as TextPart).text}${block}` };
+        else parts.unshift({ type: 'text', text: block });
+    }
     for (const image of images) parts.push(...imageParts(image.fileId, image.name, 'earlier'));
     return parts;
 }
