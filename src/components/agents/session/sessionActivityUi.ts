@@ -167,6 +167,9 @@ export function describeSessionEvent(event: SessionLogEvent): EventView | null {
         case 'agent.compaction':
             return { key: 'evCompaction', values: {}, tone: 'gray' };
         case 'action.required':
+            if (data.kind === 'client_tool') {
+                return { key: 'evClientToolRequested', values: { name: typeof data.toolName === 'string' ? data.toolName : '?' }, tone: 'blue' };
+            }
             return data.kind === 'user_question'
                 ? { key: 'evQuestionAsked', values: {}, tone: 'orange' }
                 : {
@@ -175,6 +178,11 @@ export function describeSessionEvent(event: SessionLogEvent): EventView | null {
                     tone: 'orange',
                 };
         case 'action.resolved': {
+            if (data.kind === 'client_tool') {
+                return data.ok === false
+                    ? { key: 'evClientToolFailed', values: { name: typeof data.toolName === 'string' ? data.toolName : '?' }, tone: 'red' }
+                    : { key: 'evClientToolAnswered', values: { name: typeof data.toolName === 'string' ? data.toolName : '?' }, tone: 'green' };
+            }
             if (data.expired) return { key: 'evActionExpired', values: {}, tone: 'gray' };
             if (data.cancelled) return { key: 'evActionCancelled', values: {}, tone: 'gray' };
             if (data.kind === 'user_question') return { key: 'evQuestionAnswered', values: {}, tone: 'green' };
@@ -208,6 +216,8 @@ export function describeSessionEvent(event: SessionLogEvent): EventView | null {
         }
         case 'session.error':
             return { key: 'evRunFailed', values: {}, tone: 'red', detail: excerpt(data.message) };
+        case 'session.truncated':
+            return { key: 'evTruncated', values: { removed: String(data.removedMessages ?? '') }, tone: 'gray' };
         case 'session.work_done':
             return null;
         default:

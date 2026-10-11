@@ -1006,6 +1006,7 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
       agentKey: extra.agentKey,
       body,
       authorize: extra.authorize ?? allow,
+      actor: ownerActor,
     });
   }
 

@@ -133,6 +133,7 @@ export default defineConfig({
             { text: 'Approvals & Questions', link: '/guide/agent-approvals' },
             { text: 'Agent Sessions API', link: '/guide/agent-sessions' },
             { text: 'Session Events', link: '/guide/agent-session-events' },
+            { text: 'Feedback & Message Actions', link: '/guide/agent-feedback-and-experience' },
             { text: 'Session Budgets', link: '/guide/agent-session-budgets' },
             { text: 'Webhooks', link: '/guide/webhooks' },
             { text: 'Session Files', link: '/guide/session-files' },

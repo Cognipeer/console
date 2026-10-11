@@ -1637,11 +1637,36 @@ export const TENANT_SCHEMA_SQL = `
     resolution TEXT,
     agentVersion INTEGER,
     usePublished INTEGER,
-    createdBy TEXT
+    createdBy TEXT,
+    clientTool TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_apa_conversation_status ON agent_pending_actions(conversationId, status);
   CREATE INDEX IF NOT EXISTS idx_apa_status_expiresAt ON agent_pending_actions(status, expiresAt);
   CREATE INDEX IF NOT EXISTS idx_apa_tenant_project_status ON agent_pending_actions(tenantId, projectId, status);
+
+  -- A person's rating of an assistant message (see IAgentMessageFeedback).
+  CREATE TABLE IF NOT EXISTS agent_message_feedback (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentKey TEXT NOT NULL,
+    agentVersion INTEGER,
+    conversationId TEXT NOT NULL,
+    messageId TEXT NOT NULL,
+    messageIndex INTEGER NOT NULL DEFAULT 0,
+    userId TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'dashboard',
+    portalId TEXT,
+    rating TEXT NOT NULL,
+    reasons TEXT NOT NULL DEFAULT '[]',
+    comment TEXT,
+    removedAt TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_amf_message_user ON agent_message_feedback(conversationId, messageId, userId);
+  CREATE INDEX IF NOT EXISTS idx_amf_agent_created ON agent_message_feedback(projectId, agentKey, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_amf_portal_created ON agent_message_feedback(portalId, createdAt);
 
   -- Outgoing webhook subscriptions and the deliveries owed to them (IWebhookEndpoint / IWebhookDelivery).
   CREATE TABLE IF NOT EXISTS webhook_endpoints (

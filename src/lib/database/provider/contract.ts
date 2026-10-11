@@ -11,6 +11,9 @@ import type {
   AgentSessionRuntimeStatus,
   IAgentConversationState,
   IAgentPendingAction,
+  IAgentMessageFeedback,
+  AgentMessageFeedbackFilter,
+  AgentMessageFeedbackTotals,
   IAgentSessionEvent,
   NewAgentSessionEvent,
   IAgentSkill,
@@ -1542,6 +1545,29 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   /** `status = pending AND expiresAt < now`, oldest first — the reconciler's timeout sweep. */
   listExpiredAgentPendingActions(now: Date, limit?: number): Promise<IAgentPendingAction[]>;
   deleteAgentPendingActions(conversationId: string): Promise<number>;
+
+  // ── Message feedback (tenant-specific; a person's rating of an assistant message) ──
+  /**
+   * Stores the rating, replacing the person's earlier one for the same message
+   * (`conversationId + messageId + userId`). `created` is false for a replacement.
+   */
+  upsertAgentMessageFeedback(
+    feedback: Omit<IAgentMessageFeedback, '_id' | 'createdAt' | 'updatedAt' | 'removedAt'>,
+  ): Promise<{ feedback: IAgentMessageFeedback; created: boolean }>;
+  findAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<IAgentMessageFeedback | null>;
+  /** Withdraws a rating. False when there was none. */
+  deleteAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<boolean>;
+  /** Every rating of one conversation, oldest first; `userId` narrows it to one person's. */
+  listAgentMessageFeedbackByConversation(conversationId: string, options?: { userId?: string }): Promise<IAgentMessageFeedback[]>;
+  /** An agent's ratings, newest first. */
+  listAgentMessageFeedback(
+    filter: AgentMessageFeedbackFilter,
+    options?: { limit?: number; skip?: number },
+  ): Promise<{ items: IAgentMessageFeedback[]; total: number }>;
+  aggregateAgentMessageFeedback(filter: AgentMessageFeedbackFilter): Promise<AgentMessageFeedbackTotals>;
+  /** Marks the ratings of messages at or after `fromIndex` as removed (the messages were cut from the transcript). */
+  markAgentMessageFeedbackRemoved(conversationId: string, fromIndex: number, at?: Date): Promise<number>;
+  deleteAgentMessageFeedbackByConversation(conversationId: string): Promise<number>;
 
   // ── Webhook subscriptions (tenant-specific) ──
   createWebhookEndpoint(

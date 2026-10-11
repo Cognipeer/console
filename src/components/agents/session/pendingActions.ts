@@ -31,7 +31,13 @@ export interface QuestionResolveBody {
     cancelled?: boolean;
 }
 
-export type ResolveBody = ApprovalResolveBody | QuestionResolveBody;
+/** Body of `POST …/actions/:actionId/resolve` for a client tool call: the page's result, or why it has none. */
+export interface ClientToolResolveBody {
+    output?: unknown;
+    error?: string;
+}
+
+export type ResolveBody = ApprovalResolveBody | QuestionResolveBody | ClientToolResolveBody;
 
 // ── Which actions are open ───────────────────────────────────────────────
 
@@ -59,6 +65,9 @@ export function patchAction(
 
 /** What the server will have recorded for this answer — shown at once, before the continuation streams in. */
 export function resolutionFromBody(body: ResolveBody): IAgentPendingActionResolution {
+    if (!('decision' in body) && !('answers' in body)) {
+        return body.error !== undefined ? { error: body.error } : { output: body.output };
+    }
     if ('answers' in body) {
         return { answers: body.answers, ...(body.cancelled ? { cancelled: true } : {}) };
     }
@@ -109,7 +118,9 @@ export type ResolvedKind =
     | 'answered'
     | 'skipped'
     | 'expired'
-    | 'cancelled';
+    | 'cancelled'
+    | 'tool_ran'
+    | 'tool_failed';
 
 /** How a settled action reads in the transcript. `null` while it is still pending. */
 export function resolvedKind(action: PendingActionView): ResolvedKind | null {
@@ -117,6 +128,7 @@ export function resolvedKind(action: PendingActionView): ResolvedKind | null {
     if (action.status === 'expired') return 'expired';
     if (action.status === 'cancelled') return 'cancelled';
     const resolution = action.resolution;
+    if (action.kind === 'client_tool') return resolution?.error !== undefined ? 'tool_failed' : 'tool_ran';
     if (action.kind === 'user_question') return resolution?.cancelled ? 'skipped' : 'answered';
     if (resolution?.decision === 'deny') return 'denied';
     return resolution?.approvedArgs ? 'approved_edited' : 'approved';

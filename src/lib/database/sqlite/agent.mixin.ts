@@ -12,6 +12,10 @@ import type {
   IAgentConversationListItem,
   IAgentConversationState,
   IAgentPendingAction,
+  IAgentMessageFeedback,
+  AgentMessageFeedbackFilter,
+  AgentMessageFeedbackTotals,
+  AgentFeedbackReason,
   IAgentSessionEvent,
   IAgentVersion,
   NewAgentSessionEvent,
@@ -303,6 +307,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       // The session's event log and pending approvals die with it.
       db.prepare(`DELETE FROM ${TABLES.agentSessionEvents} WHERE conversationId = @id`).run({ id });
       db.prepare(`DELETE FROM ${TABLES.agentPendingActions} WHERE conversationId = @id`).run({ id });
+      db.prepare(`DELETE FROM ${TABLES.agentMessageFeedback} WHERE conversationId = @id`).run({ id });
       return db.prepare(`DELETE FROM ${TABLES.agentConversations} WHERE id = @id`).run({ id }).changes === 1;
     }
 
@@ -548,10 +553,11 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       const insert = db.prepare(`
         INSERT INTO ${TABLES.agentPendingActions}
         (id, tenantId, projectId, agentKey, conversationId, runId, kind, sdkId, toolCallId, toolName, args, questions,
-         allowFreeText, status, requestedAt, expiresAt, resolvedAt, resolvedBy, resolution, agentVersion, usePublished, createdBy)
+         allowFreeText, status, requestedAt, expiresAt, resolvedAt, resolvedBy, resolution, agentVersion, usePublished, createdBy,
+         clientTool)
         VALUES (@id, @tenantId, @projectId, @agentKey, @conversationId, @runId, @kind, @sdkId, @toolCallId, @toolName, @args,
          @questions, @allowFreeText, @status, @requestedAt, @expiresAt, @resolvedAt, @resolvedBy, @resolution, @agentVersion,
-         @usePublished, @createdBy)
+         @usePublished, @createdBy, @clientTool)
       `);
       const created: IAgentPendingAction[] = actions.map((action) => ({
         ...action,
@@ -582,6 +588,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
             agentVersion: action.agentVersion ?? null,
             usePublished: action.usePublished === undefined ? null : action.usePublished ? 1 : 0,
             createdBy: action.createdBy ?? null,
+            clientTool: action.clientTool ? this.toJson(action.clientTool) : null,
           });
         }
       })();
@@ -654,7 +661,162 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       return db.prepare(`DELETE FROM ${TABLES.agentPendingActions} WHERE conversationId = @conversationId`).run({ conversationId }).changes;
     }
 
+    // ── Message feedback ─────────────────────────────────────────
+
+    async upsertAgentMessageFeedback(
+      feedback: Omit<IAgentMessageFeedback, '_id' | 'createdAt' | 'updatedAt' | 'removedAt'>,
+    ): Promise<{ feedback: IAgentMessageFeedback; created: boolean }> {
+      const db = this.getTenantDb();
+      const now = this.now();
+      const params = {
+        id: `fb_${this.newId().replace(/-/g, '').slice(0, 24)}`,
+        tenantId: feedback.tenantId,
+        projectId: feedback.projectId,
+        agentKey: feedback.agentKey,
+        agentVersion: feedback.agentVersion ?? null,
+        conversationId: feedback.conversationId,
+        messageId: feedback.messageId,
+        messageIndex: feedback.messageIndex,
+        userId: feedback.userId,
+        channel: feedback.channel,
+        portalId: feedback.portalId ?? null,
+        rating: feedback.rating,
+        reasons: this.toJson(feedback.reasons ?? []),
+        comment: feedback.comment ?? null,
+        now,
+      };
+      const existed = db.prepare(
+        `SELECT 1 FROM ${TABLES.agentMessageFeedback} WHERE conversationId = @conversationId AND messageId = @messageId AND userId = @userId`,
+      ).get(params) !== undefined;
+      // A replacement keeps its id and createdAt and is live again (a cleared `removedAt`).
+      db.prepare(`
+        INSERT INTO ${TABLES.agentMessageFeedback}
+        (id, tenantId, projectId, agentKey, agentVersion, conversationId, messageId, messageIndex, userId, channel,
+         portalId, rating, reasons, comment, removedAt, createdAt, updatedAt)
+        VALUES (@id, @tenantId, @projectId, @agentKey, @agentVersion, @conversationId, @messageId, @messageIndex, @userId,
+         @channel, @portalId, @rating, @reasons, @comment, NULL, @now, @now)
+        ON CONFLICT(conversationId, messageId, userId) DO UPDATE SET
+          agentVersion = excluded.agentVersion,
+          messageIndex = excluded.messageIndex,
+          channel = excluded.channel,
+          portalId = excluded.portalId,
+          rating = excluded.rating,
+          reasons = excluded.reasons,
+          comment = excluded.comment,
+          removedAt = NULL,
+          updatedAt = excluded.updatedAt
+      `).run(params);
+      const stored = (await this.findAgentMessageFeedback(feedback.conversationId, feedback.messageId, feedback.userId))!;
+      return { feedback: stored, created: !existed };
+    }
+
+    async findAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<IAgentMessageFeedback | null> {
+      const row = this.getTenantDb().prepare(
+        `SELECT * FROM ${TABLES.agentMessageFeedback} WHERE conversationId = @conversationId AND messageId = @messageId AND userId = @userId`,
+      ).get({ conversationId, messageId, userId }) as SqliteRow | undefined;
+      return row ? this.mapMessageFeedback(row) : null;
+    }
+
+    async deleteAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<boolean> {
+      return this.getTenantDb().prepare(
+        `DELETE FROM ${TABLES.agentMessageFeedback} WHERE conversationId = @conversationId AND messageId = @messageId AND userId = @userId`,
+      ).run({ conversationId, messageId, userId }).changes > 0;
+    }
+
+    async listAgentMessageFeedbackByConversation(conversationId: string, options?: { userId?: string }): Promise<IAgentMessageFeedback[]> {
+      const params: Record<string, unknown> = { conversationId };
+      let sql = `SELECT * FROM ${TABLES.agentMessageFeedback} WHERE conversationId = @conversationId`;
+      if (options?.userId) { sql += ' AND userId = @userId'; params.userId = options.userId; }
+      sql += ' ORDER BY messageIndex ASC, createdAt ASC, rowid ASC';
+      return (this.getTenantDb().prepare(sql).all(params) as SqliteRow[]).map((row) => this.mapMessageFeedback(row));
+    }
+
+    async listAgentMessageFeedback(
+      filter: AgentMessageFeedbackFilter,
+      options?: { limit?: number; skip?: number },
+    ): Promise<{ items: IAgentMessageFeedback[]; total: number }> {
+      const db = this.getTenantDb();
+      const { where, params } = this.feedbackWhere(filter);
+      const total = Number((db.prepare(`SELECT COUNT(*) AS cnt FROM ${TABLES.agentMessageFeedback} ${where}`).get(params) as SqliteRow).cnt) || 0;
+      const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
+      const skip = Math.max(0, options?.skip ?? 0);
+      const rows = db.prepare(
+        `SELECT * FROM ${TABLES.agentMessageFeedback} ${where} ORDER BY createdAt DESC, rowid DESC LIMIT @limit OFFSET @skip`,
+      ).all({ ...params, limit, skip }) as SqliteRow[];
+      return { items: rows.map((row) => this.mapMessageFeedback(row)), total };
+    }
+
+    async aggregateAgentMessageFeedback(filter: AgentMessageFeedbackFilter): Promise<AgentMessageFeedbackTotals> {
+      const db = this.getTenantDb();
+      const { where, params } = this.feedbackWhere(filter);
+      const counts = db.prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN rating = 'up' THEN 1 ELSE 0 END), 0) AS up,
+           COALESCE(SUM(CASE WHEN rating = 'down' THEN 1 ELSE 0 END), 0) AS down,
+           COALESCE(SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END), 0) AS withComment
+         FROM ${TABLES.agentMessageFeedback} ${where}`,
+      ).get(params) as SqliteRow;
+      const reasonRows = db.prepare(
+        `SELECT j.value AS reason, COUNT(*) AS cnt
+         FROM (SELECT reasons FROM ${TABLES.agentMessageFeedback} ${where}) AS f, json_each(f.reasons) AS j
+         GROUP BY j.value`,
+      ).all(params) as SqliteRow[];
+      const reasons: Partial<Record<AgentFeedbackReason, number>> = {};
+      for (const row of reasonRows) reasons[String(row.reason) as AgentFeedbackReason] = Number(row.cnt) || 0;
+      return { up: Number(counts.up) || 0, down: Number(counts.down) || 0, withComment: Number(counts.withComment) || 0, reasons };
+    }
+
+    async markAgentMessageFeedbackRemoved(conversationId: string, fromIndex: number, at: Date = new Date()): Promise<number> {
+      return this.getTenantDb().prepare(
+        `UPDATE ${TABLES.agentMessageFeedback} SET removedAt = @at
+         WHERE conversationId = @conversationId AND messageIndex >= @fromIndex AND removedAt IS NULL`,
+      ).run({ conversationId, fromIndex, at: at.toISOString() }).changes;
+    }
+
+    async deleteAgentMessageFeedbackByConversation(conversationId: string): Promise<number> {
+      return this.getTenantDb().prepare(
+        `DELETE FROM ${TABLES.agentMessageFeedback} WHERE conversationId = @conversationId`,
+      ).run({ conversationId }).changes;
+    }
+
     // ── Private helpers ──────────────────────────────────────────
+
+    private feedbackWhere(filter: AgentMessageFeedbackFilter): { where: string; params: Record<string, unknown> } {
+      const clauses = ['projectId = @projectId', 'agentKey = @agentKey'];
+      const params: Record<string, unknown> = { projectId: filter.projectId, agentKey: filter.agentKey };
+      if (filter.rating) { clauses.push('rating = @rating'); params.rating = filter.rating; }
+      if (filter.portalId) { clauses.push('portalId = @portalId'); params.portalId = filter.portalId; }
+      if (filter.reason) {
+        clauses.push('EXISTS (SELECT 1 FROM json_each(reasons) WHERE value = @reason)');
+        params.reason = filter.reason;
+      }
+      if (filter.hasComment) clauses.push("comment IS NOT NULL AND comment <> ''");
+      if (filter.from) { clauses.push('createdAt >= @from'); params.from = filter.from.toISOString(); }
+      if (filter.to) { clauses.push('createdAt <= @to'); params.to = filter.to.toISOString(); }
+      return { where: `WHERE ${clauses.join(' AND ')}`, params };
+    }
+
+    private mapMessageFeedback(row: SqliteRow): IAgentMessageFeedback {
+      return {
+        _id: String(row.id),
+        tenantId: String(row.tenantId),
+        projectId: String(row.projectId ?? ''),
+        agentKey: String(row.agentKey),
+        agentVersion: row.agentVersion === null || row.agentVersion === undefined ? null : Number(row.agentVersion),
+        conversationId: String(row.conversationId),
+        messageId: String(row.messageId),
+        messageIndex: Number(row.messageIndex) || 0,
+        userId: String(row.userId),
+        channel: String(row.channel),
+        ...(row.portalId ? { portalId: String(row.portalId) } : {}),
+        rating: String(row.rating) as IAgentMessageFeedback['rating'],
+        reasons: this.parseJson<AgentFeedbackReason[]>(row.reasons, []),
+        ...(row.comment ? { comment: String(row.comment) } : {}),
+        removedAt: row.removedAt ? new Date(row.removedAt as string) : null,
+        createdAt: new Date(row.createdAt as string),
+        updatedAt: new Date(row.updatedAt as string),
+      };
+    }
 
     private mapAgent(row: SqliteRow): IAgent {
       return {
@@ -706,6 +868,7 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
         agentVersion: row.agentVersion === null || row.agentVersion === undefined ? null : Number(row.agentVersion),
         ...(row.usePublished !== null && row.usePublished !== undefined ? { usePublished: Number(row.usePublished) === 1 } : {}),
         ...(row.createdBy ? { createdBy: String(row.createdBy) } : {}),
+        ...(row.clientTool ? { clientTool: this.parseJson<NonNullable<IAgentPendingAction['clientTool']>>(row.clientTool, { timeoutSeconds: 60 }) } : {}),
       };
     }
 

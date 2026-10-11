@@ -119,6 +119,7 @@ Authorization: Bearer <token>
 | Approve and stop asking | `{ "decision": "allow", "remember_for_session": true }` |
 | Answer a question | `{ "answers": { "Which environment?": "staging" } }` (a list of values for a multi-select) |
 | Skip a question | `{ "cancelled": true }` |
+| Answer a client tool | `{ "output": { "text": "…" } }` (any JSON, at most 64 KB), or `{ "error": "nothing is selected" }` when the page could not do it |
 
 `approved_args` has to be a JSON object that satisfies the tool's schema, or the call is refused with `400` and the request stays open. Tool guardrails still apply when the tool runs.
 
@@ -141,6 +142,32 @@ You can also read what a session is waiting on at any time with `GET /api/client
 A background run that pauses has the non-terminal status `requires_action`; its `result` carries the same `required_action`, and the `agent_run.requires_action` callback and webhook fire. Answering queues the same run again; it finishes as usual. Cancelling a paused run ends it and drops its open requests. Clients that poll until a terminal status should stop on `requires_action` too, or they wait for a person.
 
 Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`. Unless the agent cancels the pending request on a new message, a `message/send` to a conversation that is still waiting is refused, with the ids to answer in the error's `data.pending_action_ids`. `tasks/cancel` is not supported (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that waits on a person is ended by answering its requests through the actions endpoint above (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids. A caller who may not answer those requests gets the JSON-RPC error `-32010` (with a `decision_id`) from `tasks/cancel` on such a task, and from a `message/send` that would cancel the request.
+
+## Tools the page runs (`client_tool`)
+
+A chat that is embedded in a host page (a portal's widget) can let the agent use tools **that run in the page** — read what is selected, open a record — without any server-side connector. The embedding's admin declares which tools exist (name, description, input schema, timeout, and whether each call needs approval first); only those are offered, and only on a run that says it is embedded. Nothing declares them from a client request: they are never offered over the plain API.
+
+A call pauses the turn like an approval, as a pending action of kind `client_tool`:
+
+```json
+{
+  "id": "act_0123456789abcdef01234567",
+  "kind": "client_tool",
+  "tool_name": "get_selection",
+  "args": { "max": 100 },
+  "timeout_seconds": 30,
+  "status": "pending",
+  "expires_at": "2026-10-11T12:00:45.000Z"
+}
+```
+
+The page runs the tool and answers with `output` or `error` (table above). The turn then continues; the model reads `output` as the tool's result (after the agent's `tool.post` guardrails) and `error` as the tool failing.
+
+- A page that does not answer within the tool's timeout — plus a few seconds for the round trip — is answered by the console with the error *The host page did not answer.*, whatever the agent's *On timeout* setting says, and the turn goes on as a background job.
+- A tool the admin marked for approval asks a person first (an ordinary `tool_approval`), and only then the page.
+- `tool.pre` guardrails see the arguments before the page does. The audit trail (`agent.client_tool.resolve`) records the call and its result as digests and sizes, never as content; the session log has `action.required` / `action.resolved` and an `agent.tool_result` with `source: client`.
+- Only the person the chat belongs to can supply the page's `output` (it goes into the model's context as a tool result); an administrator or another project member — whom *Who can answer* lets approve a tool — can only give the call up with an `error`. Tool-access guardrails see the tool as `agent.client.<name>`.
+- Studio shows the open call as *Waiting for the page*, with a **Give up on it** button that answers with an error.
 
 ## Unattended runs
 

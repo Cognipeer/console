@@ -217,6 +217,13 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     { key: { status: 1, expiresAt: 1 }, options: { name: 'idx_status_expiresAt' } },
     { key: { tenantId: 1, projectId: 1, status: 1 }, options: { name: 'idx_tenant_project_status' } },
   ],
+  // A person's rating of an assistant message: one per person per message, listed
+  // per agent (newest first), per conversation and per portal.
+  agent_message_feedback: [
+    { key: { conversationId: 1, messageId: 1, userId: 1 }, options: { name: 'idx_message_user', unique: true } },
+    { key: { projectId: 1, agentKey: 1, createdAt: -1 }, options: { name: 'idx_agent_createdAt' } },
+    { key: { portalId: 1, createdAt: -1 }, options: { name: 'idx_portal_createdAt' } },
+  ],
   // Outgoing webhooks: endpoints are listed per tenant/project; deliveries are
   // swept by (status, nextAttemptAt) and read per endpoint, newest first.
   webhook_endpoints: [{ key: { tenantId: 1, projectId: 1 }, options: { name: 'idx_tenant_project' } }],

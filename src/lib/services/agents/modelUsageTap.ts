@@ -37,6 +37,8 @@ export interface ModelUsageTapContext {
     /** The usage row's `route` — tells an agent call apart from a gateway call. */
     route: string;
     agentKey?: string;
+    /** What the call is for when it is not the agent answering (`title`): rides on the usage row's request. */
+    purpose?: string;
     /**
      * Called once per model request with what it cost — the one place every
      * request of an agent passes through, so this is where the tenant's spend
@@ -126,7 +128,12 @@ function record(
         // conversation plus tool results, and the trace already holds it.
         // Duplicating it into every usage row would multiply storage for no
         // reader.
-        providerRequest: { model: ctx.model.key, stream: outcome.streamed, agentKey: ctx.agentKey },
+        providerRequest: {
+            model: ctx.model.key,
+            stream: outcome.streamed,
+            agentKey: ctx.agentKey,
+            ...(ctx.purpose ? { purpose: ctx.purpose } : {}),
+        },
         providerResponse: toolCalls ? { toolCalls } : {},
         ...(outcome.error
             ? { errorMessage: outcome.error instanceof Error ? outcome.error.message : String(outcome.error) }

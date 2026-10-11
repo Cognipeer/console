@@ -133,6 +133,15 @@ import {
   validateNativeConfigUpdate,
 } from './agent-config-write';
 import { requestCanNameBucket } from './files-permission';
+import { sessionHasAgentsPermission } from './agents-permission';
+import {
+  FeedbackError,
+  FEEDBACK_REASONS,
+  listAgentFeedback,
+  listSessionFeedback,
+  summarizeAgentFeedback,
+  toFeedbackView,
+} from '@/lib/services/agents/agentFeedback';
 
 const logger = createLogger('api:agents');
 
@@ -226,6 +235,32 @@ export async function requireScopedSession(
     return null;
   }
   return { ...scoped, conversation: loaded.conversation, owner: loaded.owner };
+}
+
+/** The window of a feedback query in days (default 30, at most 365). */
+function feedbackDays(rawQuery: unknown): number {
+  const days = Number((rawQuery as { days?: string } | undefined)?.days);
+  return Number.isFinite(days) && days >= 1 ? Math.min(Math.floor(days), 365) : 30;
+}
+
+/** The filter of the Feedback tab's queries, or the 400 message. */
+function parseFeedbackFilter(rawQuery: unknown, agentKey: string, projectId: string) {
+  const query = (rawQuery ?? {}) as Record<string, string | undefined>;
+  if (query.rating !== undefined && query.rating !== 'up' && query.rating !== 'down') {
+    return { error: '`rating` must be "up" or "down"' };
+  }
+  if (query.reason !== undefined && !(FEEDBACK_REASONS as readonly string[]).includes(query.reason)) {
+    return { error: `\`reason\` must be one of: ${FEEDBACK_REASONS.join(', ')}` };
+  }
+  return {
+    projectId,
+    agentKey,
+    from: new Date(Date.now() - feedbackDays(query) * 86_400_000),
+    ...(query.rating ? { rating: query.rating as 'up' | 'down' } : {}),
+    ...(query.reason ? { reason: query.reason as (typeof FEEDBACK_REASONS)[number] } : {}),
+    ...(query.portalId ? { portalId: query.portalId } : {}),
+    ...(query.hasComment === 'true' || query.hasComment === '1' ? { hasComment: true } : {}),
+  };
 }
 
 /**
@@ -1711,6 +1746,77 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       agent: scoped.agent,
       projectId: scoped.projectId,
     }));
+  }));
+
+  // ── Feedback: what people said about this agent's answers ──
+  //
+  // Counts and reasons are for everyone who can read agents; the words people wrote (and
+  // who wrote them) only for those who can change them (`canReadComments` says which).
+
+  app.get('/agents/:agentId/sessions/:sessionId/feedback', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
+      if (!scoped) return reply;
+      const canReadComments = await sessionHasAgentsPermission(scoped.session, 'write');
+      const rows = await listSessionFeedback({
+        tenantDbName: scoped.session.tenantDbName,
+        projectId: scoped.projectId,
+        conversationId: String(scoped.conversation._id),
+        agentKey: scoped.agent.key,
+      });
+      return reply.code(200).send({
+        feedback: rows.map((row) => {
+          const view = toFeedbackView(row, { includeComment: canReadComments });
+          return canReadComments ? view : { ...view, userId: undefined };
+        }),
+        canReadComments,
+      });
+    } catch (error) {
+      if (error instanceof FeedbackError) return reply.code(error.status).send({ error: error.message, code: error.code });
+      return sendRouteError(reply, error, 'List session feedback error', 'Failed to list feedback');
+    }
+  }));
+
+  app.get('/agents/:agentId/feedback', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const filter = parseFeedbackFilter(request.query, agent.key, projectId);
+      if ('error' in filter) return reply.code(400).send({ error: filter.error });
+      const query = (request.query ?? {}) as Record<string, string | undefined>;
+      const canReadComments = await sessionHasAgentsPermission(session, 'write');
+      const page = await listAgentFeedback(session.tenantDbName, filter, {
+        limit: Math.min(Math.max(Number(query.limit) || 25, 1), 100),
+        skip: Math.max(Number(query.skip) || 0, 0),
+      });
+      return reply.code(200).send({
+        items: page.items.map((row) => ({
+          ...toFeedbackView(row, { includeComment: canReadComments }),
+          conversationId: row.conversationId,
+          agentVersion: row.agentVersion ?? null,
+          ...(canReadComments ? {} : { userId: undefined }),
+        })),
+        total: page.total,
+        canReadComments,
+      });
+    } catch (error) {
+      return sendRouteError(reply, error, 'List agent feedback error', 'Failed to list feedback');
+    }
+  }));
+
+  app.get('/agents/:agentId/feedback/summary', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const { agent, projectId, session } = scoped;
+      const filter = parseFeedbackFilter(request.query, agent.key, projectId);
+      if ('error' in filter) return reply.code(400).send({ error: filter.error });
+      const summary = await summarizeAgentFeedback(session.tenantDbName, filter);
+      return reply.code(200).send({ summary, days: feedbackDays(request.query) });
+    } catch (error) {
+      return sendRouteError(reply, error, 'Summarize agent feedback error', 'Failed to summarize feedback');
+    }
   }));
 
   app.get('/agents/:agentId/sessions/:sessionId/actions', withApiRequestContext(async (request, reply) => {

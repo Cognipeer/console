@@ -559,13 +559,16 @@ export async function cleanupExpiredSessionFiles(
  */
 export async function findUnsentSessionFiles(
     scope: SessionFileScope,
-    conversation: Pick<IAgentConversation, '_id' | 'messages'>,
+    conversation: Pick<IAgentConversation, '_id' | 'messages'> & Partial<Pick<IAgentConversation, 'metadata'>>,
 ): Promise<IFileRecord[]> {
     const db = await tenantDb(scope.tenantDbName);
     const carried = new Set<string>();
     for (const message of conversation.messages ?? []) {
         for (const attachment of message.attachments ?? []) carried.add(attachment.fileId);
     }
+    // Files of messages that were cut from the transcript (truncate / regenerate / edit) were sent already.
+    const sent = conversation.metadata?.sentFileIds;
+    if (Array.isArray(sent)) for (const fileId of sent) if (typeof fileId === 'string') carried.add(fileId);
     const files = await db.listFileRecordsByConversation(String(conversation._id));
     return files.filter((record) => record.purpose === 'conversation'
         && record.projectId === scope.projectId
