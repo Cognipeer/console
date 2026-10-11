@@ -32,6 +32,19 @@ export function sessionStatusKind(input: {
     return 'idle';
 }
 
+/**
+ * Who a waiting session waits for, from the viewer's side: `you` (they may answer what it waits on, or the server did
+ * not say they may not), `elsewhere` (the server says they may not - an approver, the session's owner), or `null`
+ * (it waits on nobody). The Sessions list words its badge and its status filter by this, so a row never says "Waiting
+ * for you" to somebody who cannot answer.
+ */
+export type WaitingFor = 'you' | 'elsewhere' | null;
+
+export function waitingFor(row: { runtimeStatus?: string | null; canResolve?: boolean | null }): WaitingFor {
+  if (row.runtimeStatus !== 'requires_action') return null;
+  return row.canResolve === false ? 'elsewhere' : 'you';
+}
+
 export interface StopReasonBadge {
     /** Translation key under `agents.activity`. */
     key: string;

@@ -279,6 +279,21 @@ export function composerGate(
     return policy === 'cancel_pending' ? 'cancel' : 'blocked';
 }
 
+/**
+ * The composer's gate for THIS viewer. A viewer the server says may not answer the open request cannot send the
+ * message that would cancel it either (the server refuses it), so the composer waits - `blocked` - and says it waits
+ * for an approver (`waitingElsewhere`), in the words of the badge, instead of "your response".
+ */
+export function composerGateFor(
+    openCount: number,
+    policy: 'reject' | 'cancel_pending' | undefined,
+    blocked: AnswerBlockedReason | null | undefined,
+): { gate: ComposerGate; waitingElsewhere: boolean } {
+    const gate = composerGate(openCount, policy);
+    const waitingElsewhere = gate !== 'open' && isAnswerLocked(blocked);
+    return { gate: waitingElsewhere ? 'blocked' : gate, waitingElsewhere };
+}
+
 // ── Who may answer ──────────────────────────────────────────────────────
 
 /**
@@ -309,10 +324,28 @@ export interface ServerPendingAction {
 
 /**
  * The reason to tell the viewer about, or `null` when there is nothing to say: they may answer every open request,
- * or the server did not say. A notice, not a lock: the server decides again at resolve time, so the buttons stay
- * usable and a refusal is still reported.
+ * or the server did not say. The server decides again at resolve time; the page uses the verdict it handed over to
+ * say so up front (`isAnswerLocked`) instead of offering buttons that can only be refused.
  */
 export function answerBlockedReason(actions: readonly ServerPendingAction[] | undefined | null): AnswerBlockedReason | null {
     const blocked = (actions ?? []).find((action) => action.canResolve === false);
     return blocked ? (blocked.resolveBlockedReason ?? 'policy') : null;
+}
+
+/** The verdict of each open request the server says the viewer may not answer, by request id. */
+export function answerBlockedById(actions: readonly ServerPendingAction[] | undefined | null): Record<string, AnswerBlockedReason> {
+    const out: Record<string, AnswerBlockedReason> = {};
+    for (const action of actions ?? []) {
+        if (action.canResolve === false) out[action.id] = action.resolveBlockedReason ?? 'policy';
+    }
+    return out;
+}
+
+/**
+ * Do the cards of the open requests lock (every control disabled, the reason shown) for this verdict? Yes for a
+ * definite "no". `unavailable` is not one - the server could not check, so the viewer is told and the buttons stay,
+ * and the server decides when the answer is sent.
+ */
+export function isAnswerLocked(reason: AnswerBlockedReason | null | undefined): boolean {
+    return !!reason && reason !== 'unavailable';
 }

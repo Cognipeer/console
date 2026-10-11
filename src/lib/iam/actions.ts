@@ -182,6 +182,26 @@ export function resourceActionId(type: string, verb: string): string {
   return `${type}.${verb}`;
 }
 
+/**
+ * Service levels ADD UP, the way an effective level is read (effective.ts: `admin` counts only when `write` and `read`
+ * are allowed too): Admin includes Write and Read, Write includes Read. The level groups (`Read`, `Write`, `Admin`) and
+ * the service actions (`<service>.read|write|admin`) are separate Cedar actions, so the engine does not add them up
+ * by itself - an ALLOW rule that names only `webhooks.admin` would let nobody read a webhook. The policy compiler
+ * (policySpec.ts) therefore adds the lower levels to every allow rule; a deny rule keeps naming exactly what it blocks.
+ */
+const LOWER_LEVELS: Readonly<Record<ActionLevel, readonly ActionLevel[]>> = Object.freeze({
+  read: [],
+  write: ['read'],
+  admin: ['write', 'read'],
+});
+
+/** The ids an allow rule that names `def` also covers: the lower levels of the same group or service (none for Read, and for resource actions). */
+export function impliedLevelActionIds(def: { kind: ActionKind; level: ActionLevel; service?: string }): string[] {
+  if (def.kind === 'group') return LOWER_LEVELS[def.level].map((level) => LEVEL_TO_GROUP[level]);
+  if (def.kind === 'service' && def.service) return LOWER_LEVELS[def.level].map((level) => serviceActionId(def.service as string, level));
+  return [];
+}
+
 /** HTTP method -> service-level action level (mirrors getRequiredPermissionLevel's read/write split). */
 export function methodToActionLevel(method: string): 'read' | 'write' {
   const m = method.toUpperCase();

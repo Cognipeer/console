@@ -20,7 +20,9 @@ import StopNotice from '@/components/agents/session/StopNotice';
 import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel';
 import AgentHumanInTheLoopPanel from '@/components/agents/studio/AgentHumanInTheLoopPanel';
 import {
+  answerBlockedById,
   answerBlockedReason,
+  isAnswerLocked,
   isStaleActionRefusal,
   type PendingActionView,
 } from '@/components/agents/session/pendingActions';
@@ -31,6 +33,7 @@ import {
   sessionStatusKind,
   stopReasonBadge,
   stopReasonKey,
+  waitingFor,
   type SessionLogEvent,
   type SessionStatusKind,
 } from '@/components/agents/session/sessionActivityUi';
@@ -272,6 +275,24 @@ describe('a request that is no longer open', () => {
   });
 });
 
+describe('waitingFor (the Sessions list\'s badge and status filter)', () => {
+  it('says "you" unless the server says the viewer may not answer - and nothing for a session that waits on nobody', () => {
+    expect(waitingFor({ runtimeStatus: 'requires_action' })).toBe('you');
+    expect(waitingFor({ runtimeStatus: 'requires_action', canResolve: true })).toBe('you');
+    expect(waitingFor({ runtimeStatus: 'requires_action', canResolve: false })).toBe('elsewhere');
+    for (const runtimeStatus of ['idle', 'running', 'budget_paused', undefined, null]) {
+      expect(waitingFor({ runtimeStatus, canResolve: false }), String(runtimeStatus)).toBeNull();
+    }
+  });
+
+  it('the list filters by it: "Waiting for you" does not list what only somebody else can answer', () => {
+    const source = readFileSync(join(process.cwd(), 'src/components/agents/studio/SessionList.tsx'), 'utf8');
+    expect(source).toContain("waitingFor(session) !== (status === 'waiting' ? 'you' : 'elsewhere')");
+    expect(source).toContain("value: 'waiting_elsewhere'");
+    expect(source).not.toContain("if (session.runtimeStatus !== 'requires_action') return false;");
+  });
+});
+
 describe('who may answer an open request', () => {
   // The server decides (the policy engine's rule) and says why when the viewer cannot; the page only words it.
   it('says nothing when the server says the viewer may answer every open request, or says nothing at all', () => {
@@ -291,17 +312,111 @@ describe('who may answer an open request', () => {
   const open: PendingActionView = { id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', args: {}, status: 'pending' };
   const settled: PendingActionView = { ...open, id: 'act_2', status: 'resolved', resolution: { decision: 'allow' } };
 
-  it('shows the notice above an open request, and keeps Approve usable', () => {
+  // The opening tag of the first <button> whose label is `label` (Mantine puts `disabled=""` on it when it is).
+  const buttonTag = (html: string, label: string): string => {
+    const chunk = html.split('<button').slice(1).find((part) => part.includes(`>${label}<`));
+    return chunk === undefined ? '' : `<button${chunk.slice(0, chunk.indexOf('>') + 1)}`;
+  };
+  const disabled = (tag: string) => /\sdisabled(=|\s|>|\/)/.test(tag);
+  /** Every <input> of this type (attribute order is the renderer's business). */
+  const inputsOf = (html: string, type: string): string[] => (html.match(/<input[^>]*>/g) ?? []).filter((tag) => new RegExp(`type="${type}"`).test(tag));
+
+  it('shows the notice above an open request', () => {
     const html = render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'approvers_admin' }));
     expect(html).toContain('Only the session owner, workspace admins and the admins of the project can approve');
-    expect(html).toContain('Approve');
-    expect(html).not.toMatch(/<button[^>]*disabled[^>]*>(?:(?!<\/button>).)*Approve/);
     expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'approvers_owner' })))
       .toContain('Only the person who started this session can approve');
     expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'policy' })))
       .toContain('A rule of your workspace stops you');
     expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'session_owner' })))
       .toContain('Only its owner');
+  });
+
+  it('disables Approve, Deny, Edit arguments and Don\'t ask again for a viewer the server says may not answer - each with the reason', () => {
+    for (const reason of ['approvers_owner', 'approvers_admin', 'approvers_member', 'policy'] as const) {
+      const html = render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: reason }));
+      for (const label of ['Approve', 'Deny', 'Edit arguments']) {
+        const tag = buttonTag(html, label);
+        expect(tag, `${label} / ${reason}`).not.toBe('');
+        expect(disabled(tag), `${label} / ${reason}`).toBe(true);
+        // the reason rides on the control itself, not only in the notice above
+        expect(tag, `${label} / ${reason}`).toMatch(/title="[^"]{20,}"/);
+      }
+      const boxes = inputsOf(html, 'checkbox');
+      expect(boxes).toHaveLength(1);
+      expect(disabled(boxes[0])).toBe(true);
+      expect(html).toContain('data-locked="true"');
+    }
+  });
+
+  it('keeps every control usable for a viewer who may answer', () => {
+    for (const blocked of [null, undefined]) {
+      const html = render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked }));
+      for (const label of ['Approve', 'Deny', 'Edit arguments']) expect(disabled(buttonTag(html, label)), label).toBe(false);
+      expect(html).not.toContain('data-locked');
+    }
+  });
+
+  it('does not lock on "unavailable": the server could not check, which is no "no" - the notice is shown and the server decides on send', () => {
+    const html = render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'unavailable' }));
+    expect(html).toContain('answer-blocked');
+    expect(disabled(buttonTag(html, 'Approve'))).toBe(false);
+    expect(disabled(buttonTag(html, 'Deny'))).toBe(false);
+    expect(html).not.toContain('data-locked');
+    expect(isAnswerLocked('unavailable')).toBe(false);
+    expect(isAnswerLocked(null)).toBe(false);
+    expect(isAnswerLocked('policy')).toBe(true);
+  });
+
+  it('locks a question the same way: Send, Skip and the inputs', () => {
+    const question: PendingActionView = {
+      id: 'q_1', kind: 'user_question', status: 'pending',
+      questions: [{ question: 'Which environment?', options: [{ label: 'Staging' }, { label: 'Prod' }] }],
+    };
+    const html = render(h(PendingActionList, { actions: [question], busy: false, onResolve: noop, blocked: 'session_owner' }));
+    expect(disabled(buttonTag(html, 'Send'))).toBe(true);
+    expect(disabled(buttonTag(html, 'Skip'))).toBe(true);
+    expect(buttonTag(html, 'Send')).toMatch(/title="[^"]{10,}"/);
+    // every option and the free-text box
+    expect(inputsOf(html, 'radio').every((tag) => disabled(tag))).toBe(true);
+    expect(inputsOf(html, 'radio')).toHaveLength(2);
+    const typed = (page: string) => (page.match(/<input[^>]*>/g) ?? []).filter((tag) => tag.includes('aria-label="Which environment?"'));
+    expect(typed(html).map(disabled)).toEqual([true]);
+    // the same question, answerable: nothing is disabled but Send (nothing picked yet)
+    const open2 = render(h(PendingActionList, { actions: [question], busy: false, onResolve: noop, blocked: null }));
+    expect(disabled(buttonTag(open2, 'Skip'))).toBe(false);
+    expect(inputsOf(open2, 'radio').some(disabled)).toBe(false);
+    expect(typed(open2).map(disabled)).toEqual([false]);
+  });
+
+  it('locks only the requests the viewer may not answer when the verdict is given per request', () => {
+    const question: PendingActionView = { id: 'q_2', kind: 'user_question', status: 'pending', questions: [{ question: 'Which?', options: [{ label: 'A' }] }] };
+    const approval: PendingActionView = { ...open, id: 'act_9' };
+    const blockedById = answerBlockedById([
+      { id: 'act_9', canResolve: false, resolveBlockedReason: 'approvers_admin' },
+      { id: 'q_2', canResolve: true },
+    ]);
+    expect(blockedById).toEqual({ act_9: 'approvers_admin' });
+    const html = render(h(PendingActionList, { actions: [approval, question], busy: false, onResolve: noop, blocked: 'approvers_admin', blockedById }));
+    expect(disabled(buttonTag(html, 'Approve'))).toBe(true);
+    expect(disabled(buttonTag(html, 'Skip'))).toBe(false);
+    expect(html.match(/data-locked="true"/g)).toHaveLength(1);
+  });
+
+  it('the composer words its waiting for an approver in the badge\'s words, not "your response"', () => {
+    for (const messages of [en, tr]) {
+      const access = (messages as unknown as { agents: { sessionAccess: Record<string, string> } }).agents.sessionAccess;
+      expect(access.composerWaitingElsewhere).toBe(access.waitingElsewhereBadge);
+      expect(access.composerWaitingElsewhereNote.length).toBeGreaterThan(20);
+    }
+    expect(en.agents.sessionAccess.composerWaitingElsewhere).toBe('Waiting for an approver');
+    expect(en.agents.sessionAccess.composerWaitingElsewhereNote).not.toMatch(/your response/i);
+  });
+
+  it('words the reason on the controls in Turkish too', () => {
+    const html = render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'approvers_owner' }), 'tr');
+    expect(buttonTag(html, 'Onayla')).toMatch(/title="Yalnızca bu oturumu başlatan kişi onaylayabilir/);
+    expect(disabled(buttonTag(html, 'Onayla'))).toBe(true);
   });
 
   it('shows nothing extra without a reason, or when nothing is open', () => {

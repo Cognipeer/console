@@ -102,6 +102,12 @@ export interface ResourceAuthzSubject {
   /** The portal the action is asked through. Required in the `portal` channel: the replay needs it. */
   portalId?: string;
   portalKey?: string;
+  /** The portal's display name: named separately in the audit row, never as the resource (that is the agent). */
+  portalName?: string;
+  /**
+   * What the row calls the thing asked about: the agent for an approval or a session action (its key or name -
+   * never the portal it was reached through), the portal for `portal.use`, the bucket for a bucket action.
+   */
   resourceName?: string;
 }
 
@@ -286,6 +292,7 @@ function audit(
     ...(input.subject.resourceName ? { resourceName: input.subject.resourceName } : {}),
     ...(input.subject.portalId ? { portalId: input.subject.portalId } : {}),
     ...(input.subject.portalKey ? { portalKey: input.subject.portalKey } : {}),
+    ...(input.subject.portalName ? { portalName: input.subject.portalName } : {}),
     ...(principal?.contextProjectId ? { projectId: principal.contextProjectId } : {}),
     ...(session.ownerId ? { ownerId: session.ownerId } : {}),
     ...(session.approvers ? { approvers: session.approvers } : {}),

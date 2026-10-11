@@ -322,6 +322,8 @@ export interface DecisionRecord {
   channel: string | null;
   /** What the decision was about, for a refusal about a single resource (a portal, an agent run through one). */
   resource: { type: string; id: string; label?: string } | null;
+  /** The portal an agent action was asked through, named apart from the agent above (portal channel). */
+  portal?: { id: string; key?: string; label?: string };
   /** Ready to feed Access check; `null` when the server could not reconstruct it. */
   simulateInput: SimulateRequest | null;
   /** Custom policies that decided it (empty = default deny or built-in rules). */

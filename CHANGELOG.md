@@ -23,13 +23,18 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   agent that cancels pending requests) takes the same permission; answering a question follows the session instead.
   The timeout sweep is recorded in the audit log as `system`. When the engine cannot decide who may answer, the answer
   is `503 authorization_unavailable` with nothing recorded. The session page and the Sessions list show the server's
-  verdict (`canResolve`, `resolveBlockedReason`) instead of guessing from a role.
+  verdict (`canResolve`, `resolveBlockedReason`) instead of guessing from a role: for a request the viewer may not answer
+  the cards say why and their controls (Approve, Deny, Edit arguments, Don't ask again, or Send and Skip) are disabled,
+  and the header badge, side panel, drawer, composer and status filter say "Waiting for an approver" instead of
+  "Waiting for you".
 - Two more agent actions decide what somebody else may do with a session another person started:
   `agent.session_view_others` (Read) and `agent.session_manage_others` (Write); continuing a session (a message, a
   run, an answer to its question) asks both. By default every holder of
   `agents` Read / Write has them; a role that holds Tracing or Files but no `agents` level does not reach other
   people's agent sessions through those screens (earlier releases did not look at who started a session there). The
   Access check takes the session's owner and the agent's setting as inputs.
+  A refused approval that was asked through a portal names the agent as the resource and the portal apart from it, in the
+  audit feed and in the decision lookup.
   Every path to a session's content asks the same question - the session routes, its files (also through the Document
   Store and the client Files API), events, runs, tracing threads, Assistants threads and the continuation of a session
   by id in the Responses and chat completions routes, whichever service gate let the token in. A list shows the caller
@@ -48,6 +53,11 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   same Files question as creating or updating one.
 - `POST /client/v1/threads/:id` only writes the keys of a thread's metadata that belong to the caller; the keys the
   server keeps there (including the session's tool allow-list) are left as they are.
+- Levels add up in an allow rule: choosing Admin on a service (or the Admin level for every service) also allows Write and
+  Read, and Write also allows Read, so a rule that names only `webhooks.admin` lets the person read, change and
+  administer webhooks instead of administering what they cannot see. The policy editor shows the included levels and
+  says so; the rule that is stored and shown lists all of them. A deny rule blocks exactly the levels it names. A rule
+  written as Cedar text is taken literally and the editor warns when it names a level without the lower ones.
 - Webhooks are an administration service: the policy engine is the only authority (Read to look, Admin to change),
   owners and admins hold it by default and everybody else until it is granted. Being a project admin is no longer a
   permission on webhooks by itself; grant **Webhooks** to the people or groups who should manage them. Tenant-wide

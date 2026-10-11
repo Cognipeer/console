@@ -53,6 +53,8 @@ export interface DecisionRecord {
   channel?: string;
   /** What the decision was about, for a refusal about a single resource (a portal, an agent run through one). */
   resource?: { type: string; id: string; label?: string };
+  /** The portal an agent action was asked through (portal channel). Named apart: the resource above is the agent. */
+  portal?: { id: string; key?: string; label?: string };
   /** Feed this to the access check; null when the decision cannot be replayed (e.g. an undeclared route). */
   simulateInput: SimulateInput | null;
   /** What decided it, when the gate recorded it: custom policy ids and Cedar ids (empty = default deny). */
@@ -112,7 +114,7 @@ function resourceReplay(
   principal: { type: 'user' | 'token'; id: string },
   at: string,
   ip: string | null,
-): { channel: string; resource: NonNullable<DecisionRecord['resource']>; input: SimulateInput | null } | null {
+): { channel: string; resource: NonNullable<DecisionRecord['resource']>; portal?: NonNullable<DecisionRecord['portal']>; input: SimulateInput | null } | null {
   const action = text(meta.action);
   const channel = text(meta.channel);
   const type = text(meta.resourceType);
@@ -129,9 +131,17 @@ function resourceReplay(
   const ownerId = text(meta.ownerId);
   const approvers = text(meta.approvers);
   const replayable = meta.code === 'forbidden' && !!principal.id && (!throughPortal || !!portalId);
+  // An action of an AGENT asked through a portal: the portal is named apart (the resource is the agent). Opening
+  // the portal itself has the portal as its resource already.
+  const portalKey = text(meta.portalKey);
+  const portalLabel = text(meta.portalName);
+  const through = channel === 'portal' && portalId && type !== 'portal'
+    ? { id: portalId, ...(portalKey ? { key: portalKey } : {}), ...(portalLabel ? { label: portalLabel } : {}) }
+    : undefined;
   return {
     channel,
     resource: { type, id, ...(label ? { label } : {}) },
+    ...(through ? { portal: through } : {}),
     input: replayable
       ? {
           principal,
@@ -200,7 +210,7 @@ export async function getDecision(tenant: IamTenant, decisionId: string): Promis
     route: row.path ?? '',
     method: row.method ?? '',
     code,
-    ...(portal ? { channel: portal.channel, resource: portal.resource } : {}),
+    ...(portal ? { channel: portal.channel, resource: portal.resource, ...(portal.portal ? { portal: portal.portal } : {}) } : {}),
     simulateInput: portal
       ? portal.input
       : replayable

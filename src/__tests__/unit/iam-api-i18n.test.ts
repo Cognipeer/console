@@ -110,7 +110,7 @@ describe.each(Object.entries(locales))('audit feed sentences [%s]', (_name, mess
     const literal = [...source.matchAll(/\btext\s*[:=]\s*\{\s*key: '([A-Za-z.]+)'/g)].map((m) => m[1]);
     const denied = ['policy', 'tokenScope', 'project', 'noRule'].map((reason) => `denied.${reason}`); // key: `denied.${reason}`
     const portal = ['portalUse', 'portalUsePolicy', 'portalInvoke', 'portalInvokePolicy'].map((key) => `denied.${key}`); // a refusal of the portal runtime
-    const sessions = ['approve', 'approvePolicy', 'sessionView', 'sessionViewPolicy', 'sessionManage', 'sessionManagePolicy'].map((key) => `denied.${key}`); // a refusal about a session of an agent
+    const sessions = ['approve', 'approvePolicy', 'approveInPortal', 'approveInPortalPolicy', 'sessionView', 'sessionViewPolicy', 'sessionManage', 'sessionManagePolicy'].map((key) => `denied.${key}`); // a refusal about a session of an agent
     const buckets = ['bucketChoose', 'bucketChoosePolicy', 'bucketName', 'bucketNamePolicy'].map((key) => `denied.${key}`); // a refusal about the bucket an agent keeps its files in
     const ip = ['ipNotAllowed', 'ipNotAllowedAt']; // key: row.path ? 'ipNotAllowedAt' : 'ipNotAllowed'
     const keys = uniq([...literal, ...denied, ...portal, ...sessions, ...buckets, ...ip]);

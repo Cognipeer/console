@@ -189,8 +189,14 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
         : action === 'agent.session_view_others' ? 'viewing someone else\'s session of agent'
           : 'acting on someone else\'s session of agent';
       const noRule = action === 'agent.approve' ? 'because no rule appoints them' : 'because no rule allows it';
-      summary = `Denied ${whoLabel} ${phrase} "${target}" ${byPolicy ? `by policy "${names}"` : noRule}`;
-      text = { key: `denied.${verb}${byPolicy ? 'Policy' : ''}`, params: { who: whoLabel, resource: target, policies: names } };
+      // An approval asked through a portal names the portal apart from the agent (the thing asked about).
+      const portal = action === 'agent.approve' && str(meta.channel) === 'portal' ? (str(meta.portalName) ?? str(meta.portalKey)) : undefined;
+      const where = portal ? ` in portal "${portal}"` : '';
+      summary = `Denied ${whoLabel} ${phrase} "${target}"${where} ${byPolicy ? `by policy "${names}"` : noRule}`;
+      text = {
+        key: `denied.${verb}${portal ? 'InPortal' : ''}${byPolicy ? 'Policy' : ''}`,
+        params: { who: whoLabel, resource: target, policies: names, ...(portal ? { portal } : {}) },
+      };
     } else if (BUCKET_ACTION_KEYS.has(action) && str(meta.channel) !== 'portal') {
       // A refusal about a Document Store bucket asked by the agents routes (resourceAuthz.ts): listing it as a choice
       // for an agent's session files, or naming it in the agent's settings.

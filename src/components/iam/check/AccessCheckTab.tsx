@@ -414,6 +414,11 @@ export default function AccessCheckTab({ canManage }: AccessCheckTabProps) {
                       })}
                     </Text>
                   ) : null}
+                  {decision.portal ? (
+                    <Text size="xs" c="dimmed" data-testid="decision-portal">
+                      {t('check.decisionPortal', { portal: decision.portal.label ?? decision.portal.key ?? decision.portal.id })}
+                    </Text>
+                  ) : null}
                   {decision.channel ? (
                     <Text size="xs" c="dimmed">
                       {t('check.decisionChannel', { channel: labels.channel(decision.channel) })}

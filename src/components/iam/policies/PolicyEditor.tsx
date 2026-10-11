@@ -654,6 +654,7 @@ export default function PolicyEditor({
                 catalog={catalog}
                 index={index}
                 labels={labels}
+                effect={draft.effect}
                 value={draft.actions}
                 onChange={(actions) => patch({ actions })}
                 error={showErrors && hasIssue(issues, 'actions') ? t('validation.actions') : undefined}

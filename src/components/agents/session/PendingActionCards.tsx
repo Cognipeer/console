@@ -37,6 +37,7 @@ import {
     buildApprovalBody,
     emptyDraft,
     formatArgs,
+    isAnswerLocked,
     isRequired,
     optionValue,
     parseEditedArgs,
@@ -57,15 +58,25 @@ interface CardProps {
     busy: boolean;
     /** This very action is the one being sent. */
     resolving: boolean;
+    /**
+     * The server says the viewer may not answer this request: every control is disabled, each with `title` = the
+     * reason (already worded). Absent = the viewer may answer, or the server could not tell (it decides again).
+     */
+    lockedReason?: string;
 }
 
 export function ToolApprovalCard({
     action,
     busy,
     resolving,
+    lockedReason,
     onResolve,
 }: CardProps & { onResolve: (body: ApprovalResolveBody) => void }) {
     const t = useTranslations('agents.hitl');
+    const locked = lockedReason !== undefined;
+    /** Nothing can be changed or sent while a call is in flight, or when the viewer may not answer. */
+    const off = busy || locked;
+    const why = locked ? lockedReason : undefined;
     const [editing, setEditing] = useState(false);
     const [argsText, setArgsText] = useState(() => formatArgs(action.args));
     const [comment, setComment] = useState('');
@@ -79,6 +90,7 @@ export function ToolApprovalCard({
     const changed = Boolean(edited && argsDiffer(action.args, edited));
 
     const send = (decision: 'allow' | 'deny') => {
+        if (locked) return;
         if (decision === 'allow' && argsError) return;
         onResolve(buildApprovalBody({
             decision,
@@ -90,7 +102,7 @@ export function ToolApprovalCard({
     };
 
     return (
-        <Paper withBorder radius="md" p="sm" className={classes.card}>
+        <Paper withBorder radius="md" p="sm" className={classes.card} data-locked={locked ? 'true' : undefined}>
             <Stack gap="xs">
                 <Group gap={6} wrap="wrap">
                     <Badge size="xs" variant="light" color="orange" leftSection={<IconHandStop size={10} />}>
@@ -107,7 +119,8 @@ export function ToolApprovalCard({
                             size="compact-xs"
                             variant="subtle"
                             color="gray"
-                            disabled={busy}
+                            disabled={off}
+                            title={why}
                             onClick={() => {
                                 if (editing) setArgsText(formatArgs(action.args));
                                 setEditing((value) => !value);
@@ -125,7 +138,7 @@ export function ToolApprovalCard({
                             minRows={3}
                             maxRows={14}
                             error={argsError}
-                            disabled={busy}
+                            disabled={off}
                             aria-label={t('arguments')}
                         />
                     ) : (
@@ -142,14 +155,16 @@ export function ToolApprovalCard({
                     autosize
                     minRows={1}
                     maxRows={4}
-                    disabled={busy}
+                    disabled={off}
+                    title={why}
                 />
                 <Checkbox
                     size="xs"
                     label={t('remember')}
                     checked={remember}
                     onChange={(event) => setRemember(event.currentTarget.checked)}
-                    disabled={busy}
+                    disabled={off}
+                    title={why}
                 />
 
                 <Group justify="flex-end" gap="xs">
@@ -158,7 +173,8 @@ export function ToolApprovalCard({
                         variant="default"
                         color="red"
                         leftSection={<IconX size={13} />}
-                        disabled={busy}
+                        disabled={off}
+                        title={why}
                         loading={resolving && busy}
                         onClick={() => send('deny')}
                     >
@@ -167,7 +183,8 @@ export function ToolApprovalCard({
                     <Button
                         size="xs"
                         leftSection={<IconCheck size={13} />}
-                        disabled={busy || Boolean(argsError)}
+                        disabled={off || Boolean(argsError)}
+                        title={why}
                         loading={resolving && busy}
                         onClick={() => send('allow')}
                     >
@@ -183,9 +200,13 @@ export function QuestionCard({
     action,
     busy,
     resolving,
+    lockedReason,
     onResolve,
 }: CardProps & { onResolve: (body: QuestionResolveBody) => void }) {
     const t = useTranslations('agents.hitl');
+    const locked = lockedReason !== undefined;
+    const off = busy || locked;
+    const why = locked ? lockedReason : undefined;
     const questions = action.questions ?? [];
     const [draft, setDraft] = useState(() => emptyDraft(questions));
     const built = buildAnswers(questions, draft);
@@ -193,7 +214,7 @@ export function QuestionCard({
     const freeText = action.allowFreeText !== false;
 
     return (
-        <Paper withBorder radius="md" p="sm" className={classes.card}>
+        <Paper withBorder radius="md" p="sm" className={classes.card} data-locked={locked ? 'true' : undefined}>
             <Stack gap="sm">
                 <Group gap={6}>
                     <Badge size="xs" variant="light" color="orange" leftSection={<IconHelp size={10} />}>
@@ -237,7 +258,8 @@ export function QuestionCard({
                                                     label={option.label}
                                                     description={option.description}
                                                     size="xs"
-                                                    disabled={busy}
+                                                    disabled={off}
+                                                    title={why}
                                                     classNames={{ description: classes.optionDescription }}
                                                 />
                                             ))}
@@ -257,7 +279,8 @@ export function QuestionCard({
                                                     label={option.label}
                                                     description={option.description}
                                                     size="xs"
-                                                    disabled={busy}
+                                                    disabled={off}
+                                                    title={why}
                                                     classNames={{ description: classes.optionDescription }}
                                                 />
                                             ))}
@@ -277,7 +300,8 @@ export function QuestionCard({
                                         const text = event.currentTarget.value;
                                         setDraft((current) => typeAnswer(current, index, question, text));
                                     }}
-                                    disabled={busy}
+                                    disabled={off}
+                                    title={why}
                                     aria-label={question.question}
                                 />
                             ) : null}
@@ -291,18 +315,20 @@ export function QuestionCard({
                     <Button
                         size="xs"
                         variant="default"
-                        disabled={busy}
+                        disabled={off}
+                        title={why}
                         loading={resolving && busy}
-                        onClick={() => onResolve({ answers: {}, cancelled: true })}
+                        onClick={() => { if (!locked) onResolve({ answers: {}, cancelled: true }); }}
                     >
                         {t('skip')}
                     </Button>
                     <Button
                         size="xs"
                         leftSection={<IconCheck size={13} />}
-                        disabled={busy || !built.ok}
+                        disabled={off || !built.ok}
+                        title={why}
                         loading={resolving && busy}
-                        onClick={() => { if (built.ok) onResolve({ answers: built.answers }); }}
+                        onClick={() => { if (built.ok && !locked) onResolve({ answers: built.answers }); }}
                     >
                         {t('send')}
                     </Button>
@@ -379,17 +405,30 @@ export interface PendingActionListProps {
     resolvingId?: string | null;
     onResolve: (actionId: string, body: ResolveBody) => void;
     /**
-     * Why the server says the viewer cannot answer an open request, when it does - a notice above the open
-     * requests. The cards stay usable: the server decides again when the answer is sent.
+     * Why the server says the viewer cannot answer an open request, when it does: a notice above the open requests,
+     * and every control of the open cards disabled (`title` = the reason). The one exception is `unavailable`
+     * (the server could not check): that is no "no", so the notice is shown and the cards stay usable - the
+     * server decides again when the answer is sent.
      */
     blocked?: AnswerBlockedReason | null;
+    /**
+     * The verdict per open request (`answerBlockedById`), when the caller has it: only the requests the viewer may
+     * not answer lock, so a question they may answer is not locked by an approval they may not. Without it the
+     * single `blocked` verdict applies to every open card.
+     */
+    blockedById?: Readonly<Record<string, AnswerBlockedReason>>;
 }
 
 /** The approvals and questions a paused turn is waiting on, open ones as cards and the rest as one-liners. */
-export default function PendingActionList({ actions, busy, resolvingId, onResolve, blocked }: PendingActionListProps) {
+export default function PendingActionList({ actions, busy, resolvingId, onResolve, blocked, blockedById }: PendingActionListProps) {
     const t = useTranslations('agents.hitl');
     if (actions.length === 0) return null;
     const open = actions.some((action) => action.status === 'pending');
+    /** The words for the reason this request is locked, or undefined when its controls stay usable. */
+    const lockedReasonOf = (action: PendingActionView): string | undefined => {
+        const reason = blockedById ? blockedById[action.id] : blocked;
+        return reason && isAnswerLocked(reason) ? t(BLOCKED_TEXT[reason]) : undefined;
+    };
     return (
         <Stack gap="xs" mt="xs">
             {open && blocked ? (
@@ -405,6 +444,7 @@ export default function PendingActionList({ actions, busy, resolvingId, onResolv
                         action={action}
                         busy={busy}
                         resolving={resolvingId === action.id}
+                        lockedReason={lockedReasonOf(action)}
                         onResolve={(body) => onResolve(action.id, body)}
                     />
                 ) : (
@@ -413,6 +453,7 @@ export default function PendingActionList({ actions, busy, resolvingId, onResolv
                         action={action}
                         busy={busy}
                         resolving={resolvingId === action.id}
+                        lockedReason={lockedReasonOf(action)}
                         onResolve={(body) => onResolve(action.id, body)}
                     />
                 );

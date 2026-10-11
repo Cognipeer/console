@@ -15,7 +15,7 @@
  *   actor    the person; for a token the owner AND the token (`apiTokenId`, actorType 'api_token')
  *   event    the action id    outcome 'denied'   statusCode 403 (503 when the engine could not decide)
  *   metadata { iamEnforce, code, decisionId, action, channel, resourceType, resourceId, resourceName?,
- *              portalId?, portalKey?, ownerId?, approvers?, contextProjectId?, source, reasons[<=10],
+ *              portalId?, portalKey?, portalName?, ownerId?, approvers?, contextProjectId?, source, reasons[<=10],
  *              policyIds[<=10], policyNames?, contextIp? }
  *
  * Fire-and-forget: the refusal must not wait for, or fail on, the audit write. It
@@ -50,6 +50,8 @@ export interface ResourceDenialEntry {
   /** The portal an action was asked through (portal channel). */
   portalId?: string;
   portalKey?: string;
+  /** The portal's display name (portal channel); the row names it apart from the resource, which is the agent. */
+  portalName?: string;
   /** The project the request ran in (dashboard / API). */
   projectId?: string;
   /** A session action: who started the session (the first owner) and which answerers the agent accepts, so a replay can rebuild the question. */
@@ -141,6 +143,7 @@ async function write(entry: ResourceDenialEntry): Promise<void> {
       ...(entry.resourceName ? { resourceName: entry.resourceName.slice(0, 200) } : {}),
       ...(entry.portalId ? { portalId: entry.portalId } : {}),
       ...(entry.portalKey ? { portalKey: entry.portalKey.slice(0, 120) } : {}),
+      ...(entry.portalName ? { portalName: entry.portalName.slice(0, 200) } : {}),
       ...(entry.projectId ? { contextProjectId: entry.projectId } : {}),
       ...(entry.ownerId ? { ownerId: entry.ownerId.slice(0, 200) } : {}),
       ...(entry.approvers ? { approvers: entry.approvers.slice(0, 40) } : {}),

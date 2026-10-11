@@ -6,7 +6,7 @@
  */
 
 import { policyAnnotations, policyToJson, splitPolicyText, type CedarMessage } from './cedar';
-import { RUNTIME_ENFORCED_ACTIONS } from './actions';
+import { RUNTIME_ENFORCED_ACTIONS, impliedLevelActionIds } from './actions';
 import { askedGateActions } from './gateActions';
 import { MANAGED_ANNOTATION } from './managedPolicies';
 import { isRuntimeEnforced } from './runtimeEnforced';
@@ -126,6 +126,29 @@ function unaskedScope(json: { action?: ScopeJson }): string | null {
   return `only names actions that nothing in the product checks yet (${list})`;
 }
 
+/**
+ * A permit written as text that names a higher level without the lower ones (`webhooks.admin` without `webhooks.write`
+ * and `webhooks.read`; `Write` without `Read`). The guided editor adds the lower levels to every allow rule - levels add
+ * up - but Cedar does not: the statement grants exactly what it names, so whoever it is for could administer a service
+ * and still not read it. A warning, never a refusal (a rule may mean exactly that); null when nothing is missing.
+ */
+function levelsNotAddedUp(json: { action?: ScopeJson }): string | null {
+  const catalog = new Map(getIamSchema().catalog.map((a) => [a.id, a]));
+  const named = namedActions(json.action).filter((id) => catalog.has(id));
+  const have = new Set(named);
+  const missing: string[] = [];
+  for (const id of named) {
+    const def = catalog.get(id);
+    if (!def) continue;
+    for (const lower of impliedLevelActionIds(def)) {
+      if (catalog.has(lower) && !have.has(lower) && !missing.includes(lower)) missing.push(lower);
+    }
+  }
+  if (missing.length === 0) return null;
+  const list = (ids: readonly string[]) => ids.slice(0, 6).join(', ') + (ids.length > 6 ? ', ...' : '');
+  return `names ${list(named)} but not ${list(missing)}. In policy text levels do not add up (Admin does not include Write or Read, Write does not include Read), so it grants only what it names. List the lower levels too, or build the rule in the guided editor, which adds them`;
+}
+
 /** Validate Cedar text as a custom policy against the generated schema. Pure: touches no store. */
 export function validateCustomPolicyText(cedar: unknown, options: { reachability?: boolean } = {}): PolicyValidation {
   const fail = (message: string): PolicyValidation => ({
@@ -173,6 +196,15 @@ export function validateCustomPolicyText(cedar: unknown, options: { reachability
     if (!json.ok) return;
     const scope = json.json as unknown as { action?: ScopeJson; resource?: ScopeJson };
     const forbid = json.json.effect === 'forbid';
+    const lowerLevels = forbid ? null : levelsNotAddedUp(scope);
+    // Said after the statement's reachability warnings (those are the more fundamental problem).
+    const sayLowerLevels = () => {
+      if (!lowerLevels) return;
+      warnings.push({
+        message: `This permit statement ${lowerLevels}.` + (parts.policies.length > 1 ? ` (statement ${i + 1})` : ''),
+        policyId: `candidate#${i}`,
+      });
+    };
     const why = unreachableScope(scope);
     if (why) {
       (forbid ? errors : warnings).push({
@@ -180,6 +212,7 @@ export function validateCustomPolicyText(cedar: unknown, options: { reachability
           + (parts.policies.length > 1 ? ` (statement ${i + 1})` : ''),
         policyId: `candidate#${i}`,
       });
+      sayLowerLevels();
       return;
     }
     // Not provably unreachable, but nothing asks for its actions: say so, never refuse it.
@@ -191,6 +224,7 @@ export function validateCustomPolicyText(cedar: unknown, options: { reachability
         policyId: `candidate#${i}`,
       });
     }
+    sayLowerLevels();
   });
   return { valid: errors.length === 0, errors, warnings, statements: parts.policies };
 }

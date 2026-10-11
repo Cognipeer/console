@@ -57,13 +57,14 @@ import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
 import type { AnswerBlockedReason } from '../session/pendingActions';
+import { waitingFor } from '../session/sessionActivityUi';
 import type { SessionOwnerView } from '../session/sessionTypes';
 import classes from './SessionList.module.css';
 
 
 type WindowFilter = 'all' | '24h' | '7d' | '30d' | 'custom';
 type ActivityFilter = 'all' | 'used' | 'empty' | 'unpriced';
-type StatusFilter = 'all' | 'success' | 'error' | 'stopped' | 'waiting';
+type StatusFilter = 'all' | 'success' | 'error' | 'stopped' | 'waiting' | 'waiting_elsewhere';
 type DateRange = [Date | null, Date | null];
 type SortColumn = 'title' | 'turns' | 'totalTokens' | 'costUsd' | 'activeMs' | 'updatedAt';
 interface SortState {
@@ -279,8 +280,9 @@ export default function SessionList({
                 if (from !== undefined && when < from) return false;
                 if (to !== undefined && when > to) return false;
             }
-            if (status === 'waiting') {
-                if (session.runtimeStatus !== 'requires_action') return false;
+            if (status === 'waiting' || status === 'waiting_elsewhere') {
+                // "Waiting for you" lists what the viewer could answer; what only somebody else can is its own filter.
+                if (waitingFor(session) !== (status === 'waiting' ? 'you' : 'elsewhere')) return false;
             } else if (status !== 'all' && session.status !== status) return false;
             if (source !== 'all' && (session.source ?? 'unknown') !== source) return false;
             if (activity === 'used' && (session.turns ?? 0) === 0) return false;
@@ -394,6 +396,10 @@ export default function SessionList({
                             { value: 'error', label: 'Has errors' },
                             { value: 'stopped', label: 'Stopped early' },
                             { value: 'waiting', label: t('waitingFilter') },
+                            // only where such a row exists (a viewer who may answer everything never sees it)
+                            ...(sessions.some((session) => waitingFor(session) === 'elsewhere')
+                                ? [{ value: 'waiting_elsewhere', label: ts('waitingElsewhereBadge') }]
+                                : []),
                         ]}
                         value={status}
                         onChange={(next) => setStatus((next as StatusFilter) ?? 'all')}

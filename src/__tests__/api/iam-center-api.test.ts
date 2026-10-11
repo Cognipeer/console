@@ -493,10 +493,15 @@ describeForEachProvider('IAM center API', (getDb) => {
         const partly = await compile({ spec: memberSpec(A, { actions: ['agents.write', 'agents.admin'] }) });
         expect(partly.body.warnings.find((w: any) => w.code === 'partly_not_asked_actions')).toMatchObject({ field: 'actions', params: { actions: 'agents.admin' } });
         expect(partly.body.warnings.map((w: any) => w.code)).not.toContain('not_asked_actions');
-        // a rule for what IS asked has no such warning; an allow rule says "grant"
+        // a rule for what IS asked has no such warning
         expect((await compile({ spec: memberSpec(A, { actions: ['agents.write'] }) })).body.warnings.map((w: any) => w.code)).not.toContain('not_asked_actions');
+        // an allow rule's levels add up: Admin includes the Write and Read the gates do ask, so it is no dead rule - and the
+        // Cedar it compiles to says so
         const permit = await compile({ spec: { effect: 'permit', principals: { groups: [A.groups.eng] }, actions: ['agents.admin'], resources: { any: true } } });
-        expect(permit.body.warnings.find((w: any) => w.code === 'not_asked_actions').message).toContain('would never grant anything');
+        expect(permit.body.ok).toBe(true);
+        expect(permit.body.warnings.map((w: any) => w.code)).not.toContain('not_asked_actions');
+        expect(permit.body.warnings.map((w: any) => w.code)).not.toContain('partly_not_asked_actions');
+        expect(permit.body.cedar).toContain('action in [Action::"agents.admin", Action::"agents.write", Action::"agents.read"]');
         // raw Cedar gets the same warning as plain text
         const raw = await compile({ cedar: 'forbid(principal, action == Action::"agents.admin", resource);' });
         expect(raw.body.ok).toBe(true);

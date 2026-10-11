@@ -34,7 +34,7 @@
 import { runWithTenantScope } from '@/lib/database';
 import { isPermissionService, RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
 import { isIamChannel, IAM_CHANNELS, parseCidr, toCedarDatetime, type IamChannel } from './context';
-import { RUNTIME_ENFORCED_ACTIONS, serviceActionId, type ActionDefinition } from './actions';
+import { RUNTIME_ENFORCED_ACTIONS, impliedLevelActionIds, serviceActionId, type ActionDefinition } from './actions';
 import type { CedarMessage } from './cedar';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
 import { askedGateActions } from './gateActions';
@@ -205,6 +205,30 @@ function parseInstant(raw: unknown, field: string, issues: PolicyIssue[]): strin
     return undefined;
   }
   return iso;
+}
+
+/**
+ * `actions` plus the lower levels each of them includes (see `impliedLevelActionIds`), the named ones first, in the
+ * order given, then what they imply; each id once. Only ids the catalog knows are added. Idempotent. Applied to ALLOW
+ * rules: "Admin" on a service is read and write access too, in every screen that shows the rule and in the Cedar it
+ * compiles to.
+ */
+export function withImpliedLevels(actions: readonly string[], view: SpecCatalogView = currentCatalogView()): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string) => {
+    if (!seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  };
+  for (const id of actions) add(id);
+  for (const id of actions) {
+    const def = view.actions.get(id);
+    if (!def) continue;
+    for (const implied of impliedLevelActionIds(def)) if (view.actions.has(implied)) add(implied);
+  }
+  return out;
 }
 
 export type SpecParse = { ok: true; spec: PolicySpec } | { ok: false; errors: PolicyIssue[] };
@@ -381,7 +405,8 @@ export function parsePolicySpec(input: unknown, view: SpecCatalogView = currentC
   const spec: PolicySpec = {
     effect: effect as PolicyEffect,
     principals,
-    actions,
+    // An allow rule adds the lower levels of every level it names (Admin -> Write, Read); a deny rule blocks exactly what it names.
+    actions: effect === 'permit' ? withImpliedLevels(actions, view) : actions,
     resources,
     ...(conditions ? { conditions } : {}),
   };
@@ -706,7 +731,7 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
     hasSpecific,
     portalOnly: channels.length > 0 && channels.every((c) => c === 'portal'),
     hasPortal: channels.includes('portal'),
-    unasked: unaskedGateActions(defs, sel?.services?.length ? sel.services : null),
+    unasked: unaskedGateActions(defs, sel?.services?.length ? sel.services : null, spec.effect === 'permit'),
     gatePlane: gateActions > 0 && gateChannelOk && !specificOnly,
     portalPlane,
     sessionPlane,
@@ -722,12 +747,17 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
 }
 
 /** The gate-level actions among `defs` that nothing asks for (see GateReach.unasked). */
-function unaskedGateActions(defs: readonly ActionDefinition[], services: readonly string[] | null): string[] {
+function unaskedGateActions(defs: readonly ActionDefinition[], services: readonly string[] | null, levelsAddUp = false): string[] {
   const asked = askedGateActions();
   if (!asked) return [];
   const inScope = services ?? RBAC_SERVICE_DEFINITIONS.filter((d) => !d.deprecated).map((d) => d.id);
+  const ids = new Set(defs.map((d) => d.id));
   const out: string[] = [];
   for (const def of defs) {
+    // An allow rule's Admin level includes Write (withImpliedLevels), which is what a change is checked as, so the
+    // Admin entry itself is no dead weight: the rule grants what the lower levels grant.
+    if (levelsAddUp && def.level === 'admin' && (def.kind === 'service' || def.kind === 'group')
+      && ids.has(def.kind === 'group' ? 'Write' : serviceActionId(def.service as string, 'write'))) continue;
     if (def.kind === 'service') {
       if (!asked.has(def.id)) out.push(def.id);
     } else if (def.kind === 'group') {

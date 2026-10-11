@@ -93,10 +93,11 @@ import LiveToolCalls, {
 import { consumeSse } from './consumeSse';
 import PendingActionList from './PendingActionCards';
 import {
+    answerBlockedById,
     answerBlockedReason,
     applyLocalResolution,
     cancelOpenActions,
-    composerGate,
+    composerGateFor,
     isStaleActionRefusal,
     openActionsOf,
     type AnswerBlockedReason,
@@ -210,6 +211,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const tb = useTranslations('agents.budget');
     const ta = useTranslations('agents.attachments');
     const tp = useTranslations('agents.sessionPage');
+    const tsa = useTranslations('agents.sessionAccess');
     const router = useRouter();
     const tConfirm = useTranslations('common.confirm');
     const deleteResource = useDeleteResource();
@@ -256,7 +258,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // said above them when the viewer cannot answer, instead of guessing from the agent's setting and their role.
     const [serverActions, setServerActions] = useState<ServerPendingAction[]>([]);
     // (only the ones still open: an answered request has nothing left to be refused)
-    const blockedReason = answerBlockedReason(serverActions.filter((action) => openActions.some((open) => open.id === action.id)));
+    const openServerActions = serverActions.filter((action) => openActions.some((open) => open.id === action.id));
+    const blockedReason = answerBlockedReason(openServerActions);
+    // ...and per request, so a question the viewer may answer is not locked by an approval they may not.
+    const blockedById = answerBlockedById(openServerActions);
     // The session's spend budget (absent for a session without one), and a change to it in flight.
     const budgetView = useMemo(() => sessionBudgetView(session, messages), [session, messages]);
     const [budgetBusy, setBudgetBusy] = useState(false);
@@ -277,7 +282,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // A budget that stops (rather than pauses) does not carry the turn on once raised: a new message does.
     const budgetStops = budgetView?.budget.onReach === 'stop';
     // What the composer does while the agent waits for an approval or an answer.
-    const gate = composerGate(openActions.length, agent?.config?.humanInTheLoop?.onUserMessageWhilePending);
+    // A viewer the server says may not answer the open request cannot send the message that would cancel it either (the
+    // server refuses it), so the composer waits for an approver, in the badge's words, instead of "your response".
+    const { gate, waitingElsewhere } = composerGateFor(openActions.length, agent?.config?.humanInTheLoop?.onUserMessageWhilePending, blockedReason);
 
     const viewportRef = useRef<HTMLDivElement>(null);
     const turnRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -1139,6 +1146,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 resolvingId={resolvingId}
                                                                 onResolve={(actionId, body) => void resolveAction(actionId, body)}
                                                                 blocked={blockedReason}
+                                                                blockedById={blockedById}
                                                                 budgetBannerShown={budgetBannerShown}
                                                                 budgetStops={budgetStops}
                                                             />
@@ -1240,7 +1248,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                     : budgetBlocked
                                         ? tb('composerPlaceholder')
                                         : gate === 'blocked'
-                                            ? t('composerBlockedPlaceholder')
+                                            ? (waitingElsewhere ? tsa('composerWaitingElsewhere') : t('composerBlockedPlaceholder'))
                                             : 'Send a message to the agent'}
                                 value={input}
                                 onChange={(event) => setInput(event.currentTarget.value)}
@@ -1281,7 +1289,11 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                     mt={6}
                                     p="xs"
                                 >
-                                    <Text size="xs">{gate === 'blocked' ? t('composerBlocked') : t('composerCancelWarning')}</Text>
+                                    <Text size="xs">
+                                        {gate === 'blocked'
+                                            ? (waitingElsewhere ? tsa('composerWaitingElsewhereNote') : t('composerBlocked'))
+                                            : t('composerCancelWarning')}
+                                    </Text>
                                 </Alert>
                             ) : null}
                             <Group justify="space-between" mt={6}>
@@ -1436,6 +1448,7 @@ function AssistantTurn({
     resolvingId,
     onResolve,
     blocked,
+    blockedById,
     budgetBannerShown,
     budgetStops,
 }: {
@@ -1444,6 +1457,7 @@ function AssistantTurn({
     resolvingId: string | null;
     onResolve: (actionId: string, body: ResolveBody) => void;
     blocked: AnswerBlockedReason | null;
+    blockedById: Readonly<Record<string, AnswerBlockedReason>>;
     budgetBannerShown: boolean;
     /** The session budget stops the session instead of pausing it. */
     budgetStops: boolean;
@@ -1475,6 +1489,7 @@ function AssistantTurn({
                     resolvingId={resolvingId}
                     onResolve={onResolve}
                     blocked={blocked}
+                    blockedById={blockedById}
                 />
             ) : null}
             {message.output !== undefined ? <StructuredOutputBlock output={message.output} /> : null}

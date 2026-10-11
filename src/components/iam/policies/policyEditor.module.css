@@ -102,6 +102,14 @@
   font-weight: 500;
 }
 
+/* Included in a higher level the rule names (an allow rule's levels add up): shown as on, not togglable. */
+.chipImplied {
+  background: transparent;
+  border: 1px dashed var(--ds-accent);
+  color: var(--ds-accent);
+  cursor: default;
+}
+
 .advancedGroup {
   border-bottom: 1px solid var(--ds-border-soft);
   padding: 8px 12px 10px;

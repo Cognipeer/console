@@ -4,6 +4,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { Badge, Checkbox, Collapse, Group, Pill, Text, TextInput, UnstyledButton } from '@mantine/core';
 import { IconChevronDown, IconChevronRight, IconSearch } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { impliedLevelActionIds } from '@/lib/iam/actions';
 import type { CatalogService, IamCatalog } from '../api';
 import {
   LEVELS,
@@ -21,6 +22,11 @@ interface ActionMatrixProps {
   catalog: IamCatalog;
   index: CatalogIndex;
   labels: IamLabels;
+  /**
+   * `permit` (default): levels add up - Admin includes Write and Read, Write includes Read - so the lower levels of
+   * a chosen one show as included. `forbid`: a deny rule blocks exactly the levels it names, nothing is implied.
+   */
+  effect?: 'permit' | 'forbid';
   /** Selected catalog action ids (level groups, service actions, resource actions). */
   value: string[];
   onChange: (next: string[]) => void;
@@ -30,15 +36,36 @@ interface ActionMatrixProps {
 
 function LevelChip({
   on,
+  implied,
+  impliedTitle,
   label,
   disabled,
   onClick,
 }: {
   on: boolean;
+  /** Not chosen itself, but included in a higher level that is (an allow rule): shown as on, nothing to toggle. */
+  implied?: boolean;
+  impliedTitle?: string;
   label: string;
   disabled?: boolean;
   onClick: () => void;
 }) {
+  if (implied && !on) {
+    return (
+      <button
+        type="button"
+        className={`${classes.chip} ${classes.chipImplied}`}
+        aria-pressed
+        aria-disabled
+        title={impliedTitle}
+        data-implied="true"
+        tabIndex={-1}
+        onClick={(event) => event.preventDefault()}
+      >
+        {label}
+      </button>
+    );
+  }
   return (
     <button
       type="button"
@@ -57,11 +84,21 @@ function LevelChip({
  * three level shortcuts that span every service, and an advanced list of the
  * individual catalog actions (invoke an agent, execute a tool...).
  */
-export default function ActionMatrix({ catalog, index, labels, value, onChange, disabled, error }: ActionMatrixProps) {
+export default function ActionMatrix({ catalog, index, labels, effect = 'permit', value, onChange, disabled, error }: ActionMatrixProps) {
   const t = useTranslations('iamCenter');
   const [query, setQuery] = useState('');
   const [advanced, setAdvanced] = useState(false);
   const selected = useMemo(() => new Set(value), [value]);
+  // The levels an allow rule includes without the author ticking them (the server adds them on save: withImpliedLevels).
+  const implied = useMemo(() => {
+    const out = new Set<string>();
+    if (effect === 'forbid') return out;
+    for (const id of value) {
+      const action = index.actionById.get(id);
+      if (action) for (const lower of impliedLevelActionIds(action)) out.add(lower);
+    }
+    return out;
+  }, [effect, value, index]);
 
   const toggle = (id: string) => {
     if (disabled) return;
@@ -108,6 +145,10 @@ export default function ActionMatrix({ catalog, index, labels, value, onChange, 
         aria-label={t('matrix.searchPlaceholder')}
       />
 
+      <Text size="xs" c="dimmed" mb="xs" data-testid="matrix-levels-hint">
+        {effect === 'forbid' ? t('matrix.levelsHintDeny') : t('matrix.levelsHintAllow')}
+      </Text>
+
       <div className={classes.matrix}>
         <div className={classes.matrixScroll}>
           <div className={`${classes.row} ${classes.rowAll}`}>
@@ -120,6 +161,8 @@ export default function ActionMatrix({ catalog, index, labels, value, onChange, 
                 <LevelChip
                   key={action.id}
                   on={selected.has(action.id)}
+                  implied={implied.has(action.id)}
+                  impliedTitle={t('matrix.includedChip')}
                   label={labels.level(action.level)}
                   disabled={disabled}
                   onClick={() => toggle(action.id)}
@@ -147,6 +190,8 @@ export default function ActionMatrix({ catalog, index, labels, value, onChange, 
                           <LevelChip
                             key={level}
                             on={selected.has(action.id)}
+                            implied={implied.has(action.id)}
+                            impliedTitle={t('matrix.includedChip')}
                             label={labels.level(level)}
                             disabled={disabled}
                             onClick={() => toggle(action.id)}

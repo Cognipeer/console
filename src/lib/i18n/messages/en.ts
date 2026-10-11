@@ -1602,6 +1602,8 @@ export const en = {
         portalInvokePolicy: 'Denied {who} running agent "{resource}" in a portal by policy "{policies}"',
         approve: 'Denied {who} approving a tool call of agent "{resource}" because no rule appoints them',
         approvePolicy: 'Denied {who} approving a tool call of agent "{resource}" by policy "{policies}"',
+        approveInPortal: 'Denied {who} approving a tool call of agent "{resource}" in portal "{portal}" because no rule appoints them',
+        approveInPortalPolicy: 'Denied {who} approving a tool call of agent "{resource}" in portal "{portal}" by policy "{policies}"',
         sessionView: 'Denied {who} viewing someone else\'s session of agent "{resource}" because no rule allows it',
         sessionViewPolicy: 'Denied {who} viewing someone else\'s session of agent "{resource}" by policy "{policies}"',
         sessionManage: 'Denied {who} acting on someone else\'s session of agent "{resource}" because no rule allows it',
@@ -2395,6 +2397,9 @@ export const en = {
       enforcedInAgents: 'Checked on agent requests',
       selected: 'Selected actions ({count})',
       nothingSelected: 'Nothing selected yet.',
+      levelsHintAllow: 'Levels add up in an allow rule: Admin includes Write and Read, and Write includes Read. Choosing Admin on a service lets people read and change it too.',
+      levelsHintDeny: 'A deny rule blocks only the levels you choose: denying Write does not block Read, and denying Admin does not block Write.',
+      includedChip: 'Included in a higher level you chose',
       categories: {
         build: 'Build',
         data: 'Data',
@@ -2729,6 +2734,7 @@ export const en = {
       approversHelp: 'The agent\'s "who can approve" setting. Leave it empty for the default.',
       approversDefault: 'Default: the session owner and admins',
       decisionResource: '{action} on {resource}',
+      decisionPortal: 'Asked through portal: {portal}',
       decisionChannel: 'Channel: {channel}',
       policyState: {
         disabled: 'Switched off',
@@ -4366,6 +4372,8 @@ export const en = {
       ownOnlyNotice: 'You see only the sessions you started. Viewing sessions that other people started is not allowed for you; ask an administrator if you need it.',
       waitingElsewhereBadge: 'Waiting for an approver',
       waitingElsewhereTooltip: 'This session is waiting for an approval or an answer that you are not allowed to give',
+      composerWaitingElsewhere: 'Waiting for an approver',
+      composerWaitingElsewhereNote: 'This session is waiting for an approval or an answer that you are not allowed to give. You can send a message once someone who may has answered it.',
     },
     hitl: {
       sectionDescription: 'When the agent stops to ask a person: approving tool calls and answering the agent’s questions.',

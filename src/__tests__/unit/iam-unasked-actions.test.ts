@@ -123,15 +123,22 @@ describe('unaskedWarnings', () => {
   beforeEach(registerRoutes);
   const warn = (s: PolicySpec) => unaskedWarnings(s, reach(s));
 
-  it('a rule that names only unasked actions would never apply: a forbid "blocks nothing", a permit "grants nothing"', () => {
+  it('a deny rule that names only unasked actions would never block anything', () => {
     const [forbid] = warn(spec({ effect: 'forbid', actions: ['models.admin'] }));
     expect(forbid).toMatchObject({ code: 'not_asked_actions', field: 'actions', params: { actions: 'models.admin', effect: 'forbid' } });
     expect(forbid.message).toMatch(/Nothing in the product checks models\.admin yet, so this rule would never block anything/);
     expect(forbid.message).toMatch(/choose Read or Write/);
+  });
 
-    const [permit] = warn(spec({ effect: 'permit', actions: ['agents.admin', 'models.admin'] }));
-    expect(permit).toMatchObject({ code: 'not_asked_actions', params: { actions: 'agents.admin, models.admin', effect: 'permit' } });
-    expect(permit.message).toMatch(/would never grant anything/);
+  it('an allow rule that names only an Admin level is not dead weight: levels add up, so it grants what Write and Read grant', () => {
+    // (parsePolicySpec adds the lower levels to every allow rule)
+    const admin = spec({ effect: 'permit', actions: ['agents.admin', 'models.admin'] });
+    expect(admin.actions).toEqual(['agents.admin', 'models.admin', 'agents.write', 'agents.read', 'models.write', 'models.read']);
+    expect(reach(admin).unasked).toEqual([]);
+    expect(warn(admin)).toEqual([]);
+    // ... but written without them (a stored rule, or one built by hand) the Admin entries are still judged on their own
+    const bare = { ...admin, actions: ['agents.admin', 'models.admin'] };
+    expect(warn(bare)[0]).toMatchObject({ code: 'not_asked_actions', params: { actions: 'agents.admin, models.admin', effect: 'permit' } });
   });
 
   it('a rule that names some unasked actions among asked ones is only partly effective', () => {
@@ -148,8 +155,8 @@ describe('unaskedWarnings', () => {
 
   it('a forbid on <administration service>.admin is left to the "checked as Write" explanation instead', () => {
     expect(warn(spec({ effect: 'forbid', actions: ['members.admin'] }))).toEqual([]);
-    // a permit of it still would grant nothing
-    expect(codes(warn(spec({ effect: 'permit', actions: ['members.admin'] })))).toEqual(['not_asked_actions']);
+    // a permit of it grants what its lower levels grant (levels add up), so there is nothing to warn about
+    expect(warn(spec({ effect: 'permit', actions: ['members.admin'] }))).toEqual([]);
     // mixed with another unasked action, only the other one is named
     expect(warn(spec({ effect: 'forbid', actions: ['members.admin', 'models.admin'] }))[0]).toMatchObject({ params: { actions: 'models.admin' } });
   });

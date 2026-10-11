@@ -1293,6 +1293,8 @@ export const tr: typeof en = {
         portalInvokePolicy: 'Reddedildi: {who}, bir portalda "{resource}" ajanını "{policies}" politikası nedeniyle çalıştıramadı',
         approve: 'Reddedildi: {who}, "{resource}" ajanının araç çağrısını onaylayamadı çünkü hiçbir kural onu onaylayıcı atamıyor',
         approvePolicy: 'Reddedildi: {who}, "{resource}" ajanının araç çağrısını "{policies}" politikası nedeniyle onaylayamadı',
+        approveInPortal: 'Reddedildi: {who}, "{portal}" portalında "{resource}" ajanının araç çağrısını onaylayamadı çünkü hiçbir kural onu onaylayıcı atamıyor',
+        approveInPortalPolicy: 'Reddedildi: {who}, "{portal}" portalında "{resource}" ajanının araç çağrısını "{policies}" politikası nedeniyle onaylayamadı',
         sessionView: 'Reddedildi: {who}, "{resource}" ajanının başkasına ait oturumunu görüntüleyemedi çünkü hiçbir kural izin vermiyor',
         sessionViewPolicy: 'Reddedildi: {who}, "{resource}" ajanının başkasına ait oturumunu "{policies}" politikası nedeniyle görüntüleyemedi',
         sessionManage: 'Reddedildi: {who}, "{resource}" ajanının başkasına ait oturumunda işlem yapamadı çünkü hiçbir kural izin vermiyor',
@@ -1579,6 +1581,9 @@ export const tr: typeof en = {
       enforcedInAgents: 'Ajan isteklerinde denetlenir',
       selected: 'Seçilen işlemler ({count})',
       nothingSelected: 'Henüz bir şey seçilmedi.',
+      levelsHintAllow: 'İzin kuralında seviyeler birikir: Yönetici, Yazma ve Okuma\'yı da kapsar; Yazma, Okuma\'yı kapsar. Bir serviste Yönetici seçmek, insanların onu okumasına ve değiştirmesine de izin verir.',
+      levelsHintDeny: 'Engelleme kuralı yalnızca seçtiğiniz seviyeleri engeller: Yazma\'yı engellemek Okuma\'yı engellemez, Yönetici\'yi engellemek de Yazma\'yı engellemez.',
+      includedChip: 'Seçtiğiniz daha yüksek bir seviyenin içinde',
       categories: {
         build: 'Geliştirme',
         data: 'Veri',
@@ -1913,6 +1918,7 @@ export const tr: typeof en = {
       approversHelp: 'Ajanın "kimler onaylayabilir" ayarı. Varsayılan için boş bırakın.',
       approversDefault: 'Varsayılan: oturum sahibi ve yöneticiler',
       decisionResource: '{resource} üzerinde {action}',
+      decisionPortal: 'Şu portal üzerinden soruldu: {portal}',
       decisionChannel: 'Kanal: {channel}',
       policyState: {
         disabled: 'Kapalı',
@@ -2833,6 +2839,8 @@ export const tr: typeof en = {
       ownOnlyNotice: 'Yalnızca kendi başlattığınız oturumları görüyorsunuz. Başkalarının başlattığı oturumları görüntüleme izniniz yok; gerekiyorsa bir yöneticiye danışın.',
       waitingElsewhereBadge: 'Onaylayıcı bekliyor',
       waitingElsewhereTooltip: 'Bu oturum, vermenize izin verilmeyen bir onayı ya da yanıtı bekliyor',
+      composerWaitingElsewhere: 'Onaylayıcı bekliyor',
+      composerWaitingElsewhereNote: 'Bu oturum, vermenize izin verilmeyen bir onayı ya da yanıtı bekliyor. İzni olan biri yanıtladıktan sonra mesaj gönderebilirsiniz.',
     },
     hitl: {
       sectionDescription: 'Agent bir kişiye danışmak için durduğunda: araç çağrılarını onaylama ve agent’ın sorularını yanıtlama.',

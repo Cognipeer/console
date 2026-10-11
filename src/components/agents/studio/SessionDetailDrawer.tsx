@@ -32,7 +32,7 @@ import { useTranslations } from '@/lib/i18n';
 import PendingActionList from '../session/PendingActionCards';
 import SessionActivity from '../session/SessionActivity';
 import SessionStatusBadge from '../session/SessionStatusBadge';
-import { answerBlockedReason, isStaleActionRefusal, openActionsOf, type ResolveBody, type ServerPendingAction } from '../session/pendingActions';
+import { answerBlockedById, answerBlockedReason, isStaleActionRefusal, openActionsOf, type ResolveBody, type ServerPendingAction } from '../session/pendingActions';
 import { sessionStatusKind, stopReasonBadge } from '../session/sessionActivityUi';
 import { formatCost } from '../session/sessionUsage';
 import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
@@ -208,7 +208,9 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         });
         // A settled session says how its last run ended; a waiting or paused one is already saying more.
         const stopBadge = status === 'idle' ? stopReasonBadge(record?.stopReason) : null;
-        const blocked = answerBlockedReason(serverActions.filter((action) => openActions.some((open) => open.id === action.id)));
+        const openServerActions = serverActions.filter((action) => openActions.some((open) => open.id === action.id));
+        const blocked = answerBlockedReason(openServerActions);
+        const blockedById = answerBlockedById(openServerActions);
 
         const properties: PropertyRow[] = [
             { key: 'created', label: 'Created', value: <Text size="sm">{session.createdAt ? new Date(session.createdAt).toLocaleString() : '—'}</Text> },
@@ -281,6 +283,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                             resolvingId={resolvingId}
                             onResolve={(actionId, body) => void resolveAction(actionId, body)}
                             blocked={blocked}
+                            blockedById={blockedById}
                         />
                     </Alert>
                 ) : null}

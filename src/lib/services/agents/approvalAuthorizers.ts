@@ -43,8 +43,11 @@ export interface PortalApprovalInput {
     userId: string;
     user?: RbacUserLike & { projectIds?: string[] };
     portal: { id: string; key?: string; name?: string; access: PortalAccessInput };
-    /** The agent the portal runs: its registry id (what `agent.get` is asked about) and key. */
-    agent: { id: string; key?: string };
+    /**
+     * The agent the portal runs: its registry id (what `agent.get` is asked about), key and, when the caller has it,
+     * display name (what an audit row calls the agent; the key otherwise).
+     */
+    agent: { id: string; key?: string; name?: string };
     client?: ResourceAuthzClient;
 }
 
@@ -81,7 +84,10 @@ export function portalApprovalAuthorizer(input: PortalApprovalInput): ApprovalAu
             subject: {
                 portalId: input.portal.id,
                 ...(input.portal.key ? { portalKey: input.portal.key } : {}),
-                resourceName: input.portal.name ?? input.agent.key ?? conversation.agentKey,
+                // The thing asked about is the AGENT's session: the row names the agent (the portal is named apart,
+                // `portalName`), so the feed reads "approving a tool call of agent X in portal Y" and not the other way round.
+                resourceName: input.agent.name ?? input.agent.key ?? conversation.agentKey,
+                ...(input.portal.name ? { portalName: input.portal.name } : {}),
             },
             ...(input.client ? { client: input.client } : {}),
         });

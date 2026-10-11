@@ -94,7 +94,8 @@ describe('parsePolicySpec', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.spec.principals).toEqual({ users: ['u1', 'u2'], groups: ['g1'], anyToken: true });
-    expect(r.spec.actions).toEqual(['agents.read', 'Write']);
+    // an allow rule's Write level includes Read (levels add up): named first, what they imply after
+    expect(r.spec.actions).toEqual(['agents.read', 'Write', 'Read']);
     expect(r.spec.resources).toEqual({ services: ['agents', 'models'], projects: ['p1'], resources: [{ type: 'agent', id: 'a1' }] });
     expect(r.spec.conditions).toEqual({
       validFrom: '2026-01-01T00:00:00.000Z',

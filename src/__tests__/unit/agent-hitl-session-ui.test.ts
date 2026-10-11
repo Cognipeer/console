@@ -14,6 +14,7 @@ import {
   buildApprovalBody,
   cancelOpenActions,
   composerGate,
+  composerGateFor,
   emptyDraft,
   openActionsOf,
   parseEditedArgs,
@@ -186,6 +187,27 @@ describe('composerGate', () => {
     expect(composerGate(1, undefined)).toBe('blocked');
     expect(composerGate(2, 'reject')).toBe('blocked');
     expect(composerGate(1, 'cancel_pending')).toBe('cancel');
+  });
+});
+
+describe('composerGateFor (this viewer)', () => {
+  it('is composerGate for a viewer who may answer, or whom the server could not check', () => {
+    for (const blocked of [null, undefined, 'unavailable'] as const) {
+      expect(composerGateFor(0, 'reject', blocked)).toEqual({ gate: 'open', waitingElsewhere: false });
+      expect(composerGateFor(1, 'reject', blocked)).toEqual({ gate: 'blocked', waitingElsewhere: false });
+      expect(composerGateFor(1, 'cancel_pending', blocked)).toEqual({ gate: 'cancel', waitingElsewhere: false });
+    }
+  });
+
+  it('waits for an approver when the server says the viewer may not answer - also where a message would cancel the request, which the server refuses', () => {
+    for (const blocked of ['approvers_owner', 'approvers_admin', 'approvers_member', 'session_owner', 'policy'] as const) {
+      expect(composerGateFor(1, 'reject', blocked)).toEqual({ gate: 'blocked', waitingElsewhere: true });
+      expect(composerGateFor(1, 'cancel_pending', blocked)).toEqual({ gate: 'blocked', waitingElsewhere: true });
+    }
+  });
+
+  it('has nothing to wait for when nothing is open', () => {
+    expect(composerGateFor(0, 'cancel_pending', 'policy')).toEqual({ gate: 'open', waitingElsewhere: false });
   });
 });
 

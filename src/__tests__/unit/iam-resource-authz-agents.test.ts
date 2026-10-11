@@ -402,6 +402,61 @@ describeForEachProvider('agent session decisions', (getDb) => {
     expect(refused).toMatchObject({ allowed: false, decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
   });
 
+  /** The decision id a refusal carries (the verdict is a union; an allow has none). */
+  const decisionOf = (verdict: unknown): string => String((verdict as { decisionId?: string }).decisionId ?? '');
+
+  it('names the AGENT as the resource of a refusal and the portal apart from it - in the audit row, the feed sentence and the decision lookup', async () => {
+    registerIamPortalResolver(async () => portal);
+    const refused = await authorizer('admin')(request(idOf('starter')));
+    expect(refused.allowed).toBe(false);
+    await drainPendingTasks();
+    const [row] = (await rows({ service: 'portals', metadata: { key: 'decisionId', value: decisionOf(refused) } })).items;
+    expect(row.metadata).toMatchObject({
+      channel: 'portal', action: 'agent.approve', resourceType: 'agent', resourceId: T.agentId,
+      // the agent is the thing asked about; the portal is where it was asked
+      resourceName: 'support', portalId: portal.id, portalKey: 'branch', portalName: 'Branch',
+    });
+    expect(row.metadata?.resourceName).not.toBe('Branch');
+
+    const feed = await listAuditFeed(tenant(), { kind: 'denials', limit: 20, offset: 0 });
+    const item = feed.items.find((i) => i.decisionId === decisionOf(refused));
+    expect(item).toMatchObject({
+      summary: 'Denied admin approving a tool call of agent "support" in portal "Branch" because no rule appoints them',
+      text: { key: 'denied.approveInPortal', params: { who: 'admin', resource: 'support', portal: 'Branch' } },
+    });
+
+    const decision = (await getDecision(tenant(), decisionOf(refused)))!;
+    expect(decision).toMatchObject({
+      channel: 'portal',
+      resource: { type: 'agent', id: T.agentId, label: 'support' },
+      portal: { id: portal.id, key: 'branch', label: 'Branch' },
+    });
+  });
+
+  it('prefers the agent\'s display name when the caller has one, and never falls back to the portal\'s name', async () => {
+    registerIamPortalResolver(async () => portal);
+    const named = portalApprovalAuthorizer({
+      tenantDbName: T.dbName, tenantId: T.id, userId: idOf('admin'),
+      portal: { id: portal.id, key: portal.key, name: portal.name, access: { ...portal.access, userIds: [idOf('starter')] } },
+      agent: { id: T.agentId, key: 'support', name: 'Support bot' },
+    });
+    const refused = await named(request(idOf('starter')));
+    await drainPendingTasks();
+    const [row] = (await rows({ service: 'portals', metadata: { key: 'decisionId', value: decisionOf(refused) } })).items;
+    expect(row.metadata).toMatchObject({ resourceName: 'Support bot', portalName: 'Branch' });
+    // no name, no key: the session's own agent key
+    const bare = portalApprovalAuthorizer({
+      tenantDbName: T.dbName, tenantId: T.id, userId: idOf('admin'),
+      portal: { id: portal.id, name: portal.name, access: { ...portal.access, userIds: [idOf('starter')] } },
+      agent: { id: T.agentId },
+    });
+    resetResourceAuthzThrottleForTests();
+    const second = await bare(request(idOf('starter')));
+    await drainPendingTasks();
+    const [row2] = (await rows({ service: 'portals', metadata: { key: 'decisionId', value: decisionOf(second) } })).items;
+    expect(row2.metadata?.resourceName).toBe('support');
+  });
+
   it('a question follows the session\'s ownership: the person who started it answers, nobody else, and the engine is not asked', async () => {
     registerIamPortalResolver(async () => portal);
     expect(await authorizer('starter')(request(idOf('starter'), 'owner', 'user_question'))).toEqual({ allowed: true });
