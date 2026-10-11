@@ -151,7 +151,7 @@ Name the files a message uses in the chat body: `attachments: ["<fileId>", …]`
 
 ## Where you see them
 
-An attached file is shown wherever the message is: in the session page, in the **session detail** drawer's request inspector (a thumbnail for a picture, a chip with type icon and size for anything else; one that has expired is a muted *expired* chip) and in Observability traces for requests that carry pictures. They are one component, so they look the same everywhere.
+An attached file is shown wherever the message is: in the session page, in the **session detail** drawer's request inspector (a thumbnail for a picture, a chip with type icon and size for anything else; one that has expired is a muted *expired* chip) and in Observability traces for requests that carry pictures. They are one component, so they look the same everywhere. In a trace of an agent session, a picture the request names by reference (`session-file://…`) is drawn as a thumbnail from the session's content route, under the session's own access check; if the route refuses you or the file is gone (retention, deletion), the picture is shown as a chip with its name instead. A trace that is not an agent session's lists such pictures by name only.
 
 ## Cleanup
 

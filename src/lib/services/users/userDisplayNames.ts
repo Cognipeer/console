@@ -51,16 +51,29 @@ export async function resolveUserDisplayNames(
     return names;
 }
 
-/** Each record with `uploadedByName` when its `uploadedBy` is a known user. */
-export async function withUploaderNames<T extends { uploadedBy?: string }>(
+/**
+ * Each record with `uploadedByName` when its `uploadedBy` is a known user, and `createdByName`
+ * when its `createdBy` is one (one lookup per distinct id for both).
+ */
+export async function withUploaderNames<T extends { uploadedBy?: string; createdBy?: string }>(
     tenantDbName: string,
     records: T[],
     options?: Parameters<typeof resolveUserDisplayNames>[2],
-): Promise<Array<T & { uploadedByName?: string }>> {
-    const names = await resolveUserDisplayNames(tenantDbName, records.map((record) => record.uploadedBy), options);
+): Promise<Array<T & { uploadedByName?: string; createdByName?: string }>> {
+    const names = await resolveUserDisplayNames(
+        tenantDbName,
+        records.flatMap((record) => [record.uploadedBy, record.createdBy]),
+        options,
+    );
     if (names.size === 0) return records;
     return records.map((record) => {
-        const name = record.uploadedBy ? names.get(record.uploadedBy) : undefined;
-        return name ? { ...record, uploadedByName: name } : record;
+        const uploadedByName = record.uploadedBy ? names.get(record.uploadedBy) : undefined;
+        const createdByName = record.createdBy ? names.get(record.createdBy) : undefined;
+        if (!uploadedByName && !createdByName) return record;
+        return {
+            ...record,
+            ...(uploadedByName ? { uploadedByName } : {}),
+            ...(createdByName ? { createdByName } : {}),
+        };
     });
 }

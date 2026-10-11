@@ -39,7 +39,7 @@ import type {
 } from '@/lib/services/files';
 import { ApiError, apiRequest } from '@/lib/api/client';
 import { useLocale, useTranslations } from '@/lib/i18n';
-import { FolderPath, SessionFileCells } from './FileBrowseParts';
+import { createdByWho, FolderPath, SessionFileCells } from './FileBrowseParts';
 import {
   applySessionFilter,
   filesInFolder,
@@ -615,9 +615,15 @@ export default function FileObjectManager({ bucket }: FileObjectManagerProps) {
                     <Table.Td>
                       <Stack gap={4}>
                         <Text fw={600}>{record.name}</Text>
-                        <Text size="xs" c="dimmed">
-                          Created by {record.createdBy ?? 'system'}
-                        </Text>
+                        {(() => {
+                          // A person's name, never their id; none when the Uploaded-by column already says it.
+                          const who = createdByWho(record, showSessionColumns);
+                          return who ? (
+                            <Text size="xs" c="dimmed" title={record.createdBy}>
+                              {t('createdBy', { who })}
+                            </Text>
+                          ) : null;
+                        })()}
                       </Stack>
                     </Table.Td>
                     <Table.Td>

@@ -1103,6 +1103,8 @@ export const en = {
       expires: 'Expires',
       uploadedBy: 'Uploaded by',
     },
+    // The line under a file's name in the Document Store: who created it ({who} is a person's name or a system actor).
+    createdBy: 'Created by {who}',
     session: {
       open: 'Open session',
       openUnknownAgent: 'Session {id}',

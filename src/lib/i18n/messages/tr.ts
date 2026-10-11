@@ -179,6 +179,8 @@ export const tr: typeof en = {
       expires: 'Sona erer',
       uploadedBy: 'Yükleyen',
     },
+    // Document Store'da dosya adının altındaki satır: kim oluşturdu ({who} bir kişinin adı ya da bir sistem aktörü).
+    createdBy: 'Oluşturan: {who}',
     session: {
       open: 'Oturumu aç',
       openUnknownAgent: 'Oturum {id}',
