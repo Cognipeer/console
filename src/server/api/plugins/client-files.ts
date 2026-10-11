@@ -135,17 +135,21 @@ export const clientFilesApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { bucketKey } = request.params as { bucketKey: string };
-      const query = (request.query ?? {}) as { cursor?: string; limit?: string; search?: string };
+      const query = (request.query ?? {}) as { cursor?: string; limit?: string; prefix?: string; purpose?: string; search?: string };
+      // `prefix` (even empty) = list one folder: its files, and its sub-folders in `folders`.
       const result = await listFiles(ctx.tenantDbName, ctx.tenantId, ctx.projectId, {
         bucketKey,
         cursor: query.cursor,
         limit: query.limit ? Number.parseInt(query.limit, 10) : 50,
         search: query.search,
+        ...(typeof query.prefix === 'string' ? { prefix: query.prefix } : {}),
+        ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
       });
 
       return reply.code(200).send({
         count: result.items.length,
         files: result.items,
+        ...(result.folders ? { folders: result.folders, prefix: result.prefix } : {}),
         nextCursor: result.nextCursor,
       });
     } catch (error) {

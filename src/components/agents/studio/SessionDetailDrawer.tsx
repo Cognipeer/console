@@ -33,11 +33,12 @@ import type { IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.d
 import PendingActionList from '../session/PendingActionCards';
 import SessionActivity from '../session/SessionActivity';
 import SessionStatusBadge from '../session/SessionStatusBadge';
-import { answerRestriction, openActionsOf, type ResolveBody } from '../session/pendingActions';
+import { answerRestriction, isStaleActionRefusal, openActionsOf, type ResolveBody } from '../session/pendingActions';
 import { sessionStatusKind, stopReasonBadge } from '../session/sessionActivityUi';
 import { useViewer } from '../session/useViewer';
 import { formatCost } from '../session/sessionUsage';
 import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
+import { sessionFilesUrl, toAttachmentViews, type SessionFileItem } from '../session/sessionFilesUi';
 import { isContinuableSession, SessionSourceBadge, sessionSourceLabel, type SessionListItem } from './SessionList';
 
 export interface SessionDetailDrawerProps {
@@ -52,12 +53,20 @@ export interface SessionDetailDrawerProps {
     onResolved?: () => void;
 }
 
+/** What links a message's files to the session's content route, and which of them are gone. */
+export interface TranscriptFiles {
+    agentId: string;
+    sessionId: string;
+    /** The files the server lists for the session; null = not listed (yet), so none is called expired. */
+    files: ReadonlyArray<Pick<SessionFileItem, 'id' | 'expiresAt'>> | null;
+}
+
 /**
  * The stored transcript as the inspector's ordered stream: a divider per turn,
- * the user message, the turn's tool calls (call + result grouped by step id),
- * then the answer.
+ * the user message with the files it carried, the turn's tool calls (call +
+ * result grouped by step id), then the answer.
  */
-function toItems(messages: ChatMessage[]): LlmRequestItem[] {
+export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFiles): LlmRequestItem[] {
     const items: LlmRequestItem[] = [];
     let turn = 0;
     messages.forEach((message, index) => {
@@ -68,7 +77,10 @@ function toItems(messages: ChatMessage[]): LlmRequestItem[] {
                 itemType: 'divider',
                 label: `Turn ${turn}${at ? ` · ${new Date(at).toLocaleTimeString()}` : ''}`,
             });
-            items.push({ itemType: 'message', role: 'user', content: message.content });
+            const attachments = transcriptFiles && message.attachments?.length
+                ? toAttachmentViews(message.attachments, transcriptFiles)
+                : undefined;
+            items.push({ itemType: 'message', role: 'user', content: message.content, ...(attachments ? { attachments } : {}) });
             return;
         }
         (message.steps ?? []).forEach((step, stepIndex) => {
@@ -90,6 +102,8 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
     const th = useTranslations('agents.hitl');
     const ta = useTranslations('agents.activity');
     const [record, setRecord] = useState<SessionRecord | null>(null);
+    // The session's files as the server lists them: a file a message names that is not in it has expired or been deleted.
+    const [files, setFiles] = useState<SessionFileItem[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     // Bumped to re-read the session after a request was answered.
     const [reloadKey, setReloadKey] = useState(0);
@@ -109,6 +123,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         if (loadedFor.current !== sessionId) {
             loadedFor.current = sessionId;
             setRecord(null);
+            setFiles(null);
             setActivityOpen(false);
         }
         setError(null);
@@ -116,7 +131,24 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             .then(async (res) => {
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
-                if (!cancelled) setRecord(data.session as SessionRecord);
+                if (cancelled) return;
+                const loaded = data.session as SessionRecord;
+                setRecord(loaded);
+                // Which of the files its messages name still exist. Asked only when a message carries any, and
+                // beside the transcript, never part of it: a list that cannot be read only means no file is
+                // marked expired.
+                if (!loaded.messages?.some((message) => message.attachments?.length)) {
+                    setFiles(null);
+                    return;
+                }
+                try {
+                    const filesRes = await fetch(sessionFilesUrl(agentId, sessionId), { cache: 'no-store' });
+                    if (!filesRes.ok) throw new Error(`HTTP ${filesRes.status}`);
+                    const filesData = await filesRes.json();
+                    if (!cancelled) setFiles(Array.isArray(filesData.files) ? (filesData.files as SessionFileItem[]) : []);
+                } catch {
+                    if (!cancelled) setFiles(null);
+                }
             })
             .catch((err: unknown) => {
                 if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -141,7 +173,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 // Answered elsewhere, or timed out while the drawer was open: show how it ended.
-                if ((res.status === 409 && (err.type === 'action_not_pending' || err.code === 'action_not_pending')) || res.status === 410) {
+                if (isStaleActionRefusal(res.status, err)) {
                     notifications.show({ title: th('resolveFailed'), message: th('resolveStateChanged'), color: 'orange' });
                     setReloadKey((key) => key + 1);
                     onResolved?.();
@@ -283,11 +315,11 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         return {
             badges,
             banner,
-            items: record ? toItems(messages) : [],
+            items: record ? toItems(messages, { agentId, sessionId: session._id, files }) : [],
             properties,
             ...(record ? { raw: { request: record.metadata ?? {}, response: messages } } : {}),
         };
-    }, [session, record, error, onContinue, agentId, approvers, viewer, th, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
+    }, [session, record, files, error, onContinue, agentId, approvers, viewer, th, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
 
     return (
         <LlmRequestDetailModal

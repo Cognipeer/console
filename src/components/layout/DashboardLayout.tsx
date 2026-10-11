@@ -23,6 +23,7 @@ import MobileNavDrawer from './launcher/MobileNavDrawer';
 import ServiceSubNav, {
   SUBNAV_CONFIG,
   findServiceForPath,
+  visibleSubNavItems,
   type SubNavItem,
 } from './launcher/ServiceSubNav';
 import { useLauncherState } from './launcher/useLauncherState';
@@ -37,10 +38,11 @@ import NavigationProgress from '@/components/common/navigation/NavigationProgres
 import { useNavigationFeedback } from '@/components/common/navigation/useNavigationFeedback';
 import { DEFAULT_SDK_DOC, resolveSdkDoc, type SdkDocId } from '@/lib/docs/sdkDocs';
 import {
+  canUseDashboardService,
   getDashboardServices,
   SETTINGS_NAV_SECTION,
 } from '@/lib/utils/dashboardServices';
-import type { UserServicePermissions } from '@/lib/security/rbac';
+import type { PermissionService, UserServicePermissions } from '@/lib/security/rbac';
 
 /** Display order of the Settings section items in the left nav. */
 export const SETTINGS_NAV_ORDER: string[] = [
@@ -48,7 +50,6 @@ export const SETTINGS_NAV_ORDER: string[] = [
   'providers',
   'resources',
   'tokens',
-  'webhooks',
   'audit',
   'iam',
   'license',
@@ -154,6 +155,16 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   // the menu is then role-based). A service narrowed to "none" here is not offered at all.
   const effectivePermissions = useEffectivePermissions();
 
+  // Same answer the services are offered by: the engine's for this project, else the role's.
+  const canUseService = useCallback(
+    (service: PermissionService) =>
+      canUseDashboardService(
+        { role: defaultUser.role, servicePermissions: defaultUser.servicePermissions, effectivePermissions },
+        service,
+      ),
+    [defaultUser.role, defaultUser.servicePermissions, effectivePermissions],
+  );
+
   const allowedServices = useMemo(
     () =>
       getDashboardServices({
@@ -232,6 +243,19 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
   }, [activeService, recordVisit]);
 
   const isSettingsActive = Boolean(activeService?.isSettings);
+
+  // A sub-nav entry can belong to another service than the section it sits in
+  // (Webhooks, in Agents): it is left out for someone who has no access to that service.
+  const serviceSubnavItems = useMemo(
+    () =>
+      activeService && !isSettingsActive
+        ? visibleSubNavItems(
+            SUBNAV_CONFIG[activeService.id],
+            (service) => canUseService(service),
+          )
+        : undefined,
+    [activeService, isSettingsActive, canUseService],
+  );
   const hasSubnav = Boolean(
     activeService && (SUBNAV_CONFIG[activeService.id] || isSettingsActive),
   );
@@ -302,6 +326,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       isTenantAdmin,
       openLauncher: () => setLauncherOpen(true),
       hydrated,
+      canUseService,
     }),
     [
       pinned,
@@ -313,6 +338,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
       recentServices,
       isTenantAdmin,
       hydrated,
+      canUseService,
     ],
   );
 
@@ -374,7 +400,7 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
                 isPinned={pinned.has(activeService.id)}
                 onTogglePin={() => togglePin(activeService.id)}
                 onOpenDocs={() => openDocs(DEFAULT_SDK_DOC)}
-                items={isSettingsActive ? settingsNavItems : undefined}
+                items={isSettingsActive ? settingsNavItems : serviceSubnavItems}
                 hidePin={isSettingsActive}
               />
             ) : null}
@@ -412,7 +438,9 @@ export default function DashboardLayout({ children, supportEnabled = false, isOn
               subnavOverride={
                 isSettingsActive
                   ? { title: tNavigation('settings'), items: settingsNavItems }
-                  : null
+                  : activeService && serviceSubnavItems
+                    ? { title: tNavigation(activeService.navLabelKey), items: serviceSubnavItems }
+                    : null
               }
               settingsHref={settingsHref}
               settingsActive={isSettingsActive}

@@ -18,7 +18,16 @@ import type { ChatMessage } from './sessionTypes';
  * the reader to the per-turn limit in Configure) and points at the budget banner
  * only while that banner is still there.
  */
-export default function StopNotice({ message, budgetBannerShown }: { message: ChatMessage; budgetBannerShown: boolean }) {
+export default function StopNotice({
+    message,
+    budgetBannerShown,
+    budgetStops = false,
+}: {
+    message: ChatMessage;
+    budgetBannerShown: boolean;
+    /** The session budget stops the session instead of pausing it: raising it reopens the composer, it does not carry the turn on. */
+    budgetStops?: boolean;
+}) {
     const ts = useTranslations('agents.stopNotice');
     if (!message.stopReason) return null;
     const hasText = Boolean(message.content?.trim());
@@ -28,7 +37,7 @@ export default function StopNotice({ message, budgetBannerShown }: { message: Ch
         ? `${ts('budget')}${amounts ? ` (${amounts})` : ''}`
         : `${ts(message.stopReason)}${message.stopDetail ? ` — ${message.stopDetail}` : ''}`;
     const hint = budgetStop
-        ? (budgetBannerShown ? ts('budgetHint') : '')
+        ? (budgetBannerShown ? ts(budgetStops ? 'budgetHintStopped' : 'budgetHint') : '')
         : (message.stopReason === 'limit' ? ts('limitHint') : '');
     return (
         <Alert

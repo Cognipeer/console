@@ -29,6 +29,7 @@ import {
 } from '@tabler/icons-react';
 import {
   ALL_DASHBOARD_SERVICES,
+  DASHBOARD_SUBPAGES,
   type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
 import { useTranslations } from '@/lib/i18n';
@@ -424,7 +425,18 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
     const candidates: ReadonlyArray<DashboardServiceDefinition> = offered
       ? offered
       : ALL_DASHBOARD_SERVICES.filter((s) => !s.tenantAdminOnly || isTenantAdmin);
-    return candidates.map((s: DashboardServiceDefinition) => {
+    const entries = [
+      ...candidates,
+      // Pages that sit inside another service's sub-nav (Agents → Webhooks) are found by name too,
+      // when the service they sit in is offered and the person may use the service they belong to
+      // (the shell's own judgement; without a shell, administration pages are for tenant admins).
+      ...DASHBOARD_SUBPAGES.filter(
+        (page) =>
+          candidates.some((s) => s.id === page.parent) &&
+          (launcher?.canUseService ? launcher.canUseService(page.service) : isTenantAdmin),
+      ),
+    ];
+    return entries.map((s) => {
       const ServiceIcon = s.icon;
       const label = tNav(s.navLabelKey);
       const description = tNav(s.navDescriptionKey);
@@ -445,7 +457,7 @@ export default function CommandPalette({ isTenantAdmin = false }: CommandPalette
           .toLowerCase(),
       };
     });
-  }, [isTenantAdmin, offered, tNav]);
+  }, [isTenantAdmin, launcher, offered, tNav]);
 
   /* ── Dynamic API fetch (debounced) ───────────────────────────────── */
 

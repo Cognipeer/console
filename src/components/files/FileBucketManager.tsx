@@ -22,6 +22,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import CreateFileBucketModal from '@/components/files/CreateFileBucketModal';
 import type { FileBucketView } from '@/lib/services/files';
 import { ApiError, apiRequest } from '@/lib/api/client';
+import { bucketRefusalMessage } from './fileBrowse';
 
 function formatDate(value?: Date | string | null) {
   if (!value) {
@@ -132,7 +133,12 @@ export default function FileBucketManager({
       id: bucket.id,
       extraWarning: tSafe('fileBucketExtra'),
       action: async () => {
-        await deleteBucket.mutateAsync(bucket);
+        try {
+          await deleteBucket.mutateAsync(bucket);
+        } catch (error) {
+          // A bucket an agent stores its session files in is refused with the agents named; the dialog shows that reason.
+          throw new Error(bucketRefusalMessage(error));
+        }
       },
     });
   };

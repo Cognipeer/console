@@ -17,6 +17,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
     memory: 'Memory',
     sandbox: 'Sandbox',
     execution: 'Execution',
+    files: 'Files',
     hitl: 'Approvals & questions',
     advanced: 'Runtime',
     output: 'Structured output',
@@ -27,6 +28,7 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
  * rest of the headings are English until their sections are localized.
  */
 export const CONFIG_SECTION_TITLE_KEYS: Record<string, string> = {
+    files: 'attachments.sectionTitle',
     hitl: 'hitl.sectionTitle',
 };
 
@@ -43,7 +45,8 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     skills: ['skills', 'skillPolicy'],
     memory: ['memory'],
     sandbox: ['sandbox'],
-    execution: ['execution', 'attachments'],
+    execution: ['execution'],
+    files: ['attachments'],
     hitl: ['humanInTheLoop'],
     advanced: ['runtime'],
     output: ['structuredOutput'],

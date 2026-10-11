@@ -203,6 +203,9 @@ describe('POST …/actions/:actionId/resolve', () => {
     it.each([
         [{ kind: 'not_found' }, 404, undefined],
         [{ kind: 'not_pending', status: 'resolved' }, 409, 'action_not_pending'],
+        // Cancelled elsewhere (a new message, a run cancel) and swept as expired say so: a portal shows "Cancelled" / "Expired", not "Answered".
+        [{ kind: 'not_pending', status: 'cancelled' }, 409, 'action_cancelled'],
+        [{ kind: 'not_pending', status: 'expired' }, 410, 'action_expired'],
         [{ kind: 'expired' }, 410, 'action_expired'],
         [{ kind: 'forbidden', message: 'nope' }, 403, undefined],
         [{ kind: 'invalid', message: 'bad body' }, 400, undefined],

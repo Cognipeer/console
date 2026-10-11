@@ -1,5 +1,5 @@
 /**
- * The pure parts of the Settings → Webhooks screens: how a subscription's event
+ * The pure parts of the Agents → Webhooks screens: how a subscription's event
  * list is shown and edited (exact types and `group.*` patterns), the wire types,
  * and the labels derived from an endpoint. No React.
  */

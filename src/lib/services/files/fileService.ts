@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getDatabase, type DatabaseProvider, type FileMarkdownStatus, type IFileBucketRecord, type IFileRecord, type IProviderRecord } from '@/lib/database';
+import { normalizeFolderPrefix } from '@/lib/database/fileEntryWalk';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
 import { runtimePool, hashCredentials } from '@/lib/core/runtimePool';
@@ -304,7 +305,8 @@ function assertUploadAllowed(request: UploadFileRequest, fileBuffer: Buffer): vo
     }
 }
 
-function generateRelativeKey(fileName: string): string {
+/** A unique object key (relative to the bucket) for a file name: `<slug>-<timestamp>-<id>.<ext>`. */
+export function generateFileRelativeKey(fileName: string): string {
     const normalized = normalizeFileName(fileName);
     const extension = path.extname(normalized);
     const baseName = normalized.slice(0, normalized.length - extension.length) || 'file';
@@ -313,6 +315,55 @@ function generateRelativeKey(fileName: string): string {
         .replace(/[^a-z0-9-_]+/g, '-')
         .replace(/^-+|-+$/g, '') || 'file';
     return `${safeBase}-${Date.now()}-${randomUUID().slice(0, 8)}${extension}`;
+}
+
+/**
+ * The object key (relative to the bucket) an upload is stored under. No hint =
+ * a generated unique name. A hint that ends with `/` names a folder: the file
+ * lands in it under the generated name (the Document Store uploads from inside a
+ * folder this way). Any other hint is the whole key.
+ */
+export function chooseRelativeFileKey(keyHint: string | undefined, fileName: string): string {
+    const hint = keyHint?.trim().replace(/^\/+/, '');
+    if (!hint) return generateFileRelativeKey(fileName);
+    if (!hint.endsWith('/')) return hint;
+    return `${hint.replace(/\/{2,}/g, '/')}${generateFileRelativeKey(fileName)}`;
+}
+
+/**
+ * The `keyHint` for an upload that names a destination folder (`folder`, or its
+ * alias `prefix`): the Document Store uploads from inside the folder it is
+ * showing. With a folder alone the file lands in it under a generated unique name;
+ * with a `keyHint` too, the hint is the file's name inside the folder. A segment
+ * that climbs out (`..`) or a path that is not text is refused. Neither given =
+ * no hint (a generated name at the bucket root, as before).
+ */
+export function composeUploadKeyHint(input: { folder?: unknown; keyHint?: unknown }): { keyHint?: string } | { error: string } {
+    const MAX = 512;
+    const clean = (value: unknown, field: string): { value: string } | { error: string } => {
+        if (typeof value !== 'string') return { error: `${field} must be text.` };
+        const slashed = value.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+        if (slashed.length > MAX) return { error: `${field} must be at most ${MAX} characters.` };
+        if (slashed.split('/').some((segment) => segment === '..' || segment === '.')) {
+            return { error: `${field} cannot contain "." or ".." segments.` };
+        }
+        if (/[\u0000-\u001f]/.test(slashed)) return { error: `${field} cannot contain control characters.` };
+        return { value: slashed };
+    };
+    const hasFolder = input.folder !== undefined && input.folder !== null && input.folder !== '';
+    const hasHint = input.keyHint !== undefined && input.keyHint !== null && input.keyHint !== '';
+    if (!hasFolder) {
+        if (!hasHint) return {};
+        const hint = clean(input.keyHint, 'keyHint');
+        return 'error' in hint ? hint : { keyHint: hint.value };
+    }
+    const folder = clean(input.folder, 'folder');
+    if ('error' in folder) return folder;
+    const root = normalizeFolderPrefix(folder.value);
+    if (!hasHint) return root ? { keyHint: root } : {};
+    const hint = clean(input.keyHint, 'keyHint');
+    if ('error' in hint) return hint;
+    return { keyHint: `${root}${hint.value.replace(/^\/+/, '')}` };
 }
 
 function decodeData(payload: Buffer | string): Buffer {
@@ -605,11 +656,34 @@ export async function listFiles(
     }
 
     const db = await withTenantDb(tenantDbName);
+
+    // A folder, not a search: its files and its sub-folders, derived from the keys.
+    if (request.prefix !== undefined && !request.search) {
+        const prefix = normalizeFolderPrefix(request.prefix);
+        const page = await db.listFileEntries({
+            providerKey: bucket.providerKey,
+            bucketKey: bucket.key,
+            projectId,
+            prefix,
+            purpose: request.purpose,
+            limit: request.limit,
+            cursor: request.cursor,
+        });
+        return {
+            items: page.items.map(serializeFileRecord) as FileRecordListItem[],
+            folders: page.folders,
+            prefix,
+            nextCursor: page.nextCursor,
+        };
+    }
+
     const { items, nextCursor } = await db.listFileRecords({
         providerKey: bucket.providerKey,
         bucketKey: bucket.key,
         projectId,
         search: request.search,
+        ...(request.prefix ? { prefix: normalizeFolderPrefix(request.prefix) } : {}),
+        purpose: request.purpose,
         limit: request.limit,
         cursor: request.cursor,
     });
@@ -737,10 +811,7 @@ export async function uploadFile(
     const fileBuffer = decodeData(request.data);
     assertUploadAllowed(request, fileBuffer);
     const fileName = normalizeFileName(request.fileName);
-    const relativeKeyHint = request.keyHint?.trim().replace(/^\/+/, '');
-    const chosenRelativeKey = relativeKeyHint && relativeKeyHint.length > 0
-        ? relativeKeyHint
-        : generateRelativeKey(fileName);
+    const chosenRelativeKey = chooseRelativeFileKey(request.keyHint, fileName);
 
     const providerObjectKey = composeProviderObjectKey(
         bucket,

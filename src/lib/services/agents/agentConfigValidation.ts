@@ -26,6 +26,8 @@ import {
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
+import { normalizeAttachmentsFolder } from './sessionFilesConfig';
+import { inspectFileBucket } from './sessionFilesBucket';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -227,9 +229,25 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         checkNumber(issues, 'attachments.inlineMaxTokens', attachments.inlineMaxTokens, { min: 100, integer: true });
         checkNumber(issues, 'attachments.readPageChars', attachments.readPageChars, { min: 500, max: 200_000, integer: true });
         checkNumber(issues, 'attachments.retentionDays', attachments.retentionDays, { min: 1, max: 3650 });
+        checkNumber(issues, 'attachments.maxImages', attachments.maxImages, { min: 1, max: 50, integer: true });
+        checkNumber(issues, 'attachments.maxBytes', attachments.maxBytes, { min: 100_000, max: 200_000_000, integer: true });
+        checkNumber(issues, 'attachments.carryRecentImages', attachments.carryRecentImages, { min: 0, max: 20, integer: true });
         if (attachments.allowedMimeTypes !== undefined
             && (!Array.isArray(attachments.allowedMimeTypes) || attachments.allowedMimeTypes.some((entry) => typeof entry !== 'string'))) {
             issues.errors.push({ field: 'attachments.allowedMimeTypes', message: 'must be a list of MIME types (image/* is allowed)' });
+        }
+        for (const flag of ['enabled', 'attachNewUploads'] as const) {
+            if (attachments[flag] !== undefined && typeof attachments[flag] !== 'boolean') {
+                issues.errors.push({ field: `attachments.${flag}`, message: 'must be true or false' });
+            }
+        }
+        const folder = normalizeAttachmentsFolder(attachments.folder);
+        if (folder.error) issues.errors.push({ field: 'attachments.folder', message: folder.error });
+        if (attachments.bucketKey !== undefined && typeof attachments.bucketKey !== 'string') {
+            issues.errors.push({ field: 'attachments.bucketKey', message: 'must be a bucket key' });
+        } else if (attachments.enabled === true && !attachments.bucketKey?.trim()) {
+            // Files are kept in a bucket of the project; there is no built-in storage to fall back to.
+            issues.errors.push({ field: 'attachments.bucketKey', message: 'Choose a bucket to keep the files in' });
         }
     }
 
@@ -400,6 +418,21 @@ export async function validateAgentConfig(input: {
             if (templates && !templates.some((template) => template.key === config.sandbox!.templateKey)) {
                 issues.errors.push({ field: 'sandbox.templateKey', message: `Sandbox template "${config.sandbox.templateKey}" does not exist` });
             }
+        }
+    }
+
+    // Session files need a bucket that can take a file: it exists in this project, is
+    // active, and its provider exists, is assigned here and is active.
+    const filesBucketKey = config.attachments?.enabled === true && typeof config.attachments.bucketKey === 'string'
+        ? config.attachments.bucketKey.trim()
+        : '';
+    if (filesBucketKey && input.tenantId) {
+        const inspection = await inspectFileBucket(db, input.tenantId, projectId, filesBucketKey).catch(() => null);
+        if (inspection && !inspection.usable) {
+            issues.errors.push({
+                field: 'attachments.bucketKey',
+                message: `${inspection.message.charAt(0).toUpperCase()}${inspection.message.slice(1)}`,
+            });
         }
     }
 

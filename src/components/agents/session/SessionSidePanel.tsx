@@ -32,6 +32,8 @@ import { stepFailed, type ChatMessage, type PlaygroundStep, type TurnCompaction 
 import { formatCompactTokens, formatCost, summariseSession } from './sessionUsage';
 import ContextCompactionCard, { compactionShrinkLabel } from './ContextCompactionCard';
 import SessionActivity from './SessionActivity';
+import SessionFilesPanel from './SessionFilesPanel';
+import type { SessionFileItem } from './sessionFilesUi';
 import { stopReasonBadge, type SessionStatusKind } from './sessionActivityUi';
 import {
     collectConfiguredTools,
@@ -63,6 +65,16 @@ export interface SessionSidePanelProps {
     messages: ChatMessage[];
     /** Jumps the transcript to the turn an event belongs to. */
     onGoToTurn: (index: number) => void;
+    /** The session's files as the server lists them (null = not loaded yet); omitted for an agent that has no files. */
+    files?: {
+        items: SessionFileItem[] | null;
+        failed?: boolean;
+        maxFiles?: number;
+        readOnly?: boolean;
+        deleting?: string[];
+        onDelete: (file: SessionFileItem) => void;
+        onRetry: () => void;
+    };
 }
 
 interface FlatEvent {
@@ -87,10 +99,13 @@ export default function SessionSidePanel({
     agentConfig,
     messages,
     onGoToTurn,
+    files,
 }: SessionSidePanelProps) {
     const th = useTranslations('agents.hitl');
     const tb = useTranslations('agents.budget');
     const ta = useTranslations('agents.activity');
+    const tf = useTranslations('agents.attachments');
+    const tp = useTranslations('agents.sessionPage');
     const [tab, setTab] = useState<string | null>('session');
     const statusLabel = status === 'running'
         ? th('running')
@@ -209,17 +224,22 @@ export default function SessionSidePanel({
             </Box>
 
             <Tabs.List grow>
-                <Tabs.Tab value="session">Session</Tabs.Tab>
+                <Tabs.Tab value="session">{tp('tabSession')}</Tabs.Tab>
                 <Tabs.Tab value="events">
-                    Events{events.length > 0 ? <span className={classes.tabCount}>{events.length}</span> : null}
+                    {tp('tabEvents')}{events.length > 0 ? <span className={classes.tabCount}>{events.length}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="tools">
-                    Tools{tools.length > 0 ? <span className={classes.tabCount}>{tools.length}</span> : null}
+                    {tp('tabTools')}{tools.length > 0 ? <span className={classes.tabCount}>{tools.length}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="context">
-                    Context{compactions.length > 0 ? <span className={classes.tabCount}>{compactions.length}</span> : null}
+                    {tp('tabContext')}{compactions.length > 0 ? <span className={classes.tabCount}>{compactions.length}</span> : null}
                 </Tabs.Tab>
                 <Tabs.Tab value="activity">{ta('tabLabel')}</Tabs.Tab>
+                {files ? (
+                    <Tabs.Tab value="files">
+                        {tf('tab')}{files.items && files.items.length > 0 ? <span className={classes.tabCount}>{files.items.length}</span> : null}
+                    </Tabs.Tab>
+                ) : null}
             </Tabs.List>
 
             <ScrollArea className={classes.sidePanelBody}>
@@ -422,6 +442,22 @@ export default function SessionSidePanel({
                         refreshKey={activityKey}
                     />
                 </Tabs.Panel>
+
+                {files ? (
+                    <Tabs.Panel value="files" p="md">
+                        <SessionFilesPanel
+                            agentId={agentId}
+                            sessionId={sessionId}
+                            files={files.items}
+                            failed={files.failed}
+                            maxFiles={files.maxFiles}
+                            readOnly={files.readOnly}
+                            deleting={files.deleting}
+                            onDelete={files.onDelete}
+                            onRetry={files.onRetry}
+                        />
+                    </Tabs.Panel>
+                ) : null}
 
                 <Tabs.Panel value="tools" p="md">
                     {tools.length === 0 ? (

@@ -6,12 +6,12 @@ A session is a conversation that can go on for days through many turns. The per-
 
 - **For an agent.** **Configure → Execution → Session budget**: an amount in USD and what happens when it is reached. Every new session starts with it. Empty = no session budget.
 - **For one session.** Give `budget` in the request that starts the session, or change it later. A budget can be added after the session started, raised, lowered or removed; unlike a fixed cap, it is a setting of the session.
-- **In Studio.** The session header shows spent / budget. A session paused on its budget shows a banner with **New budget**, **Increase and continue** and **Remove budget**.
+- **In Studio.** The session header shows spent / budget. A session paused on its budget shows a banner with **New budget**, **Increase and continue** and **Remove budget**; a session whose budget *stops* offers **Increase budget** only, after which the message box is open again.
 
 | When the budget is reached | |
 | --- | --- |
 | **Pause and wait** (default) | The turn stops where it is. The session is `budget_paused`. Once the budget is raised or removed, the turn carries on from where it stopped, with no new message. |
-| **Stop** | The turn stops and new messages are refused until the budget is raised or removed. |
+| **Stop** | The turn stops and new messages are refused until the budget is raised or removed. Raising it only reopens the session: nothing carries on by itself, the next message starts the next turn. |
 
 The budget is checked before each model request against what the session has actually spent, so a turn can overshoot by at most one request. The per-turn limit still applies: a turn runs under the lower of the two.
 
@@ -40,7 +40,7 @@ PATCH /api/client/v1/agents/sessions/{conversationId}
 
 `{ "budget": null }` removes it. The new `max_cost_usd` has to be above what the session has already spent (`400` otherwise). The session reports `budget`, `spent_usd` and `runtime_status` (`budget_paused` while it waits).
 
-For a session that is paused on its budget, the `PATCH` also continues it: the turn runs as a [background run](/guide/agent-background-execution) and the answer is `202` with the run. Send `"resume": false` to change the budget only. A session whose turn had already finished when it reached the budget has nothing to continue: the `PATCH` returns it idle (`200`) instead of starting a run.
+For a session that is paused on its budget, the `PATCH` also continues it: the turn runs as a [background run](/guide/agent-background-execution) and the answer is `202` with the run. Send `"resume": false` to change the budget only. A session whose turn had already finished when it reached the budget has nothing to continue: the `PATCH` returns it idle (`200`) instead of starting a run. The same goes for a budget that *stops* instead of pausing: the `PATCH` raises it and returns the session idle (`200`, `resume` has no effect), and the next message starts the next turn.
 
 A message sent to a session whose budget is used up is refused with `402`:
 

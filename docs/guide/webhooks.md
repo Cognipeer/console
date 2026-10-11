@@ -2,7 +2,7 @@
 
 A webhook subscription sends signed events to a URL of yours when something happens in your agents: a session goes idle, a background run finishes, an approval is waiting, a session budget is reached, a schedule fires. Events are thin: ids and a few small fields. Fetch the details through the API when you need them.
 
-Manage them in **Settings → Webhooks**, or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner holds the `webhooks` permission (within the token's own scope), and never a tenant-wide endpoint or another project's, whoever owns it.
+Manage them under **Agents → Webhooks** in the dashboard (`/dashboard/agents/webhooks`; the old `/dashboard/webhooks` address redirects there), or through the API (`/api/webhooks` for the dashboard, `/api/client/v1/webhooks` with an API token). A token acts in its own project only: it manages that project's endpoints when its owner holds the `webhooks` permission (within the token's own scope), and never a tenant-wide endpoint or another project's, whoever owns it.
 
 ## Who can manage them
 
@@ -22,7 +22,7 @@ Where the permission is exercised decides what an endpoint can reach:
 
 Without the permission a route answers **403** with the engine's reason and a `decisionId` (also in the `X-Decision-Id` header; look it up in **Authorization → Access check**). The **404** is for someone who holds the permission when the endpoint is outside their reach: another project's, or a tenant-wide one.
 
-Settings → Webhooks shows only what the person may do: without Admin the page is read-only, and the "every project" scope appears only with workspace-level Admin. The list response carries that as `capabilities` (`manage`, `workspaceScope`).
+Agents → Webhooks shows only what the person may do: without Admin the page is read-only, and the "every project" scope appears only with workspace-level Admin. The list response carries that as `capabilities` (`manage`, `workspaceScope`).
 
 ## Events
 

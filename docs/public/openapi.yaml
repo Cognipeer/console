@@ -288,7 +288,7 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (published version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) or `session_id` (a session created with `POST /agents/sessions`, or any session id) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponsePublished
       parameters:
         - name: X-Cognipeer-Background
@@ -344,7 +344,7 @@ paths:
                   spent_usd: 1.02
                   max_cost_usd: 1
         "403":
-          description: "The agent takes no attachments (`attachments_disabled`), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
           content:
             application/json:
               schema:
@@ -446,6 +446,104 @@ paths:
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
+  /agents/sessions:
+    post:
+      tags:
+        - Agent Sessions
+      summary: Start an agent session
+      description: "Creates an empty session for an agent without sending a message: nothing runs and nothing is spent. Use it to upload files to the session before the first message (`POST /agents/sessions/{conversationId}/files`), to give it a budget, or to tag it with `metadata`; then send messages with `session_id` on `POST /agents/responses`. The session belongs to the token's owner and is marked as coming from the API. The same agent and budget rules as the first turn of a Responses call apply."
+      operationId: createAgentSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentSessionCreateRequest"
+      responses:
+        "201":
+          description: "The new session: `runtime_status: idle`, no messages."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSession"
+        "400":
+          description: "`agent` missing, the agent is not active, or `title`, `metadata` or `budget` is invalid (`invalid_metadata`, `invalid_budget`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The agent's own session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No agent with that key in the token's project (`agent_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags:
+        - Agent Sessions
+      summary: List agent sessions
+      description: "The sessions of the token's project, newest created first. A row is the session without its transcript (`message_count` instead) and without `pending_actions`; `GET /agents/sessions/{conversationId}` has those. Page with `next_cursor`: it marks the last row you read, so sessions created while you page never shift a row into or out of a page you already have."
+      operationId: listAgentSessions
+      parameters:
+        - name: agent
+          in: query
+          required: false
+          description: Only this agent's sessions (its key).
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: "Only sessions in this runtime state. `idle` includes a session that has not run yet."
+          schema:
+            type: string
+            enum:
+              - idle
+              - running
+              - requires_action
+              - budget_paused
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: after
+          in: query
+          required: false
+          description: The `next_cursor` of the previous page.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSessionList"
+        "400":
+          description: "`limit` outside 1..100 (`invalid_limit`), an unknown `status` (`invalid_status`), or an `after` this API did not issue (`invalid_cursor`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}:
     get:
       tags:
@@ -466,6 +564,42 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Agent Sessions
+      summary: Delete an agent session
+      description: "Deletes the session with its files (object, markdown and record), its event log and any open approvals or questions. Refused while a run (synchronous or background) is queued or running on it."
+      operationId: deleteAgentSession
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      responses:
+        "200":
+          description: The session was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    type: string
+                    enum:
+                      - agent.session
+                  deleted:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A run is queued or running on this session (`agent_run_conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
     patch:
@@ -666,13 +800,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: "Someone already answered it (`action_not_pending`, with `action_status`), or another run is active for the conversation (`agent_run_conflict`)."
+          description: "Someone already answered it (`action_not_pending`, with `action_status`), it was cancelled meanwhile — by a new message, a cancelled run or the timeout policy (`action_cancelled`) — or another run is active for the conversation (`agent_run_conflict`)."
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "410":
-          description: The request ran out of time (`action_expired`).
+          description: The request ran out of time (`action_expired`), including one that was already swept as expired.
           content:
             application/json:
               schema:
@@ -714,7 +848,7 @@ paths:
       tags:
         - Agent Sessions
       summary: Upload a file to a session
-      description: "Attaches a file to the session. Send the file as the raw request body with its MIME type as `Content-Type` and its name in `?name=`. A small file can also go as a JSON body `{ \"name\", \"content_type\", \"data\" }` with base64 (or a data URL) `data`; a `.json` file goes as `application/octet-stream` and its name still says what it is. The file is converted to markdown (the original is kept) and counts toward the project's file quotas. What a session accepts is the agent's `attachments` setting: size, count, types, retention. Name the file in the next message with the `attachments` list of the dashboard chat, or use `input_file` / `input_image` parts of the Responses API."
+      description: "Attaches a file to the session. Send the file as the raw request body with its MIME type as `Content-Type` and its name in `?name=`. A small file can also go as a JSON body `{ \"name\", \"content_type\", \"data\" }` with base64 (or a data URL) `data`; a `.json` file goes as `application/octet-stream` and its name still says what it is. The file is converted to markdown (the original is kept) and counts toward the project's file quotas. What a session accepts is the agent's `attachments` setting (Configure -> Files): bucket, folder, size, count, types, retention. The file is stored in the agent's bucket at `<folder>/<agentKey>/<sessionId>/<name>`. A file nobody has sent yet goes with the session's next message; or name it in the message with an `input_file` / `input_image` part of the Responses API (or the `attachments` list of the dashboard chat)."
       operationId: uploadAgentSessionFile
       parameters:
         - $ref: "#/components/parameters/AgentSessionId"
@@ -758,7 +892,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          description: The agent takes no attachments (`attachments_disabled`).
+          description: "The agent takes no attachments (`attachments_disabled`): files are off for it, or on with no bucket chosen (`Files are not set up for this agent.`)."
           content:
             application/json:
               schema:
@@ -766,7 +900,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: The session already holds the agent's maximum number of files (`too_many_files`).
+          description: "The session already holds the agent's maximum number of files (`too_many_files`), or the bucket the agent keeps its files in cannot take a file now - it was deleted, disabled, or its provider is gone, inactive or not assigned to the project (`storage_unavailable`, naming the bucket)."
           content:
             application/json:
               schema:
@@ -826,6 +960,84 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/files/{fileId}/content:
+    get:
+      tags:
+        - Agent Sessions
+      summary: Read a session file
+      description: >-
+        Returns the file's bytes: the original, or the markdown the platform converted it to
+        (`variant=markdown`, only for a file whose `conversion_status` is `succeeded`). The response
+        carries the file's own `Content-Type` and a sanitised `Content-Disposition`; pictures open in
+        place (`inline`), everything else is offered as a download (`attachment`). SVG, HTML and other
+        active types are always a download, whatever `disposition` asks. The response is
+        `Cache-Control: private` with `X-Content-Type-Options: nosniff`. A file of another session is not found.
+      operationId: getAgentSessionFileContent
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: fileId
+          in: path
+          required: true
+          description: The id of the file.
+          schema:
+            type: string
+        - name: variant
+          in: query
+          required: false
+          description: "`original` (default), or `markdown` for the text version."
+          schema:
+            type: string
+            enum:
+              - original
+              - markdown
+        - name: disposition
+          in: query
+          required: false
+          description: "`inline` to open in place or `attachment` to download. Defaults to `inline` for pictures and `attachment` for everything else; a type that could run code in the browser is always `attachment`."
+          schema:
+            type: string
+            enum:
+              - inline
+              - attachment
+      responses:
+        "200":
+          description: The file's bytes.
+          headers:
+            Content-Disposition:
+              description: "`inline` or `attachment`, with a sanitised `filename` and the real name in `filename*`."
+              schema:
+                type: string
+            Cache-Control:
+              description: "`private, max-age=60`."
+              schema:
+                type: string
+            X-Content-Type-Options:
+              description: "`nosniff`."
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: "`variant` or `disposition` is not one of the allowed values."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "The file has no text version (`markdown_unavailable`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/{agentKey}:
@@ -3835,7 +4047,7 @@ paths:
       tags:
         - Files
       summary: List files in bucket
-      description: List files in a specific bucket with cursor-based pagination and optional search filtering.
+      description: "List files in a specific bucket with cursor-based pagination and optional search filtering. Without `prefix` this is the flat list of every file. With `prefix` it lists one folder like an object store with a `/` delimiter: the files directly in it (`files`) and its sub-folders (`folders`), derived from the file keys, in key order."
       operationId: listFiles
       parameters:
         - name: bucketKey
@@ -3847,9 +4059,24 @@ paths:
         - name: search
           in: query
           required: false
-          description: Search term to filter files.
+          description: Search term to filter files. With `prefix`, it searches everything under the prefix, however deep (no `folders`).
           schema:
             type: string
+        - name: prefix
+          in: query
+          required: false
+          description: "A folder path inside the bucket (for example `agent-sessions/support-bot/`); a trailing `/` is added when missing. Empty (`prefix=`) is the bucket root. Present: list that folder (files and `folders`)."
+          schema:
+            type: string
+        - name: purpose
+          in: query
+          required: false
+          description: "`conversation` keeps only files attached to agent sessions; `other` only the rest."
+          schema:
+            type: string
+            enum:
+              - conversation
+              - other
         - name: limit
           in: query
           required: false
@@ -3875,6 +4102,16 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/FileObject"
+                  folders:
+                    type: array
+                    description: "Only with `prefix`: the sub-folders of that folder, each a full path ending in `/`."
+                    items:
+                      type: string
+                    example:
+                      - agent-sessions/support-bot/
+                  prefix:
+                    type: string
+                    description: "Only with `prefix`: the folder listed, normalised."
                   count:
                     type: integer
                     example: 12
@@ -7972,7 +8209,7 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (draft version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) or `session_id` for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponseDraft
       parameters:
         - name: X-Cognipeer-Background
@@ -8028,7 +8265,7 @@ paths:
                   spent_usd: 1.02
                   max_cost_usd: 1
         "403":
-          description: "The agent takes no attachments (`attachments_disabled`), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
           content:
             application/json:
               schema:
@@ -13264,7 +13501,7 @@ components:
             $ref: "#/components/schemas/AgentPendingAction"
     AgentSession:
       type: object
-      description: The runtime state of a conversation.
+      description: A conversation with an agent and its runtime state.
       properties:
         id:
           type: string
@@ -13276,6 +13513,23 @@ components:
         agent:
           type: string
           description: Agent key.
+        title:
+          type: string
+          nullable: true
+          description: The session's title; the first message names a session that has none.
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: The string pairs the client gave when it created the session (`{}` for a session it did not create with `POST /agents/sessions`).
         runtime_status:
           type: string
           enum:
@@ -13370,6 +13624,99 @@ components:
         last_seq:
           type: integer
           description: The `seq` of the last event returned, or the `after` you sent when there were none. Pass it as `after` next time.
+    AgentSessionCreateRequest:
+      type: object
+      properties:
+        agent:
+          type: string
+          description: Key of an active agent of the token's project.
+        title:
+          type: string
+          maxLength: 200
+          description: Optional title. Default `New conversation`.
+        metadata:
+          type: object
+          maxProperties: 16
+          additionalProperties:
+            type: string
+            maxLength: 512
+          description: "Up to 16 string pairs (keys up to 64 characters, values up to 512), returned as the session's `metadata`. Never read by the agent."
+        budget:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AgentSessionBudget"
+          description: "A spend budget for the session (`null` = none, overriding the agent's default; absent = the agent's default). Subject to the agent's own budget when it binds API clients (`403`, `budget_override_forbidden`)."
+        runtime_context:
+          $ref: "#/components/schemas/AgentRuntimeContext"
+      required:
+        - agent
+    AgentSessionSummary:
+      type: object
+      description: A session as a list shows it - without its transcript or pending requests.
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          enum:
+            - agent.session
+        agent:
+          type: string
+        title:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        message_count:
+          type: integer
+          description: How many messages the session holds.
+        runtime_status:
+          type: string
+          enum:
+            - idle
+            - running
+            - requires_action
+            - budget_paused
+        stop_reason:
+          type: string
+          nullable: true
+        last_event_seq:
+          type: integer
+        budget:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AgentSessionBudget"
+        spent_usd:
+          type: number
+    AgentSessionList:
+      type: object
+      properties:
+        object:
+          type: string
+          enum:
+            - list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentSessionSummary"
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `after` for the next page. Null on the last page.
     AgentSessionFile:
       type: object
       description: A file attached to a session.
@@ -13399,6 +13746,12 @@ components:
           description: "`succeeded`: the text could be read, so the agent sees it. `failed` / `skipped`: only the original exists and the agent can see that the file is there, not what is in it. `pending`: still converting."
         conversion_error:
           type: string
+        bucket_key:
+          type: string
+          description: The Document Store bucket the file is stored in (the agent's `attachments.bucketKey` when it was uploaded).
+        path:
+          type: string
+          description: "The object's path inside that bucket: `<folder>/<agentKey>/<sessionId>/<unique name>`."
         created_at:
           type: string
           format: date-time
@@ -13406,6 +13759,9 @@ components:
           type: string
           format: date-time
           description: When the file is deleted (the agent's `attachments.retentionDays`).
+        content_url:
+          type: string
+          description: "Where the file's bytes are served (`GET /agents/sessions/{conversationId}/files/{fileId}/content`), as a path on the API's origin (it starts with `/api/client/v1`)."
     AgentSessionFileJsonUpload:
       type: object
       description: A small file as JSON.
@@ -13735,6 +14091,19 @@ components:
           type: string
           nullable: true
           description: ID (`resp_{conversationId}`) from a previous response, to continue a multi-turn conversation.
+        session_id:
+          type: string
+          nullable: true
+          description: "Continue this session (for example one created with `POST /agents/sessions`, with files already uploaded to it). Same session as `previous_response_id` and `conversation`: give one, or several that agree (`400 session_conflict` when they name different sessions). `404 session_not_found` for a session of another agent or project. `file_id` input parts may name a file of this session."
+        conversation:
+          nullable: true
+          description: "OpenAI-style alias of `session_id`: a session id, or an object `{ \"id\": \"...\" }`."
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                id:
+                  type: string
         version:
           type: integer
           minimum: 1
@@ -13915,6 +14284,27 @@ components:
           type: string
           format: date-time
           description: When the agent was created.
+        attachments:
+          type: object
+          description: "Only on the single-agent lookup. What a client needs before it offers an attach button: whether the agent takes files right now, its limits, and whether its model reads images."
+          properties:
+            enabled:
+              type: boolean
+              description: Files are switched on for the agent AND its bucket can take a file now.
+            max_files:
+              type: integer
+              description: Files one session holds (0 while files are off).
+            max_file_size_mb:
+              type: number
+              description: Largest file in MB (0 while files are off).
+            allowed_mime_types:
+              type: array
+              items:
+                type: string
+              description: Accepted MIME types (`image/*` allowed); empty = any.
+            accepts_images:
+              type: boolean
+              description: "The agent's model accepts image input. When false, an attached image is replaced by a note saying so. A chat model with no stored setting is taken to accept images when its id belongs to a known vision family."
     AgentUpdateInput:
       type: object
       additionalProperties: true
@@ -16963,7 +17353,7 @@ components:
                   description: "`budget_reached` only: the session's budget."
                 action_status:
                   type: string
-                  description: "`action_not_pending` only: the state the request is in (`resolved`, `expired`, `cancelled`)."
+                  description: "`action_not_pending`, `action_cancelled` and `action_expired` only: the state the request is in (`resolved`, `expired`, `cancelled`)."
         code:
           type: string
           description: "Machine-readable reason on a refusal: `forbidden`, `route_not_declared`, `authorization_unavailable`, `ip_not_allowed`."

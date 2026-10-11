@@ -23,9 +23,11 @@ import {
 } from '../helpers/iamCenterUi';
 import {
   ALL_DASHBOARD_SERVICES,
+  canUseDashboardService,
   getDashboardServices,
   type DashboardServiceDefinition,
 } from '@/lib/utils/dashboardServices';
+import { SUBNAV_CONFIG, visibleSubNavItems } from '@/components/layout/launcher/ServiceSubNav';
 import {
   ACTIVE_PROJECT_CHANGED_EVENT,
   notifyActiveProjectChanged,
@@ -57,13 +59,20 @@ describe('getDashboardServices with the engine\'s answer for the active project'
   });
 
   it('Webhooks is an administration service: a plain member does not see it until the permission is granted', () => {
-    expect(ids(getDashboardServices({ ...asUser }))).not.toContain('webhooks');
-    expect(ids(getDashboardServices({ role: 'admin', servicePermissions: {} }))).toContain('webhooks');
+    // Webhooks sit in the Agents menu (no service entry of their own), judged by the level the services are.
+    const sees = (options: Parameters<typeof canUseDashboardService>[0]) =>
+      visibleSubNavItems(SUBNAV_CONFIG.agents, (service) => canUseDashboardService(options, service))!.some(
+        (entry) => entry.id === 'webhooks',
+      );
+    expect(sees({ ...asUser })).toBe(false);
+    expect(sees({ role: 'admin', servicePermissions: {} })).toBe(true);
     // an own grant, or the engine's answer for this project (a group, a policy), shows it
-    expect(ids(getDashboardServices({ role: 'user', servicePermissions: { webhooks: 'read' } }))).toContain('webhooks');
-    expect(ids(getDashboardServices({ ...asUser, effectivePermissions: { webhooks: 'admin' } }))).toContain('webhooks');
+    expect(sees({ role: 'user', servicePermissions: { webhooks: 'read' } })).toBe(true);
+    expect(sees({ ...asUser, effectivePermissions: { webhooks: 'admin' } })).toBe(true);
     // ...and a rule that takes it away from an admin hides it
-    expect(ids(getDashboardServices({ role: 'admin', servicePermissions: {}, effectivePermissions: { webhooks: 'none' } }))).not.toContain('webhooks');
+    expect(sees({ role: 'admin', servicePermissions: {}, effectivePermissions: { webhooks: 'none' } })).toBe(false);
+    // the rest of the Agents menu is not affected
+    expect(visibleSubNavItems(SUBNAV_CONFIG.agents, (service) => canUseDashboardService(asUser, service))!.map((entry) => entry.id)).toEqual(['list', 'tools', 'skills']);
   });
 
   it('hides a service the active project narrowed to none, instead of leaving a link that answers 403', () => {
@@ -234,6 +243,24 @@ describe('the command palette follows the services the shell offers', () => {
     const t = text();
     expect(t).toContain('Agents');
     expect(t).not.toContain('Model Hub');
+  });
+
+  it('finds Webhooks (a page of the Agents menu) only when the shell says the person may use the service', async () => {
+    const offered = getDashboardServices({ role: 'user', servicePermissions: {} });
+    expect(ids(offered)).toContain('agents');
+    const palette = (canUseService: LauncherContextValue['canUseService']) =>
+      createElement(
+        LauncherProvider as never,
+        { value: { ...launcherValue(offered), canUseService } } as never,
+        createElement(CommandPalette, { isTenantAdmin: false }),
+      );
+
+    await openPalette(palette((service) => service !== 'webhooks'));
+    expect(text()).not.toContain('Webhooks');
+    await mounted.unmount();
+
+    await openPalette(palette(() => true));
+    expect(text()).toContain('Webhooks');
   });
 
   it('without a shell around it, lists every service the old way', async () => {

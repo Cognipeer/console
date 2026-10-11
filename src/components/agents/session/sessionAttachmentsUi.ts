@@ -31,12 +31,25 @@ export function formatFileSize(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
-/** Files the session already holds: those on earlier messages plus the ones waiting to be sent. */
-export function heldFileCount(messages: ChatMessage[], pending: PendingAttachment[]): number {
-    const sent = new Set<string>();
-    for (const message of messages) for (const file of message.attachments ?? []) sent.add(file.fileId);
-    for (const file of pending) sent.add(file.fileId);
-    return sent.size;
+/**
+ * Files the session already holds. The server's list is the truth (a file that
+ * expired or was deleted elsewhere no longer counts, and one uploaded from the
+ * API does); until it has loaded, the files on earlier messages stand in. Files
+ * waiting to be sent are always counted, once, in case the list predates them.
+ */
+export function heldFileCount(
+    messages: ChatMessage[],
+    pending: PendingAttachment[],
+    serverFiles?: ReadonlyArray<{ id: string }> | null,
+): number {
+    const held = new Set<string>();
+    if (serverFiles) {
+        for (const file of serverFiles) held.add(file.id);
+    } else {
+        for (const message of messages) for (const file of message.attachments ?? []) held.add(file.fileId);
+    }
+    for (const file of pending) held.add(file.fileId);
+    return held.size;
 }
 
 /** Why a file cannot be attached, or null when it can. */
@@ -79,9 +92,4 @@ export function isImageAttachment(file: Pick<IAgentMessageAttachment, 'mimeType'
 /** True when a converted file has no text the agent can read. */
 export function lacksReadableText(file: PendingAttachment): boolean {
     return !isImageAttachment(file) && (file.conversionStatus === 'failed' || file.conversionStatus === 'skipped');
-}
-
-/** The "Allowed file types" text → the MIME types it lists (comma-separated; blanks dropped). */
-export function parseMimeTypes(text: string): string[] {
-    return text.split(',').map((entry) => entry.trim()).filter(Boolean);
 }

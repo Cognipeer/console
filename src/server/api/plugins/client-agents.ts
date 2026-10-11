@@ -37,7 +37,8 @@ import { assertQueuedTurnSpendAllowed } from '@/lib/services/agents/agentSpendLi
 import { assertSessionBudgetAvailable, clientBudgetViolation, parseSessionBudget } from '@/lib/services/agents/sessionBudget';
 import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentActionResolution';
 import { extractResponseUserInput, namedFileIds, storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
-import { agentTakesAttachments } from '@/lib/services/agents/sessionFiles';
+import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/services/agents/sessionFiles';
+import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -57,6 +58,7 @@ import {
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
+import { tokenHasFilesPermission } from './files-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 
@@ -78,6 +80,28 @@ function conversationIdFromResponseId(
   if (responseId.startsWith('resp_')) return { strippedId: responseId.slice(5), kind: 'resp' };
   if (responseId.startsWith('run_')) return { strippedId: responseId.slice(4), kind: 'run' };
   return null;
+}
+
+/**
+ * The session a Responses request continues, named by `session_id` or its
+ * OpenAI-style alias `conversation` (a string, or `{ id }`). Naming it twice is
+ * fine as long as both say the same session.
+ */
+export function readSessionReference(body: Record<string, unknown>): { id?: string } | { error: string } {
+  const named: string[] = [];
+  if (body.session_id !== undefined && body.session_id !== null) {
+    if (typeof body.session_id !== 'string' || body.session_id.trim() === '') return { error: 'session_id must be a session id (a string)' };
+    named.push(body.session_id.trim());
+  }
+  if (body.conversation !== undefined && body.conversation !== null) {
+    const raw = typeof body.conversation === 'object' && !Array.isArray(body.conversation)
+      ? (body.conversation as { id?: unknown }).id
+      : body.conversation;
+    if (typeof raw !== 'string' || raw.trim() === '') return { error: 'conversation must be a session id, or an object { id }' };
+    named.push(raw.trim());
+  }
+  if (named.length === 2 && named[0] !== named[1]) return { error: 'session_id and conversation name different sessions' };
+  return named.length > 0 ? { id: named[0] } : {};
 }
 
 function createResponsesHandler(usePublished: boolean) {
@@ -117,12 +141,17 @@ function createResponsesHandler(usePublished: boolean) {
           error: 'input field is required (string or array of message items)',
         });
       }
-      if (userInput.files.length > 0 && !agentTakesAttachments(agent.config)) {
-        return reply.code(403).send(invalidRequestErrorBody('This agent does not take attachments.', 'attachments_disabled'));
+      const attachmentsAvailable = attachmentsAvailability(agent.config);
+      if (userInput.files.length > 0 && !attachmentsAvailable.available) {
+        return reply.code(403).send(invalidRequestErrorBody(attachmentsUnavailableMessage(attachmentsAvailable.reason), 'attachments_disabled'));
       }
-      if (userInput.files.some((file) => file.fileId) && typeof body.previous_response_id !== 'string') {
+      // The session this request continues: `previous_response_id`, or `session_id` / `conversation`.
+      const sessionRef = readSessionReference(body);
+      if ('error' in sessionRef) return reply.code(400).send(invalidRequestErrorBody(sessionRef.error, 'invalid_request'));
+      if (userInput.files.some((file) => file.fileId)
+        && typeof body.previous_response_id !== 'string' && sessionRef.id === undefined) {
         return reply.code(400).send(invalidRequestErrorBody(
-          'file_id names a file already uploaded to a session: continue that session with previous_response_id, or send file_data / image_url.',
+          'file_id names a file already uploaded to a session: continue that session with session_id (or previous_response_id), or send file_data / image_url.',
           'attachment_not_found',
         ));
       }
@@ -135,8 +164,9 @@ function createResponsesHandler(usePublished: boolean) {
       // conversationId on every attempt, so including it in the hash would
       // make the SAME logical retry never match itself. Only stabilize the
       // hash on conversationId when the caller explicitly continued an
-      // EXISTING conversation via previous_response_id.
+      // EXISTING conversation via previous_response_id or session_id.
       let idempotencyConversationScope: string | null = null;
+      let resolvedConversationId: string | undefined;
       if (typeof body.previous_response_id === 'string') {
         // Dual-mode (§8, §12.3): a background/run response is polled by its
         // OWN `run_<runId>` id, and its embedded `result.id` is
@@ -156,15 +186,28 @@ function createResponsesHandler(usePublished: boolean) {
         const run = parsed
           ? await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, parsed.strippedId)
           : null;
-        const resolvedConversationId = run ? run.conversationId : parsed?.kind === 'resp' ? parsed.strippedId : undefined;
-        const conversation = resolvedConversationId !== undefined
-          ? await getConversationById(ctx.tenantDbName, resolvedConversationId)
-          : null;
-        if (resolvedConversationId === undefined || !conversation
-          || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
-          return reply.code(404).send({
-            error: 'previous_response_id does not match a valid conversation',
-          });
+        resolvedConversationId = run ? run.conversationId : parsed?.kind === 'resp' ? parsed.strippedId : undefined;
+        if (resolvedConversationId === undefined) {
+          return reply.code(404).send({ error: 'previous_response_id does not match a valid conversation' });
+        }
+      }
+      // `session_id` / `conversation` name the same thing in the session's own words. With
+      // `previous_response_id` too they must agree: two different sessions is a mistake, not a choice.
+      if (sessionRef.id !== undefined) {
+        if (resolvedConversationId !== undefined && resolvedConversationId !== sessionRef.id) {
+          return reply.code(400).send(invalidRequestErrorBody(
+            'session_id and previous_response_id name different sessions: send one of them',
+            'session_conflict',
+          ));
+        }
+        resolvedConversationId = sessionRef.id;
+      }
+      if (resolvedConversationId !== undefined) {
+        const conversation = await getConversationById(ctx.tenantDbName, resolvedConversationId).catch(() => null);
+        if (!conversation || conversation.agentKey !== agent.key || conversation.projectId !== ctx.projectId) {
+          return reply.code(404).send(sessionRef.id !== undefined && typeof body.previous_response_id !== 'string'
+            ? apiErrorBody('not_found_error', 'session_id does not match a session of this agent', 'session_not_found')
+            : { error: 'previous_response_id does not match a valid conversation' });
         }
         // Waiting on an approval or an answer, and the agent refuses new
         // messages meanwhile: say so before any run is created.
@@ -453,6 +496,14 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
+      // What a client needs to decide whether to offer an attach button (and to warn about an image).
+      const attachments = await describeAgentAttachments({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        config: agent.config,
+      }).catch(() => null);
+
       return reply.code(200).send({
         agent: {
           config: {
@@ -466,6 +517,15 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: agent.key,
           name: agent.name,
           status: agent.status,
+          ...(attachments ? {
+            attachments: {
+              enabled: attachments.enabled,
+              max_files: attachments.maxFiles,
+              max_file_size_mb: attachments.maxFileSizeMb,
+              allowed_mime_types: attachments.allowedMimeTypes,
+              accepts_images: attachments.acceptsImages,
+            },
+          } : {}),
         },
       });
     } catch (error) {
@@ -501,7 +561,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
+        canWriteFiles: async () => tokenHasFilesPermission(ctx, 'write'),
       });
+      if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
 
       const agent = await createAgentRecord(
@@ -568,7 +630,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
-          });
+            canWriteFiles: async () => tokenHasFilesPermission(ctx, 'write'),
+          }, existing.config);
+          if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
         }
       }

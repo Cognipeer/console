@@ -7,13 +7,17 @@
 
 import React, { createElement as h, type ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
+import { I18nProvider } from '@/lib/i18n';
 import { BudgetBanner, BudgetMeter } from '@/components/agents/session/SessionBudgetControls';
 import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel';
 import {
   budgetPatchBody,
   sessionBudgetView,
+  shouldContinueAfterBudgetChange,
   suggestedBudget,
   validBudgetAmount,
 } from '@/components/agents/session/sessionBudgetUi';
@@ -23,7 +27,8 @@ import { tr } from '@/lib/i18n/messages/tr';
 
 (globalThis as { React?: typeof React }).React = React;
 
-const render = (node: ReactNode) => renderToStaticMarkup(h(MantineProvider, null, node));
+const render = (node: ReactNode, locale: 'en' | 'tr' = 'en') =>
+  renderToStaticMarkup(h(MantineProvider, null, h(I18nProvider, { locale, children: node })));
 const noop = () => undefined;
 const turn = (costUsd?: number): ChatMessage => ({ role: 'assistant', content: 'x', ...(costUsd !== undefined ? { usage: { costUsd } } : {}) });
 const budget = { maxCostUsd: 1, onReach: 'pause' as const };
@@ -51,6 +56,40 @@ describe('sessionBudgetView', () => {
     expect(sessionBudgetView({ budget, spentUsd: 1.1, stopReason: 'budget_reached' }, [])?.continuable).toBe(true);
     // Overshot on a turn that still finished: raising the budget alone is enough.
     expect(sessionBudgetView({ budget, spentUsd: 1.1, runtimeStatus: 'idle', stopReason: 'end_turn' }, [])?.continuable).toBe(false);
+  });
+
+  it('is never continuable in stop mode: the budget only refuses messages, even though the turn’s stop reason is the budget', () => {
+    const stop = { maxCostUsd: 1, onReach: 'stop' as const };
+    expect(sessionBudgetView({ budget: stop, spentUsd: 1.1, runtimeStatus: 'idle', stopReason: 'budget_reached' }, [])?.continuable).toBe(false);
+    expect(sessionBudgetView({ budget: stop, spentUsd: 1.1, stopReason: 'budget_reached' }, [])?.continuable).toBe(false);
+    // A session that really is paused (the budget was switched to stop after) can still be carried on.
+    expect(sessionBudgetView({ budget: stop, spentUsd: 1.1, runtimeStatus: 'budget_paused' }, [])?.continuable).toBe(true);
+  });
+});
+
+describe('after the budget changed', () => {
+  it('carries the session on only when it was waiting to be and the server’s answer still says paused', () => {
+    expect(shouldContinueAfterBudgetChange(true, { runtimeStatus: 'budget_paused' })).toBe(true);
+    // The turn had finished when it crossed the budget: the raise left the session idle, and /continue would be refused.
+    expect(shouldContinueAfterBudgetChange(true, { runtimeStatus: 'idle' })).toBe(false);
+    expect(shouldContinueAfterBudgetChange(true, {})).toBe(false);
+    expect(shouldContinueAfterBudgetChange(true, null)).toBe(false);
+    // Not waiting to begin with (stop mode, or an ordinary edit from the meter).
+    expect(shouldContinueAfterBudgetChange(false, { runtimeStatus: 'budget_paused' })).toBe(false);
+  });
+
+  it('prefers the server’s own `continuable` over reading the stored status', () => {
+    expect(shouldContinueAfterBudgetChange(true, { runtimeStatus: 'idle' }, true)).toBe(true);
+    expect(shouldContinueAfterBudgetChange(true, { runtimeStatus: 'budget_paused' }, false)).toBe(false);
+    expect(shouldContinueAfterBudgetChange(true, null, true)).toBe(true);
+    // Never when the person was not stopped on the budget to begin with.
+    expect(shouldContinueAfterBudgetChange(false, { runtimeStatus: 'budget_paused' }, true)).toBe(false);
+  });
+
+  it('the session view asks that, and does not continue on its own guess', () => {
+    const source = readFileSync(join(__dirname, '../../components/agents/session/AgentSessionView.tsx'), 'utf8');
+    expect(source).toContain('shouldContinueAfterBudgetChange(wasContinuable, stored?.session, stored?.continuable)');
+    expect(source).not.toMatch(/patchBudget\(budget\)\s*&&\s*carryOn/);
   });
 });
 
@@ -94,6 +133,18 @@ describe('BudgetMeter / BudgetBanner', () => {
     expect(html).toContain('Increase and continue');
     expect(html).toContain('Remove budget and continue');
     expect(html).toContain('$1.04 / $1.00');
+  });
+
+  it('the banner of a stop-mode session that hit its budget makes no promise to carry on', () => {
+    const stopped = sessionBudgetView({ budget: { maxCostUsd: 1, onReach: 'stop' }, spentUsd: 1.04, runtimeStatus: 'idle', stopReason: 'budget_reached' }, [])!;
+    const html = render(h(BudgetBanner, { view: stopped, busy: false, onIncrease: noop, onRemove: noop }));
+    expect(html).toContain('Session budget reached');
+    expect(html).toContain('new messages are refused');
+    expect(html).toContain('Increase budget');
+    expect(html).toContain('Remove budget');
+    expect(html).not.toContain('carries on from where it stopped');
+    expect(html).not.toContain('and continue');
+    expect(render(h(BudgetBanner, { view: stopped, busy: false, onIncrease: noop, onRemove: noop }), 'tr')).not.toContain('kaldığı yerden');
   });
 
   it('the banner of a session that only refuses messages offers just the budget change', () => {

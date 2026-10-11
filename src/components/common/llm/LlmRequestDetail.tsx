@@ -6,6 +6,9 @@ import PropertiesPanel, { type PropertyRow } from '@/components/common/ui/Proper
 import MessageBlock from '@/components/common/ui/MessageBlock';
 import CollapsibleText from '@/components/common/ui/CollapsibleText';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
+import { MessageAttachments } from '@/components/agents/session/SessionAttachments';
+import type { AttachmentView } from '@/components/agents/session/sessionFilesUi';
+import { messageImageViews } from './messageImages';
 
 /**
  * One ordered stream of "what happened in this request" — every surface
@@ -21,13 +24,22 @@ import JsonTreeViewer from '@/components/common/JsonTreeViewer';
  * grouping never reaches across an unrelated message.
  */
 export type LlmRequestItem =
-  | { itemType: 'message'; role: string; roleLabel?: ReactNode; content: unknown }
+  | { itemType: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[] }
   | { itemType: 'divider'; label: ReactNode }
   /** Escape hatch for content a surface already renders well (e.g. a tool-definitions
    *  or response-format section) — passed through as-is, in its position in the stream. */
   | { itemType: 'custom'; node: ReactNode }
   | { itemType: 'call'; turnId: string; name?: string; args: unknown }
   | { itemType: 'result'; turnId: string; name?: string; content: unknown };
+
+/**
+ * A file a message carried: `{ fileId, name, mimeType, size, url?, expired? }`.
+ * `url` shows or opens it (an image is drawn from it, a document is saved from
+ * it); a file that is gone is `expired` and shows muted. Pictures inside the
+ * message's own content parts (`image_url` / `input_image`) are drawn too,
+ * without being listed here.
+ */
+export type LlmRequestAttachment = AttachmentView;
 
 export interface LlmRequestDetailData {
   /** Status/latency/finish-reason/decision/etc chips, rendered above the tabs. */
@@ -89,7 +101,7 @@ interface TurnEntry {
 }
 
 type GroupedEntry =
-  | { kind: 'message'; role: string; roleLabel?: ReactNode; content: unknown }
+  | { kind: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[] }
   | { kind: 'divider'; label: ReactNode }
   | { kind: 'custom'; node: ReactNode }
   | { kind: 'turn'; turnId: string; name?: string; entries: TurnEntry[] };
@@ -117,7 +129,7 @@ function groupItems(items: LlmRequestItem[]): GroupedEntry[] {
       // grouping never reaches across an unrelated turn of the conversation.
       openTurns.clear();
       if (item.itemType === 'message') {
-        output.push({ kind: 'message', role: item.role, roleLabel: item.roleLabel, content: item.content });
+        output.push({ kind: 'message', role: item.role, roleLabel: item.roleLabel, content: item.content, attachments: item.attachments });
       } else if (item.itemType === 'divider') {
         output.push({ kind: 'divider', label: item.label });
       } else {
@@ -249,7 +261,12 @@ export function LlmRequestItemsView({ items, labels: labelsOverride }: LlmReques
     <Stack gap="lg">
       {grouped.map((g, i) => {
         if (g.kind === 'message') {
-          return <MessageBlock key={i} messageRole={g.role} roleLabel={g.roleLabel} content={g.content} />;
+          const files = [...(g.attachments ?? []), ...messageImageViews(g.content)];
+          return (
+            <MessageBlock key={i} messageRole={g.role} roleLabel={g.roleLabel} content={g.content}>
+              {files.length > 0 ? <MessageAttachments attachments={files} /> : null}
+            </MessageBlock>
+          );
         }
         if (g.kind === 'divider') {
           return <Divider key={i} label={g.label} labelPosition="left" />;

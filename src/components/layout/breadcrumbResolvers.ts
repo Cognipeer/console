@@ -160,7 +160,8 @@ const STANDARD_RESOLVERS: BreadcrumbResolver[] = [
     path: ['agents'],
     buildUrl: (id) => `/api/agents/${encodeURIComponent(id)}`,
     pickLabel: (b) => wrappedName(b, 'agent'),
-    excludeValues: ['new'],
+    // `webhooks` is a page of the Agents menu, not an agent id.
+    excludeValues: ['new', 'webhooks'],
   }),
   createStandardResolver({
     path: ['portals'],

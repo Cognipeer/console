@@ -28,9 +28,7 @@ import {
 } from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
-import type { IAgentAttachmentsConfig, IAgentExecutionConfig } from '@/lib/database/provider/types.domain';
-import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
-import { parseMimeTypes } from '../session/sessionAttachmentsUi';
+import type { IAgentExecutionConfig } from '@/lib/database/provider/types.domain';
 import { ConfigBlock } from './ConfigSection';
 import { SANDBOX_SECRET_MASK } from './AgentSandboxPanel';
 
@@ -44,15 +42,6 @@ interface ExecutionLimits {
 export interface AgentExecutionPanelProps {
     value: IAgentExecutionConfig | undefined;
     onChange: (next: IAgentExecutionConfig | undefined) => void;
-    /** `config.attachments` — shown (and editable) only when the page passes the pair. */
-    attachments?: IAgentAttachmentsConfig;
-    onAttachmentsChange?: (next: IAgentAttachmentsConfig | undefined) => void;
-}
-
-/** Drops keys left empty so an untouched agent saves no `attachments` at all. */
-function compactAttachments(next: IAgentAttachmentsConfig): IAgentAttachmentsConfig | undefined {
-    const entries = Object.entries(next).filter(([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0));
-    return entries.length > 0 ? (Object.fromEntries(entries) as IAgentAttachmentsConfig) : undefined;
 }
 
 /** Drops keys left empty so an untouched agent saves no `execution` at all. */
@@ -61,48 +50,8 @@ function compact(next: IAgentExecutionConfig): IAgentExecutionConfig | undefined
     return entries.length > 0 ? (Object.fromEntries(entries) as IAgentExecutionConfig) : undefined;
 }
 
-/**
- * The "Allowed file types" field. It keeps the text as typed — a comma and a
- * space are part of typing the next type — and hands the parsed list up on every
- * change; the text is tidied when the field loses focus. Re-deriving the text
- * from the list on each keystroke would swallow the separator.
- */
-function MimeTypesInput({
-    value,
-    onChange,
-    label,
-    description,
-}: {
-    value: string[];
-    onChange: (next: string[]) => void;
-    label: string;
-    description: string;
-}) {
-    const [text, setText] = useState(() => value.join(', '));
-    const stored = value.join('\n');
-    // The agent was reloaded from outside: show what is stored, but never rewrite what is being typed.
-    useEffect(() => {
-        setText((current) => (parseMimeTypes(current).join('\n') === stored ? current : stored.split('\n').filter(Boolean).join(', ')));
-    }, [stored]);
-
-    return (
-        <TextInput
-            label={label}
-            description={description}
-            placeholder="application/pdf, image/*"
-            value={text}
-            onChange={(event) => {
-                setText(event.currentTarget.value);
-                onChange(parseMimeTypes(event.currentTarget.value));
-            }}
-            onBlur={() => setText(parseMimeTypes(text).join(', '))}
-        />
-    );
-}
-
-export default function AgentExecutionPanel({ value, onChange, attachments, onAttachmentsChange }: AgentExecutionPanelProps) {
+export default function AgentExecutionPanel({ value, onChange }: AgentExecutionPanelProps) {
     const tb = useTranslations('agents.budget');
-    const ta = useTranslations('agents.attachments');
     const [limits, setLimits] = useState<ExecutionLimits | null>(null);
 
     useEffect(() => {
@@ -116,9 +65,6 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
 
     const current = value ?? {};
     const set = (patch: Partial<IAgentExecutionConfig>) => onChange(compact({ ...current, ...patch }));
-    const currentAttachments = attachments ?? {};
-    const setAttachments = (patch: Partial<IAgentAttachmentsConfig>) => onAttachmentsChange?.(compactAttachments({ ...currentAttachments, ...patch }));
-    const attachmentsEnabled = currentAttachments.enabled !== false;
     const backgroundEnabled = current.backgroundEnabled !== false;
     const effectiveSync = Math.min(current.syncTimeoutSeconds ?? Infinity, limits?.syncTimeoutSeconds ?? Infinity);
     const effectiveBackground = Math.min(
@@ -192,81 +138,6 @@ export default function AgentExecutionPanel({ value, onChange, attachments, onAt
                     ) : null}
                 </Stack>
             </ConfigBlock>
-
-            {onAttachmentsChange ? (
-                <ConfigBlock title={ta('cfgTitle')}>
-                    <Stack gap="sm">
-                        <Switch
-                            label={ta('cfgAccept')}
-                            description={ta('cfgAcceptDescription')}
-                            checked={attachmentsEnabled}
-                            onChange={(event) => setAttachments({ enabled: event.currentTarget.checked ? undefined : false })}
-                        />
-                        {attachmentsEnabled ? (
-                            <>
-                                <SimpleGrid cols={{ base: 1, md: 2 }} spacing="sm">
-                                    <NumberInput
-                                        label={ta('cfgMaxFiles')}
-                                        placeholder={String(SESSION_FILES_DEFAULTS.maxFiles)}
-                                        min={1}
-                                        max={100}
-                                        allowDecimal={false}
-                                        value={currentAttachments.maxFiles ?? ''}
-                                        onChange={(v) => setAttachments({ maxFiles: typeof v === 'number' ? v : undefined })}
-                                    />
-                                    <NumberInput
-                                        label={ta('cfgMaxFileSize')}
-                                        placeholder={String(SESSION_FILES_DEFAULTS.maxFileSizeMb)}
-                                        min={1}
-                                        value={currentAttachments.maxFileSizeMb ?? ''}
-                                        onChange={(v) => setAttachments({ maxFileSizeMb: typeof v === 'number' ? v : undefined })}
-                                    />
-                                    <NumberInput
-                                        label={ta('cfgInlineTokens')}
-                                        description={ta('cfgInlineTokensDescription')}
-                                        placeholder={String(SESSION_FILES_DEFAULTS.inlineMaxTokens)}
-                                        min={100}
-                                        allowDecimal={false}
-                                        value={currentAttachments.inlineMaxTokens ?? ''}
-                                        onChange={(v) => setAttachments({ inlineMaxTokens: typeof v === 'number' ? v : undefined })}
-                                    />
-                                    <NumberInput
-                                        label={ta('cfgReadPage')}
-                                        placeholder={String(SESSION_FILES_DEFAULTS.readPageChars)}
-                                        min={500}
-                                        allowDecimal={false}
-                                        value={currentAttachments.readPageChars ?? ''}
-                                        onChange={(v) => setAttachments({ readPageChars: typeof v === 'number' ? v : undefined })}
-                                    />
-                                    <NumberInput
-                                        label={ta('cfgRetention')}
-                                        description={ta('cfgRetentionDescription')}
-                                        placeholder={String(SESSION_FILES_DEFAULTS.retentionDays)}
-                                        min={1}
-                                        allowDecimal={false}
-                                        value={currentAttachments.retentionDays ?? ''}
-                                        onChange={(v) => setAttachments({ retentionDays: typeof v === 'number' ? v : undefined })}
-                                    />
-                                    <MimeTypesInput
-                                        label={ta('cfgMimeTypes')}
-                                        description={ta('cfgMimeTypesDescription')}
-                                        value={currentAttachments.allowedMimeTypes ?? []}
-                                        onChange={(allowedMimeTypes) => setAttachments({ allowedMimeTypes })}
-                                    />
-                                </SimpleGrid>
-                                <TextInput
-                                    label={ta('cfgBucket')}
-                                    description={ta('cfgBucketDescription')}
-                                    placeholder="conversation-files"
-                                    value={currentAttachments.bucketKey ?? ''}
-                                    onChange={(event) => setAttachments({ bucketKey: event.currentTarget.value.trim() || undefined })}
-                                    maw={420}
-                                />
-                            </>
-                        ) : null}
-                    </Stack>
-                </ConfigBlock>
-            ) : null}
 
             <ConfigBlock title="Background runs">
                 <Stack gap="sm">

@@ -16,9 +16,16 @@ import { notifications } from '@mantine/notifications';
 import { IconBolt, IconBrain } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import {
-  getDefaultModelInputModalities,
   getDefaultModelOutputModalities,
+  type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
+import ModelInputModalitiesField from '@/components/models/ModelInputModalitiesField';
+import {
+  inferredInputModalities,
+  inputModalitiesPayload,
+  isMultimodalFor,
+  shownInputModalities,
+} from '@/components/models/inputModalities';
 import FormShell, {
   Checklist,
   ChipPicker,
@@ -99,6 +106,8 @@ interface FormValues {
   category: ModelCategory;
   modelId: string;
   isMultimodal: boolean;
+  /** An explicit choice of what the model can be sent; null = detected from the model id. */
+  inputModalities: ModelInputModality[] | null;
   supportsToolCalls: boolean;
   capabilities: {
     contextWindow: number | '';
@@ -188,6 +197,7 @@ export default function CreateModelModal({
       category: 'llm',
       modelId: '',
       isMultimodal: false,
+      inputModalities: null,
       // Capabilities default ON: nearly every current chat model does all of
       // this, and an operator who knows their model does not is one toggle away
       // from saying so. Defaulting them off had the opposite failure mode —
@@ -283,6 +293,17 @@ export default function CreateModelModal({
     [availableProviders, formValues.providerKey],
   );
 
+  // What the model id is known to accept, and what the provider can take at all.
+  const inferredModalities = useMemo(
+    () => inferredInputModalities(formValues.category, formValues.modelId),
+    [formValues.category, formValues.modelId],
+  );
+  const allowedModalities = useMemo(
+    (): ModelInputModality[] | undefined => (providerSupportsMultimodal(selectedProvider) ? undefined : ['text', 'file']),
+    [selectedProvider],
+  );
+  const effectiveModalities = shownInputModalities(formValues.inputModalities, inferredModalities, allowedModalities);
+
   // Same registry the gateway consults at call time, so the form shows exactly
   // what will be dropped rather than a description of it.
   const autoDropped = useMemo(
@@ -346,6 +367,7 @@ export default function CreateModelModal({
     }
     if (!providerSupportsMultimodal(selectedProvider)) {
       setFieldValue('isMultimodal', false);
+      setFieldValue('inputModalities', null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProvider, formValues.category]);
@@ -420,15 +442,15 @@ export default function CreateModelModal({
           description: values.description,
           category: values.category,
           modelId: values.modelId,
-          isMultimodal: values.isMultimodal,
+          isMultimodal: CAPABILITY_CATEGORIES.includes(values.category)
+            ? isMultimodalFor(effectiveModalities)
+            : false,
           supportsToolCalls: values.supportsToolCalls,
           capabilities: {
             ...(contextWindow !== undefined ? { contextWindow } : {}),
             ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-            inputModalities: getDefaultModelInputModalities(
-              values.category,
-              values.isMultimodal,
-            ),
+            // Only a choice someone made is stored; otherwise the model id decides.
+            ...(CAPABILITY_CATEGORIES.includes(values.category) ? inputModalitiesPayload(values.inputModalities) : {}),
             outputModalities: getDefaultModelOutputModalities(values.category),
             supportsReasoning: values.capabilities.supportsReasoning,
             supportsStructuredOutputs: values.capabilities.supportsStructuredOutputs,
@@ -549,7 +571,7 @@ export default function CreateModelModal({
           value={
             [
               formValues.supportsToolCalls ? tWizard('review.capabilityTags.tools') : null,
-              formValues.isMultimodal ? tWizard('review.capabilityTags.vision') : null,
+              CAPABILITY_CATEGORIES.includes(formValues.category) && effectiveModalities.includes('image') ? tWizard('review.capabilityTags.vision') : null,
               formValues.capabilities.supportsReasoning
                 ? tWizard('review.capabilityTags.reasoning')
                 : null,
@@ -749,13 +771,6 @@ export default function CreateModelModal({
             onChange={(v) => setFieldValue('supportsToolCalls', v)}
           />
           <ToggleRow
-            label="Multimodal (vision)"
-            description="Model accepts image inputs in addition to text."
-            checked={formValues.isMultimodal}
-            disabled={!providerSupportsMultimodal(selectedProvider)}
-            onChange={(v) => setFieldValue('isMultimodal', v)}
-          />
-          <ToggleRow
             label={tWizard('fields.supportsReasoning.label')}
             description={tWizard('fields.supportsReasoning.description')}
             checked={formValues.capabilities.supportsReasoning}
@@ -768,6 +783,17 @@ export default function CreateModelModal({
             onChange={(v) => setFieldValue('capabilities.supportsStructuredOutputs', v)}
           />
         </ToggleList>
+        <FormRow cols={1}>
+          <FormField label={tWizard('fields.inputModalities.label')} hint={tWizard('fields.inputModalities.description')}>
+            <ModelInputModalitiesField
+              hideLabel
+              value={formValues.inputModalities}
+              inferred={inferredModalities}
+              allowed={allowedModalities}
+              onChange={(next) => setFieldValue('inputModalities', next)}
+            />
+          </FormField>
+        </FormRow>
         <FormRow cols={2}>
           <FormField
             label={tWizard('fields.contextWindow.label')}

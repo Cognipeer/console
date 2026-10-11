@@ -96,6 +96,7 @@ import {
     applyLocalResolution,
     cancelOpenActions,
     composerGate,
+    isStaleActionRefusal,
     openActionsOf,
     type AnswerRestriction,
     type ResolveBody,
@@ -105,7 +106,7 @@ import { useViewer } from './useViewer';
 import { interpretSessionEvent } from './sessionFollow';
 import ContextCompactionCard from './ContextCompactionCard';
 import { BudgetBanner, BudgetMeter } from './SessionBudgetControls';
-import { budgetPatchBody, sessionBudgetView } from './sessionBudgetUi';
+import { budgetPatchBody, sessionBudgetView, shouldContinueAfterBudgetChange } from './sessionBudgetUi';
 import { AttachButton, AttachmentChips, MessageAttachments } from './SessionAttachments';
 import {
     attachmentIds,
@@ -115,6 +116,8 @@ import {
     uploadContentType,
     type PendingAttachment,
 } from './sessionAttachmentsUi';
+import { sessionFileLinks, sessionFilesUrl, sessionFileUrl, toAttachmentViews, type SessionFileItem } from './sessionFilesUi';
+import { useAgentModelVision } from './agentModelVision';
 import type { AgentToolConfig } from './sessionTools';
 import {
     stepFailed, type ChatMessage, type PlaygroundStep, type SessionRecord, type TurnCompaction,
@@ -127,7 +130,7 @@ interface AgentSummary {
     name: string;
     description?: string;
     publishedVersion?: number | null;
-    config?: AgentToolConfig & { kind?: 'native' | 'external'; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig };
+    config?: AgentToolConfig & { kind?: 'native' | 'external'; modelKey?: string; humanInTheLoop?: IAgentHumanInTheLoopConfig; attachments?: IAgentAttachmentsConfig };
 }
 
 interface VersionOption {
@@ -203,6 +206,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const t = useTranslations('agents.hitl');
     const tb = useTranslations('agents.budget');
     const ta = useTranslations('agents.attachments');
+    const tp = useTranslations('agents.sessionPage');
     const router = useRouter();
     const tConfirm = useTranslations('common.confirm');
     const deleteResource = useDeleteResource();
@@ -258,9 +262,15 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // Files uploaded to the session and waiting to go with the next message.
     const [attached, setAttached] = useState<PendingAttachment[]>([]);
     const [uploadingNames, setUploadingNames] = useState<string[]>([]);
+    // The files the session holds, as the server lists them (null until the first list arrives).
+    const [sessionFiles, setSessionFiles] = useState<SessionFileItem[] | null>(null);
+    const [sessionFilesFailed, setSessionFilesFailed] = useState(false);
+    const [deletingFiles, setDeletingFiles] = useState<string[]>([]);
     const budgetBlocked = Boolean(budgetView?.exhausted);
     // The banner under the transcript that raises the budget or removes it.
     const budgetBannerShown = Boolean(budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly);
+    // A budget that stops (rather than pauses) does not carry the turn on once raised: a new message does.
+    const budgetStops = budgetView?.budget.onReach === 'stop';
     // What the composer does while the agent waits for an approval or an answer.
     const gate = composerGate(openActions.length, agent?.config?.humanInTheLoop?.onUserMessageWhilePending);
 
@@ -281,13 +291,51 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
     const isConnected = agent?.config?.kind === 'external';
     const attachmentsConfig = useMemo(() => resolveAttachmentsConfig(agent?.config?.attachments), [agent?.config?.attachments]);
-    const takesAttachments = !readOnly && !isConnected
-        && agentTakesAttachments({ attachments: agent?.config?.attachments } as IAgentConfig);
+    // The agent has files set up (on, with a bucket); a read-only session cannot add to them.
+    const filesConfigured = !isConnected && agentTakesAttachments({ attachments: agent?.config?.attachments } as IAgentConfig);
+    const takesAttachments = !readOnly && filesConfigured;
+
+    // A text-only model drops the images a person attaches; say so on the chip. A session pinned to a published
+    // version runs that version's model, so the pinned snapshot is asked for it.
+    const [pinnedModelKey, setPinnedModelKey] = useState<string | undefined>(undefined);
+    useEffect(() => {
+        if (!pinnedVersion || isConnected) {
+            setPinnedModelKey(undefined);
+            return;
+        }
+        let cancelled = false;
+        fetch(`/api/agents/${agentId}/versions?version=${encodeURIComponent(pinnedVersion)}`, { cache: 'no-store' })
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data: { version?: { snapshot?: { config?: { modelKey?: string } } } } | null) => {
+                if (!cancelled) setPinnedModelKey(data?.version?.snapshot?.config?.modelKey);
+            })
+            .catch(() => { if (!cancelled) setPinnedModelKey(undefined); });
+        return () => { cancelled = true; };
+    }, [agentId, pinnedVersion, isConnected]);
+    const modelVision = useAgentModelVision(pinnedModelKey ?? agent?.config?.modelKey, takesAttachments);
+    const textOnlyModel = modelVision && !modelVision.acceptsImages ? { name: modelVision.name, href: modelVision.href } : null;
+
+    /** Re-reads the session's files. A failure keeps the list on screen and only flags it. */
+    const loadSessionFiles = useCallback(async () => {
+        try {
+            const res = await fetch(sessionFilesUrl(agentId, sessionId), { cache: 'no-store' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            setSessionFiles(Array.isArray(data.files) ? (data.files as SessionFileItem[]) : []);
+            setSessionFilesFailed(false);
+        } catch {
+            setSessionFilesFailed(true);
+        }
+    }, [agentId, sessionId]);
+
+    useEffect(() => {
+        if (!loading && agent && !isConnected) void loadSessionFiles();
+    }, [loading, agent, isConnected, loadSessionFiles]);
 
     /** Uploads picked files to the session, one by one; each becomes a chip. */
     const uploadFiles = async (files: File[]) => {
         for (const file of files) {
-            const refusal = checkAttachmentCandidate(file, attachmentsConfig, heldFileCount(messages, attached));
+            const refusal = checkAttachmentCandidate(file, attachmentsConfig, heldFileCount(messages, attached, sessionFiles));
             if (refusal) {
                 const message = refusal.code === 'too_many_files'
                     ? ta('tooManyFiles', { max: refusal.max })
@@ -314,6 +362,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     size: stored.size,
                     conversionStatus: stored.conversionStatus,
                 }]);
+                void loadSessionFiles();
             } catch (err) {
                 notifications.show({
                     title: ta('uploadFailed', { name: file.name }),
@@ -329,7 +378,32 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     /** Drops a file waiting to be sent — from the chips and from the session. */
     const removeAttachment = async (fileId: string) => {
         setAttached((current) => current.filter((file) => file.fileId !== fileId));
-        await fetch(`/api/agents/${agentId}/sessions/${sessionId}/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' }).catch(() => undefined);
+        await fetch(sessionFileUrl(agentId, sessionId, fileId), { method: 'DELETE' }).catch(() => undefined);
+        void loadSessionFiles();
+    };
+
+    /** Deletes a file from the Files tab: the object, its text and the record go, and a chip waiting for it too. */
+    const deleteSessionFile = async (file: SessionFileItem) => {
+        if (!window.confirm(ta('filesDeleteConfirm', { name: file.name }))) return;
+        setDeletingFiles((ids) => [...ids, file.id]);
+        try {
+            const res = await fetch(sessionFileUrl(agentId, sessionId, file.id), { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || `HTTP ${res.status}`);
+            }
+            setAttached((current) => current.filter((item) => item.fileId !== file.id));
+            setSessionFiles((current) => (current ? current.filter((item) => item.id !== file.id) : current));
+            notifications.show({ title: ta('filesDeleted', { name: file.name }), message: '', color: 'teal' });
+        } catch (err) {
+            notifications.show({
+                title: ta('filesDeleteFailed', { name: file.name }),
+                message: err instanceof Error ? err.message : String(err),
+                color: 'red',
+            });
+        } finally {
+            setDeletingFiles((ids) => ids.filter((id) => id !== file.id));
+        }
     };
 
     const load = useCallback(async () => {
@@ -414,6 +488,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         // A session with a budget may have stopped on it (`budget_paused`): the
         // server knows, and its status is written before the result is sent.
         if (budgetView) void refreshSessionMeta();
+        // The turn may have used, or an expiry removed, files the tab lists.
+        if (!isConnected) void loadSessionFiles();
     };
 
     /**
@@ -611,8 +687,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 const err = await res.json().catch(() => ({}));
                 // The request was answered elsewhere or timed out while this
                 // page was open: show how it really ended instead of a stale card.
-                if ((res.status === 409 && (err.type === 'action_not_pending' || err.code === 'action_not_pending'))
-                    || res.status === 410) {
+                if (isStaleActionRefusal(res.status, err)) {
                     notifications.show({ title: t('resolveFailed'), message: t('resolveStateChanged'), color: 'orange' });
                     await refreshSession();
                     return;
@@ -659,8 +734,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
-    /** Adds, changes or removes the session's budget. True once the server has stored it. */
-    const patchBudget = async (budget: IAgentSessionBudget | null): Promise<boolean> => {
+    /** Adds, changes or removes the session's budget. The session as the server stored it, or null when it was refused. */
+    const patchBudget = async (budget: IAgentSessionBudget | null): Promise<{ session: SessionRecord; continuable?: boolean } | null> => {
         setBudgetBusy(true);
         try {
             const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}`, {
@@ -675,14 +750,14 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             const data = await res.json();
             // Keep the transcript on screen: only the session's own fields changed.
             setSession((current) => ({ ...(data.session as SessionRecord), messages: current?.messages }));
-            return true;
+            return { session: data.session as SessionRecord, ...(typeof data.continuable === 'boolean' ? { continuable: data.continuable } : {}) };
         } catch (err) {
             notifications.show({
                 title: tb('saveFailed'),
                 message: err instanceof Error ? err.message : String(err),
                 color: 'red',
             });
-            return false;
+            return null;
         } finally {
             setBudgetBusy(false);
         }
@@ -729,10 +804,15 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
         }
     };
 
-    /** Banner / meter action: change the budget, then carry on if the session was stopped on it. */
+    /**
+     * Banner / meter action: change the budget, then carry on if the session was stopped on it. What the
+     * server answers decides: a session whose turn had finished when it crossed the budget is idle again
+     * after the raise, and asking it to continue would only be refused.
+     */
     const changeBudget = async (budget: IAgentSessionBudget | null) => {
-        const carryOn = Boolean(budgetView?.continuable);
-        if (await patchBudget(budget) && carryOn) await continueBudgetSession();
+        const wasContinuable = Boolean(budgetView?.continuable);
+        const stored = await patchBudget(budget);
+        if (shouldContinueAfterBudgetChange(wasContinuable, stored?.session, stored?.continuable)) await continueBudgetSession();
     };
 
     // A session opened while a turn is still running (started elsewhere, or
@@ -912,7 +992,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             leftSection={<IconArrowsLeftRight size={14} />}
                             onClick={() => setCompareOpen(true)}
                         >
-                            Compare
+                            {tp('compare')}
                         </Button>
                     ) : null}
                     {/*
@@ -928,7 +1008,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         onClick={continueSession}
                         disabled={liveActive}
                     >
-                        Continue
+                        {tp('continue')}
                     </Button>
                     <Button
                         size="xs"
@@ -938,7 +1018,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         loading={deleting}
                         onClick={() => void deleteSession()}
                     >
-                        Delete
+                        {tp('delete')}
                     </Button>
                 </>
             }
@@ -1041,11 +1121,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 onResolve={(actionId, body) => void resolveAction(actionId, body)}
                                                                 restriction={restriction}
                                                                 budgetBannerShown={budgetBannerShown}
+                                                                budgetStops={budgetStops}
                                                             />
                                                         ) : (
                                                             <>
                                                                 <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
-                                                                <MessageAttachments attachments={msg.attachments} />
+                                                                <MessageAttachments attachments={toAttachmentViews(msg.attachments, { agentId, sessionId, files: sessionFiles })} />
                                                             </>
                                                         )}
                                                     </>
@@ -1130,6 +1211,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 uploading={uploadingNames}
                                 disabled={liveActive}
                                 onRemove={(fileId) => void removeAttachment(fileId)}
+                                textOnlyModel={textOnlyModel}
+                                linksFor={(file) => sessionFileLinks(agentId, sessionId, file.fileId)}
                             />
                             <Textarea
                                 ref={composerRef}
@@ -1183,10 +1266,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                 </Alert>
                             ) : null}
                             <Group justify="space-between" mt={6}>
-                                <Text size="10px" c="dimmed">Enter to send · Shift+Enter for a new line</Text>
+                                <Text size="10px" c="dimmed">{tp('enterToSend')}</Text>
                                 <UnstyledButton onClick={() => setOverrideOpen((value) => !value)}>
                                     <Group gap={3}>
-                                        <Text size="10px" c="dimmed">Context override</Text>
+                                        <Text size="10px" c="dimmed">{tp('contextOverride')}</Text>
                                         {overrideOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
                                     </Group>
                                 </UnstyledButton>
@@ -1194,7 +1277,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             <Collapse in={overrideOpen}>
                                 <Box mt="xs">
                                     <Text size="10px" c="dimmed" mb={4}>
-                                        Applies to the next message only, merged over the session context.
+                                        {tp('contextOverrideHint')}
                                     </Text>
                                     <RuntimeContextEditor value={runtimeContextJson} onChange={setRuntimeContextJson} />
                                 </Box>
@@ -1221,6 +1304,16 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         agentConfig={agent.config}
                         messages={messages}
                         onGoToTurn={goToTurn}
+                        // The tab is for agents with files, and for any session that holds some (an API upload, or files from before the setting was turned off).
+                        files={isConnected || !(filesConfigured || (sessionFiles?.length ?? 0) > 0) ? undefined : {
+                            items: sessionFiles,
+                            failed: sessionFilesFailed,
+                            maxFiles: filesConfigured ? attachmentsConfig.maxFiles : undefined,
+                            readOnly,
+                            deleting: deletingFiles,
+                            onDelete: (file) => void deleteSessionFile(file),
+                            onRetry: () => void loadSessionFiles(),
+                        }}
                     />
                 </Paper>
             </Group>
@@ -1310,6 +1403,7 @@ function AssistantTurn({
     onResolve,
     restriction,
     budgetBannerShown,
+    budgetStops,
 }: {
     message: ChatMessage;
     busy: boolean;
@@ -1317,6 +1411,8 @@ function AssistantTurn({
     onResolve: (actionId: string, body: ResolveBody) => void;
     restriction: AnswerRestriction | null;
     budgetBannerShown: boolean;
+    /** The session budget stops the session instead of pausing it. */
+    budgetStops: boolean;
 }) {
     return (
         <Box className={classes.chatMarkdown}>
@@ -1335,7 +1431,7 @@ function AssistantTurn({
             ))}
             {/* A pause with cards says what it waits for on the cards themselves. */}
             {message.stopReason && !(message.stopReason === 'paused' && message.pendingActions?.length)
-                ? <StopNotice message={message} budgetBannerShown={budgetBannerShown} />
+                ? <StopNotice message={message} budgetBannerShown={budgetBannerShown} budgetStops={budgetStops} />
                 : null}
             <Markdown text={message.content} />
             {message.pendingActions?.length ? (

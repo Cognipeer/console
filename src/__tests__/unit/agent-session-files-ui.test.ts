@@ -1,8 +1,8 @@
 /**
  * The session composer's attachments: the pre-upload checks and request pieces
  * (pure), that the paperclip, the chips and the message attachments mount and
- * say what they should, that Configure → Execution edits the settings, and that
- * both languages carry the strings.
+ * say what they should, that the file settings live in Configure → Files and no
+ * longer in Execution, and that both languages carry the strings.
  */
 
 import React, { createElement as h, type ReactNode } from 'react';
@@ -61,6 +61,17 @@ describe('checking a file before it is uploaded', () => {
     ];
     expect(heldFileCount(sent, waiting)).toBe(2);
     expect(heldFileCount([], [])).toBe(0);
+  });
+
+  it('counts the server’s list when there is one: a file expired or uploaded over the API changes the count', () => {
+    const sent: ChatMessage[] = [
+      { role: 'user', content: 'x', attachments: [{ fileId: 'a', name: 'a', mimeType: 'text/plain', size: 1 }, { fileId: 'gone', name: 'g', mimeType: 'text/plain', size: 1 }] },
+    ];
+    // `gone` expired; `api` was uploaded from the API; `b` is waiting and not in the list yet.
+    const waiting: PendingAttachment[] = [{ fileId: 'b', name: 'b', mimeType: 'text/plain', size: 1 }];
+    expect(heldFileCount(sent, waiting, [{ id: 'a' }, { id: 'api' }])).toBe(3);
+    expect(heldFileCount(sent, [], [])).toBe(0);
+    expect(heldFileCount(sent, [], null)).toBe(2);
   });
 });
 
@@ -126,33 +137,19 @@ describe('the composer pieces', () => {
   });
 });
 
-describe('Configure → Execution: attachments', () => {
-  it('is not shown unless the page passes the settings', () => {
-    expect(render(h(AgentExecutionPanel, { value: undefined, onChange: noop }))).not.toContain('Accept attached files');
-  });
-
-  it('shows every setting with its default as the placeholder', () => {
-    const html = render(h(AgentExecutionPanel, { value: undefined, onChange: noop, attachments: undefined, onAttachmentsChange: noop }));
-    for (const label of ['Accept attached files', 'Files per session', 'Largest file (MB)', 'Put in the message up to (tokens)',
-      'Page size when reading (characters)', 'Keep files for (days)', 'Allowed file types', 'Storage bucket']) {
-      expect(html).toContain(label);
+describe('Configure → Execution no longer carries the file settings', () => {
+  it('shows none of them', () => {
+    const html = render(h(AgentExecutionPanel, { value: undefined, onChange: noop }));
+    for (const label of ['Accept attached files', 'Let people attach files', 'Files per session', 'Largest file (MB)', 'Allowed file types', 'Storage bucket']) {
+      expect(html).not.toContain(label);
     }
-    for (const placeholder of ['placeholder="10"', 'placeholder="20"', 'placeholder="30000"', 'placeholder="20000"', 'placeholder="30"']) {
-      expect(html).toContain(placeholder);
-    }
+    expect(html).toContain('Background runs');
   });
 
-  it('shows the stored values, and hides the details when attachments are switched off', () => {
-    const on = render(h(AgentExecutionPanel, { value: undefined, onChange: noop, attachments: { maxFiles: 4, allowedMimeTypes: ['image/*', 'application/pdf'] }, onAttachmentsChange: noop }));
-    expect(on).toContain('value="4"');
-    expect(on).toContain('value="image/*, application/pdf"');
-    const off = render(h(AgentExecutionPanel, { value: undefined, onChange: noop, attachments: { enabled: false }, onAttachmentsChange: noop }));
-    expect(off).toContain('Accept attached files');
-    expect(off).not.toContain('Files per session');
-  });
-
-  it('is part of the Execution section, so a change there marks it changed', () => {
-    expect(CONFIG_SECTION_KEYS.execution).toEqual(['execution', 'attachments']);
+  it('the Files section owns config.attachments, so a change there marks Files — not Execution — changed', () => {
+    expect(CONFIG_SECTION_KEYS.files).toEqual(['attachments']);
+    expect(CONFIG_SECTION_KEYS.execution).toEqual(['execution']);
+    expect(Object.keys(CONFIG_SECTION_KEYS).indexOf('files')).toBe(Object.keys(CONFIG_SECTION_KEYS).indexOf('execution') + 1);
   });
 });
 
