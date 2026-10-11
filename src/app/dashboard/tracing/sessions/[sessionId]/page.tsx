@@ -64,6 +64,8 @@ import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
 import { messageContentToText } from '@/components/common/ui/MessageBlock';
 import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
+import { useTraceSessionFiles } from '@/components/common/llm/useTraceSessionFiles';
+import type { TraceSessionFiles } from '@/components/common/llm/messageImages';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import FunctionsList from '@/components/common/ui/FunctionsList';
 import TokenStats from '@/components/common/ui/TokenStats';
@@ -917,7 +919,7 @@ function buildEventDetailData(event: TracingEvent): LlmRequestDetailData {
     };
 }
 
-function EventDetailPanel({ event }: { event: TracingEvent }) {
+function EventDetailPanel({ event, sessionFiles }: { event: TracingEvent; sessionFiles?: TraceSessionFiles | null }) {
     const [fullViewOpened, fullViewHandlers] = useDisclosure(false);
     const detailData = useMemo(() => buildEventDetailData(event), [event]);
     const hasSections = event.sections && event.sections.length > 0;
@@ -976,6 +978,7 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
                 onClose={fullViewHandlers.close}
                 title={event.label ? humanize(event.label) : humanize(event.type) || 'Event'}
                 data={detailData}
+                sessionFiles={sessionFiles}
             />
 
             {/* Info rows */}
@@ -1013,7 +1016,7 @@ function EventDetailPanel({ event }: { event: TracingEvent }) {
 
                 <Tabs.Panel value="sections" pt="md">
                     {hasSections ? (
-                        <LlmRequestItemsView items={sectionsToItems(event.sections!, true)} />
+                        <LlmRequestItemsView items={sectionsToItems(event.sections!, true)} sessionFiles={sessionFiles} />
                     ) : (
                         <Text size="sm" c="dimmed">No structured sections for this event.</Text>
                     )}
@@ -1121,6 +1124,8 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [detail, setDetail] = useState<SessionDetailResponse | null>(null);
+    // The trace's thread is an agent session's: its recorded pictures are drawn from the session's files.
+    const sessionFiles = useTraceSessionFiles(detail?.session?.threadId);
     const [eventDetailError, setEventDetailError] = useState<string | null>(null);
     const [eventDetailLoading, setEventDetailLoading] = useState(false);
     const [eventDetailsById, setEventDetailsById] = useState<Record<string, SessionDetailResponse['events'][number]>>({});
@@ -1579,7 +1584,7 @@ export default function SessionDetailPage({ params }: { params: Promise<{ sessio
                                 <Text fw={600}>Event detail</Text>
                                 {selectedEvent ? (
                                     <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
-                                        <EventDetailPanel event={selectedEvent} />
+                                        <EventDetailPanel event={selectedEvent} sessionFiles={sessionFiles} />
                                     </ScrollArea>
                                 ) : selectedEventId && eventDetailLoading ? (
                                     <Center h={200}>

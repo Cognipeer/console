@@ -127,10 +127,12 @@ export interface AttachmentThumbProps {
     size: number;
     /** Click opens the preview; without it the thumbnail is only a picture. */
     onOpen?: () => void;
+    /** Called once when the address cannot be loaded (refused, gone, not a picture), so the caller can show something else. */
+    onFail?: () => void;
 }
 
 /** The picture of an image attachment, drawn from its address; a stand-in when it cannot be loaded. */
-export function AttachmentThumb({ file, size, onOpen }: AttachmentThumbProps) {
+export function AttachmentThumb({ file, size, onOpen, onFail }: AttachmentThumbProps) {
     const t = useTranslations('agents.attachments');
     const [failed, setFailed] = useState(false);
     const frame = {
@@ -157,7 +159,7 @@ export function AttachmentThumb({ file, size, onOpen }: AttachmentThumbProps) {
             width={size}
             height={size}
             loading="lazy"
-            onError={() => setFailed(true)}
+            onError={() => { setFailed(true); onFail?.(); }}
             style={{ ...frame, display: 'block', objectFit: 'cover' }}
         />
     );
@@ -314,11 +316,18 @@ function AttachmentFileChip({ file }: { file: AttachmentView }) {
     );
 }
 
-/** An image attachment as a tile: the thumbnail, and its name beneath. */
+/**
+ * An image attachment as a tile: the thumbnail, and its name beneath. A picture that asked for it
+ * (`fallbackToChip`) becomes the named chip when its address cannot be loaded.
+ */
 function AttachmentImageTile({ file, onOpen }: { file: AttachmentView; onOpen: () => void }) {
+    const [refused, setRefused] = useState(false);
+    if (refused && file.fallbackToChip) {
+        return <AttachmentFileChip file={{ ...file, url: undefined, downloadUrl: undefined, fallbackToChip: false, reference: true }} />;
+    }
     return (
         <Stack gap={2} w={84} data-testid="attachment-thumbnail">
-            <AttachmentThumb file={file} size={84} onOpen={onOpen} />
+            <AttachmentThumb file={file} size={84} onOpen={onOpen} onFail={() => setRefused(true)} />
             <Text size="10px" truncate title={file.name} style={{ color: CHIP_CAPTION }}>{file.name}</Text>
         </Stack>
     );

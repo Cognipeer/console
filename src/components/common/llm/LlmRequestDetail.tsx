@@ -8,7 +8,7 @@ import CollapsibleText from '@/components/common/ui/CollapsibleText';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
 import { MessageAttachments } from '@/components/agents/session/SessionAttachments';
 import type { AttachmentView } from '@/components/agents/session/sessionFilesUi';
-import { contentWithoutDrawnParts, messageImageViews } from './messageImages';
+import { contentWithoutDrawnParts, messageImageViews, type TraceSessionFiles } from './messageImages';
 
 /**
  * One ordered stream of "what happened in this request" — every surface
@@ -90,6 +90,8 @@ export interface LlmRequestDetailModalProps {
   title: ReactNode;
   data: LlmRequestDetailData | null;
   labels?: Partial<LlmRequestDetailLabels>;
+  /** The agent session the request was recorded in, when it is one: its recorded pictures are then drawn as thumbnails. */
+  sessionFiles?: TraceSessionFiles | null;
 }
 
 /* ─── Grouping: the ordered item stream → messages / dividers / turn cards ─── */
@@ -235,6 +237,12 @@ function TurnCard({
 export interface LlmRequestItemsViewProps {
   items: LlmRequestItem[];
   labels?: Partial<LlmRequestDetailLabels>;
+  /**
+   * The agent session these messages were recorded in. A picture the request names by reference
+   * (`session-file://<id>`) is drawn from that session's content route — and shown as its name
+   * when the viewer is refused or the file is gone. Without it a reference is only a named chip.
+   */
+  sessionFiles?: TraceSessionFiles | null;
 }
 
 /**
@@ -244,7 +252,7 @@ export interface LlmRequestItemsViewProps {
  * rendering inline (e.g. Agent Observability's own Sections tab) without the
  * full-screen modal chrome around it.
  */
-export function LlmRequestItemsView({ items, labels: labelsOverride }: LlmRequestItemsViewProps) {
+export function LlmRequestItemsView({ items, labels: labelsOverride, sessionFiles }: LlmRequestItemsViewProps) {
   const labels = { ...DEFAULT_LABELS, ...labelsOverride };
   const grouped = groupItems(items);
   let turnNumber = 0;
@@ -261,7 +269,7 @@ export function LlmRequestItemsView({ items, labels: labelsOverride }: LlmReques
     <Stack gap="lg">
       {grouped.map((g, i) => {
         if (g.kind === 'message') {
-          const drawnFromContent = messageImageViews(g.content);
+          const drawnFromContent = messageImageViews(g.content, { sessionFiles });
           const files = [...(g.attachments ?? []), ...drawnFromContent];
           return (
             <MessageBlock
@@ -318,6 +326,7 @@ export default function LlmRequestDetailModal({
   title,
   data,
   labels: labelsOverride,
+  sessionFiles,
 }: LlmRequestDetailModalProps) {
   const labels = { ...DEFAULT_LABELS, ...labelsOverride };
   const hasRaw = Boolean(data?.raw && (data.raw.request !== undefined || data.raw.response !== undefined));
@@ -348,7 +357,7 @@ export default function LlmRequestDetailModal({
               <Box style={{ display: 'flex', gap: 40, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                 <ScrollArea.Autosize mah="calc(100vh - 220px)" style={{ flex: '1 1 520px', minWidth: 0 }} type="auto">
                   <Box pr="sm" maw={760}>
-                    <LlmRequestItemsView items={data.items} labels={labels} />
+                    <LlmRequestItemsView items={data.items} labels={labels} sessionFiles={sessionFiles} />
                   </Box>
                 </ScrollArea.Autosize>
 

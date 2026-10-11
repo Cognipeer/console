@@ -101,6 +101,12 @@ export interface AttachmentView {
     reference?: boolean;
     /** `url` is an address on another site: shown as a link to click, never fetched by the page itself. */
     external?: boolean;
+    /**
+     * A picture drawn from a reference the viewer may not be allowed to open (a tracing request's
+     * `session-file://`): when its address refuses or the file is gone, the named chip is shown
+     * in its place instead of a broken-picture stand-in.
+     */
+    fallbackToChip?: boolean;
 }
 
 export type AttachmentKind = 'image' | 'pdf' | 'document' | 'spreadsheet' | 'presentation' | 'archive' | 'code' | 'text' | 'other';

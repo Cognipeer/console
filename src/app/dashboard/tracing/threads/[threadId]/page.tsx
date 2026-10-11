@@ -58,6 +58,7 @@ import {
 } from '@/lib/utils/tracingUtils';
 import { messageContentToText } from '@/components/common/ui/MessageBlock';
 import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
+import { useTraceSessionFiles } from '@/components/common/llm/useTraceSessionFiles';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import FunctionsList from '@/components/common/ui/FunctionsList';
 import TokenStats from '@/components/common/ui/TokenStats';
@@ -367,6 +368,8 @@ export default function ThreadDetailPage({
 }) {
   const { threadId } = use(params);
   const router = useRouter();
+  // The thread is an agent session's: its recorded pictures are drawn from the session's files.
+  const sessionFiles = useTraceSessionFiles(threadId);
   const [thread, setThread] = useState<ThreadDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -925,6 +928,7 @@ export default function ThreadDetailPage({
                 onClose={fullViewHandlers.close}
                 title={selectedEvent ? (selectedEvent.label ? humanize(selectedEvent.label) : humanize(selectedEvent.type) || 'Event') : 'Event'}
                 data={selectedEventDetailData}
+                sessionFiles={sessionFiles}
               />
               {selectedEvent ? (
                 <ScrollArea style={{ flex: 1 }} type="auto" offsetScrollbars>
@@ -1047,7 +1051,7 @@ export default function ThreadDetailPage({
                         Sections
                       </Text>
                       {selectedEvent.sections && selectedEvent.sections.length > 0 ? (
-                        <LlmRequestItemsView items={sectionsToItems(selectedEvent.sections, true).items} />
+                        <LlmRequestItemsView items={sectionsToItems(selectedEvent.sections, true).items} sessionFiles={sessionFiles} />
                       ) : (
                         <Text size="sm" c="dimmed">
                           No structured sections for this event.

@@ -25,6 +25,8 @@ export interface FileRecordView extends Omit<IFileRecord, '_id'> {
    * routes when they list or read a record; absent for a system actor or a removed account.
    */
   uploadedByName?: string;
+  /** `createdBy` as a person's name, set the same way; absent for a system actor or a removed account. */
+  createdByName?: string;
 }
 
 export type FileRecordListItem = FileRecordView;
