@@ -141,7 +141,7 @@ describe('client agent session routes', () => {
     });
   });
 
-  it('404s a conversation of another project, a missing one, and an id the store rejects', async () => {
+  it('404s a conversation of another project, and an id that names no conversation (the store answers null for one that is no id of its own)', async () => {
     hoisted.getConversationById.mockResolvedValueOnce(conversation({ projectId: 'proj-other' }));
     let res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/sessions/conv-1', headers: { authorization: '******' } });
     expect(res.statusCode).toBe(404);
@@ -150,9 +150,19 @@ describe('client agent session routes', () => {
     res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/sessions/nope/events', headers: { authorization: '******' } });
     expect(res.statusCode).toBe(404);
 
-    hoisted.getConversationById.mockRejectedValueOnce(new Error('bad ObjectId'));
+    hoisted.getConversationById.mockResolvedValueOnce(null);
     res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/sessions/zzz/events/stream', headers: { authorization: '******' } });
     expect(res.statusCode).toBe(404);
+    expect(hoisted.db.listAgentSessionEvents).not.toHaveBeenCalled();
+  });
+
+  it('503s (never 404s, never serves) a session the store failed to read', async () => {
+    for (const url of ['/api/client/v1/agents/sessions/conv-1', '/api/client/v1/agents/sessions/conv-1/events', '/api/client/v1/agents/sessions/conv-1/events/stream']) {
+      hoisted.getConversationById.mockRejectedValueOnce(new Error('cosmos 429 TooManyRequests'));
+      const res = await app.inject({ method: 'GET', url, headers: { authorization: '******' } });
+      expect(res.statusCode, url).toBe(503);
+      expect(res.headers['retry-after'], url).toBeDefined();
+    }
     expect(hoisted.db.listAgentSessionEvents).not.toHaveBeenCalled();
   });
 

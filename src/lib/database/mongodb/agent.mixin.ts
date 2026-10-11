@@ -332,6 +332,9 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     }
 
     async findAgentConversationById(id: string): Promise<IAgentConversation | null> {
+      // An id that cannot be one of ours (another producer's thread id, a typo) names no conversation: not found,
+      // not an error - so a caller can tell "no such session" from a store that failed.
+      if (typeof id !== 'string' || !/^[0-9a-fA-F]{24}$/.test(id)) return null;
       const db = this.getTenantDb();
       const doc = await db
         .collection(COLLECTIONS.agentConversations)
@@ -364,16 +367,17 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       runtimeStatus?: AgentSessionRuntimeStatus;
       limit: number;
       after?: { createdAt: Date; id: string };
-      ownOnly?: { userId: string; agentKeys?: string[] };
+      ownOnly?: { userId: string; viewableAgentKeys?: string[] };
     }): Promise<IAgentConversationListItem[]> {
       const db = this.getTenantDb();
       const match: Record<string, unknown> = { projectId: filters.projectId };
       if (filters.agentKey) match.agentKey = filters.agentKey;
       if (filters.ownOnly) {
-        // Other people's sessions of the restricted agents are not visible: the caller's own, and every other agent's, are.
-        const keys = filters.ownOnly.agentKeys;
-        if (keys === undefined) match.createdBy = filters.ownOnly.userId;
-        else if (keys.length > 0) match.$and = [{ $or: [{ createdBy: filters.ownOnly.userId }, { agentKey: { $nin: keys } }] }];
+        // The caller's own sessions, and every session of the agents they may view; nothing else - an agent that
+        // is not named (including one that no longer exists) shows only what the caller started.
+        const keys = filters.ownOnly.viewableAgentKeys ?? [];
+        if (keys.length === 0) match.createdBy = filters.ownOnly.userId;
+        else match.$and = [{ $or: [{ createdBy: filters.ownOnly.userId }, { agentKey: { $in: keys } }] }];
       }
       // A conversation that never ran has no status: "idle" covers it.
       if (filters.runtimeStatus === 'idle') match.runtimeStatus = { $in: [null, 'idle'] };

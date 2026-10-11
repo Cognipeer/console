@@ -2294,7 +2294,7 @@ export const tr: typeof en = {
     },
     table: {
       url: 'Uç nokta',
-      urlRedacted: 'Sorgu dizesi olmadan gösteriliyor: adresin tamamını yalnızca Webhooks üzerinde Yönetici yetkisi olanlar görür.',
+      urlRedacted: 'Sorgu dizesi olmadan ve yolun uzun bölümleri gizlenerek gösteriliyor: adresin tamamını yalnızca Webhooks üzerinde Yönetici yetkisi olanlar görür.',
       events: 'Olaylar',
       scope: 'Kapsam',
       status: 'Durum',

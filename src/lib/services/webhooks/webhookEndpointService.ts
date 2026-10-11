@@ -81,19 +81,35 @@ export interface WebhookCapabilities {
 
 // ── Wire shapes ──────────────────────────────────────────────────────────
 
+/** What stands in the place of a path segment a reader may not see. */
+const HIDDEN_SEGMENT = '…';
+/** A path segment longer than this is not shown: identifiers and route words are short, the secret a receiver hands out is not. */
+const MAX_SHOWN_SEGMENT_LENGTH = 8;
+
+/** `/services/T0000/B0000/<token>` -> `/services/T0000/B0000/…`: the short segments stay, the long ones go. */
+function maskPath(path: string): string {
+  return path.split('/').map((segment) => (segment.length > MAX_SHOWN_SEGMENT_LENGTH ? HIDDEN_SEGMENT : segment)).join('/');
+}
+
 /**
- * A receiver URL as a reader may see it: scheme, host, port and path - the query string, fragment and userinfo
- * are replaced (`?…` marks that a query string was there). Never throws; text that is no URL is cut at its first
- * `?` or `#`, and anything with an `@` before the path loses what stands before it.
+ * A receiver URL as a reader may see it: scheme, host and port, and a MASKED path - the query string, fragment
+ * and userinfo are replaced (`?…` marks that a query string was there), and every path segment longer than eight
+ * characters is replaced by `…`. Many receivers put their secret in the path (a chat tool's incoming-webhook
+ * address ends in its token; an automation tool's catch-hook address IS a token), so the path is not shown whole;
+ * what stays tells the reader where the events go. Never throws; text that is no URL is cut at its first `?` or
+ * `#`, loses anything with an `@` before the path, and has its path masked the same way.
  */
 export function redactWebhookUrl(url: string): string {
   try {
     const parsed = new URL(url);
-    const shown = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    const shown = `${parsed.protocol}//${parsed.host}${maskPath(parsed.pathname)}`;
     return parsed.search || parsed.hash ? `${shown}?…` : shown;
   } catch {
     const cut = url.search(/[?#]/);
-    return cut >= 0 ? `${url.slice(0, cut).replace(/\/\/[^/@]*@/, '//')}?…` : url.replace(/\/\/[^/@]*@/, '//');
+    const head = (cut >= 0 ? url.slice(0, cut) : url).replace(/\/\/[^/@]*@/, '//');
+    const authority = head.match(/^(?:[a-z][a-z0-9+.-]*:)?\/\/[^/]*/i)?.[0] ?? '';
+    const masked = `${authority}${maskPath(head.slice(authority.length))}`;
+    return cut >= 0 ? `${masked}?…` : masked;
   }
 }
 

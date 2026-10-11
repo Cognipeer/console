@@ -32,6 +32,7 @@ import {
     type AgentManifest,
 } from '../agentManifest';
 import { validateAgentConfig } from '../agentConfigValidation';
+import { assertMayNameBucket, type CanNameBucket } from '../attachmentsBucketAccess';
 import {
     remapSpecResourceKeys,
     type ManifestAuthShape,
@@ -76,6 +77,16 @@ export interface ImportContext {
     tenantId: string;
     projectId: string;
     userId: string;
+}
+
+/**
+ * Where an import WRITES: the context plus the Files question every config write asks. An import that
+ * names `attachments.bucketKey` is choosing where an agent keeps its files, which needs the right to name
+ * that bucket exactly like the create and update routes (see `attachmentsBucketAccess.ts`). Required, so a
+ * caller that writes cannot leave it out; a preview, which writes nothing, takes the plain context.
+ */
+export interface ImportWriteContext extends ImportContext {
+    canNameBucket: CanNameBucket;
 }
 
 // ── Preview ─────────────────────────────────────────────────────────────
@@ -486,7 +497,7 @@ async function withImportRollback<T>(
 }
 
 export async function applyAgentDocumentImport(
-    ctx: ImportContext,
+    ctx: ImportWriteContext,
     input: ApplyAgentDocumentImportInput,
 ): Promise<AgentImportApplyResult> {
     const doc = parseAgentDocument(input.content);
@@ -609,7 +620,10 @@ export async function applyAgentDocumentImport(
             spec: config,
             dependencies: [],
         } as AgentManifest;
-        const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, manifest, { mode: 'create' });
+        const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, manifest, {
+            mode: 'create',
+            canNameBucket: ctx.canNameBucket,
+        });
 
         // Provenance: where this agent came from, for whoever opens it next.
         const db = await getDatabase();
@@ -655,7 +669,7 @@ function authIsComplete(auth: ReturnType<typeof mergeAuth>): boolean {
 }
 
 async function applyManifestDocument(
-    ctx: ImportContext,
+    ctx: ImportWriteContext,
     manifest: AgentManifest,
     input: ApplyAgentDocumentImportInput,
 ): Promise<AgentImportApplyResult> {
@@ -665,6 +679,13 @@ async function applyManifestDocument(
     // Refuse before creating anything: a key clash must not leave library records behind.
     if (!input.overwrite && await agentKeyExists(ctx.tenantDbName, ctx.projectId, key)) {
         throw new AgentImportError(`An agent with key "${key}" already exists in this project. Choose another key.`, 409);
+    }
+    // Also before anything is created: a bucket the caller may not name must not leave library records behind.
+    if (manifest.spec?.attachments?.bucketKey) {
+        const db = await getDatabase();
+        await db.switchToTenant(ctx.tenantDbName);
+        const overwritten = input.overwrite ? await db.findAgentByKey(key, ctx.projectId) : null;
+        await assertMayNameBucket(manifest.spec, overwritten?.config, ctx.canNameBucket);
     }
 
     const resources = manifest.resources ?? {};
@@ -786,6 +807,7 @@ async function applyManifestDocument(
             mode: input.overwrite ? 'upsert' : 'create',
             key,
             name: input.name,
+            canNameBucket: ctx.canNameBucket,
         });
         return {
             agent: result.agent,

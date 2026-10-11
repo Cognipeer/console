@@ -7,7 +7,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-import { filterSessionLinkedRows, refuseTracingThread, sendSessionRefusal } from './agent-session-access';
+import { offsetPageOf, pageOfVisibleRows, refuseTracingThread, sendSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:tracing');
 
@@ -68,24 +68,38 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if ('error' in metadataFilter) {
         return reply.code(400).send({ error: metadataFilter.error });
       }
-      const result = await AgentTracingService.listSessions(session.tenantDbName, projectId, {
-        agent: query.agent,
-        from: query.from,
-        limit: query.limit || '50',
-        query: query.query,
-        skip: query.skip || '0',
-        status: query.status,
-        to: query.to,
-        // Only sessions with truncatedEvents > 0 (a truncated/cut-off model
-        // response somewhere in the session).
-        truncated: query.truncated === 'true' ? true : undefined,
-        ...metadataFilter,
-      });
-
       // A tracing session of an agent is a turn of somebody's session: the sessions of an agent whose other
-      // people's sessions the caller may not view are left out (nothing to look up for the default caller).
-      const visible = await filterSessionLinkedRows(request, result.sessions, (row) => row.threadId, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
-      return reply.code(200).send({ ...result, sessions: visible, total: Math.max(0, result.total - (result.sessions.length - visible.length)) });
+      // people's sessions the caller may not view are left out. The default caller gets one plain read; a
+      // restricted caller's page is filled from further reads, so it is not short while the list goes on.
+      const { skip, limit } = offsetPageOf(query);
+      let latest: Awaited<ReturnType<typeof AgentTracingService.listSessions>> | undefined;
+      const page = await pageOfVisibleRows(request, {
+        start: skip,
+        limit,
+        minBatch: 25,
+        threadIdOf: (row: { threadId?: string | null }) => row.threadId,
+        actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        fetchPage: async (position, size) => {
+          latest = await AgentTracingService.listSessions(session.tenantDbName, projectId, {
+            agent: query.agent,
+            from: query.from,
+            limit: String(size),
+            query: query.query,
+            skip: String(position),
+            status: query.status,
+            to: query.to,
+            // Only sessions with truncatedEvents > 0 (a truncated/cut-off model
+            // response somewhere in the session).
+            truncated: query.truncated === 'true' ? true : undefined,
+            ...metadataFilter,
+          });
+          const total = latest.total;
+          return { rows: latest.sessions, after: (consumed) => (position + consumed >= total ? null : position + consumed) };
+        },
+      });
+      if (!page.restricted && latest) return reply.code(200).send(latest);
+      // A restricted caller's total cannot be known without reading everything: say where the next page starts instead.
+      return reply.code(200).send({ sessions: page.rows, hasMore: page.next !== null, nextSkip: page.next });
     } catch (error) {
       logger.error('List tracing sessions error', { error });
       return sendProjectContextError(reply, error)
@@ -163,19 +177,31 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if ('error' in metadataFilter) {
         return reply.code(400).send({ error: metadataFilter.error });
       }
-      const result = await AgentTracingService.listThreads(session.tenantDbName, projectId, {
-        agent: query.agent,
-        from: query.from,
-        limit: query.limit || '50',
-        skip: query.skip || '0',
-        status: query.status,
-        threadId: query.threadId,
-        to: query.to,
-        ...metadataFilter,
+      const { skip, limit } = offsetPageOf(query);
+      let latest: Awaited<ReturnType<typeof AgentTracingService.listThreads>> | undefined;
+      const page = await pageOfVisibleRows(request, {
+        start: skip,
+        limit,
+        minBatch: 25,
+        threadIdOf: (row: { threadId?: unknown }) => (typeof row.threadId === 'string' ? row.threadId : null),
+        actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        fetchPage: async (position, size) => {
+          latest = await AgentTracingService.listThreads(session.tenantDbName, projectId, {
+            agent: query.agent,
+            from: query.from,
+            limit: String(size),
+            skip: String(position),
+            status: query.status,
+            threadId: query.threadId,
+            to: query.to,
+            ...metadataFilter,
+          });
+          const total = latest.total;
+          return { rows: latest.threads, after: (consumed) => (position + consumed >= total ? null : position + consumed) };
+        },
       });
-
-      const threads = await filterSessionLinkedRows(request, result.threads, (row) => (typeof row.threadId === 'string' ? row.threadId : null), { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
-      return reply.code(200).send({ ...result, threads, total: Math.max(0, result.total - (result.threads.length - threads.length)) });
+      if (!page.restricted && latest) return reply.code(200).send(latest);
+      return reply.code(200).send({ threads: page.rows, hasMore: page.next !== null, nextSkip: page.next });
     } catch (error) {
       logger.error('List tracing threads error', { error });
       return sendProjectContextError(reply, error)

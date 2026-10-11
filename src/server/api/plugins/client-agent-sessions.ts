@@ -57,8 +57,10 @@ import { approvalAuthorizerFor } from './agent-approval-authz';
 import {
   loadSessionForPrincipal,
   sendAuthorizationUnavailable,
+  sendClientListUnavailable,
   sendClientSessionRefusal,
   sessionListScope,
+  sessionStreamStillAllowed,
   type SessionNeed,
 } from './agent-session-access';
 
@@ -321,6 +323,9 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
         next_cursor: page.nextCursor ?? null,
       });
     } catch (error) {
+      // The engine that could not say which sessions the caller may see is a 503 to retry, not a failure of the list.
+      const unavailable = sendClientListUnavailable(reply, request, error);
+      if (unavailable) return unavailable;
       logger.error('Client agent session list error', { error });
       return reply.code(500).send(INTERNAL_ERROR_BODY);
     }
@@ -487,7 +492,10 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(500).send(INTERNAL_ERROR_BODY);
     }
     if (!conversation) return reply;
-    return streamSessionEvents(request, reply, ctx.tenantDbName, String(conversation._id), 'client');
+    const conversationId = String(conversation._id);
+    return streamSessionEvents(request, reply, ctx.tenantDbName, conversationId, 'client', () => sessionStreamStillAllowed(request, conversationId, {
+      projectId: ctx.projectId,
+    }));
   }));
 
   // ── Answer a pending approval / question ──

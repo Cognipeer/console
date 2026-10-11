@@ -83,7 +83,7 @@ Enabling it again re-checks the address. Deliveries that were still queued when 
 
 ## API
 
-A receiver address is often a credential (a chat tool's incoming-webhook URL carries its token). **Webhooks · Read** is the right to look at subscriptions, not to use them, so a reader gets the address without its query string, fragment and userinfo — `https://host/path?…`, with `urlRedacted: true` on the endpoint — and only **Webhooks · Admin** (where the endpoint lives: the project for a project's endpoint, the workspace for a tenant-wide one) sees it whole.
+A receiver address is often a credential: a chat tool's incoming-webhook URL ends in its token, and an automation tool's catch-hook URL is one. **Webhooks · Read** is the right to look at subscriptions, not to use them, so a reader gets the address without its query string, fragment and userinfo, and with every path segment longer than eight characters replaced by `…` — `https://hooks.slack.com/services/T0000/B0000/…`, with `urlRedacted: true` on the endpoint. What stays tells the reader where the events go; a secret of eight characters or fewer is not hidden by this, so treat the full address as sensitive. Only **Webhooks · Admin** (where the endpoint lives: the project for a project's endpoint, the workspace for a tenant-wide one) sees it whole.
 
 The endpoint and delivery objects use `camelCase` (`projectId`, `disabledReason`, `failingSince`, `eventType`, `nextAttemptAt`), like the other resource-management endpoints; errors are `{ "error": "…", "code": "…" }`. The agent endpoints you may call from a handler (runs, sessions, events) are `snake_case`.
 

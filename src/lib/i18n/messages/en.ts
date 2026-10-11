@@ -1886,7 +1886,7 @@ export const en = {
     },
     table: {
       url: 'Endpoint',
-      urlRedacted: 'Shown without its query string: only Admin on Webhooks sees the whole address.',
+      urlRedacted: 'Shown without its query string, and with the long parts of its path hidden: only Admin on Webhooks sees the whole address.',
       events: 'Events',
       scope: 'Scope',
       status: 'Status',

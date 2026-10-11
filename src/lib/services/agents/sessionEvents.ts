@@ -610,10 +610,22 @@ export interface FollowSessionEventsOptions {
   maxDurationMs?: number;
   pingIntervalMs?: number;
   replayPageSize?: number;
+  /**
+   * Is the follower still allowed to watch? Asked every `recheckIntervalMs` while the stream is open, because the
+   * check that let it in ran once, at the start, and a stream can run for an hour: a rule written since, a removed
+   * membership or a revoked token must end it too. `false` - or a check that fails: not knowing is not an allow -
+   * ends the stream (`onRevoked` runs first, to tell the client); the client resumes with `Last-Event-ID` and is
+   * answered by the same check at the door.
+   */
+  recheck?: () => Promise<boolean>;
+  recheckIntervalMs?: number;
+  onRevoked?: () => void;
 }
 
 const FOLLOW_MAX_DURATION_MS = 60 * 60 * 1000;
 const FOLLOW_PING_INTERVAL_MS = 15_000;
+/** How often an open stream asks whether its viewer is still allowed to watch. */
+export const FOLLOW_RECHECK_INTERVAL_MS = 60_000;
 const REPLAY_PAGE_SIZE = 500;
 
 /**
@@ -632,10 +644,11 @@ export async function followSessionEvents(options: FollowSessionEventsOptions): 
 
   let lastSent = Math.max(0, options.afterSeq);
   let replaying = true;
+  let revoked = false;
   const held: SessionEventFrame[] = [];
 
   const send = (frame: SessionEventFrame) => {
-    if (!wanted(frame.type)) return;
+    if (revoked || !wanted(frame.type)) return;
     if (frame.seq !== undefined) {
       if (frame.seq <= lastSent) return;
       lastSent = frame.seq;
@@ -652,6 +665,7 @@ export async function followSessionEvents(options: FollowSessionEventsOptions): 
 
   let ping: ReturnType<typeof setInterval> | undefined;
   let cap: ReturnType<typeof setTimeout> | undefined;
+  let recheck: ReturnType<typeof setInterval> | undefined;
   const done = new Promise<void>((resolve) => {
     if (signal.aborted) return resolve();
     signal.addEventListener('abort', () => resolve(), { once: true });
@@ -661,6 +675,30 @@ export async function followSessionEvents(options: FollowSessionEventsOptions): 
       try { writePing(); } catch { resolve(); }
     }, options.pingIntervalMs ?? FOLLOW_PING_INTERVAL_MS);
     ping.unref?.();
+    if (options.recheck) {
+      const stillAllowed = options.recheck;
+      let asking = false;
+      recheck = setInterval(() => {
+        if (asking || revoked) return;
+        asking = true;
+        stillAllowed()
+          .catch((error: unknown) => {
+            logger.warn('Re-checking access to a followed session failed; ending the stream', {
+              conversationId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return false;
+          })
+          .then((allowed) => {
+            if (allowed) return;
+            revoked = true;
+            try { options.onRevoked?.(); } catch { /* the stream ends either way */ }
+            resolve();
+          })
+          .finally(() => { asking = false; });
+      }, options.recheckIntervalMs ?? FOLLOW_RECHECK_INTERVAL_MS);
+      recheck.unref?.();
+    }
   });
 
   try {
@@ -693,6 +731,7 @@ export async function followSessionEvents(options: FollowSessionEventsOptions): 
     replaying = false;
     unsubscribe();
     if (ping) clearInterval(ping);
+    if (recheck) clearInterval(recheck);
     if (cap) clearTimeout(cap);
   }
 }

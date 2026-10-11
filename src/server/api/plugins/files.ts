@@ -40,8 +40,8 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
-import { filterSessionLinkedRows, refuseSessionLinked, sendSessionRefusal } from './agent-session-access';
-import { sessionOfFile } from './session-linked-files';
+import { refuseSessionLinked, sendSessionRefusal } from './agent-session-access';
+import { listVisibleFiles, sessionOfFile } from './session-linked-files';
 
 const logger = createLogger('api:files');
 
@@ -459,22 +459,26 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as FileObjectsQuery;
 
       // `prefix` (even empty) = list one folder: its files, and its sub-folders in `folders`.
-      const scoped = await listFiles(session.tenantDbName, session.tenantId, projectId, {
-        bucketKey,
-        cursor: query.cursor || undefined,
-        limit: parseLimit(query.limit) ?? 50,
-        search: query.search || undefined,
-        ...(typeof query.prefix === 'string' ? { prefix: query.prefix } : {}),
-        ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
-      });
-
       // The files a session holds are the session's: those of somebody else's session the caller may not view
-      // are left out (a caller who may view every session costs no lookup).
-      const visible = await filterSessionLinkedRows(request, scoped.items, sessionOfFile);
+      // are left out, and the page is filled from the following reads rather than cut short (a caller who may
+      // view every session costs one plain read and no lookup).
+      const limit = parseLimit(query.limit) ?? 50;
+      const visible = await listVisibleFiles(request, {
+        cursor: query.cursor || undefined,
+        limit,
+        read: (cursor, size) => listFiles(session.tenantDbName, session.tenantId, projectId, {
+          bucketKey,
+          cursor,
+          limit: size,
+          search: query.search || undefined,
+          ...(typeof query.prefix === 'string' ? { prefix: query.prefix } : {}),
+          ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
+        }),
+      });
       return reply.code(200).send({
-        items: await withAgentIds(session.tenantDbName, projectId, visible),
-        ...(scoped.folders ? { folders: scoped.folders, prefix: scoped.prefix } : {}),
-        nextCursor: scoped.nextCursor,
+        items: await withAgentIds(session.tenantDbName, projectId, visible.items),
+        ...(visible.folders ? { folders: visible.folders, prefix: visible.prefix } : {}),
+        nextCursor: visible.nextCursor,
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'File bucket not found.') {

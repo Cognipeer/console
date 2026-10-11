@@ -43,8 +43,8 @@ export interface SessionListFilters {
     status?: AgentSessionRuntimeStatus;
     limit: number;
     after?: { createdAt: Date; id: string };
-    /** The caller may not see other people's sessions of these agents (every agent when no keys): only their own are listed. */
-    ownOnly?: { userId: string; agentKeys?: string[] };
+    /** The caller may view other people's sessions of only these agents (none when no keys): of any other agent only their own are listed. */
+    ownOnly?: { userId: string; viewableAgentKeys?: string[] };
 }
 
 export interface SessionListPage {

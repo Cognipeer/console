@@ -50,7 +50,13 @@ vi.mock('@/server/api/plugins/agent-approval-authz', () => ({ authorizeEndingOpe
 // Whose session a run belongs to is the session access module's question (api/agent-session-authz.test.ts has its own tests);
 // only the wiring is checked here: the run's session, the need (view to read, manage to cancel), and the refusal's shape.
 vi.mock('@/server/api/plugins/agent-session-access', () => ({
-  decideSessionAccess: hoisted.access,
+  // The linked-path helper in miniature: read the run's conversation, ignore one of another project, else ask the access question.
+  refuseSessionLinked: async (request: unknown, conversationId: string, need: string, options: { actor: { projectId: string } }) => {
+    const conversation = await hoisted.getConversationById('tenant_acme', conversationId) as { projectId: string } | null;
+    if (!conversation || conversation.projectId !== options.actor.projectId) return null;
+    const decision = await hoisted.access(request, conversation, { need, ...options });
+    return decision.ok ? null : decision;
+  },
   sendClientSessionRefusal: (reply: { code: (status: number) => { send: (body: unknown) => unknown } }, _request: unknown, refusal: { status: number; reason: string; decisionId?: string }) => (
     reply.code(refusal.status).send({ error: { code: refusal.reason, ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}) } })
   ),

@@ -29,21 +29,35 @@
  *
  * A LIST cannot ask per row: `sessionListScope` decides once per request which agents'
  * sessions the caller sees in full and which only their own, and the database applies
- * that before it cuts the page (`ownOnly`).
+ * that before it cuts the page (`ownOnly`). The scope is an ALLOW list - the agents whose
+ * other people's sessions the caller may view - so a session whose agent no longer exists
+ * (a deleted agent keeps its sessions) is somebody else's like any other as soon as a
+ * restriction is in force.
+ *
+ * A lookup that FAILS (the store is down, as opposed to the id naming no session) is never
+ * read as "not a session, so allowed": the single-session paths answer 503, a list fails
+ * its request with the same 503.
  */
 
+import { createHash } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { createLogger } from '@/lib/core/logger';
 import type { IAgent, IAgentConversation } from '@/lib/database';
 import { agentSessionResource } from '@/lib/iam/agentEntities';
+import { describeTenantPolicySet } from '@/lib/iam/engine';
 import { getAgentByKey, getConversationById, listAgents } from '@/lib/services/agents';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import {
   authorizationRefusalOf,
   authorizeResourceForRequest,
+  refreshRequestPrincipal,
   requireProjectContextForRequest,
   resourceRefusalError,
   sendProjectContextError,
+  serviceLevelForRequest,
 } from '../fastify-utils';
+
+const logger = createLogger('api:agent-session-access');
 
 export type SessionNeed = 'view' | 'manage';
 
@@ -100,6 +114,15 @@ export type SessionGrant = {
 
 export type LoadedSession = (SessionGrant & { conversation: IAgentConversation }) | SessionRefusal;
 export type SessionDecision = SessionGrant | Exclude<SessionRefusal, { status: 404 }>;
+
+/** The answer when the store could not be asked who a session belongs to: unavailable (503), never an allow. */
+function lookupFailed(need: SessionNeed, conversationId: string | null | undefined, error: unknown): Extract<SessionRefusal, { status: 503 }> {
+  logger.warn('Could not read a session to decide access', {
+    conversationId,
+    error: error instanceof Error ? error.message : String(error),
+  });
+  return { ok: false, status: 503, reason: 'unavailable', need };
+}
 
 /** Who the request acts for and in which project: a token (its owner, its project) or the signed-in session. */
 export async function sessionActorOf(request: FastifyRequest): Promise<SessionActor> {
@@ -181,8 +204,10 @@ export async function loadSessionForPrincipal(
   let conversation: IAgentConversation | null = null;
   try {
     conversation = typeof conversationId === 'string' && conversationId ? await getConversationById(actor.tenantDbName, conversationId) : null;
-  } catch {
-    conversation = null;
+  } catch (error) {
+    // An id that names no conversation is a clean "not found" from the store; this is the store failing. Not a 404
+    // (the session may well exist) and never an allow.
+    return lookupFailed(options.need, conversationId, error);
   }
   if (!conversation
     || conversation.projectId !== projectId
@@ -217,23 +242,117 @@ export async function canViewOthersSessions(
   return result.allowed;
 }
 
-/** Per request: the agents whose other-people's sessions the caller may not view (asked once per request). */
-const restrictedByRequest = new WeakMap<FastifyRequest, Promise<string[]>>();
+/**
+ * Is the viewer of an open event stream still allowed to watch it? The route's checks ran once, when the stream
+ * opened; this asks them again - the caller's standing in the project and on `agents` (a removed membership, a
+ * lowered role, a revoked token), then the session itself (`loadSessionForPrincipal`, so a rule written since is
+ * seen) - against what is stored NOW. Anything that goes wrong is a "no": not knowing is not an allow.
+ */
+export async function sessionStreamStillAllowed(
+  request: FastifyRequest,
+  conversationId: string,
+  options: Omit<LoadSessionOptions, 'need' | 'quiet'> = {},
+): Promise<boolean> {
+  try {
+    await refreshRequestPrincipal(request);
+    const actor = options.actor ?? await sessionActorOf(request);
+    const projectId = options.projectId ?? actor.projectId;
+    if ((await serviceLevelForRequest(request, 'agents', { projectId })) === 'none') return false;
+    const loaded = await loadSessionForPrincipal(request, conversationId, { ...options, actor, projectId, need: 'view' });
+    return loaded.ok;
+  } catch {
+    return false;
+  }
+}
 
-/** The keys of the project's agents whose sessions started by others the caller may NOT view. */
-async function restrictedAgentKeys(request: FastifyRequest, projectId: string, known?: SessionActor): Promise<string[]> {
-  const cached = restrictedByRequest.get(request);
+// ── what the caller may view, per agent ──────────────────────────────────
+
+/** What the caller may view of other people's sessions, agent by agent. */
+interface AgentViewScope {
+  /** Some agent's other-people's sessions are off limits to the caller; false = they see every session. */
+  restricted: boolean;
+  /** The agents (keys) whose other-people's sessions the caller may view. Meaningful only when `restricted`. */
+  viewable: string[];
+}
+
+/** The scope is decided once per request... */
+const viewScopeByRequest = new WeakMap<FastifyRequest, Promise<AgentViewScope>>();
+/**
+ * ...and, when custom rules make that a question per agent, kept for a few seconds across requests (the same person, the
+ * same rules, the same policy version). A change of the person's role or groups is seen after those seconds, and an agent
+ * created in them is treated, for that long, like one whose sessions the caller may not view.
+ */
+const viewScopeCache = new Map<string, { expiresAt: number; scope: AgentViewScope }>();
+export const VIEW_SCOPE_CACHE_TTL_MS = 5_000;
+const VIEW_SCOPE_CACHE_MAX = 500;
+
+/** The key an agent that no longer exists is asked about: only a rule that covers every agent (not one that names an id) can match it. */
+const DELETED_AGENT_KEY = '(deleted agent)';
+
+/** Test seam. */
+export function resetSessionAccessCachesForTests(): void {
+  viewScopeCache.clear();
+}
+
+/** An engine (or a store) that could not answer a list's question: the 503 the gates use, never "nothing is restricted". */
+function listUnavailable(request: FastifyRequest, projectId: string | null, why: string, error: unknown): Error {
+  logger.warn(why, { error: error instanceof Error ? error.message : String(error) });
+  return resourceRefusalError(request, { action: ACTION_OF_NEED.view, level: 'read', unavailable: true, projectId });
+}
+
+function scopeCacheKey(request: FastifyRequest, actor: SessionActor, projectId: string, policy: { setId: string; version: number }): string {
+  const token = request.apiTokenContext;
+  const who = token
+    ? `token:${String(token.tokenRecord._id ?? '')}:${createHash('sha1').update(JSON.stringify(token.tokenRecord.servicePermissions ?? null)).digest('hex')}`
+    : 'session';
+  return [actor.tenantDbName, policy.setId, policy.version, actor.userId, who, projectId].join('|');
+}
+
+async function computeViewScope(request: FastifyRequest, projectId: string, actor: SessionActor): Promise<AgentViewScope> {
+  let policy: Awaited<ReturnType<typeof describeTenantPolicySet>>;
+  try {
+    policy = await describeTenantPolicySet(actor.tenantDbName);
+  } catch (error) {
+    throw listUnavailable(request, projectId, 'Could not load the policy set to scope a list of sessions', error);
+  }
+
+  // No custom rule in force: the managed rules alone decide, and `agent.session_view_others` sits in the Read
+  // group - the caller holds it for every agent exactly when they hold `agents` at Read or above (the token's
+  // scope and the project's limits included, as the engine builds them). No question per agent.
+  if (policy.custom === 0) {
+    const level = await serviceLevelForRequest(request, 'agents', { projectId });
+    return level === 'none' ? { restricted: true, viewable: [] } : { restricted: false, viewable: [] };
+  }
+
+  const key = scopeCacheKey(request, actor, projectId, policy);
+  const hit = viewScopeCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.scope;
+
+  const agents = await listAgents(actor.tenantDbName, { projectId });
+  const viewable: string[] = [];
+  let denied = 0;
+  for (const agent of agents) {
+    if (await canViewOthersSessions(request, { agent, projectId, actor })) viewable.push(agent.key);
+    else denied += 1;
+  }
+  // A session whose agent was deleted stays in the store: one question stands for all of them.
+  const ghostsViewable = await canViewOthersSessions(request, { agent: { _id: DELETED_AGENT_KEY, key: DELETED_AGENT_KEY }, projectId, actor });
+  const scope: AgentViewScope = { restricted: denied > 0 || !ghostsViewable, viewable };
+
+  if (viewScopeCache.size >= VIEW_SCOPE_CACHE_MAX) {
+    const oldest = viewScopeCache.keys().next().value as string | undefined;
+    if (oldest !== undefined) viewScopeCache.delete(oldest);
+  }
+  viewScopeCache.set(key, { expiresAt: Date.now() + VIEW_SCOPE_CACHE_TTL_MS, scope });
+  return scope;
+}
+
+/** The caller's view scope for this request (asked once per request). Throws the 503 when the engine cannot decide. */
+function agentViewScope(request: FastifyRequest, projectId: string, actor: SessionActor): Promise<AgentViewScope> {
+  const cached = viewScopeByRequest.get(request);
   if (cached) return cached;
-  const actor = known ?? await sessionActorOf(request);
-  const loading = (async () => {
-    const agents = await listAgents(actor.tenantDbName, { projectId });
-    const denied: string[] = [];
-    for (const agent of agents) {
-      if (!(await canViewOthersSessions(request, { agent, projectId, actor }))) denied.push(agent.key);
-    }
-    return denied;
-  })();
-  restrictedByRequest.set(request, loading);
+  const loading = computeViewScope(request, projectId, actor);
+  viewScopeByRequest.set(request, loading);
   return loading;
 }
 
@@ -241,13 +360,14 @@ export interface SessionListScope {
   /** The caller; the rows they started are always theirs. */
   userId: string;
   /** What the database must apply before it cuts a page; absent = the caller sees everything. */
-  ownOnly?: { userId: string; agentKeys?: string[] };
+  ownOnly?: { userId: string; viewableAgentKeys?: string[] };
 }
 
 /**
- * What the caller may see in a LIST of sessions: everything (the default), or - for the agents whose other
- * people's sessions they may not view - only the ones they started. `agent` names the list's agent (one
- * decision); without it the project's agents are asked (cached for the request).
+ * What the caller may see in a LIST of sessions: everything (the default), or - when they may not view other
+ * people's sessions of some agent - only the ones they started plus every session of the agents they may view
+ * (`viewableAgentKeys`; a session of an agent that no longer exists is never in it). `agent` names the list's
+ * agent (one decision); without it the project's agents are asked (cached for the request).
  */
 export async function sessionListScope(
   request: FastifyRequest,
@@ -260,10 +380,10 @@ export async function sessionListScope(
       ? { userId: actor.userId }
       : { userId: actor.userId, ownOnly: { userId: actor.userId } };
   }
-  const denied = await restrictedAgentKeys(request, projectId, actor);
-  return denied.length === 0
-    ? { userId: actor.userId }
-    : { userId: actor.userId, ownOnly: { userId: actor.userId, agentKeys: denied } };
+  const scope = await agentViewScope(request, projectId, actor);
+  return scope.restricted
+    ? { userId: actor.userId, ownOnly: { userId: actor.userId, viewableAgentKeys: scope.viewable } }
+    : { userId: actor.userId };
 }
 
 // ── paths to the same transcript outside the session routes ───────────────
@@ -273,24 +393,29 @@ export async function sessionListScope(
  * IS its conversation: `threadId` = the conversation id), a file the session holds in a bucket (`purpose:
  * 'conversation'`) - names the session by id. Before it is read (`need: 'view'`) or changed (`'manage'`), ask
  * whether it is a session of this project the caller may touch; an id that is no session (any other producer's
- * thread id, an ordinary file) is not the session permission's business. Null when the caller may.
+ * thread id, an ordinary file) is not the session permission's business. Null when the caller may. A store that
+ * cannot say whether the id is a session answers `unavailable` (503), not "no session".
  */
 export async function refuseSessionLinked(
   request: FastifyRequest,
   conversationId: string | null | undefined,
   need: SessionNeed,
-  options: { actor?: SessionActor } = {},
+  options: { actor?: SessionActor; alsoOwnedBy?: ReadonlyArray<string | null | undefined> } = {},
 ): Promise<Exclude<SessionRefusal, { status: 404 }> | null> {
   if (!conversationId) return null;
   const actor = options.actor ?? await sessionActorOf(request);
   let conversation: IAgentConversation | null = null;
   try {
     conversation = await getConversationById(actor.tenantDbName, conversationId);
-  } catch {
-    conversation = null;
+  } catch (error) {
+    return lookupFailed(need, conversationId, error);
   }
   if (!conversation || conversation.projectId !== actor.projectId) return null;
-  const decision = await decideSessionAccess(request, conversation, { need, actor });
+  const decision = await decideSessionAccess(request, conversation, {
+    need,
+    actor,
+    ...(options.alsoOwnedBy ? { alsoOwnedBy: options.alsoOwnedBy } : {}),
+  });
   return decision.ok ? null : decision;
 }
 
@@ -303,10 +428,53 @@ export function refuseTracingThread(
   return refuseSessionLinked(request, threadId, 'view', options);
 }
 
+/** The conversations the rows of this request name, each read once. */
+const conversationsByRequest = new WeakMap<FastifyRequest, Map<string, Promise<IAgentConversation | null>>>();
+
+function conversationOnce(request: FastifyRequest, tenantDbName: string, conversationId: string): Promise<IAgentConversation | null> {
+  let reads = conversationsByRequest.get(request);
+  if (!reads) {
+    reads = new Map();
+    conversationsByRequest.set(request, reads);
+  }
+  let read = reads.get(conversationId);
+  if (!read) {
+    read = getConversationById(tenantDbName, conversationId);
+    reads.set(conversationId, read);
+  }
+  return read;
+}
+
+/** For each row: may a restricted caller see it? (A row that names no session of this project is not the permission's business.) */
+async function visibleFlags<T>(
+  request: FastifyRequest,
+  scope: AgentViewScope,
+  actor: SessionActor,
+  rows: readonly T[],
+  threadIdOf: (row: T) => string | null | undefined,
+): Promise<boolean[]> {
+  const viewable = new Set(scope.viewable);
+  return Promise.all(rows.map(async (row) => {
+    const threadId = threadIdOf(row);
+    if (!threadId) return true;
+    let conversation: IAgentConversation | null;
+    try {
+      conversation = await conversationOnce(request, actor.tenantDbName, threadId);
+    } catch (error) {
+      // Not knowing whose a row is does not make it the caller's: the request fails.
+      throw listUnavailable(request, actor.projectId, 'Could not read a session to filter a list', error);
+    }
+    if (!conversation || conversation.projectId !== actor.projectId) return true;
+    if (viewable.has(conversation.agentKey)) return true;
+    return !!actor.userId && String(conversation.createdBy) === actor.userId;
+  }));
+}
+
 /**
  * Keeps the rows of a list (tracing threads and sessions, the files of a bucket) that are not somebody else's
  * agent sessions the caller may not view. `threadIdOf` reads the id of the session a row belongs to (null: none).
- * A caller who may view every agent's sessions (the default) costs no lookup at all.
+ * A caller who may view every agent's sessions (the default) costs no lookup at all. A page filtered this way
+ * can come out short: a list that pages should use `pageOfVisibleRows`.
  */
 export async function filterSessionLinkedRows<T>(
   request: FastifyRequest,
@@ -315,22 +483,80 @@ export async function filterSessionLinkedRows<T>(
   options: { actor?: SessionActor } = {},
 ): Promise<T[]> {
   const actor = options.actor ?? await sessionActorOf(request);
-  const denied = new Set(await restrictedAgentKeys(request, actor.projectId, actor));
-  if (denied.size === 0) return [...rows];
-  const checks = await Promise.all(rows.map(async (row) => {
-    const threadId = threadIdOf(row);
-    if (!threadId) return true;
-    let conversation: IAgentConversation | null = null;
-    try {
-      conversation = await getConversationById(actor.tenantDbName, threadId);
-    } catch {
-      conversation = null;
+  const scope = await agentViewScope(request, actor.projectId, actor);
+  if (!scope.restricted) return [...rows];
+  const flags = await visibleFlags(request, scope, actor, rows, threadIdOf);
+  return rows.filter((_, index) => flags[index]);
+}
+
+/** `?skip=&limit=` of an offset-paged list as whole numbers (`defaultLimit` and 0 when absent or not a number). */
+export function offsetPageOf(query: { skip?: string; limit?: string }, defaultLimit = 50): { skip: number; limit: number } {
+  const limit = Number.parseInt(query.limit ?? '', 10);
+  const skip = Number.parseInt(query.skip ?? '', 10);
+  return {
+    limit: Number.isInteger(limit) && limit >= 0 ? limit : defaultLimit,
+    skip: Number.isInteger(skip) && skip > 0 ? skip : 0,
+  };
+}
+
+/** The most pages one restricted request reads to fill a page; past it the page is returned short, with where to go on from. */
+export const VISIBLE_PAGE_MAX_ROUNDS = 20;
+
+/** One read of the unfiltered list: its rows, and the position after the first `consumed` of them (null = the list ends there). */
+export interface UnfilteredPage<T, P> {
+  rows: T[];
+  after: (consumed: number) => P | null;
+}
+
+/**
+ * One page of a list whose rows may be somebody else's agent sessions, filled to `limit` visible rows.
+ *
+ * The default caller (who may view every session) gets exactly one read, unfiltered, and the caller keeps its
+ * own total. A restricted caller's rows are filtered AFTER the read, so a single read can come back short or
+ * empty while the list goes on: this reads on - at most `VISIBLE_PAGE_MAX_ROUNDS` times - from where the
+ * previous read ended until the page is full or the list ends, and says where the next page starts (`next`,
+ * null = nothing more). Their count is not knowable without reading everything, so none is reported.
+ *
+ * `fetchPage(position, size)` reads the unfiltered list from `position` (the list's own idea of one: an offset, a
+ * cursor); `minBatch` is the least it is asked for (a cursor can only continue after a whole read, so it asks for
+ * exactly what is missing; an offset can be cut anywhere and reads more to need fewer rounds).
+ */
+export async function pageOfVisibleRows<T, P>(
+  request: FastifyRequest,
+  input: {
+    start: P;
+    limit: number;
+    minBatch?: number;
+    threadIdOf: (row: T) => string | null | undefined;
+    fetchPage: (position: P, size: number) => Promise<UnfilteredPage<T, P>>;
+    actor?: SessionActor;
+  },
+): Promise<{ restricted: false; rows: T[]; next: P | null } | { restricted: true; rows: T[]; next: P | null }> {
+  const actor = input.actor ?? await sessionActorOf(request);
+  const scope = await agentViewScope(request, actor.projectId, actor);
+  if (!scope.restricted) {
+    const page = await input.fetchPage(input.start, input.limit);
+    return { restricted: false, rows: page.rows, next: page.after(page.rows.length) };
+  }
+
+  const out: T[] = [];
+  let position: P | null = input.start;
+  for (let round = 0; round < VISIBLE_PAGE_MAX_ROUNDS && position !== null && out.length < input.limit; round += 1) {
+    const page: UnfilteredPage<T, P> = await input.fetchPage(position, Math.max(input.limit - out.length, input.minBatch ?? 1));
+    const flags = await visibleFlags(request, scope, actor, page.rows, input.threadIdOf);
+    let consumed = page.rows.length;
+    for (let index = 0; index < page.rows.length; index += 1) {
+      if (!flags[index]) continue;
+      out.push(page.rows[index]);
+      if (out.length >= input.limit) {
+        consumed = index + 1;
+        break;
+      }
     }
-    if (!conversation || conversation.projectId !== actor.projectId) return true;
-    if (!denied.has(conversation.agentKey)) return true;
-    return !!actor.userId && String(conversation.createdBy) === actor.userId;
-  }));
-  return rows.filter((_, index) => checks[index]);
+    // A read that returned nothing ends the list, whatever the source says (no endless loop on a source that never does).
+    position = page.rows.length === 0 ? null : page.after(consumed);
+  }
+  return { restricted: true, rows: out, next: position };
 }
 
 // ── refusals ─────────────────────────────────────────────────────────────
@@ -373,6 +599,21 @@ export function sendAuthorizationUnavailable(
     return reply.code(503).send(apiErrorBody('api_error', CLIENT_UNAVAILABLE_MESSAGE, 'authorization_unavailable', decisionId ? { decision_id: decisionId } : undefined));
   }
   return reply.code(503).send(error.body ?? { error: CLIENT_UNAVAILABLE_MESSAGE, code: 'authorization_unavailable' });
+}
+
+/**
+ * A client LIST route that catches broadly: the engine (or the store behind a scope question) that could not
+ * decide is a 503 with `Retry-After` and the decision id - the answer a retrying client expects - not the
+ * route's own 500. Null for any other error, which stays the route's to answer.
+ */
+export function sendClientListUnavailable(reply: FastifyReply, request: FastifyRequest, error: unknown): FastifyReply | null {
+  const refusal = authorizationRefusalOf(error);
+  if (refusal?.status !== 503) return null;
+  return sendAuthorizationUnavailable(reply, request, 'client', {
+    action: ACTION_OF_NEED.view,
+    level: LEVEL_OF_NEED.view,
+    ...(refusal.decisionId ? { decisionId: refusal.decisionId } : {}),
+  });
 }
 
 /** The OpenAI-shaped routes' reply to a refusal (`{ error: { message, type, code } }`). */

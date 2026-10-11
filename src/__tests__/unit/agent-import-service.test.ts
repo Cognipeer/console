@@ -42,7 +42,7 @@ import {
 } from '@/lib/services/agents/import/importService';
 
 const fn = (f: unknown) => f as ReturnType<typeof vi.fn>;
-const CTX = { tenantDbName: 't_db', tenantId: 't1', projectId: 'p1', userId: 'u1' };
+const CTX = { tenantDbName: 't_db', tenantId: 't1', projectId: 'p1', userId: 'u1', canNameBucket: async () => ({ allowed: true }) };
 
 const DOC = `---
 name: Support Bot

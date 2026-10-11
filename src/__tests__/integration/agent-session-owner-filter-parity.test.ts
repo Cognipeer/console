@@ -3,8 +3,9 @@
  * contract both database providers must keep (SQLite and MongoDB via mongodb-memory-server).
  *
  *  - `listAgentConversations(agentKey, { createdBy })` - one agent's sessions started by one person;
- *  - `listAgentConversationPage({ ownOnly })` - a project's sessions where, for the restricted agents (or
- *    every agent), only the caller's own are visible, cut BEFORE the page so a busy teammate cannot push the
+ *  - `listAgentConversationPage({ ownOnly })` - a project's sessions where only the caller's own are visible,
+ *    except for the agents the caller may view (an allow list: an agent that is not named - one that no longer
+ *    exists included - shows only the caller's own), cut BEFORE the page so a busy teammate cannot push the
  *    caller's rows off it, and still keyset-paged;
  *  - `listAgentRuns({ userId })` - the background runs the caller queued.
  *
@@ -59,17 +60,19 @@ describeForEachProvider('Sessions listed for their owner only', (getDb) => {
     expect(ids(await db.listAgentConversations('bot-a', { projectId, createdBy: 'ann', limit: 2 }))).toEqual(ids([c, a]));
   });
 
-  it('a project page: every agent\'s sessions are the caller\'s own when no agent is named as exempt', async () => {
+  it('a project page: every agent\'s sessions are the caller\'s own when no agent is named as viewable', async () => {
     const db = getDb();
     const own = await conversation('bot-a', 'ann');
     await conversation('bot-a', 'bob');
     const ownB = await conversation('bot-b', 'ann');
     await conversation('bot-b', 'bob');
     expect(ids(await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann' } }))).toEqual(ids([ownB, own]));
+    // an empty allow list is the same: nobody else's, anywhere
+    expect(ids(await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', viewableAgentKeys: [] } }))).toEqual(ids([ownB, own]));
     expect(await db.listAgentConversationPage({ projectId, limit: 10 })).toHaveLength(4);
   });
 
-  it('a project page: only the RESTRICTED agents are cut to the caller\'s own; the others stay whole', async () => {
+  it('a project page: only the agents the caller may view stay whole; every other agent is cut to the caller\'s own', async () => {
     const db = getDb();
     const aOwn = await conversation('bot-a', 'ann');
     await conversation('bot-a', 'bob');
@@ -77,15 +80,27 @@ describeForEachProvider('Sessions listed for their owner only', (getDb) => {
     const bOwn = await conversation('bot-b', 'ann');
     const cOthers = await conversation('bot-c', 'bob');
 
-    const page = await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', agentKeys: ['bot-a'] } });
+    // bot-a is the restricted one
+    const page = await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', viewableAgentKeys: ['bot-b', 'bot-c'] } });
     expect(ids(page)).toEqual(ids([cOthers, bOwn, bOthers, aOwn]));
-    // two restricted agents
-    expect(ids(await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', agentKeys: ['bot-a', 'bot-b'] } })))
+    // bot-a and bot-b are the restricted ones
+    expect(ids(await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', viewableAgentKeys: ['bot-c'] } })))
       .toEqual(ids([cOthers, bOwn, aOwn]));
-    // an empty list restricts nobody
-    expect(await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', agentKeys: [] } })).toHaveLength(5);
+    // every agent viewable: nothing is cut
+    expect(await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', viewableAgentKeys: ['bot-a', 'bot-b', 'bot-c'] } })).toHaveLength(5);
     // naming the agent in the page filter works together with the restriction
-    expect(ids(await db.listAgentConversationPage({ projectId, agentKey: 'bot-a', limit: 10, ownOnly: { userId: 'ann', agentKeys: ['bot-a'] } }))).toEqual(ids([aOwn]));
+    expect(ids(await db.listAgentConversationPage({ projectId, agentKey: 'bot-a', limit: 10, ownOnly: { userId: 'ann', viewableAgentKeys: ['bot-b'] } }))).toEqual(ids([aOwn]));
+  });
+
+  it('the sessions of an agent that no longer exists are somebody else\'s like any other: only the person who started them sees them', async () => {
+    const db = getDb();
+    const ghostOwn = await conversation('bot-gone', 'ann');
+    await conversation('bot-gone', 'bob');
+    const live = await conversation('bot-a', 'bob');
+    // the allow list names the project's CURRENT agents, so a deleted agent's key is never in it
+    const page = await db.listAgentConversationPage({ projectId, limit: 10, ownOnly: { userId: 'ann', viewableAgentKeys: ['bot-a'] } });
+    expect(ids(page)).toEqual(ids([live, ghostOwn]));
+    expect(ids(await db.listAgentConversationPage({ projectId, agentKey: 'bot-gone', limit: 10, ownOnly: { userId: 'ann', viewableAgentKeys: ['bot-a'] } }))).toEqual(ids([ghostOwn]));
   });
 
   it('the restriction is applied before the page is cut, and keyset paging still works through it', async () => {
@@ -97,13 +112,23 @@ describeForEachProvider('Sessions listed for their owner only', (getDb) => {
       await conversation('bot-a', 'bob');
     }
     const expected = [...mine].reverse();
-    const ownOnly = { userId: 'ann', agentKeys: ['bot-a'] };
+    const ownOnly = { userId: 'ann', viewableAgentKeys: ['bot-z'] };
     const first = await db.listAgentConversationPage({ projectId, limit: 2, ownOnly });
     expect(ids(first)).toEqual(expected.slice(0, 2));
     const cursor = (row: { _id?: unknown; createdAt?: Date }) => ({ createdAt: row.createdAt!, id: String(row._id) });
     const second = await db.listAgentConversationPage({ projectId, limit: 2, ownOnly, after: cursor(first[1]) });
     expect(ids(second)).toEqual(expected.slice(2, 4));
     expect(await db.listAgentConversationPage({ projectId, limit: 2, ownOnly, after: cursor(second[1]) })).toEqual([]);
+  });
+
+  it('an id that names no conversation is "not found", not an error: a failing store is the only thing that throws', async () => {
+    const db = getDb();
+    const real = await conversation('bot-a', 'ann');
+    expect(String((await db.findAgentConversationById(String(real._id)))?._id)).toBe(String(real._id));
+    // another producer's thread id, a prefixed id, a typo, an empty id, a valid-looking id nothing stores
+    for (const id of ['some-other-producers-thread', `thread_${String(real._id)}`, 'not an id', '', 'ffffffffffffffffffffffff']) {
+      expect(await db.findAgentConversationById(id)).toBeNull();
+    }
   });
 
   it('background runs: the ones one person queued', async () => {

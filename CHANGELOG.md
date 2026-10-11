@@ -26,18 +26,27 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   verdict (`canResolve`, `resolveBlockedReason`) instead of guessing from a role.
 - Two more agent actions decide what somebody else may do with a session another person started:
   `agent.session_view_others` (Read) and `agent.session_manage_others` (Write). By default every holder of
-  `agents` Read / Write has them, as before; the Access check takes the session's owner and the agent's setting as inputs.
+  `agents` Read / Write has them; a role that holds Tracing or Files but no `agents` level does not reach other
+  people's agent sessions through those screens (earlier releases did not look at who started a session there). The
+  Access check takes the session's owner and the agent's setting as inputs.
   Every path to a session's content asks the same question - the session routes, its files (also through the Document
   Store and the client Files API), events, runs, tracing threads, Assistants threads and the continuation of a session
   by id in the Responses and chat completions routes, whichever service gate let the token in. A list shows the caller
-  only their own sessions when a rule stops them from viewing others', cut in the database before the page; the Sessions
-  table shows who started each session.
+  only their own sessions when a rule stops them from viewing others', cut in the database before the page (the sessions
+  of a deleted agent count as others' too); the Sessions table shows who started each session. The tracing and Files
+  lists are read on until the page is full and, for such a caller, report `hasMore` / `nextSkip` instead of a `total`.
+  A session that cannot be read is `503`, never an allow; so is an engine outage under a list. An open event stream is
+  checked again every minute and ends when the caller may no longer watch it.
 - Naming the bucket an agent keeps its session files in is a Files decision about that bucket (`file-bucket.update`);
   the bucket picker lists only the buckets the caller may look at (`file-bucket.get`). A bucket that an agent names is
   a reference of the agent in the resource graph (`agent.attachmentsBucket`), and the policy lists of an agent or a
   bucket show the rules that reach them.
-- A reader of Webhooks (`webhooks` Read) sees an endpoint's URL without its query string and userinfo
-  (`https://host/path?…`); only Admin sees it whole.
+- A reader of Webhooks (`webhooks` Read) sees an endpoint's URL without its query string and userinfo and with every
+  path segment longer than eight characters hidden (`https://host/services/T0000/…`); only Admin sees it whole.
+- Importing an agent (`POST /agents/import`, `POST /agents/import/document`) that names a session-files bucket asks the
+  same Files question as creating or updating one.
+- `POST /client/v1/threads/:id` only writes the keys of a thread's metadata that belong to the caller; the keys the
+  server keeps there (including the session's tool allow-list) are left as they are.
 - Webhooks are an administration service: the policy engine is the only authority (Read to look, Admin to change),
   owners and admins hold it by default and everybody else until it is granted. Being a project admin is no longer a
   permission on webhooks by itself; grant **Webhooks** to the people or groups who should manage them. Tenant-wide

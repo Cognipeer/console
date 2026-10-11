@@ -108,6 +108,7 @@ import {
   sendAuthorizationUnavailable,
   sendSessionRefusal,
   sessionListScope,
+  sessionStreamStillAllowed,
   type SessionNeed,
 } from './agent-session-access';
 import { resolveSessionOwners, type SessionOwner } from '@/lib/services/agents/sessionOwners';
@@ -118,8 +119,10 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { BucketNamingForbiddenError } from '@/lib/services/agents/attachmentsBucketAccess';
 import {
   applyConfigGuardrailBindings,
+  bucketNamingForbiddenBody,
   connectedConfigForUpdate,
   normalizeA2aUpdate,
   pickAgentUpdateFields,
@@ -917,6 +920,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: body.key,
           name: body.name,
           allowMissingDependencies: body.allowMissingDependencies,
+          // Importing is a config write like any other: naming a bucket takes the right to name it.
+          canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
         },
       );
 
@@ -926,6 +931,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         missing: result.missing,
       });
     } catch (error) {
+      if (error instanceof BucketNamingForbiddenError) {
+        return reply.code(403).send(bucketNamingForbiddenBody(error));
+      }
       if (error instanceof AgentManifestError) {
         return reply.code(400).send({ error: error.message, issues: error.issues });
       }
@@ -939,6 +947,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // says otherwise. `/preview` writes nothing.
   const sendImportError = (reply: FastifyReply, error: unknown) => {
     if (error instanceof AgentDocumentParseError) return reply.code(400).send({ error: error.message });
+    if (error instanceof BucketNamingForbiddenError) return reply.code(403).send(bucketNamingForbiddenBody(error));
     if (error instanceof AgentImportError) {
       return reply.code(error.status).send({ error: error.message, ...(error.details ? { details: error.details } : {}) });
     }
@@ -973,7 +982,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({ error: 'content is required' });
       }
       const result = await applyAgentDocumentImport(
-        { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId, userId: String(user._id) },
+        {
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          projectId,
+          userId: String(user._id),
+          canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
+        },
         body,
       );
       return reply.code(result.action === 'created' ? 201 : 200).send({
@@ -1688,7 +1703,12 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       return sendRouteError(reply, error, 'Session event stream error', 'Failed to open the event stream');
     }
     if (!scoped) return reply;
-    return streamSessionEvents(request, reply, scoped.session.tenantDbName, String(scoped.conversation._id));
+    const conversationId = String(scoped.conversation._id);
+    return streamSessionEvents(request, reply, scoped.session.tenantDbName, conversationId, 'dashboard', () => sessionStreamStillAllowed(request, conversationId, {
+      agentKey: scoped.agent.key,
+      agent: scoped.agent,
+      projectId: scoped.projectId,
+    }));
   }));
 
   app.get('/agents/:agentId/sessions/:sessionId/actions', withApiRequestContext(async (request, reply) => {

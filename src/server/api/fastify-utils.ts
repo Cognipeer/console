@@ -444,6 +444,18 @@ function sessionRbacFor(request: FastifyRequest, session: ApiSessionContext): Pr
   return loading;
 }
 
+/**
+ * For a request that outlives its first check - an event stream followed for as long as an hour: forget what was
+ * loaded about the caller when it started, so the next handler-level decision reads them again (their role and
+ * groups for a session; the token itself - revoked, expired, no longer allowed from this address - for a token,
+ * which throws like the first authentication did). The policy set and the engine's own caches are read fresh by
+ * every decision already.
+ */
+export async function refreshRequestPrincipal(request: FastifyRequest): Promise<void> {
+  sessionRbacOfRequest.delete(request);
+  if (request.apiTokenContext) request.apiTokenContext = await requireApiTokenContext(request);
+}
+
 async function requestPrincipal(
   request: FastifyRequest,
   service: PermissionService,
@@ -503,9 +515,10 @@ async function requestPrincipal(
 export async function serviceLevelForRequest(
   request: FastifyRequest,
   service: PermissionService,
-  options: { workspace?: boolean; rbac?: SessionRbacHint } = {},
+  /** `projectId`: the project the question is about, when the handler has already checked it is the request's (else the cookie's, or the token's). */
+  options: { workspace?: boolean; rbac?: SessionRbacHint; projectId?: string | null } = {},
 ): Promise<EffectiveLevel> {
-  const principal = await requestPrincipal(request, service, { rbac: options.rbac, required: 'read' });
+  const principal = await requestPrincipal(request, service, { rbac: options.rbac, required: 'read', projectId: options.projectId });
   if (!principal) return 'none';
   try {
     return await quietServiceLevel(principal, service, { workspace: options.workspace });

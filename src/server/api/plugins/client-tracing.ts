@@ -14,7 +14,7 @@ import {
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
 import { AgentTracingService, recordTracingSessionCreated, recordTraceModelUsage } from '@/lib/services/agentTracing';
-import { filterSessionLinkedRows, refuseTracingThread, sendClientSessionRefusal } from './agent-session-access';
+import { offsetPageOf, pageOfVisibleRows, refuseTracingThread, sendClientListUnavailable, sendClientSessionRefusal } from './agent-session-access';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest } from '@/lib/services/otlpMapper';
 import {
   buildResponseFormatSection,
@@ -1486,22 +1486,37 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         from?: string; to?: string; limit?: string; skip?: string;
       };
 
-      const result = await AgentTracingService.listThreads(auth.tenantDbName, auth.projectId, {
-        agent: query.agent,
-        status: query.status,
-        threadId: query.threadId,
-        from: query.from,
-        to: query.to,
-        limit: query.limit || '50',
-        skip: query.skip || '0',
-      });
-
       // A thread of an agent is its session: the ones of an agent whose other people's sessions the token's
-      // owner may not view are left out (nothing to look up for the default caller).
+      // owner may not view are left out. The default caller gets one plain read; a restricted caller's page is
+      // filled from further reads, and has no total (it cannot be known without reading everything).
       const actor = { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') };
-      const threads = await filterSessionLinkedRows(request, result.threads, (row) => (typeof row.threadId === 'string' ? row.threadId : null), { actor });
-      return reply.code(200).send({ ...result, threads, total: Math.max(0, result.total - (result.threads.length - threads.length)) });
+      const { skip, limit } = offsetPageOf(query);
+      let latest: Awaited<ReturnType<typeof AgentTracingService.listThreads>> | undefined;
+      const page = await pageOfVisibleRows(request, {
+        start: skip,
+        limit,
+        minBatch: 25,
+        threadIdOf: (row: { threadId?: unknown }) => (typeof row.threadId === 'string' ? row.threadId : null),
+        actor,
+        fetchPage: async (position, size) => {
+          latest = await AgentTracingService.listThreads(auth.tenantDbName, auth.projectId, {
+            agent: query.agent,
+            status: query.status,
+            threadId: query.threadId,
+            from: query.from,
+            to: query.to,
+            limit: String(size),
+            skip: String(position),
+          });
+          const total = latest.total;
+          return { rows: latest.threads, after: (consumed) => (position + consumed >= total ? null : position + consumed) };
+        },
+      });
+      if (!page.restricted && latest) return reply.code(200).send(latest);
+      return reply.code(200).send({ threads: page.rows, hasMore: page.next !== null, nextSkip: page.next });
     } catch (error) {
+      const unavailable = sendClientListUnavailable(reply, request, error);
+      if (unavailable) return unavailable;
       logger.error('Client tracing threads list error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Failed to list tracing threads',

@@ -1477,11 +1477,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     limit: number;
     after?: { createdAt: Date; id: string };
     /**
-     * The caller may not see other people's sessions of these agents (`agentKeys`; every agent when absent):
-     * a row of such an agent is returned only when `userId` started it. Rows of any other agent are unaffected.
+     * The caller may view other people's sessions of only some agents (`viewableAgentKeys`; none when absent):
+     * a row is returned when `userId` started it or its agent is one of those; a row of any other agent - one
+     * that no longer exists included - is returned only to the person who started it.
      * Applied before the page is cut, so a busy teammate cannot push the caller's own sessions off it.
      */
-    ownOnly?: { userId: string; agentKeys?: string[] };
+    ownOnly?: { userId: string; viewableAgentKeys?: string[] };
   }): Promise<IAgentConversationListItem[]>;
   /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
   findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;

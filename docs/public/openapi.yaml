@@ -23301,7 +23301,7 @@ components:
             $ref: "#/components/schemas/TracingThreadSession"
     TracingThreadList:
       type: object
-      description: Paginated list of tracing threads.
+      description: Paginated list of tracing threads. A caller who may not view other people's agent sessions gets a page filled with their own threads and `hasMore` / `nextSkip` in place of `total` (which cannot be known without reading every thread).
       properties:
         threads:
           type: array
@@ -23309,6 +23309,14 @@ components:
             $ref: "#/components/schemas/TracingThread"
         total:
           type: number
+          description: Number of threads. Absent for a caller held to their own sessions.
+        hasMore:
+          type: boolean
+          description: Whether another page follows. Only for a caller held to their own sessions.
+        nextSkip:
+          type: integer
+          nullable: true
+          description: The `skip` the next page starts at; null when the list ends. Only for a caller held to their own sessions.
     TracingThreadSession:
       type: object
       description: A session belonging to a thread.
@@ -23753,7 +23761,7 @@ components:
           description: "`whk_...`"
         url:
           type: string
-          description: "The receiver address. For a caller with Read on `webhooks` only, its query string, fragment and userinfo are removed (`https://host/path?…`) and `urlRedacted` is `true`; Admin sees it whole."
+          description: "The receiver address. For a caller with Read on `webhooks` only, its query string, fragment and userinfo are removed and every path segment longer than eight characters is replaced by `…` (`https://host/services/T0000/…?…`), and `urlRedacted` is `true`; Admin sees it whole."
         urlRedacted:
           type: boolean
           description: "Present and `true` when `url` is shown without its query string and userinfo."

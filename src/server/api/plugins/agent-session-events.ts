@@ -124,6 +124,8 @@ export async function streamSessionEvents(
   tenantDbName: string,
   conversationId: string,
   wire: SessionEventWire = 'dashboard',
+  /** Is the viewer still allowed to watch? Asked while the stream is open (see `followSessionEvents`). */
+  recheck?: () => Promise<boolean>,
 ): Promise<FastifyReply> {
   const query = (request.query ?? {}) as Record<string, unknown>;
   const afterSeq = parseResumeSeq(request.headers['last-event-id'], query.after);
@@ -155,6 +157,11 @@ export async function streamSessionEvents(
         `${frame.id !== undefined ? `id: ${frame.id}\n` : ''}event: ${frame.event}\ndata: ${JSON.stringify(wire === 'client' ? toClientEventFrame(frame.data) : frame.data)}\n\n`,
       ),
       writePing: () => writeRaw(': ping\n\n'),
+      ...(recheck ? {
+        recheck,
+        // The client reconnects with Last-Event-ID and is answered at the door.
+        onRevoked: () => writeRaw(`event: error\ndata: ${JSON.stringify({ error: 'access to this session ended' })}\n\n`),
+      } : {}),
     }));
   } catch (error) {
     // Headers are long gone; end the stream, the client reconnects with Last-Event-ID.

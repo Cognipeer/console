@@ -395,21 +395,22 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       runtimeStatus?: AgentSessionRuntimeStatus;
       limit: number;
       after?: { createdAt: Date; id: string };
-      ownOnly?: { userId: string; agentKeys?: string[] };
+      ownOnly?: { userId: string; viewableAgentKeys?: string[] };
     }): Promise<IAgentConversationListItem[]> {
       const db = this.getTenantDb();
       const conditions: string[] = ['projectId = @projectId'];
       const params: Record<string, unknown> = { projectId: filters.projectId, limit: filters.limit };
       if (filters.agentKey) { conditions.push('agentKey = @agentKey'); params.agentKey = filters.agentKey; }
       if (filters.ownOnly) {
-        // Other people's sessions of the restricted agents are not visible: the caller's own, and every other agent's, are.
+        // The caller's own sessions, and every session of the agents they may view; nothing else - an agent that
+        // is not named (including one that no longer exists) shows only what the caller started.
         params.ownOnlyUser = filters.ownOnly.userId;
-        const keys = filters.ownOnly.agentKeys;
-        if (keys === undefined) {
+        const keys = filters.ownOnly.viewableAgentKeys ?? [];
+        if (keys.length === 0) {
           conditions.push('createdBy = @ownOnlyUser');
-        } else if (keys.length > 0) {
+        } else {
           const names = keys.map((key, i) => { params[`ownOnlyKey${i}`] = key; return `@ownOnlyKey${i}`; });
-          conditions.push(`(createdBy = @ownOnlyUser OR agentKey NOT IN (${names.join(', ')}))`);
+          conditions.push(`(createdBy = @ownOnlyUser OR agentKey IN (${names.join(', ')}))`);
         }
       }
       if (filters.runtimeStatus === 'idle') {

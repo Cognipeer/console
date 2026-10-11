@@ -78,6 +78,8 @@ The answer then holds the files directly in that folder (`files`) and its sub-fo
 
 ### Session files
 
+Who may see a session file is who may see its session: the person who started the session, or anybody the Agents service lets view other people's sessions (`agent.session_view_others` needs Agents at Read). A role with Files access and no Agents level sees ordinary files only; session files are left out of its listings and refused by key. A listing for a caller held to their own sessions is filled from the following pages, so the page is not short while the bucket goes on (`nextCursor` continues it). See [Authorization](/guide/authorization#sessions-and-approvals).
+
 Files attached to agent sessions are ordinary files in the bucket the agent names (**Configure → Files**), under `<folder>/<agentKey>/<sessionId>/`; they carry `purpose: "conversation"`, the session they belong to, when they expire and who uploaded them. A bucket an agent keeps session files in cannot be deleted or disabled until the agent uses another one (`409 bucket_in_use`, naming the agents — also an agent whose *published* version still uses it). A session file's row carries `agentId`, the `_id` of its agent, so a Session link can be built. Uploading from inside a folder: add `folder` (alias `prefix`) to the upload body — the file lands in it under a generated name, or under `keyHint` taken as its name in the folder; a `..` or `.` segment is refused.
 
 ## Markdown Conversion

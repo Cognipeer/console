@@ -15,6 +15,19 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
     sendProjectContextError: vi.fn().mockReturnValue(null),
   };
 });
+// Who may see which session file is the session access module's question (api/agent-session-access-routes.test.ts has the
+// real engine behind it); these tests are about the listing's parameters, so the default caller - who sees every
+// session - stands in: one plain read of the unfiltered list.
+vi.mock('@/server/api/plugins/agent-session-access', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/server/api/plugins/agent-session-access')>();
+  return {
+    ...actual,
+    pageOfVisibleRows: async (_request: unknown, input: { start: unknown; limit: number; fetchPage: (position: unknown, size: number) => Promise<{ rows: unknown[]; after: (consumed: number) => unknown }> }) => {
+      const page = await input.fetchPage(input.start, input.limit);
+      return { restricted: false, rows: page.rows, next: page.after(page.rows.length) };
+    },
+  };
+});
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
   // The gate reads the caller (and the engine its policies) through the tenant scope.

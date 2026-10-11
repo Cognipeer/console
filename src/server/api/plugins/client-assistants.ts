@@ -58,6 +58,7 @@ import {
   updateAgentRecord,
 } from '@/lib/services/agents';
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
+import { mergeClientConversationMetadata } from '@/lib/services/agents/conversationMetadata';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   getApiTokenContextForRequest,
@@ -635,18 +636,15 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       const db = await getDatabase();
       await db.switchToTenant(ctx.tenantDbName);
       const conversationId = conversationIdFromThreadId(rawId);
-      if (body.metadata && typeof body.metadata === 'object') {
-        const merged = { ...(loaded.conversation.metadata ?? {}), ...(body.metadata as Record<string, unknown>) };
-        // The Assistants bookkeeping namespace is server-owned; a caller
-        // patching `metadata` must not be able to erase pending messages or
-        // run history it never knew existed.
-        merged.assistantsApi = readAssistantsMetadata(loaded.conversation);
-        // Same for the thread's sandbox record: the run path owns it, and a
-        // caller-supplied `sandbox` key would point the thread at someone
-        // else's machine (or drop it).
-        const sandboxRecord = (loaded.conversation.metadata as Record<string, unknown> | undefined)?.sandbox;
-        if (sandboxRecord === undefined) delete merged.sandbox;
-        else merged.sandbox = sandboxRecord;
+      if (body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)) {
+        // The column also holds the server's own bookkeeping: the Assistants namespace (pending messages, run
+        // history), the thread's sandbox record, and the settings a run is configured by - the session's tool
+        // allow-list among them, which only resolving an approval writes. The server keeps those as they are;
+        // every other key is the caller's.
+        const merged = mergeClientConversationMetadata(
+          loaded.conversation.metadata as Record<string, unknown> | undefined,
+          body.metadata as Record<string, unknown>,
+        );
         await db.updateAgentConversation(conversationId, { metadata: merged });
       }
       const refreshed = await getConversationById(ctx.tenantDbName, conversationId);

@@ -36,6 +36,7 @@ If an environment ran a pre-release build of this feature (a staging system, a d
 | 7 | **Refusals carry a decision id.** A `403` has `code`, `service`, `required` and `decisionId` and an `X-Decision-Id` header; a route without an authorization declaration is refused with `route_not_declared`. | Clients that parse refusal bodies. | - |
 | 8 | **The engine fails closed.** If it cannot decide a request, the answer is `503 authorization_unavailable` with `Retry-After`; it never falls back to another rule set. A server that cannot load the engine does not start. | Operators. | - |
 | 9 | **Four new administration services** (`portals`, `resources`, `iam`, `webhooks`) and the IAM center. Owners and admins only, unless granted. | Nobody loses anything. | - |
+| 10 | **Agent sessions belong to the person who started them.** Anybody else needs the Agents service at Read to view a session (Write to change it): this now also applies to the agent threads in Tracing and the session files in the Files screens. | Roles that hold Tracing or Files but no `agents` level. Give them `agents` Read, or an allow rule for `agent.session_view_others`, to keep that reach. | Less access |
 
 The preflight report below counts rows 1 to 5.
 
