@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { resolveTraceSession } from '@/lib/services/agents/traceSession';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
   requireProjectContextForRequest,
@@ -233,6 +234,27 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Failed to fetch thread',
+        });
+    }
+  }));
+
+  // The agent session a thread belongs to (the thread id is the conversation's id), so the
+  // request inspector can draw a recorded `session-file://` picture from the session's content
+  // route. It only names the session; opening a file is checked again by that route.
+  app.get('/tracing/threads/:threadId/session', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { threadId } = request.params as { threadId: string };
+      const ref = await resolveTraceSession({ tenantDbName: session.tenantDbName, projectId, threadId });
+      if (!ref) {
+        return reply.code(404).send({ error: 'This thread is not an agent session' });
+      }
+      return reply.code(200).send(ref);
+    } catch (error) {
+      logger.error('Get tracing thread session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Failed to resolve the thread session',
         });
     }
   }));

@@ -10,12 +10,29 @@
  * session-file reference a muted chip, and an address on another site a link to
  * click. The page never fetches an image address a caller put in a request —
  * that would send the viewer's browser to wherever the request pointed.
+ *
+ * The one address it does draw from is its own: when the trace is a session's, the
+ * caller says which (`sessionFiles`) and a `session-file://` reference becomes a
+ * thumbnail from that session's content route — a route of this app, under the
+ * session's own access check. If the route refuses the viewer or the file is gone,
+ * the thumbnail gives way to the named chip (`fallbackToChip`).
  */
 
-import type { AttachmentView } from '@/components/agents/session/sessionFilesUi';
+import { sessionFileLinks, type AttachmentView } from '@/components/agents/session/sessionFilesUi';
 
 /** The most pictures drawn for one message; a request can hold hundreds. */
 export const MAX_MESSAGE_IMAGES = 24;
+
+/** The session a trace belongs to: where its `session-file://` pictures can be fetched from. */
+export interface TraceSessionFiles {
+  agentId: string;
+  sessionId: string;
+}
+
+export interface MessageImageOptions {
+  /** Set when the trace is an agent session's; without it a session-file reference stays a named chip. */
+  sessionFiles?: TraceSessionFiles | null;
+}
 
 const SESSION_FILE_SCHEME = 'session-file://';
 const DATA_IMAGE = /^data:(image\/[a-z0-9.+-]+)(?:;[a-z0-9=.+-]+)*?(;base64)?,/i;
@@ -69,7 +86,7 @@ function fileViewOf(part: Record<string, unknown>, index: number): AttachmentVie
 }
 
 /** One image or file part as something to draw, or null when it is not one this can show. */
-function viewOf(part: Record<string, unknown>, index: number): AttachmentView | null {
+function viewOf(part: Record<string, unknown>, index: number, options?: MessageImageOptions): AttachmentView | null {
   const type = part.type;
   if (type === 'file' || type === 'input_file') return fileViewOf(part, index);
   if (type !== 'image_url' && type !== 'input_image' && type !== 'image') return null;
@@ -80,6 +97,18 @@ function viewOf(part: Record<string, unknown>, index: number): AttachmentView | 
 
   if (address?.startsWith(SESSION_FILE_SCHEME) || (!address && fileId)) {
     const id = fileId ?? address!.slice(SESSION_FILE_SCHEME.length);
+    const session = options?.sessionFiles;
+    if (session && id) {
+      // The trace is this session's: draw the picture from its content route. The route decides whether the
+      // viewer may see it; when it says no (or the file is gone) the thumbnail becomes the named chip.
+      return {
+        fileId: id,
+        name: name ?? id,
+        mimeType: 'image/*',
+        ...sessionFileLinks(session.agentId, session.sessionId, id),
+        fallbackToChip: true,
+      };
+    }
     return { fileId: id, name: name ?? id, mimeType: 'image/*', reference: true };
   }
   // A picture that is only a name (a recording cut off inside it): listed, with nothing to open.
@@ -109,12 +138,12 @@ function viewOf(part: Record<string, unknown>, index: number): AttachmentView | 
 }
 
 /** The pictures and files of a message's content (an array of parts); a plain string holds none. */
-export function messageImageViews(content: unknown): AttachmentView[] {
+export function messageImageViews(content: unknown, options?: MessageImageOptions): AttachmentView[] {
   if (!Array.isArray(content)) return [];
   const views: AttachmentView[] = [];
   content.forEach((part, index) => {
     if (views.length >= MAX_MESSAGE_IMAGES || !part || typeof part !== 'object') return;
-    const view = viewOf(part as Record<string, unknown>, index);
+    const view = viewOf(part as Record<string, unknown>, index, options);
     if (view) views.push(view);
   });
   return views;

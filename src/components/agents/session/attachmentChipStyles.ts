@@ -1,5 +1,5 @@
 /**
- * The colours of an attachment chip, as design-system tokens (`globals.css`),
+ * The colours of an attachment chip and of the Files panel's small text, as design-system tokens (`globals.css`),
  * not Mantine's "light gray" badge.
  *
  * That variant drew the file name in the palette's faint grey (#98a1ad) on a
@@ -14,6 +14,8 @@ export const CHIP_TEXT = 'var(--ds-text-soft)';
 export const CHIP_SURFACE = 'var(--ds-surface-2)';
 /** A small caption under a thumbnail or next to a file name (on the card or the chip). */
 export const CHIP_CAPTION = 'var(--ds-text-soft)';
+/** A small link beside those lines (the bucket a file is stored in): Mantine's own blue is 3.5:1 on white. */
+export const CHIP_LINK = 'var(--ds-link-text)';
 /** A chip that warns (an image the model cannot read, a file with no readable text). */
 export const CHIP_WARN_TEXT = 'var(--ds-warn-text)';
 export const CHIP_WARN_SURFACE = 'var(--ds-warn-wash)';
@@ -45,5 +47,10 @@ export const CHIP_CONTRAST_PAIRS: ReadonlyArray<{ name: string; text: string; ba
     { name: 'warning chip', text: '--ds-warn-text', background: '--ds-warn-wash' },
     { name: 'warning line', text: '--ds-warn-text', background: '--ds-surface-raised' },
     { name: 'thumbnail caption', text: '--ds-text-soft', background: '--ds-surface-raised' },
+    { name: 'Files panel title', text: '--ds-text-soft', background: '--ds-surface-raised' },
+    { name: 'Files panel title on the page', text: '--ds-text-soft', background: '--ds-surface-0' },
+    { name: 'Files panel location link', text: '--ds-link-text', background: '--ds-surface-raised' },
+    { name: 'Files panel location link on the page', text: '--ds-link-text', background: '--ds-surface-0' },
+    { name: 'Files panel location link on a soft surface', text: '--ds-link-text', background: '--ds-surface-2' },
     { name: 'expired line in the Files panel', text: '--ds-err-text', background: '--ds-surface-raised' },
 ];

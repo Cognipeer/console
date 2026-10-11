@@ -53,6 +53,25 @@ export function FolderPath({ prefix, onOpen }: FolderPathProps) {
     );
 }
 
+/**
+ * Who the line under a file's name says created it, or null for no line.
+ *
+ * A person is named, never shown by id. A session file's "Uploaded by" cell already says who put it
+ * there, so the line would only repeat it. A system actor (`system`, `system:cron`) is shown as it
+ * is; an id that belongs to no user of the tenant (a removed account) says nothing rather than a
+ * 36-character id.
+ */
+export function createdByWho(
+    record: Pick<FileRecordView, 'purpose' | 'uploadedBy' | 'createdBy' | 'createdByName'>,
+    uploaderColumnShown: boolean,
+): string | null {
+    if (uploaderColumnShown && isSessionFile(record) && record.uploadedBy) return null;
+    if (record.createdByName) return record.createdByName;
+    if (!record.createdBy) return 'system';
+    if (record.createdBy === 'system' || record.createdBy.includes(':')) return record.createdBy;
+    return null;
+}
+
 export interface SessionFileCellsProps {
     record: Pick<FileRecordView, 'purpose' | 'conversationId' | 'agentKey' | 'expiresAt' | 'uploadedBy' | 'uploadedByName'>;
     /** The agent's id when it is known (the session page is addressed by it); the link is omitted without it. */

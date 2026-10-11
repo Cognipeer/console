@@ -17,7 +17,7 @@ import { IconAlertTriangle, IconDownload, IconFileText, IconTrash } from '@table
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { expiryLabel } from '@/components/files/fileBrowse';
 import { AttachmentIcon, AttachmentPreviewModal, AttachmentThumb } from './SessionAttachments';
-import { CHIP_CAPTION } from './attachmentChipStyles';
+import { CHIP_CAPTION, CHIP_LINK } from './attachmentChipStyles';
 import { formatFileSize, isImageAttachment } from './sessionAttachmentsUi';
 import {
     bucketHref,
@@ -87,7 +87,7 @@ export default function SessionFilesPanel({
     return (
         <Stack gap="sm">
             <Group justify="space-between" align="baseline" wrap="nowrap">
-                <Text size="xs" fw={700} tt="uppercase" c="dimmed">{t('tab')}</Text>
+                <Text size="xs" fw={700} tt="uppercase" style={{ color: CHIP_CAPTION }} data-testid="files-panel-title">{t('tab')}</Text>
                 <Text size="xs" fw={600} data-testid="held-count">
                     {maxFiles !== undefined ? t('filesHeld', { count: files.length, max: maxFiles }) : t('filesHeldNoMax', { count: files.length })}
                 </Text>
@@ -95,7 +95,7 @@ export default function SessionFilesPanel({
             <Text size="10px" style={{ color: CHIP_CAPTION }}>{t('filesIntro')}</Text>
 
             {files.length === 0 ? (
-                <Text size="xs" c="dimmed">{t('filesEmpty')}</Text>
+                <Text size="xs" style={{ color: CHIP_CAPTION }}>{t('filesEmpty')}</Text>
             ) : (
                 <Stack gap="xs">
                     {files.map((file) => {
@@ -170,7 +170,7 @@ export default function SessionFilesPanel({
                                             <Text size="10px" style={{ flexShrink: 0, color: CHIP_CAPTION }}>{t('filesLocation')}</Text>
                                             {bucket ? (
                                                 <Tooltip label={`${t('filesOpenBucket')} · ${location}`} withArrow>
-                                                    <Anchor component={Link} href={bucket} size="10px" ff="monospace" truncate>{location}</Anchor>
+                                                    <Anchor component={Link} href={bucket} size="10px" ff="monospace" truncate style={{ color: CHIP_LINK }} data-testid="file-location-link">{location}</Anchor>
                                                 </Tooltip>
                                             ) : (
                                                 <Text size="10px" ff="monospace" truncate title={location}>{location}</Text>

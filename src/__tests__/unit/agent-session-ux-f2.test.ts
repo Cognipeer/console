@@ -47,7 +47,7 @@ import { messageImageViews } from '@/components/common/llm/messageImages';
 import { parseFlattenedParts, tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
 import { CHIP_CONTRAST_PAIRS } from '@/components/agents/session/attachmentChipStyles';
 import SessionFilesPanel from '@/components/agents/session/SessionFilesPanel';
-import { SessionFileCells } from '@/components/files/FileBrowseParts';
+import { createdByWho, SessionFileCells } from '@/components/files/FileBrowseParts';
 import { sessionLoadFailure } from '@/components/agents/session/sessionLoadFailure';
 import { parseByteRange } from '@/lib/services/agents/byteRange';
 import { displayNameOf, resolveUserDisplayNames, withUploaderNames } from '@/lib/services/users/userDisplayNames';
@@ -305,6 +305,20 @@ describe('tracing: a recorded message is drawn, not printed as JSON', () => {
       expect(source(file), file).toContain("content: tracedMessageContent(section)");
     }
   });
+
+  it('both tracing pages hand the trace’s session to the inspector, in the modal and in the Sections tab', () => {
+    for (const file of [
+      'app/dashboard/tracing/threads/[threadId]/page.tsx',
+      'app/dashboard/tracing/sessions/[sessionId]/page.tsx',
+    ]) {
+      const page = source(file);
+      expect(page, file).toContain('useTraceSessionFiles(');
+      expect(page.match(/sessionFiles=\{sessionFiles\}/g)?.length, file).toBeGreaterThanOrEqual(2);
+    }
+    // A trace session's thread is the conversation; the thread page's own id is that thread.
+    expect(source('app/dashboard/tracing/sessions/[sessionId]/page.tsx')).toContain('useTraceSessionFiles(detail?.session?.threadId)');
+    expect(source('app/dashboard/tracing/threads/[threadId]/page.tsx')).toContain('useTraceSessionFiles(threadId)');
+  });
 });
 
 // ── Chip contrast ───────────────────────────────────────────────────────────
@@ -352,6 +366,31 @@ describe('attachment chips meet WCAG AA in the light and the dark scheme', () =>
 
   it('what the old chips drew would have failed: faint grey on the wash is under 3:1', () => {
     expect(contrast('#98a1ad', '#f4f4f1')).toBeLessThan(3);
+  });
+
+  it('what the Files panel drew would have failed too: Mantine’s dimmed grey and blue link on white', () => {
+    expect(contrast('#98a1ad', '#ffffff')).toBeLessThan(3);
+    expect(contrast('#228be6', '#ffffff')).toBeLessThan(4.5);
+    // …and the tokens it draws now are named in the pairs the loop above holds to AA in both schemes.
+    const named = CHIP_CONTRAST_PAIRS.map((pair) => pair.name);
+    expect(named).toContain('Files panel title');
+    expect(named).toContain('Files panel location link');
+  });
+
+  it('the Files panel’s title and bucket link draw in those tokens, in both colour schemes', () => {
+    const out = render(h(SessionFilesPanel, {
+      files: [{ id: 'f1', name: 'a.pdf', mimeType: 'application/pdf', size: 10, bucketKey: 'docs', path: 'sessions/a/f1.pdf', expiresAt: '2099-01-01T00:00:00Z' }], onDelete: noop, onRetry: noop,
+    }));
+    const tag = (testid: string) => out.match(new RegExp(`<[^>]*data-testid="${testid}"[^>]*>`))?.[0] ?? '';
+    expect(tag('files-panel-title')).toContain('color:var(--ds-text-soft)');
+    expect(tag('file-location-link')).toContain('color:var(--ds-link-text)');
+    // Not Mantine's dimmed grey nor its default anchor blue.
+    expect(tag('files-panel-title')).not.toMatch(/data-c="dimmed"|mantine-dimmed|--text-color/);
+    expect(out).not.toContain('mantine-dimmed');
+    // The empty state is soft text as well.
+    const empty = render(h(SessionFilesPanel, { files: [], onDelete: noop, onRetry: noop }));
+    expect(empty).not.toContain('mantine-dimmed');
+    expect(empty).toContain('color:var(--ds-text-soft)');
   });
 
   it('the chips use those tokens, not Mantine’s light gray and not an opacity', () => {
@@ -428,6 +467,52 @@ describe('the uploader is a person, not an id', () => {
     expect(named).toContain('Ada Lovelace');
     expect(named).toContain('title="u1"');
     expect(row()).toContain('u1');
+  });
+
+  it('names who created a file too (createdBy), in the same lookup', async () => {
+    db.findUserById.mockClear();
+    const records = [{ id: 'a', createdBy: 'u1' }, { id: 'b', createdBy: 'system:cron' }, { id: 'c', uploadedBy: 'u1', createdBy: 'u1' }, { id: 'd', createdBy: 'u3' }];
+    const out = await withUploaderNames('tenant_x', records, { db });
+    expect(out[0]).toEqual({ id: 'a', createdBy: 'u1', createdByName: 'Ada Lovelace' });
+    expect(out[1]).toBe(records[1]);
+    expect(out[2]).toEqual({ id: 'c', uploadedBy: 'u1', createdBy: 'u1', uploadedByName: 'Ada Lovelace', createdByName: 'Ada Lovelace' });
+    expect(out[3]).toBe(records[3]);
+    // u1 is asked once for the three places it appears.
+    expect(db.findUserById.mock.calls.map((call) => call[0]).sort()).toEqual(['u1', 'u3']);
+  });
+
+  describe('the Name cell of the Document Store', () => {
+    const session = { purpose: 'conversation' as const, uploadedBy: 'u1', createdBy: 'u1', createdByName: 'Ada Lovelace' };
+    const rawId = '2383e3cb-06b3-4357-b23e-420c6ae1a6d3';
+
+    it('drops the "Created by" line of a session file whose Uploaded-by column already says who', () => {
+      expect(createdByWho(session, true)).toBeNull();
+      expect(createdByWho({ ...session, createdByName: undefined, createdBy: rawId, uploadedBy: rawId }, true)).toBeNull();
+    });
+
+    it('names the person instead of printing the id', () => {
+      expect(createdByWho({ createdBy: rawId, createdByName: 'Ada Lovelace' }, false)).toBe('Ada Lovelace');
+      // A file the column does not cover (not a session file, or no column) keeps the line, with the name.
+      expect(createdByWho({ ...session }, false)).toBe('Ada Lovelace');
+      expect(createdByWho({ createdBy: rawId, createdByName: 'Ada Lovelace' }, true)).toBe('Ada Lovelace');
+    });
+
+    it('never prints a raw user id: an id that is nobody’s name has no line; a system actor is shown as it is', () => {
+      expect(createdByWho({ createdBy: rawId }, false)).toBeNull();
+      expect(createdByWho({ createdBy: '665f1c2e9b1e8a3d4c5b6a79' }, false)).toBeNull();
+      expect(createdByWho({ createdBy: 'system:cron' }, false)).toBe('system:cron');
+      expect(createdByWho({ createdBy: 'system' }, false)).toBe('system');
+      expect(createdByWho({ createdBy: undefined as unknown as string }, false)).toBe('system');
+    });
+
+    it('the Document Store prints it through the helper and the translated line', () => {
+      const manager = source('components/files/FileObjectManager.tsx');
+      expect(manager).toContain('createdByWho(record, showSessionColumns)');
+      expect(manager).toContain("t('createdBy', { who })");
+      expect(manager).not.toMatch(/Created by \{record\.createdBy/);
+      expect(en.files.createdBy).toBe('Created by {who}');
+      expect(tr.files.createdBy).toContain('{who}');
+    });
   });
 
   it('the list routes add the names', () => {

@@ -36,6 +36,7 @@
   --ds-warn-wash: #fdf3e3;       /* chip wash for a warning (text on it: --ds-warn-text, AA) */
   --ds-warn-text: #7a4a07;
   --ds-err-text: #a32727;        /* error text on a surface (AA); --ds-err is for fills and icons */
+  --ds-link-text: #0a7b62;       /* a small link on a surface (AA on white and on every --ds-surface-*); Mantine's blue is 3.5:1 */
   --ds-err: #c93b3b;
   --ds-info: #2a6fdb;
 
@@ -136,6 +137,7 @@
   --ds-warn-wash: #2b2112;
   --ds-warn-text: #f0c27a;
   --ds-err-text: #f19a9a;
+  --ds-link-text: #2fd49e;
 
   --ds-accent-soft: rgba(15, 186, 148, 0.10);
   --ds-accent-ring: rgba(15, 186, 148, 0.28);
