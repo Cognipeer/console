@@ -114,8 +114,10 @@ describe('the provider query a request becomes', () => {
   });
 
   it('turns a kind into whether the account can sign in', () => {
-    expect(filter({ kind: 'person' })).toEqual({ tenantId: 't1', canLogin: true });
-    expect(filter({ kind: 'service' })).toEqual({ tenantId: 't1', canLogin: false });
+    // an external account (a host application's person) cannot sign in either, but is neither of these
+    expect(filter({ kind: 'person' })).toEqual({ tenantId: 't1', canLogin: true, external: false });
+    expect(filter({ kind: 'service' })).toEqual({ tenantId: 't1', canLogin: false, external: false });
+    expect(filter({ kind: 'external' })).toEqual({ tenantId: 't1', external: true });
   });
 
   it('carries the rest across', () => {

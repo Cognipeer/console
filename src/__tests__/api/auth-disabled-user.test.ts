@@ -60,6 +60,8 @@ const activeUser = {
   projectIds: [],
 };
 const disabledUser = { ...activeUser, status: 'disabled' as const, disabledAt: new Date() };
+// A person of a host application whose identity a trusted issuer vouched for: never signs in to the dashboard, by any door.
+const externalUser = { ...activeUser, _id: 'ext-1', kind: 'external' as const, canLogin: false, password: '!external-account' };
 
 describe('disabled users and the auth routes', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
@@ -132,6 +134,15 @@ describe('disabled users and the auth routes', () => {
       expect(db.registerUserInDirectory).not.toHaveBeenCalled();
     });
 
+    it('an external account never signs in, even if a lookup returned it and its flags said it could', async () => {
+      db.findUserByEmail.mockResolvedValue({ ...externalUser, canLogin: true } as never);
+      const res = await login({ email: activeUser.email, password: 'pw-123456', slug: tenant.slug });
+      expectGenericFailure(res);
+      expect(bcrypt.compare).not.toHaveBeenCalled();
+      registerExternalAuthenticator(async () => ({ outcome: 'pass', user: { ...externalUser, canLogin: true } as unknown as IUser }));
+      expectGenericFailure(await login({ email: activeUser.email, password: 'pw-123456', slug: tenant.slug }));
+    });
+
     it('a legacy row with no status field and an explicitly active row still sign in', async () => {
       for (const user of [activeUser, { ...activeUser, status: 'active' as const }]) {
         db.findUserByEmail.mockResolvedValue(user as never);
@@ -164,6 +175,17 @@ describe('disabled users and the auth routes', () => {
       expect(r.setCookie).not.toHaveBeenCalled();
       expect(TokenManager.generateToken).not.toHaveBeenCalled();
       expect(ensureDefaultProject).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint a session for an external account, whichever authenticator called it', async () => {
+      const r = reply();
+      await issueSessionForAuthenticatedUser(
+        db as never, tenant as unknown as ITenant, { ...externalUser, canLogin: true } as unknown as IUser, request, r,
+      );
+      expect(r.code).toHaveBeenCalledWith(401);
+      expect(r.send).toHaveBeenCalledWith({ error: 'Invalid email or password' });
+      expect(r.setCookie).not.toHaveBeenCalled();
+      expect(TokenManager.generateToken).not.toHaveBeenCalled();
     });
 
     it('still issues one for an active user', async () => {

@@ -234,8 +234,10 @@ function shouldAuditRequest(request: FastifyRequest, statusCode: number): boolea
     return true;
   }
   // A request the engine could not decide is audited whatever its method: the
-  // decision id in the response must lead somewhere.
-  return statusCode === 401 || statusCode === 403 || request.iamDenial?.code === 'authorization_unavailable';
+  // decision id in the response must lead somewhere. So is a call that tried to act for a person and was not let in.
+  return statusCode === 401 || statusCode === 403
+    || request.iamDenial?.code === 'authorization_unavailable'
+    || request.iamDenial?.code === 'delegation_refused';
 }
 
 function getHeaderString(request: FastifyRequest, name: string): string | undefined {
@@ -254,7 +256,10 @@ function getHeaderString(request: FastifyRequest, name: string): string | undefi
 export function stampDecisionHeader(request: FastifyRequest, reply: FastifyReply): void {
   const decisionId = request.iamDenial?.decisionId ?? request.iamDecisionId;
   if (!decisionId) return;
-  if (reply.statusCode === 403 || (reply.statusCode === 503 && request.iamDenial?.code === 'authorization_unavailable')) {
+  // A refusal to act for a person is a 401, a 403 or a 503 and always names its decision.
+  if (reply.statusCode === 403
+    || (reply.statusCode === 503 && request.iamDenial?.code === 'authorization_unavailable')
+    || (request.iamDenial?.code === 'delegation_refused' && [401, 403, 503].includes(reply.statusCode))) {
     reply.header('X-Decision-Id', decisionId);
   }
 }
@@ -290,12 +295,38 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
     return;
   }
 
-  const actorUser = request.rbacUser ?? apiToken?.user ?? null;
+  // A call that acts for a person is attributed to that person (the subject) and to the application token (the actor);
+  // a call that tried to and was refused is attributed to the application token alone, never to the account it belongs to.
+  const delegation = apiToken?.delegation;
+  const refusedDelegation = delegation?.state === 'refused';
+  const actorUser = refusedDelegation ? null : (request.rbacUser ?? apiToken?.user ?? null);
   const method = request.method.toUpperCase();
   const action = denial?.code === 'route_not_declared' ? 'security' : getRequiredPermissionLevel(method, service);
   const apiTokenId = apiToken?.tokenRecord?._id
     ? String(apiToken.tokenRecord._id)
     : undefined;
+  // `via` in the metadata the row already has: the person is the subject (actorUserId), the application token the actor
+  // (apiTokenId), and the issuer who vouched for the person says how the call came to act for them.
+  const delegatedIssuer = delegation?.issuer;
+  const metadata: Record<string, unknown> = {
+    ...(delegatedIssuer ? { via: { kind: 'delegated', issuer: delegatedIssuer } } : {}),
+    ...(delegation?.state === 'refused' && delegation.subject ? { delegationSubject: delegation.subject } : {}),
+    ...(denial
+      ? {
+          iamEnforce: true,
+          code: denial.code,
+          ...(denial.decisionId ? { decisionId: denial.decisionId } : {}),
+          ...(denial.service ? { deniedService: denial.service } : {}),
+          ...(denial.required ? { required: denial.required } : {}),
+          ...(denial.action ? { action: denial.action } : {}),
+          ...(denial.projectId ? { contextProjectId: denial.projectId } : {}),
+          // The address the policy engine evaluated (the one a replay must use), not the audit IP.
+          ...(denial.ip ? { contextIp: denial.ip } : {}),
+          ...(denial.reasons?.length ? { reasons: denial.reasons } : {}),
+          ...(denial.policyIds?.length ? { policyIds: denial.policyIds } : {}),
+        }
+      : {}),
+  };
 
   criticalFireAndForget('api-audit-log', () => recordAuditLog(
     { tenantDbName, tenantId },
@@ -306,7 +337,7 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
       actorType: apiToken ? 'api_token' : 'user',
       actorUserId: actorUser?._id
         ? String(actorUser._id)
-        : (apiToken?.tokenRecord.userId ?? sessionHeaders?.['x-user-id']),
+        : refusedDelegation ? undefined : (apiToken?.tokenRecord.userId ?? sessionHeaders?.['x-user-id']),
       apiTokenId,
       event: `${method} ${pathname}`,
       ipAddress: getClientIp(request),
@@ -318,23 +349,7 @@ export function enqueueAuditLog(request: FastifyRequest, reply: FastifyReply): v
       service,
       statusCode,
       userAgent: getHeaderString(request, 'user-agent'),
-      ...(denial
-        ? {
-            metadata: {
-              iamEnforce: true,
-              code: denial.code,
-              ...(denial.decisionId ? { decisionId: denial.decisionId } : {}),
-              ...(denial.service ? { deniedService: denial.service } : {}),
-              ...(denial.required ? { required: denial.required } : {}),
-              ...(denial.action ? { action: denial.action } : {}),
-              ...(denial.projectId ? { contextProjectId: denial.projectId } : {}),
-              // The address the policy engine evaluated (the one a replay must use), not the audit IP.
-              ...(denial.ip ? { contextIp: denial.ip } : {}),
-              ...(denial.reasons?.length ? { reasons: denial.reasons } : {}),
-              ...(denial.policyIds?.length ? { policyIds: denial.policyIds } : {}),
-            },
-          }
-        : {}),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
     },
   ));
 }

@@ -200,6 +200,9 @@ export function listHandler(options: { withActions?: boolean } = {}): RouteHandl
   };
 }
 
+/** The activity of a person who has done nothing lately: what the drawer's Activity section starts from. */
+export const EMPTY_ACTIVITY = { windowDays: 30, usage: [], usageTruncated: false, events: [], hasMoreEvents: false };
+
 export function directoryRoutes(caps: unknown = CAPS_ADMIN): Array<[string, string | RegExp, RouteHandler]> {
   return [
     ['GET', '/api/iam/capabilities', () => caps],
@@ -215,6 +218,7 @@ export function directoryRoutes(caps: unknown = CAPS_ADMIN): Array<[string, stri
         return personDetail(id);
       },
     ],
+    ['GET', /^\/api\/iam\/principals\/user\/[^/]+\/activity$/, () => EMPTY_ACTIVITY],
     ['GET', '/api/projects', () => PROJECTS],
     ['GET', '/api/iam/catalog', () => jsonResponse({ error: 'not under test' }, 404)],
   ];

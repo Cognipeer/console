@@ -1654,7 +1654,9 @@ export interface RealtimeSessionLogDelta {
 // requirement) and behave identically on MongoDB and SQLite. It is NOT a general
 // query surface: documents are addressed by id.
 
-export const IAM_COLLECTIONS = ['iam_policies', 'iam_meta'] as const;
+// `iam_identities` is kept by the SQLite provider only: one small document per account that is of kind `external` or holds an
+// external identity, addressed by the user id (the users table has no column for either; MongoDB keeps both on the user).
+export const IAM_COLLECTIONS = ['iam_policies', 'iam_meta', 'iam_delegations', 'iam_identities'] as const;
 export type IamCollectionName = typeof IAM_COLLECTIONS[number];
 
 export interface IIamDoc {
@@ -1695,6 +1697,11 @@ export interface IamUserFilter {
   excludeIds?: string[];
   /** true = accounts that cannot sign in (service accounts), false = accounts that can. A row without the flag can sign in. */
   canLogin?: boolean;
+  /**
+   * true = only `external` accounts (people of a host application, see `IUser.kind`), false = leave them out (the
+   * workspace's own people). Absent = both.
+   */
+  external?: boolean;
   /** Where the account signs in. 'local' also matches rows that have no provider. */
   authProviders?: Array<'local' | 'ldap' | 'oidc' | 'saml'>;
   /**

@@ -391,3 +391,49 @@ describe('what the viewer is offered on a group', () => {
     }
   });
 });
+
+describe('external accounts (a host application\'s people whose identity an issuer vouched for)', () => {
+  const T_EXTERNAL = target({ id: 'ext-1', role: 'user', canLogin: false, kind: 'external' });
+  const GRANTING = { tenantRole: 'admin' };
+  const PLAIN = {};
+
+  it('keep the issuer\'s profile: name and email are not edited here', () => {
+    expect(code(checkProfileChange(OWNER, T_EXTERNAL, ['name']))).toBe('external_user');
+    expect(code(checkProfileChange(ADMIN, T_EXTERNAL, ['email']))).toBe('external_user');
+    expect(code(checkProfileChange(ADMIN, T_EXTERNAL, []))).toBe('ok');
+  });
+
+  it('always have the User role and no personal permissions', () => {
+    expect(code(checkRoleChange(OWNER, T_EXTERNAL, 'admin'))).toBe('external_user');
+    expect(code(checkRoleChange(ADMIN, T_EXTERNAL, 'project_admin'))).toBe('external_user');
+    // saying what is already true is not a change
+    expect(checkRoleChange(ADMIN, T_EXTERNAL, 'user')).toMatchObject({ ok: true, noop: true });
+    expect(assignableRoles(OWNER, T_EXTERNAL)).toEqual([]);
+    expect(code(checkPermissionsEdit(OWNER, T_EXTERNAL))).toBe('external_user');
+  });
+
+  it('join groups that grant nothing, and never groups that grant access', () => {
+    expect(code(checkGroupMembership(ADMIN, T_EXTERNAL, PLAIN))).toBe('ok');
+    expect(code(checkGroupMembership(OWNER, T_EXTERNAL, GRANTING))).toBe('external_user');
+    expect(code(checkGroupMembership(OWNER, T_EXTERNAL, { servicePermissions: { agents: 'write' } }))).toBe('external_user');
+    expect(code(checkGroupMembership(OWNER, T_USER, GRANTING))).toBe('ok');
+  });
+
+  it('can still be disabled and deleted by an administrator', () => {
+    expect(code(checkStatusChange(ADMIN, T_EXTERNAL))).toBe('ok');
+    expect(code(checkDelete(ADMIN, T_EXTERNAL))).toBe('ok');
+    expect(code(checkStatusChange(USER, T_EXTERNAL))).toBe('forbidden');
+  });
+
+  it('are reported to the directory with the reason', () => {
+    const actions = computeAllowedActions(ADMIN, T_EXTERNAL);
+    expect(actions.editProfile).toEqual({ allowed: false, reason: 'external_user' });
+    expect(actions.changeRole).toEqual({ allowed: false, reason: 'external_user' });
+    expect(actions.editPermissions).toEqual({ allowed: false, reason: 'external_user' });
+    expect(actions.manageProjects).toEqual({ allowed: false, reason: 'external_user' });
+    expect(actions.mintToken).toEqual({ allowed: false, reason: 'external_user' });
+    expect(actions.disable.allowed).toBe(true);
+    expect(actions.delete.allowed).toBe(true);
+    expect(actions.manageGroups.allowed).toBe(true);
+  });
+});

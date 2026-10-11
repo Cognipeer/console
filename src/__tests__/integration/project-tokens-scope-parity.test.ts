@@ -317,6 +317,24 @@ describeForEachProvider('Project API token routes', (getDb) => {
     }
   });
 
+  it('deleting a token through the project also deletes what it was set up to act for', async () => {
+    const inTenant = <T,>(fn: () => Promise<T>): Promise<T> => (db.runWithTenant ? db.runWithTenant(tenantDbName, fn) : fn());
+    const doomed = await tokenRowOf('tok-user2');
+    const kept = await tokenRowOf('tok-user');
+    for (const row of [doomed, kept]) await inTenant(() => db.iamDocPut('iam_delegations', String(row._id), { enabled: true }));
+
+    expect((await remove('admin', 'tok-user2')).statusCode).toBe(200);
+    expect(await inTenant(() => db.iamDocGet('iam_delegations', String(doomed._id)))).toBeNull();
+    // (only the deleted token's own document goes)
+    expect(await inTenant(() => db.iamDocGet('iam_delegations', String(kept._id)))).not.toBeNull();
+    // and a refused delete leaves it where it is
+    expect((await remove('admin', 'tok-owner')).statusCode).toBe(403);
+    const ownerRow = await tokenRowOf('tok-owner');
+    await inTenant(() => db.iamDocPut('iam_delegations', String(ownerRow._id), { enabled: true }));
+    expect((await remove('admin', 'tok-owner')).statusCode).toBe(403);
+    expect(await inTenant(() => db.iamDocGet('iam_delegations', String(ownerRow._id)))).not.toBeNull();
+  });
+
   it('answers 404 for a token id that is not well-formed, or not this project\'s', async () => {
     const elsewhere = (await db.listApiTokens(users.owner.id)).find((row) => row.label === 'tok-owner-elsewhere');
     expect(elsewhere).toBeDefined();

@@ -118,8 +118,8 @@ export interface PrincipalSummary extends PrincipalRef {
   // What the directory list adds. Left `undefined` (not null) when a server does not send them.
   /** Users: the sign-in address. */
   email?: string;
-  /** Users: a person, or a service account (cannot sign in). */
-  kind?: 'person' | 'service';
+  /** Users: a person, a service account (cannot sign in) or an external account (a host application's person). */
+  kind?: 'person' | 'service' | 'external';
   /** Users: where the account lives: local, ldap, oidc or saml. */
   authProvider?: string;
   /** Users: name, email and password are kept in a directory, not here. */
@@ -153,7 +153,7 @@ export interface PrincipalSummary extends PrincipalRef {
 
 const asBool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
 const optString = (v: unknown): string | undefined => asString(v) ?? undefined;
-const optKind = (v: unknown): 'person' | 'service' | undefined => (v === 'person' || v === 'service' ? v : undefined);
+const optKind = (v: unknown): 'person' | 'service' | 'external' | undefined => (v === 'person' || v === 'service' || v === 'external' ? v : undefined);
 
 export function parsePrincipalSummary(raw: unknown, fallbackType?: PrincipalType): PrincipalSummary | null {
   const r = asRecord(raw);
@@ -187,7 +187,7 @@ export function parsePrincipalSummary(raw: unknown, fallbackType?: PrincipalType
     summary.prefix = optString(r.prefix);
     summary.ownerId = optString(r.ownerId);
     summary.ownerLabel = optString(r.ownerLabel);
-    summary.ownerKind = optKind(r.ownerKind);
+    summary.ownerKind = r.ownerKind === 'person' || r.ownerKind === 'service' ? r.ownerKind : undefined;
     summary.ownerDisabled = asBool(r.ownerDisabled);
     summary.ownerMissing = asBool(r.ownerMissing);
     summary.projectId = optString(r.projectId);
@@ -221,6 +221,8 @@ export interface PrincipalPage {
   nextCursor: string | null;
   /** Exact size of the filtered view, when it was asked for. */
   total?: number;
+  /** People list, when the total was asked for: the workspace's external accounts (people of host applications). */
+  externalTotal?: number;
 }
 
 export function clampLimit(limit: number | undefined, fallback = DEFAULT_PAGE_SIZE): number {
@@ -261,10 +263,12 @@ export function parsePrincipalPage(raw: unknown, type: PrincipalType): Principal
     items.push(item);
   }
   const total = asNumber(r.total);
+  const externalTotal = asNumber(r.externalTotal);
   return {
     items,
     nextCursor: asString(r.nextCursor),
     ...(total !== null && total >= 0 ? { total: Math.floor(total) } : {}),
+    ...(externalTotal !== null && externalTotal >= 0 ? { externalTotal: Math.floor(externalTotal) } : {}),
   };
 }
 
@@ -549,9 +553,11 @@ export interface PrincipalExtras {
   lastUsedAt: string | null;
   /** Tokens: whether the token has a scope that caps it (null when the server did not say). */
   scoped: boolean | null;
-  /** Users: `local`, `ldap`, `oidc` or `saml`; `canLogin === false` is a service account. */
+  /** Users: `local`, `ldap`, `oidc` or `saml`; `canLogin === false` is a service account (or an external one, see `kind`). */
   authProvider: string | null;
   canLogin: boolean | null;
+  /** Users: a person, a service account, or an external account (a host application's person). */
+  kind: 'person' | 'service' | 'external' | null;
   /** Groups: `local` or `ldap` (directory), and the tenant role every member gets. */
   source: string | null;
   tenantRole: string | null;
@@ -588,7 +594,7 @@ export interface ManagedInfo {
 /** One thing the viewer may or may not do to the principal, with the reason when not. */
 export interface AllowedAction {
   allowed: boolean;
-  /** `forbidden`, `self`, `owner_immutable`, `higher_privileges`, `directory_managed`, `no_pending_invite`, `account_disabled`. */
+  /** `forbidden`, `self`, `owner_immutable`, `higher_privileges`, `directory_managed`, `no_pending_invite`, `account_disabled`, `external_user`. */
   reason?: string;
 }
 
@@ -690,6 +696,7 @@ function parseExtras(raw: unknown): PrincipalExtras {
     scoped: r.scope === undefined ? null : r.scope !== null && typeof r.scope === 'object',
     authProvider: asString(r.authProvider),
     canLogin: typeof r.canLogin === 'boolean' ? r.canLogin : null,
+    kind: optKind(r.kind) ?? null,
     source: asString(r.source),
     tenantRole: asString(r.tenantRole),
     email: asString(r.email),

@@ -66,10 +66,15 @@ export function isGroupDirectoryManaged(group: { source?: unknown }): boolean {
 
 // ── how the directory classifies a person ────────────────────────────────
 
-export type UserKind = 'person' | 'service';
+export type UserKind = 'person' | 'service' | 'external';
 
-/** A service account is an identity that cannot sign in (`canLogin === false`); a missing flag means it can. */
-export function userKind(user: { canLogin?: boolean | null }): UserKind {
+/**
+ * An EXTERNAL account is a person of a host application whose identity a trusted issuer vouched for (`kind === 'external'`):
+ * they cannot sign in either, but they are not a service account. A service account is an identity that cannot sign in
+ * (`canLogin === false`); a missing flag means it can.
+ */
+export function userKind(user: { canLogin?: boolean | null; kind?: string | null }): UserKind {
+  if (user.kind === 'external') return 'external';
   return user.canLogin === false ? 'service' : 'person';
 }
 
@@ -130,6 +135,7 @@ export const PEOPLE_ERROR_CODES = [
   'invalid_password',
   'invalid_current_password',
   'no_pending_invite',
+  'external_user',
 ] as const;
 export type PeopleErrorCode = (typeof PEOPLE_ERROR_CODES)[number];
 
@@ -141,7 +147,8 @@ export type ActionDenial =
   | 'higher_privileges'
   | 'directory_managed'
   | 'no_pending_invite'
-  | 'account_disabled';
+  | 'account_disabled'
+  | 'external_user';
 
 export interface AllowedAction {
   allowed: boolean;

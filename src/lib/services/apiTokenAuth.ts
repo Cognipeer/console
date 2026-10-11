@@ -45,6 +45,24 @@ export interface ApiTokenAuthOptions {
   clientIp?: string | null;
 }
 
+/**
+ * A call that acts FOR a person (the application sent a signed statement about them in `X-Cognipeer-User-Token`, see
+ * lib/iam/delegationGate.ts). `active`: `user` and `tokenRecord.userId` of the context are that person, `tokenRecord._id`
+ * and the scope stay the application's token. `refused`: the statement was not accepted - the call is answered with an
+ * error and attributed to the application token alone, never to the token's owner.
+ */
+export type ApiTokenDelegation =
+  | {
+    state: 'active';
+    issuer: string;
+    subject: string;
+    kind: 'person' | 'external';
+    /** The account the token belongs to: whom the call would have been without the user token. */
+    appOwnerId: string;
+    created: boolean;
+  }
+  | { state: 'refused'; code: string; issuer?: string; subject?: string };
+
 export interface ApiTokenContext {
   token: string;
   tokenRecord: IApiToken;
@@ -54,6 +72,8 @@ export interface ApiTokenContext {
   tenantDbName: string;
   projectId: string;
   user: IUser | null;
+  /** Set when the call acts for a person (see {@link ApiTokenDelegation}). */
+  delegation?: ApiTokenDelegation;
 }
 
 export interface ApiTokenRequestLike {
@@ -202,6 +222,11 @@ export async function requireApiTokenFromHeader(
   }
   if (isUserDisabled(user)) {
     throw new ApiTokenAuthError('API token owner is disabled', 401);
+  }
+  // An external account (a person of a host application) holds no API tokens: a token that somehow names one
+  // authenticates nobody.
+  if (user.kind === 'external') {
+    throw new ApiTokenAuthError('API token owner cannot hold API tokens', 401);
   }
 
   // Non-critical last-used timestamp update — fire and forget

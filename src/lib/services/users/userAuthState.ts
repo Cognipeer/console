@@ -34,9 +34,13 @@ export function isUserDisabled(user: Pick<IUser, 'status'> | null | undefined): 
   return user?.status === 'disabled';
 }
 
-/** True when the account may not authenticate by any route (no login capability, or disabled). */
-export function isUserLoginBlocked(user: Pick<IUser, 'canLogin' | 'status'>): boolean {
-  return user.canLogin === false || isUserDisabled(user);
+/**
+ * True when the account may not authenticate by any route: no login capability, disabled, or an EXTERNAL account
+ * (a person of a host application whose identity a trusted issuer vouched for - they never sign in to the dashboard,
+ * whatever vouches for them).
+ */
+export function isUserLoginBlocked(user: Pick<IUser, 'canLogin' | 'status'> & { kind?: IUser['kind'] }): boolean {
+  return user.canLogin === false || user.kind === 'external' || isUserDisabled(user);
 }
 
 export function userAuthStateCacheKey(tenantDbName: string, userId: string): string {

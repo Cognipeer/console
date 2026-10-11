@@ -31,6 +31,7 @@ import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
 import { foldedRegexSource } from '@/lib/shared/searchFold';
+import { decodeUserDocExternalIds } from '../provider/externalIds';
 
 const MAX_PAGE = 200;
 const MAX_IDS = 500;
@@ -97,6 +98,9 @@ export function IamDirectoryMixin<TBase extends Constructor<MongoDBProviderBase>
       // A row without the flag can sign in.
       if (query.canLogin === true) and.push({ canLogin: { $ne: false } });
       else if (query.canLogin === false) and.push({ canLogin: false });
+      // An account without a kind is a member.
+      if (query.external === true) and.push({ kind: 'external' });
+      else if (query.external === false) and.push({ kind: { $ne: 'external' } });
       if (query.authProviders?.length) {
         const parts: Record<string, unknown>[] = [];
         const named = query.authProviders.filter((provider) => provider !== 'local');
@@ -155,7 +159,7 @@ export function IamDirectoryMixin<TBase extends Constructor<MongoDBProviderBase>
         .limit(limit + 1)
         .toArray();
       return {
-        items: docs.slice(0, limit).map((doc) => ({ ...doc, _id: doc._id?.toString(), password: '' }) as IUser),
+        items: docs.slice(0, limit).map((doc) => ({ ...decodeUserDocExternalIds(doc), _id: doc._id?.toString(), password: '' }) as IUser),
         hasMore: docs.length > limit,
       };
     }

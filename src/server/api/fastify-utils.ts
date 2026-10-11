@@ -35,6 +35,7 @@ import {
   requireApiTokenFromHeader,
   type ApiTokenContext,
 } from '@/lib/services/apiTokenAuth';
+import { DelegationError, resolveDelegatedCaller, USER_TOKEN_HEADER } from '@/lib/iam/delegationGate';
 import {
   ProjectContextError,
   resolveProjectContext,
@@ -837,6 +838,59 @@ export async function requireApiTokenContext(
   }
 }
 
+/**
+ * The context a request runs in once its user token (if any) has been honoured. A request without the header is returned
+ * as it is. With it, the person becomes the principal: `user` and `tokenRecord.userId` are theirs (so every handler that
+ * reads "who is calling" - the engine gate, the quota keys, the runtime context, the attribution of what is created -
+ * sees the person), while `tokenRecord._id`, the token scope and the project stay the application's - and the person must
+ * be able to open that project themselves (the gate refuses with `project_not_accessible` otherwise).
+ * A refusal throws a {@link DelegationError}; it is audited with a decision id and attributed to the application token,
+ * never to the account the token belongs to.
+ */
+async function applyDelegation(request: FastifyRequest, apiToken: ApiTokenContext): Promise<ApiTokenContext> {
+  try {
+    const caller = await resolveDelegatedCaller({
+      headerValue: request.headers[USER_TOKEN_HEADER],
+      tokenId: apiToken.tokenRecord._id ? String(apiToken.tokenRecord._id) : undefined,
+      tenantDbName: apiToken.tenantDbName,
+      tenantId: apiToken.tenantId,
+      // The project the call runs in: the person must be able to open it themselves.
+      projectId: apiToken.projectId,
+    });
+    if (!caller) return apiToken;
+    const delegated: ApiTokenContext = {
+      ...apiToken,
+      tokenRecord: { ...apiToken.tokenRecord, userId: String(caller.user._id) },
+      user: caller.user,
+      delegation: {
+        state: 'active',
+        issuer: caller.issuer,
+        subject: caller.subject,
+        kind: caller.kind,
+        appOwnerId: String(apiToken.tokenRecord.userId),
+        created: caller.created,
+      },
+    };
+    request.apiTokenContext = delegated;
+    return delegated;
+  } catch (error) {
+    if (error instanceof DelegationError) {
+      request.iamDenial = {
+        code: 'delegation_refused',
+        decisionId: error.decisionId,
+        reasons: [error.code],
+        ip: getAuthzClientIp(request),
+      };
+      request.apiTokenContext = {
+        ...apiToken,
+        user: null,
+        delegation: { state: 'refused', code: error.code, issuer: error.issuer, subject: error.subject },
+      };
+    }
+    throw error;
+  }
+}
+
 export async function getApiTokenContextForRequest(
   request: FastifyRequest,
 ): Promise<ApiTokenContext> {
@@ -845,6 +899,12 @@ export async function getApiTokenContextForRequest(
   }
 
   const context = await requireApiTokenContext(request);
+  // A route that authenticates here instead of through `withClientApiRequestContext` (which has already honoured the header
+  // and left its context on the request) does not act for users. A call that asks it to is refused rather than answered as
+  // the token's owner.
+  if (request.headers[USER_TOKEN_HEADER] !== undefined) {
+    throw new ApiTokenAuthError('This endpoint does not act for users: remove the user token header', 400, 'user_token_not_supported');
+  }
   request.apiTokenContext = context;
   return context;
 }
@@ -926,6 +986,23 @@ function sendClientApiError(
       return reply.code(401).send(openAiErrorBody(error.message, 'invalid_request_error'));
     }
     return reply.code(error.status).send({ error: error.message });
+  }
+
+  if (error instanceof DelegationError) {
+    // 401 (the user token was not accepted), 403 (the person may not act through an API token) or 503 (the stores cannot
+    // answer): the typed code and the decision id are in every dialect, so a caller can tell them apart and quote the id.
+    if (error.status === 503) reply.header('Retry-After', AUTHORIZATION_RETRY_AFTER_SECONDS);
+    if (style === 'anthropic') {
+      const type = error.status === 403 ? 'permission_error' : error.status === 503 ? 'api_error' : 'authentication_error';
+      const envelope = anthropicErrorEnvelope(error.message, type);
+      return reply.code(error.status).send({ ...envelope, error: { ...envelope.error, code: error.code, decision_id: error.decisionId } });
+    }
+    if (style === 'openai') {
+      const type = error.status === 403 ? 'permission_error' : error.status === 503 ? 'server_error' : 'invalid_request_error';
+      const body = openAiErrorBody(error.message, type);
+      return reply.code(error.status).send({ error: { ...body.error, code: error.code, decision_id: error.decisionId } });
+    }
+    return reply.code(error.status).send({ error: error.message, code: error.code, decisionId: error.decisionId });
   }
 
   if (error instanceof RbacAuthorizationError) {
@@ -1013,6 +1090,9 @@ export function withClientApiRequestContext<
     try {
       apiToken = await requireApiTokenContext(request);
       request.apiTokenContext = apiToken;
+      // A call that carries a user token acts for that person: from here on they are the principal (capped by this
+      // token's scope and project), and this token stays the actor.
+      apiToken = await applyDelegation(request, apiToken);
       if (enforceRbac) {
         await enforceApiTokenRbac(request, apiToken);
       }
@@ -1035,6 +1115,7 @@ export function withClientApiRequestContext<
           apiTokenId: apiToken.tokenRecord._id ? String(apiToken.tokenRecord._id) : undefined,
           actorType: 'api_token',
           source: 'api',
+          ...(apiToken.delegation?.state === 'active' ? { via: { kind: 'delegated' as const, issuer: apiToken.delegation.issuer } } : {}),
         },
         async () => {
           // Bind the tenant DB for the whole handler execution so every nested

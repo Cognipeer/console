@@ -22,6 +22,10 @@ export type PeopleAuditEvent =
   | 'user.bulk'
   | 'group.member.add'
   | 'group.member.remove'
+  // verified identities (lib/iam/delegatedIdentity.ts): an account created for one, an account linked to one, a group created for an issuer
+  | 'user.jit.create'
+  | 'user.identity.link'
+  | 'group.jit.create'
   | 'token.revoke';
 
 export interface PeopleAuditActor {

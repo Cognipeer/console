@@ -193,7 +193,7 @@ export function parseDirectoryFilters(type: PrincipalType, raw: Record<string, u
       else filters.roles = roles as TenantRole[];
     }
     filters.status = choice('status', ['active', 'disabled', 'invited'] as const);
-    filters.kind = choice('kind', ['person', 'service'] as const);
+    filters.kind = choice('kind', ['person', 'service', 'external'] as const);
     const source = single(raw, 'source');
     if (source === null) bad('source', 'Must be a comma separated list of sources');
     else if (source !== undefined) {
@@ -292,6 +292,11 @@ export interface DirectoryPage {
   items: DirectoryItem[];
   hasMore: boolean;
   total?: number;
+  /**
+   * People list, when the total was asked for: how many external accounts the workspace has (people of host
+   * applications whose identity a trusted issuer vouched for), whatever the filters say.
+   */
+  externalTotal?: number;
 }
 
 /** The provider filter a person-list request stands for. */
@@ -309,7 +314,13 @@ export function userFilterOf(tenantId: string, request: Pick<DirectoryRequest, '
   } else if (request.status === 'invited') {
     filter.invited = true;
   }
-  if (request.kind) filter.canLogin = request.kind === 'person';
+  // A person can sign in; a service account cannot and is not external; an external account is its own kind.
+  if (request.kind === 'external') {
+    filter.external = true;
+  } else if (request.kind) {
+    filter.canLogin = request.kind === 'person';
+    filter.external = false;
+  }
   if (request.providers) filter.authProviders = request.providers;
   if (request.groupId) filter.groupId = request.groupId;
   if (request.projectId) filter.projectId = request.projectId;
@@ -329,14 +340,16 @@ export async function listDirectory(
   return runWithTenantScope(tenant.tenantDbName, async (db) => {
     if (request.type === 'user') {
       const filter = userFilterOf(tenant.tenantId, request);
-      const [res, total] = await Promise.all([
+      const [res, total, externalTotal] = await Promise.all([
         db.iamListUsers({ ...filter, ...page, sort: request.sort, dir: request.dir }),
         request.count ? db.iamCountUsers(filter) : Promise.resolve(undefined),
+        request.count ? db.countExternalUsers() : Promise.resolve(undefined),
       ]);
       const roleManaged = await roleManagedPredicate(tenant, res.items);
       return {
         hasMore: res.hasMore,
         ...(total !== undefined ? { total } : {}),
+        ...(externalTotal !== undefined ? { externalTotal } : {}),
         items: res.items.map((user): DirectoryUserItem => ({
           type: 'user',
           id: String(user._id),
@@ -635,7 +648,7 @@ export interface GroupMemberRow {
   status: ListStatus | null;
   kind: UserKind | null;
   /** Where the membership comes from (a directory group's members are the directory's): the group's own source. */
-  membershipSource: 'local' | 'ldap' | 'oidc';
+  membershipSource: 'local' | 'ldap' | 'oidc' | 'delegated';
   /** The membership points at an account that no longer exists: it can still be removed. */
   missing?: true;
 }
@@ -673,7 +686,9 @@ export async function listGroupMembers(
       ? await db.iamListUsers({ tenantId: tenant.tenantId, ids: ids.items, limit: Math.max(1, ids.items.length) })
       : { items: [] as IUser[], hasMore: false };
     const byId = new Map(people.items.map((user) => [String(user._id), user]));
-    const membershipSource = group.source === 'oidc' ? 'oidc' as const : isGroupDirectoryManaged(group) ? 'ldap' as const : 'local' as const;
+    const membershipSource = group.source === 'oidc' ? 'oidc' as const
+      : group.source === 'delegated' ? 'delegated' as const
+        : isGroupDirectoryManaged(group) ? 'ldap' as const : 'local' as const;
     return {
       hasMore: ids.hasMore,
       total: counts[groupId] ?? 0,

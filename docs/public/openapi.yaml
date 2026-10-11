@@ -12,6 +12,11 @@ info:
     ## Authentication
     All endpoints require a Bearer token: `Authorization: Bearer <token>`.
 
+    ### Acting for a user
+    An application that signs its own users in can add `X-Cognipeer-User-Token: <jwt>`, a statement about the person the call is for signed by an issuer the workspace trusts (claims `iss`, `aud`, `sub`, `iat`, `exp`; optional `email`, `email_verified`, `name`, `groups`). The call then runs as that person, capped by the token's scope and project (which the person must be able to open themselves), and the token stays the actor in the logs. The token must have been set up for it by an owner or admin in the dashboard. Without the header nothing changes; with the header the token's owner is never the fallback.
+
+    A refused statement is answered `401` with `code` one of `delegation_not_enabled`, `invalid_assertion`, `expired`, `untrusted_key`, `unknown_principal`, `disabled`, `seat_limit` or `conflict`; a person who may not be acted for (the workspace owner, or an administrator the setup does not allow) with `403` and `code: "delegation_refused"`; a person who cannot open the project the token is bound to (no membership of their own or of one of their groups) with `403` and `code: "project_not_accessible"`; an unreadable store with `503` and `code: "delegation_unavailable"` (retry). An endpoint that does not act for users answers a request that carries the header with `400` and `code: "user_token_not_supported"`. Every one carries a `decisionId` (`X-Decision-Id` header; `error.decision_id` in the OpenAI- and Anthropic-compatible dialects).
+
     ## Conventions
     - Content-Type is `application/json` unless a request is a file upload (`multipart/form-data`) or a response is binary/streamed.
     - Successful responses are typically wrapped as `{ "data": ... }`; OpenAI-compatible endpoints (chat, embeddings, moderations, responses) return the provider-shaped object directly.

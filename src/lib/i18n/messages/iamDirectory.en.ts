@@ -29,7 +29,9 @@ export const iamDirectoryEn = {
     kinds: {
       person: 'Person',
       service: 'Service account',
+      external: 'External',
     },
+    externalHint: 'A person of a host application whose identity a trusted issuer vouched for. They cannot sign in to the dashboard or hold API tokens, and they join no project.',
     sources: {
       local: 'Local',
       directory: 'Directory',
@@ -67,6 +69,8 @@ export const iamDirectoryEn = {
     pageSize: 'Rows per page',
     noMatchesFilters: 'Nothing matches these filters. Reset them to see everything.',
     inviteFirst: 'Invite your first person',
+    externalCount: '{count} external',
+    externalCountHint: 'People of host applications whose identity a trusted issuer vouched for. They are left out of member lists and pickers. Select to list them.',
     tokenNote: 'Every API token you are allowed to manage. Your own tokens are also on the API Tokens page.',
   },
   filters: {
@@ -127,6 +131,7 @@ export const iamDirectoryEn = {
     directory_managed: 'This account is managed by your directory. Change it there, or disable it here.',
     no_pending_invite: 'There is no pending invitation for this account.',
     account_disabled: 'This account is disabled.',
+    external_user: 'This is an external account: it follows the issuer that vouches for it, has no personal permissions, joins no project and holds no API tokens.',
   },
   confirm: {
     disable: {
@@ -218,6 +223,7 @@ export const iamDirectoryEn = {
     already_in_state: 'Already in that state.',
     not_a_member: 'Not a member of that group.',
     no_pending_invite: 'There is no pending invitation for this account.',
+    external_user: 'This is an external account (a host application\'s person). It always has the User role, joins no project and cannot hold API tokens.',
     unauthorized: 'Your session has expired. Sign in again.',
     notFound: 'This record no longer exists.',
     generic: 'Something went wrong. Try again.',
@@ -603,6 +609,28 @@ export const iamDirectoryEn = {
     },
     token: {
       project: 'Project',
+    },
+    activity: {
+      title: 'Activity',
+      hint: 'What this person did lately, including the calls an application made on their behalf.',
+      loading: 'Loading activity…',
+      failed: 'The activity could not be loaded.',
+      usageTitle: 'Usage in the last {days} days',
+      noUsage: 'No calls in this period.',
+      service: 'Service',
+      requests: 'Calls',
+      errors: 'Errors',
+      tokens: 'Tokens',
+      last: 'Last',
+      through: 'Through',
+      usageTruncated: 'There is more than could be read; the totals are a lower bound.',
+      eventsTitle: 'Recent actions',
+      noEvents: 'No recorded actions in this period.',
+      moreEvents: 'There are more actions than shown. The audit trail has them all.',
+      outcomes: { success: 'Done', failure: 'Failed', denied: 'Refused' },
+      via: 'via {label}',
+      viaToken: 'An application\'s API token acted for this person.',
+      viaIssuer: 'An application\'s API token acted for this person, vouched for by {issuer}.',
     },
   },
   bulk: {

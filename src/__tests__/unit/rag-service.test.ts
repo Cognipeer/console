@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
+import { runWithRequestContext } from '@/lib/core/requestContext';
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 vi.mock('@cognipeer/to-markdown', () => ({
@@ -951,6 +952,30 @@ describe('RAG Service', () => {
           }),
         }),
       );
+    });
+
+    it('records, for a call an application\'s token made for a person, who it was for, who made it and how', async () => {
+      await runWithRequestContext(
+        { userId: 'person-1', apiTokenId: 'app-token-1', actorType: 'api_token', via: { kind: 'delegated', issuer: 'https://idp.example.com' } },
+        () => queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq),
+      );
+      expect(db.createRagQueryLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'person-1',
+          apiTokenId: 'app-token-1',
+          actorType: 'api_token',
+          metadata: expect.objectContaining({ via: { kind: 'delegated', issuer: 'https://idp.example.com' } }),
+        }),
+      );
+    });
+
+    it('records no via for a call nobody acted for', async () => {
+      await runWithRequestContext(
+        { userId: 'owner-1', apiTokenId: 'app-token-1', actorType: 'api_token' },
+        () => queryRag(DB_NAME, TENANT_ID, PROJECT_ID, queryReq),
+      );
+      const logged = db.createRagQueryLog.mock.calls.at(-1)?.[0] as { metadata?: Record<string, unknown> };
+      expect(logged.metadata).not.toHaveProperty('via');
     });
 
     it('records what the threshold discarded, not just what survived', async () => {

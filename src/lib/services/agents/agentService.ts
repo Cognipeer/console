@@ -1338,10 +1338,15 @@ function extractAgentReasoning(result: AgentSdkInvokeResult): string | undefined
  * it was sent for prompt rendering, not for a tracing filter, and object/array
  * values would need a shape decision this call site should not make silently.
  */
-function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undefined): Record<string, string> | undefined {
+export function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undefined): Record<string, string> | undefined {
     if (!runtimeContext) return undefined;
     const out: Record<string, string> = {};
     if (runtimeContext.source) out.source = runtimeContext.source;
+    // An application's token acted for the person: the tags let the Traces views filter calls made on someone's behalf.
+    if (runtimeContext.via) {
+        out.via = runtimeContext.via.kind;
+        out.viaIssuer = runtimeContext.via.issuer;
+    }
     const meta = runtimeContext.metadata;
     for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
         const value = meta?.[key];

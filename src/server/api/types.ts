@@ -38,11 +38,13 @@ declare module 'fastify' {
     /**
      * Set when the authorization engine refused this request (iam/enforce.ts), so
      * the audit row can carry the decisionId the caller was shown:
-     * `forbidden` (403, a decision), `route_not_declared` (403) or
-     * `authorization_unavailable` (503, the engine could not decide).
+     * `forbidden` (403, a decision), `route_not_declared` (403),
+     * `authorization_unavailable` (503, the engine could not decide) or
+     * `delegation_refused` (a call that tried to act for a person was not let in:
+     * 401/403/503, the typed reason is in `reasons`).
      */
     iamDenial?: {
-      code: 'forbidden' | 'route_not_declared' | 'authorization_unavailable';
+      code: 'forbidden' | 'route_not_declared' | 'authorization_unavailable' | 'delegation_refused';
       decisionId?: string;
       service?: string;
       required?: string;

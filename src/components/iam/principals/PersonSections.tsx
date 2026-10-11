@@ -6,9 +6,9 @@
  * markup over the loaded detail; every change is a callback.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ActionIcon, Badge, Button, Group, Menu, Stack, Text, Tooltip } from '@mantine/core';
+import { ActionIcon, Badge, Button, Group, Loader, Menu, Stack, Table, Text, Tooltip } from '@mantine/core';
 import {
   IconDots,
   IconExternalLink,
@@ -20,6 +20,8 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
+import { directoryApi, type PersonActivityView } from './directoryApi';
 import {
   iamLinks,
   ownedTokenSummary,
@@ -408,6 +410,120 @@ export function UserTokensSection({
           )}
         </div>
       ) : null}
+    </Stack>
+  );
+}
+
+// ── activity of a person ──────────────────────────────────────────────────
+
+const SERVICE_LABEL = new Map<string, string>(RBAC_SERVICE_DEFINITIONS.map((definition) => [definition.id, definition.label]));
+const OUTCOME_COLOR: Record<string, string> = { success: 'teal', failure: 'orange', denied: 'red' };
+
+/**
+ * What a person did lately: the calls they made (or an application made for them) by service over the last days, and the
+ * audit rows they are the subject of. Loaded when the drawer opens; read-only.
+ */
+export function ActivitySection({ userId, locale }: { userId: string; locale: string }) {
+  const td = useTranslations('iamDirectory');
+  const [state, setState] = useState<{ status: 'loading' } | { status: 'failed' } | { status: 'ready'; activity: PersonActivityView }>({ status: 'loading' });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ status: 'loading' });
+    directoryApi
+      .activity(userId, { signal: controller.signal })
+      .then((activity) => setState({ status: 'ready', activity }))
+      .catch(() => {
+        if (!controller.signal.aborted) setState({ status: 'failed' });
+      });
+    return () => controller.abort();
+  }, [userId]);
+
+  if (state.status === 'loading') {
+    return (
+      <Group gap="xs" data-testid="activity-loading">
+        <Loader size="xs" />
+        <Muted>{td('drawer.activity.loading')}</Muted>
+      </Group>
+    );
+  }
+  if (state.status === 'failed') return <Muted>{td('drawer.activity.failed')}</Muted>;
+
+  const { activity } = state;
+  return (
+    <Stack gap="md" data-testid="activity-body">
+      <Stack gap={6}>
+        <Text size="sm" fw={600}>{td('drawer.activity.usageTitle', { days: activity.windowDays })}</Text>
+        {activity.usage.length === 0 ? (
+          <Muted>{td('drawer.activity.noUsage')}</Muted>
+        ) : (
+          <Table.ScrollContainer minWidth={460}>
+            <Table verticalSpacing={6} fz="xs" data-testid="activity-usage">
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>{td('drawer.activity.service')}</Table.Th>
+                  <Table.Th ta="right">{td('drawer.activity.requests')}</Table.Th>
+                  <Table.Th ta="right">{td('drawer.activity.errors')}</Table.Th>
+                  <Table.Th ta="right">{td('drawer.activity.tokens')}</Table.Th>
+                  <Table.Th>{td('drawer.activity.last')}</Table.Th>
+                  <Table.Th>{td('drawer.activity.through')}</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {activity.usage.map((row) => (
+                  <Table.Tr key={row.service}>
+                    <Table.Td>{SERVICE_LABEL.get(row.service) ?? row.service}</Table.Td>
+                    <Table.Td ta="right">{row.requests.toLocaleString(locale)}</Table.Td>
+                    <Table.Td ta="right">{row.errors.toLocaleString(locale)}</Table.Td>
+                    <Table.Td ta="right">{row.totalTokens.toLocaleString(locale)}</Table.Td>
+                    <Table.Td>{row.lastDay}</Table.Td>
+                    <Table.Td>
+                      <Group gap={4}>
+                        {row.viaTokens.length === 0 ? <Muted>—</Muted> : null}
+                        {row.viaTokens.map((via) => (
+                          <Badge key={via.id} size="xs" variant="default" tt="none">{`${via.label} · ${via.requests.toLocaleString(locale)}`}</Badge>
+                        ))}
+                      </Group>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
+        )}
+        {activity.usageTruncated ? <Muted>{td('drawer.activity.usageTruncated')}</Muted> : null}
+      </Stack>
+
+      <Stack gap={6}>
+        <Text size="sm" fw={600}>{td('drawer.activity.eventsTitle')}</Text>
+        {activity.events.length === 0 ? (
+          <Muted>{td('drawer.activity.noEvents')}</Muted>
+        ) : (
+          <div className={styles.bordered} data-testid="activity-events">
+            {activity.events.map((event) => (
+              <div key={event.id} className={styles.listRow}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Text size="sm" ff="monospace" style={{ wordBreak: 'break-all' }}>
+                    {event.method && event.path ? `${event.method} ${event.path}` : event.event}
+                  </Text>
+                  <Group gap={6} mt={2}>
+                    <Text size="xs" c="dimmed">{formatDateTime(event.at, locale)}</Text>
+                    <Badge size="xs" variant="light" color={OUTCOME_COLOR[event.outcome] ?? 'gray'}>
+                      {translateOr(td, 'iamDirectory', `drawer.activity.outcomes.${event.outcome}`, event.outcome)}
+                    </Badge>
+                    {event.viaToken ? (
+                      <Tooltip label={event.issuer ? td('drawer.activity.viaIssuer', { issuer: event.issuer }) : td('drawer.activity.viaToken')} withArrow>
+                        <Badge size="xs" variant="default" tt="none">{td('drawer.activity.via', { label: event.viaToken.label })}</Badge>
+                      </Tooltip>
+                    ) : null}
+                  </Group>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {activity.hasMoreEvents ? <Muted>{td('drawer.activity.moreEvents')}</Muted> : null}
+      </Stack>
     </Stack>
   );
 }

@@ -13,10 +13,12 @@ import FormShell, {
   SummaryKV,
 } from '@/components/common/ui/FormShell';
 import { formatDateTime } from '@/components/iam/timeFormat';
+import { useDashboardUser } from '@/components/layout/DashboardUserContext';
 import { useLocale, useTranslations } from '@/lib/i18n';
 import ExpiryField from './ExpiryField';
 import IpAllowlistField from './IpAllowlistField';
 import TokenAccessSection from './TokenAccessSection';
+import TokenDelegationSection from './TokenDelegationSection';
 import TokenStatusBadges from './TokenStatusBadges';
 import { readErrorBody, tokenErrorMessage } from './tokenErrors';
 import {
@@ -52,6 +54,9 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
   const tCommon = useTranslations('common');
   const tNotifications = useTranslations('notifications');
   const locale = useLocale();
+  const viewer = useDashboardUser();
+  // Setting up acting for users lets the token act as other accounts: owners and admins only (the server decides again).
+  const canSetUpDelegation = viewer?.role === 'owner' || viewer?.role === 'admin';
 
   const open = token !== null;
   const { policy } = useTokenPolicy(open);
@@ -230,7 +235,13 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
         <IpAllowlistField text={ipText} onChange={setIpText} policy={policy} disabled={!canEdit} />
       </FormSection>
 
-      <FormSection number={4} title={t('access.title')} description={t('access.description')} collapsible defaultOpen>
+      {canSetUpDelegation && canEdit ? (
+        <FormSection number={4} title={t('delegation.title')} description={t('delegation.sectionDescription')} collapsible defaultOpen={false}>
+          <TokenDelegationSection tokenId={token._id} />
+        </FormSection>
+      ) : null}
+
+      <FormSection number={canSetUpDelegation && canEdit ? 5 : 4} title={t('access.title')} description={t('access.description')} collapsible defaultOpen>
         <TokenAccessSection tokenId={token._id} />
       </FormSection>
     </FormShell>

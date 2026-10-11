@@ -48,6 +48,32 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 - People who are neither owners nor admins and hold no `iam` permission no longer see the IAM center.
 - The Members and Tenant settings pages are removed; their old addresses redirect.
 
+### Acting for a user (verified identity)
+
+- An application can send a signed statement about the person a call is for in the `X-Cognipeer-User-Token` header,
+  next to its API token. The call then runs as that person (their access, limits, quotas and name in the logs), capped
+  by the token's scope and project; the token stays the actor. Owners and admins set it up per token under **IAM center
+  → Principals → API tokens → Acting for users**: issuer, audience, a pinned algorithm (`HS256`, `RS256`, `ES256`), a
+  shared secret with key ids, a public key or a key set URL, how the person is found (identity and/or verified email)
+  and what to do when nobody matches (nothing, an external account, or a person managed by the identity provider).
+- The workspace owner can never be acted for; an administrator only when the setup allows it, and a refused account is
+  left untouched (not linked to the subject, no group changes). A refused call
+  is answered `401` (`delegation_not_enabled`, `invalid_assertion`, `expired`, `untrusted_key`, `unknown_principal`,
+  `disabled`, `seat_limit`, `conflict`), `403` (`delegation_refused`, `project_not_accessible`) or `503`
+  (`delegation_unavailable`), always with a decision id; the token's owner is never the fallback.
+- The person must be able to open the token's project themselves, as in the dashboard: a membership of their own or of
+  one of their groups (an external person: a delegated group that was given the project), or any project for an
+  administrator. Otherwise the call is refused (`project_not_accessible`).
+- **External** accounts: people of a host application who are vouched for by a trusted issuer. They cannot sign in to
+  the dashboard or hold API tokens, always have the User role, are never added to a project (their access comes from the
+  groups they are in) and are left out of member lists and pickers; the IAM center shows them with a badge and a
+  counter. Creating one counts toward the licence user limit.
+- Groups can follow the statement: with a group map, memberships in groups created for that issuer (never in a local or
+  directory group) follow the `groups` claim, and every change is audited.
+- Usage rows, request logs, runs and traces record the person as the subject and the application token as the actor, with
+  `via: { kind: "delegated", issuer }` where a record has a metadata field. A person's drawer in the IAM center has a new
+  **Activity** section.
+
 ### Portals (Enterprise)
 
 - Opening a portal and running an agent through it are decided by the policy engine. A portal's access list is its

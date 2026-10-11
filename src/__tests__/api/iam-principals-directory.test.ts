@@ -529,6 +529,67 @@ describeForEachProvider('IAM directory API', (getDb) => {
 
   // ── the members of a group ──────────────────────────────────────────────
 
+  describe('the activity of a person', () => {
+    const dayAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const ISSUER = 'https://idp.activity.example';
+    const url = (key: string, query = '') => `/api/iam/principals/user/${String(W.users[key]._id)}/activity${query}`;
+
+    beforeAll(async () => {
+      const alice = W.users.alice;
+      await db.runWithTenant!(W.dbName, async () => {
+        const row = (extra: Record<string, unknown>) => ({
+          tenantId: W.id, projectId: W.projects.pj1, userId: String(alice._id), apiTokenId: '', actorType: 'user', source: 'dashboard',
+          service: 'models', refKey: 'm1', day: dayAgo(1), requests: 1, errors: 0, totalTokens: 0, costUsd: 0, ...extra,
+        });
+        await db.incrementUsageDaily([
+          row({ requests: 4, errors: 1, totalTokens: 40, costUsd: 0.2 }),
+          row({ requests: 6, totalTokens: 60, costUsd: 0.3, apiTokenId: W.tokens.aliceCi, actorType: 'api_token', source: 'api' }),
+        ] as never);
+        await db.createAuditLog({
+          tenantId: W.id, actorType: 'api_token', actorUserId: String(alice._id), actorEmail: alice.email, apiTokenId: W.tokens.aliceCi,
+          service: 'models', action: 'write', event: 'POST /api/client/v1/chat/completions', method: 'POST',
+          path: '/api/client/v1/chat/completions', outcome: 'success', statusCode: 200, metadata: { via: { kind: 'delegated', issuer: ISSUER } },
+        } as never);
+      });
+    });
+
+    it('reports the usage by service and the actions, naming the token and the issuer behind a call made for the person', async () => {
+      const res = await call('GET', url('alice', '?days=7&limit=50'), 'admin');
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.windowDays).toBe(7);
+      expect(res.body.usage).toEqual([
+        expect.objectContaining({
+          service: 'models', requests: 10, errors: 1, totalTokens: 100,
+          viaTokens: [{ id: W.tokens.aliceCi, label: 'aliceCi', requests: 6 }],
+        }),
+      ]);
+      const viaApp = (res.body.events as Array<{ path?: string }>).find((event) => event.path === '/api/client/v1/chat/completions');
+      expect(viaApp).toMatchObject({
+        method: 'POST', outcome: 'success', statusCode: 200,
+        viaToken: { id: W.tokens.aliceCi, label: 'aliceCi' }, via: { kind: 'delegated', issuer: ISSUER },
+      });
+      // nothing of anybody else's
+      expect(JSON.stringify(res.body)).not.toContain(String(W.users.bob._id));
+    });
+
+    it('is a read of the center: open to whoever reads it, closed to everybody else', async () => {
+      expect((await call('GET', url('alice'), 'reader')).status).toBe(200);
+      expect((await call('GET', url('alice'), 'owner')).status).toBe(200);
+      expect((await call('GET', url('alice'), 'plain')).status).toBe(403);
+    });
+
+    it('answers 404 for somebody who does not exist or belongs to another workspace', async () => {
+      expect((await call('GET', `/api/iam/principals/user/${'0'.repeat(24)}/activity`, 'admin')).status).toBe(404);
+      expect((await call('GET', `/api/iam/principals/user/${String(OTHER.users.alice._id)}/activity`, 'admin')).status).toBe(404);
+    });
+
+    it('is quiet for somebody who did nothing', async () => {
+      const res = await call('GET', url('bob'), 'admin');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ usage: [], hasMoreEvents: false });
+    });
+  });
+
   describe('the members of a group', () => {
     const members = (id: string, query = '', who = 'admin', ws: Workspace = W) => call('GET', `/api/iam/principals/group/${id}/members${query}`, who, undefined, ws);
 
