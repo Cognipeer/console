@@ -27,7 +27,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { runWithTenantScope } from '@/lib/database';
+import { runWithTenantScope, type DatabaseProvider } from '@/lib/database';
 import type { CedarMessage } from './cedar';
 import { invalidateTenantPolicies } from './events';
 import { compileSpecToCedar, type PolicySpec } from './policySpec';
@@ -150,13 +150,16 @@ function fromDoc(data: Record<string, unknown>): IIamPolicy {
 
 // ── version counter ──────────────────────────────────────────────────────
 
+/** The policy version, read through a provider that is already in the tenant's scope. */
+export async function readPolicyVersion(db: Pick<DatabaseProvider, 'iamDocGet'>): Promise<number> {
+  const doc = await db.iamDocGet(META, VERSION_DOC);
+  const value = doc?.data?.[VERSION_FIELD];
+  return typeof value === 'number' ? value : 0;
+}
+
 /** Current policy version of the tenant (0 when the tenant never had a custom policy). */
 export async function getPolicyVersion(tenantDbName: string): Promise<number> {
-  return runWithTenantScope(tenantDbName, async (db) => {
-    const doc = await db.iamDocGet(META, VERSION_DOC);
-    const value = doc?.data?.[VERSION_FIELD];
-    return typeof value === 'number' ? value : 0;
-  });
+  return runWithTenantScope(tenantDbName, (db) => readPolicyVersion(db));
 }
 
 async function bumpPolicyVersion(tenantDbName: string): Promise<number> {
@@ -174,15 +177,23 @@ export interface ListPoliciesOptions {
   service?: string;
 }
 
-export async function listPolicies(
-  tenantDbName: string,
+/** The policies, read through a provider that is already in the tenant's scope. */
+export async function readPolicies(
+  db: Pick<DatabaseProvider, 'iamDocList'>,
   options: ListPoliciesOptions = {},
 ): Promise<IIamPolicy[]> {
-  const docs = await runWithTenantScope(tenantDbName, (db) => db.iamDocList(POLICIES, { limit: 10_000 }));
+  const docs = await db.iamDocList(POLICIES, { limit: 10_000 });
   return docs
     .map((d) => fromDoc(d.data))
     .filter((p) => options.enabled === undefined || p.enabled === options.enabled)
     .filter((p) => !options.service || p.service === options.service);
+}
+
+export async function listPolicies(
+  tenantDbName: string,
+  options: ListPoliciesOptions = {},
+): Promise<IIamPolicy[]> {
+  return runWithTenantScope(tenantDbName, (db) => readPolicies(db, options));
 }
 
 export async function getPolicy(tenantDbName: string, policyId: string): Promise<IIamPolicy | null> {

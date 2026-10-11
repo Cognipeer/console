@@ -237,7 +237,10 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
    * out unless `includeExternal` asks for them: every picker and every seat count means the workspace's own people.
    */
   listUsers(options?: { includeExternal?: boolean }): Promise<IUser[]>;
-  /** The `external` account that holds this identity (token issuer + subject), or null. */
+  /**
+   * The account that holds this identity (token issuer + subject), or null: an `external` account, or a member an
+   * earlier verified sign-in linked to it.
+   */
   findUserByExternalIdentity(issuer: string, subject: string): Promise<IUser | null>;
   /** How many `external` accounts the workspace has (the portal users' counter; they are not console seats). */
   countExternalUsers(): Promise<number>;

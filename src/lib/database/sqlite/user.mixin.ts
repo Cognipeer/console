@@ -63,7 +63,7 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       return row ? this.mapUserRow(row) : null;
     }
 
-    /** The `external` account that holds this identity (issuer + subject), or null. */
+    /** The account (external, or a linked member) that holds this identity (issuer + subject), or null. */
     async findUserByExternalIdentity(issuer: string, subject: string): Promise<IUser | null> {
       if (typeof issuer !== 'string' || typeof subject !== 'string' || !issuer || !subject) return null;
       const db = this.getTenantDb();

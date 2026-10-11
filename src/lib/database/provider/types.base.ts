@@ -174,8 +174,10 @@ export interface IUser {
   /** How an `external` account came to be (`portal-embed`); absent for members. */
   source?: string;
   /**
-   * An `external` account's identities in host applications' directories: the issuer of the signed token and the subject
-   * (`sub`) it names. Indexed, so the same person is found again at their next sign-in. Not the LDAP / SSO `externalId` above.
+   * The identities an account holds in host applications' directories: the issuer of the signed token and the subject
+   * (`sub`) it names. An `external` account is created with one; a member gets one (at most one per issuer) when a host's
+   * token with a VERIFIED email first matches them, so the same person is found again by identity at their next sign-in.
+   * Indexed. Not the LDAP / SSO `externalId` above.
    */
   externalIdentities?: IUserExternalIdentity[];
   invitedBy?: string;

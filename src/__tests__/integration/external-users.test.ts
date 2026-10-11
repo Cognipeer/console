@@ -3,10 +3,12 @@
  *
  *   storage       an external account is found by the identity (issuer + subject) its token names, never by email;
  *                 it stays out of `listUsers()` and the seat counts, and is counted on its own
- *   resolution    a member by email, an external account by identity, or a new external account when provisioning is on;
- *                 nobody found and provisioning off is a refusal; profile and mapped groups follow the token
- *   limits        a token never signs in as an owner or admin by default, never rewrites a member's profile, never fills a
- *                 group that grants access or a directory group, and never removes a membership an administrator made
+ *   resolution    the identity first; then a member by VERIFIED email (linking the identity to them), or a new external
+ *                 account when provisioning is on; nobody found and provisioning off is a refusal; the profile and mapped
+ *                 groups of an external account follow the token
+ *   limits        a token never signs in as an owner or admin by default - by role or through a group - never rewrites a
+ *                 member's profile or groups, never fills a group that grants access (a role, permissions, a project
+ *                 assignment, a custom policy) or a directory group, and never removes a membership an administrator made
  *   the directory the Authorization center lists them as their own kind, with the counter
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,11 +32,14 @@ import type { DatabaseProvider, IGroup, IUser } from '@/lib/database';
 import { MongoDBProvider } from '@/lib/database/mongodb.provider';
 import { listDirectory } from '@/lib/iam/directory';
 import { userKind } from '@/lib/iam/identity';
+import { resetGroupPolicyRefsForTests } from '@/lib/iam/policyGroupRefs';
+import { createPolicy, deletePolicy } from '@/lib/iam/store';
 import {
   countExternalUsers,
   EXTERNAL_MEMBERSHIP_SOURCE,
   EXTERNAL_PASSWORD_PLACEHOLDER,
   externalGroupProblem,
+  findExternalGroupProblem,
   isExternalUser,
   resolveExternalUser,
   type ExternalUserMapping,
@@ -55,6 +60,8 @@ describeForEachProvider('external users', (getDb) => {
   let admin: IUser;
   let disabledMember: IUser;
   let serviceAccount: IUser;
+  let groupAdmin: IUser;
+  let groupGranted: IUser;
   const groups: Record<string, IGroup> = {};
 
   const byIdentity: ExternalUserMapping = { matchBy: 'external_id', provision: true };
@@ -81,6 +88,8 @@ describeForEachProvider('external users', (getDb) => {
       admin = await mk('boss@intranet.example.com', 'Boss', { role: 'admin' });
       disabledMember = await mk('gone@intranet.example.com', 'Gone', { status: 'disabled' });
       serviceAccount = await mk('svc@intranet.example.com', 'Service', { canLogin: false });
+      groupAdmin = await mk('effadmin@intranet.example.com', 'Admin Through A Group');
+      groupGranted = await mk('granted@intranet.example.com', 'Has A Permission Group');
       const grp = (key: string, extra: Partial<IGroup> = {}) => db.createGroup({
         tenantId, name: key, createdBy: 't', source: 'local', ...extra,
       } as never).then((g) => { groups[key] = g; });
@@ -89,16 +98,23 @@ describeForEachProvider('external users', (getDb) => {
       await grp('privileged', { tenantRole: 'admin' } as never);
       await grp('granting', { servicePermissions: { agents: 'write' } } as never);
       await grp('directory', { source: 'ldap' } as never);
+      // a member whose admin power comes only from a group's workspace role, and one in a group that grants a service level
+      await db.addGroupMember({ tenantId, groupId: String(groups.privileged._id), userId: String(groupAdmin._id), role: 'member', source: 'local' });
+      await db.addGroupMember({ tenantId, groupId: String(groups.granting._id), userId: String(groupGranted._id), role: 'member', source: 'local' });
     });
   });
   afterAll(async () => {
     hoisted.getDatabase.mockReset();
   });
   beforeEach(async () => {
-    // every test starts with no external accounts, so counts mean something
+    // every test starts with no external accounts, so counts mean something, and with no member linked to an identity
+    resetGroupPolicyRefsForTests();
     await run(async () => {
       for (const user of await db.listUsers({ includeExternal: true })) {
         if (isExternalUser(user)) await db.deleteUser(String(user._id));
+      }
+      for (const fixture of [member, admin, disabledMember, serviceAccount, groupAdmin, groupGranted]) {
+        await db.updateUser(String(fixture._id), { externalIdentities: [] });
       }
     });
   });
@@ -234,13 +250,110 @@ describeForEachProvider('external users', (getDb) => {
     });
 
     it('matches a member by email, whatever the case, and leaves the member\'s profile alone', async () => {
-      const result = await resolve({ email: 'AYSE@intranet.example.com', name: 'Someone Else' }, { matchBy: 'email', provision: false });
-      expect(result).toMatchObject({ ok: true, created: false, matchedBy: 'email', profileSynced: false });
+      const result = await resolve({ email: 'AYSE@intranet.example.com', name: 'Someone Else', emailVerified: true }, { matchBy: 'email', provision: false });
+      expect(result).toMatchObject({ ok: true, created: false, matchedBy: 'email', linked: true, profileSynced: false });
       if (!result.ok) return;
       expect(String(result.user._id)).toBe(String(member._id));
       const stored = await run(() => db.findUserById(String(member._id)));
       expect(stored).toMatchObject({ name: 'Ayse Member' });
       expect(await countExternalUsers(tenantDbName)).toBe(0);
+    });
+
+    describe('by email, the host must vouch for the address', () => {
+      const identitiesOf = async (user: IUser) => (await run(() => db.findUserById(String(user._id))))?.externalIdentities ?? [];
+
+      it('never matches a member by an address the token does not say is verified', async () => {
+        for (const claims of [{ email: member.email }, { email: member.email, emailVerified: false }]) {
+          const result = await resolve({ subject: 'claimant', ...claims }, { matchBy: 'email', provision: false });
+          expect(result, JSON.stringify(claims)).toMatchObject({ ok: false, code: 'identity_not_found', reason: 'email_unverified' });
+        }
+        expect(await identitiesOf(member)).toEqual([]);
+        expect(await countExternalUsers(tenantDbName)).toBe(0);
+      });
+
+      it('with provisioning on, an unverified address makes an external account and never reaches the member', async () => {
+        const result = await resolve({ subject: 'claimant', email: member.email, name: 'Claimant' }, { matchBy: 'email', provision: true });
+        expect(result).toMatchObject({ ok: true, created: true, linked: false, matchedBy: 'external_id' });
+        if (!result.ok) return;
+        expect(String(result.user._id)).not.toBe(String(member._id));
+        expect(result.user).toMatchObject({ kind: 'external', canLogin: false });
+        expect(await identitiesOf(member)).toEqual([]);
+      });
+
+      it('matches a member by an address the administrator trusts the host with, and says so in the row it keeps', async () => {
+        const result = await resolve({ subject: 'trusted-sub', email: member.email }, { matchBy: 'email', provision: false, trustEmails: true });
+        expect(result).toMatchObject({ ok: true, matchedBy: 'email', linked: true });
+        // trusting the host changes nothing about the rules for owners and admins
+        expect(await resolve({ subject: 'trusted-admin', email: admin.email }, { matchBy: 'email', provision: false, trustEmails: true })).toMatchObject({ ok: false, code: 'identity_privileged' });
+      });
+
+      it('links the identity to the member at the first verified match, and the next sign-in is by identity', async () => {
+        const first = await resolve({ subject: 'ayse-1', email: member.email, emailVerified: true }, { matchBy: 'email', provision: false });
+        expect(first).toMatchObject({ ok: true, matchedBy: 'email', linked: true, created: false });
+        expect(await identitiesOf(member)).toEqual([{ issuer: ISSUER, subject: 'ayse-1' }]);
+        expect(String((await run(() => db.findUserByExternalIdentity(ISSUER, 'ayse-1')))?._id)).toBe(String(member._id));
+        // it stays a member: not counted as an external account, not given the external kind
+        expect(await countExternalUsers(tenantDbName)).toBe(0);
+        expect((await run(() => db.findUserById(String(member._id))))?.kind).toBeUndefined();
+
+        // later the address no longer decides anything: not a verified one, not another member's, not none
+        for (const claims of [{}, { email: 'someone.else@intranet.example.com', emailVerified: true }, { email: member.email }]) {
+          const again = await resolve({ subject: 'ayse-1', ...claims }, { matchBy: 'email', provision: false });
+          expect(again, JSON.stringify(claims)).toMatchObject({ ok: true, matchedBy: 'external_id', linked: false });
+          if (again.ok) expect(String(again.user._id)).toBe(String(member._id));
+        }
+      });
+
+      it('refuses another subject of the same issuer for a member who is already linked', async () => {
+        await resolve({ subject: 'ayse-1', email: member.email, emailVerified: true }, { matchBy: 'email', provision: false });
+        const taker = await resolve({ subject: 'attacker', email: member.email, emailVerified: true }, { matchBy: 'email', provision: false });
+        expect(taker).toMatchObject({ ok: false, code: 'identity_not_found', reason: 'identity_conflict' });
+        expect(await identitiesOf(member)).toEqual([{ issuer: ISSUER, subject: 'ayse-1' }]);
+        expect(await run(() => db.findUserByExternalIdentity(ISSUER, 'attacker'))).toBeNull();
+        // with provisioning on the refusal stands: a conflict is not "nobody found"
+        expect(await resolve({ subject: 'attacker', email: member.email, emailVerified: true }, { matchBy: 'email', provision: true })).toMatchObject({ ok: false, reason: 'identity_conflict' });
+        expect(await countExternalUsers(tenantDbName)).toBe(0);
+      });
+
+      it('lets a member be linked to one subject per issuer', async () => {
+        await resolve({ subject: 'ayse-1', email: member.email, emailVerified: true }, { matchBy: 'email', provision: false });
+        const other = await resolveExternalUser({
+          tenantDbName,
+          tenantId,
+          claims: { issuer: 'https://other-host.example.com', subject: 'ayse-9', email: member.email, emailVerified: true },
+          mapping: { matchBy: 'email', provision: false },
+        });
+        expect(other).toMatchObject({ ok: true, linked: true });
+        expect(await identitiesOf(member)).toEqual([
+          { issuer: ISSUER, subject: 'ayse-1' },
+          { issuer: 'https://other-host.example.com', subject: 'ayse-9' },
+        ]);
+      });
+
+      it('lets the identity win over the address: a subject that an external account holds stays that account', async () => {
+        const ext = await resolve({ subject: 'holder', email: 'holder@host.example.com' }, { matchBy: 'external_id', provision: true });
+        if (!ext.ok) throw new Error('expected an account');
+        const viaEmailMapping = await resolve({ subject: 'holder', email: member.email, emailVerified: true }, { matchBy: 'email', provision: false });
+        expect(viaEmailMapping).toMatchObject({ ok: true, matchedBy: 'external_id', created: false, linked: false });
+        if (viaEmailMapping.ok) expect(String(viaEmailMapping.user._id)).toBe(String(ext.user._id));
+        expect(await identitiesOf(member)).toEqual([]);
+      });
+
+      it('refuses to link when the identity was taken by another account in the meantime (where the store enforces it)', async () => {
+        if (isMongo()) return; // MongoDB enforces it with the unique index of the index manifest, which a fresh test collection may not have yet
+        const holder = await resolve({ subject: 'raced' }, { matchBy: 'external_id', provision: true });
+        if (!holder.ok) throw new Error('expected an account');
+        const real = db.findUserByExternalIdentity.bind(db);
+        let blind = 1; // the first lookup of the second request ran before the first request wrote anything
+        const spy = vi.spyOn(db, 'findUserByExternalIdentity').mockImplementation(async (issuer, subject) => (blind-- > 0 ? null : real(issuer, subject)));
+        try {
+          const result = await resolve({ subject: 'raced', email: member.email, emailVerified: true }, { matchBy: 'email', provision: false });
+          expect(result).toMatchObject({ ok: false, reason: 'identity_conflict' });
+          expect(await identitiesOf(member)).toEqual([]);
+        } finally {
+          spy.mockRestore();
+        }
+      });
     });
 
     it('by email, falls back to the identity and then to provisioning', async () => {
@@ -257,17 +370,18 @@ describeForEachProvider('external users', (getDb) => {
       const ext = await resolve({ subject: 'twin', email: member.email, name: 'Twin' });
       expect(ext).toMatchObject({ ok: true, created: true });
       // ...but an email match finds the member
-      const viaEmail = await resolve({ subject: 'other', email: member.email }, { matchBy: 'email', provision: false });
+      const viaEmail = await resolve({ subject: 'other', email: member.email, emailVerified: true }, { matchBy: 'email', provision: false });
       expect(viaEmail.ok && String(viaEmail.user._id)).toBe(String(member._id));
     });
 
     it('does not treat a service account as a person the host can vouch for', async () => {
-      const result = await resolve({ email: serviceAccount.email }, { matchBy: 'email', provision: false });
+      const result = await resolve({ email: serviceAccount.email, emailVerified: true }, { matchBy: 'email', provision: false });
       expect(result).toMatchObject({ ok: false, code: 'identity_not_found' });
+      expect(result.ok === false && result.reason).toBeUndefined();
     });
 
     it('refuses a disabled member and a disabled external account', async () => {
-      expect(await resolve({ email: disabledMember.email }, { matchBy: 'email' })).toMatchObject({ ok: false, code: 'account_disabled' });
+      expect(await resolve({ email: disabledMember.email, emailVerified: true }, { matchBy: 'email' })).toMatchObject({ ok: false, code: 'account_disabled' });
       const first = await resolve({ subject: 'soon-gone' });
       if (!first.ok) throw new Error('expected an account');
       await run(() => db.updateUser(String(first.user._id), { status: 'disabled' }));
@@ -275,8 +389,23 @@ describeForEachProvider('external users', (getDb) => {
     });
 
     it('does not sign in as an owner or admin unless asked to', async () => {
-      expect(await resolve({ email: admin.email }, { matchBy: 'email' })).toMatchObject({ ok: false, code: 'identity_privileged' });
-      expect(await resolve({ email: admin.email }, { matchBy: 'email', allowPrivilegedRoles: true })).toMatchObject({ ok: true, matchedBy: 'email' });
+      expect(await resolve({ email: admin.email, emailVerified: true }, { matchBy: 'email' })).toMatchObject({ ok: false, code: 'identity_privileged' });
+      expect(await resolve({ email: admin.email, emailVerified: true }, { matchBy: 'email', allowPrivilegedRoles: true })).toMatchObject({ ok: true, matchedBy: 'email' });
+    });
+
+    it('judges an owner or admin by the effective role: a workspace role from a group counts, a service permission does not', async () => {
+      const refused = await resolve({ subject: 'eff', email: groupAdmin.email, emailVerified: true }, { matchBy: 'email', provision: false });
+      expect(refused).toMatchObject({ ok: false, code: 'identity_privileged' });
+      // a refused account is left exactly as it was: no link
+      expect((await run(() => db.findUserById(String(groupAdmin._id))))?.externalIdentities ?? []).toEqual([]);
+      expect(await run(() => db.findUserByExternalIdentity(ISSUER, 'eff'))).toBeNull();
+      // the same refusal when the account is found by an identity it was linked to earlier (and its role changed since)
+      await run(() => db.updateUser(String(groupAdmin._id), { externalIdentities: [{ issuer: ISSUER, subject: 'eff-linked' }] }));
+      expect(await resolve({ subject: 'eff-linked' }, { matchBy: 'external_id', provision: false })).toMatchObject({ ok: false, code: 'identity_privileged' });
+      // allowed on purpose
+      expect(await resolve({ subject: 'eff-linked' }, { matchBy: 'external_id', provision: false, allowPrivilegedRoles: true })).toMatchObject({ ok: true, matchedBy: 'external_id' });
+      // a group that only grants a service level is not a workspace role
+      expect(await resolve({ subject: 'granted', email: groupGranted.email, emailVerified: true }, { matchBy: 'email', provision: false })).toMatchObject({ ok: true, matchedBy: 'email' });
     });
 
     it('refuses claims that are not usable', async () => {
@@ -370,14 +499,71 @@ describeForEachProvider('external users', (getDb) => {
       expect(first.groups).toEqual({ added: [], removed: [], skipped: [] });
     });
 
-    it('fills the groups of a member found by email too', async () => {
-      const result = await resolve({ email: member.email, groups: ['sales'] }, { matchBy: 'email', groupMap: map() });
+    it('leaves the groups of a member alone: they are the administrators\'', async () => {
+      const result = await resolve({ email: member.email, emailVerified: true, groups: ['sales', 'support'] }, { matchBy: 'email', groupMap: map() });
       expect(result).toMatchObject({ ok: true, matchedBy: 'email' });
-      expect(result.ok && result.groups.added).toEqual([String(groups.plain._id)]);
+      if (!result.ok) return;
+      expect(result.groups.added).toEqual([]);
+      expect(result.groups.removed).toEqual([]);
+      expect(result.groups.skipped).toEqual(expect.arrayContaining([
+        { groupId: String(groups.plain._id), reason: 'member_account' },
+        { groupId: String(groups['plain-two']._id), reason: 'member_account' },
+      ]));
+      expect(await memberships(String(member._id))).toEqual([]);
+      // and a membership an administrator made is neither touched nor reported as the host's
+      await run(() => db.addGroupMember({ tenantId, groupId: String(groups.plain._id), userId: String(member._id), role: 'member', source: 'local' }));
+      const again = await resolve({ email: member.email, emailVerified: true, groups: [] }, { matchBy: 'email', groupMap: map() });
+      expect(again.ok && again.groups.removed).toEqual([]);
+      expect(await memberships(String(member._id))).toEqual([[String(groups.plain._id), 'local']]);
       await run(() => db.removeGroupMember(String(groups.plain._id), String(member._id)));
     });
 
-    it('classifies groups', () => {
+    it('does not fill a group that is assigned to a project, nor one a custom policy names', async () => {
+      const mk = (name: string) => run(() => db.createGroup({ tenantId, name: `${name}-${Math.random().toString(36).slice(2, 6)}`, createdBy: 't', source: 'local' } as never));
+      const projected = await mk('projected');
+      const named = await mk('named');
+      const policyId = `names-${Math.random().toString(36).slice(2, 8)}`;
+      await run(async () => {
+        await db.upsertGroupProject({ tenantId, groupId: String(projected._id), projectId: 'project-1', role: 'member' });
+        await createPolicy(tenantDbName, { policyId, name: policyId, cedar: `forbid(principal in Group::"${String(named._id)}", action == Action::"agents.write", resource is Service);` }, 'u');
+      });
+      try {
+        const map2 = { sales: String(groups.plain._id), projected: String(projected._id), named: String(named._id) };
+        const result = await resolve({ groups: ['sales', 'projected', 'named'] }, { groupMap: map2 });
+        if (!result.ok) throw new Error('expected an account');
+        expect(result.groups.added).toEqual([String(groups.plain._id)]);
+        expect(result.groups.skipped).toEqual(expect.arrayContaining([
+          { groupId: String(projected._id), reason: 'project_group' },
+          { groupId: String(named._id), reason: 'policy_group' },
+        ]));
+        expect(await memberships(String(result.user._id))).toEqual([[String(groups.plain._id), EXTERNAL_MEMBERSHIP_SOURCE]]);
+        await run(async () => {
+          expect(await findExternalGroupProblem(db, projected)).toBe('project_group');
+          expect(await findExternalGroupProblem(db, named)).toBe('policy_group');
+          expect(await findExternalGroupProblem(db, groups.plain)).toBeNull();
+          expect(await findExternalGroupProblem(db, groups.privileged)).toBe('privileged_group');
+          expect(await findExternalGroupProblem(db, groups.directory)).toBe('directory_group');
+        });
+      } finally {
+        await deletePolicy(tenantDbName, policyId);
+      }
+      // with the policy gone the group may be filled again (the answer follows the policy version)
+      await run(async () => { expect(await findExternalGroupProblem(db, named)).toBeNull(); });
+    });
+
+    it('takes the host\'s people out of a group that started to grant something after they were put there', async () => {
+      const grp = await run(() => db.createGroup({ tenantId, name: `later-${Math.random().toString(36).slice(2, 6)}`, createdBy: 't', source: 'local' } as never));
+      const map3 = { later: String(grp._id) };
+      const first = await resolve({ subject: 'later-person', groups: ['later'] }, { groupMap: map3 });
+      expect(first.ok && first.groups.added).toEqual([String(grp._id)]);
+      if (!first.ok) return;
+      await run(() => db.upsertGroupProject({ tenantId, groupId: String(grp._id), projectId: 'project-2', role: 'project_admin' }));
+      const second = await resolve({ subject: 'later-person', groups: ['later'] }, { groupMap: map3 });
+      expect(second.ok && second.groups).toMatchObject({ added: [], removed: [String(grp._id)], skipped: [{ groupId: String(grp._id), reason: 'project_group' }] });
+      expect(await memberships(String(first.user._id))).toEqual([]);
+    });
+
+    it('classifies groups by their own document', () => {
       expect(externalGroupProblem({})).toBeNull();
       expect(externalGroupProblem({ source: 'local' })).toBeNull();
       expect(externalGroupProblem({ tenantRole: 'admin' })).toBe('privileged_group');
