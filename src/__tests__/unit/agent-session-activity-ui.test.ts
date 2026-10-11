@@ -94,6 +94,15 @@ describe('the status in the side panel', () => {
     expect(panel('idle')).toContain('>Idle<');
   });
 
+  it('says it waits for an approver when the viewer may not answer what it waits for', () => {
+    const html = render(h(SessionSidePanel, {
+      agentId: 'a1', sessionId: 's1', status: 'waiting', waitingElsewhere: true, activityKey: '0', agentName: 'Agent', agentKey: 'agent',
+      pinnedVersion: '', messages: [], onGoToTurn: noop,
+    }));
+    expect(html).toContain('Waiting for an approver');
+    expect(html).not.toContain('Waiting for you');
+  });
+
   it('adds how the last run ended to a settled session only', () => {
     expect(panel('idle', 'limit')).toContain('stopped by a limit');
     expect(panel('idle', 'end_turn')).not.toContain('stopped by');
@@ -116,6 +125,15 @@ describe('SessionStatusBadge', () => {
     expect(render(h(SessionStatusBadge, { status: 'budget_paused' }))).toContain('Budget reached');
     expect(render(h(SessionStatusBadge, { status: 'idle' }))).toContain('Idle');
     expect(render(h(SessionStatusBadge, { status: 'waiting' }), 'tr')).toContain('Sizi bekliyor');
+  });
+
+  it('says a session waits for an approver - not for the viewer - when the server says the viewer may not answer', () => {
+    const html = render(h(SessionStatusBadge, { status: 'waiting', waitingElsewhere: true }));
+    expect(html).toContain('Waiting for an approver');
+    expect(html).not.toContain('Waiting for you');
+    expect(render(h(SessionStatusBadge, { status: 'waiting', waitingElsewhere: true }), 'tr')).toContain('Onaylayıcı bekliyor');
+    // only a waiting session is worded this way
+    expect(render(h(SessionStatusBadge, { status: 'idle', waitingElsewhere: true }))).toContain('Idle');
   });
 });
 

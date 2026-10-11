@@ -390,10 +390,11 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
     return null;
   }
   // Continuing a session somebody else started is acting on it: the owner always may, anybody else needs
-  // `agent.session_manage_others`. Asked first, so a refusal does not reveal whether the session is read-only.
+  // `agent.session_manage_others` and `agent.session_view_others` (the reply is built from what the session holds).
+  // Asked first, so a refusal does not reveal whether the session is read-only.
   if (typeof body.conversationId === 'string') {
     const loaded = await loadSessionForPrincipal(request, body.conversationId, {
-      need: 'manage',
+      need: 'continue',
       agentKey: agent.key,
       agent,
       projectId,
@@ -1575,7 +1576,8 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/agents/:agentId/sessions/:sessionId/continue', withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
-      scoped = await requireScopedSession(request, reply, { need: 'manage' });
+      // A turn in the session: its owner always may; anybody else must be allowed to change AND to view it.
+      scoped = await requireScopedSession(request, reply, { need: 'continue' });
     } catch (error) {
       return sendRouteError(reply, error, 'Continue session error', 'Failed to continue the session');
     }

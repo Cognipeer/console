@@ -49,7 +49,7 @@ Token scope and the project's own limits still win over any allow policy. A refu
 | --- | --- |
 | Allow or deny a tool call, edit its arguments, *remember for this session* | `agent.approve` |
 | End somebody's open **approval** as a side effect: cancelling a run that is paused on it, or sending a new message to an agent that cancels the pending request (*A new message while waiting*) | `agent.approve`: ending an approval is answering it with "no" |
-| Answer a **question** | not an approval: it follows the session. The person who started the session may always answer; anybody else needs *Agent · Act on others' sessions* (`agent.session_manage_others`) |
+| Answer a **question** | not an approval: it follows the session. The person who started the session may always answer; anybody else needs *Agent · Act on others' sessions* (`agent.session_manage_others`) and *Agent · View others' sessions* (`agent.session_view_others`) |
 | The timeout sweep and the continuation that follows it | the system's, outside the permission engine; recorded in the audit log as `system` (`system:timeout`) |
 
 Restricting approvals therefore never stops people from answering their own sessions' questions.

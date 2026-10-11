@@ -348,9 +348,10 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
           const conversation = await getConversationById(auth.tenantDbName, body.conversation_id);
           if (conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId) {
             // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
-            // `agent.session_manage_others` - as for the Responses route, whichever service gate let the token in.
+            // `agent.session_manage_others` and `agent.session_view_others` - as for the Responses route, whichever
+            // service gate let the token in.
             const access = await decideSessionAccess(request, conversation, {
-              need: 'manage',
+              need: 'continue',
               agent,
               actor: { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') },
             });

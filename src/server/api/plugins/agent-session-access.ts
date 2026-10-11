@@ -15,6 +15,13 @@
  * policy. Sessions that no person started (`a2a-public`, `system:*`, `evaluation`,
  * `redteam`) belong to nobody in particular: they are always someone else's.
  *
+ *   need 'continue' a new turn in the session: `agent.session_manage_others` AND
+ *                   `agent.session_view_others`. The turn is answered by a model that has
+ *                   read everything the session holds, and the answer goes to the sender,
+ *                   so a rule that stops somebody viewing a session also stops them
+ *                   talking into it. The other changes (budget, files, delete) hand nothing
+ *                   of the transcript back and stay a matter of `manage` alone.
+ *
  * Before this module every route carried its own copy of the project / agent check
  * (about seventeen of them) and none looked at the owner. The loader does both, once:
  * a session of another project or agent answers `not_found`, so an id does not
@@ -59,7 +66,10 @@ import {
 
 const logger = createLogger('api:agent-session-access');
 
-export type SessionNeed = 'view' | 'manage';
+/** What the engine is asked about a session somebody else started (one action each). */
+export type SessionAction = 'view' | 'manage';
+/** What a request needs: one action, or (`continue`, a new turn) both of them - see the module comment. */
+export type SessionNeed = SessionAction | 'continue';
 
 const ACTION_OF_NEED = {
   view: 'agent.session_view_others',
@@ -69,7 +79,7 @@ const ACTION_OF_NEED = {
 const LEVEL_OF_NEED = { view: 'read', manage: 'write' } as const;
 
 /** The 403 sentence for a session somebody else started. */
-export const SESSION_FORBIDDEN_MESSAGE: Readonly<Record<SessionNeed, string>> = Object.freeze({
+export const SESSION_FORBIDDEN_MESSAGE: Readonly<Record<SessionAction, string>> = Object.freeze({
   view: 'This session was started by someone else, and you are not allowed to view it.',
   manage: 'This session was started by someone else, and you are not allowed to change it.',
 });
@@ -101,8 +111,8 @@ export interface LoadSessionOptions {
 /** Why a session could not be handed to the caller. */
 export type SessionRefusal =
   | { ok: false; status: 404; reason: 'not_found' }
-  | { ok: false; status: 403; reason: 'forbidden'; need: SessionNeed; decisionId?: string }
-  | { ok: false; status: 503; reason: 'unavailable'; need: SessionNeed; decisionId?: string };
+  | { ok: false; status: 403; reason: 'forbidden'; need: SessionAction; decisionId?: string }
+  | { ok: false; status: 503; reason: 'unavailable'; need: SessionAction; decisionId?: string };
 
 export type SessionGrant = {
   ok: true;
@@ -121,7 +131,7 @@ function lookupFailed(need: SessionNeed, conversationId: string | null | undefin
     conversationId,
     error: error instanceof Error ? error.message : String(error),
   });
-  return { ok: false, status: 503, reason: 'unavailable', need };
+  return { ok: false, status: 503, reason: 'unavailable', need: need === 'view' ? 'view' : 'manage' };
 }
 
 /** Who the request acts for and in which project: a token (its owner, its project) or the signed-in session. */
@@ -145,7 +155,7 @@ async function agentIdOf(
 }
 
 /** Runs one engine question; an outage (the handler-level 503) is an answer here, not an exception. */
-async function ask<T>(need: SessionNeed, run: () => Promise<T>): Promise<T | { unavailable: true; decisionId?: string; need: SessionNeed }> {
+async function ask<T>(need: SessionAction, run: () => Promise<T>): Promise<T | { unavailable: true; decisionId?: string; need: SessionAction }> {
   try {
     return await run();
   } catch (error) {
@@ -169,22 +179,35 @@ export async function decideSessionAccess(
   // The person who started it needs nothing beyond the route's own service check.
   if (actor.userId && owners.some((id) => id === actor.userId)) return { ok: true, userId: actor.userId, owner: true };
 
-  const answer = await ask(options.need, async () => authorizeResourceForRequest(request, {
-    action: ACTION_OF_NEED[options.need],
-    resource: agentSessionResource({
-      id: await agentIdOf(actor.tenantDbName, conversation, options.agent),
-      key: conversation.agentKey,
+  const agentId = await agentIdOf(actor.tenantDbName, conversation, options.agent);
+  /** One engine question; null when the answer is yes. */
+  const decide = async (action: SessionAction): Promise<Exclude<SessionDecision, { ok: true }> | null> => {
+    const answer = await ask(action, async () => authorizeResourceForRequest(request, {
+      action: ACTION_OF_NEED[action],
+      resource: agentSessionResource({
+        id: agentId,
+        key: conversation.agentKey,
+        projectId: conversation.projectId,
+        ownerIds: owners,
+      }),
+      subject: { resourceName: conversation.agentKey },
+      // The session is in the request's project (the caller checked): decide in exactly that one.
       projectId: conversation.projectId,
-      ownerIds: owners,
-    }),
-    subject: { resourceName: conversation.agentKey },
-    // The session is in the request's project (the caller checked): decide in exactly that one.
-    projectId: conversation.projectId,
-    ...(options.quiet ? { quiet: true } : {}),
-  }));
-  if ('unavailable' in answer) return { ok: false, status: 503, reason: 'unavailable', need: options.need, ...(answer.decisionId ? { decisionId: answer.decisionId } : {}) };
-  if (!answer.allowed) {
-    return { ok: false, status: 403, reason: 'forbidden', need: options.need, ...(answer.decisionId ? { decisionId: answer.decisionId } : {}) };
+      ...(options.quiet ? { quiet: true } : {}),
+    }));
+    if ('unavailable' in answer) return { ok: false, status: 503, reason: 'unavailable', need: action, ...(answer.decisionId ? { decisionId: answer.decisionId } : {}) };
+    if (!answer.allowed) {
+      return { ok: false, status: 403, reason: 'forbidden', need: action, ...(answer.decisionId ? { decisionId: answer.decisionId } : {}) };
+    }
+    return null;
+  };
+
+  const refused = await decide(options.need === 'view' ? 'view' : 'manage');
+  if (refused) return refused;
+  // A new turn is also read back to the sender: somebody a rule stops from viewing the session is stopped here, as such.
+  if (options.need === 'continue') {
+    const mayNotView = await decide('view');
+    if (mayNotView) return mayNotView;
   }
   return { ok: true, userId: actor.userId, owner: false };
 }

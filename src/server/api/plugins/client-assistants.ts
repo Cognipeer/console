@@ -871,7 +871,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(request, ctx, rawId, 'manage');
+      // A run is a new turn in the session: changing it and viewing it.
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'continue');
       if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const body = readJsonBody<Record<string, unknown>>(request);

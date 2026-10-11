@@ -48,6 +48,8 @@ export interface SessionSidePanelProps {
     sessionId: string;
     /** What the session is doing — running, waiting for a person, paused on its budget, or idle. */
     status: SessionStatusKind;
+    /** The session waits for a person and the server says the viewer may not answer it (the status then says so). */
+    waitingElsewhere?: boolean;
     /** Why the last turn stopped (the session's `stopReason`). */
     stopReason?: string;
     /** Changes whenever the session may have logged something new — refreshes the Activity tab. */
@@ -87,6 +89,7 @@ export default function SessionSidePanel({
     agentId,
     sessionId,
     status,
+    waitingElsewhere = false,
     stopReason,
     activityKey,
     createdAt,
@@ -106,10 +109,13 @@ export default function SessionSidePanel({
     const ta = useTranslations('agents.activity');
     const tf = useTranslations('agents.attachments');
     const tp = useTranslations('agents.sessionPage');
+    const tsa = useTranslations('agents.sessionAccess');
     const [tab, setTab] = useState<string | null>('session');
     const statusLabel = status === 'running'
         ? th('running')
-        : status === 'waiting' ? th('waitingBadge') : status === 'budget_paused' ? tb('pausedBadge') : th('idle');
+        : status === 'waiting'
+            ? (waitingElsewhere ? tsa('waitingElsewhereBadge') : th('waitingBadge'))
+            : status === 'budget_paused' ? tb('pausedBadge') : th('idle');
     // A settled session says how its last run ended; a running / waiting one is already saying more.
     const stopBadge = status === 'idle' ? stopReasonBadge(stopReason) : null;
     const totals = useMemo(() => summariseSession(messages), [messages]);

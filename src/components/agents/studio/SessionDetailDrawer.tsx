@@ -96,6 +96,7 @@ export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFil
 
 export default function SessionDetailDrawer({ agentId, session, onClose, onContinue, onResolved }: SessionDetailDrawerProps) {
     const th = useTranslations('agents.hitl');
+    const tsa = useTranslations('agents.sessionAccess');
     const ta = useTranslations('agents.activity');
     const [record, setRecord] = useState<SessionRecord | null>(null);
     // What the server says the viewer may do with the open requests (its own rule, not guessed from the agent's setting).
@@ -241,7 +242,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         const badges = (
             <Group justify="space-between" wrap="nowrap">
                 <Group gap="xs" wrap="wrap">
-                    <SessionStatusBadge status={status} size="xs" />
+                    <SessionStatusBadge status={status} size="xs" waitingElsewhere={Boolean(blocked)} />
                     {stopBadge ? <Badge size="xs" variant="light" color={stopBadge.color}>{ta(stopBadge.key)}</Badge> : null}
                     <SessionSourceBadge source={session.source} />
                     <span className="ds-badge ds-badge-info">{session.turns ?? 0} turn{session.turns === 1 ? '' : 's'}</span>
@@ -272,8 +273,8 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             <Stack gap="xs">
                 {notices}
                 {openActions.length > 0 ? (
-                    <Alert color="orange" variant="light" icon={<IconHandStop size={16} />} title={th('waitingBadge')}>
-                        <Text size="xs">{th('waitingTooltip')}</Text>
+                    <Alert color="orange" variant="light" icon={<IconHandStop size={16} />} title={blocked ? tsa('waitingElsewhereBadge') : th('waitingBadge')}>
+                        <Text size="xs">{blocked ? tsa('waitingElsewhereTooltip') : th('waitingTooltip')}</Text>
                         <PendingActionList
                             actions={openActions}
                             busy={Boolean(resolvingId)}
@@ -312,7 +313,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             properties,
             ...(record ? { raw: { request: record.metadata ?? {}, response: messages } } : {}),
         };
-    }, [session, record, files, error, onContinue, agentId, serverActions, th, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
+    }, [session, record, files, error, onContinue, agentId, serverActions, th, tsa, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
 
     return (
         <LlmRequestDetailModal

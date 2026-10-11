@@ -946,7 +946,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             title={
                 <>
                     <span className="detail-title">{session?.title || 'Session'}</span>
-                    <SessionStatusBadge status={status} />
+                    <SessionStatusBadge status={status} waitingElsewhere={Boolean(blockedReason)} />
                     <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
                         {agent.name}
                     </Badge>
@@ -1311,6 +1311,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                         agentId={agentId}
                         sessionId={sessionId}
                         status={status}
+                        waitingElsewhere={Boolean(blockedReason)}
                         stopReason={session?.stopReason}
                         activityKey={`${session?.lastEventSeq ?? 0}:${session?.runtimeStatus ?? ''}:${messages.length}`}
                         createdAt={session?.createdAt}

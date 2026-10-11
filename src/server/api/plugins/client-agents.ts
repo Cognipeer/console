@@ -212,10 +212,11 @@ function createResponsesHandler(usePublished: boolean) {
             : { error: 'previous_response_id does not match a valid conversation' });
         }
         // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
-        // `agent.session_manage_others`. Whichever route the request came in on (this one is `agents`, the
-        // OpenAI-shaped `/responses` is `models`), a token only reaches a session through this check.
+        // `agent.session_manage_others` and `agent.session_view_others` (the answer is built from what the session
+        // holds). Whichever route the request came in on (this one is `agents`, the OpenAI-shaped `/responses` is
+        // `models`), a token only reaches a session through this check.
         const access = await decideSessionAccess(request, conversation, {
-          need: 'manage',
+          need: 'continue',
           agent,
           actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
         });

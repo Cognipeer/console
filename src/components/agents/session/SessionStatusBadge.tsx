@@ -14,11 +14,17 @@ import type { SessionStatusKind } from './sessionActivityUi';
 export interface SessionStatusBadgeProps {
     status: SessionStatusKind;
     size?: 'xs' | 'sm';
+    /**
+     * The session waits for a person but the server says THIS viewer may not answer it: the badge then says it waits
+     * for an approver instead of claiming it waits for the viewer.
+     */
+    waitingElsewhere?: boolean;
 }
 
-export default function SessionStatusBadge({ status, size = 'sm' }: SessionStatusBadgeProps) {
+export default function SessionStatusBadge({ status, size = 'sm', waitingElsewhere = false }: SessionStatusBadgeProps) {
     const t = useTranslations('agents.hitl');
     const tb = useTranslations('agents.budget');
+    const ts = useTranslations('agents.sessionAccess');
     const icon = size === 'xs' ? 10 : 11;
 
     if (status === 'running') {
@@ -26,9 +32,9 @@ export default function SessionStatusBadge({ status, size = 'sm' }: SessionStatu
     }
     if (status === 'waiting') {
         return (
-            <Tooltip label={t('waitingTooltip')} withArrow>
+            <Tooltip label={waitingElsewhere ? ts('waitingElsewhereTooltip') : t('waitingTooltip')} withArrow>
                 <Badge size={size} variant="light" color="orange" leftSection={<IconHandStop size={icon} />}>
-                    {t('waitingBadge')}
+                    {waitingElsewhere ? ts('waitingElsewhereBadge') : t('waitingBadge')}
                 </Badge>
             </Tooltip>
         );

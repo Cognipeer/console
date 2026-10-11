@@ -25,7 +25,8 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   is `503 authorization_unavailable` with nothing recorded. The session page and the Sessions list show the server's
   verdict (`canResolve`, `resolveBlockedReason`) instead of guessing from a role.
 - Two more agent actions decide what somebody else may do with a session another person started:
-  `agent.session_view_others` (Read) and `agent.session_manage_others` (Write). By default every holder of
+  `agent.session_view_others` (Read) and `agent.session_manage_others` (Write); continuing a session (a message, a
+  run, an answer to its question) asks both. By default every holder of
   `agents` Read / Write has them; a role that holds Tracing or Files but no `agents` level does not reach other
   people's agent sessions through those screens (earlier releases did not look at who started a session there). The
   Access check takes the session's owner and the agent's setting as inputs.

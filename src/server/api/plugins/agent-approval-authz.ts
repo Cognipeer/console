@@ -102,10 +102,13 @@ async function askToApprove(request: FastifyRequest, question: ApprovalQuestion)
   }
 }
 
-/** Answering a QUESTION is acting on the session: its owner always may, anybody else needs `agent.session_manage_others`. */
+/**
+ * Answering a QUESTION is acting on the session: its owner always may, anybody else needs
+ * `agent.session_manage_others` - and `agent.session_view_others`, since the run goes on and its reply comes back to the answerer.
+ */
 async function askToAnswer(request: FastifyRequest, question: ApprovalQuestion): Promise<ApprovalVerdict> {
   const decision = await decideSessionAccess(request, question.conversation, {
-    need: 'manage',
+    need: 'continue',
     agent: question.agent,
     alsoOwnedBy: question.raisedBy,
     ...(question.quiet ? { quiet: true } : {}),
@@ -139,7 +142,7 @@ export type AnswerBlockedReason =
   | 'approvers_admin'
   /** Every member of the project may approve, and the caller is not one. */
   | 'approvers_member'
-  /** A question: only the session's owner, and the people allowed to act on others' sessions, may answer it. */
+  /** A question: only the session's owner, and the people allowed to view and act on others' sessions, may answer it. */
   | 'session_owner'
   /** A rule of the workspace stops the caller. */
   | 'policy'
