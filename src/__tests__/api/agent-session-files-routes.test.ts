@@ -6,6 +6,8 @@
  * `integration/agent-session-files.test.ts`; faked here.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/services/apiTokenAuth', () => {
@@ -565,6 +567,38 @@ describe('client Responses: input_file / input_image', () => {
     }
     expect(createConversation).not.toHaveBeenCalled();
     await r.close();
+  });
+
+  it('F2-03: file parts to an agent that takes none are refused loudly — nothing is stored or run — while the same agent still answers text (earlier releases ran the text and ignored the parts)', async () => {
+    const r = await responses();
+    mockFn(getAgentByKey).mockResolvedValue({ ...AGENT, config: { modelKey: 'm', attachments: { enabled: false, bucketKey: 'docs' } } });
+    const parts: Array<Record<string, unknown>> = [
+      { type: 'input_image', image_url: 'data:image/png;base64,QUJD' },
+      { type: 'input_image', image_url: 'https://example.com/cat.png' },
+      { type: 'input_file', file_data: 'QUJD', filename: 'a.txt' },
+      { type: 'input_file', file_id: 'f1' },
+    ];
+    for (const part of parts) {
+      const res = await post(r, { model: 'field-ops', input: [{ role: 'user', content: [{ type: 'input_text', text: 'describe it' }, part] }] });
+      expect(res.statusCode, JSON.stringify(part)).toBe(403);
+      expect(parseJsonBody<{ error: { code: string; message: string } }>(res.body).error).toMatchObject({
+        code: 'attachments_disabled', message: 'This agent does not take attachments.',
+      });
+    }
+    expect(createConversation).not.toHaveBeenCalled();
+    expect(storeResponseInputFiles).not.toHaveBeenCalled();
+    expect(runSyncAgentTurn).not.toHaveBeenCalled();
+
+    // A request without file parts is untouched by the change.
+    const text = await post(r, { model: 'field-ops', input: [{ role: 'user', content: [{ type: 'input_text', text: 'just text' }] }] });
+    expect(text.statusCode).toBe(200);
+    expect(mockFn(runSyncAgentTurn).mock.calls[0]![0].request).toMatchObject({ userMessage: 'just text' });
+    await r.close();
+
+    // The change is written down where clients look for it.
+    const root = process.cwd();
+    expect(readFileSync(join(root, 'docs/guide/session-files.md'), 'utf8')).toContain('now answers a request that carries such a part with `403 attachments_disabled`');
+    expect(readFileSync(join(root, 'docs/public/openapi.yaml'), 'utf8')).toContain('earlier releases ignored those parts and ran the text');
   });
 
   it('a file_id needs the session it was uploaded to (session_id, conversation or previous_response_id)', async () => {

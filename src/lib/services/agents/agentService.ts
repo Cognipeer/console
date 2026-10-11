@@ -126,6 +126,7 @@ import {
     NO_ATTACHMENTS,
     type AssembledAttachments,
 } from './sessionFiles';
+import { neutralizeAttachmentMarker } from './sessionAttachmentText';
 import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
 import {
     agentSpendSettler,
@@ -1328,6 +1329,7 @@ export const __testables = {
     buildAgentGuardrailPlugins,
     MessageRewriteLedger,
     persistedUserTurn,
+    firstTurnTitle,
 };
 
 /**
@@ -3618,11 +3620,22 @@ async function earlierAttachments(input: {
     return { supportsVision, carryRecentImages, ...(availableFileIds ? { availableFileIds } : {}) };
 }
 
-/** The first exchange of a "New conversation" names it after what was asked. */
-function firstTurnTitle(conversation: IAgentConversation, messageCount: number, userText: string): string | undefined {
-    return conversation.title === 'New conversation' && messageCount <= 2
-        ? userText.substring(0, 80)
-        : conversation.title;
+/**
+ * The first exchange of a "New conversation" names it after what was asked — or,
+ * when the message is files alone, after the first file. A message with neither
+ * leaves the title as it was (an empty title would read as a broken session).
+ */
+function firstTurnTitle(
+    conversation: Pick<IAgentConversation, 'title'>,
+    messageCount: number,
+    userText: string,
+    attachments?: ReadonlyArray<{ name: string }>,
+): string | undefined {
+    const untitled = !conversation.title || conversation.title === 'New conversation';
+    if (!untitled || messageCount > 2) return conversation.title;
+    if (userText.trim()) return userText.substring(0, 80);
+    const fileName = attachments?.find((file) => file.name.trim())?.name.trim();
+    return fileName ? fileName.substring(0, 80) : conversation.title;
 }
 
 /**
@@ -3732,8 +3745,11 @@ async function runAgentChatTurn(
         projectId,
         agentKey,
         conversationId,
-        userMessage,
     } = request;
+    // The block that separates the person's words from what the turn adds for
+    // attached files must not be something the person can type: the transcript
+    // is cut at it (`persistedUserTurn`).
+    const userMessage = neutralizeAttachmentMarker(request.userMessage);
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -4104,7 +4120,7 @@ async function runAgentChatTurn(
         if (!supersededByDeadlineOrCancel) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
-                title: firstTurnTitle(conversation, updatedMessages.length, persistedUserMessage),
+                title: firstTurnTitle(conversation, updatedMessages.length, persistedUserMessage, attached.attachments),
             });
             // The turn's cost joins the session total; added, not set, so a turn
             // that overlaps this one cannot erase it (see `addSessionTurnSpend`).
@@ -4844,9 +4860,7 @@ async function persistSessionTurn(
             // First exchange in a freshly-created "New session" names itself
             // after what was actually asked, same convention the live chat
             // path already uses for its conversation titles.
-            title: (!conversation.title || conversation.title === 'New conversation') && messages.length <= 2
-                ? userMessage.substring(0, 80)
-                : conversation.title,
+            title: firstTurnTitle(conversation, messages.length, userMessage, attachments),
         });
         return messages.length;
     } catch (error) {

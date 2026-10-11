@@ -18,6 +18,7 @@ const hoisted = vi.hoisted(() => ({
     findFileBucketByKey: vi.fn(),
     findProviderByKey: vi.fn(),
     deleteFileRecord: vi.fn(),
+    findFileRecordById: vi.fn(),
   },
   uploadFile: vi.fn(),
   deleteFile: vi.fn(),
@@ -54,7 +55,9 @@ import {
   attachmentsAvailability,
   cleanupExpiredSessionFiles,
   buildUserTurnContent,
+  conversationFileFacts,
   contentDispositionHeader,
+  createSessionImageSource,
   estimateBase64Size,
   estimateTokens,
   findUnsentSessionFiles,
@@ -62,6 +65,7 @@ import {
   isMimeAllowed,
   pageCount,
   pageText,
+  readSessionImage,
   resolveAttachmentsConfig,
   resolveSessionFilesBucket,
   resolveUploadMimeType,
@@ -638,5 +642,105 @@ describe('approvals and config checks', () => {
     expect(shape({ folder: '../x' }).errors.map((e) => e.field)).toEqual(['attachments.folder']);
     expect(shape({ folder: 'a b' }).errors.map((e) => e.field)).toEqual(['attachments.folder']);
     expect(shape({ enabled: 'yes', attachNewUploads: 1 }).errors.map((e) => e.field)).toEqual(['attachments.enabled', 'attachments.attachNewUploads']);
+  });
+});
+
+
+describe('pictures in a format the model cannot be shown (F2-05)', () => {
+  const cfg = resolveAttachmentsConfig({ enabled: true, bucketKey: 'docs' });
+  const picture = (id: string, contentType: string, name = `${id}.bin`) => fileRecord(id, {
+    name, contentType, markdownStatus: 'skipped', markdownKey: undefined,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    hoisted.downloads.clear();
+  });
+
+  it('tiff, svg and heic are ordinary files without text: no image part, a note that says why, and a count of their own', async () => {
+    const records = [picture('t', 'image/tiff', 'scan.tiff'), picture('s', 'image/svg+xml', 'logo.svg'), picture('h', 'image/heic', 'shot.heic')];
+    const out = await assembleTurnAttachments({ scope, records, cfg, supportsVision: true });
+
+    expect(out.images).toEqual([]);
+    expect(out.block).toContain('The person attached 3 files: 3 images in a format the model does not support.');
+    expect(out.block).toContain('[Image "scan.tiff" (id t) is attached, but its format (image/tiff) is not supported by the model.]');
+    expect(out.block).toContain('(image/svg+xml)');
+    expect(out.block).toContain('(image/heic)');
+    expect(out.attachments.map((a) => a.name)).toEqual(['scan.tiff', 'logo.svg', 'shot.heic']);
+    // Nothing was read from the bucket to build the turn.
+    expect(buildUserTurnContent('look', out)).toContain('look');
+    expect(typeof buildUserTurnContent('look', out)).toBe('string');
+  });
+
+  it('only png, jpeg, gif and webp are sent, and with a model that cannot read images they are the ones noted as such', async () => {
+    const mixed = [picture('a', 'image/png'), picture('b', 'image/jpeg'), picture('c', 'image/gif'), picture('d', 'image/webp'), picture('e', 'image/bmp', 'e.bmp')];
+    const seeing = await assembleTurnAttachments({ scope, records: mixed, cfg, supportsVision: true });
+    expect(seeing.images.map((image) => image.fileId)).toEqual(['a', 'b', 'c', 'd']);
+    expect(seeing.block).toContain('4 images shown below, 1 image in a format the model does not support');
+
+    const blind = await assembleTurnAttachments({ scope, records: mixed, cfg, supportsVision: false });
+    expect(blind.images).toEqual([]);
+    expect(blind.block).toContain('4 images not shown, 1 image in a format the model does not support');
+    expect(blind.block).toContain('cannot read images');
+  });
+
+  it('what the model could be shown is what the session counts as holding an image', async () => {
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([picture('t', 'image/tiff'), fileRecord('d')]);
+    expect(await conversationFileFacts(hoisted.db as never, 'c1')).toEqual({ any: true, images: false });
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([picture('t', 'image/tiff'), picture('p', 'image/png')]);
+    expect(await conversationFileFacts(hoisted.db as never, 'c1')).toEqual({ any: true, images: true });
+  });
+
+  it('the model wrapper’s source knows only the sendable pictures of the session, and sends image/jpg as image/jpeg', async () => {
+    const records: Record<string, IFileRecord> = {
+      t: picture('t', 'image/tiff'),
+      j: picture('j', 'image/jpg', 'p.jpg'),
+      d: fileRecord('d'),
+    };
+    hoisted.db.findFileRecordById.mockImplementation(async (id: string) => records[id] ?? null);
+    hoisted.downloads.set('j', 'JPEGBYTES');
+    hoisted.downloads.set('t', 'TIFFBYTES');
+    const source = createSessionImageSource(scope, 'c1');
+
+    expect(await source.find('t')).toBeNull();
+    expect(await source.find('d')).toBeNull();
+    expect(await source.find('j')).toEqual({ name: 'p.jpg', size: 10 });
+    expect(await source.read('j')).toEqual({ base64: Buffer.from('JPEGBYTES').toString('base64'), mediaType: 'image/jpeg' });
+    // Even asked for by id directly, an unsupported format is never read for a request.
+    await expect(source.read('t')).rejects.toThrow('not an image format the model can be shown');
+    await expect(readSessionImage(scope, records.t!)).rejects.toThrow('not an image format the model can be shown');
+  });
+
+  it('a picture bigger than a model request carries is refused at upload with the words of that limit; a document of that size is not', async () => {
+    const conversation = { _id: 'c1', agentKey: 'agent' };
+    const actor = { userId: 'u1', licenseType: 'FREE' };
+    hoisted.db.listFileRecordsByConversation.mockResolvedValue([]);
+    hoisted.db.findFileBucketByKey.mockResolvedValue({ key: 'docs', providerKey: 'local', status: 'active' });
+    hoisted.db.findProviderByKey.mockResolvedValue({ key: 'local', type: 'file', driver: 'local-filesystem', status: 'active', label: 'Local' });
+    hoisted.db.countFileRecords.mockResolvedValue(0);
+    hoisted.db.sumFileRecordBytes.mockResolvedValue(0);
+    hoisted.perRequest.mockResolvedValue({ allowed: true, effectiveLimits: { quotas: {} } });
+    hoisted.rate.mockResolvedValue({ allowed: true });
+    hoisted.resource.mockResolvedValue({ allowed: true });
+    hoisted.uploadFile.mockResolvedValue({ record: { id: 'f1', name: 'a', contentType: 'x', size: 1, markdownStatus: 'skipped', bucketKey: 'docs', key: 'k' } });
+    const agentConfig = { modelKey: 'm', attachments: { enabled: true, bucketKey: 'docs', maxFileSizeMb: 20, maxBytes: 5_000_000 } };
+    const upload = (fileName: string, contentType: string, bytes: number) => uploadSessionFile({
+      scope, conversation, agentConfig, fileName, contentType, data: Buffer.alloc(bytes, 1), actor,
+    });
+
+    const refused = classifyAgentRunError(await upload('big.png', 'image/png', 6_000_000).catch((e) => e));
+    expect(refused).toMatchObject({ status: 413, error: { code: 'file_too_large', message: 'Images larger than 5 MB cannot be shown to the model (the image size limit of this agent).' } });
+    expect(hoisted.uploadFile).not.toHaveBeenCalled();
+    // The same bytes as a base64 body are refused before decoding.
+    const asBase64 = classifyAgentRunError(await uploadSessionFile({
+      scope, conversation, agentConfig, fileName: 'big.png', contentType: 'image/png', data: Buffer.alloc(6_000_000, 1).toString('base64'), actor,
+    }).catch((e) => e));
+    expect(asBase64).toMatchObject({ status: 413, error: { code: 'file_too_large' } });
+
+    await expect(upload('big.pdf', 'application/pdf', 6_000_000)).resolves.toBeTruthy();
+    await expect(upload('big.tiff', 'image/tiff', 6_000_000)).resolves.toBeTruthy();
+    // Over the per-file limit it is the file limit that speaks, whatever the type.
+    const huge = classifyAgentRunError(await upload('huge.pdf', 'application/pdf', 21 * 1024 * 1024).catch((e) => e));
+    expect(huge).toMatchObject({ status: 413, error: { message: 'File exceeds the 20 MB limit of this agent.' } });
   });
 });

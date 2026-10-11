@@ -9,6 +9,8 @@ import type { IAgentMessageAttachment } from '@/lib/database/provider/types.doma
 import {
     isImageMime,
     isMimeAllowed,
+    isSendableImageMime,
+    maxUploadBytes,
     type ResolvedAttachmentsConfig,
 } from '@/lib/services/agents/sessionFilesConfig';
 import type { ChatMessage } from './sessionTypes';
@@ -59,7 +61,11 @@ export function checkAttachmentCandidate(
     held: number,
 ): AttachmentRefusal | null {
     if (held >= cfg.maxFiles) return { code: 'too_many_files', max: cfg.maxFiles };
-    if (file.size > cfg.maxFileSizeMb * 1024 * 1024) return { code: 'file_too_large', max: cfg.maxFileSizeMb };
+    // A picture is also held to what one model request carries (the server refuses it past that).
+    if (file.size > maxUploadBytes(cfg, file.type)) {
+        const requestBound = isSendableImageMime(file.type) && cfg.maxBytes < Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
+        return { code: 'file_too_large', max: requestBound ? Math.round((cfg.maxBytes / 1_000_000) * 10) / 10 : cfg.maxFileSizeMb };
+    }
     // An unknown type is left to the server, which also looks at the file name.
     if (file.type && !isMimeAllowed(file.type, cfg.allowedMimeTypes)) return { code: 'unsupported_file_type' };
     return null;
@@ -92,4 +98,29 @@ export function isImageAttachment(file: Pick<IAgentMessageAttachment, 'mimeType'
 /** True when a converted file has no text the agent can read. */
 export function lacksReadableText(file: PendingAttachment): boolean {
     return !isImageAttachment(file) && (file.conversionStatus === 'failed' || file.conversionStatus === 'skipped');
+}
+
+/** What deleting a file waiting to be sent came to: gone (or already gone), or why it is still there. */
+export type AttachmentRemoval = { removed: true } | { removed: false; message: string };
+
+/**
+ * Deletes a session file on the server and says whether it is really gone. The
+ * chip may only leave the composer when it is: a file that is still on the
+ * session rides along with the next message (`attachNewUploads`), so a failed
+ * delete that looked like a removal would send a file the person took out.
+ * A 404 means it is already gone.
+ */
+export async function removeSessionFile(
+    url: string,
+    fetchFn: (input: string, init?: { method: string }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }> = fetch,
+): Promise<AttachmentRemoval> {
+    try {
+        const res = await fetchFn(url, { method: 'DELETE' });
+        if (res.ok || res.status === 404) return { removed: true };
+        const data = await res.json().catch(() => ({})) as { error?: unknown };
+        const detail = typeof data.error === 'string' ? data.error : (data.error as { message?: unknown } | undefined)?.message;
+        return { removed: false, message: typeof detail === 'string' && detail ? detail : `HTTP ${res.status}` };
+    } catch (error) {
+        return { removed: false, message: error instanceof Error ? error.message : String(error) };
+    }
 }

@@ -213,10 +213,28 @@ describe('client agent session lifecycle routes', () => {
         metadata: { ticket: '7' }, message_count: 3, runtime_status: 'budget_paused', stop_reason: 'budget_reached', last_event_seq: 12,
         budget: { max_cost_usd: 2, on_reach: 'pause' }, spent_usd: 2,
       });
-      // A session that never ran reads as idle; no transcript, no pending actions in a list row.
-      expect(body.data[1]).toMatchObject({ id: 'c2', runtime_status: 'idle', stop_reason: null, last_event_seq: 0, budget: null, spent_usd: 0 });
+      // A session that never ran its runtime reads as idle; no transcript, no pending actions in a list row.
+      // Its total was never kept (it has messages), which a list cannot add up: unknown, not zero.
+      expect(body.data[1]).toMatchObject({ id: 'c2', runtime_status: 'idle', stop_reason: null, last_event_seq: 0, budget: null, spent_usd: null });
       expect(JSON.stringify(body)).not.toContain('messages');
       expect(body.data[1]).not.toHaveProperty('pending_actions');
+    });
+
+    it('spent_usd of a row is the stored running total: 0 only when it is known to be 0, null when the session predates the total (F2-11)', async () => {
+      hoisted.listSessionPage.mockResolvedValue({
+        sessions: [
+          row('kept', { spentUsd: 0.0412 }),
+          row('zero', { spentUsd: 0 }),
+          row('empty', { messageCount: 0 }),
+          row('legacy'),
+        ],
+        hasMore: false,
+      });
+
+      const res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/sessions', headers });
+
+      const spent = Object.fromEntries(parseJsonBody<{ data: Array<{ id: string; spent_usd: number | null }> }>(res.body).data.map((entry) => [entry.id, entry.spent_usd]));
+      expect(spent).toEqual({ kept: 0.0412, zero: 0, empty: 0, legacy: null });
     });
 
     it('the last page has no next cursor', async () => {

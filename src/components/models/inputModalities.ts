@@ -12,6 +12,7 @@
 
 import type { IModel } from '@/lib/database';
 import {
+    isLegacyTextOnlyDefault,
     resolveModelCapabilities,
     type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
@@ -35,13 +36,28 @@ export function inferredInputModalities(
     } as unknown as IModel).inputModalities;
 }
 
-/** The input types stored on the model as an explicit choice, or null when it has none. */
-export function storedInputModalities(metadata: Record<string, unknown> | undefined): ModelInputModality[] | null {
+/**
+ * The input types stored on the model as an explicit choice, or null when it has none.
+ * With the model's `category` and `isMultimodal`, the plain "text only" that the
+ * forms of earlier releases wrote on every save is no choice either
+ * (`isLegacyTextOnlyDefault`): the page then shows the detected types and a
+ * re-save does not write that value back.
+ */
+export function storedInputModalities(
+    metadata: Record<string, unknown> | undefined,
+    model?: { category: IModel['category']; isMultimodal?: boolean },
+): ModelInputModality[] | null {
     const capabilities = metadata?.capabilities;
-    const raw = capabilities && typeof capabilities === 'object' ? (capabilities as { inputModalities?: unknown }).inputModalities : undefined;
+    const stored = capabilities && typeof capabilities === 'object'
+        ? (capabilities as { inputModalities?: unknown; inputModalitiesExplicit?: unknown })
+        : undefined;
+    const raw = stored?.inputModalities;
     if (!Array.isArray(raw)) return null;
     const known = raw.filter((entry): entry is ModelInputModality => typeof entry === 'string' && KNOWN.has(entry));
-    return known.length > 0 ? INPUT_MODALITY_OPTIONS.filter((option) => known.includes(option)) : null;
+    if (known.length === 0) return null;
+    const chosen = INPUT_MODALITY_OPTIONS.filter((option) => known.includes(option));
+    if (model && isLegacyTextOnlyDefault(model.category, model.isMultimodal, chosen, stored?.inputModalitiesExplicit)) return null;
+    return chosen;
 }
 
 /** The boxes as they are drawn: the explicit choice, else the detected types, within what the provider can take. */

@@ -98,7 +98,7 @@ describe('capabilities of a model with nothing stored', () => {
   });
 
   it('an explicit choice wins over the name — "text only" included', () => {
-    const textOnly = model({ metadata: { capabilities: { inputModalities: ['text'] } } });
+    const textOnly = model({ metadata: { capabilities: { inputModalities: ['text'], inputModalitiesExplicit: true } } });
     expect(resolveModelCapabilities(textOnly).inputModalities).toEqual(['text']);
     const explicitImage = model({ modelId: 'in-house-llm-7b', metadata: { capabilities: { inputModalities: ['text', 'image'] } } });
     expect(resolveModelCapabilities(explicitImage).inputModalities).toEqual(['text', 'image']);
