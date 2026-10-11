@@ -82,6 +82,10 @@ export interface RelayTransport {
   publish(channel: string, message: string): Promise<void>;
   /** Resolves once the subscription is live. Returns the unsubscribe function. */
   subscribe(channel: string, onMessage: (message: string) => void): Promise<() => Promise<void>>;
+  /** Optional short-lived key/value (same Redis, same prefix). Used by the MCP SSE session registry. */
+  setKey?(key: string, value: string, ttlSeconds: number): Promise<void>;
+  getKey?(key: string): Promise<string | null>;
+  delKey?(key: string): Promise<void>;
 }
 
 /** What the worker needs to find the caller. Plain data — serializes over the queue. */
@@ -191,6 +195,21 @@ class RedisRelayTransport implements RelayTransport {
   async publish(channel: string, message: string): Promise<void> {
     await this.connect();
     await this.publisher!.publish(`${this.prefix}${channel}`, message);
+  }
+
+  async setKey(key: string, value: string, ttlSeconds: number): Promise<void> {
+    await this.connect();
+    await this.publisher!.set(`${this.prefix}${key}`, value, 'EX', ttlSeconds);
+  }
+
+  async getKey(key: string): Promise<string | null> {
+    await this.connect();
+    return this.publisher!.get(`${this.prefix}${key}`);
+  }
+
+  async delKey(key: string): Promise<void> {
+    await this.connect();
+    await this.publisher!.del(`${this.prefix}${key}`);
   }
 
   async subscribe(channel: string, onMessage: (message: string) => void): Promise<() => Promise<void>> {
