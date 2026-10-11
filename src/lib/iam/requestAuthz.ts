@@ -28,10 +28,11 @@ import {
   type ServicePermissionLevel,
   type UserServicePermissions,
 } from '@/lib/security/rbac';
-import { describeTenantPolicySet } from './engine';
+import { authorize, describeTenantPolicySet } from './engine';
 import { managedLevel, probeServiceLevel, type EffectiveLevel } from './effective';
 import { buildEnforcePrincipal, decideEnforced } from './enforce';
 import type { IamPrincipal } from './entities';
+import { serviceActionId } from './actions';
 import type { RouteAuthzLevel } from './routeAuthz';
 
 export interface ServiceAuthzPrincipal {
@@ -166,7 +167,49 @@ export async function quietServiceLevel(
 ): Promise<EffectiveLevel> {
   const workspace = options.workspace === true;
   if (workspace && principal.subject === 'token') return 'none';
-  const engine = await buildEnforcePrincipal({
+  const engine = await quietEnginePrincipal(principal, service, workspace);
+  const policySet = await describeTenantPolicySet(principal.tenantDbName);
+  // No custom policy in force: the managed rules are arithmetic over the principal's own level sets (effective.ts).
+  if (policySet.custom === 0) return managedLevel(engine, service);
+  const { level } = await probeServiceLevel(principal.tenantDbName, engine, service, quietContext(principal, engine, workspace));
+  return level;
+}
+
+/**
+ * Whether the engine allows ONE action of a service - `<service>.<level>` and only that - asked quietly like
+ * `quietServiceLevel` (same principal, same workspace rule: a token never answers a workspace question). The
+ * level ladder (`quietServiceLevel`) counts a level only when every lower one is allowed; this does not, so it
+ * answers exactly what a route gate that asks for `<service>.<level>` would: a deny rule that names Write leaves
+ * Admin allowed, and the other way round. For a handler that shows or hides what such a route lets the caller do.
+ */
+export async function quietServiceAllows(
+  principal: ServiceAuthzPrincipal,
+  service: PermissionService,
+  level: RouteAuthzLevel,
+  options: { workspace?: boolean } = {},
+): Promise<boolean> {
+  const workspace = options.workspace === true;
+  if (workspace && principal.subject === 'token') return false;
+  const engine = await quietEnginePrincipal(principal, service, workspace);
+  const policySet = await describeTenantPolicySet(principal.tenantDbName);
+  // Nothing custom in force: the managed rules give one level per service, and no rule can deny a lower level on its own.
+  if (policySet.custom === 0) {
+    const held = managedLevel(engine, service);
+    return level === 'read' ? held !== 'none' : level === 'write' ? held === 'write' || held === 'admin' : held === 'admin';
+  }
+  const res = await authorize({
+    tenant: principal.tenantDbName,
+    principal: engine,
+    action: serviceActionId(service, level),
+    resource: { kind: 'service', service },
+    context: quietContext(principal, engine, workspace),
+  });
+  if (res.failed) throw new Error(res.errors.join('; ') || 'the engine could not decide');
+  return res.allowed;
+}
+
+function quietEnginePrincipal(principal: ServiceAuthzPrincipal, service: PermissionService, workspace: boolean): Promise<IamPrincipal> {
+  return buildEnforcePrincipal({
     subject: principal.subject,
     tenantDbName: principal.tenantDbName,
     tenantId: principal.tenantId,
@@ -186,14 +229,13 @@ export async function quietServiceLevel(
     ip: principal.ip,
     path: principal.path,
   });
-  const policySet = await describeTenantPolicySet(principal.tenantDbName);
-  // No custom policy in force: the managed rules are arithmetic over the principal's own level sets (effective.ts).
-  if (policySet.custom === 0) return managedLevel(engine, service);
-  const { level } = await probeServiceLevel(principal.tenantDbName, engine, service, {
+}
+
+function quietContext(principal: ServiceAuthzPrincipal, engine: IamPrincipal, workspace: boolean) {
+  return {
     ...(workspace ? {} : { projectId: engine.contextProjectId }),
-    channel: principal.subject === 'token' ? 'api' : 'dashboard',
+    channel: principal.subject === 'token' ? ('api' as const) : ('dashboard' as const),
     ip: principal.ip,
     path: principal.path,
-  });
-  return level;
+  };
 }

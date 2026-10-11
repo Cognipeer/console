@@ -26,8 +26,8 @@ import {
   type EnforceUnavailableReason,
 } from '@/lib/iam/enforce';
 import { fetchGroupsByIds, grantsOf, listUserGroupIds } from '@/lib/iam/groupGrants';
-import { markGated, resolveRouteAuthz, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
-import { authorizeServiceAccess, buildServicePrincipal, quietServiceLevel, type ServiceAuthzOptions, type ServiceAuthzPrincipal, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
+import { markGated, resolveRouteAuthz, type RouteAuthzLevel, type RouteAuthzResolution } from '@/lib/iam/routeAuthz';
+import { authorizeServiceAccess, buildServicePrincipal, quietServiceAllows, quietServiceLevel, type ServiceAuthzOptions, type ServiceAuthzPrincipal, type ServiceAuthzResult } from '@/lib/iam/requestAuthz';
 import type { EffectiveLevel } from '@/lib/iam/effective';
 import { authorizeResourceForPrincipal, type ResourceAuthzAction, type ResourceAuthzResult, type ResourceAuthzSubject } from '@/lib/iam/resourceAuthz';
 import { auditLevelOf } from '@/lib/iam/denialAudit';
@@ -524,6 +524,28 @@ export async function serviceLevelForRequest(
     return await quietServiceLevel(principal, service, { workspace: options.workspace });
   } catch (error) {
     throw authorizationUnavailable(request, principal.tenantDbName, 'evaluation_error', error, { service, required: 'read' });
+  }
+}
+
+/**
+ * Does the engine allow the caller exactly `<service>.<level>` (and nothing else is asked), QUIETLY - the question a
+ * route that declares `authz.service(service, level)` puts to its gate - so a page can show or hide what that route
+ * would let the caller do. Unlike `serviceLevelForRequest` it does not climb the read -> write -> admin ladder: a deny
+ * rule that names one action leaves the others as they are. `workspace: true` asks about the workspace itself (a
+ * token never answers that: false). When the engine cannot decide it throws the 503 the gate would have sent.
+ */
+export async function serviceActionAllowedForRequest(
+  request: FastifyRequest,
+  service: PermissionService,
+  level: RouteAuthzLevel,
+  options: { workspace?: boolean; rbac?: SessionRbacHint; projectId?: string | null } = {},
+): Promise<boolean> {
+  const principal = await requestPrincipal(request, service, { rbac: options.rbac, required: level, projectId: options.projectId });
+  if (!principal) return false;
+  try {
+    return await quietServiceAllows(principal, service, level, { workspace: options.workspace });
+  } catch (error) {
+    throw authorizationUnavailable(request, principal.tenantDbName, 'evaluation_error', error, { service, required: level });
   }
 }
 

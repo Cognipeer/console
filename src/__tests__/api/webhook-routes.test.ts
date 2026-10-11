@@ -171,6 +171,29 @@ const body = (overrides: Record<string, unknown> = {}) => ({
   url: 'https://hooks.example.com/in', events: ['session.idled', 'agent_run.*'], description: 'Ops channel', ...overrides,
 });
 
+/** A custom policy, in force from now on (the engine reads the policy set fresh). */
+async function installPolicy(policyId: string, cedar: string) {
+  await createPolicy(dbName, { policyId, name: policyId, cedar }, 'tester');
+  resetIamEngineForTests();
+  configureIamEngine({ validateRequests: false });
+  resetEffectiveLevelsForTests();
+  resetPrincipalCacheForTests();
+}
+const userIs = (who: Who) => `principal == User::"${String(users[who]._id)}"`;
+
+/** Every call that changes something, against the endpoint `id` (redelivery of an unknown id: it passes the gate and finds nothing). */
+const changesOf = (id: string) => [
+  ['POST', '', body()],
+  ['PATCH', `/${id}`, { description: 'edited' }],
+  ['POST', `/${id}/rotate-secret`, undefined],
+  ['POST', `/${id}/test`, undefined],
+  ['POST', '/deliveries/nope/redeliver', undefined],
+  ['DELETE', `/${id}`, undefined],
+] as const;
+/** What each of those answers when the gate lets it through. */
+const CHANGES_ALLOWED = [201, 200, 200, 200, 404, 200];
+const SECRET_URL = 'https://hooks.example.com/services/T0/B0?token=abc';
+
 describe('dashboard /api/webhooks', () => {
   let app: Awaited<ReturnType<typeof createFastifyApiTestApp>>;
   beforeEach(async () => { app = await createFastifyApiTestApp(webhooksApiPlugin); });
@@ -395,7 +418,7 @@ describe('dashboard /api/webhooks', () => {
       await createPolicy(dbName, {
         policyId: 'no-webhook-changes',
         name: 'No webhook changes',
-        cedar: `forbid (principal == User::"${String(users.admin._id)}", action == Action::"webhooks.write", resource);`,
+        cedar: `forbid (principal == User::"${String(users.admin._id)}", action == Action::"webhooks.admin", resource);`,
       }, 'tester');
       resetIamEngineForTests();
       configureIamEngine({ validateRequests: false });
@@ -411,17 +434,98 @@ describe('dashboard /api/webhooks', () => {
     });
   });
 
+  describe('the gate asks for exactly Read to look and Admin to change', () => {
+    // Cedar treats webhooks.read / .write / .admin as three actions; the gate of a route that changes something asks
+    // for webhooks.admin (never the method-derived webhooks.write), so a rule that names only Write cannot edit a webhook.
+    const withSecretUrl = async () => {
+      actAs('admin');
+      return json(await call('POST', '', body({ url: SECRET_URL }))).endpoint as { id: string };
+    };
+    const statusesOf = async (id: string) => {
+      const out: number[] = [];
+      for (const [method, url, payload] of changesOf(id)) out.push((await call(method, url, payload)).statusCode);
+      return out;
+    };
+
+    it('an allow rule that names Write and Read lets a person look - and not change a thing, however it is called', async () => {
+      const mine = await withSecretUrl();
+      await installPolicy('write-and-read', `permit (${userIs('member')}, action in [Action::"webhooks.write", Action::"webhooks.read"], resource);`);
+      actAs('member');
+
+      const got = json(await call('GET', `/${mine.id}`)).endpoint;
+      expect(got).toMatchObject({ url: 'https://hooks.example.com/services/T0/B0?…', urlRedacted: true });
+      expect(await capabilitiesOf()).toEqual({ manage: false, workspaceScope: false });
+      for (const [method, url, payload] of changesOf(mine.id)) {
+        const res = await call(method, url, payload);
+        expect(res.statusCode, `${method} ${url}`).toBe(403);
+        expect(json(res), `${method} ${url}`).toMatchObject({ code: 'forbidden', service: 'webhooks', decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+      }
+      expect(await db.findWebhookEndpointById(mine.id)).toMatchObject({ description: 'Ops channel', url: SECRET_URL });
+      expect(hoisted.safeFetch).not.toHaveBeenCalled();
+    });
+
+    it('the Write level group does not include Admin either', async () => {
+      const mine = await withSecretUrl();
+      await installPolicy('write-group', `permit (${userIs('member')}, action in [Action::"Write", Action::"Read"], resource);`);
+      actAs('member');
+      expect((await call('GET', '')).statusCode).toBe(200);
+      expect((await call('PATCH', `/${mine.id}`, { description: 'edited' })).statusCode).toBe(403);
+      expect((await call('POST', '', body())).statusCode).toBe(403);
+      expect((await call('DELETE', `/${mine.id}`)).statusCode).toBe(403);
+    });
+
+    it('an allow rule that names Admin (with the levels it includes) lets a person change everything and see the address whole', async () => {
+      const mine = await withSecretUrl();
+      await installPolicy('admin-levels', `permit (${userIs('member')}, action in [Action::"webhooks.admin", Action::"webhooks.write", Action::"webhooks.read"], resource);`);
+      actAs('member');
+      expect(json(await call('GET', `/${mine.id}`)).endpoint.url).toBe(SECRET_URL);
+      expect(await capabilitiesOf()).toEqual({ manage: true, workspaceScope: true });
+      expect(await statusesOf(mine.id)).toEqual(CHANGES_ALLOWED);
+    });
+
+    it('a deny rule on Write blocks exactly Write: Admin still changes things and still sees the address whole', async () => {
+      const mine = await withSecretUrl();
+      await installPolicy('no-write', `forbid (${userIs('admin')}, action == Action::"webhooks.write", resource);`);
+      actAs('admin');
+      expect(json(await call('GET', `/${mine.id}`)).endpoint.url).toBe(SECRET_URL);
+      expect(await capabilitiesOf()).toEqual({ manage: true, workspaceScope: true });
+      expect(await statusesOf(mine.id)).toEqual(CHANGES_ALLOWED);
+    });
+
+    it('a deny rule on Admin blocks changes only: the person still reads, the address redacted', async () => {
+      const mine = await withSecretUrl();
+      await installPolicy('no-admin', `forbid (${userIs('admin')}, action == Action::"webhooks.admin", resource);`);
+      actAs('admin');
+      expect(json(await call('GET', `/${mine.id}`)).endpoint).toMatchObject({ url: 'https://hooks.example.com/services/T0/B0?…', urlRedacted: true });
+      expect(await capabilitiesOf()).toEqual({ manage: false, workspaceScope: false });
+      for (const [method, url, payload] of changesOf(mine.id)) {
+        expect((await call(method, url, payload)).statusCode, `${method} ${url}`).toBe(403);
+      }
+      expect(await db.findWebhookEndpointById(mine.id)).toBeTruthy();
+    });
+
+    it('a deny rule on Read blocks reading only, as the rule says', async () => {
+      const mine = await withSecretUrl();
+      await installPolicy('no-read', `forbid (${userIs('admin')}, action == Action::"webhooks.read", resource);`);
+      actAs('admin');
+      expect((await call('GET', '')).statusCode).toBe(403);
+      expect((await call('GET', `/${mine.id}`)).statusCode).toBe(403);
+      expect((await call('GET', '/events')).statusCode).toBe(403);
+      expect((await call('PATCH', `/${mine.id}`, { description: 'edited' })).statusCode).toBe(200);
+    });
+  });
+
   describe('what lies outside the request\'s project', () => {
     // (Nobody can hold the permission in a project without holding it in the workspace - a project only narrows - so
     // a caller that passes the gate and still lacks the workspace answer is a token, or someone a rule stops outside projects.)
     it('a custom rule that stops the workspace-level answer leaves only the project\'s endpoints in reach', async () => {
-      // A deny that applies outside any project - no `projectId` in the context - removes the workspace-level Read.
-      // (Rules that name a project do not apply to a workspace-level answer.)
+      // A deny that applies outside any project - no `projectId` in the context - removes the workspace-level Read and
+      // Admin (a deny blocks exactly the actions it names). (Rules that name a project do not apply to a workspace-level answer.)
       const wide = await tenantWide();
       await createPolicy(dbName, {
         policyId: 'no-webhooks-outside-projects',
         name: 'No webhooks outside projects',
-        cedar: `forbid (principal == User::"${String(users.admin._id)}", action == Action::"webhooks.read", resource) unless { context has projectId };`,
+        cedar: `forbid (principal == User::"${String(users.admin._id)}", action in [Action::"webhooks.read", Action::"webhooks.admin"], resource) unless { context has projectId };`,
       }, 'tester');
       resetIamEngineForTests();
       configureIamEngine({ validateRequests: false });
@@ -638,6 +742,52 @@ describe('client /api/client/v1/webhooks', () => {
     const res = await call('GET', '');
     expect(res.statusCode).toBe(403);
     expect(json(res).error).toMatch(/webhooks/);
+  });
+
+  describe('the gate asks for exactly Read to look and Admin to change', () => {
+    const secretOwn = async () => {
+      await tokenFor('admin');
+      return json(await call('POST', '', body({ url: SECRET_URL }))).endpoint as { id: string };
+    };
+
+    it('a token whose owner is allowed Write and Read looks (address redacted) and changes nothing', async () => {
+      const mine = await secretOwn();
+      await installPolicy('token-write-and-read', 'permit (principal is ApiToken, action in [Action::"webhooks.write", Action::"webhooks.read"], resource);');
+      await tokenFor('member');
+      expect(json(await call('GET', `/${mine.id}`)).endpoint).toMatchObject({ url: 'https://hooks.example.com/services/T0/B0?…', urlRedacted: true });
+      expect(json(await call('GET', '')).capabilities).toEqual({ manage: false, workspaceScope: false });
+      for (const [method, url, payload] of changesOf(mine.id)) {
+        const res = await call(method, url, payload);
+        expect(res.statusCode, `${method} ${url}`).toBe(403);
+        expect(json(res), `${method} ${url}`).toMatchObject({ service: 'webhooks', decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+      }
+      expect(await db.findWebhookEndpointById(mine.id)).toMatchObject({ description: 'Ops channel', url: SECRET_URL });
+      expect(hoisted.safeFetch).not.toHaveBeenCalled();
+    });
+
+    it('a token whose owner is allowed Admin changes everything in its project and sees the address whole', async () => {
+      const mine = await secretOwn();
+      await installPolicy('token-admin', 'permit (principal is ApiToken, action in [Action::"webhooks.admin", Action::"webhooks.write", Action::"webhooks.read"], resource);');
+      await tokenFor('member');
+      expect(json(await call('GET', `/${mine.id}`)).endpoint.url).toBe(SECRET_URL);
+      expect(json(await call('GET', '')).capabilities).toEqual({ manage: true, workspaceScope: false });
+      const statuses: number[] = [];
+      for (const [method, url, payload] of changesOf(mine.id)) statuses.push((await call(method, url, payload)).statusCode);
+      expect(statuses).toEqual(CHANGES_ALLOWED);
+    });
+
+    it('a deny rule on Write leaves Admin alone; a deny rule on Admin stops every change', async () => {
+      const mine = await secretOwn();
+      await installPolicy('token-no-write', 'forbid (principal is ApiToken, action == Action::"webhooks.write", resource);');
+      expect((await call('PATCH', `/${mine.id}`, { description: 'edited' })).statusCode).toBe(200);
+      expect(json(await call('GET', `/${mine.id}`)).endpoint.url).toBe(SECRET_URL);
+
+      await installPolicy('token-no-admin', 'forbid (principal is ApiToken, action == Action::"webhooks.admin", resource);');
+      for (const [method, url, payload] of changesOf(mine.id)) {
+        expect((await call(method, url, payload)).statusCode, `${method} ${url}`).toBe(403);
+      }
+      expect((await call('GET', `/${mine.id}`)).statusCode).toBe(200);
+    });
   });
 
   it('a call without a valid token is refused', async () => {

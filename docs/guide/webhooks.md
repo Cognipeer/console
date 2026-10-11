@@ -13,7 +13,7 @@ The **Webhooks** permission decides, and only that. A webhook is outbound networ
 | Read | list endpoints and their deliveries, read the event catalog |
 | Admin | everything: create, edit, enable / disable, send a test event, rotate the secret, redeliver, delete |
 
-There is no "write" in between: changing a webhook needs Admin. A project's own member permissions can lower the level inside that project, never raise it, and a deny policy on `webhooks` (**Authorization → Policies**) takes it away from whoever it names.
+There is no "write" in between: changing a webhook needs Admin, and every route that changes something asks the policy engine for `webhooks.admin` itself - an allow rule that names only Write on `webhooks` lets a person look, not change. A deny rule blocks exactly the levels it names (denying Write leaves Admin alone; deny Admin to make someone read-only), and the Webhooks page and the whole receiver address follow the same two questions (`webhooks.read` to look, `webhooks.admin` to change and to see the address whole). A project's own member permissions can lower the level inside that project, never raise it, and a deny policy on `webhooks` (**Authorization → Policies**) takes it away from whoever it names.
 
 Where the permission is exercised decides what an endpoint can reach:
 

@@ -62,6 +62,14 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   owners and admins hold it by default and everybody else until it is granted. Being a project admin is no longer a
   permission on webhooks by itself; grant **Webhooks** to the people or groups who should manage them. Tenant-wide
   endpoints and other projects' endpoints need the permission in the workspace itself, which an API token never has.
+  Every route that changes something (create, edit, delete, test, rotate the secret, redeliver) asks for `webhooks.admin`
+  itself, on the dashboard and the client API alike: an allow rule that names only `webhooks.write` no longer lets a
+  person change a webhook, and the Webhooks page and the whole receiver address follow the same two questions
+  (`webhooks.read` to look, `webhooks.admin` to change), so a deny rule on Write leaves Admin as it is.
+- The Document Store's folder view hides the session folders too: in the listing of `<folder>/<agentKey>/` the
+  sub-folder of a session that a caller may not view (`agent.session_view_others`) is left out, as its files already
+  were. Folders count as entries of the page, which is filled from the following reads; the scope is decided once per
+  request. The dashboard and the client Files API answer alike on SQLite and MongoDB.
 
 ### People and access
 
