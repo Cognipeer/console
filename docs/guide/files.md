@@ -14,6 +14,22 @@ Click a bucket row to drill into the file browser for that bucket — uploads, d
 
 File providers are registered through the contract system. Common providers include S3-compatible storage (AWS S3, MinIO, Cloudflare R2, etc.).
 
+| Provider | Use when |
+|----------|----------|
+| Local filesystem | Single-node dev; needs a persistent volume in Kubernetes |
+| Amazon S3 (and S3-compatible: MinIO, Ceph, R2) | You have object storage. Set a custom endpoint for MinIO/Ceph |
+| MongoDB GridFS | On-prem/self-hosted installs with no S3. Needs nothing beyond MongoDB |
+
+### MongoDB GridFS
+
+Stores files in MongoDB GridFS (`<bucket>.files` / `<bucket>.chunks`), tenant- and provider-isolated by filename prefix. Works with MongoDB Community.
+
+- **Connection URI** — leave empty to reuse the app's `MONGODB_URI` (requires `DB_PROVIDER=mongodb`). Set it to use a separate MongoDB, or when the app runs on SQLite.
+- **Database** — defaults to `cognipeer_files` (or the main database when `MONGODB_SINGLE_DATABASE` is on).
+- **GridFS bucket name / chunk size** — default `files` / 255 KiB.
+
+File traffic grows the database and its backups. For large volumes, point the provider at a dedicated MongoDB. On managed Cosmos DB (Mongo API) prefer S3-compatible storage: GridFS is RU-heavy there.
+
 ## Service Functions
 
 | Function | Description |
