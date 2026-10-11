@@ -49,16 +49,17 @@ Each event:
 | `user.message` | `content` |
 | `session.status_running` | `trigger`: `message`, `resume` or `timeout` |
 | `agent.tool_use` | `tool_call_id`, `name`, `args`, `subagent?` |
-| `agent.tool_result` | `tool_call_id`, `name`, `ok`, `duration_ms?`, `error?`, `subagent?` |
+| `agent.tool_result` | `tool_call_id`, `name`, `ok`, `duration_ms?`, `error?`, `subagent?`, `source?` (`client`: the page embedding the chat ran it) |
 | `agent.compaction` | what a context compaction did (`at`, `messages_compressed`, `tokens_before`, `tokens_after`, …) |
-| `action.required` | `action_id`, `kind`, `tool_name?` (`tool_approval` only), `args?`, `questions?`, `allow_free_text?`, `expires_at?` |
-| `action.resolved` | `action_id`, `kind`, `decision?`, `cancelled?`, `expired?`, `resolved_by`, `channel` (`dashboard`, `api`, `portal`, `timeout` or `system`) |
+| `action.required` | `action_id`, `kind` (`tool_approval`, `user_question` or `client_tool`), `tool_name?` (`tool_approval` and `client_tool`), `args?`, `questions?`, `allow_free_text?`, `timeout_seconds?` (`client_tool`), `expires_at?` |
+| `action.resolved` | `action_id`, `kind`, `tool_name?` (`client_tool`), `decision?`, `cancelled?`, `expired?`, `ok?`, `duration_ms?`, `timed_out?` (`client_tool`), `resolved_by`, `channel` (`dashboard`, `api`, `portal`, `timeout` or `system`) |
 | `agent.message` | `content`, `message_index?`, `stop_reason?`, `usage?` |
 | `session.usage` | `turn_cost_usd`, `spent_usd`, `budget` (sessions with a [budget](/guide/agent-session-budgets)) |
 | `budget.reached` | `spent_usd`, `max_cost_usd` |
 | `session.status_idle` | `stop_reason`, `pending_action_ids?`, `detail?` |
 | `session.error` | `message`, `code?` |
 | `session.work_done` | none; right after an idle with `stop_reason: end_turn` |
+| `session.truncated` | `reason` (`truncate`, `regenerate` or `edit`), `kept_messages`, `removed_messages`, `removed_from`, `cancelled_actions`, `by`, `channel`: messages were cut from the transcript ([details](/guide/agent-feedback-and-experience)) |
 
 A turn is bracketed by `session.status_running` and `session.status_idle`. A new event type can appear in a future version: ignore the ones you do not know.
 

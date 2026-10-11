@@ -24,6 +24,7 @@
  * the run already has.
  */
 
+import { clientToolMeta } from './agentClientTools';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
     CostEstimator,
@@ -484,6 +485,12 @@ function isSyntheticText(message: LooseMessage): boolean {
     });
 }
 
+/** The open pause is a tool call only the page embedding the chat can answer. */
+function waitsOnHostPage(state: unknown): boolean {
+    const pending = (state as { pendingUserQuestions?: Array<{ status?: string; metadata?: Record<string, unknown> }> } | undefined)?.pendingUserQuestions;
+    return (pending ?? []).some((entry) => entry.status === 'pending' && clientToolMeta(entry) !== null);
+}
+
 export function describeTurnOutcome(
     result: Pick<AgentSdkInvokeResult, 'content' | 'state'>,
     /** How many messages the run started with — only text written after that counts. */
@@ -506,7 +513,7 @@ export function describeTurnOutcome(
         stopDetail = ctx.__awaitingApproval
             ? 'waiting for a tool approval'
             : ctx.__awaitingUserQuestion
-                ? 'waiting for an answer to a question'
+                ? (waitsOnHostPage(result.state) ? 'waiting for the host page to run a tool' : 'waiting for an answer to a question')
                 : undefined;
     }
 

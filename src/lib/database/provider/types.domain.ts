@@ -2497,6 +2497,29 @@ export interface IAgentConfig {
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
   /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
+  /**
+   * What a chat surface (a portal, a widget) shows around this agent: the
+   * welcome text and the suggested first messages. Absent = nothing extra.
+   */
+  experience?: IAgentExperienceConfig;
+}
+
+/** A suggested first message shown on an empty conversation. */
+export interface IAgentStarter {
+  /** The message the starter puts in the composer (or sends). */
+  text: string;
+  /** Short chip label; defaults to the text. */
+  label?: string;
+  /** Send the message at once instead of only filling the composer. Default false. */
+  autoSend?: boolean;
+}
+
+/** `IAgentConfig.experience` — what a chat surface shows around the agent. */
+export interface IAgentExperienceConfig {
+  /** At most 6. */
+  starters?: IAgentStarter[];
+  /** Markdown welcome text; may use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`. */
+  welcome?: string;
 }
 
 /** Whether a tool call waits for a person first. */
@@ -2749,7 +2772,21 @@ export interface IAgentMessageAttachment {
   size: number;
 }
 
+/** An earlier answer to the same question, kept when an answer is regenerated (newest last, at most 5). */
+export interface IAgentMessageVersion {
+  content: string;
+  timestamp: Date;
+  stopReason?: 'limit' | 'cancelled' | 'paused';
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number };
+}
+
 export interface IAgentConversationMessage {
+  /**
+   * Stable id of the message, assigned the first time something has to point at
+   * it (feedback, a regenerate). Absent on messages nothing ever referred to;
+   * `#<index>` addresses those.
+   */
+  id?: string;
   role: string;
   content: string;
   /** Files attached to this (user) message. Absent on every message without any. */
@@ -2757,6 +2794,8 @@ export interface IAgentConversationMessage {
   /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
   reasoning?: string;
   timestamp: Date;
+  /** Answers this one replaced (a regenerate), oldest first. */
+  previousVersions?: IAgentMessageVersion[];
   /**
    * Debug detail for an assistant turn produced by a Session (not the live
    * `/v1/responses` path, which deliberately returns content only — see
@@ -2851,7 +2890,13 @@ export interface IAgentSessionBudget {
   onReach: 'pause' | 'stop';
 }
 
-export type AgentPendingActionKind = 'tool_approval' | 'user_question';
+/**
+ * - `tool_approval`: a person decides whether a tool call runs.
+ * - `user_question`: the model asked the person something.
+ * - `client_tool`: the model called a tool that runs in the page that embeds the
+ *   chat (declared by the embedding's admin); the page answers with its result.
+ */
+export type AgentPendingActionKind = 'tool_approval' | 'user_question' | 'client_tool';
 export type AgentPendingActionStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
 
 /** One question of an `ask user` pause — mirrors the agent-sdk `UserQuestionItem`. */
@@ -2872,6 +2917,14 @@ export interface IAgentPendingActionResolution {
   answers?: Record<string, string | string[]>;
   cancelled?: boolean;
   rememberForSession?: boolean;
+  /** `client_tool`: the result the host page returned (JSON, at most 64 KB). */
+  output?: unknown;
+  /** `client_tool`: the host page could not do it, or did not answer in time. The model reads it as the tool's error. */
+  error?: string;
+  /** `client_tool`: the error is a timeout. */
+  timedOut?: boolean;
+  /** `client_tool`: how long the host page took, measured from the request. */
+  durationMs?: number;
 }
 
 /** The copy of a pending action carried on the assistant message — see `IAgentConversationMessage.pendingActions`. */
@@ -2882,6 +2935,8 @@ export interface IAgentMessagePendingAction {
   args?: unknown;
   questions?: IAgentUserQuestion[];
   allowFreeText?: boolean;
+  /** `client_tool`: how long the host page may take. */
+  timeoutSeconds?: number;
   status: AgentPendingActionStatus;
   resolution?: IAgentPendingActionResolution;
 }
@@ -2912,11 +2967,67 @@ export interface IAgentPendingAction {
   resolvedAt?: Date | null;
   resolvedBy?: string;
   resolution?: IAgentPendingActionResolution;
+  /** `client_tool`: how long the host page may take before the call is answered with an error. */
+  clientTool?: { timeoutSeconds: number };
   /** The config the paused turn ran with, so the continuation rebuilds the same agent. */
   agentVersion?: number | null;
   usePublished?: boolean;
   /** Who started the paused turn. */
   createdBy?: string;
+}
+
+export type AgentFeedbackRating = 'up' | 'down';
+export type AgentFeedbackReason = 'inaccurate' | 'incomplete' | 'off_topic' | 'too_long' | 'unsafe' | 'other';
+
+/**
+ * One person's rating of one assistant message (`agent_message_feedback`).
+ * At most one per person per message (`conversationId + messageId + userId`);
+ * rating again replaces it and withdrawing deletes it.
+ */
+export interface IAgentMessageFeedback {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  /** The version the rated turn ran (null = the draft). */
+  agentVersion?: number | null;
+  conversationId: string;
+  /** The message's stable id (`IAgentConversationMessage.id`). */
+  messageId: string;
+  /** Where the message sat in the transcript when it was rated. */
+  messageIndex: number;
+  userId: string;
+  /** Where the rating came from: `portal`, `embed`, `dashboard`, `api`… */
+  channel: string;
+  portalId?: string;
+  rating: AgentFeedbackRating;
+  reasons: AgentFeedbackReason[];
+  comment?: string;
+  /** Set when the rated message was later removed (regenerated, edited away). The rating still counts. */
+  removedAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Filters of `listAgentMessageFeedback` / `aggregateAgentMessageFeedback`. */
+export interface AgentMessageFeedbackFilter {
+  projectId: string;
+  agentKey: string;
+  rating?: AgentFeedbackRating;
+  reason?: AgentFeedbackReason;
+  portalId?: string;
+  hasComment?: boolean;
+  from?: Date;
+  to?: Date;
+}
+
+/** Counts over a feedback filter. */
+export interface AgentMessageFeedbackTotals {
+  up: number;
+  down: number;
+  withComment: number;
+  /** How many ratings name each reason (a rating can name several). */
+  reasons: Partial<Record<AgentFeedbackReason, number>>;
 }
 
 /**

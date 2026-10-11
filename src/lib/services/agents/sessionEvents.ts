@@ -58,6 +58,7 @@ export type SessionEventType =
   | 'session.error'
   | 'session.work_done'
   | 'session.usage'
+  | 'session.truncated'
   | 'budget.reached';
 
 /** Never persisted — published to live subscribers only. */

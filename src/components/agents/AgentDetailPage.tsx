@@ -29,6 +29,7 @@ import { notifications } from '@mantine/notifications';
 import {
   IconMessageCircle,
   IconCode,
+  IconThumbUp,
   IconCopy,
   IconCheck,
   IconSettings,
@@ -73,6 +74,9 @@ import AgentFilesPanel from './studio/AgentFilesPanel';
 import { filesEnabled, filesSaveErrors, MAX_FOLDER_LENGTH, type AttachmentsSettings } from './studio/filesSettings';
 import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig';
 import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
+import AgentExperiencePanel from './studio/AgentExperiencePanel';
+import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
+import { experienceForSave, experienceSaveErrors } from './studio/experienceSettings';
 import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
 import CompareVersionsDrawer from './studio/CompareVersionsDrawer';
@@ -88,6 +92,7 @@ import type {
   IAgentMemoryConfig,
   IAgentSandboxConfig,
   IAgentExecutionConfig,
+  IAgentExperienceConfig,
   IAgentHumanInTheLoopConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
@@ -197,6 +202,9 @@ const TAB_ALIASES: Record<string, { top: string; sub?: string }> = {
   attachments: { top: 'configure', sub: 'files' },
   hitl: { top: 'configure', sub: 'hitl' },
   approvals: { top: 'configure', sub: 'hitl' },
+  experience: { top: 'configure', sub: 'experience' },
+  starters: { top: 'configure', sub: 'experience' },
+  feedback: { top: 'feedback' },
   advanced: { top: 'configure', sub: 'advanced' },
   output: { top: 'configure', sub: 'output' },
   deploy: { top: 'deploy' },
@@ -272,6 +280,9 @@ export default function AgentDetailPage() {
   const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
   const [attachmentsConfig, setAttachmentsConfig] = useState<AttachmentsSettings | undefined>(undefined);
+  const [experienceConfig, setExperienceConfig] = useState<IAgentExperienceConfig | undefined>(undefined);
+  // A save was refused because a starter is blank or too long: the fields show their errors from then on.
+  const [experienceSaveRefused, setExperienceSaveRefused] = useState(false);
   // A save was refused because Files is on without a bucket: the field shows its error from then on.
   const [filesSaveRefused, setFilesSaveRefused] = useState(false);
   // Build page: the published snapshot, to flag changed sections.
@@ -370,6 +381,8 @@ export default function AgentDetailPage() {
         setExecutionConfig(cfg.execution);
         setHitlConfig(cfg.humanInTheLoop);
         setAttachmentsConfig(cfg.attachments);
+        setExperienceConfig(cfg.experience);
+        setExperienceSaveRefused(false);
         setFilesSaveRefused(false);
 
         // An array — even an empty one — means the operator has already moved
@@ -613,6 +626,8 @@ export default function AgentDetailPage() {
     nextConfig.humanInTheLoop = hitlConfig && Object.keys(hitlConfig).length > 0 ? hitlConfig : undefined;
     // Absent = files off.
     nextConfig.attachments = attachmentsConfig && Object.keys(attachmentsConfig).length > 0 ? attachmentsConfig : undefined;
+    // Absent = nothing extra around the agent (a blank starter still being typed is left out).
+    nextConfig.experience = experienceForSave(experienceConfig);
 
     if (values.promptMode === 'custom') {
       nextConfig.systemPrompt = values.systemPrompt;
@@ -667,6 +682,20 @@ export default function AgentDetailPage() {
       return false;
     }
 
+    // A starter that is blank-with-a-label, or text that is too long, is not sent: the field says what to fix.
+    if (experienceSaveErrors(experienceForSave(experienceConfig)).length > 0) {
+      setExperienceSaveRefused(true);
+      if (notify) {
+        notifications.show({
+          title: t('notifications.error'),
+          message: t('experience.saveRefused'),
+          color: 'red',
+        });
+        document.getElementById('config-experience')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return false;
+    }
+
     try {
       const res = await fetch(`/api/agents/${agentId}`, {
         method: 'PATCH',
@@ -698,6 +727,7 @@ export default function AgentDetailPage() {
       const data = await res.json();
       setAgent(data.agent);
       setFilesSaveRefused(false);
+      setExperienceSaveRefused(false);
       setConfigIssues(Array.isArray(data.warnings) && data.warnings.length > 0
         ? { errors: [], warnings: data.warnings }
         : null);
@@ -1048,6 +1078,11 @@ export default function AgentDetailPage() {
           <Tabs.Tab value="deploy" leftSection={<IconRocket size={14} />}>
             Ship
           </Tabs.Tab>
+          {!isConnected ? (
+            <Tabs.Tab value="feedback" leftSection={<IconThumbUp size={14} />}>
+              {t('tabs.feedback')}
+            </Tabs.Tab>
+          ) : null}
           <Tabs.Tab value="usage" leftSection={<IconCode size={14} />}>
             {t('tabs.usage')}
           </Tabs.Tab>
@@ -1280,6 +1315,23 @@ export default function AgentDetailPage() {
                 <Badge size="xs" color="orange" variant="light" w="fit-content">
                   {[hitlConfig?.toolApproval?.enabled ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
                     .filter(Boolean).join(' + ')}
+                </Badge>
+              ) : null,
+            )}
+            {buildSection(
+              'experience',
+              t('experience.sectionDescription'),
+              <AgentExperiencePanel
+                value={experienceConfig}
+                onChange={(next) => {
+                  setExperienceConfig(next);
+                  if (experienceSaveRefused && experienceSaveErrors(experienceForSave(next)).length === 0) setExperienceSaveRefused(false);
+                }}
+                showErrors={experienceSaveRefused}
+              />,
+              (experienceConfig?.starters?.length ?? 0) > 0 || experienceConfig?.welcome ? (
+                <Badge size="xs" color="teal" variant="light" w="fit-content">
+                  {t('experience.badge', { starters: experienceConfig?.starters?.length ?? 0 })}
                 </Badge>
               ) : null,
             )}
@@ -1566,6 +1618,11 @@ export default function AgentDetailPage() {
           tab because it is what someone integrating the agent opens first,
           and it had been buried as the second item of Observe's rail.
         */}
+        {/* ── Feedback ────────────────────────────────────────── */}
+        <Tabs.Panel value="feedback">
+          {activeTab === 'feedback' ? <AgentFeedbackPanel agentId={agentId} /> : null}
+        </Tabs.Panel>
+
         <Tabs.Panel value="usage">
           <SectionCard p="md">
             <Stack gap="md">

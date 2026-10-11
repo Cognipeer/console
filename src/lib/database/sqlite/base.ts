@@ -92,6 +92,7 @@ export const TABLES = {
   agentConversationStates: 'agent_conversation_states',
   agentSessionEvents: 'agent_session_events',
   agentPendingActions: 'agent_pending_actions',
+  agentMessageFeedback: 'agent_message_feedback',
   webhookEndpoints: 'webhook_endpoints',
   webhookDeliveries: 'webhook_deliveries',
   agentSkills: 'agent_skills',
@@ -1088,6 +1089,8 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.agentConversations, 'spentUsd', 'spentUsd REAL');
     this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
     this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
+    // A client tool call a host page has to answer: its timeout (JSON).
+    this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);

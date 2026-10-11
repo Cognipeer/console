@@ -30,6 +30,7 @@ import type {
     IAgentUserQuestion,
 } from '@/lib/database';
 import { AgentPendingActionError } from './agentErrors';
+import { CLIENT_TOOL_SERVER_GRACE_SECONDS, clientToolMeta } from './agentClientTools';
 import { MAX_STATE_BYTES, serializeCarriedState, toPlainMessage } from './agentTurnState';
 import type { ResolvedHitlConfig } from './agentHumanInTheLoop';
 import type { SessionEventWriter } from './sessionEvents';
@@ -46,6 +47,8 @@ export interface PublicPendingAction {
     args?: unknown;
     questions?: IAgentPendingAction['questions'];
     allowFreeText?: boolean;
+    /** `client_tool`: how long the host page may take. */
+    timeoutSeconds?: number;
     status: IAgentPendingAction['status'];
     expiresAt?: string;
     requestedAt: string;
@@ -59,6 +62,7 @@ export function toPublicPendingAction(action: IAgentPendingAction): PublicPendin
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
+        ...(action.clientTool ? { timeoutSeconds: action.clientTool.timeoutSeconds } : {}),
         status: action.status,
         ...(action.expiresAt ? { expiresAt: new Date(action.expiresAt).toISOString() } : {}),
         requestedAt: new Date(action.requestedAt).toISOString(),
@@ -74,6 +78,7 @@ export function toMessagePendingAction(action: IAgentPendingAction): IAgentMessa
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
+        ...(action.clientTool ? { timeoutSeconds: action.clientTool.timeoutSeconds } : {}),
         status: action.status,
         ...(action.resolution ? { resolution: action.resolution } : {}),
     };
@@ -88,6 +93,7 @@ export function actionRequiredEventData(action: IAgentPendingAction): Record<str
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: action.questions } : {}),
         ...(action.allowFreeText !== undefined ? { allowFreeText: action.allowFreeText } : {}),
+        ...(action.clientTool ? { timeoutSeconds: action.clientTool.timeoutSeconds } : {}),
         ...(action.expiresAt ? { expiresAt: new Date(action.expiresAt).toISOString() } : {}),
     };
 }
@@ -181,9 +187,11 @@ interface PauseEntry {
     args?: unknown;
     questions?: IAgentUserQuestion[];
     allowFreeText?: boolean;
+    /** `client_tool`: how long the host page may take. */
+    timeoutSeconds?: number;
 }
 
-/** The approvals and questions the SDK state is waiting on. */
+/** The approvals, questions and client tool calls the SDK state is waiting on. */
 export function collectPauseEntries(state: AgentSdkSmartState | undefined): PauseEntry[] {
     const entries: PauseEntry[] = [];
     for (const approval of state?.pendingApprovals ?? []) {
@@ -198,6 +206,19 @@ export function collectPauseEntries(state: AgentSdkSmartState | undefined): Paus
     }
     for (const question of state?.pendingUserQuestions ?? []) {
         if (question.status !== 'pending') continue;
+        // A tool the embedding page runs: its call, not a question, waits for the answer.
+        const clientTool = clientToolMeta(question as { metadata?: Record<string, unknown> });
+        if (clientTool) {
+            entries.push({
+                kind: 'client_tool',
+                sdkId: question.id,
+                toolCallId: question.toolCallId,
+                toolName: clientTool.name,
+                args: clientTool.args,
+                timeoutSeconds: clientTool.timeoutSeconds,
+            });
+            continue;
+        }
         entries.push({
             kind: 'user_question',
             sdkId: question.id,
@@ -278,7 +299,11 @@ export async function openPause(db: PendingDb, input: OpenPauseInput): Promise<O
         ...(entry.allowFreeText !== undefined ? { allowFreeText: entry.allowFreeText } : {}),
         status: 'pending' as const,
         requestedAt: now,
-        expiresAt,
+        // A page gets its own tool's timeout (plus a little for the round trip), not the approvals' one.
+        expiresAt: entry.kind === 'client_tool' && entry.timeoutSeconds !== undefined
+            ? new Date(now.getTime() + (entry.timeoutSeconds + CLIENT_TOOL_SERVER_GRACE_SECONDS) * 1000)
+            : expiresAt,
+        ...(entry.kind === 'client_tool' && entry.timeoutSeconds !== undefined ? { clientTool: { timeoutSeconds: entry.timeoutSeconds } } : {}),
         agentVersion: input.agentVersion,
         usePublished: input.usePublished,
         createdBy: input.createdBy,
@@ -383,6 +408,10 @@ export function actionResolvedEventData(
         decision?: 'allow' | 'deny';
         cancelled?: boolean;
         expired?: boolean;
+        /** `client_tool`: the page answered with a result (true) or an error / nothing (false). */
+        ok?: boolean;
+        durationMs?: number;
+        timedOut?: boolean;
         resolvedBy: string;
         channel: string;
     },
@@ -390,9 +419,13 @@ export function actionResolvedEventData(
     return {
         actionId: String(action._id),
         kind: action.kind,
+        ...(action.kind === 'client_tool' && action.toolName ? { toolName: action.toolName } : {}),
         ...(detail.decision ? { decision: detail.decision } : {}),
         ...(detail.cancelled ? { cancelled: true } : {}),
         ...(detail.expired ? { expired: true } : {}),
+        ...(detail.ok !== undefined ? { ok: detail.ok } : {}),
+        ...(detail.durationMs !== undefined ? { durationMs: detail.durationMs } : {}),
+        ...(detail.timedOut ? { timedOut: true } : {}),
         resolvedBy: detail.resolvedBy,
         channel: detail.channel,
     };
