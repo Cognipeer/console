@@ -824,6 +824,7 @@ export const tr: typeof en = {
       sectionTitle: 'Deneyim',
       sectionDescription: 'Sohbet yüzeyinin bu agent’ın çevresinde gösterdikleri: bir karşılama metni ve önerilen ilk mesajlar. Bir portal ikisini de kendisi için değiştirebilir.',
       badge: 'karşılama · {starters} öneri',
+      badgePageTools: 'sayfa araçları',
       welcomeTitle: 'Karşılama metni',
       welcomePlaceholder: 'Merhaba {{user.firstName}}! Şu konularda yardımcı olabilirim…',
       welcomeDescription: 'Boş bir konuşmada gösterilir. Markdown desteklenir (bağlantı, liste, kalın).',
@@ -848,6 +849,10 @@ export const tr: typeof en = {
       autoSendDescription: 'Kapalıysa tıklama yalnızca mesaj kutusunu doldurur; kişi önce düzenleyebilir.',
       preview: 'Çipler böyle görünür',
       publishNote: 'Portal yayınlanmış sürümü gösterir; değişikliklerin orada görünmesi için yeniden yayınlayın.',
+      pageToolsTitle: 'Sayfadan gelen araçlar',
+      pageToolsLabel: 'Bu agent’ı gömen sayfanın araçlarını kabul et',
+      pageToolsDescription: 'Bir portal ya da widget, kişinin kendi sayfasında çalışan araçlar tanımlayabilir; örneğin “seçili metni oku”. Kapalıyken portal ne tanımlarsa tanımlasın bu agent bunları hiç almaz.',
+      pageToolsTrust: 'Böyle bir aracın döndürdüğü değer kişinin tarayıcısında yazılır; bu yüzden model onu güvenilmeyen girdi olarak okur. Kimlik ya da yetki için ona güvenmeyin. Portal yöneticisi bir aracı muaf tutmadıkça bu agent’ın onay politikası (Onaylar ve sorular) bu çağrılara da uygulanır.',
       saveRefused: 'Önce konuşma başlatıcılarını düzeltin — Deneyim bölümüne bakın.',
     },
     feedback: {

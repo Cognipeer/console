@@ -176,6 +176,7 @@ import {
     resolveClientToolState,
     type EmbeddedRunContext,
 } from './agentClientTools';
+import { agentAcceptsClientTools } from './agentExperience';
 import {
     applyToolApprovals,
     denyUnattendedTools,
@@ -3403,12 +3404,18 @@ async function buildLocalAgentRun(input: {
     cleanupTasks.push(sandboxTools.cleanup);
 
     // Tools that run in the page embedding the chat. Offered only to a run that says it is
-    // embedded AND can be paused (a Session) AND has a person on the other end; they are kept
-    // out of the approval policy below, which would otherwise gate every one of them.
+    // embedded AND can be paused (a Session) AND has a person on the other end AND whose
+    // author opted in (`experience.clientTools.enabled`): what such a tool returns is typed
+    // in the end user's browser. They are kept out of the approval pass below, which only
+    // knows the tools built above; their own approval follows the agent's policy (see
+    // `clientToolNeedsApproval`), unless the embedding's admin exempted the tool.
     const allowedTools = sessionAllowedTools(input.conversation?.metadata);
     let clientTools: AgentSdkToolInterface[] = [];
     if (input.embedded && input.embedded.clientTools.length > 0) {
-        if (input.canPause === false || input.unattended || !input.conversation) {
+        if (!agentAcceptsClientTools(config)) {
+            logger.debug('Client tools not offered: the agent does not accept tools from the page', { agentKey });
+            warnings.add('Host page tools were not offered: this agent does not accept tools from the page (Configure → Experience).');
+        } else if (input.canPause === false || input.unattended || !input.conversation) {
             logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
         } else {
             const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');
@@ -3424,7 +3431,13 @@ async function buildLocalAgentRun(input: {
                 logger.warn('Client tools not offered: the declared list is invalid', { agentKey, problem: checked.errors[0] });
                 warnings.add(`Host page tools were not offered: ${checked.errors[0].field} ${checked.errors[0].message}`);
             } else {
-                const built = buildClientTools({ declared: checked.tools, createToolFn: createTool, guard: toolGuard, allowedTools });
+                const built = buildClientTools({
+                    declared: checked.tools,
+                    createToolFn: createTool,
+                    guard: toolGuard,
+                    allowedTools,
+                    approvalPolicy: hitl,
+                });
                 clientTools = built.tools;
                 toolDefinitions.push(...built.definitions);
             }
@@ -5160,8 +5173,10 @@ export async function executeAgentResumeLocal(request: AgentResumeRequest): Prom
 /**
  * What the model reads as the result of a client tool: the page's output as
  * text, run through the agent's `tool.post` guardrails like any tool result
- * (the page's data is not more trusted than a connector's), or the error line
- * when the page could not do it. A result that cannot be checked is withheld.
+ * (the page's data is user input, so it is no more trusted than a connector's),
+ * or the error line when the page could not do it. A result that cannot be
+ * checked is withheld. The untrusted notice is added where the answer is applied
+ * (`resolveClientToolState`), after the guardrails have seen the plain text.
  */
 async function clientToolContent(
     guard: Pick<AgentToolGuard, 'protect'>,

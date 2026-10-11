@@ -2520,6 +2520,22 @@ export interface IAgentExperienceConfig {
   starters?: IAgentStarter[];
   /** Markdown welcome text; may use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`. */
   welcome?: string;
+  /**
+   * Tools the page that embeds a chat may hand this agent (a portal's embed
+   * settings declare them). The agent's author opts in here: absent, or
+   * `enabled` not true, = the agent never gets a tool from a page.
+   */
+  clientTools?: IAgentClientToolsConfig;
+}
+
+/**
+ * `IAgentExperienceConfig.clientTools`. What such a tool returns is typed by the
+ * end user's browser, so it reaches the model marked as untrusted and the agent's
+ * approval policy applies to the call unless the embedding's admin exempts the tool.
+ */
+export interface IAgentClientToolsConfig {
+  /** Accept tools from the embedding page. Default false. */
+  enabled?: boolean;
 }
 
 /** Whether a tool call waits for a person first. */

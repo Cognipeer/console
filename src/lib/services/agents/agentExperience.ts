@@ -67,7 +67,31 @@ export function validateExperienceConfig(config: Pick<IAgentConfig, 'experience'
             });
         }
     }
+    if (experience.clientTools !== undefined && experience.clientTools !== null) {
+        const clientTools = experience.clientTools as unknown;
+        if (typeof clientTools !== 'object' || Array.isArray(clientTools)) {
+            errors.push({ field: 'experience.clientTools', message: 'must be an object' });
+        } else {
+            const enabled = (clientTools as { enabled?: unknown }).enabled;
+            if (enabled !== undefined && typeof enabled !== 'boolean') {
+                errors.push({ field: 'experience.clientTools.enabled', message: 'must be true or false' });
+            }
+        }
+    }
     return { errors };
+}
+
+/**
+ * Has the agent's author agreed to take tools from the page that embeds the chat?
+ * What such a tool returns is typed in the end user's browser, so an agent only
+ * gets them when this is explicitly on; the runtime offers a host's declared tools
+ * to no other agent.
+ */
+export function agentAcceptsClientTools(config: Pick<IAgentConfig, 'experience'> | undefined | null): boolean {
+    const experience = config?.experience;
+    if (!experience || typeof experience !== 'object') return false;
+    const clientTools = experience.clientTools;
+    return Boolean(clientTools) && typeof clientTools === 'object' && clientTools?.enabled === true;
 }
 
 export interface ResolvedAgentExperience {
