@@ -110,6 +110,74 @@ This document defines the general development rules for `cognipeer-console` (gat
    - Use `registerShutdownHandler(name, fn)` for cleanup on SIGTERM/SIGINT.
    - Check `isShuttingDown()` to decline new work during shutdown.
 
+## 3.2) Authorization (IAM) Rules (Mandatory)
+
+Every request is decided by the Cedar policy engine (`src/lib/iam/*`). There is no legacy mode and no per-workspace switch. The simple settings — tenant role, per-user service permissions, group grants, project member levels, token scope — are inputs of the built-in (managed) policies (`managedPolicies.ts`); custom policies add exceptions. Read `docs/guide/authorization.md` before changing anything here.
+
+1. **Declare every route**
+   - Every Fastify route (community and EE overlay) carries `config: authz.*` from `src/lib/iam/routeAuthz.ts`:
+     - `authz.service(service, level?)`: gated by a permission service. The gate asks `read` for GET/HEAD/OPTIONS and `write` for every other verb; pass `level` only when the route needs something else (a POST that only reads, an admin-only route).
+     - `authz.authenticated()`: any signed-in principal, no service check. Use only when the handler makes its own engine checks.
+     - `authz.self(reason)`: the route authorizes itself (capability URLs, portal runtime, auth flows). Always give the reason.
+     - `authz.public()`: no authentication.
+   - Undeclared routes are refused with 403 `route_not_declared`. CI guards: `src/__tests__/unit/iam-route-declarations.test.ts` (community) and the `ee-route-declarations` test (EE overlay).
+   - Prefer an explicit declaration over the path map (`ROUTE_PREFIXES` in `rbac.ts`).
+
+2. **Adding a service / module**
+   - Add it to `RBAC_SERVICE_DEFINITIONS` (`src/lib/security/rbac.ts`): id, label, description, category, and `adminService: true` when mutations must require admin. Check the role defaults (`getRoleDefaultPermission`: owner/admin → admin, user/project_admin → write, adminService → none for non-admins).
+   - The action catalog (`src/lib/iam/actions.ts`) derives `<service>.read|write|admin` automatically. `<service>.admin` is asked only by explicit handler checks: if the module has an admin-only operation, check it in the handler (rule 4), otherwise policies written against `.admin` match nothing.
+   - Actions asked by handlers or the EE overlay (not visible in the route table) must be registered with `registerGateAction` (`src/lib/iam/gateActions.ts`), or policy compile warns that nothing asks them.
+   - Add labels for the service and its actions to `en.ts` and `tr.ts`.
+
+3. **Adding a resource type** (anything people will want to name in a policy or a limit)
+   - Register it in the resource registry (`src/lib/resources/*`) with key, name, project, service and tags, so `<type>.<verb>` actions, the pickers and `/api/resources/search` know it.
+   - The route gate only sees the service, never the resource. For "user X may not use resource Y" call the engine in the handler after resolving the resource: `authorizeResourceAccess` (`src/lib/iam/resourceAuthz.ts`) with action, resource, channel and context. Until a handler asks, the policy editor flags such rules as not enforced.
+   - Reuse the execution verbs (`agent.invoke`, `model.infer`, `tool.execute`, `mcp-server.call`, `rag-module.query`, `portal.use`) instead of inventing parallel ones.
+
+4. **Handler-level checks**
+   - Never decide a request with `rbac.ts` arithmetic (`authorizeService*`). Use `authorizeServiceForRequest(request, service, { level })` (`src/server/api/fastify-utils.ts`) or `authorizeResourceAccess`. They follow the engine (project narrowing, token caps, group grants, custom policies), stamp `X-Decision-Id`, and throw `authorization_unavailable` (503) when the engine cannot decide: never catch that and allow.
+   - Never check `role === 'owner' | 'admin'` from the JWT or a header. Use the live identity (`src/lib/iam/identity.ts`, `request.rbacUser`; server layouts: `getCurrentIdentity()` / `canOpenIamCenter()` in `src/lib/auth/serverIdentity.ts`). Writes on people go through `src/lib/services/users/peoplePolicy.ts` (owner immutable, no self role change, only owner/admin grant admin, never upward, directory-managed fields).
+   - Per-item filtering asks the engine (batched where possible); never re-implement role tables.
+
+5. **Failure semantics**
+   - Fail closed: a missing principal, a store error or an engine error is 503 `authorization_unavailable` with a decision id, never a silent allow.
+   - Owner safety is the only bypass: the workspace owner's session is always allowed on the `iam` service. Do not add others.
+   - A custom forbid whose evaluation errors counts as a deny. Managed policies must not be able to error (use `has` checks).
+   - Error bodies: `error` stays the human-readable reason; `code`, `message`, `service`, `required`, `decisionId` are additive; OpenAI/Anthropic envelopes carry `error.decision_id`. Never reveal which policy denied.
+
+6. **Semantics to preserve**
+   - Project levels narrow the workspace level (min), never widen; "Inherit" stores nothing; explicit `none` entries saved before a workspace's activation instant are read as not set (`projectLevels.ts`).
+   - Tokens authorize as their owner (live role plus the owner's group grants), capped by the token scope; project-bound tokens use their project. Personal token lists are own-only; acting on another person's tokens follows never-upward (`canActOnTokensOf`).
+   - Token rules (lifetime policy, IP allowlist) live in `src/lib/services/apiTokens/*`. Never use `request.ip` for authorization or allowlists: use `getAuthzClientIp` (connection address unless `TRUSTED_PROXIES` is set).
+   - Group grants only raise. Directory groups (source `ldap`/`oidc`) have read-only memberships (409 `group_directory_managed`); directory-managed people keep name, email and password in the directory, and their role when role sync is on (409 `directory_managed`).
+
+7. **Caching and invalidation**
+   - Principals are cached for about 15 s (`principalCache.ts`), the live identity for about 30 s. Every write that changes role, status, group membership or grants, project membership or levels, token scope or policies must call the existing invalidation (follow `PATCH /api/users/:id`, the group and project member routes, the policy store) so it applies at once on this node; other nodes converge within the TTL.
+
+8. **Audit and attribution**
+   - Engine denials are audited automatically (`request.iamDenial`). Semantic changes (role, membership, policy, token restrictions, directory sync) write explicit audit rows with the actor (`directory:<source>` for directory sync); new event kinds go into the IAM audit feed (`auditFeed.ts`) and i18n.
+   - Usage, tracing and request logs must carry `userId`, `apiTokenId` and the actor type so a person's activity stays attributable across services.
+
+9. **Limits (quotas)**
+   - A new metered call picks or adds a quota domain (`src/lib/quota/types.ts`) and calls the guard with the same keys the target picker stores (`src/lib/quota/targets.ts`); keep `quota-targets.test.ts` (drift guard) green.
+
+10. **Channels and end-user surfaces**
+    - Requests through a portal use channel `portal`; the portal access list is the portal's built-in policy. New end-user surfaces reuse `authorizeResourceAccess` with an explicit channel instead of keeping their own access lists.
+
+11. **Storage, seams and upgrades**
+    - No migrations and no new indexes; use existing JSON/settings fields. `iam_*` documents are created lazily through the iam-docs mixins. SQLite and MongoDB must behave the same (`describeForEachProvider` parity tests).
+    - Community ↔ EE contracts go through `src/enterprise/*` seams (`registry.ts` `SEAM_CONTRACT_VERSION`, `iam-portal.ts`, `directory-role-sync.ts`). Changing a seam means bumping the version in both registries and in EE `COMPAT.json`.
+    - A change that alters who may do what on existing data: run `scripts/iam/preflight-diff.ts` on a copy of the databases and describe the effect in `docs/guide/upgrading-to-the-policy-engine.md`.
+
+12. **UI**
+    - The IAM center is for owners, admins and holders of an `iam` grant. End-user pages (personal API tokens, My account) stay outside it. Gate in the UI (`useIamCapabilities`, server layouts) and enforce on the server.
+    - Navigation visibility uses `session.effectivePermissions` (active project).
+    - Create/edit flows are full-screen FormShell; every string in `en.ts` and `tr.ts`.
+
+13. **Tests for any authorization-relevant change**
+    - Route-declaration guard green; allow and deny through the real gates (session and token), including a custom forbid, project narrowing and a token cap; the 503 path; SQLite and MongoDB; a negative control for security fixes.
+    - The community repo is public: neutral wording in code, tests, docs and commit messages; no exploit narratives.
+
 ## 4) API Design Rules
 
 - All runtime APIs must be registered from `src/server/api/plugins/*`.
@@ -207,6 +275,9 @@ Note: fixing unrelated legacy issues is not required, but they should be reporte
 - [ ] No `console.*` in server code (`src/lib/`, `src/server/`) — use `createLogger()`
 - [ ] Runtime Fastify code does not depend on `src/server/api/routes/*`
 - [ ] No sensitive data in logs
+- [ ] Every new route has an `authz.*` declaration; handler checks use `authorizeServiceForRequest` / `authorizeResourceAccess`, never `rbac.ts` arithmetic or JWT role strings
+- [ ] Authorization changes are tested allow + deny through the real gates (session and token, SQLite and MongoDB) and documented in `docs/guide/authorization.md`
+- [ ] Writes that change role, membership, grants, project levels, token scope or policies invalidate the principal/identity caches
 - [ ] Lint/build (and relevant tests) pass
 
 ## 10) console-sdk Alignment Notes
@@ -221,6 +292,7 @@ If gateway and SDK evolve together:
 ## Short Agent Summary
 
 - Prioritize tenant safety and license checks first.
+- Every request is authorized by the policy engine: declare routes, ask the engine in handlers, fail closed (section 3.2).
 - Keep UI work in `src/app/*` and runtime API work in `src/server/api/plugins/*`.
 - Then implement API and service changes within correct domain boundaries.
 - Keep UI strictly aligned with existing Mantine design language.
