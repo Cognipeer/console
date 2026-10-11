@@ -78,8 +78,26 @@ import type { FastifyInstance } from 'fastify';
  *     `compatibleCommunity` floor of COMPAT.json is for; a community tree
  *     without an overlay never registers a resolver, and the portal rules stay
  *     "not enforced".
+ * 7 — approvals decided by the policy engine, and agent files on buckets. The
+ *     registry's own shape is unchanged; the community contract the portal
+ *     runtime compiles against changed in both directions. The resolve service
+ *     (`@/lib/services/agents/agentActionResolution`) REQUIRES `authorize` (an
+ *     `ApprovalAuthorizer`; the portal builds it with `portalApprovalAuthorizer`
+ *     from `@/lib/services/agents/approvalAuthorizers`), lost `ResolveActor.isAdmin`
+ *     and gained the `unavailable` outcome (the engine could not decide, which
+ *     is a 503 and never an allow). Community also added
+ *     `describeAgentAttachments` (`@/lib/services/agents/agentAttachmentInfo`),
+ *     the run `signal` of the playground and resolve calls,
+ *     `executeAgentContinueLocal`, `updateSessionBudget`, `readSessionFileContent`,
+ *     `normalizeStaleRunningStatus`, the session event log
+ *     (`listAgentSessionEvents`, `getAgentSessionMaxSeq`) and the run-state /
+ *     budget columns of `agent_conversations`. A seam-6 overlay no longer
+ *     compiles against this tree (`authorize` is required, `isAdmin` is gone),
+ *     and a seam-7 overlay not against a seam-6 one (no authorizer, no
+ *     attachments info, no event log). `compatibleCommunity` in COMPAT.json is
+ *     raised to the first community release that declares 7.
  */
-export const SEAM_CONTRACT_VERSION = 6;
+export const SEAM_CONTRACT_VERSION = 7;
 
 
 
