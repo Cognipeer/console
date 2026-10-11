@@ -145,7 +145,16 @@ Over A2A, a paused task reports the state `input-required` with the requests in 
 
 ## Tools the page runs (`client_tool`)
 
-A chat that is embedded in a host page (a portal's widget) can let the agent use tools **that run in the page** — read what is selected, open a record — without any server-side connector. The embedding's admin declares which tools exist (name, description, input schema, timeout, and whether each call needs approval first); only those are offered, and only on a run that says it is embedded. Nothing declares them from a client request: they are never offered over the plain API.
+A chat that is embedded in a host page (a portal's widget) can let the agent use tools **that run in the page** — read what is selected, open a record — without any server-side connector. Two people have to agree before an agent gets one:
+
+- **The agent's author opts in.** *Build → Configure → Experience → Tools from the page* (`config.experience.clientTools.enabled`) is off by default. An agent that did not turn it on never receives a tool from a page, whatever the embedding declares; the run carries a warning saying so.
+- **The embedding's admin declares the tools** (name, description, input schema, timeout, and what to do about approval, below). Only those are offered, and only on a run that says it is embedded. Nothing declares them from a client request: they are never offered over the plain API.
+
+::: warning What a page returns is user input
+The person controls their browser, so a tool's result is whatever they (or a script in their page) send. A tool such as `get_user_role` or `get_order_total` lets the person steer an agent that believes the value. **Do not let a client tool's result carry an authorization decision**: take identity, roles and permissions from the signed identity of the session and from server-side tools, never from the page.
+
+The console helps, but it cannot make the value true: the description the model sees says the result is untrusted, every result reaches the model behind a one-line notice saying so, the arguments are checked against the declared schema and the result against the 64 KB limit, and the agent's guardrails screen it like any tool result.
+:::
 
 A call pauses the turn like an approval, as a pending action of kind `client_tool`:
 
@@ -164,7 +173,7 @@ A call pauses the turn like an approval, as a pending action of kind `client_too
 The page runs the tool and answers with `output` or `error` (table above). The turn then continues; the model reads `output` as the tool's result (after the agent's `tool.post` guardrails) and `error` as the tool failing.
 
 - A page that does not answer within the tool's timeout — plus a few seconds for the round trip — is answered by the console with the error *The host page did not answer.*, whatever the agent's *On timeout* setting says, and the turn goes on as a background job.
-- A tool the admin marked for approval asks a person first (an ordinary `tool_approval`), and only then the page.
+- **Approval follows the agent's policy.** Unless the admin decided for the tool, a call is treated like a call to any other tool of the agent: with *Approvals & questions* on and the default *ask*, a person approves it first (an ordinary `tool_approval`), and only then the page is asked; the *read-only* exemption of the agent's own lookup tools does not apply. The admin can decide per tool: `needsApproval: true` always asks, `needsApproval: false` exempts the tool from the agent's policy (for a harmless one, such as reading the page title), and leaving it out follows the agent.
 - `tool.pre` guardrails see the arguments before the page does. The audit trail (`agent.client_tool.resolve`) records the call and its result as digests and sizes, never as content; the session log has `action.required` / `action.resolved` and an `agent.tool_result` with `source: client`.
 - Only the person the chat belongs to can supply the page's `output` (it goes into the model's context as a tool result); an administrator or another project member — whom *Who can answer* lets approve a tool — can only give the call up with an `error`. Tool-access guardrails see the tool as `agent.client.<name>`.
 - Studio shows the open call as *Waiting for the page*, with a **Give up on it** button that answers with an error.

@@ -19,7 +19,7 @@ export { AGENT_STARTERS_MAX, AGENT_STARTER_LABEL_MAX, AGENT_STARTER_TEXT_MAX, AG
 export const WELCOME_VARIABLES = ['{{user.name}}', '{{user.firstName}}', '{{agent.name}}', '{{portal.name}}'] as const;
 
 function isEmpty(value: IAgentExperienceConfig): boolean {
-    return !value.welcome && (value.starters ?? []).length === 0;
+    return !value.welcome && (value.starters ?? []).length === 0 && value.clientTools?.enabled !== true;
 }
 
 /** Applies a partial edit; an empty result is `undefined` (the key is dropped on save). */
@@ -30,7 +30,22 @@ export function patchExperience(
     const next: IAgentExperienceConfig = { ...(value ?? {}), ...patch };
     if (next.welcome !== undefined && next.welcome.trim() === '') delete next.welcome;
     if (next.starters !== undefined && next.starters.length === 0) delete next.starters;
+    // Off is the default: it is stored as absent, never as `{ enabled: false }`.
+    if (next.clientTools !== undefined && next.clientTools.enabled !== true) delete next.clientTools;
     return isEmpty(next) ? undefined : next;
+}
+
+/** Whether the agent accepts tools from the page that embeds its chat. */
+export function acceptsPageTools(value: IAgentExperienceConfig | undefined): boolean {
+    return value?.clientTools?.enabled === true;
+}
+
+/** Turns the opt-in to host-page tools on or off. */
+export function setAcceptsPageTools(value: IAgentExperienceConfig | undefined, enabled: boolean): IAgentExperienceConfig | undefined {
+    if (enabled) return { ...(value ?? {}), clientTools: { enabled: true } };
+    const next: IAgentExperienceConfig = { ...(value ?? {}) };
+    delete next.clientTools;
+    return patchExperience(undefined, next);
 }
 
 export function addStarter(value: IAgentExperienceConfig | undefined): IAgentExperienceConfig | undefined {
@@ -97,5 +112,6 @@ export function experienceForSave(value: IAgentExperienceConfig | undefined): IA
     return patchExperience(undefined, {
         ...(value.welcome ? { welcome: value.welcome.trim() } : {}),
         starters,
+        ...(value.clientTools?.enabled === true ? { clientTools: { enabled: true } } : {}),
     });
 }

@@ -13,6 +13,8 @@ What a chat surface — a portal, an embedded widget — builds on top of an age
 
 An agent that sets neither shows nothing extra. A portal shows the **published** version, and may override both for itself. The single-agent lookup of the client API returns them as `experience` (`welcome`, `starters[]` with `auto_send`).
 
+The same section holds one setting that is about what the agent may receive rather than what it shows: **Tools from the page** (`config.experience.clientTools.enabled`, off by default). An agent only gets tools that run in the embedding page when its author turns this on; what such a tool returns is typed in the person's browser, so it reaches the model as untrusted input and the agent's approval policy applies to the calls. See [Tools the page runs](/guide/agent-approvals#tools-the-page-runs-client-tool).
+
 ## Feedback
 
 A person can rate an answer **helpful** or **not helpful**. A thumbs down can carry reasons (`inaccurate`, `incomplete`, `off_topic`, `too_long`, `unsafe`, `other`) and a comment of up to 1000 characters.

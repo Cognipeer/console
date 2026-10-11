@@ -6,7 +6,11 @@
  * The welcome text (Markdown, with a few variables) and the suggested first
  * messages ("starters") that a portal or an embedded widget shows on an empty
  * conversation. Both are optional and stored on the agent's config; a portal may
- * override them for itself. Nothing here changes how the agent answers.
+ * override them for itself. They do not change how the agent answers.
+ *
+ * The one setting that does is the opt-in to tools from the embedding page: what
+ * such a tool returns is typed in the person's browser, so an agent takes them
+ * only when its author says so.
  */
 
 import {
@@ -36,7 +40,9 @@ import {
     experienceSaveErrors,
     moveStarter,
     patchExperience,
+    acceptsPageTools,
     removeStarter,
+    setAcceptsPageTools,
     updateStarter,
 } from './experienceSettings';
 
@@ -194,6 +200,17 @@ export default function AgentExperiencePanel({ value, onChange, showErrors = fal
                             </Group>
                         </Stack>
                     ) : null}
+                </Stack>
+            </ConfigBlock>
+            <ConfigBlock title={t('pageToolsTitle')}>
+                <Stack gap={6}>
+                    <Switch
+                        label={t('pageToolsLabel')}
+                        description={t('pageToolsDescription')}
+                        checked={acceptsPageTools(value)}
+                        onChange={(event) => onChange(setAcceptsPageTools(value, event.currentTarget.checked))}
+                    />
+                    <Text size="xs" c="dimmed">{t('pageToolsTrust')}</Text>
                 </Stack>
             </ConfigBlock>
             <Text size="xs" c="dimmed">{t('publishNote')}</Text>
