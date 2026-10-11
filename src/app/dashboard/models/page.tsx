@@ -50,6 +50,7 @@ import { useTranslations } from '@/lib/i18n';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
+import { modelTakesImages } from '@/components/models/inputModalities';
 import CreateDynamicModelModal, {
   type CandidateModel,
   type DynamicModelInit,
@@ -151,6 +152,8 @@ interface ModelDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** What the model resolves to (an explicit choice, else detected from its id). */
+  capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, unknown>;
@@ -301,6 +304,7 @@ export default function ModelsPage() {
       category: model.category,
       modelId: model.modelId,
       isMultimodal: model.isMultimodal,
+      capabilities: (model as { capabilities?: { inputModalities?: string[] } }).capabilities,
       supportsToolCalls: model.supportsToolCalls,
       pricing: model.pricing as ModelPricing,
       settings: model.settings ?? {},
@@ -340,7 +344,7 @@ export default function ModelsPage() {
   const counts = useMemo(() => {
     const llm = models.filter((m) => m.category === 'llm').length;
     const embedding = models.filter((m) => m.category === 'embedding').length;
-    const multimodal = models.filter((m) => m.isMultimodal).length;
+    const multimodal = models.filter(modelTakesImages).length;
     return { all: models.length, llm, embedding, multimodal };
   }, [models]);
 
@@ -379,7 +383,7 @@ export default function ModelsPage() {
   const filtered = useMemo(() => {
     return models.filter((m) => {
       if (activeType !== 'all' && m.category !== activeType) return false;
-      if (capability === 'multimodal' && !m.isMultimodal) return false;
+      if (capability === 'multimodal' && !modelTakesImages(m)) return false;
       if (capability === 'tools' && !m.supportsToolCalls) return false;
       if (providerFilter !== 'all' && m.providerKey !== providerFilter) return false;
       if (query) {
@@ -1019,7 +1023,7 @@ function modelColumns(
           ) : (
             <span className="ds-badge">{m.category}</span>
           )}
-          {m.isMultimodal ? (
+          {modelTakesImages(m) ? (
             <span className="ds-badge ds-badge-info" title={t('list.capabilities.multimodal')}>
               vision
             </span>

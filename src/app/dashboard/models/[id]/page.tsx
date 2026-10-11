@@ -93,6 +93,7 @@ import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
 import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import type { IDynamicRoutingConfig, IDynamicRoutingTarget } from '@/lib/database';
+import { modelTakesImages } from '@/components/models/inputModalities';
 
 interface ModelPricing {
   currency?: string;
@@ -121,6 +122,8 @@ interface ModelDetailDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** What the model resolves to (an explicit choice, else detected from its id). */
+  capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, unknown>;
@@ -816,7 +819,7 @@ export default function ModelDetailPage() {
               ) : (
                 <span className="ds-badge">{model.category}</span>
               )}
-              {model.isMultimodal ? (
+              {modelTakesImages(model) ? (
                 <span className="ds-badge ds-badge-info">vision</span>
               ) : null}
               {model.supportsToolCalls ? (

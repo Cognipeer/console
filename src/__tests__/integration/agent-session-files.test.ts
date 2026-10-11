@@ -1216,6 +1216,40 @@ describe('images are seen, survive compaction and later turns', () => {
     expect(userTurn(model.seen[0]).content).toBe('again');
   });
 
+  it('F2 retest: the carry looks at the window the SDK sends, not the saved list — a picture that left it comes back (16 turns)', async () => {
+    await vision({ attachments: { carryRecentImages: 2 } });
+    const conversation = await newConversation();
+    const id = String(conversation._id);
+    const image = photo();
+    const model = scriptModel(() => answer('ok'));
+
+    await chat(id, 'hello, just chatting');
+    // Uploaded after the first message: the first user message, which the SDK always keeps, holds no picture.
+    const cat = await attach(conversation, 'cat.png', image, 'image/png');
+    await chat(id, 'is this one red?', [cat.id]);
+    const perTurn: Array<{ turn: number; images: number; carried: boolean }> = [];
+    for (let turn = 3; turn <= 16; turn += 1) {
+      const before = model.seen.length;
+      await chat(id, `chat turn ${turn}`);
+      const request = model.seen[before]!;
+      perTurn.push({
+        turn,
+        images: imageUrls(request).length,
+        carried: JSON.stringify(userTurn(request).content).includes('Earlier image'),
+      });
+    }
+
+    // Every request of the session still holds the picture (the SDK keeps the first user message and the last 10
+    // user turns: the picture left that window at turn 12, so it is shown again with the message of turn 12 …
+    expect(perTurn.filter((row) => row.images === 0)).toEqual([]);
+    expect(perTurn.filter((row) => row.carried).map((row) => row.turn)).toEqual([12]);
+    // … and it is what the model sees: the bytes, from the stored file.
+    expect(imageUrls(model.seen.at(-1)!)).toEqual([dataUrl(image)]);
+    // The saved state and the transcript still hold no copy of the bytes.
+    expect(await snapshotOf(id)).not.toContain('base64');
+    expect(JSON.stringify((await stored(id)).messages)).not.toContain('Earlier image');
+  });
+
   it('works the same on the dashboard (playground) path', async () => {
     await vision();
     const model = scriptModel(() => answer('a cat'));
@@ -1252,8 +1286,11 @@ describe('the SDK token counter', () => {
     expect(counter(`data:image/png;base64,${bytes}`)).toBeLessThan(1_000);
     expect(counter(text)).toBe(defaultTokenCounter(text));
     expect(counter('')).toBe(0);
-    // The SDK's own message estimate, with the counter swapped in the way a run does.
-    expect(countMessagesTokens(JSON.parse(inline))).toBeGreaterThan(30_000);
+    // The SDK's own message estimate of the same message. agent-sdk before 0.10.6 counted the base64 payload as
+    // text (tens of thousands of tokens for a ~425-token picture); from 0.10.6 it counts a short placeholder.
+    // Either way the console's counter above is the one that says what an image costs.
+    const sdkEstimate = countMessagesTokens(JSON.parse(inline));
+    expect(sdkEstimate > 30_000 || sdkEstimate < 1_000).toBe(true);
   });
 });
 

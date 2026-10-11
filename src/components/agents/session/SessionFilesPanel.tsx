@@ -17,6 +17,7 @@ import { IconAlertTriangle, IconDownload, IconFileText, IconTrash } from '@table
 import { useLocale, useTranslations } from '@/lib/i18n';
 import { expiryLabel } from '@/components/files/fileBrowse';
 import { AttachmentIcon, AttachmentPreviewModal, AttachmentThumb } from './SessionAttachments';
+import { CHIP_CAPTION } from './attachmentChipStyles';
 import { formatFileSize, isImageAttachment } from './sessionAttachmentsUi';
 import {
     bucketHref,
@@ -91,7 +92,7 @@ export default function SessionFilesPanel({
                     {maxFiles !== undefined ? t('filesHeld', { count: files.length, max: maxFiles }) : t('filesHeldNoMax', { count: files.length })}
                 </Text>
             </Group>
-            <Text size="10px" c="dimmed">{t('filesIntro')}</Text>
+            <Text size="10px" style={{ color: CHIP_CAPTION }}>{t('filesIntro')}</Text>
 
             {files.length === 0 ? (
                 <Text size="xs" c="dimmed">{t('filesEmpty')}</Text>
@@ -121,10 +122,10 @@ export default function SessionFilesPanel({
                                         <Box style={{ minWidth: 0 }}>
                                             <Text size="xs" fw={600} truncate title={file.name}>{file.name}</Text>
                                             <Group gap={6} wrap="wrap">
-                                                <Text size="10px" c="dimmed">{formatFileSize(file.size)} · {file.mimeType}</Text>
+                                                <Text size="10px" style={{ color: CHIP_CAPTION }}>{formatFileSize(file.size)} · {file.mimeType}</Text>
                                                 {badge ? (
                                                     <Tooltip label={file.conversionError ?? ''} disabled={!file.conversionError} withArrow multiline w={220}>
-                                                        <Badge size="xs" variant="light" color={badge.color}>{t(badge.key)}</Badge>
+                                                        <Badge size="xs" variant="light" color={badge.color} styles={{ root: { color: 'var(--ds-text)' } }}>{t(badge.key)}</Badge>
                                                     </Tooltip>
                                                 ) : null}
                                             </Group>
@@ -166,7 +167,7 @@ export default function SessionFilesPanel({
                                 <Stack gap={2} mt={6}>
                                     {location ? (
                                         <Group gap={4} wrap="nowrap">
-                                            <Text size="10px" c="dimmed" style={{ flexShrink: 0 }}>{t('filesLocation')}</Text>
+                                            <Text size="10px" style={{ flexShrink: 0, color: CHIP_CAPTION }}>{t('filesLocation')}</Text>
                                             {bucket ? (
                                                 <Tooltip label={`${t('filesOpenBucket')} · ${location}`} withArrow>
                                                     <Anchor component={Link} href={bucket} size="10px" ff="monospace" truncate>{location}</Anchor>
@@ -176,13 +177,13 @@ export default function SessionFilesPanel({
                                             )}
                                         </Group>
                                     ) : null}
-                                    <Text size="10px" c={expiry.kind === 'expired' ? 'red' : 'dimmed'}>
+                                    <Text size="10px" style={{ color: expiry.kind === 'expired' ? 'var(--ds-err-text)' : CHIP_CAPTION }}>
                                         {expiry.kind === 'none'
                                             ? t('filesNoExpiry')
                                             : expiry.kind === 'expired'
                                                 ? `${t('filesExpired')} · ${expiry.text}`
                                                 : t('filesExpires', { when: expiry.text })}
-                                        {file.uploadedBy ? ` · ${t('filesUploadedBy', { who: file.uploadedBy })}` : ''}
+                                        {file.uploadedBy || file.uploadedByName ? ` · ${t('filesUploadedBy', { who: file.uploadedByName ?? file.uploadedBy })}` : ''}
                                     </Text>
                                 </Stack>
                             </Box>

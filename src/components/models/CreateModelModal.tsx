@@ -58,7 +58,6 @@ const DEFAULT_PRICING = {
 const CAPABILITY_KEYS = {
   categories: 'model.categories',
   toolCalls: 'model.supports.tool_calls',
-  multimodal: 'model.supports.multimodal',
 } as const;
 
 type ModelCategory = 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
@@ -105,7 +104,6 @@ interface FormValues {
   description: string;
   category: ModelCategory;
   modelId: string;
-  isMultimodal: boolean;
   /** An explicit choice of what the model can be sent; null = detected from the model id. */
   inputModalities: ModelInputModality[] | null;
   supportsToolCalls: boolean;
@@ -170,10 +168,6 @@ function providerSupportsToolCalls(provider?: ModelProviderView) {
   return Boolean(provider?.driverCapabilities?.[CAPABILITY_KEYS.toolCalls]);
 }
 
-function providerSupportsMultimodal(provider?: ModelProviderView) {
-  return Boolean(provider?.driverCapabilities?.[CAPABILITY_KEYS.multimodal]);
-}
-
 export default function CreateModelModal({
   opened,
   onClose,
@@ -196,7 +190,6 @@ export default function CreateModelModal({
       description: '',
       category: 'llm',
       modelId: '',
-      isMultimodal: false,
       inputModalities: null,
       // Capabilities default ON: nearly every current chat model does all of
       // this, and an operator who knows their model does not is one toggle away
@@ -293,16 +286,15 @@ export default function CreateModelModal({
     [availableProviders, formValues.providerKey],
   );
 
-  // What the model id is known to accept, and what the provider can take at all.
+  // What the model id is known to accept. Every driver can be told that a model
+  // takes images — a driver's own "multimodal" capability describes what the
+  // driver itself can discover, not what the operator's model can read — so the
+  // boxes are never limited by the provider.
   const inferredModalities = useMemo(
     () => inferredInputModalities(formValues.category, formValues.modelId),
     [formValues.category, formValues.modelId],
   );
-  const allowedModalities = useMemo(
-    (): ModelInputModality[] | undefined => (providerSupportsMultimodal(selectedProvider) ? undefined : ['text', 'file']),
-    [selectedProvider],
-  );
-  const effectiveModalities = shownInputModalities(formValues.inputModalities, inferredModalities, allowedModalities);
+  const effectiveModalities = shownInputModalities(formValues.inputModalities, inferredModalities);
 
   // Same registry the gateway consults at call time, so the form shows exactly
   // what will be dropped rather than a description of it.
@@ -364,10 +356,6 @@ export default function CreateModelModal({
     // operator's choice stands.
     if (!providerSupportsToolCalls(selectedProvider)) {
       setFieldValue('supportsToolCalls', false);
-    }
-    if (!providerSupportsMultimodal(selectedProvider)) {
-      setFieldValue('isMultimodal', false);
-      setFieldValue('inputModalities', null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProvider, formValues.category]);
@@ -789,7 +777,6 @@ export default function CreateModelModal({
               hideLabel
               value={formValues.inputModalities}
               inferred={inferredModalities}
-              allowed={allowedModalities}
               onChange={(next) => setFieldValue('inputModalities', next)}
             />
           </FormField>

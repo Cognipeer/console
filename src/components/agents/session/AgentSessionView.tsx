@@ -70,6 +70,7 @@ import {
     IconArrowsLeftRight,
 } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
+import ConfirmModal from '@/components/common/ui/ConfirmModal';
 import Markdown from './AgentMarkdown';
 import LoadingState from '@/components/common/LoadingState';
 import EmptyState from '@/components/common/EmptyState';
@@ -116,6 +117,7 @@ import {
     uploadContentType,
     type PendingAttachment,
 } from './sessionAttachmentsUi';
+import { sessionLoadFailure, type SessionLoadFailure } from './sessionLoadFailure';
 import { sessionFileLinks, sessionFilesUrl, sessionFileUrl, toAttachmentViews, type SessionFileItem } from './sessionFilesUi';
 import { useAgentModelVision } from './agentModelVision';
 import type { AgentToolConfig } from './sessionTools';
@@ -214,7 +216,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [session, setSession] = useState<SessionRecord | null>(null);
     const [versions, setVersions] = useState<VersionOption[]>([]);
     const [loading, setLoading] = useState(true);
-    const [notFound, setNotFound] = useState(false);
+    // Why the page could not be shown: the session is not there, or the person may not open it.
+    const [loadFailure, setLoadFailure] = useState<SessionLoadFailure | null>(null);
 
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [input, setInput] = useState('');
@@ -264,6 +267,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [sessionFiles, setSessionFiles] = useState<SessionFileItem[] | null>(null);
     const [sessionFilesFailed, setSessionFilesFailed] = useState(false);
     const [deletingFiles, setDeletingFiles] = useState<string[]>([]);
+    // The file the person asked to delete, until they confirm in the app's own dialog.
+    const [fileToDelete, setFileToDelete] = useState<SessionFileItem | null>(null);
     /** Chips whose delete is still on its way: Send waits for them, or the file would go with the message. */
     const [removingFiles, setRemovingFiles] = useState<string[]>([]);
     const budgetBlocked = Boolean(budgetView?.exhausted);
@@ -395,7 +400,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
 
     /** Deletes a file from the Files tab: the object, its text and the record go, and a chip waiting for it too. */
     const deleteSessionFile = async (file: SessionFileItem) => {
-        if (!window.confirm(ta('filesDeleteConfirm', { name: file.name }))) return;
         setDeletingFiles((ids) => [...ids, file.id]);
         try {
             const res = await fetch(sessionFileUrl(agentId, sessionId, file.id), { method: 'DELETE' });
@@ -424,10 +428,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 fetch(`/api/agents/${agentId}`, { cache: 'no-store' }),
                 fetch(`/api/agents/${agentId}/sessions/${sessionId}`, { cache: 'no-store' }),
             ]);
-            if (!agentRes.ok || !sessionRes.ok) {
-                setNotFound(true);
+            const failure = sessionLoadFailure(agentRes, sessionRes);
+            if (failure) {
+                setLoadFailure(failure);
                 return;
             }
+            setLoadFailure(null);
             const agentData = await agentRes.json();
             const sessionData = await sessionRes.json();
             setAgent(agentData.agent);
@@ -444,7 +450,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             }
         } catch (err) {
             console.error('Failed to load session', err);
-            setNotFound(true);
+            setLoadFailure('notFound');
         } finally {
             setLoading(false);
         }
@@ -910,11 +916,12 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     };
 
     if (loading) return <LoadingState label="Loading session..." minHeight={400} />;
-    if (notFound || !agent) {
+    if (loadFailure || !agent) {
+        const refused = loadFailure === 'forbidden';
         return (
             <EmptyState
-                title="Session not found"
-                description="This session may have been deleted, or belongs to a different agent."
+                title={refused ? tp('accessDeniedTitle') : tp('notFoundTitle')}
+                description={refused ? tp('accessDeniedBody') : tp('notFoundBody')}
                 minHeight={400}
             />
         );
@@ -1312,12 +1319,26 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                             maxFiles: filesConfigured ? attachmentsConfig.maxFiles : undefined,
                             readOnly,
                             deleting: deletingFiles,
-                            onDelete: (file) => void deleteSessionFile(file),
+                            onDelete: (file) => setFileToDelete(file),
                             onRetry: () => void loadSessionFiles(),
                         }}
                     />
                 </Paper>
             </Group>
+            <ConfirmModal
+                opened={fileToDelete !== null}
+                title={ta('filesDelete')}
+                message={fileToDelete ? ta('filesDeleteConfirm', { name: fileToDelete.name }) : ''}
+                confirmLabel={ta('filesDeleteAction')}
+                cancelLabel={ta('cancel')}
+                loading={fileToDelete ? deletingFiles.includes(fileToDelete.id) : false}
+                onClose={() => setFileToDelete(null)}
+                onConfirm={() => {
+                    const file = fileToDelete;
+                    if (!file) return;
+                    void deleteSessionFile(file).finally(() => setFileToDelete(null));
+                }}
+            />
             <CompareVersionsDrawer
                 opened={compareOpen}
                 onClose={() => setCompareOpen(false)}

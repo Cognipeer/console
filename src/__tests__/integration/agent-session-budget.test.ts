@@ -815,7 +815,10 @@ describe('a turn that is not persisted still counts against the session budget',
 
     await chat(id, 'go', { signal: controller.signal });
     const after = await stored(id);
-    expect(after.messages).toHaveLength(0);
+    // What a cancelled turn leaves in the transcript depends on the agent-sdk: before 0.10.6 the abort threw and
+    // nothing was persisted; from 0.10.6 the run ends as a cancelled result and the turn is kept. What must hold
+    // either way is the spend: the requests made before the abort are counted.
+    expect([0, 2]).toContain(after.messages.length);
     expect(after.spentUsd ?? 0).toBeGreaterThan(0);
   });
 

@@ -50,6 +50,7 @@ import {
     IconPresentation,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { CHIP_CAPTION, CHIP_STYLES, EXPIRED_CHIP_STYLES, WARN_CHIP_STYLES } from './attachmentChipStyles';
 import {
     formatFileSize,
     isImageAttachment,
@@ -213,7 +214,8 @@ function chipText(file: Pick<AttachmentView, 'name' | 'size'>): string {
     return file.size === undefined ? file.name : `${file.name} · ${formatFileSize(file.size)}`;
 }
 
-const CHIP_LABEL_STYLES = { label: { textTransform: 'none', fontWeight: 500 } } as const;
+/** The look of every file chip — see `attachmentChipStyles.ts` for why it is not Mantine's light gray. */
+const CHIP_LABEL_STYLES = CHIP_STYLES;
 
 /** A file that is not an image (or whose picture is not available): icon, name, size, and a link that saves it. */
 function AttachmentFileChip({ file }: { file: AttachmentView }) {
@@ -229,7 +231,7 @@ function AttachmentFileChip({ file }: { file: AttachmentView }) {
                     radius="sm"
                     leftSection={<IconClockOff size={12} />}
                     data-expired="true"
-                    styles={{ root: { opacity: 0.7, borderStyle: 'dashed' }, label: { textTransform: 'none', fontWeight: 500 } }}
+                    styles={EXPIRED_CHIP_STYLES}
                 >
                     {chipText(file)} · {t('filesExpired')}
                 </Badge>
@@ -317,7 +319,7 @@ function AttachmentImageTile({ file, onOpen }: { file: AttachmentView; onOpen: (
     return (
         <Stack gap={2} w={84} data-testid="attachment-thumbnail">
             <AttachmentThumb file={file} size={84} onOpen={onOpen} />
-            <Text size="10px" c="dimmed" truncate title={file.name}>{file.name}</Text>
+            <Text size="10px" truncate title={file.name} style={{ color: CHIP_CAPTION }}>{file.name}</Text>
         </Stack>
     );
 }
@@ -400,7 +402,7 @@ export function AttachmentChips({ files, uploading, disabled, onRemove, textOnly
                             rightSection={
                                 <CloseButton size="xs" aria-label={t('remove')} disabled={disabled} onClick={() => onRemove(file.fileId)} />
                             }
-                            styles={CHIP_LABEL_STYLES}
+                            styles={unsent(file) || lacksReadableText(file) ? WARN_CHIP_STYLES : CHIP_LABEL_STYLES}
                         >
                             <Tooltip
                                 label={unsent(file)
@@ -408,21 +410,21 @@ export function AttachmentChips({ files, uploading, disabled, onRemove, textOnly
                                     : lacksReadableText(file) ? t('noText') : `${file.mimeType} · ${formatFileSize(file.size)}`}
                                 withArrow
                             >
-                                <span>{file.name} <Text span size="10px" c="dimmed">{formatFileSize(file.size)}</Text></span>
+                                <span>{file.name} <Text span size="10px" style={{ color: 'inherit' }}>{formatFileSize(file.size)}</Text></span>
                             </Tooltip>
                         </Badge>
                     );
                 })}
                 {uploading.map((name) => (
-                    <Badge key={`up-${name}`} variant="outline" color="gray" size="lg" radius="sm" leftSection={<Loader size={10} />} styles={{ label: { textTransform: 'none' } }}>
+                    <Badge key={`up-${name}`} variant="outline" color="gray" size="lg" radius="sm" leftSection={<Loader size={10} />} styles={EXPIRED_CHIP_STYLES}>
                         {name}
                     </Badge>
                 ))}
             </Group>
             {warning ? (
                 <Group gap={6} wrap="wrap" role="alert" data-testid="image-warning">
-                    <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />
-                    <Text size="xs" c="orange.7">{t('imageTextOnly', { model: warning.name })}</Text>
+                    <IconAlertTriangle size={12} color="var(--ds-warn-text)" />
+                    <Text size="xs" style={{ color: 'var(--ds-warn-text)' }}>{t('imageTextOnly', { model: warning.name })}</Text>
                     <Anchor component={Link} href={warning.href} size="xs">{t('imageChangeInModels')}</Anchor>
                 </Group>
             ) : null}

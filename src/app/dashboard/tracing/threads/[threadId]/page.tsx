@@ -57,6 +57,7 @@ import {
   statusVariant,
 } from '@/lib/utils/tracingUtils';
 import { messageContentToText } from '@/components/common/ui/MessageBlock';
+import { tracedMessageContent } from '@/components/common/llm/tracedMessageContent';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import FunctionsList from '@/components/common/ui/FunctionsList';
 import TokenStats from '@/components/common/ui/TokenStats';
@@ -218,8 +219,8 @@ function sectionsToItems(
     const tool = typeof section.tool === 'string' ? section.tool : undefined;
 
     if (kind === 'message' && role) {
-      // The content goes in as it came: a part that is an image is drawn by the inspector, which flattens the rest to text itself.
-      items.push({ itemType: 'message', role, content: section.content });
+      // A recorded message is handed over as parts (structured when the SDK kept them, else read back from the flattened text), so pictures and files are drawn by the inspector instead of printed as JSON.
+      items.push({ itemType: 'message', role, content: tracedMessageContent(section) });
     } else if (kind === 'tool_call') {
       const raw = section.content;
       let args: unknown = raw;

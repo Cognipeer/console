@@ -59,9 +59,19 @@ function hostOf(address: string): string {
   }
 }
 
-/** One image part as something to draw, or null when it is not a picture this can show. */
+/** A document part (`file` / `input_file`) as a chip: only what the request names, never a download. */
+function fileViewOf(part: Record<string, unknown>, index: number): AttachmentView | null {
+  const file = part.file && typeof part.file === 'object' ? (part.file as Record<string, unknown>) : {};
+  const fileId = asString(part.fileId) ?? asString(part.file_id) ?? asString(file.file_id);
+  const name = asString(part.name) ?? asString(part.filename) ?? asString(file.filename);
+  if (!fileId && !name) return null;
+  return { fileId: fileId ?? `file-${index + 1}`, name: name ?? fileId!, mimeType: 'application/octet-stream', reference: true };
+}
+
+/** One image or file part as something to draw, or null when it is not one this can show. */
 function viewOf(part: Record<string, unknown>, index: number): AttachmentView | null {
   const type = part.type;
+  if (type === 'file' || type === 'input_file') return fileViewOf(part, index);
   if (type !== 'image_url' && type !== 'input_image' && type !== 'image') return null;
 
   const address = partAddress(part);
@@ -72,6 +82,8 @@ function viewOf(part: Record<string, unknown>, index: number): AttachmentView | 
     const id = fileId ?? address!.slice(SESSION_FILE_SCHEME.length);
     return { fileId: id, name: name ?? id, mimeType: 'image/*', reference: true };
   }
+  // A picture that is only a name (a recording cut off inside it): listed, with nothing to open.
+  if (!address && name) return { fileId: `image-${index + 1}`, name, mimeType: 'image/*' };
   if (!address) return null;
 
   const inline = DATA_IMAGE.exec(address);
@@ -96,7 +108,7 @@ function viewOf(part: Record<string, unknown>, index: number): AttachmentView | 
   return null;
 }
 
-/** The pictures of a message's content (an array of parts); a plain string holds none. */
+/** The pictures and files of a message's content (an array of parts); a plain string holds none. */
 export function messageImageViews(content: unknown): AttachmentView[] {
   if (!Array.isArray(content)) return [];
   const views: AttachmentView[] = [];
@@ -106,4 +118,21 @@ export function messageImageViews(content: unknown): AttachmentView[] {
     if (view) views.push(view);
   });
   return views;
+}
+
+/**
+ * The content without the parts that `messageImageViews` draws, for the text
+ * above them: a picture is shown once, as a picture, not also as "[image]".
+ * Parts it cannot draw stay, so the text still says something was there.
+ */
+export function contentWithoutDrawnParts(content: unknown): unknown {
+  if (!Array.isArray(content)) return content;
+  let drawn = 0;
+  return content.filter((part, index) => {
+    if (!part || typeof part !== 'object') return true;
+    if (drawn >= MAX_MESSAGE_IMAGES) return true;
+    const isDrawn = viewOf(part as Record<string, unknown>, index) !== null;
+    if (isDrawn) drawn += 1;
+    return !isDrawn;
+  });
 }

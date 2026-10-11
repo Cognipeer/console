@@ -42,6 +42,7 @@ import type {
 } from '@/lib/database';
 
 import { chunkText } from './assembledStream';
+import { sdkContextWindow, type SdkContextWindowOptions } from './sdkContextWindow';
 import {
     rebuildUserTurn,
     recentImageAttachments,
@@ -359,8 +360,10 @@ export async function saveConversationState(
  * in (`rebuildUserTurn`) — the documents named for the session file tools, the
  * images as references. And whichever way the history was built, the person's
  * last `carryRecentImages` image-bearing messages are shown again with the new
- * message when the history no longer holds them (the SDK keeps only the first
- * user message and the latest turns).
+ * message when the model would no longer see them. "See" means the window the
+ * SDK builds each request from (`sdkContextWindow`), not the saved list: the
+ * SDK keeps the first user message and the latest turns, and a picture in an
+ * older message is still in the list long after it stopped being sent.
  */
 export function buildTurnInputState(input: {
     carried: CarriedState | null;
@@ -379,6 +382,11 @@ export function buildTurnInputState(input: {
         carryRecentImages: number;
         /** Files the session still holds; an image whose file is gone is not carried. Absent = all. */
         availableFileIds?: ReadonlySet<string>;
+        /**
+         * How the agent's context is windowed (`runtime.context`). An image counts as seen only when it
+         * sits inside that window. Absent = the whole history is taken as seen.
+         */
+        window?: Pick<SdkContextWindowOptions, 'policy' | 'lastTurnsToKeep'>;
     };
 }): AgentSdkSmartState {
     const replay = input.attachments;
@@ -392,7 +400,15 @@ export function buildTurnInputState(input: {
 
     let userContent: string | unknown[] = input.userContent ?? input.userMessage;
     if (replay && replay.supportsVision && replay.carryRecentImages > 0) {
-        const visible = referencedImageIds([...history, { content: userContent }]);
+        const everything: Array<{ role?: string; content?: unknown }> = [
+            ...(input.systemPrompt ? [{ role: 'system', content: input.systemPrompt }] : []),
+            ...history,
+            { role: 'user', content: userContent },
+        ];
+        const sent = replay.window
+            ? sdkContextWindow(everything, { ...replay.window, hasSummary: Boolean(input.carried?.summaryRecords?.length) })
+            : everything;
+        const visible = referencedImageIds(sent);
         const missing = recentImageAttachments(input.transcript, replay.carryRecentImages)
             .filter((image) => !visible.has(image.fileId))
             .filter((image) => !replay.availableFileIds || replay.availableFileIds.has(image.fileId));

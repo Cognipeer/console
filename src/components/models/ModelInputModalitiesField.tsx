@@ -22,8 +22,6 @@ export interface ModelInputModalitiesFieldProps {
     /** What the model id is known to accept. */
     inferred: ModelInputModality[];
     onChange: (next: ModelInputModality[] | null) => void;
-    /** Types the provider can take at all; the others are shown but cannot be ticked. */
-    allowed?: readonly ModelInputModality[];
     disabled?: boolean;
     /** The host draws its own label (the create form's FormField). */
     hideLabel?: boolean;
@@ -33,12 +31,11 @@ export default function ModelInputModalitiesField({
     value,
     inferred,
     onChange,
-    allowed,
     disabled,
     hideLabel,
 }: ModelInputModalitiesFieldProps) {
     const t = useTranslations('modelWizard.fields.inputModalities');
-    const shown = shownInputModalities(value, inferred, allowed);
+    const shown = shownInputModalities(value, inferred);
 
     return (
         <Stack gap={6}>
@@ -55,7 +52,7 @@ export default function ModelInputModalitiesField({
                         label={t(`options.${modality}`)}
                         checked={shown.includes(modality)}
                         // The last box cannot be cleared: a model takes something.
-                        disabled={disabled || (allowed ? !allowed.includes(modality) : false) || (shown.length === 1 && shown[0] === modality)}
+                        disabled={disabled || (shown.length === 1 && shown[0] === modality)}
                         onChange={(event) => onChange(toggleInputModality(shown, modality, event.currentTarget.checked))}
                     />
                 ))}

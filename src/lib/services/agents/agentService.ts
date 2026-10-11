@@ -3617,7 +3617,10 @@ async function earlierAttachments(input: {
             logger.debug('Could not list the session files to carry images from', { error: error instanceof Error ? error.message : String(error) });
         }
     }
-    return { supportsVision, carryRecentImages, ...(availableFileIds ? { availableFileIds } : {}) };
+    // The window the SDK builds each request from: a picture counts as still seen only inside it.
+    const { policy, lastTurnsToKeep } = resolveAgentRuntimeOptions(input.config).context ?? {};
+    const window = policy && lastTurnsToKeep ? { policy, lastTurnsToKeep } : undefined;
+    return { supportsVision, carryRecentImages, ...(availableFileIds ? { availableFileIds } : {}), ...(window ? { window } : {}) };
 }
 
 /**

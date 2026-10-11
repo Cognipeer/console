@@ -291,7 +291,8 @@ describe('dashboard: list and delete', () => {
     const res = await app.inject({ method: 'GET', url: DASH_URL, headers: dashHeaders });
     expect(res.statusCode).toBe(200);
     expect(parseJsonBody<{ files: Array<{ id: string; name: string }> }>(res.body).files).toMatchObject([{ id: 'f1', name: 'notes.txt' }]);
-    expect(listSessionFiles).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1' }, 'conv-1');
+    // The Studio panel names the uploader as a person, so the dashboard list asks for names; the client API list does not.
+    expect(listSessionFiles).toHaveBeenCalledWith({ tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1' }, 'conv-1', { withNames: true });
   });
 
   it('deletes one file, and 404s a file that is not on this session', async () => {
@@ -354,6 +355,63 @@ describe('dashboard: file content', () => {
     mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
     expect((await app.inject({ method: 'GET', url: `${DASH_URL}/f1/content`, headers: dashHeaders })).statusCode).toBe(200);
   });
+});
+
+describe('file content: Range', () => {
+  const routes = [
+    ['dashboard', DASH_URL, dashHeaders],
+    ['client API', CLIENT_URL, clientHeaders],
+  ] as const;
+
+  for (const [name, base, headers] of routes) {
+    describe(name, () => {
+      const get = (range?: string) => app.inject({
+        method: 'GET', url: `${base}/f1/content`, headers: { ...headers, ...(range ? { range } : {}) },
+      });
+
+      it('says it takes byte ranges, and sends the whole file when none is asked for', async () => {
+        mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
+        const res = await get();
+        expect(res.statusCode).toBe(200);
+        expect(res.headers['accept-ranges']).toBe('bytes');
+        expect(res.body).toBe('hello');
+      });
+
+      it('answers one range with 206, its Content-Range and exactly those bytes', async () => {
+        mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
+        for (const [range, bytes, contentRange] of [
+          ['bytes=1-3', 'ell', 'bytes 1-3/5'],
+          ['bytes=3-', 'lo', 'bytes 3-4/5'],
+          ['bytes=-2', 'lo', 'bytes 3-4/5'],
+          ['bytes=0-99', 'hello', 'bytes 0-4/5'],
+        ] as const) {
+          const res = await get(range);
+          expect(res.statusCode, range).toBe(206);
+          expect(res.body, range).toBe(bytes);
+          expect(res.headers['content-range'], range).toBe(contentRange);
+          expect(res.headers['content-length'], range).toBe(String(bytes.length));
+          expect(res.headers['accept-ranges'], range).toBe('bytes');
+          // The partial answer keeps the headers that make serving from our origin safe.
+          expect(res.headers['x-content-type-options'], range).toBe('nosniff');
+          expect(res.headers['content-disposition'], range).toBe(CONTENT.contentDisposition);
+          expect(res.headers['content-type'], range).toBe('text/plain');
+        }
+      });
+
+      it('answers a range that starts past the end with 416 and the size, and ignores what it cannot honour', async () => {
+        mockFn(readSessionFileContent).mockResolvedValue(CONTENT);
+        const past = await get('bytes=9-');
+        expect(past.statusCode).toBe(416);
+        expect(past.headers['content-range']).toBe('bytes */5');
+        // Several ranges, another unit, nonsense: the whole file, as a server may always do.
+        for (const range of ['bytes=0-1,3-4', 'items=0-1', 'bytes=abc', 'bytes=4-2', 'bytes=-']) {
+          const res = await get(range);
+          expect(res.statusCode, range).toBe(200);
+          expect(res.body, range).toBe('hello');
+        }
+      });
+    });
+  }
 });
 
 describe('client API: file content', () => {
