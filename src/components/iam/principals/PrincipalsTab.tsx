@@ -169,6 +169,8 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
   const refresh = useCallback(() => setReload((n) => n + 1), []);
   const [load, setLoad] = useState<LoadState>({ forType: null, page: null, loading: true, error: null });
   const totals = useRef(new Map<string, number>());
+  // How many external accounts the workspace has (a host application's people who use a portal's embed): asked with the first page.
+  const externalCount = useRef<number | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectChoice[]>([]);
   const [ownerLabel, setOwnerLabel] = useState<string | null>(null);
@@ -194,6 +196,7 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
       .then((page) => {
         if (controller.signal.aborted) return;
         if (page.total !== undefined) totals.current.set(key, page.total);
+        if (type === 'user' && page.externalTotal !== undefined) externalCount.current = page.externalTotal;
         setLoad({ forType: type, page, loading: false, error: null });
       })
       .catch((error: unknown) => {
@@ -466,7 +469,14 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
           width: 150,
           render: (row) =>
             row.kind ? (
-              <Badge variant="default" radius="sm" tt="none" style={NO_SHRINK}>
+              <Badge
+                variant={row.kind === 'external' ? 'light' : 'default'}
+                color={row.kind === 'external' ? 'grape' : undefined}
+                radius="sm"
+                tt="none"
+                style={NO_SHRINK}
+                data-testid={row.kind === 'external' ? 'external-badge' : undefined}
+              >
                 {td(`badges.kinds.${row.kind}`)}
               </Badge>
             ) : (
@@ -840,6 +850,23 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
         <Text size="sm" c="dimmed" maw={640} style={{ flex: '1 1 260px' }}>
           {t(`hint.${type}`)}
         </Text>
+        {type === 'user' && externalCount.current !== null && externalCount.current > 0 ? (
+          <Tooltip label={td('list.externalCountHint')} withArrow multiline w={280}>
+            <Badge
+              component="button"
+              type="button"
+              variant="light"
+              color="grape"
+              radius="sm"
+              tt="none"
+              style={{ cursor: 'pointer' }}
+              onClick={() => changeFilters({ kind: 'external' })}
+              data-testid="external-counter"
+            >
+              {td('list.externalCount', { count: externalCount.current.toLocaleString() })}
+            </Badge>
+          </Tooltip>
+        ) : null}
       </Group>
 
       <FilterBar

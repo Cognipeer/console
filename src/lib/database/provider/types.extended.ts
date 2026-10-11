@@ -1695,6 +1695,11 @@ export interface IamUserFilter {
   excludeIds?: string[];
   /** true = accounts that cannot sign in (service accounts), false = accounts that can. A row without the flag can sign in. */
   canLogin?: boolean;
+  /**
+   * true = only `external` accounts (people of a host application who use a portal's embed), false = leave them out
+   * (the workspace's own people: seat counts, pickers). Absent = both.
+   */
+  external?: boolean;
   /** Where the account signs in. 'local' also matches rows that have no provider. */
   authProviders?: Array<'local' | 'ldap' | 'oidc' | 'saml'>;
   /**

@@ -238,6 +238,10 @@ export interface SimulateContext {
   ownerId?: string;
   /** A session action: which answerers the agent accepts (default `owner_or_admin`). */
   approvers?: AgentApprovers;
+  /** Portal channel: the request arrived through the portal's embed with a host-verified identity (a replayed denial carries it). */
+  embedded?: boolean;
+  /** Portal channel: a test session of a workspace owner or admin (a replayed denial carries it). */
+  test?: boolean;
   ip?: string;
   /** ISO timestamp. */
   at?: string;
@@ -298,6 +302,10 @@ export interface SimulatePortal {
   mode: 'all' | 'selected';
   userCount: number;
   groupCount: number;
+  /** The network boundary: `any`, or `allow_list` with how many ranges (the ranges are not listed). */
+  networks: { mode: 'any' | 'allow_list'; count: number };
+  /** What the access list means for people who arrive through the embed. */
+  embedded: 'access_list' | 'any_verified';
 }
 
 /** A custom policy that decided a request, and what became of it since. */
@@ -776,6 +784,11 @@ function normalizeSimulatePortal(raw: unknown): SimulatePortal | null {
     mode: o.mode === 'all' ? 'all' : 'selected',
     userCount: num(o.userCount),
     groupCount: num(o.groupCount),
+    networks: {
+      mode: asRecord(o.networks).mode === 'allow_list' ? 'allow_list' : 'any',
+      count: num(asRecord(o.networks).count),
+    },
+    embedded: o.embedded === 'any_verified' ? 'any_verified' : 'access_list',
   };
 }
 
@@ -802,6 +815,8 @@ export function normalizeSimulateInput(raw: unknown): SimulateRequest | null {
     ...(optStr(c.portalId) ? { portalId: optStr(c.portalId) } : {}),
     ...(optStr(c.ownerId) ? { ownerId: optStr(c.ownerId) } : {}),
     ...(AGENT_APPROVERS.find((value) => value === c.approvers) ? { approvers: AGENT_APPROVERS.find((value) => value === c.approvers) } : {}),
+    ...(c.embedded === true ? { embedded: true } : {}),
+    ...(c.test === true ? { test: true } : {}),
     ...(optStr(c.ip) ? { ip: optStr(c.ip) } : {}),
     ...(optStr(c.at) ? { at: optStr(c.at) } : {}),
   };

@@ -24,8 +24,12 @@ export type BuiltInKind =
   | 'tokenScope'
   /** `managed:portal:use|agent`: the portal's access list admits the person. */
   | 'portalList'
-  /** `managed:portal:*-boundary`: nothing but the portal's access list opens a portal or runs its agents. */
+  /** `managed:portal:use-boundary|agent-boundary`: nothing but the portal's access list opens a portal or runs its agents. */
   | 'portalBoundary'
+  /** `managed:portal:network-boundary|agent-network-boundary`: the portal can only be used from its listed networks. */
+  | 'portalNetwork'
+  /** `managed:portal:test-use|test-agent`: a workspace owner or admin trying the portal out. */
+  | 'portalTest'
   /** `managed:agent:approve*`: the session's owner, or whoever the agent accepts, may approve its tool calls. */
   | 'approvalRule'
   | 'other';
@@ -38,11 +42,15 @@ export interface BuiltInReason {
 
 const MANAGED = /^managed:(rbac|boundary):(user|token|token-cap|project)-(read|write|admin)$/;
 const PORTAL_MANAGED = /^managed:portal:(use|agent)(-boundary)?$/;
+const PORTAL_NETWORK_MANAGED = /^managed:portal:(agent-)?network-boundary$/;
+const PORTAL_TEST_MANAGED = /^managed:portal:test-(use|agent)$/;
 const AGENT_MANAGED = /^managed:agent:approve(-token)?$/;
 
 export function parseBuiltInReason(cedarId: string): BuiltInReason {
   const portal = PORTAL_MANAGED.exec(cedarId);
   if (portal) return { kind: portal[2] ? 'portalBoundary' : 'portalList', level: null };
+  if (PORTAL_NETWORK_MANAGED.test(cedarId)) return { kind: 'portalNetwork', level: null };
+  if (PORTAL_TEST_MANAGED.test(cedarId)) return { kind: 'portalTest', level: null };
   const agent = AGENT_MANAGED.exec(cedarId);
   if (agent) return { kind: 'approvalRule', level: null };
   const match = MANAGED.exec(cedarId);
@@ -77,6 +85,8 @@ export function reasonLink(
   switch (kind) {
     case 'portalList':
     case 'portalBoundary':
+    case 'portalNetwork':
+    case 'portalTest':
       return portalId ? { labelKey: 'portal', href: portalHref(portalId) } : null;
     case 'role':
       return who.type === 'user' ? { labelKey: 'member', href: memberHref(who.id) } : { labelKey: 'token', href: TOKENS_HREF };

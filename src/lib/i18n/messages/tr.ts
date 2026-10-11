@@ -9,6 +9,7 @@
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
+import { portalsNowTr } from './portalsNow.tr';
 
 export const tr: typeof en = {
   ...en,
@@ -948,7 +949,7 @@ export const tr: typeof en = {
       },
       'portal-use-boundary': {
         name: 'Portalı yalnızca erişim listesi açar',
-        description: 'Erişim listesinin kabul etmediği kimse, rolü ya da bir izin kuralı ne derse desin o portalı açamaz. Engelleme kuralları listedeki kişileri yine de engelleyebilir.',
+        description: 'Erişim listesinin kabul etmediği kimse, rolü ya da bir izin kuralı ne derse desin o portalı açamaz (işaretli bir test oturumundaki çalışma alanı sahibi ya da yöneticisi ile doğrulanmış her gömülü kişiyi kabul eden bir portalın içeri aldığı kişiler bunun istisnasıdır). Engelleme kuralları listedeki kişileri yine de engelleyebilir.',
       },
       'portal-agent': {
         name: 'Portalın erişim listesindekiler ajanlarını çalıştırabilir',
@@ -957,6 +958,22 @@ export const tr: typeof en = {
       'portal-agent-boundary': {
         name: 'Portaldaki ajanları yalnızca erişim listesi çalıştırır',
         description: 'Bir portalda, portalın erişim listesi kabul etmedikçe kimse rolü ya da bir izin kuralı ne derse desin bir ajanı çalıştıramaz ya da araç çağrılarını onaylayamaz.',
+      },
+      'portal-network-boundary': {
+        name: 'Bir portal yalnızca listelediği ağlardan açılabilir',
+        description: 'Bir portal kullanılabileceği ağları listeliyorsa, bu ağların dışındaki bir adresten kimse onu açamaz; okunabilir adresi olmayan istek de reddedilir. Hiçbir şey bunu aşamaz, test oturumları dahil. Ağ listelemeyen portallar etkilenmez.',
+      },
+      'portal-agent-network-boundary': {
+        name: 'Bir portalın ajanları yalnızca listelenen ağlardan kullanılabilir',
+        description: 'Bir portal kullanılabileceği ağları listeliyorsa, bu ağların dışındaki bir adresten kimse ajanlarını çalıştıramaz ya da onaylarını yanıtlayamaz. Ağ listelemeyen portallar etkilenmez.',
+      },
+      'portal-test-use': {
+        name: 'Çalışma alanı sahipleri ve yöneticileri bir portalı test olarak açabilir',
+        description: 'Çalışma alanı sahibi ya da yöneticisi, erişim listesi adını anmasa bile herhangi bir portalı işaretli bir test oturumunda açabilir. Test denetim kaydına yazılır ve portalın ağ sınırı yine geçerlidir.',
+      },
+      'portal-test-agent': {
+        name: 'Çalışma alanı sahipleri ve yöneticileri bir portalın ajanlarını test olarak deneyebilir',
+        description: 'İşaretli bir test oturumunda çalışma alanı sahibi ya da yöneticisi, erişim listesi adını anmasa bile portalın sunduğu ajanları çalıştırabilir. Test oturumlarının konuşmaları işaretlenir ve portalın istatistiklerine katılmaz.',
       },
       'agent-approve': {
         name: 'Bir ajanın araç çağrılarını onaylayabilecek kişiler',
@@ -1840,9 +1857,13 @@ export const tr: typeof en = {
       portalOpenAll: 'Çalışma alanındaki herkese açık',
       portalAudience: 'Erişim listesinde {users} kişi ve {groups} grup',
       portalDisabled: 'Kapalı',
+      portalNetworks: 'Yalnızca listelenen {count} ağdan',
+      portalEmbedded: 'Gömülü girişle oturum açan herkesi kabul eder',
       portalReason: {
         list: 'Portalın erişim listesi bu kişiyi kabul ediyor.',
         boundary: 'Portalın erişim listesi bu kişiyi kabul etmiyor ve başka hiçbir şey bir portalı açamaz ya da içindeki ajanları çalıştıramaz.',
+        network: 'Portal yalnızca listelenen ağlardan kullanılabilir ve bu adres onlardan biri değil (ya da adres bilinmiyordu).',
+        test: 'Bir çalışma alanı sahibi ya da yöneticisi portalı test oturumunda deniyor.',
       },
       approvalReason: {
         rule: 'Bu kişi oturumu başlatmış, ajan onu onaylayıcı olarak kabul ediyor ya da izin kurallarınızdan biri onu onaylayıcı atıyor.',
@@ -4872,5 +4893,7 @@ export const tr: typeof en = {
       copied: 'Kopyalandı',
       retry: 'Yeniden dene',
     },
+    // Portalların "Şimdi" sürümü ve ana uygulamanın imzaladığı kimlikle gömme (portalsNow.tr.ts).
+    ...portalsNowTr,
   },
 };

@@ -149,6 +149,14 @@ function ReasonRow({ reason, labels, ctx }: { reason: SimulateReason; labels: Ia
       title = labels.managedName(reason.cedarId, reason.name);
       detail = t('result.portalReason.boundary');
       break;
+    case 'portalNetwork':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.portalReason.network');
+      break;
+    case 'portalTest':
+      title = labels.managedName(reason.cedarId, reason.name);
+      detail = t('result.portalReason.test');
+      break;
     case 'approvalRule':
       title = labels.managedName(reason.cedarId, reason.name);
       detail = t('result.approvalReason.rule');
@@ -327,6 +335,16 @@ export default function SimulateResultCard({
                   ? t('result.portalOpenAll')
                   : t('result.portalAudience', { users: portal.userCount, groups: portal.groupCount })}
               </Text>
+              {portal.networks.mode === 'allow_list' ? (
+                <Text size="xs" c="dimmed" data-testid="check-portal-networks">
+                  {t('result.portalNetworks', { count: portal.networks.count })}
+                </Text>
+              ) : null}
+              {portal.embedded === 'any_verified' ? (
+                <Text size="xs" c="dimmed" data-testid="check-portal-embedded">
+                  {t('result.portalEmbedded')}
+                </Text>
+              ) : null}
               <ChangeLink link={{ labelKey: 'portal', href: portalHref(portal.id) }} />
             </Stack>
           </Section>

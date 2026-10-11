@@ -15,6 +15,13 @@
  *              engine when the caller does not provide one
  *   method     HTTP method
  *   path       canonical request path (no query string)
+ *   embedded   true when the person reached a portal through its EMBED with an
+ *              identity the host application vouched for (a signed token the
+ *              portal verified). Only the portal runtime can know this; it is
+ *              never taken from a request header
+ *   test       true for a TEST SESSION of a portal: a workspace owner or admin
+ *              trying the portal out. The managed rules honour it for those two
+ *              roles only (managedPolicies.ts), so a caller cannot claim it
  *
  * Why the care around `ip` and `now`: Cedar evaluates a request atomically. A
  * context attribute that does not parse (`ip("unknown")`, an IPv4-mapped IPv6
@@ -40,10 +47,12 @@ export interface IamRequestContext {
   now?: Date | string | number | null;
   method?: string | null;
   path?: string | null;
+  embedded?: boolean | null;
+  test?: boolean | null;
 }
 
-/** The context of a Cedar request: plain strings and extension values. */
-export type CedarContextValue = string | { __extn: { fn: string; arg: string } };
+/** The context of a Cedar request: plain strings, booleans and extension values. */
+export type CedarContextValue = string | boolean | { __extn: { fn: string; arg: string } };
 export type CedarContext = Record<string, CedarContextValue>;
 
 const MAX_STRING = 512;
@@ -154,6 +163,9 @@ export function buildCedarContext(context: IamRequestContext | undefined | null,
   if (typeof c.channel === 'string' && c.channel) out.channel = clip(c.channel);
   if (typeof c.method === 'string' && c.method) out.method = clip(c.method.toUpperCase());
   if (typeof c.path === 'string' && c.path) out.path = clip(c.path);
+  // Flags are only ever set when TRUE: an absent flag is "not claimed", which is what every rule tests.
+  if (c.embedded === true) out.embedded = true;
+  if (c.test === true) out.test = true;
   const ip = normalizeIp(c.ip);
   if (ip) out.ip = { __extn: { fn: 'ip', arg: ip } };
   const at = toCedarDatetime(c.now ?? now) ?? toCedarDatetime(now);

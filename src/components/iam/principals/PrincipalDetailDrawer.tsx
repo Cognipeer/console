@@ -141,6 +141,7 @@ const NO_EXTRAS: PrincipalExtras = {
   scoped: null,
   authProvider: null,
   canLogin: null,
+  kind: null,
   source: null,
   tenantRole: null,
   email: null,

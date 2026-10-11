@@ -13,6 +13,10 @@
  *  - A directory-managed account (LDAP, SSO) keeps its name, email and password
  *    in the directory: they are read-only here, and the account is disabled
  *    rather than deleted (it would be created again at its next sign-in).
+ *  - An EXTERNAL account (a host application's person who uses a portal's embed) is the
+ *    host's: its profile follows the token, it always has the User role and no personal
+ *    permissions, it joins no group that grants access, holds no API token and belongs
+ *    to no project. Disabling it and deleting it stay available.
  *
  * Nothing here reads the database or the request.
  */
@@ -43,6 +47,8 @@ export interface PolicyTarget {
   role: string;
   canLogin?: boolean | null;
   authProvider?: string | null;
+  /** `external`: a host application's person who uses a portal's embed. */
+  kind?: string | null;
   status?: string | null;
   invitedBy?: string | null;
   inviteAcceptedAt?: Date | string | null;
@@ -54,6 +60,7 @@ export function targetOf(user: {
   role?: string | null;
   canLogin?: boolean | null;
   authProvider?: string | null;
+  kind?: string | null;
   status?: string | null;
   invitedBy?: string | null;
   inviteAcceptedAt?: Date | string | null;
@@ -63,6 +70,7 @@ export function targetOf(user: {
     role: String(user.role ?? ''),
     canLogin: user.canLogin,
     authProvider: user.authProvider,
+    kind: user.kind,
     status: user.status,
     invitedBy: user.invitedBy,
     inviteAcceptedAt: user.inviteAcceptedAt,
@@ -82,6 +90,8 @@ const OK: PolicyVerdict = { ok: true };
 function refuse(status: PolicyRefusal['status'], code: PeopleErrorCode, message: string): PolicyRefusal {
   return { ok: false, status, code, message };
 }
+
+const isExternal = (target: Pick<PolicyTarget, 'kind'>): boolean => target.kind === 'external';
 
 const isSelf = (actor: PolicyActor, target: Pick<PolicyTarget, 'id'>): boolean =>
   String(actor.id) === String(target.id);
@@ -134,6 +144,9 @@ export function checkProfileChange(
   if (fields.length > 0 && isDirectoryManaged(target)) {
     return refuse(409, 'directory_managed', 'The name and email of this account are managed by the directory');
   }
+  if (fields.length > 0 && isExternal(target)) {
+    return refuse(409, 'external_user', 'The name and email of an external account come from the host application');
+  }
   return OK;
 }
 
@@ -170,11 +183,16 @@ export function checkRoleChange(actor: PolicyActor, target: PolicyTarget, next: 
     return refuse(403, 'admin_grant_requires_admin', 'Only owners and admins can grant or remove the admin role');
   }
   if (next === target.role) return { ok: true, noop: true };
+  if (isExternal(target)) {
+    return refuse(409, 'external_user', 'An external account always has the User role');
+  }
   return OK;
 }
 
 /** The roles `actor` could give `target` (empty when the role cannot be changed at all). */
 export function assignableRoles(actor: PolicyActor, target: PolicyTarget): AssignableRole[] {
+  // An external account has the User role and no other; there is nothing to choose.
+  if (isExternal(target)) return [];
   return ASSIGNABLE_ROLES.filter((role) => checkRoleChange(actor, target, role).ok);
 }
 
@@ -190,6 +208,9 @@ export function checkPermissionsEdit(actor: PolicyActor, target: PolicyTarget): 
   }
   if (roleRank(actor.role) < roleRank(target.role)) {
     return refuse(403, 'higher_privileges', 'You cannot change the permissions of an account with more privileges than yours');
+  }
+  if (isExternal(target)) {
+    return refuse(409, 'external_user', 'An external account has no personal permissions; what it may do comes from the portals it uses');
   }
   return OK;
 }
@@ -249,6 +270,10 @@ export function checkGroupMembership(
   if (isGroupDirectoryManaged(group)) {
     return refuse(409, 'group_directory_managed', 'Membership of directory groups is managed by the directory');
   }
+  // A host application's person never receives a workspace grant from a group.
+  if (isExternal(target) && groupGrantsAccess(group)) {
+    return refuse(409, 'external_user', 'An external account cannot join a group that grants access');
+  }
   // Belonging to such a group is a grant, and handing out access is for owners and admins.
   if (groupGrantsAccess(group) && !isOwnerOrAdmin(actor.role)) {
     return refuse(403, 'forbidden', 'Only owners and admins can add people to a group that grants access');
@@ -297,6 +322,7 @@ const DENIAL_OF: Partial<Record<PeopleErrorCode, ActionDenial>> = {
   owner_immutable: 'owner_immutable',
   higher_privileges: 'higher_privileges',
   directory_managed: 'directory_managed',
+  external_user: 'external_user',
   group_directory_managed: 'directory_managed',
   self_not_allowed: 'self',
   cannot_change_own_role: 'self',
@@ -344,8 +370,9 @@ export function computeAllowedActions(actor: PolicyActor, target: PolicyTarget):
     delete: asAction(checkDelete(actor, target)),
     copyInvitationLink,
     manageGroups: baseAction,
-    manageProjects: baseAction,
-    mintToken: disabled && !isSelf(actor, target) ? deny('account_disabled') : tokenVerdict,
+    // An external account belongs to no project and holds no token; only revoking (of one that should not exist) stays.
+    manageProjects: isExternal(target) && baseAction.allowed ? deny('external_user') : baseAction,
+    mintToken: isExternal(target) ? deny('external_user') : disabled && !isSelf(actor, target) ? deny('account_disabled') : tokenVerdict,
     revokeTokens: tokenVerdict,
   };
 }

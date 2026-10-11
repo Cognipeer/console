@@ -74,6 +74,9 @@ function userFilter(query: IamUserFilter, params: Record<string, unknown>): stri
   // A row without the flag can sign in.
   if (query.canLogin === true) where.push('(canLogin IS NULL OR canLogin != 0)');
   else if (query.canLogin === false) where.push('canLogin = 0');
+  // An account without a kind is a member.
+  if (query.external === true) where.push(`kind = 'external'`);
+  else if (query.external === false) where.push(`(kind IS NULL OR kind != 'external')`);
   if (query.authProviders?.length) {
     const parts: string[] = [];
     const named = query.authProviders.filter((provider) => provider !== 'local');

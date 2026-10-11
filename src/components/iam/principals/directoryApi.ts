@@ -206,7 +206,7 @@ export interface GroupMemberRow {
   email: string | null;
   role: string | null;
   status: string | null;
-  kind: 'person' | 'service' | null;
+  kind: 'person' | 'service' | 'external' | null;
   membershipSource: string;
   /** The membership points at a user that no longer exists: it can still be removed. */
   missing: boolean;
@@ -233,7 +233,7 @@ export function parseGroupMembersPage(raw: unknown): GroupMembersPage {
       email: asString(e.email),
       role: asString(e.role),
       status: asString(e.status),
-      kind: e.kind === 'person' || e.kind === 'service' ? e.kind : null,
+      kind: e.kind === 'person' || e.kind === 'service' || e.kind === 'external' ? e.kind : null,
       membershipSource: asString(e.membershipSource) ?? 'local',
       missing: e.missing === true,
     });

@@ -17,7 +17,7 @@ export type ListType = 'user' | 'group' | 'token';
 
 export const USER_ROLES = ['owner', 'admin', 'project_admin', 'user'] as const;
 export const USER_STATUS_FILTERS = ['active', 'disabled', 'invited'] as const;
-export const USER_KINDS = ['person', 'service'] as const;
+export const USER_KINDS = ['person', 'service', 'external'] as const;
 export const USER_SOURCES = ['local', 'directory', 'ldap', 'oidc', 'saml'] as const;
 export const GROUP_SOURCES = ['local', 'directory', 'ldap'] as const;
 export const TOKEN_STATUS_FILTERS = ['active', 'expired'] as const;

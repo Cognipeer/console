@@ -13,6 +13,7 @@ import { MAX_ALLOWED_IP_RANGES } from '@/lib/services/apiTokens/ipAllowlist';
 import { recordTokenRestrictionChange, type TokenRestrictionChange } from '@/lib/services/apiTokens/restrictionAudit';
 import {
   canActOnTokensOf,
+  EXTERNAL_TOKEN_OWNER_REFUSAL,
   canListProjectTokens,
   canManageToken,
   filterManageableTokens,
@@ -459,6 +460,10 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         }
         if (!canActOnTokensOf(session.userRole, targetUser)) {
           return reply.code(403).send({ error: 'Forbidden' });
+        }
+        // External accounts (a host application's people) hold no API tokens at all.
+        if (targetUser.kind === 'external') {
+          return reply.code(400).send(EXTERNAL_TOKEN_OWNER_REFUSAL);
         }
         // A token minted for a disabled account would be dead on arrival
         // (the auth path rejects its owner) and would silently outlive a

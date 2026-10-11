@@ -29,7 +29,9 @@ export const iamDirectoryEn = {
     kinds: {
       person: 'Person',
       service: 'Service account',
+      external: 'External',
     },
+    externalHint: 'A person of a host application who uses a portal through its embed. They cannot sign in to the dashboard or hold API tokens, and they are not counted as seats.',
     sources: {
       local: 'Local',
       directory: 'Directory',
@@ -67,6 +69,8 @@ export const iamDirectoryEn = {
     pageSize: 'Rows per page',
     noMatchesFilters: 'Nothing matches these filters. Reset them to see everything.',
     inviteFirst: 'Invite your first person',
+    externalCount: '{count} external',
+    externalCountHint: 'People of host applications who use a portal through its embed. They are portal users, not seats. Select to list them.',
     tokenNote: 'Every API token you are allowed to manage. Your own tokens are also on the API Tokens page.',
   },
   filters: {
@@ -127,6 +131,7 @@ export const iamDirectoryEn = {
     directory_managed: 'This account is managed by your directory. Change it there, or disable it here.',
     no_pending_invite: 'There is no pending invitation for this account.',
     account_disabled: 'This account is disabled.',
+    external_user: 'This is an external account: it follows the host application, has no personal permissions, joins no project and holds no API tokens.',
   },
   confirm: {
     disable: {
@@ -218,6 +223,7 @@ export const iamDirectoryEn = {
     already_in_state: 'Already in that state.',
     not_a_member: 'Not a member of that group.',
     no_pending_invite: 'There is no pending invitation for this account.',
+    external_user: 'This is an external account (a host application\'s person who uses a portal). It always has the User role, joins no project and cannot hold API tokens.',
     unauthorized: 'Your session has expired. Sign in again.',
     notFound: 'This record no longer exists.',
     generic: 'Something went wrong. Try again.',

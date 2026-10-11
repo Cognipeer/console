@@ -128,6 +128,9 @@ function resourceReplay(
   const portalId = text(meta.portalId);
   const throughPortal = channel === 'portal' && (action === 'agent.invoke' || action === 'agent.approve');
   const projectId = text(meta.contextProjectId);
+  // The flags only the portal runtime sets are part of the question; an older row has none (and replays without).
+  const embedded = channel === 'portal' && meta.contextEmbedded === true;
+  const test = channel === 'portal' && meta.contextTest === true;
   const ownerId = text(meta.ownerId);
   const approvers = text(meta.approvers);
   const replayable = meta.code === 'forbidden' && !!principal.id && (!throughPortal || !!portalId);
@@ -153,6 +156,8 @@ function resourceReplay(
             ...(channel !== 'portal' && projectId ? { projectId } : {}),
             ...(ownerId ? { ownerId } : {}),
             ...(approvers === 'owner' || approvers === 'owner_or_admin' || approvers === 'project_members' ? { approvers } : {}),
+            ...(embedded ? { embedded: true } : {}),
+            ...(test ? { test: true } : {}),
             ...(ip ? { ip } : {}),
             at,
           },

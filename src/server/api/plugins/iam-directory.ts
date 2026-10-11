@@ -199,6 +199,7 @@ export const iamDirectoryApiPlugin: FastifyPluginAsync = async (app) => {
         items: page.items,
         nextCursor: paged ? encodeCursor(next) : null,
         ...(page.total !== undefined ? { total: page.total } : {}),
+        ...(page.externalTotal !== undefined ? { externalTotal: page.externalTotal } : {}),
         ...(page.hasMore && !paged ? { warnings: ['paging_capped'] } : {}),
       });
     } catch (error) {

@@ -203,6 +203,11 @@ export async function requireApiTokenFromHeader(
   if (isUserDisabled(user)) {
     throw new ApiTokenAuthError('API token owner is disabled', 401);
   }
+  // An external account (a host application's person who uses a portal's embed) holds no API tokens: a token that
+  // somehow names one authenticates nobody.
+  if (user.kind === 'external') {
+    throw new ApiTokenAuthError('API token owner cannot hold API tokens', 401);
+  }
 
   // Non-critical last-used timestamp update — fire and forget
   fireAndForget('token-last-used', async () => {

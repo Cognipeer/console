@@ -130,6 +130,12 @@ export interface IPromptComment {
   updatedAt?: Date;
 }
 
+/** One identity of a person in a host application's directory (token issuer + subject). */
+export interface IUserExternalIdentity {
+  issuer: string;
+  subject: string;
+}
+
 export interface IUser {
   _id?: ObjectId | string;
   /** May be an empty string for a "Programmatic User" (canLogin=false) — a deliberate design choice to avoid a SQLite NOT NULL migration, not a bug. */
@@ -158,6 +164,20 @@ export interface IUser {
   authProvider?: 'local' | 'ldap' | 'oidc' | 'saml';
   /** Stable identifier from the external directory (e.g. LDAP entry DN). */
   externalId?: string;
+  /**
+   * What kind of account this is. Missing means `member` (every row written before this field existed): a person of the
+   * workspace. `external` is a person of a HOST APPLICATION who reached a portal through its embed with an identity the host
+   * signed: no password, no dashboard sign-in, no API tokens, left out of the workspace's pickers and seat counts, listed in
+   * the Authorization center with a badge. See lib/services/users/externalUsers.ts.
+   */
+  kind?: 'member' | 'external';
+  /** How an `external` account came to be (`portal-embed`); absent for members. */
+  source?: string;
+  /**
+   * An `external` account's identities in host applications' directories: the issuer of the signed token and the subject
+   * (`sub`) it names. Indexed, so the same person is found again at their next sign-in. Not the LDAP / SSO `externalId` above.
+   */
+  externalIdentities?: IUserExternalIdentity[];
   invitedBy?: string;
   invitedAt?: Date;
   inviteAcceptedAt?: Date;
@@ -1296,8 +1316,10 @@ export interface IGroupMember {
   /** Whether the user can manage group membership. */
   role: 'admin' | 'member';
   /** Where the membership came from. LDAP-sourced rows are reconciled on
-   *  directory login; local rows are never touched by the sync. Defaults to 'local'. */
-  source?: GroupSource;
+   *  directory login; local rows are never touched by the sync. Defaults to 'local'.
+   *  `portal-embed`: added from the groups claim of a host application's token (external users, see
+   *  lib/services/users/externalUsers.ts); only those rows are ever removed by that sync. */
+  source?: GroupSource | 'portal-embed';
   addedBy?: string;
   createdAt?: Date;
 }

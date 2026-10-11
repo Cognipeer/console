@@ -28,7 +28,9 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     kinds: {
       person: 'Kişi',
       service: 'Servis hesabı',
+      external: 'Harici',
     },
+    externalHint: 'Bir portalı gömülü girişle kullanan, bir ana uygulamanın kişisi. Panele giriş yapamaz, API token\'ı tutamaz ve koltuk olarak sayılmaz.',
     sources: {
       local: 'Yerel',
       directory: 'Dizin',
@@ -66,6 +68,8 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     pageSize: 'Sayfa başına satır',
     noMatchesFilters: 'Bu filtrelerle eşleşen kayıt yok. Hepsini görmek için filtreleri sıfırlayın.',
     inviteFirst: 'İlk kişiyi davet edin',
+    externalCount: '{count} harici',
+    externalCountHint: 'Bir portalı gömülü girişle kullanan ana uygulama kişileri. Koltuk değil, portal kullanıcısıdır. Listelemek için seçin.',
     tokenNote: 'Yönetebildiğiniz tüm API token\'ları. Kendi token\'larınız API Token\'ları sayfasında da listelenir.',
   },
   filters: {
@@ -126,6 +130,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     directory_managed: 'Bu hesap dizininiz tarafından yönetiliyor. Değişikliği orada yapın veya burada devre dışı bırakın.',
     no_pending_invite: 'Bu hesap için bekleyen bir davet yok.',
     account_disabled: 'Bu hesap devre dışı.',
+    external_user: 'Bu harici bir hesap: ana uygulamayı izler, kişisel izni yoktur, hiçbir projeye katılmaz ve API token\'ı tutmaz.',
   },
   confirm: {
     disable: {
@@ -217,6 +222,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     already_in_state: 'Zaten o durumda.',
     not_a_member: 'O grubun üyesi değil.',
     no_pending_invite: 'Bu hesap için bekleyen bir davet yok.',
+    external_user: 'Bu harici bir hesap (bir portalı kullanan ana uygulama kişisi). Her zaman Kullanıcı rolündedir, hiçbir projeye katılmaz ve API token\'ı tutamaz.',
     unauthorized: 'Oturumunuzun süresi doldu. Yeniden giriş yapın.',
     notFound: 'Bu kayıt artık mevcut değil.',
     generic: 'Bir şeyler ters gitti. Tekrar deneyin.',

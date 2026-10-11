@@ -126,7 +126,7 @@ Expiry rules and IP allowlists are part of [Authentication](/guide/authenticatio
 
 ## Built-in policies
 
-Eighteen policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
+Twenty-two policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
 
 | Policy | What it does |
 |---|---|
@@ -135,7 +135,9 @@ Eighteen policies ship with the engine. They are the same in every workspace, ca
 | `managed:boundary:token-cap-read`, `-write`, `-admin` | A scoped token is denied what its scope does not name. No custom allow can exceed it. |
 | `managed:boundary:project-read`, `-write`, `-admin` | A service that the active project limits is denied above the project level. No custom allow can exceed it. |
 | `managed:portal:use`, `managed:portal:agent` | A person on a portal's access list (or in a group on it, or anyone when the portal is open to the workspace) may open the portal and run its agents. See [Portals](#portals). |
-| `managed:portal:use-boundary`, `managed:portal:agent-boundary` | Nobody else may, whatever their role or any allow rule says. Custom deny rules still apply on top. |
+| `managed:portal:use-boundary`, `managed:portal:agent-boundary` | Nobody else may, whatever their role or any allow rule says. Custom deny rules still apply on top. The exceptions are a workspace owner or admin in a marked [test session](#test-sessions-and-view-as) and, for a portal that takes every verified embedded person, someone who arrived through its embed. |
+| `managed:portal:network-boundary`, `managed:portal:agent-network-boundary` | A portal that lists the [networks](#network-restriction) it may be used from is refused to every address outside them (opening it, running its agents, answering its approvals). Portals that list none are not affected. |
+| `managed:portal:test-use`, `managed:portal:test-agent` | A workspace owner or admin may open a portal and run its agents in a marked [test session](#test-sessions-and-view-as) although the access list does not name them. |
 | `managed:agent:approve`, `managed:agent:approve-token` | A person (or a token, on behalf of its owner) may approve a tool call of an agent session when they started it, or when the agent's *Who can answer* setting accepts them. The generic Write permits leave this one action out, so the rule is what appoints; your own allow rules can appoint more approvers. See [Sessions and approvals](#sessions-and-approvals). |
 
 The simple settings stay the single place to change what people can do; the built-in policies only translate them. Nothing is stored per person or per group in a policy.
@@ -219,6 +221,24 @@ A portal (an Enterprise feature) lets chosen people and groups use chosen agents
 - A rule that names a portal also covers the agents run through it (an agent run through a portal is *in* that portal).
 - An allow rule never adds anyone to a portal; the editor says so when you write one.
 - These rules are accepted only on an installation that has portals. Without them there is nothing to apply a rule to, and a deny about portals is refused like any rule that cannot match a request.
+
+### Network restriction
+
+A portal can list the networks it may be used from (**Portals → the portal → Access → Network restriction**: any network, or only the IP ranges you list). The check is made on the address the console sees for the request, so it covers people using the embedded chat and administrators trying the portal as well. A request whose address cannot be read is refused when a list is set, and an empty list is not accepted (it would lock everybody out). The address is the one described under [Client address and TRUSTED_PROXIES](#client-address-and-trusted-proxies): without `TRUSTED_PROXIES` behind a proxy every caller looks like the proxy, so set it before you rely on this.
+
+A portal lists at most 32 ranges (IPv4 or IPv6, a single address or a CIDR); combine neighbouring ranges into larger ones when you need more. The form can check your own address against the list before you save. The Access check reads the same list: give it `context.ip` and it says whether the address is let in, and which built-in rule refused it.
+
+### Test sessions and view as
+
+A workspace owner or admin can **open a portal as a test** without being on its access list. The portal marks the session (`context.test`), the built-in rules honour the mark for those two roles only (a member who sends it gains nothing), the session is left out of the portal's statistics and each use is written to the audit log (event `portal.test_session`, at most once a minute per person and portal). The network restriction still applies, so a test shows what people would meet.
+
+**View as** answers, without running anything, what a person or a group would meet at a portal: whether they can open it and which of its agents they could run, optionally from a given address or as someone who arrived through the embed. A group is checked as a plain member of it. The Access check accepts a group for `portal.use`, `agent.invoke` and `agent.approve` in the `portal` channel for the same purpose.
+
+### People who arrive through an embed
+
+A portal can be embedded in another application, which tells the portal who the person is with a signed token. The access list decides by default (`access.embedded: access_list`); a portal can instead take every person its token check verified (`any_verified`). The portal marks such requests (`context.embedded`) and only the portal runtime can set the mark. The network restriction applies to both.
+
+The people in those tokens are matched to console users by email or by the identity the token names (issuer and subject). When nobody matches and provisioning is on, an **external user** is created: a person of the host application, with the User role, no password and no sign-in. External users cannot sign in to the console, cannot hold API tokens, are left out of the pickers and the seat count, and appear in the IAM center's people list with an **External** badge, a filter and a counter. The groups of their token fill console groups through a map the portal's administrator sets; only groups that grant nothing (no workspace role, no service permissions, not a directory group) are filled this way, and a membership an administrator made is never removed. A token never signs in as a workspace owner or admin.
 
 **A refusal shows a reference code.** The person sees it on the portal's error page (and in the message of a refused chat message); an administrator pastes it into **Access check → decision id** and sees the action on the portal or agent, the channel, the people and rules that decided and, for a rule that has since been switched off or deleted, which one and what the current policies say about the same request. Like every refusal it is written to the audit log, once per person, action, portal and reason per minute (a client that keeps retrying shares one reference code and one row).
 
@@ -380,7 +400,7 @@ The IAM API is part of the dashboard API: it authenticates with the session cook
 | `GET /api/iam/policies`, `GET /api/iam/policies/{policyId}` | Built-in and custom policies. |
 | `POST /api/iam/policies`, `PUT /api/iam/policies/{policyId}`, `DELETE /api/iam/policies/{policyId}` | Create, change (also enable and disable) and delete a custom policy. |
 | `POST /api/iam/policies/compile`, `POST /api/iam/policies/preview` | Compile a draft, and see who it would affect. Read-only. |
-| `POST /api/iam/simulate` | The Access check. Read-only. For a portal, ask `portal.use` on the resource `{ "kind": "resource", "type": "portal", "id": ... }`, or `agent.invoke` on an agent with `context: { "channel": "portal", "portalId": ... }`; the answer includes the portal's name, mode and the number of people and groups on its list. For a session action (`agent.approve`, `agent.session_view_others`, `agent.session_manage_others`) ask on an agent with `context: { "ownerId": <user who started the session>, "approvers": "owner" \| "owner_or_admin" \| "project_members" }`; the answer includes the session it assumed. |
+| `POST /api/iam/simulate` | The Access check. Read-only. `principal` is a user, a token, or (for the portal actions in the `portal` channel) `{ "type": "group", "id": ... }`; the portal channel also takes `context.embedded` and `context.test` and a network boundary is checked against `context.ip`. For a portal, ask `portal.use` on the resource `{ "kind": "resource", "type": "portal", "id": ... }`, or `agent.invoke` on an agent with `context: { "channel": "portal", "portalId": ... }`; the answer includes the portal's name, mode and the number of people and groups on its list. For a session action (`agent.approve`, `agent.session_view_others`, `agent.session_manage_others`) ask on an agent with `context: { "ownerId": <user who started the session>, "approvers": "owner" \| "owner_or_admin" \| "project_members" }`; the answer includes the session it assumed. |
 | `GET /api/iam/decisions/{decisionId}` | A refusal the caller saw, as an access check. |
 | `GET /api/iam/principals`, `GET /api/iam/principals/{type}/{id}` | People and tokens with their effective levels. |
 | `GET /api/iam/audit`, `GET /api/iam/audit/export` | Denials and policy changes (`kind=denials` or `changes`). |

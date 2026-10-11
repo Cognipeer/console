@@ -41,7 +41,7 @@
  * its agents is decided by the portal's ACCESS LIST, which is the portal's built-in
  * policy. The list is not stored as Cedar: the Portal entity carries it as
  * attributes (`mode`, `allowedUsers`, `allowedGroups`, see portalEntities.ts) and
- * these four policies read them, so editing a portal's list never touches a policy.
+ * the first four policies below read them, so editing a portal's list never touches a policy.
  *
  *   portal:use / portal:agent                the list GRANTS `portal.use` on the portal and
  *                                            `agent.invoke` on an agent run through it
@@ -54,6 +54,27 @@
  *
  * Custom forbids still restrict on top: a rule that blocks a person, a group or one
  * agent wins over the list like it wins over any permit.
+ *
+ * Three more settings of the portal are read the same way (attributes of the Portal entity,
+ * flags of the request context), each opt-in so a portal that never turned one on behaves as before:
+ *
+ *   portal:network-boundary / portal:agent-network-boundary
+ *                                            when the portal lists the networks it may be used from
+ *                                            (`networkMode == "allow_list"`, ranges `net0` ... `net31`),
+ *                                            forbid every request whose `context.ip` is in none of
+ *                                            them - opening the portal, running its agents, answering
+ *                                            its approvals; a request with no usable address is
+ *                                            refused too. Nothing overrides it, test sessions and
+ *                                            embedded sessions included
+ *   portal:test-use / portal:test-agent      a workspace owner or admin may open the portal and run its
+ *                                            agents in a TEST SESSION (`context.test`, set by the portal
+ *                                            runtime for that button only) although the access list does
+ *                                            not name them; the access list's boundary lets that session
+ *                                            through too, the network boundary does not
+ *   (the access list itself)                 a portal that takes people signed in through its embed
+ *                                            (`embedAccess == "any_verified"`) also admits a request the
+ *                                            runtime marks `context.embedded`: the host application vouched
+ *                                            for that person with a signed token the portal verified
  *
  * AGENTS - `managed:agent:*`, `@managed("agent")`: who may answer a pending TOOL APPROVAL
  * (`agent.approve`: allow, deny, edit the arguments, remember for the session - and, as a side
@@ -81,6 +102,8 @@
  * members are typed entity references (portalEntities.ts), and a managed forbid
  * that nevertheless errors fails the decision instead of being skipped (engine.ts).
  */
+
+import { PORTAL_NETWORK_SLOTS } from './portalNetworks';
 
 export const MANAGED_ANNOTATION = 'managed';
 
@@ -139,15 +162,41 @@ export const PORTAL_POLICY_IDS = {
   useBoundary: 'managed:portal:use-boundary',
   agent: 'managed:portal:agent',
   agentBoundary: 'managed:portal:agent-boundary',
+  networkBoundary: 'managed:portal:network-boundary',
+  agentNetworkBoundary: 'managed:portal:agent-network-boundary',
+  testUse: 'managed:portal:test-use',
+  testAgent: 'managed:portal:test-agent',
 } as const;
 
-/** "The requester is on this portal's access list", for a Portal entity expression `x` (`resource`, `resource.portal`), laid out for reading. */
+/**
+ * "The requester is on this portal's access list", for a Portal entity expression `x` (`resource`, `resource.portal`), laid out for reading.
+ * The last line is the embed setting: a portal that takes `any_verified` embedded people admits a request the runtime marks `context.embedded`.
+ */
 function onAccessList(x: string, indent: string): string {
   return [
     `${x} has mode && (`,
     `${indent}  ${x}.mode == "all"`,
     `${indent}  || (${x} has allowedUsers && principal in ${x}.allowedUsers)`,
     `${indent}  || (${x} has allowedGroups && principal in ${x}.allowedGroups)`,
+    `${indent}  || (${x} has embedAccess && ${x}.embedAccess == "any_verified" && context has channel && context.channel == "portal" && context has embedded && context.embedded == true)`,
+    `${indent})`,
+  ].join('\n');
+}
+
+/** "A workspace owner or admin is trying the portal out": the runtime marks the request `context.test`; the role is checked here, not trusted. */
+function testSession(indent: string): string {
+  return [
+    `context has channel && context.channel == "portal"`,
+    `${indent}&& context has test && context.test == true`,
+    `${indent}&& (principal.role == "owner" || principal.role == "admin")`,
+  ].join('\n');
+}
+
+/** "The request comes from one of the portal's listed networks", for a Portal entity expression `x`: one line per slot of ranges. */
+function inListedNetwork(x: string, indent: string): string {
+  return [
+    'context has ip && (',
+    ...PORTAL_NETWORK_SLOTS.map((slot, i) => `${indent}  ${i === 0 ? '  ' : '||'} (${x} has ${slot} && context.ip.isInRange(${x}.${slot}))`),
     `${indent})`,
   ].join('\n');
 }
@@ -162,7 +211,10 @@ when {
 forbid (principal, action == Action::"portal.use", resource is Portal)
 unless {
   principal is User
-  && ${onAccessList('resource', '  ')}
+  && (
+    ${onAccessList('resource', '    ')}
+    || (${testSession('      ')})
+  )
 };`,
   [PORTAL_POLICY_IDS.agent]: `@managed("portal")
 permit (principal is User, action == Action::"agent.invoke", resource is Agent)
@@ -171,14 +223,48 @@ when {
   && resource has portal
   && ${onAccessList('resource.portal', '  ')}
 };`,
-  // Running an agent in a portal AND answering its pending requests there: both are open to the access list only.
+  // Running an agent in a portal AND answering its pending requests there: both are open to the access list only
+  // (and to an administrator's test session).
   [PORTAL_POLICY_IDS.agentBoundary]: `@managed("portal")
 forbid (principal, action in [Action::"agent.invoke", Action::"agent.approve"], resource is Agent)
 when { context has channel && context.channel == "portal" }
 unless {
   principal is User
   && resource has portal
-  && ${onAccessList('resource.portal', '  ')}
+  && (
+    ${onAccessList('resource.portal', '    ')}
+    || (${testSession('      ')})
+  )
+};`,
+  // The network boundary: a portal that lists its networks is reachable from those only. Opt-in per portal.
+  [PORTAL_POLICY_IDS.networkBoundary]: `@managed("portal")
+forbid (principal, action == Action::"portal.use", resource is Portal)
+when { resource has networkMode && resource.networkMode == "allow_list" }
+unless {
+  ${inListedNetwork('resource', '  ')}
+};`,
+  [PORTAL_POLICY_IDS.agentNetworkBoundary]: `@managed("portal")
+forbid (principal, action in [Action::"agent.invoke", Action::"agent.approve"], resource is Agent)
+when {
+  context has channel && context.channel == "portal"
+  && resource has portal
+  && resource.portal has networkMode
+  && resource.portal.networkMode == "allow_list"
+}
+unless {
+  ${inListedNetwork('resource.portal', '  ')}
+};`,
+  // A workspace owner or admin may try a portal out although the access list does not name them.
+  [PORTAL_POLICY_IDS.testUse]: `@managed("portal")
+permit (principal is User, action == Action::"portal.use", resource is Portal)
+when {
+  ${testSession('  ')}
+};`,
+  [PORTAL_POLICY_IDS.testAgent]: `@managed("portal")
+permit (principal is User, action == Action::"agent.invoke", resource is Agent)
+when {
+  resource has portal
+  && ${testSession('  ')}
 };`,
 });
 

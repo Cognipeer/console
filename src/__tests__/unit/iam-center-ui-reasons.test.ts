@@ -49,7 +49,7 @@ describe('parseBuiltInReason', () => {
 
   it('classifies every built-in policy the engine ships (none falls through to "other")', () => {
     const ids = listManagedPolicies().map((p) => p.id);
-    expect(ids.length).toBe(18);
+    expect(ids.length).toBe(22);
     for (const id of ids) {
       const parsed = parseBuiltInReason(id);
       expect(parsed.kind, id).not.toBe('other');
@@ -65,6 +65,13 @@ describe('parseBuiltInReason', () => {
     expect(parseBuiltInReason('managed:portal:use-boundary')).toEqual({ kind: 'portalBoundary', level: null });
     expect(parseBuiltInReason('managed:portal:agent-boundary')).toEqual({ kind: 'portalBoundary', level: null });
     expect(parseBuiltInReason('managed:portal:something-new')).toEqual({ kind: 'other', level: null });
+  });
+
+  it('knows the portal network boundary and the test-session rules', () => {
+    expect(parseBuiltInReason('managed:portal:network-boundary')).toEqual({ kind: 'portalNetwork', level: null });
+    expect(parseBuiltInReason('managed:portal:agent-network-boundary')).toEqual({ kind: 'portalNetwork', level: null });
+    expect(parseBuiltInReason('managed:portal:test-use')).toEqual({ kind: 'portalTest', level: null });
+    expect(parseBuiltInReason('managed:portal:test-agent')).toEqual({ kind: 'portalTest', level: null });
   });
 
   it('knows the approval rules: the session\'s owner and the agent\'s setting appoint', () => {

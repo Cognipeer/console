@@ -43,7 +43,7 @@ import {
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import { readJsonBody, sendApiTokenError, withClientApiRequestContext } from '../fastify-utils';
-import { canActOnTokensOf } from '@/lib/services/apiTokens/tokenGovernance';
+import { canActOnTokensOf, EXTERNAL_TOKEN_OWNER_REFUSAL } from '@/lib/services/apiTokens/tokenGovernance';
 import { clampScopeToMinter, resolveRequestedTokenScope } from './tokens';
 
 const logger = createLogger('api:client-users');
@@ -122,7 +122,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         },
         'users',
         // a count, not the whole table
-        await db.iamCountUsers({ tenantId: auth.tenantId }),
+        await db.iamCountUsers({ tenantId: auth.tenantId, external: false }),
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
 
@@ -198,6 +198,11 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
 
       if (isUserDisabled(targetUser)) {
         return reply.code(400).send({ error: 'User is disabled' });
+      }
+
+      // External accounts (a host application's people) hold no API tokens at all.
+      if (targetUser.kind === 'external') {
+        return reply.code(400).send(EXTERNAL_TOKEN_OWNER_REFUSAL);
       }
 
       // The target's profile is not a trustworthy ceiling on its own: this

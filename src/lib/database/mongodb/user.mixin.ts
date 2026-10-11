@@ -25,11 +25,12 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
       const db = this.getTenantDb();
       const trimmedEmail = trimmedInput;
       const normalizedEmail = this.normalizeEmail(trimmedInput);
+      // External accounts (people of a host application) are never found by email: they cannot sign in, and one of them
+      // must never shadow a member who has the same address.
       const user = await db.collection<IUser>(COLLECTIONS.users).findOne({
-        $or: [
-          { emailLower: normalizedEmail },
-          { email: normalizedEmail },
-          { email: trimmedEmail },
+        $and: [
+          { $or: [{ emailLower: normalizedEmail }, { email: normalizedEmail }, { email: trimmedEmail }] },
+          { kind: { $ne: 'external' } },
         ],
       });
       if (!user) return null;
@@ -77,6 +78,22 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
       };
     }
 
+    /** The `external` account that holds this identity (issuer + subject), or null. */
+    async findUserByExternalIdentity(issuer: string, subject: string): Promise<IUser | null> {
+      // Strings only: an object here would be a query operator.
+      if (typeof issuer !== 'string' || typeof subject !== 'string' || !issuer || !subject) return null;
+      const db = this.getTenantDb();
+      const user = await db
+        .collection<IUser>(COLLECTIONS.users)
+        .findOne({ externalIdentities: { $elemMatch: { issuer, subject } } } as Record<string, unknown>);
+      if (!user) return null;
+      return { ...user, _id: user._id?.toString() };
+    }
+
+    async countExternalUsers(): Promise<number> {
+      return this.getTenantDb().collection<IUser>(COLLECTIONS.users).countDocuments({ kind: 'external' });
+    }
+
     async createUser(
       userData: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IUser> {
@@ -105,8 +122,8 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
       };
 
       // Programmatic users (canLogin=false, typically no email) have nothing
-      // to register in the cross-tenant email directory.
-      if (trimmedEmail) {
+      // to register in the cross-tenant email directory; neither has an external account (its address must not pull a sign-in here).
+      if (trimmedEmail && userData.kind !== 'external') {
         try {
           const tenant = await this.findTenantById(userData.tenantId);
           if (tenant) {
@@ -173,7 +190,8 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
       };
 
       try {
-        const tenant = await this.findTenantById(updatedUser.tenantId);
+        // (an external account is never in the cross-tenant directory)
+        const tenant = updatedUser.kind === 'external' ? null : await this.findTenantById(updatedUser.tenantId);
         if (tenant) {
           const tenantId =
             typeof tenant._id === 'string'
@@ -214,7 +232,7 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
       const result = await db.collection(COLLECTIONS.users).deleteOne({ _id: objectId });
       const deleted = result.deletedCount > 0;
 
-      if (deleted) {
+      if (deleted && existingUser.kind !== 'external') {
         try {
           await this.unregisterUserFromDirectory(
             existingUser.email,
@@ -228,11 +246,11 @@ export function UserMixin<TBase extends Constructor<MongoDBProviderBase & WithTe
       return deleted;
     }
 
-    async listUsers(): Promise<IUser[]> {
+    async listUsers(options: { includeExternal?: boolean } = {}): Promise<IUser[]> {
       const db = this.getTenantDb();
       const users = await db
         .collection<IUser>(COLLECTIONS.users)
-        .find({})
+        .find(options.includeExternal ? {} : { kind: { $ne: 'external' } })
         .sort({ createdAt: -1 })
         .toArray();
 

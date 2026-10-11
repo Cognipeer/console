@@ -12,8 +12,16 @@ describe('index manifest: agent runtime collections', () => {
     ['webhook_deliveries', [{ status: 1, nextAttemptAt: 1 }, { endpointId: 1, createdAt: -1 }, { tenantId: 1, eventId: 1 }, { status: 1, createdAt: 1 }]],
     ['files', [{ purpose: 1, expiresAt: 1 }, { conversationId: 1 }]],
     ['agent_runs', [{ callbackStatus: 1, updatedAt: 1 }]],
+    // External accounts: found again by the identity a host's token names, counted by kind.
+    ['users', [{ 'externalIdentities.issuer': 1, 'externalIdentities.subject': 1 }, { kind: 1 }]],
   ])('%s has the indexes its queries need', (collection, wanted) => {
     for (const key of wanted) expect(keysOf(collection)).toContain(JSON.stringify(key));
+  });
+
+  it('an external identity belongs to one account only (unique, and only for accounts that have one)', () => {
+    const identity = TENANT_DB_INDEXES.users.find((index) => index.options.name === 'idx_external_identity');
+    expect(identity?.options.unique).toBe(true);
+    expect(identity?.options.partialFilterExpression).toEqual({ 'externalIdentities.issuer': { $exists: true } });
   });
 
   it('session events expire on expiresAt (TTL)', () => {

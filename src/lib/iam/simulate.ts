@@ -14,6 +14,14 @@
  * the way the portal runtime builds them: no project narrowing, because a portal has
  * no active project.
  *
+ * "View as": the person of a portal check can also be a GROUP (`principal: { type: 'group', id }`) -
+ * a plain member of that group and nothing else, which is what "what would this audience see?"
+ * asks. Only the portal runtime's actions accept it; there is no group principal anywhere else.
+ * The portal channel has two more inputs, both flags of the request that only the portal runtime can
+ * set: `embedded` (the person arrived through the embed with a verified host identity) and `test`
+ * (a workspace owner or admin trying the portal out). A network boundary is checked against
+ * `context.ip` like any other rule.
+ *
  * Sessions: `agent.approve`, `agent.session_view_others` and `agent.session_manage_others`
  * are checked on the agent of a SESSION - who started it (`context.ownerId`) and which
  * answerers the agent accepts (`context.approvers`, default `owner_or_admin`) are what the
@@ -29,7 +37,7 @@ import { agentSessionResource, DEFAULT_AGENT_APPROVERS, isAgentApprovers, portal
 import { IAM_CHANNELS, isIamChannel, normalizeIp, type IamChannel, type IamRequestContext } from './context';
 import { authorize, type AuthorizeResult } from './engine';
 import type { IamResource } from './entities';
-import { loadEvaluationPrincipal, PrincipalError, type EvaluationPrincipal, type IamTenant } from './principals';
+import { loadEvaluationPrincipal, loadGroupAudience, PrincipalError, type EvaluationPrincipal, type IamTenant } from './principals';
 import { describeManagedPolicy, statementInfos } from './policyRows';
 import { isSafeId, type PolicyIssue } from './policySpec';
 import { getIamSchema } from './schemaState';
@@ -48,6 +56,10 @@ export type SimulateResourceInput =
 export interface SimulateContextInput {
   projectId?: string;
   channel?: IamChannel;
+  /** Portal channel: the request arrived through the portal's embed with an identity the host vouched for. */
+  embedded?: boolean;
+  /** Portal channel: a test session (honoured for workspace owners and admins only). */
+  test?: boolean;
   /** The portal an agent is run through, or answered through (`agent.invoke` / `agent.approve` in the portal channel). */
   portalId?: string;
   /** A session action: the person who started the session (a user id). Absent = nobody in particular. */
@@ -60,7 +72,7 @@ export interface SimulateContextInput {
 }
 
 export interface SimulateInput {
-  principal: { type: 'user' | 'token'; id: string };
+  principal: { type: 'user' | 'token' | 'group'; id: string };
   action: string;
   resource: SimulateResourceInput;
   context?: SimulateContextInput;
@@ -95,6 +107,8 @@ interface ParsedInput {
   portalId?: string;
   ownerId?: string;
   approvers?: AgentApprovers;
+  embedded?: boolean;
+  test?: boolean;
   ip?: string;
   at?: Date;
 }
@@ -110,8 +124,8 @@ export function parseSimulateInput(input: unknown): ParsedInput {
   if (!isRecord(input)) throw new SimulateInputError('validation', 'The request body must be an object', 400, [{ message: 'The request body must be an object' }]);
 
   const principal = input.principal;
-  if (!isRecord(principal) || (principal.type !== 'user' && principal.type !== 'token') || typeof principal.id !== 'string' || !principal.id) {
-    issues.push({ message: 'principal must be { type: "user" | "token", id }', field: 'principal' });
+  if (!isRecord(principal) || (principal.type !== 'user' && principal.type !== 'token' && principal.type !== 'group') || typeof principal.id !== 'string' || !principal.id) {
+    issues.push({ message: 'principal must be { type: "user" | "token" | "group", id }', field: 'principal' });
   }
 
   const catalog = getIamSchema().catalog;
@@ -138,6 +152,8 @@ export function parseSimulateInput(input: unknown): ParsedInput {
   let approvers: AgentApprovers | undefined;
   let ip: string | undefined;
   let at: Date | undefined;
+  let embedded: boolean | undefined;
+  let test: boolean | undefined;
   if (input.context !== undefined && input.context !== null) {
     const c = input.context;
     if (!isRecord(c)) {
@@ -168,6 +184,12 @@ export function parseSimulateInput(input: unknown): ParsedInput {
         if (normalized) ip = normalized;
         else issues.push({ message: 'context.ip is not a valid IP address', field: 'context.ip' });
       }
+      for (const flag of ['embedded', 'test'] as const) {
+        const value = c[flag];
+        if (value === undefined || value === null) continue;
+        if (typeof value !== 'boolean') issues.push({ message: `context.${flag} must be true or false`, field: `context.${flag}` });
+        else if (value) { if (flag === 'embedded') embedded = true; else test = true; }
+      }
       if (c.at !== undefined && c.at !== null && c.at !== '') {
         const date = typeof c.at === 'string' ? new Date(c.at) : null;
         if (date && !Number.isNaN(date.getTime())) at = date;
@@ -176,9 +198,16 @@ export function parseSimulateInput(input: unknown): ParsedInput {
     }
   }
 
-  const principalType = isRecord(principal) && principal.type === 'token' ? 'token' : 'user';
+  const principalType = isRecord(principal) && principal.type === 'token' ? 'token' : isRecord(principal) && principal.type === 'group' ? 'group' : 'user';
   // Opening a portal is only ever asked in the portal channel, by a person: that is the channel to check it in.
-  if (action && !channel && action.id === 'portal.use' && principalType === 'user') channel = 'portal';
+  if (action && !channel && action.id === 'portal.use' && principalType !== 'token') channel = 'portal';
+  // A group is an audience, not somebody who acts: only the portal runtime's own actions are asked of one.
+  if (principalType === 'group' && action && !(isRuntimeAction(action.id) && channel === 'portal')) {
+    issues.push({ message: 'A group can be checked for opening a portal and running its agents only (portal channel)', field: 'principal' });
+  }
+  if ((embedded || test) && !(action && isRuntimeAction(action.id) && channel === 'portal')) {
+    issues.push({ message: 'context.embedded and context.test apply to the portal channel only', field: embedded ? 'context.embedded' : 'context.test' });
+  }
   if (action && channel === 'portal' && isRuntimeAction(action.id)) {
     if (principalType === 'token') {
       issues.push({ message: 'API tokens cannot open portals or run agents through them; choose a person', field: 'context.channel' });
@@ -198,7 +227,7 @@ export function parseSimulateInput(input: unknown): ParsedInput {
     throw new SimulateInputError('validation', issues.map((i) => i.message).join('; ') || 'Invalid request', 400, issues);
   }
   return {
-    principal: { type: (principal as { type: 'user' | 'token' }).type, id: (principal as { id: string }).id },
+    principal: { type: (principal as { type: 'user' | 'token' | 'group' }).type, id: (principal as { id: string }).id },
     action,
     resource,
     projectId,
@@ -206,6 +235,8 @@ export function parseSimulateInput(input: unknown): ParsedInput {
     portalId,
     ownerId,
     approvers,
+    embedded,
+    test,
     ip,
     at,
   };
@@ -358,7 +389,7 @@ export interface SimulateResult {
   /** Denied because nothing allowed it (no policy matched), not because a policy forbade it. */
   defaultDeny: boolean;
   principalSummary: {
-    type: 'user' | 'token';
+    type: 'user' | 'token' | 'group';
     id: string;
     label: string;
     role: string;
@@ -395,6 +426,10 @@ export interface SimulateResult {
     mode: 'all' | 'selected';
     userCount: number;
     groupCount: number;
+    /** The network boundary (ranges are not listed): `any`, or `allow_list` with how many ranges. */
+    networks: { mode: 'any' | 'allow_list'; count: number };
+    /** What the access list means for people who arrive through the embed. */
+    embedded: 'access_list' | 'any_verified';
   };
 }
 
@@ -410,7 +445,9 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
 
   let evaluation: EvaluationPrincipal;
   try {
-    evaluation = await loadEvaluationPrincipal(tenant, input.principal, projectId, inPortal ? { workspaceLevel: true } : {});
+    evaluation = input.principal.type === 'group'
+      ? await loadGroupAudience(tenant, input.principal.id)
+      : await loadEvaluationPrincipal(tenant, { type: input.principal.type, id: input.principal.id }, projectId, inPortal ? { workspaceLevel: true } : {});
   } catch (error) {
     if (error instanceof PrincipalError) throw new SimulateInputError('principal_not_found', error.message, 404);
     throw error;
@@ -421,6 +458,8 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
     channel: input.channel ?? (evaluation.type === 'token' ? 'api' : 'dashboard'),
     ip: input.ip,
     now: input.at,
+    ...(inPortal && input.embedded ? { embedded: true } : {}),
+    ...(inPortal && input.test ? { test: true } : {}),
   };
   const result: AuthorizeResult = await authorize({
     tenant: tenant.tenantDbName,
@@ -446,7 +485,7 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
     reasons,
     defaultDeny: !allowed && result.reasons.length === 0,
     principalSummary: {
-      type: evaluation.type,
+      type: evaluation.audience ?? evaluation.type,
       id: evaluation.id,
       label: evaluation.label,
       role: evaluation.role,
@@ -472,6 +511,11 @@ export async function simulate(tenant: IamTenant, rawInput: unknown): Promise<Si
             mode: resolved.portal.access.mode,
             userCount: resolved.portal.access.userIds.length,
             groupCount: resolved.portal.access.groupIds.length,
+            networks: {
+              mode: resolved.portal.access.networks?.mode === 'allow_list' ? 'allow_list' : 'any',
+              count: resolved.portal.access.networks?.mode === 'allow_list' ? resolved.portal.access.networks.cidrs.length : 0,
+            },
+            embedded: resolved.portal.access.embedded === 'any_verified' ? 'any_verified' : 'access_list',
           },
         }
       : {}),

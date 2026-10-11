@@ -33,6 +33,17 @@ export interface IamPortalAccessFacts {
   mode: 'all' | 'selected';
   userIds: string[];
   groupIds: string[];
+  /**
+   * The networks the portal may be used from (`access.networks`). Absent or `any` = no boundary; `allow_list` admits
+   * only requests whose address is inside one of the ranges (an empty list admits nobody). See lib/iam/portalNetworks.ts.
+   */
+  networks?: { mode: 'any' | 'allow_list'; cidrs: string[] };
+  /**
+   * What the access list means for people who arrive through the portal's embed with an identity the host application
+   * signed (`access.embedded`): `access_list` (the default; they must be on the list like everybody else) or
+   * `any_verified` (every person whose token the portal verified is admitted).
+   */
+  embedded?: 'access_list' | 'any_verified';
 }
 
 /** Everything the engine and the Access check need to know about one portal. */

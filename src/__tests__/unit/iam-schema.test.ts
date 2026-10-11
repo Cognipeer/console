@@ -130,8 +130,18 @@ describe('generated schema', () => {
     expect(ns.entityTypes.Agent.shape.attributes.owners).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'User' }, required: false });
     expect(ns.entityTypes.Agent.shape.attributes.approvers).toMatchObject({ type: 'String', required: false });
     expect(ns.entityTypes.Agent.shape.attributes.portal).toMatchObject({ type: 'Entity', name: 'Portal', required: false });
-    expect(Object.keys(ns.entityTypes.Portal.shape.attributes).sort()).toEqual(['adminService', 'allowedGroups', 'allowedUsers', 'key', 'mode', 'service', 'tags']);
-    for (const name of ['mode', 'allowedUsers', 'allowedGroups']) expect(ns.entityTypes.Portal.shape.attributes[name].required).toBe(false);
+    // ...plus the embed setting and the network boundary: `networkMode` and the numbered ranges `net0` ... `net31`
+    const slots = Array.from({ length: 32 }, (_, i) => `net${i}`);
+    expect(Object.keys(ns.entityTypes.Portal.shape.attributes).sort()).toEqual(
+      ['adminService', 'allowedGroups', 'allowedUsers', 'embedAccess', 'key', 'mode', 'networkMode', 'service', 'tags', ...slots].sort(),
+    );
+    for (const name of ['mode', 'allowedUsers', 'allowedGroups', 'embedAccess', 'networkMode', ...slots]) expect(ns.entityTypes.Portal.shape.attributes[name].required).toBe(false);
+    expect(ns.entityTypes.Portal.shape.attributes.net0).toMatchObject({ type: 'Extension', name: 'ipaddr' });
+    // the request context carries the two flags only the portal runtime can set
+    const actions = (schema as unknown as Record<string, { actions: Record<string, any> }>)[''].actions;
+    const context = actions['portal.use'].appliesTo.context.attributes;
+    expect(context.embedded).toMatchObject({ type: 'Boolean', required: false });
+    expect(context.test).toMatchObject({ type: 'Boolean', required: false });
     expect(ns.entityTypes.Portal.shape.attributes.allowedUsers).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'User' } });
     expect(ns.entityTypes.Portal.shape.attributes.allowedGroups).toMatchObject({ type: 'Set', element: { type: 'Entity', name: 'Group' } });
   });

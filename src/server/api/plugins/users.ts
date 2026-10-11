@@ -873,7 +873,8 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
         },
         'users',
         // a count, not the whole table: the quota only needs how many there are
-        await db.iamCountUsers({ tenantId: session.tenantId }),
+        // (external accounts - a host application's people who use a portal's embed - are portal users, not seats)
+        await db.iamCountUsers({ tenantId: session.tenantId, external: false }),
       );
 
       if (!userQuotaCheck.allowed) {

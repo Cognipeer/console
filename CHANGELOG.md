@@ -88,12 +88,24 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   your own is limited to the projects you belong to.
 - People who are neither owners nor admins and hold no `iam` permission no longer see the IAM center.
 - The Members and Tenant settings pages are removed; their old addresses redirect.
+- **External users** are the people of a host application who use a portal through its embed with a token the host
+  signed. They are accounts of a kind of their own: they cannot sign in to the console, cannot hold API tokens, always
+  have the User role, belong to no project, are left out of the member lists, pickers and seat counts, and appear in the
+  IAM center with an **External** badge, a filter and a counter. An administrator can still disable or delete them.
 
 ### Portals (Enterprise)
 
 - Opening a portal and running an agent through it are decided by the policy engine. A portal's access list is its
   built-in policy; custom deny rules can block on top of it. A refusal shows a reference code on the portal's error
   page and in the **Access check**. If the engine cannot decide, the portal fails closed.
+- A portal can list the **networks** it may be used from; built-in rules refuse every other address, for opening the
+  portal, running its agents and answering its approvals (people using the embedded chat and administrators trying
+  the portal included). The form checks your own address before you save.
+- Workspace owners and admins can open a portal as a **test** without being on its access list (marked, recorded in the
+  audit log, left out of the statistics, still bound by the network restriction), and **view as** a person or a group to
+  see whether they could open a portal and which agents they could run. The Access check accepts a group for these.
+- A portal that is embedded in another application can take every person the application verified
+  (`access.embedded`), instead of requiring them to be on the access list.
 
 ### Search and display
 

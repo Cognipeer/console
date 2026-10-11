@@ -14,7 +14,8 @@
  *   ApiToken { owner: User, scoped: Bool, capRead/capWrite/capAdmin: Set<String>, project?: Project }
  *   Service  { service, adminService }            // service-level checks (HTTP gate)
  *   <RegistryType> in [Project] { service, adminService, key?, tags? }
- *   Portal   in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group> }
+ *   Portal   in [Project] { ..., mode?, allowedUsers?: Set<User>, allowedGroups?: Set<Group>,
+ *                           embedAccess?: String, networkMode?: String, net0 ... net31?: ipaddr }
  *   Agent    in [Project, Portal] { ..., portal?: Portal, approvers?: String, owners?: Set<User> }
  *
  * `owners` and `approvers` describe the SESSION an agent is asked about (agentEntities.ts): the
@@ -38,8 +39,13 @@
  * boundary forbids can stop a CUSTOM permit from granting what the project
  * narrows away. Empty when the request has no narrowing project.
  *
+ * `embedAccess` ('access_list' | 'any_verified') and `networkMode` ('any' | 'allow_list') plus the
+ * numbered ranges `net0` ... `net31` are the portal's embed-access and network-boundary settings
+ * (portalEntities.ts, portalNetworks.ts); the managed portal rules read them.
+ *
  * Request context (all optional): projectId, channel, ip (ipaddr), now
- * (datetime), method, path.
+ * (datetime), method, path, embedded (Boolean: reached through an embed with a host-verified
+ * identity), test (Boolean: a test session of a portal).
  */
 
 import {
@@ -49,6 +55,7 @@ import {
   type CatalogResourceType,
 } from './actions';
 import type { CedarSchemaJson } from './cedar';
+import { PORTAL_NETWORK_SLOTS } from './portalNetworks';
 
 type TypeJson = Record<string, unknown>;
 
@@ -67,9 +74,11 @@ const record = (attributes: Record<string, TypeJson>): TypeJson => ({
  * a call supplies only what it knows (`context has channel` guards the rest).
  * `ip` is a Cedar `ipaddr` and `now` a Cedar `datetime` (context.ts builds them).
  */
-export const IAM_CONTEXT_ATTRS = ['projectId', 'channel', 'ip', 'now', 'method', 'path'] as const;
+export const IAM_CONTEXT_ATTRS = ['projectId', 'channel', 'ip', 'now', 'method', 'path', 'embedded', 'test'] as const;
 
 const IAM_CONTEXT_EXTENSION_TYPES: Readonly<Record<string, string>> = { ip: 'ipaddr', now: 'datetime' };
+/** Context attributes that are flags (Cedar Boolean). */
+const IAM_CONTEXT_BOOLEANS: ReadonlySet<string> = new Set(['embedded', 'test']);
 
 const extension = (name: string): TypeJson => ({ type: 'Extension', name });
 
@@ -78,7 +87,12 @@ const contextType = (): TypeJson =>
     Object.fromEntries(
       IAM_CONTEXT_ATTRS.map((name) => [
         name,
-        attr(IAM_CONTEXT_EXTENSION_TYPES[name] ? extension(IAM_CONTEXT_EXTENSION_TYPES[name]) : str(), false),
+        attr(
+          IAM_CONTEXT_EXTENSION_TYPES[name]
+            ? extension(IAM_CONTEXT_EXTENSION_TYPES[name])
+            : IAM_CONTEXT_BOOLEANS.has(name) ? bool() : str(),
+          false,
+        ),
       ]),
     ),
   );
@@ -87,7 +101,7 @@ const contextType = (): TypeJson =>
  * Bumped whenever the generated schema changes in a way the NAMES of its types and
  * actions do not show (the signature below, and so the preparsed copy, follows).
  */
-const SCHEMA_REVISION = 3;
+const SCHEMA_REVISION = 4;
 
 type EntityTypeJson = { memberOfTypes?: string[]; shape: { attributes: Record<string, TypeJson> } };
 
@@ -104,6 +118,9 @@ function applyPortalShape(entityTypes: Record<string, TypeJson>, resourceEntityT
     mode: attr(str(), false),
     allowedUsers: attr(setOf(entity('User')), false),
     allowedGroups: attr(setOf(entity('Group')), false),
+    embedAccess: attr(str(), false),
+    networkMode: attr(str(), false),
+    ...Object.fromEntries(PORTAL_NETWORK_SLOTS.map((name) => [name, attr(extension('ipaddr'), false)])),
   });
   const agentName = resourceEntityTypes.agent;
   const agent = agentName ? (entityTypes[agentName] as EntityTypeJson | undefined) : undefined;

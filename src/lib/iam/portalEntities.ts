@@ -11,7 +11,9 @@
  *
  * and an Agent run through the portal is `in` it and names it in `portal`, so a
  * custom rule can say `resource in Portal::"<id>"` and cover both opening the
- * portal and running its agents. Pure and synchronous: reading the list from the
+ * portal and running its agents. Two more settings travel the same way: the embed
+ * setting (`embedAccess`, set only for 'any_verified') and the network boundary
+ * (`networkMode` and the numbered ranges, portalNetworks.ts). Pure and synchronous: reading the list from the
  * portal feature is the resolver seam (@/enterprise/iam-portal) or the caller's.
  *
  * Every list member is a TYPED entity reference, never a plain string: the managed
@@ -33,6 +35,7 @@ import type { IamPortalAccessFacts } from '@/enterprise/iam-portal';
 import { resourceEntityTypeName } from './actions';
 import type { CedarEntity } from './cedar';
 import { resourceEntities, type IamResource } from './entities';
+import { portalNetworkAttrs } from './portalNetworks';
 
 /** Above this many entries (people + groups) a request carries only the requester's slice of the list. */
 export const PORTAL_ENTITY_SLICE_THRESHOLD = 200;
@@ -48,7 +51,7 @@ export interface PortalRequester {
   groupIds: readonly string[];
 }
 
-export type PortalAccessInput = Pick<IamPortalAccessFacts, 'mode' | 'userIds' | 'groupIds'>;
+export type PortalAccessInput = Pick<IamPortalAccessFacts, 'mode' | 'userIds' | 'groupIds'> & Partial<Pick<IamPortalAccessFacts, 'networks' | 'embedded'>>;
 
 const entityRef = (type: string, id: string) => ({ __entity: { type, id } });
 
@@ -70,6 +73,10 @@ function accessAttrs(access: PortalAccessInput, requester?: PortalRequester): Re
     mode,
     allowedUsers: userIds.map((id) => entityRef('User', id)),
     allowedGroups: groupIds.map((id) => entityRef('Group', id)),
+    // Only an explicit 'any_verified' opens the door; anything else (absent, unknown) is the access list alone.
+    ...(access?.embedded === 'any_verified' ? { embedAccess: 'any_verified' } : {}),
+    // The network boundary is opt-in: a portal that never listed networks carries no network attribute.
+    ...portalNetworkAttrs(access?.networks),
   };
 }
 

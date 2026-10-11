@@ -368,7 +368,12 @@ describe('normalizeSimulate', () => {
       allowed: false,
       portal: { id: 'P1', key: 'branch', name: 'Branch assistant', status: 'disabled', mode: 'all', userCount: 3, groupCount: 'many' },
     });
-    expect(r.portal).toEqual({ id: 'P1', key: 'branch', name: 'Branch assistant', status: 'disabled', mode: 'all', userCount: 3, groupCount: 0 });
+    expect(r.portal).toEqual({
+      id: 'P1', key: 'branch', name: 'Branch assistant', status: 'disabled', mode: 'all', userCount: 3, groupCount: 0,
+      networks: { mode: 'any', count: 0 }, embedded: 'access_list',
+    });
+    expect(normalizeSimulate({ portal: { id: 'P3', networks: { mode: 'allow_list', count: 4 }, embedded: 'any_verified' } }).portal)
+      .toMatchObject({ networks: { mode: 'allow_list', count: 4 }, embedded: 'any_verified' });
     expect(normalizeSimulate({ portal: { id: 'P2' } }).portal).toMatchObject({ name: 'P2', status: 'enabled', mode: 'selected' });
     expect(normalizeSimulate({}).portal).toBeNull();
     expect(normalizeSimulate({ portal: { name: 'no id' } }).portal).toBeNull();

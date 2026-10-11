@@ -524,6 +524,11 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // A host application's person who uses a portal's embed belongs to no project.
+      if (target.kind === 'external') {
+        return reply.code(400).send({ error: 'External users cannot be project members', code: 'external_user' });
+      }
+
       const role: ProjectRole = (body.role === 'project_admin') ? 'project_admin' : 'member';
 
       const userProject = await access.db.upsertUserProject({

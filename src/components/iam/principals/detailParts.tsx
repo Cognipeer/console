@@ -80,7 +80,8 @@ export function IdentityBadges({
   const roleText = summary.role ? translateOr(t, NS, `roles.${summary.role}`, summary.role) : null;
   const statusText = summary.status ? translateOr(t, NS, `statuses.${summary.status}`, summary.status) : null;
   const provider = extras.authProvider && extras.authProvider !== 'local' ? extras.authProvider : null;
-  const serviceAccount = extras.canLogin === false || summary.kind === 'service';
+  const external = extras.kind === 'external' || summary.kind === 'external';
+  const serviceAccount = !external && (extras.canLogin === false || summary.kind === 'service');
   const directoryUser = type === 'user' && (extras.managed?.directory === true || summary.managed === true);
 
   return (
@@ -109,6 +110,13 @@ export function IdentityBadges({
         >
           {translateOr(t, NS, `drawer.meta.authProvider.${provider}`, provider)}
         </Badge>
+      ) : null}
+      {external ? (
+        <Tooltip label={td('badges.externalHint')} withArrow multiline w={280}>
+          <Badge variant="light" color="grape" radius="sm" tt="none" data-testid="external-badge">
+            {td('badges.kinds.external')}
+          </Badge>
+        </Tooltip>
       ) : null}
       {serviceAccount ? (
         <Tooltip label={t('drawer.meta.noLoginHint')} withArrow multiline w={260}>
@@ -221,7 +229,7 @@ export function PersonFacts({ extras, summary, locale }: { extras: PrincipalExtr
   const email = extras.email ?? summary.email ?? null;
   const rows: Array<[string, ReactNode]> = [];
   rows.push([td('drawer.facts.email'), email ?? td('drawer.facts.noEmail')]);
-  const kind = extras.canLogin === false || summary.kind === 'service' ? 'service' : 'person';
+  const kind = extras.kind === 'external' || summary.kind === 'external' ? 'external' : extras.canLogin === false || summary.kind === 'service' ? 'service' : 'person';
   rows.push([td('drawer.facts.type'), td(`badges.kinds.${kind}`)]);
   rows.push([td('drawer.facts.source'), providerLabel(td, extras.authProvider ?? summary.authProvider ?? 'local')]);
   const created = extras.createdAt ?? summary.createdAt;
@@ -263,6 +271,7 @@ export const ACTION_DENIAL_REASONS = [
   'directory_managed',
   'no_pending_invite',
   'account_disabled',
+  'external_user',
 ] as const;
 
 export function reasonKey(reason: string | undefined): string {

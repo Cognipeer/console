@@ -105,6 +105,9 @@ export function IamDirectoryMixin<TBase extends Constructor<MongoDBProviderBase>
         if (named.length > 0) parts.push({ authProvider: { $in: named } });
         and.push({ $or: parts });
       }
+      // An account without a kind is a member.
+      if (query.external === true) and.push({ kind: 'external' });
+      else if (query.external === false) and.push({ kind: { $ne: 'external' } });
       if (query.invited === true) and.push(PENDING_INVITE);
       else if (query.invited === false) and.push({ $nor: [PENDING_INVITE] });
       if (query.groupId) {

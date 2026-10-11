@@ -18,7 +18,10 @@
  *      portal is opened (and its agents run) by the people its access list names
  *      and by nobody else, and a pending tool approval of an agent session is
  *      approved by the people the agent's `approvers` setting appoints and by nobody else
- *      (the generic Write permit leaves `agent.approve` out),
+ *      (the generic Write permit leaves `agent.approve` out), a portal that lists its networks
+ *      is reached from those only, a workspace owner or admin may open a portal in a marked
+ *      test session while a member who sets the flag gains nothing, and a portal that takes
+ *      every verified embedded person admits one only when the runtime marks the request,
  *      and looking at / acting on somebody else's session is governed by the level
  *      groups (a reader looks, a writer acts, nobody without `agents` does) -
  *      with no evaluation error from any managed rule.
@@ -59,6 +62,20 @@ const CANNED_PORTAL: PortalSubject = {
   access: { mode: 'selected', userIds: ['iam-selftest-listed'], groupIds: ['iam-selftest-group'] },
 };
 
+/** The same portal, usable from one network only. */
+const CANNED_NETWORK_PORTAL: PortalSubject = {
+  ...CANNED_PORTAL,
+  id: 'iam-selftest-portal-net',
+  access: { ...CANNED_PORTAL.access, networks: { mode: 'allow_list', cidrs: ['10.20.0.0/16', '2001:db8::/32'] } },
+};
+
+/** The same portal, open to every person its embed verified. */
+const CANNED_EMBED_PORTAL: PortalSubject = {
+  ...CANNED_PORTAL,
+  id: 'iam-selftest-portal-embed',
+  access: { ...CANNED_PORTAL.access, embedded: 'any_verified' },
+};
+
 function cannedDecisions(): CannedDecision[] {
   const admin = userPrincipal({ userId: 'iam-selftest-admin', user: { role: 'admin' } });
   const member = userPrincipal({ userId: 'iam-selftest-member', user: { role: 'user' } });
@@ -71,6 +88,10 @@ function cannedDecisions(): CannedDecision[] {
   const portal = portalResource(CANNED_PORTAL);
   const agent = portalAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_PORTAL);
   const inPortal: IamRequestContext = { channel: 'portal' };
+  const netPortal = portalResource(CANNED_NETWORK_PORTAL);
+  const netAgent = portalAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_NETWORK_PORTAL);
+  const embedPortal = portalResource(CANNED_EMBED_PORTAL);
+  const embedAgent = portalAgentResource({ id: 'iam-selftest-agent', projectId: 'iam-selftest-project' }, CANNED_EMBED_PORTAL);
 
   // A session of an agent, started by `starter`: who may answer its pending requests under each setting.
   const starter = userPrincipal({ userId: 'iam-selftest-starter', user: { role: 'user' }, projects: ['iam-selftest-project'] });
@@ -121,6 +142,19 @@ function cannedDecisions(): CannedDecision[] {
     { name: 'a writer acts on it', principal: colleague, action: 'agent.session_manage_others', service: 'agents', resource: session('owner'), expect: true },
     { name: 'a listed person answers in a portal', principal: listed, action: 'agent.approve', service: 'agents', resource: portalSession, context: inPortal, expect: true },
     { name: 'an admin who is not listed does not, in a portal', principal: admin, action: 'agent.approve', service: 'agents', resource: portalSession, context: inPortal, expect: false },
+    { name: 'a listed person opens a network-bound portal from its network', principal: listed, action: 'portal.use', service: 'portals', resource: netPortal, context: { channel: 'portal', ip: '10.20.30.40' }, expect: true },
+    { name: 'a listed person runs an agent there from its network', principal: listed, action: 'agent.invoke', service: 'agents', resource: netAgent, context: { channel: 'portal', ip: '2001:db8:1::7' }, expect: true },
+    { name: 'a listed person is refused from another network', principal: listed, action: 'portal.use', service: 'portals', resource: netPortal, context: { channel: 'portal', ip: '192.0.2.9' }, expect: false },
+    { name: 'a listed person is refused its agents from another network', principal: listed, action: 'agent.invoke', service: 'agents', resource: netAgent, context: { channel: 'portal', ip: '192.0.2.9' }, expect: false },
+    { name: 'and without a readable address', principal: listed, action: 'portal.use', service: 'portals', resource: netPortal, context: inPortal, expect: false },
+    { name: 'an admin opens a portal in a test session', principal: admin, action: 'portal.use', service: 'portals', resource: portal, context: { channel: 'portal', test: true }, expect: true },
+    { name: 'an admin runs its agents in a test session', principal: admin, action: 'agent.invoke', service: 'agents', resource: agent, context: { channel: 'portal', test: true }, expect: true },
+    { name: 'a member who claims a test session gains nothing', principal: member, action: 'portal.use', service: 'portals', resource: portal, context: { channel: 'portal', test: true }, expect: false },
+    { name: 'a test session does not cross the network boundary', principal: admin, action: 'portal.use', service: 'portals', resource: netPortal, context: { channel: 'portal', test: true, ip: '192.0.2.9' }, expect: false },
+    { name: 'an embedded person is admitted when the portal takes every verified one', principal: member, action: 'portal.use', service: 'portals', resource: embedPortal, context: { channel: 'portal', embedded: true }, expect: true },
+    { name: 'and runs its agents', principal: member, action: 'agent.invoke', service: 'agents', resource: embedAgent, context: { channel: 'portal', embedded: true }, expect: true },
+    { name: 'but not when the request is not marked embedded', principal: member, action: 'portal.use', service: 'portals', resource: embedPortal, context: inPortal, expect: false },
+    { name: 'nor in a portal that keeps the access list', principal: member, action: 'portal.use', service: 'portals', resource: portal, context: { channel: 'portal', embedded: true }, expect: false },
   ];
 }
 

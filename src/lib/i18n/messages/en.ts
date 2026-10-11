@@ -1,5 +1,6 @@
 import { accountPageEn } from './accountPage.en';
 import { iamDirectoryEn } from './iamDirectory.en';
+import { portalsNowEn } from './portalsNow.en';
 
 export const en = {
   auth: {
@@ -1254,7 +1255,7 @@ export const en = {
       },
       'portal-use-boundary': {
         name: 'Only the access list opens a portal',
-        description: 'Nobody can open a portal that its access list does not admit, whatever their role or any allow rule says. Deny rules can still block people who are on the list.',
+        description: 'Nobody can open a portal that its access list does not admit, whatever their role or any allow rule says (a workspace owner or admin in a marked test session, and people a portal that takes every verified embedded person lets in, are the exceptions). Deny rules can still block people who are on the list.',
       },
       'portal-agent': {
         name: 'People on a portal\'s access list can run its agents',
@@ -1263,6 +1264,22 @@ export const en = {
       'portal-agent-boundary': {
         name: 'Only the access list runs agents in a portal',
         description: 'In a portal, nobody can run an agent or approve its tool calls unless the portal\'s access list admits them, whatever their role or any allow rule says.',
+      },
+      'portal-network-boundary': {
+        name: 'A portal can only be opened from its listed networks',
+        description: 'When a portal lists the networks it may be used from, nobody can open it from an address outside them - and a request without a readable address is refused too. Nothing overrides this, test sessions included. Portals that list no networks are not affected.',
+      },
+      'portal-agent-network-boundary': {
+        name: 'A portal\'s agents can only be used from its listed networks',
+        description: 'When a portal lists the networks it may be used from, nobody can run its agents or answer its approvals from an address outside them. Portals that list no networks are not affected.',
+      },
+      'portal-test-use': {
+        name: 'Workspace owners and admins can open a portal as a test',
+        description: 'A workspace owner or admin can open any portal in a marked test session even when its access list does not name them. The test is audited, and the portal\'s network boundary still applies.',
+      },
+      'portal-test-agent': {
+        name: 'Workspace owners and admins can try a portal\'s agents as a test',
+        description: 'In a marked test session, a workspace owner or admin can run the agents a portal offers even when its access list does not name them. Conversations of a test session are flagged and left out of the portal\'s statistics.',
       },
       'agent-approve': {
         name: 'People who may approve an agent\'s tool calls',
@@ -2656,9 +2673,13 @@ export const en = {
       portalOpenAll: 'Open to everyone in the workspace',
       portalAudience: '{users} people and {groups} groups on the access list',
       portalDisabled: 'Switched off',
+      portalNetworks: 'Only from {count} listed networks',
+      portalEmbedded: 'Takes every person signed in through its embed',
       portalReason: {
         list: 'The portal access list admits this person.',
         boundary: 'The portal access list does not admit this person, and nothing else can open a portal or run its agents.',
+        network: 'The portal can only be used from its listed networks, and this address is not one of them (or no address was available).',
+        test: 'A workspace owner or admin is trying the portal out in a test session.',
       },
       approvalReason: {
         rule: 'This person started the session, the agent accepts them as an approver, or one of your allow rules appoints them.',
@@ -6627,5 +6648,7 @@ export const en = {
       copied: 'Copied',
       retry: 'Try again',
     },
+    // The "Now" release and the embed with a host-signed identity (portalsNow.en.ts).
+    ...portalsNowEn,
   },
 };

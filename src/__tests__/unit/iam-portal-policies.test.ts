@@ -79,7 +79,7 @@ const run = (principal: IamPrincipal, agentId = 'agent-1', portal = PORTAL, chan
   });
 
 describe('the managed portal policies', () => {
-  it('are four, grouped under managed:portal, and valid against the generated schema', async () => {
+  it('are eight, grouped under managed:portal, and valid against the generated schema', async () => {
     expect(Object.keys(PORTAL_POLICIES).sort()).toEqual(Object.values(PORTAL_POLICY_IDS).sort());
     expect(Object.keys(MANAGED_POLICIES)).toHaveLength(6);
     for (const [id, text] of Object.entries(PORTAL_POLICIES)) {

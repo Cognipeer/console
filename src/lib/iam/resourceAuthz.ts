@@ -42,7 +42,15 @@
  * denials feed, the decision lookup and the Access check read that row); the same
  * refusal repeated within a minute reuses the id and writes nothing, and a
  * workspace writes at most TENANT_AUDIT_ROWS_PER_MINUTE of them, so a client that
- * retries in a loop cannot flood the audit trail. An allow writes and logs nothing.
+ * retries in a loop cannot flood the audit trail. An allow writes and logs nothing -
+ * with one exception: a TEST SESSION of a portal (`client.test`) that the engine
+ * allowed is recorded, at most once a minute per person and portal, because it is the
+ * one way in that does not go through the access list (denialAudit.ts).
+ *
+ * Two flags of the request come from the portal runtime and from nowhere else:
+ * `client.embedded` (the person arrived through the portal's embed with an identity the
+ * host application signed and the portal verified) and `client.test` (a workspace owner
+ * or admin trying the portal out; the managed rules check the role themselves).
  * Never throws.
  */
 
@@ -51,7 +59,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { RbacUserLike } from '@/lib/security/rbac';
 import { RUNTIME_ENFORCED_ACTIONS } from './actions';
 import { IAM_CHANNELS, type IamChannel } from './context';
-import { recordResourceDenial } from './denialAudit';
+import { recordPortalTestSession, recordResourceDenial } from './denialAudit';
 import { authorize, customPolicyIdsOf } from './engine';
 import { recordAuthorizationUnavailable, type EnforceUnavailableReason } from './enforce';
 import { userPrincipal, type IamPrincipal, type IamResource } from './entities';
@@ -89,6 +97,16 @@ export interface ResourceAuthzClient {
   /** HTTP method and path (without the query string): policy context `method` / `path`, and the audit row. */
   method?: string;
   path?: string;
+  /**
+   * The person reached the portal through its EMBED with an identity the host application signed and the portal verified
+   * (policy context `embedded`). Only the portal runtime may set it, from its own session store - never from a header.
+   */
+  embedded?: boolean;
+  /**
+   * A TEST SESSION: a workspace owner or admin trying the portal out (policy context `test`). The managed rules admit it for
+   * those two roles only, so a caller who sets it without being one gains nothing. An allowed test session is audited.
+   */
+  test?: boolean;
 }
 
 /** Who is asking, as far as the resource builder needs to know (to cut a long access list down to the requester's slice). */
@@ -293,6 +311,8 @@ function audit(
     ...(input.subject.portalId ? { portalId: input.subject.portalId } : {}),
     ...(input.subject.portalKey ? { portalKey: input.subject.portalKey } : {}),
     ...(input.subject.portalName ? { portalName: input.subject.portalName } : {}),
+    ...(input.client?.embedded === true ? { contextEmbedded: true } : {}),
+    ...(input.client?.test === true ? { contextTest: true } : {}),
     ...(principal?.contextProjectId ? { projectId: principal.contextProjectId } : {}),
     ...(session.ownerId ? { ownerId: session.ownerId } : {}),
     ...(session.approvers ? { approvers: session.approvers } : {}),
@@ -396,12 +416,16 @@ async function decide(input: Decision): Promise<ResourceAuthzResult> {
       ip: input.client?.ip,
       method: input.client?.method,
       path: input.client?.path,
+      // The runtime's own flags (portal channel only: a dashboard or API request carries none).
+      ...(input.channel === 'portal' && input.client?.embedded === true ? { embedded: true } : {}),
+      ...(input.channel === 'portal' && input.client?.test === true ? { test: true } : {}),
     },
   });
   if (result.failed) return refuseUnavailable(refusal, 'engine_unavailable', result.errors.join(' | ') || 'engine failure');
 
   if (result.allowed) {
     countResourceAuthz(input.action, 'allow');
+    if (input.channel === 'portal' && input.client?.test === true) auditTestSession(input, principal, resource);
     return { allowed: true, source: 'engine', reasons: [], policyIds: [] };
   }
 
@@ -433,6 +457,28 @@ async function decide(input: Decision): Promise<ResourceAuthzResult> {
     audit(refusal, claimed.decisionId, 'forbidden', 'engine', reasons, policyIds);
   }
   return { allowed: false, decisionId: claimed.decisionId, source: 'engine', reasons, policyIds };
+}
+
+/** An allowed test session, recorded once a minute per person and portal (it is the way in that skips the access list). */
+function auditTestSession(input: Decision, principal: IamPrincipal, resource: IamResource): void {
+  const portalId = input.subject.portalId;
+  if (!portalId) return;
+  const key = ['test-session', input.tenantDbName, input.userId, portalId].join('|');
+  if (!claim(key, input.tenantDbName, randomUUID).audit) return;
+  const ref = resourceRefOf(resource);
+  recordPortalTestSession({
+    tenantDbName: input.tenantDbName,
+    tenantId: input.tenantId,
+    userId: input.userId,
+    ...(principal.role ? { userRole: principal.role } : {}),
+    action: input.action,
+    portalId,
+    ...(input.subject.portalKey ? { portalKey: input.subject.portalKey } : {}),
+    ...(input.subject.portalName ? { portalName: input.subject.portalName } : {}),
+    resourceType: ref.type,
+    resourceId: ref.id,
+    client: input.client,
+  });
 }
 
 /** A caller bug, not a decision: refused like any outage, with an id that at least appears in the log. */

@@ -79,7 +79,7 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
   },
   'managed:portal:use-boundary': {
     name: 'Only the access list opens a portal',
-    description: 'Nobody can open a portal that its access list does not admit, whatever their role or any allow rule says. Deny rules can still block people who are on the list.',
+    description: 'Nobody can open a portal that its access list does not admit, whatever their role or any allow rule says (a workspace owner or admin in a marked test session, and people a portal that takes every verified embedded person lets in, are the exceptions). Deny rules can still block people who are on the list.',
   },
   'managed:portal:agent': {
     name: 'People on a portal\'s access list can run its agents',
@@ -88,6 +88,22 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
   'managed:portal:agent-boundary': {
     name: 'Only the access list runs agents in a portal',
     description: 'In a portal, nobody can run an agent or approve its tool calls unless the portal\'s access list admits them, whatever their role or any allow rule says.',
+  },
+  'managed:portal:network-boundary': {
+    name: 'A portal can only be opened from its listed networks',
+    description: 'When a portal lists the networks it may be used from, nobody can open it from an address outside them - and a request without a readable address is refused too. Nothing overrides this, test sessions included. Portals that list no networks are not affected.',
+  },
+  'managed:portal:agent-network-boundary': {
+    name: 'A portal\'s agents can only be used from its listed networks',
+    description: 'When a portal lists the networks it may be used from, nobody can run its agents or answer its approvals from an address outside them. Portals that list no networks are not affected.',
+  },
+  'managed:portal:test-use': {
+    name: 'Workspace owners and admins can open a portal as a test',
+    description: 'A workspace owner or admin can open any portal in a marked test session even when its access list does not name them. The test is audited, and the portal\'s network boundary still applies.',
+  },
+  'managed:portal:test-agent': {
+    name: 'Workspace owners and admins can try a portal\'s agents as a test',
+    description: 'In a marked test session, a workspace owner or admin can run the agents a portal offers even when its access list does not name them. Conversations of a test session are flagged and left out of the portal\'s statistics.',
   },
   'managed:agent:approve': {
     name: 'People who may approve an agent\'s tool calls',

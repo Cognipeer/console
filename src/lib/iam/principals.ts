@@ -26,7 +26,7 @@ import {
 } from '@/lib/security/rbac';
 import { probeServiceLevel } from './effective';
 import { buildEnforcePrincipalWithNarrowing } from './enforce';
-import type { IamPrincipal } from './entities';
+import { userPrincipal, type IamPrincipal } from './entities';
 import { groupToGrant, loadUserGroups } from './groupGrants';
 import { listPolicies } from './store';
 import { countDirectReferences, policyReferences, toPolicyRows, type PolicyRow } from './policyRows';
@@ -79,6 +79,8 @@ export function tokenStatus(token: Pick<IApiToken, 'expiresAt'>, now = Date.now(
 
 export interface EvaluationPrincipal {
   type: 'user' | 'token';
+  /** Set for a GROUP audience (`loadGroupAudience`): a plain member of the group, not a person or a token. `type` is `user` then. */
+  audience?: 'group';
   id: string;
   label: string;
   /** The principal the gates build: groups, project narrowing, token cap. */
@@ -183,6 +185,40 @@ export async function loadEvaluationPrincipal(
     token: loaded.token ?? undefined,
     role: typeof loaded.user.role === 'string' ? loaded.user.role : '',
     accountDisabled: loaded.user.status === 'disabled',
+  };
+}
+
+/**
+ * A GROUP as an audience ("view as"): a plain member of the group and nothing else - role `user`, the group
+ * as its only group, the group's own grants, no project. It is what a portal check about a group asks:
+ * "would somebody whose only trait is being in this group be admitted?". The id is synthetic and names no
+ * user, so a custom rule that names one person never matches it.
+ */
+export async function loadGroupAudience(tenant: IamTenant, groupId: string): Promise<EvaluationPrincipal> {
+  const group = await runWithTenantScope(tenant.tenantDbName, (db) => find(() => db.findGroupById(groupId)));
+  if (!group || isForeign(group, tenant.tenantId)) throw new PrincipalError('principal_not_found', 'Group not found');
+  const grant = groupToGrant(group);
+  const principal = userPrincipal({
+    userId: `group-audience:${groupId}`,
+    user: { role: 'user' },
+    groupGrants: grant ? [grant] : [],
+    groupIds: [String(group._id)],
+  });
+  return {
+    type: 'user',
+    audience: 'group',
+    id: groupId,
+    label: group.name,
+    principal,
+    // Nothing reads the user row of an audience; the shape is only here to satisfy the evaluation contract.
+    user: { _id: `group-audience:${groupId}`, tenantId: tenant.tenantId, email: '', password: '', name: group.name, role: 'user', licenseId: '' } as IUser,
+    groupGrants: grant ? [grant] : [],
+    grantGroupNames: grant ? [group.name] : [],
+    narrowing: null,
+    groups: [{ id: String(group._id), name: group.name }],
+    tokenScope: undefined,
+    role: 'user',
+    accountDisabled: false,
   };
 }
 

@@ -2,7 +2,7 @@
  * SQLite Provider – User operations mixin
  */
 
-import type { IUser } from '../provider.interface';
+import type { IUser, IUserExternalIdentity } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES, logger } from './base';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
@@ -24,8 +24,10 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       const normalizedEmail = this.normalizeEmail(trimmedInput);
       const trimmedEmail = trimmedInput;
 
+      // External accounts (people of a host application) are never found by email: they cannot sign in, and one of them
+      // must never shadow a member who has the same address.
       const row = db.prepare(
-        `SELECT * FROM ${TABLES.users} WHERE emailLower = @emailLower OR email = @email1 OR email = @email2 LIMIT 1`,
+        `SELECT * FROM ${TABLES.users} WHERE (emailLower = @emailLower OR email = @email1 OR email = @email2) AND (kind IS NULL OR kind != 'external') LIMIT 1`,
       ).get({
         emailLower: normalizedEmail,
         email1: normalizedEmail,
@@ -61,6 +63,35 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       return row ? this.mapUserRow(row) : null;
     }
 
+    /** The `external` account that holds this identity (issuer + subject), or null. */
+    async findUserByExternalIdentity(issuer: string, subject: string): Promise<IUser | null> {
+      if (typeof issuer !== 'string' || typeof subject !== 'string' || !issuer || !subject) return null;
+      const db = this.getTenantDb();
+      const row = db.prepare(
+        `SELECT u.* FROM ${TABLES.users} u
+         JOIN ${TABLES.userExternalIdentities} e ON e.userId = u.id
+         WHERE e.issuer = @issuer AND e.subject = @subject LIMIT 1`,
+      ).get({ issuer, subject }) as SqliteRow | undefined;
+      return row ? this.mapUserRow(row) : null;
+    }
+
+    async countExternalUsers(): Promise<number> {
+      const row = this.getTenantDb()
+        .prepare(`SELECT COUNT(*) AS c FROM ${TABLES.users} WHERE kind = 'external'`)
+        .get() as SqliteRow | undefined;
+      return Number(row?.c) || 0;
+    }
+
+    /** Replace the identity rows of a user (the unique key makes a second account for the same identity fail). */
+    private writeExternalIdentities(db: ReturnType<SQLiteProviderBase['getTenantDb']>, userId: string, identities: readonly IUserExternalIdentity[] | undefined): void {
+      db.prepare(`DELETE FROM ${TABLES.userExternalIdentities} WHERE userId = @userId`).run({ userId });
+      const insert = db.prepare(
+        `INSERT INTO ${TABLES.userExternalIdentities} (issuer, subject, userId, createdAt) VALUES (@issuer, @subject, @userId, @createdAt)`,
+      );
+      const createdAt = this.now();
+      for (const identity of identities ?? []) insert.run({ issuer: identity.issuer, subject: identity.subject, userId, createdAt });
+    }
+
     async createUser(userData: Omit<IUser, '_id' | 'createdAt' | 'updatedAt'>): Promise<IUser> {
       const db = this.getTenantDb();
       const id = this.newId();
@@ -69,14 +100,18 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       const normalizedEmail = this.normalizeEmail(trimmedEmail);
       const canLogin = userData.canLogin !== false;
 
-      db.prepare(`
+      const external = userData.kind === 'external';
+      // One transaction: the account and its identities are written together, so a second account for an identity that is
+      // already taken (a race between two first sign-ins) leaves nothing behind.
+      const insert = db.transaction(() => {
+        db.prepare(`
         INSERT INTO ${TABLES.users}
         (id, email, emailLower, password, name, tenantId, role, projectIds, servicePermissions, licenseId, features,
          invitedBy, invitedAt, inviteAcceptedAt, mustChangePassword, passwordChangedAt, authProvider, externalId, canLogin,
-         status, disabledAt, disabledBy, disabledReason, createdAt, updatedAt)
+         status, disabledAt, disabledBy, disabledReason, kind, source, externalIdentities, createdAt, updatedAt)
         VALUES (@id, @email, @emailLower, @password, @name, @tenantId, @role, @projectIds, @servicePermissions, @licenseId, @features,
          @invitedBy, @invitedAt, @inviteAcceptedAt, @mustChangePassword, @passwordChangedAt, @authProvider, @externalId, @canLogin,
-         @status, @disabledAt, @disabledBy, @disabledReason, @createdAt, @updatedAt)
+         @status, @disabledAt, @disabledBy, @disabledReason, @kind, @source, @externalIdentities, @createdAt, @updatedAt)
       `).run({
         id,
         email: trimmedEmail,
@@ -101,9 +136,15 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         disabledAt: userData.disabledAt?.toISOString() ?? null,
         disabledBy: userData.disabledBy ?? null,
         disabledReason: userData.disabledReason ?? null,
+        kind: userData.kind ?? null,
+        source: userData.source ?? null,
+        externalIdentities: userData.externalIdentities ? this.toJson(userData.externalIdentities) : null,
         createdAt: now,
         updatedAt: now,
       });
+        this.writeExternalIdentities(db, id, userData.externalIdentities);
+      });
+      insert();
 
       const createdUser: IUser = {
         ...userData,
@@ -116,8 +157,8 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       };
 
       // Sync user directory. Programmatic users (canLogin=false, typically no
-      // email) have nothing to register.
-      if (trimmedEmail) {
+      // email) have nothing to register; neither has an external account (its address must not pull a sign-in here).
+      if (trimmedEmail && !external) {
         try {
           const tenant = await this.findTenantById(userData.tenantId);
           if (tenant) {
@@ -179,16 +220,25 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       if (data.disabledAt !== undefined) { sets.push('disabledAt = @disabledAt'); params.disabledAt = data.disabledAt?.toISOString() ?? null; }
       if (data.disabledBy !== undefined) { sets.push('disabledBy = @disabledBy'); params.disabledBy = data.disabledBy ?? null; }
       if (data.disabledReason !== undefined) { sets.push('disabledReason = @disabledReason'); params.disabledReason = data.disabledReason ?? null; }
+      if (data.kind !== undefined) { sets.push('kind = @kind'); params.kind = data.kind ?? null; }
+      if (data.source !== undefined) { sets.push('source = @source'); params.source = data.source ?? null; }
+      if (data.externalIdentities !== undefined) {
+        sets.push('externalIdentities = @externalIdentities');
+        params.externalIdentities = data.externalIdentities ? this.toJson(data.externalIdentities) : null;
+      }
 
-      db.prepare(`UPDATE ${TABLES.users} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      db.transaction(() => {
+        db.prepare(`UPDATE ${TABLES.users} SET ${sets.join(', ')} WHERE id = @id`).run(params);
+        if (data.externalIdentities !== undefined) this.writeExternalIdentities(db, id, data.externalIdentities ?? []);
+      })();
 
       const updated = this.mapUserRow(
         db.prepare(`SELECT * FROM ${TABLES.users} WHERE id = @id`).get({ id }) as SqliteRow,
       );
 
-      // Sync user directory
+      // Sync user directory (an external account is never in it)
       try {
-        const tenant = await this.findTenantById(updated.tenantId);
+        const tenant = updated.kind === 'external' ? null : await this.findTenantById(updated.tenantId);
         if (tenant) {
           const tenantId = typeof tenant._id === 'string' ? tenant._id : (tenant._id?.toString() ?? updated.tenantId);
           const oldEmail = existing.email as string;
@@ -219,10 +269,14 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         .get({ id }) as SqliteRow | undefined;
       if (!existing) return false;
 
-      const result = db.prepare(`DELETE FROM ${TABLES.users} WHERE id = @id`).run({ id });
+      const remove = db.transaction(() => {
+        db.prepare(`DELETE FROM ${TABLES.userExternalIdentities} WHERE userId = @id`).run({ id });
+        return db.prepare(`DELETE FROM ${TABLES.users} WHERE id = @id`).run({ id });
+      });
+      const result = remove();
       const deleted = result.changes > 0;
 
-      if (deleted) {
+      if (deleted && existing.kind !== 'external') {
         try {
           await this.unregisterUserFromDirectory(
             existing.email as string,
@@ -236,9 +290,10 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
       return deleted;
     }
 
-    async listUsers(): Promise<IUser[]> {
+    async listUsers(options: { includeExternal?: boolean } = {}): Promise<IUser[]> {
       const db = this.getTenantDb();
-      const rows = db.prepare(`SELECT * FROM ${TABLES.users} ORDER BY createdAt DESC`)
+      const where = options.includeExternal ? '' : `WHERE kind IS NULL OR kind != 'external'`;
+      const rows = db.prepare(`SELECT * FROM ${TABLES.users} ${where} ORDER BY createdAt DESC`)
         .all() as SqliteRow[];
       return rows.map((r) => this.mapUserRow(r));
     }
@@ -271,6 +326,10 @@ export function UserMixin<TBase extends Constructor<SQLiteProviderBase & WithTen
         disabledAt: this.toDate(r.disabledAt),
         disabledBy: (r.disabledBy as string | null) ?? undefined,
         disabledReason: (r.disabledReason as string | null) ?? undefined,
+        // NULL kind (every pre-existing row) stays undefined = a member.
+        kind: (r.kind as IUser['kind'] | null) ?? undefined,
+        source: (r.source as string | null) ?? undefined,
+        externalIdentities: r.externalIdentities ? this.parseJson<IUserExternalIdentity[]>(r.externalIdentities, []) : undefined,
         createdAt: this.toDate(r.createdAt),
         updatedAt: this.toDate(r.updatedAt),
       };

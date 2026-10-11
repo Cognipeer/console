@@ -149,7 +149,10 @@ describeForEachProvider('Access check and preview about portals', (getDb) => {
 
     it('tells the facts of the portal - counts, never the names on the list', async () => {
       const result = await simulate(tenant(), openReq('listed'));
-      expect(result.portal).toEqual({ id: 'portal-1', key: 'branch', name: 'Branch assistant', status: 'enabled', mode: 'selected', userCount: 1, groupCount: 1 });
+      expect(result.portal).toEqual({
+        id: 'portal-1', key: 'branch', name: 'Branch assistant', status: 'enabled', mode: 'selected', userCount: 1, groupCount: 1,
+        networks: { mode: 'any', count: 0 }, embedded: 'access_list',
+      });
       expect(JSON.stringify(result)).not.toContain(idOf('listed') + '"]'); // the list itself is not in the answer
       facts = { ...facts, status: 'disabled', access: { mode: 'all', userIds: [], groupIds: [] } };
       const open = await simulate(tenant(), openReq('stranger'));
@@ -271,7 +274,7 @@ describeForEachProvider('Access check and preview about portals', (getDb) => {
       const out = await listPoliciesForResource(tenant(), { resourceType: 'portal', resourceId: 'portal-1' });
       expect(out.custom.map((p) => [p.policyId, p.scope]).sort()).toEqual([['all-read', 'all'], ['this-one', 'this']]);
       expect(out.custom.find((p) => p.policyId === 'this-one')).toMatchObject({ name: 'Block it', effect: 'forbid', enabled: true });
-      expect(out.managed.filter((m) => m.group === 'portal')).toHaveLength(4);
+      expect(out.managed.filter((m) => m.group === 'portal')).toHaveLength(8);
     });
 
     it('asks for both halves of the filter, a real resource type and a safe id', async () => {

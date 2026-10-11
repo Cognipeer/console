@@ -54,6 +54,9 @@ export interface ResourceDenialEntry {
   portalName?: string;
   /** The project the request ran in (dashboard / API). */
   projectId?: string;
+  /** The request was a TEST SESSION / came through an EMBED: part of the question, so a replay must ask it the same way. */
+  contextTest?: boolean;
+  contextEmbedded?: boolean;
   /** A session action: who started the session (the first owner) and which answerers the agent accepts, so a replay can rebuild the question. */
   ownerId?: string;
   approvers?: string;
@@ -145,6 +148,8 @@ async function write(entry: ResourceDenialEntry): Promise<void> {
       ...(entry.portalKey ? { portalKey: entry.portalKey.slice(0, 120) } : {}),
       ...(entry.portalName ? { portalName: entry.portalName.slice(0, 200) } : {}),
       ...(entry.projectId ? { contextProjectId: entry.projectId } : {}),
+      ...(entry.contextTest ? { contextTest: true } : {}),
+      ...(entry.contextEmbedded ? { contextEmbedded: true } : {}),
       ...(entry.ownerId ? { ownerId: entry.ownerId.slice(0, 200) } : {}),
       ...(entry.approvers ? { approvers: entry.approvers.slice(0, 40) } : {}),
       source: entry.source,
@@ -164,6 +169,71 @@ export function recordResourceDenial(entry: ResourceDenialEntry): void {
   } catch (error) {
     logger.error('Could not schedule the audit row of a refusal', {
       decisionId: entry.decisionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+// ── test sessions ────────────────────────────────────────────────────────
+
+export interface PortalTestSessionEntry {
+  tenantDbName: string;
+  tenantId: string;
+  userId: string;
+  userRole?: string;
+  /** The action the engine allowed (`portal.use`, `agent.invoke`, `agent.approve`). */
+  action: string;
+  portalId: string;
+  portalKey?: string;
+  portalName?: string;
+  resourceType: string;
+  resourceId: string;
+  client?: ResourceDenialEntry['client'];
+}
+
+/**
+ * The audit row of an ALLOWED test session: a workspace owner or admin used a portal without being on its access list.
+ * Filed under the portals' service with the event `portal.test_session`, outcome `success`; it carries no `iamEnforce`
+ * marker, so it is a plain audit event and never shows up in the denials feed.
+ */
+async function writeTestSession(entry: PortalTestSessionEntry): Promise<void> {
+  await runWithTenantScope(entry.tenantDbName, (db) => db.createAuditLog({
+    tenantId: entry.tenantId,
+    actorType: 'user',
+    actorUserId: entry.userId,
+    ...(entry.userRole ? { actorRole: entry.userRole } : {}),
+    service: 'portals',
+    action: 'security',
+    event: 'portal.test_session',
+    method: entry.client?.method?.toUpperCase(),
+    path: clip(entry.client?.path),
+    statusCode: 200,
+    outcome: 'success',
+    ipAddress: entry.client?.ip ?? undefined,
+    userAgent: clip(entry.client?.userAgent),
+    requestId: entry.client?.requestId,
+    resourceType: 'portal',
+    resourceId: entry.portalId,
+    metadata: {
+      testSession: true,
+      action: entry.action,
+      channel: 'portal',
+      portalId: entry.portalId,
+      ...(entry.portalKey ? { portalKey: entry.portalKey.slice(0, 120) } : {}),
+      ...(entry.portalName ? { portalName: entry.portalName.slice(0, 200) } : {}),
+      resourceType: entry.resourceType,
+      resourceId: entry.resourceId,
+    },
+  }));
+}
+
+/** Record an allowed test session (never throws, never awaited). */
+export function recordPortalTestSession(entry: PortalTestSessionEntry): void {
+  try {
+    criticalFireAndForget('iam-portal-test-session-audit', () => writeTestSession(entry));
+  } catch (error) {
+    logger.error('Could not schedule the audit row of a test session', {
+      portalId: entry.portalId,
       error: error instanceof Error ? error.message : String(error),
     });
   }

@@ -96,6 +96,19 @@ import type { FastifyInstance } from 'fastify';
  *     and a seam-7 overlay not against a seam-6 one (no authorizer, no
  *     attachments info, no event log). `compatibleCommunity` in COMPAT.json is
  *     raised to the first community release that declares 7.
+ *     Seam 7 is still unreleased, so the portal "Now" release and the embed with a
+ *     host-signed identity are part of it too (additions only, nothing was removed):
+ *     `IamPortalAccessFacts.networks` / `.embedded` (the network boundary and the
+ *     embed setting of a portal's access list), `ResourceAuthzClient.embedded` /
+ *     `.test` (the two flags only the portal runtime may set), `simulatePortalView`
+ *     and the `group` audience of the Access check (`@/lib/iam/viewAs`,
+ *     `@/lib/iam/simulate`), `validatePortalNetworks` / `checkPortalNetwork`
+ *     (`@/lib/iam/portalNetworks`), and external users: `IUser.kind` /
+ *     `.source` / `.externalIdentities`, `findUserByExternalIdentity`,
+ *     `countExternalUsers`, `listUsers({ includeExternal })` and
+ *     `resolveExternalUser` (`@/lib/services/users/externalUsers`). An overlay that
+ *     passes `networks` to the policy engine against a tree without them would run
+ *     its portal unrestricted, which is why the pairing is checked at the seam.
  */
 export const SEAM_CONTRACT_VERSION = 7;
 

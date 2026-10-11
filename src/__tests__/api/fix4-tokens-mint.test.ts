@@ -51,6 +51,8 @@ const USERS: Record<string, Record<string, unknown>> = {
   'pa-1': { _id: 'pa-1', role: 'project_admin', tenantId: TENANT },
   'user-1': { _id: 'user-1', role: 'user', tenantId: TENANT, canLogin: true },
   'svc-1': { _id: 'svc-1', role: 'user', tenantId: TENANT, canLogin: false, email: '' },
+  // A host application's person who uses a portal's embed: no sign-in, no tokens.
+  'ext-1': { _id: 'ext-1', role: 'user', tenantId: TENANT, canLogin: false, kind: 'external', email: 'v@host.example.com' },
 };
 
 function sessionHeaders(userId: string) {
@@ -148,6 +150,15 @@ describe('POST /api/tokens for another user', () => {
 
     const forPerson = await mint('pa-1', { userId: 'user-1' });
     expect(forPerson.statusCode).toBe(403);
+  });
+
+  it('never mints for an external account, whoever asks', async () => {
+    for (const as of ['owner-1', 'admin-1']) {
+      const res = await mint(as, { userId: 'ext-1' });
+      expect(res.statusCode, as).toBe(400);
+      expect(parseJsonBody<{ code: string }>(res.body).code).toBe('external_user');
+    }
+    expect(db.createApiToken).not.toHaveBeenCalled();
   });
 
   it('keeps self-service minting as it was', async () => {

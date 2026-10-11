@@ -229,7 +229,15 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IUser>;
   updateUser(id: string, data: Partial<IUser>): Promise<IUser | null>;
   deleteUser(id: string): Promise<boolean>;
-  listUsers(): Promise<IUser[]>;
+  /**
+   * The workspace's people. Accounts of kind `external` (people of a host application who use a portal's embed) are left
+   * out unless `includeExternal` asks for them: every picker and every seat count means the workspace's own people.
+   */
+  listUsers(options?: { includeExternal?: boolean }): Promise<IUser[]>;
+  /** The `external` account that holds this identity (token issuer + subject), or null. */
+  findUserByExternalIdentity(issuer: string, subject: string): Promise<IUser | null>;
+  /** How many `external` accounts the workspace has (the portal users' counter; they are not console seats). */
+  countExternalUsers(): Promise<number>;
 
   // Project membership (UserProject — replaces user.projectIds)
   findUserProject(userId: string, projectId: string): Promise<IUserProject | null>;

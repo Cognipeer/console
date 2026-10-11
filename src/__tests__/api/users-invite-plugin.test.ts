@@ -87,7 +87,8 @@ describe('POST /api/users/invite', () => {
 
   it('charges the user quota for the number of people, read as a count - not by reading the table', async () => {
     await invite(person);
-    expect(db.iamCountUsers).toHaveBeenCalledWith({ tenantId: 'tenant-1' });
+    // seats: the workspace's own people (external accounts of a host application are portal users, not seats)
+    expect(db.iamCountUsers).toHaveBeenCalledWith({ tenantId: 'tenant-1', external: false });
     expect(db.listUsers).not.toHaveBeenCalled();
     expect((checkResourceQuota as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe('users');
     expect((checkResourceQuota as ReturnType<typeof vi.fn>).mock.calls[0][2]).toBe(42);
