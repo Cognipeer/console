@@ -139,11 +139,23 @@ function serializeSession(conversation: IAgentConversation, runtime: Awaited<Ret
 }
 
 /**
+ * What a list row reports as `spent_usd`: the stored running total. A list does
+ * not load the transcript, so it cannot add up the turns of a session that
+ * never kept a total (one that last ran before the total was kept): that is
+ * `null` — unknown, not zero — and the session resource has the figure. A
+ * session with no turns has spent nothing.
+ */
+export function listedSpentUsd(conversation: Pick<IAgentConversationListItem, 'spentUsd' | 'messageCount'>): number | null {
+  if (typeof conversation.spentUsd === 'number' && Number.isFinite(conversation.spentUsd)) return roundUsd(conversation.spentUsd);
+  return conversation.messageCount > 0 ? null : 0;
+}
+
+/**
  * A session in a list: the same fields without `pending_actions` (open one
  * session to see them) and with `message_count` in place of the transcript.
  */
 function serializeSessionSummary(conversation: IAgentConversationListItem) {
-  const spent = typeof conversation.spentUsd === 'number' && Number.isFinite(conversation.spentUsd) ? roundUsd(conversation.spentUsd) : 0;
+  const spent = listedSpentUsd(conversation);
   return {
     id: String(conversation._id),
     object: 'agent.session',

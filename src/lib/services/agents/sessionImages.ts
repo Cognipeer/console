@@ -14,7 +14,9 @@
  *    from the bucket once per run — the cache is shared by every bound copy),
  *  - keeps the request inside the agent's `attachments.maxImages` /
  *    `attachments.maxBytes`: the NEWEST images win, an older one becomes a text
- *    placeholder naming the file so the model can say what it cannot see,
+ *    placeholder naming the file so the model can say what it cannot see; an
+ *    image bigger than `maxBytes` on its own gets its own placeholder ("too
+ *    large for one request"), since no amount of room would fit it,
  *  - replaces a reference whose file is gone with `[Image "…" is no longer
  *    available]`, and
  *  - turns the result of `session_files_view_image` into a user message that
@@ -192,12 +194,23 @@ export function withSessionImages<T extends object>(input: T, options: SessionIm
         let count = 0;
         let total = 0;
         let droppedForBudget = 0;
+        let droppedTooLarge = 0;
         for (let i = slots.length - 1; i >= 0; i -= 1) {
             const slot = slots[i]!;
             const info = known.get(slot.fileId);
             const name = info?.name ?? slot.name ?? slot.fileId;
             if (!info) {
                 replacement.set(i, { type: 'text', text: `[Image "${escapeAttribute(name)}" is no longer available]` });
+                continue;
+            }
+            if (info.size > options.maxBytes) {
+                // Bigger than a whole request: no amount of room would fit it, so do not blame newer images.
+                droppedTooLarge += 1;
+                replacement.set(i, {
+                    type: 'text',
+                    text: `[Image "${escapeAttribute(name)}" (id ${slot.fileId}) is not shown: it is ${megabytes(info.size)}, `
+                        + `too large for one request (the limit is ${megabytes(options.maxBytes)}).]`,
+                });
                 continue;
             }
             if (count + 1 > options.maxImages || total + info.size > options.maxBytes) {
@@ -226,6 +239,11 @@ export function withSessionImages<T extends object>(input: T, options: SessionIm
                 continue;
             }
             replacement.set(i, { type: 'image_url', image_url: { base64: data.base64, media_type: data.mediaType } });
+        }
+        if (droppedTooLarge > 0) {
+            logger.info('Session images left out of a model request (each larger than the agent\'s image size limit)', {
+                dropped: droppedTooLarge, maxBytes: options.maxBytes,
+            });
         }
         if (droppedForBudget > 0) {
             logger.info('Session images left out of a model request (over the agent\'s image budget)', {

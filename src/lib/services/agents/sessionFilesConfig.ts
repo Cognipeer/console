@@ -145,6 +145,57 @@ export function isMimeAllowed(mimeType: string, allowed: string[]): boolean {
     });
 }
 
+/** Looks like a picture (`image/*`). Whether a model can be SHOWN it is `isSendableImageMime`. */
 export function isImageMime(mimeType: string | undefined): boolean {
     return Boolean(mimeType && mimeType.toLowerCase().startsWith('image/'));
+}
+
+/**
+ * The picture formats a model request carries: what every provider the console
+ * talks to accepts as image input. Any other `image/*` file (tiff, svg, heic,
+ * bmp, ...) is stored like a document without text — the model is told it
+ * exists and why it cannot see it, instead of the provider rejecting the
+ * request (and, since a picture is re-attached on later turns, every later one).
+ */
+export const SENDABLE_IMAGE_TYPES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** Spellings clients use for a sendable type that providers do not accept as a media type. */
+const IMAGE_TYPE_ALIASES: Readonly<Record<string, string>> = { 'image/jpg': 'image/jpeg' };
+
+/** The media type to send a picture as (parameters dropped, aliases folded), or null when it is not a sendable format. */
+export function sendableImageType(mimeType: string | undefined): string | null {
+    if (!mimeType) return null;
+    const base = mimeType.split(';')[0]!.trim().toLowerCase();
+    const type = IMAGE_TYPE_ALIASES[base] ?? base;
+    return SENDABLE_IMAGE_TYPES.has(type) ? type : null;
+}
+
+/** A picture in a format a model request can carry. */
+export function isSendableImageMime(mimeType: string | undefined): boolean {
+    return sendableImageType(mimeType) !== null;
+}
+
+/** A picture the model cannot be shown (`image/*` but not a sendable format). */
+export function isUnsupportedImageMime(mimeType: string | undefined): boolean {
+    return isImageMime(mimeType) && !isSendableImageMime(mimeType);
+}
+
+/**
+ * The most bytes one file of this type may have. A picture that is also bigger
+ * than a model request carries (`maxBytes`) could never be shown, so it is held
+ * to that smaller number: refused when it arrives rather than dropped, unseen,
+ * from every request.
+ */
+export function maxUploadBytes(cfg: Pick<ResolvedAttachmentsConfig, 'maxFileSizeMb' | 'maxBytes'>, mimeType: string | undefined): number {
+    const perFile = Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
+    return isSendableImageMime(mimeType) ? Math.min(perFile, cfg.maxBytes) : perFile;
+}
+
+/** The size refusal for a file of this type, in the words of whichever limit it hit. */
+export function fileTooLargeMessage(cfg: Pick<ResolvedAttachmentsConfig, 'maxFileSizeMb' | 'maxBytes'>, mimeType: string | undefined): string {
+    const perFile = Math.floor(cfg.maxFileSizeMb * 1024 * 1024);
+    if (isSendableImageMime(mimeType) && cfg.maxBytes < perFile) {
+        return `Images larger than ${Math.round((cfg.maxBytes / 1_000_000) * 10) / 10} MB cannot be shown to the model (the image size limit of this agent).`;
+    }
+    return `File exceeds the ${cfg.maxFileSizeMb} MB limit of this agent.`;
 }

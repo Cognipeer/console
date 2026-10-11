@@ -344,7 +344,7 @@ paths:
                   spent_usd: 1.02
                   max_cost_usd: 1
         "403":
-          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`) and the request carries `input_file` / `input_image` parts (earlier releases ignored those parts and ran the text; nothing runs now), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
           content:
             application/json:
               schema:
@@ -8263,7 +8263,7 @@ paths:
                   spent_usd: 1.02
                   max_cost_usd: 1
         "403":
-          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`) and the request carries `input_file` / `input_image` parts (earlier releases ignored those parts and ran the text; nothing runs now), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
           content:
             application/json:
               schema:
@@ -13688,6 +13688,8 @@ components:
             - $ref: "#/components/schemas/AgentSessionBudget"
         spent_usd:
           type: number
+          nullable: true
+          description: "The session's stored running total, in USD. `null` for a session that last ran before the total was kept (a list does not load the transcript to add it up): `GET /agents/sessions/{conversationId}` has the figure."
     AgentSessionList:
       type: object
       properties:

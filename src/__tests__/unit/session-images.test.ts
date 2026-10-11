@@ -17,9 +17,11 @@ import {
   recentImageAttachments,
   referencedImageIds,
   withEarlierImages,
+  wrapAttachmentBlock,
 } from '@/lib/services/agents/sessionAttachmentText';
 import { buildTurnInputState } from '@/lib/services/agents/agentTurnState';
 
+const EARLIER_BLOCK = wrapAttachmentBlock(['Pictures from earlier messages of this session are shown again below.']);
 const ref = (fileId: string, name = `${fileId}.png`) => ({ type: 'image_url', image_url: { url: `session-file://${fileId}` }, fileId, name });
 
 /** A source over a map of files: id → { name, size, bytes }. */
@@ -236,7 +238,7 @@ describe('references and the transcript replay', () => {
     expect(recentImageAttachments(history, 2).map((a) => a.fileId)).toEqual(['a', 'b', 'c']);
     expect(recentImageAttachments(history, 0)).toEqual([]);
     expect(withEarlierImages('now', [img('a')])).toEqual([
-      { type: 'text', text: 'now' },
+      { type: 'text', text: `now${EARLIER_BLOCK}` },
       { type: 'text', text: '[Earlier image: "a.png" (id a)]' },
       ref('a', 'a.png'),
     ]);
@@ -275,7 +277,7 @@ describe('buildTurnInputState with earlier attachments', () => {
       carried: carried as never, transcript, userMessage: 'and?', attachments: { supportsVision: true, carryRecentImages: 2 },
     });
     expect((back.messages.at(-1) as { content: unknown }).content).toEqual([
-      { type: 'text', text: 'and?' },
+      { type: 'text', text: `and?${EARLIER_BLOCK}` },
       { type: 'text', text: '[Earlier image: "cat.png" (id i1)]' },
       ref('i1', 'cat.png'),
     ]);

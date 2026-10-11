@@ -341,7 +341,7 @@ export default function EditModelPage() {
 
       const settings = { ...nextModel.settings };
       setRequestDefaultsText(formatRequestDefaults(settings.requestDefaults));
-      setInputModalities(storedInputModalities(nextModel.metadata));
+      setInputModalities(storedInputModalities(nextModel.metadata, nextModel));
 
       const cache = nextModel.semanticCache;
 
