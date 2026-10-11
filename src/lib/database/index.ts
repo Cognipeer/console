@@ -405,6 +405,7 @@ export type {
   IAgentPendingAction,
   IAgentMessageFeedback,
   IAgentMessageVersion,
+  IAgentClientToolsConfig,
   IAgentExperienceConfig,
   IAgentStarter,
   AgentFeedbackRating,

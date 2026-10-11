@@ -4316,6 +4316,7 @@ export const en = {
       sectionTitle: 'Experience',
       sectionDescription: 'What a chat surface shows around this agent: a welcome text and suggested first messages. A portal can override both for itself.',
       badge: 'welcome · {starters} starters',
+      badgePageTools: 'page tools',
       welcomeTitle: 'Welcome text',
       welcomePlaceholder: 'Hi {{user.firstName}}! I can help with…',
       welcomeDescription: 'Shown on an empty conversation. Markdown is supported (links, lists, bold).',
@@ -4340,6 +4341,10 @@ export const en = {
       autoSendDescription: 'Off: the click only fills the message box so the person can edit it first.',
       preview: 'How the chips look',
       publishNote: 'A portal shows the version that is published, so publish again for changes to appear there.',
+      pageToolsTitle: 'Tools from the page',
+      pageToolsLabel: 'Accept tools from the page that embeds this agent',
+      pageToolsDescription: 'A portal or widget can declare tools that run in the person’s own page, such as “read the selected text”. Off: this agent never receives them, whatever the portal declares.',
+      pageToolsTrust: 'What such a tool returns is typed in the person’s browser, so the model reads it as untrusted input — do not rely on it for identity or permissions. This agent’s approval policy (Approvals & questions) applies to these calls unless the portal admin exempts a tool.',
       saveRefused: 'Fix the conversation starters first — see the Experience section.',
     },
     feedback: {

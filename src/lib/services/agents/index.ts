@@ -42,6 +42,7 @@ export { normalizeA2aMetadataUpdate } from './a2aExposure';
 
 // What a chat surface (a portal, an embedded widget) builds on.
 export {
+  agentAcceptsClientTools,
   resolveAgentExperience,
   renderWelcomeTemplate,
   escapeForMarkdown,

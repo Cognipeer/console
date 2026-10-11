@@ -17,12 +17,14 @@ import AgentExperiencePanel from '@/components/agents/studio/AgentExperiencePane
 import MessageFeedbackRow from '@/components/agents/session/MessageFeedbackRow';
 import PendingActionList from '@/components/agents/session/PendingActionCards';
 import {
+  acceptsPageTools,
   addStarter,
   experienceForSave,
   experienceSaveErrors,
   moveStarter,
   patchExperience,
   removeStarter,
+  setAcceptsPageTools,
   updateStarter,
   AGENT_STARTERS_MAX,
 } from '@/components/agents/studio/experienceSettings';
@@ -124,6 +126,37 @@ describe('editing the Experience section', () => {
     expect(turkish).toContain('Karşılama metni');
     expect(turkish).toContain('Konuşma başlatıcıları');
     expect(turkish).not.toContain('Welcome text');
+  });
+
+  it('the opt-in to tools from the page is off by default and leaves nothing behind when it is off', () => {
+    expect(acceptsPageTools(undefined)).toBe(false);
+    expect(acceptsPageTools({ welcome: 'Hi' })).toBe(false);
+    expect(setAcceptsPageTools(undefined, false)).toBeUndefined();
+
+    const on = setAcceptsPageTools(undefined, true);
+    expect(on).toEqual({ clientTools: { enabled: true } });
+    expect(acceptsPageTools(on)).toBe(true);
+    // Only the switch set: it is a real setting, so it is saved.
+    expect(experienceForSave(on)).toEqual({ clientTools: { enabled: true } });
+
+    // Beside a welcome text the two are kept apart; turning it off drops the key, not `enabled: false`.
+    const both = setAcceptsPageTools({ welcome: 'Hi' }, true);
+    expect(both).toEqual({ welcome: 'Hi', clientTools: { enabled: true } });
+    expect(setAcceptsPageTools(both, false)).toEqual({ welcome: 'Hi' });
+    expect(setAcceptsPageTools(on, false)).toBeUndefined();
+    // Editing the rest keeps the switch.
+    expect(patchExperience(both, { welcome: 'Hello' })).toEqual({ welcome: 'Hello', clientTools: { enabled: true } });
+    expect(patchExperience({ clientTools: { enabled: false } }, {})).toBeUndefined();
+  });
+
+  it('renders the opt-in switch with its warning in both languages', () => {
+    const english = render(h(AgentExperiencePanel, { value: undefined, onChange: noop }));
+    expect(english).toContain('Accept tools from the page that embeds this agent');
+    expect(english).toContain('untrusted input');
+    const turkish = render(h(AgentExperiencePanel, { value: { clientTools: { enabled: true } }, onChange: noop }), 'tr');
+    expect(turkish).toContain('Bu agent’ı gömen sayfanın araçlarını kabul et');
+    expect(turkish).toContain('güvenilmeyen girdi');
+    expect(turkish).not.toContain('Accept tools from the page');
   });
 
   it('shows the problems of a refused save only when asked', () => {

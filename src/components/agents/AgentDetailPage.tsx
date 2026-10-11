@@ -1329,10 +1329,17 @@ export default function AgentDetailPage() {
                 }}
                 showErrors={experienceSaveRefused}
               />,
-              (experienceConfig?.starters?.length ?? 0) > 0 || experienceConfig?.welcome ? (
-                <Badge size="xs" color="teal" variant="light" w="fit-content">
-                  {t('experience.badge', { starters: experienceConfig?.starters?.length ?? 0 })}
-                </Badge>
+              (experienceConfig?.starters?.length ?? 0) > 0 || experienceConfig?.welcome || experienceConfig?.clientTools?.enabled === true ? (
+                <Group gap={4}>
+                  {(experienceConfig?.starters?.length ?? 0) > 0 || experienceConfig?.welcome ? (
+                    <Badge size="xs" color="teal" variant="light" w="fit-content">
+                      {t('experience.badge', { starters: experienceConfig?.starters?.length ?? 0 })}
+                    </Badge>
+                  ) : null}
+                  {experienceConfig?.clientTools?.enabled === true ? (
+                    <Badge size="xs" color="orange" variant="light" w="fit-content">{t('experience.badgePageTools')}</Badge>
+                  ) : null}
+                </Group>
               ) : null,
             )}
             {buildSection(

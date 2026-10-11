@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+    agentAcceptsClientTools,
     AGENT_STARTERS_MAX,
     AGENT_STARTER_LABEL_MAX,
     AGENT_STARTER_TEXT_MAX,
@@ -39,6 +40,15 @@ describe('validateExperienceConfig', () => {
         expect(fields({ experience: { starters: [null as never] } })).toEqual(['experience.starters.0']);
     });
 
+    it('checks the opt-in to tools from the page', () => {
+        expect(fields({ experience: { clientTools: { enabled: true } } })).toEqual([]);
+        expect(fields({ experience: { clientTools: { enabled: false } } })).toEqual([]);
+        expect(fields({ experience: { clientTools: {} } })).toEqual([]);
+        expect(fields({ experience: { clientTools: 'yes' as never } })).toEqual(['experience.clientTools']);
+        expect(fields({ experience: { clientTools: [] as never } })).toEqual(['experience.clientTools']);
+        expect(fields({ experience: { clientTools: { enabled: 'true' as never } } })).toEqual(['experience.clientTools.enabled']);
+    });
+
     it('names every problem, by position', () => {
         expect(fields({ experience: { starters: [{ text: '' }, { text: 'fine' }, { text: '' }] } })).toEqual(['experience.starters.0.text', 'experience.starters.2.text']);
     });
@@ -48,6 +58,30 @@ describe('validateExperienceConfig', () => {
         expect(validateAgentConfigShape(config).errors.map((e) => e.field)).toContain('experience.starters.0.text');
         const external = { kind: 'external' as const, experience: { welcome: 'x'.repeat(AGENT_WELCOME_MAX + 1) } };
         expect(validateAgentConfigShape(external).errors.map((e) => e.field)).toEqual(['experience.welcome']);
+    });
+});
+
+describe('agentAcceptsClientTools', () => {
+    it('only an author who switched it on gets tools from a page', () => {
+        expect(agentAcceptsClientTools({ experience: { clientTools: { enabled: true } } })).toBe(true);
+    });
+
+    it.each([
+        ['no config', undefined],
+        ['no experience', {}],
+        ['an experience without the setting', { experience: { welcome: 'Hi' } }],
+        ['the setting off', { experience: { clientTools: { enabled: false } } }],
+        ['the setting empty', { experience: { clientTools: {} } }],
+        ['a truthy but not boolean value', { experience: { clientTools: { enabled: 'true' } } }],
+        ['the setting as a bare boolean', { experience: { clientTools: true } }],
+    ])('%s accepts none', (_label, config) => {
+        expect(agentAcceptsClientTools(config as never)).toBe(false);
+    });
+
+    it('the opt-in is not part of what a chat surface reads as the experience', () => {
+        const config = { experience: { clientTools: { enabled: true } } };
+        expect(resolveAgentExperience(config)).toEqual({ starters: [] });
+        expect(toClientExperience(config)).toBeUndefined();
     });
 });
 

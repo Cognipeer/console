@@ -147,6 +147,10 @@ export function mayResolve(
  * (whom `approvers` lets approve a tool) may only give the call up, with an
  * error. Without this, anyone allowed to approve could put words in the model's
  * mouth in somebody else's session.
+ *
+ * That makes the owner the only author of the answer, not a trusted one: the
+ * owner controls their own browser, so the result still reaches the model marked
+ * as untrusted user input (`markClientToolContent`).
  */
 export function mayAnswerClientTool(
     actor: Pick<ResolveActor, 'userId'>,

@@ -13453,7 +13453,7 @@ components:
           type: boolean
           description: "User question. Skip the question; the model is told it was not answered."
         output:
-          description: "Client tool. The page's result: any JSON value, at most 64 KB (`400` over that, and the request stays open). The model reads it as the tool's result, after the agent's `tool.post` guardrails."
+          description: "Client tool. The page's result: any JSON value, at most 64 KB (`400` over that, and the request stays open). The model reads it as the tool's result, after the agent's `tool.post` guardrails, marked as untrusted user input (it must never carry an authorization decision)."
         error:
           type: string
           description: "Client tool. The page could not run the tool. At most 1000 characters; the model reads it as the tool failing."
