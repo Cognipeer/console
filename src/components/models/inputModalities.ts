@@ -60,14 +60,16 @@ export function storedInputModalities(
     return chosen;
 }
 
-/** The boxes as they are drawn: the explicit choice, else the detected types, within what the provider can take. */
+/**
+ * The boxes as they are drawn: the explicit choice, else the detected types.
+ * Never narrowed by the provider's driver: a driver's capabilities say what the
+ * driver discovers by itself, not what the operator's model can be sent.
+ */
 export function shownInputModalities(
     chosen: ModelInputModality[] | null,
     inferred: ModelInputModality[],
-    allowed?: readonly ModelInputModality[],
 ): ModelInputModality[] {
-    const base = chosen ?? inferred;
-    return allowed ? base.filter((modality) => allowed.includes(modality)) : [...base];
+    return [...(chosen ?? inferred)];
 }
 
 /** The next explicit choice after ticking or clearing one box; never empty, always in the boxes' order. */
@@ -91,4 +93,22 @@ export function isMultimodalFor(modalities: readonly ModelInputModality[]): bool
 /** The `inputModalities` to send: only an explicit choice is stored. */
 export function inputModalitiesPayload(chosen: ModelInputModality[] | null): { inputModalities: ModelInputModality[] } | Record<string, never> {
     return chosen && chosen.length > 0 ? { inputModalities: chosen } : {};
+}
+
+/**
+ * Whether a model record is shown as taking pictures ("vision") in the Model
+ * Hub. For a chat model that is what the model resolves to — the explicit
+ * choice, else what the model id is known for (the API sends it as
+ * `capabilities.inputModalities`) — not only the stored `isMultimodal` flag,
+ * which a model created before the detection existed, or through the API, never
+ * had set. Other categories keep the flag.
+ */
+export function modelTakesImages(model: {
+    category?: string;
+    isMultimodal?: boolean;
+    capabilities?: { inputModalities?: readonly string[] };
+}): boolean {
+    const resolved = model.capabilities?.inputModalities;
+    if (model.category === 'llm' && Array.isArray(resolved)) return resolved.includes('image');
+    return Boolean(model.isMultimodal);
 }

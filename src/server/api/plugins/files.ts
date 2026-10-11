@@ -4,6 +4,7 @@ import type { ProviderDomain } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
 import { providerRegistry } from '@/lib/providers';
 import type { ProviderStatus } from '@/lib/services/providers/providerService';
 import {
@@ -476,7 +477,10 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         }),
       });
       return reply.code(200).send({
-        items: await withAgentIds(session.tenantDbName, projectId, visible.items),
+        items: await withUploaderNames(
+          session.tenantDbName,
+          await withAgentIds(session.tenantDbName, projectId, visible.items),
+        ),
         ...(visible.folders ? { folders: visible.folders, prefix: visible.prefix } : {}),
         nextCursor: visible.nextCursor,
       });
@@ -648,7 +652,8 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       );
 
       const [withAgent] = await withAgentIds(session.tenantDbName, projectId, [record]);
-      return reply.code(200).send({ record: withAgent });
+      const [named] = await withUploaderNames(session.tenantDbName, [withAgent]);
+      return reply.code(200).send({ record: named });
     } catch (error) {
       if (
         error instanceof Error

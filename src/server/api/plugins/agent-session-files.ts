@@ -32,6 +32,7 @@ import { getAgentByKey } from '@/lib/services/agents';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
+import { parseByteRange } from '@/lib/services/agents/byteRange';
 import { listAttachmentBuckets } from '@/lib/services/agents/sessionFilesBucket';
 import {
   deleteSessionFile,
@@ -115,16 +116,30 @@ function readContentQuery(request: FastifyRequest): { variant?: SessionFileVaria
   return out;
 }
 
-/** The bytes with the headers that make serving an uploaded file from our own origin safe. */
-function sendFileContent(reply: FastifyReply, content: SessionFileContent) {
-  return reply
-    .code(200)
+/**
+ * The bytes with the headers that make serving an uploaded file from our own origin safe.
+ * One `Range` is honoured (206, `Content-Range`), so a player or a download manager can
+ * seek and resume; every answer says `Accept-Ranges: bytes`.
+ */
+function sendFileContent(reply: FastifyReply, content: SessionFileContent, rangeHeader?: string | string[]) {
+  const range = parseByteRange(rangeHeader, content.size);
+  const base = reply
     .header('Content-Type', content.contentType)
-    .header('Content-Length', String(content.size))
     .header('Content-Disposition', content.contentDisposition)
+    .header('Accept-Ranges', 'bytes')
     .header('Cache-Control', 'private, max-age=60')
-    .header('X-Content-Type-Options', 'nosniff')
-    .send(content.data);
+    .header('X-Content-Type-Options', 'nosniff');
+  if (range.kind === 'unsatisfiable') {
+    return base.code(416).header('Content-Range', `bytes */${content.size}`).header('Content-Length', '0').send();
+  }
+  if (range.kind === 'partial') {
+    return base
+      .code(206)
+      .header('Content-Range', `bytes ${range.start}-${range.end}/${content.size}`)
+      .header('Content-Length', String(range.end - range.start + 1))
+      .send(content.data.subarray(range.start, range.end + 1));
+  }
+  return base.code(200).header('Content-Length', String(content.size)).send(content.data);
 }
 
 /** The dashboard's view of a file. */
@@ -223,6 +238,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const files = await listSessionFiles(
         { tenantDbName: scoped.session.tenantDbName, tenantId: scoped.session.tenantId, projectId: scoped.projectId },
         String(scoped.conversation._id),
+        { withNames: true },
       );
       return reply.code(200).send({ files: files.map(dashboardFile) });
     } catch (error) {
@@ -244,7 +260,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
         query,
       );
       if (!content) return reply.code(404).send({ error: 'File not found' });
-      return sendFileContent(reply, content);
+      return sendFileContent(reply, content, request.headers.range);
     } catch (error) {
       return sendDashboardError(reply, error, 'Read session file error', 'Failed to read the file');
     }
@@ -358,7 +374,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
       const { fileId } = request.params as { fileId: string };
       const content = await readSessionFileContent(clientScope(ctx), String(conversation._id), fileId, query);
       if (!content) return reply.code(404).send(apiErrorBody('not_found_error', 'File not found', 'file_not_found'));
-      return sendFileContent(reply, content);
+      return sendFileContent(reply, content, request.headers.range);
     } catch (error) {
       return sendClientError(reply, error, 'Client read session file error');
     }
