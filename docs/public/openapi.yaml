@@ -972,6 +972,9 @@ paths:
         place (`inline`), everything else is offered as a download (`attachment`). SVG, HTML and other
         active types are always a download, whatever `disposition` asks. The response is
         `Cache-Control: private` with `X-Content-Type-Options: nosniff`. A file of another session is not found.
+        A single `Range: bytes=…` is honoured (`206 Partial Content` with `Content-Range`); several ranges
+        or another unit are ignored and the whole file is returned, and a range that starts past the end
+        answers `416`. Every answer carries `Accept-Ranges: bytes`.
       operationId: getAgentSessionFileContent
       parameters:
         - $ref: "#/components/parameters/AgentSessionId"
@@ -999,10 +1002,34 @@ paths:
             enum:
               - inline
               - attachment
+        - name: Range
+          in: header
+          required: false
+          description: "One byte range, e.g. `bytes=0-1023`, `bytes=1024-` or `bytes=-512`."
+          schema:
+            type: string
       responses:
+        "206":
+          description: The requested byte range of the file.
+          headers:
+            Content-Range:
+              description: "`bytes <start>-<end>/<size>`."
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "416":
+          description: The range starts past the end of the file (`Content-Range: bytes */<size>`).
         "200":
           description: The file's bytes.
           headers:
+            Accept-Ranges:
+              description: "`bytes`."
+              schema:
+                type: string
             Content-Disposition:
               description: "`inline` or `attachment`, with a sanitised `filename` and the real name in `filename*`."
               schema:

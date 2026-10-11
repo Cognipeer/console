@@ -54,7 +54,7 @@ export function FolderPath({ prefix, onOpen }: FolderPathProps) {
 }
 
 export interface SessionFileCellsProps {
-    record: Pick<FileRecordView, 'purpose' | 'conversationId' | 'agentKey' | 'expiresAt' | 'uploadedBy'>;
+    record: Pick<FileRecordView, 'purpose' | 'conversationId' | 'agentKey' | 'expiresAt' | 'uploadedBy' | 'uploadedByName'>;
     /** The agent's id when it is known (the session page is addressed by it); the link is omitted without it. */
     agentId?: string;
     now: Date;
@@ -109,7 +109,10 @@ export function SessionFileCells({ record, agentId, now, locale }: SessionFileCe
                 )}
             </Table.Td>
             <Table.Td>
-                <Text size="xs" ff="monospace" c="dimmed">{record.uploadedBy ?? '—'}</Text>
+                {/* A person's name when the id is a user of the tenant; the id itself otherwise (a system actor). */}
+                {record.uploadedByName
+                    ? <Text size="xs" title={record.uploadedBy}>{record.uploadedByName}</Text>
+                    : <Text size="xs" ff="monospace" c="dimmed">{record.uploadedBy ?? '—'}</Text>}
             </Table.Td>
         </>
     );

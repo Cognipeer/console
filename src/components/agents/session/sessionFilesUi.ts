@@ -18,6 +18,8 @@ export interface SessionFileItem {
     createdAt?: string;
     expiresAt?: string | null;
     uploadedBy?: string;
+    /** `uploadedBy` as a person's name, when the server could resolve it. */
+    uploadedByName?: string;
 }
 
 export function sessionFilesUrl(agentId: string, sessionId: string): string {

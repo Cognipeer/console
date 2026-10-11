@@ -8,7 +8,7 @@ import CollapsibleText from '@/components/common/ui/CollapsibleText';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
 import { MessageAttachments } from '@/components/agents/session/SessionAttachments';
 import type { AttachmentView } from '@/components/agents/session/sessionFilesUi';
-import { messageImageViews } from './messageImages';
+import { contentWithoutDrawnParts, messageImageViews } from './messageImages';
 
 /**
  * One ordered stream of "what happened in this request" — every surface
@@ -261,9 +261,15 @@ export function LlmRequestItemsView({ items, labels: labelsOverride }: LlmReques
     <Stack gap="lg">
       {grouped.map((g, i) => {
         if (g.kind === 'message') {
-          const files = [...(g.attachments ?? []), ...messageImageViews(g.content)];
+          const drawnFromContent = messageImageViews(g.content);
+          const files = [...(g.attachments ?? []), ...drawnFromContent];
           return (
-            <MessageBlock key={i} messageRole={g.role} roleLabel={g.roleLabel} content={g.content}>
+            <MessageBlock
+              key={i}
+              messageRole={g.role}
+              roleLabel={g.roleLabel}
+              content={drawnFromContent.length > 0 ? contentWithoutDrawnParts(g.content) : g.content}
+            >
               {files.length > 0 ? <MessageAttachments attachments={files} /> : null}
             </MessageBlock>
           );

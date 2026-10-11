@@ -20,6 +20,11 @@ export interface FileRecordView extends Omit<IFileRecord, '_id'> {
    * when the agent no longer exists.
    */
   agentId?: string;
+  /**
+   * The uploader as a person's name (`uploadedBy` is a user id). Set by the Document Store
+   * routes when they list or read a record; absent for a system actor or a removed account.
+   */
+  uploadedByName?: string;
 }
 
 export type FileRecordListItem = FileRecordView;

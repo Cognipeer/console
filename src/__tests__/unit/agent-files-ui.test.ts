@@ -606,10 +606,10 @@ describe('a model’s input types in the forms', () => {
     expect(inferredInputModalities('stt', 'whisper')).toEqual(['audio']);
   });
 
-  it('draws the choice, else the detection, within what the provider can take', () => {
+  it('draws the choice, else the detection — never narrowed by the provider', () => {
     expect(shownInputModalities(null, ['text', 'image'])).toEqual(['text', 'image']);
     expect(shownInputModalities(['text'], ['text', 'image'])).toEqual(['text']);
-    expect(shownInputModalities(null, ['text', 'image'], ['text', 'file'])).toEqual(['text']);
+    expect(shownInputModalities(['text', 'audio'], ['text'])).toEqual(['text', 'audio']);
   });
 
   it('toggles a box, in the boxes’ order, never leaving none', () => {
@@ -679,10 +679,12 @@ describe('a model’s input types in the forms', () => {
     expect(html).toContain('Detect automatically');
   });
 
-  it('disables the types the provider cannot take, and the last ticked box', () => {
-    const html = field({ value: ['text'], allowed: ['text', 'file'] });
-    // Image, audio and video (not allowed) and text (the last one ticked) cannot be changed.
-    expect(checkboxes(html).filter((tag) => tag.includes('disabled')).length).toBe(4);
+  it('disables only the last ticked box: every other type can be chosen, whatever the provider is', () => {
+    const html = field({ value: ['text'] });
+    // Text (the last one ticked) cannot be cleared; images, audio, video and files can be ticked.
+    const disabled = checkboxes(html).filter((tag) => tag.includes('disabled'));
+    expect(disabled.length).toBe(1);
+    expect(field({ value: ['text', 'image'] })).not.toContain('disabled');
   });
 
   it('speaks Turkish', () => {

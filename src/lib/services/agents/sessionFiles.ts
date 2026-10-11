@@ -57,6 +57,7 @@ import {
 import { checkPerRequestLimits, checkRateLimit, checkResourceQuota } from '@/lib/quota/quotaGuard';
 import type { LicenseType } from '@/lib/license/license-manager';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
+import { withUploaderNames } from '@/lib/services/users/userDisplayNames';
 import { AgentAttachmentError } from './agentErrors';
 import {
     SESSION_FILES_DEFAULTS,
@@ -143,6 +144,8 @@ export interface SessionFileView {
     createdAt?: Date;
     expiresAt?: Date | null;
     uploadedBy?: string;
+    /** `uploadedBy` as a person's name, when it is a user of the tenant. */
+    uploadedByName?: string;
 }
 
 export function toSessionFileView(record: Pick<
@@ -382,11 +385,19 @@ export async function uploadSessionFile(input: UploadSessionFileInput): Promise<
     return toSessionFileView(result.record);
 }
 
-/** A conversation's files, oldest first. */
-export async function listSessionFiles(scope: SessionFileScope, conversationId: string): Promise<SessionFileView[]> {
+/**
+ * A conversation's files, oldest first. With `withNames` each also says who uploaded it by
+ * name (`uploadedByName`) — a screen's wish, so the model's own file tool does not pay for it.
+ */
+export async function listSessionFiles(
+    scope: SessionFileScope,
+    conversationId: string,
+    options: { withNames?: boolean } = {},
+): Promise<SessionFileView[]> {
     const db = await tenantDb(scope.tenantDbName);
     const records = await db.listFileRecordsByConversation(conversationId);
-    return records.filter((record) => record.projectId === scope.projectId).map(toSessionFileView);
+    const views = records.filter((record) => record.projectId === scope.projectId).map(toSessionFileView);
+    return options.withNames ? withUploaderNames(scope.tenantDbName, views, { db }) : views;
 }
 
 /** The record of a file that belongs to this conversation, else null. */

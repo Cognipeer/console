@@ -33,6 +33,9 @@
 
   --ds-ok: #0a9978;
   --ds-warn: #c87b15;
+  --ds-warn-wash: #fdf3e3;       /* chip wash for a warning (text on it: --ds-warn-text, AA) */
+  --ds-warn-text: #7a4a07;
+  --ds-err-text: #a32727;        /* error text on a surface (AA); --ds-err is for fills and icons */
   --ds-err: #c93b3b;
   --ds-info: #2a6fdb;
 
@@ -130,6 +133,9 @@
   --ds-text-muted: #8a939f;
   --ds-text-faint: #5a6473;
   --ds-text-on-accent: #062a23;
+  --ds-warn-wash: #2b2112;
+  --ds-warn-text: #f0c27a;
+  --ds-err-text: #f19a9a;
 
   --ds-accent-soft: rgba(15, 186, 148, 0.10);
   --ds-accent-ring: rgba(15, 186, 148, 0.28);
