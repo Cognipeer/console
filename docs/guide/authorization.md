@@ -126,7 +126,7 @@ Expiry rules and IP allowlists are part of [Authentication](/guide/authenticatio
 
 ## Built-in policies
 
-Nineteen policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
+Eighteen policies ship with the engine. They are the same in every workspace, cannot be edited or removed, and are listed under **Built-in** on the **Policies** tab of the IAM center.
 
 | Policy | What it does |
 |---|---|
@@ -136,8 +136,7 @@ Nineteen policies ship with the engine. They are the same in every workspace, ca
 | `managed:boundary:project-read`, `-write`, `-admin` | A service that the active project limits is denied above the project level. No custom allow can exceed it. |
 | `managed:portal:use`, `managed:portal:agent` | A person on a portal's access list (or in a group on it, or anyone when the portal is open to the workspace) may open the portal and run its agents. See [Portals](#portals). |
 | `managed:portal:use-boundary`, `managed:portal:agent-boundary` | Nobody else may, whatever their role or any allow rule says. Custom deny rules still apply on top. |
-| `managed:agent:approve`, `managed:agent:approve-token` | A person (or a token, on behalf of its owner) may answer a pending request of an agent session when they started it, or when the agent's *Who can answer* setting accepts them. See [Sessions and approvals](#sessions-and-approvals). |
-| `managed:agent:approve-boundary` | Nobody else may answer one, whatever their service level or any allow rule says. Custom deny rules still apply on top. |
+| `managed:agent:approve`, `managed:agent:approve-token` | A person (or a token, on behalf of its owner) may approve a tool call of an agent session when they started it, or when the agent's *Who can answer* setting accepts them. The generic Write permits leave this one action out, so the rule is what appoints; your own allow rules can appoint more approvers. See [Sessions and approvals](#sessions-and-approvals). |
 
 The simple settings stay the single place to change what people can do; the built-in policies only translate them. Nothing is stored per person or per group in a policy.
 
@@ -160,7 +159,7 @@ A guided rule says:
 | **Where** | Services, projects, and specific portals or agents (see [Portals](#portals)). |
 | **When** | A start and end time, IP ranges, channels (`dashboard` for a signed-in session, `api` for a token, `portal` for a person using a portal). |
 
-The conditions of one rule must all hold for it to apply. The editor warns about rules that cannot do what they say: an action nothing in the product asks (`models.admin` when no route needs it), a rule about a single resource other than a portal or an agent run through one (the gates decide on services; a deny of that kind is refused), an allow rule about portals (a portal is opened by its access list alone, see [Portals](#portals)), and IP rules while `TRUSTED_PROXIES` is not set (see [below](#client-address-and-trusted-proxies)).
+The conditions of one rule must all hold for it to apply. The editor warns about rules that cannot do what they say: an action nothing in the product asks (`models.admin` when no route needs it), a rule about a single resource other than a portal, an agent or a Files bucket (the gates decide on services; a deny of that kind is refused), an allow rule about portals (a portal is opened by its access list alone, see [Portals](#portals)), and IP rules while `TRUSTED_PROXIES` is not set (see [below](#client-address-and-trusted-proxies)).
 
 A deny rule that cannot be evaluated for a request (a condition that reads something the request does not have) counts as a **deny** for that request. The decision names the rule and the problem, so a rule written to block something can never stop blocking it silently. The same holds for a broad rule: one that cannot be evaluated for *every* request it matches refuses all of them, the workspace owner's access to the IAM center excepted - so the owner can always open **Policies**, find the rule the decision names and fix or disable it. (A rule that cannot even be loaded, for example after an engine upgrade, is skipped instead, and the engine reports itself as `degraded`.)
 
@@ -170,16 +169,24 @@ An agent session belongs to the person who started it (for API traffic, the owne
 
 | Action | Asked when | Level |
 |---|---|---|
-| `agent.approve` | Somebody answers a pending tool approval or question; or ends one as a side effect (cancelling a paused run, a new message to an agent that cancels pending requests). Also asked by portals, in the `portal` channel. | Write |
+| `agent.approve` | Somebody answers a pending **tool approval** (allow, deny, edited arguments, remember for the session); or ends one as a side effect (cancelling a paused run, a new message to an agent that cancels pending requests). Also asked by portals, in the `portal` channel. | Write |
 | `agent.session_view_others` | Somebody reads a session another person started: its transcript, events, files, runs. | Read |
 | `agent.session_manage_others` | Somebody changes a session another person started: continues it, raises its budget, uploads or deletes its files, deletes it. | Write |
 
 The person who started a session needs only the route's service check. Sessions started by something that is not a person (`a2a-public`, schedules, evaluations, red-team runs) belong to nobody in particular: they count as someone else's.
 
-- **`agent.approve`** is decided by the built-in `managed:agent:*` policies from the session's owner and the agent's *Who can answer* setting (see [Agent approvals](/guide/agent-approvals)). The generic Write permission does not grant it: a workspace writer cannot answer somebody else's request unless the setting accepts them. A custom allow rule cannot widen it (the editor warns); a custom **deny** rule narrows it.
-- **`agent.session_view_others`** and **`agent.session_manage_others`** sit in the Read and Write levels, so by default every holder of `agents` Read or Write has them, as before. To restrict them, write an ordinary deny rule in **Policies**: choose the action, and who it applies to (for example a group of contractors).
+- **`agent.approve`** is **appointed**. The built-in `managed:agent:*` policies appoint the session's owner and whoever the agent's *Who can answer* setting accepts (see [Agent approvals](/guide/agent-approvals)); the generic Write permission does not grant it, so a workspace writer cannot approve somebody else's tool call unless the setting accepts them. A custom **allow** rule appoints more approvers (a compliance group, say) and a custom **deny** rule narrows; the token's scope and the project's limits apply to both. Answering a **question** is not an approval: the session's owner always may, anybody else needs `agent.session_manage_others`.
+- **`agent.session_view_others`** and **`agent.session_manage_others`** sit in the Read and Write levels, so by default every holder of `agents` Read or Write has them, as before. To restrict them, write an ordinary deny rule in **Policies**: choose the action, and who it applies to (for example a group of contractors). The person who started a session is never asked.
+
+Every path to a session's content asks the same question: the session routes themselves, the files a session holds (also through the Document Store and the client Files API), its events, its runs (polling and cancelling), a tracing thread, the threads of the Assistants API and the continuation of a session by its id in the Responses and chat completions routes - whichever service (`agents` or `models`) lets the token in. A **list** shows everybody's sessions or, when the rule stops the caller, only their own; the database applies this before the page is cut, so another person's sessions never push the caller's own off it. Rows of the Sessions table carry who started them. If the engine cannot decide, the answer is `503 authorization_unavailable` (never a `403`, never an allow).
+
+A session started through **A2A** is still only visible to the caller that started it (the stricter rule that existed before); the EE sandbox routes address a machine by its id and do not ask the session question yet.
 
 The Access check asks these actions about an agent, with the session's owner and, for `agent.approve`, the agent's setting as inputs.
+
+### Where an agent keeps its files
+
+Naming the bucket in an agent's **Files** settings (`attachments.bucketKey`) is a Files decision about **that bucket**: the person needs `file-bucket.update` on it (by default, Write on *Files*), and the bucket picker lists only the buckets they may look at (`file-bucket.get`, by default Read on *Files*), marking the ones they cannot name. Write a deny rule on one bucket to keep it out of agents' settings or out of the picker. Re-saving the bucket already stored asks nothing. The decisions are recorded in the denials feed like any other.
 
 ## Portals
 

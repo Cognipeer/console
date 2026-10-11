@@ -351,6 +351,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       conversationId?: string;
       status?: IAgentRun['status'][];
       mode?: IAgentRun['mode'];
+      userId?: string;
       limit?: number;
     }): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
@@ -359,6 +360,7 @@ export function AgentRunMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (filter.agentKey) { conds.push('agentKey = @agentKey'); params.agentKey = filter.agentKey; }
       if (filter.conversationId) { conds.push('conversationId = @conversationId'); params.conversationId = filter.conversationId; }
       if (filter.mode) { conds.push('mode = @mode'); params.mode = filter.mode; }
+      if (filter.userId) { conds.push('userId = @userId'); params.userId = filter.userId; }
       if (filter.status && filter.status.length > 0) {
         const keys = filter.status.map((status, i) => { params[`status${i}`] = status; return `@status${i}`; });
         conds.push(`status IN (${keys.join(', ')})`);

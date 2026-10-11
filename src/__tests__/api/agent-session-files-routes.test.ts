@@ -81,8 +81,10 @@ vi.mock('@/lib/services/agents/agentAttachmentInfo', () => ({ describeAgentAttac
 vi.mock('@/lib/services/agents/sessionBudgetService', () => ({ updateSessionBudget: vi.fn() }));
 // Reading the bucket list needs read access to Files; granted here (the rule itself is covered in agent-files-bucket-permission.test.ts).
 vi.mock('@/server/api/plugins/files-permission', () => ({
-  sessionHasFilesPermission: vi.fn(async () => true),
-  tokenHasFilesPermission: vi.fn(() => true),
+  requestHasFilesRead: vi.fn(async () => true),
+  // every bucket may be looked at and named here (the per-bucket decisions are unit/agent-bucket-authz.test.ts)
+  requestBucketOptions: vi.fn(async (_request: unknown, _projectId: string, options: unknown[]) => options),
+  requestCanNameBucket: vi.fn(async () => ({ allowed: true })),
   FILES_READ_REQUIRED_MESSAGE: 'read',
   FILES_WRITE_REQUIRED_MESSAGE: 'write',
 }));
@@ -685,9 +687,9 @@ describe('client Responses: continuing a session with session_id / conversation'
 
 describe('the bucket picker', () => {
   it('lists the project’s buckets for whoever edits an agent, with whether each can take a file', async () => {
-    const buckets = [{ key: 'docs', name: 'Docs', providerKey: 'local', providerLabel: 'Local disk', driver: 'local-filesystem', bucketStatus: 'active', providerStatus: 'active', usable: true, localDisk: true }];
+    const buckets = [{ id: 'bucket-1', key: 'docs', name: 'Docs', providerKey: 'local', providerLabel: 'Local disk', driver: 'local-filesystem', bucketStatus: 'active', providerStatus: 'active', usable: true, localDisk: true }];
     const db = {
-      listFileBuckets: vi.fn(async () => [{ key: 'docs', name: 'Docs', providerKey: 'local', status: 'active' }]),
+      listFileBuckets: vi.fn(async () => [{ _id: 'bucket-1', key: 'docs', name: 'Docs', providerKey: 'local', status: 'active' }]),
       listProviders: vi.fn(async () => [{ key: 'local', label: 'Local disk', driver: 'local-filesystem', type: 'file', status: 'active' }]),
       findProviderByKey: vi.fn(),
       switchToTenant: vi.fn(),

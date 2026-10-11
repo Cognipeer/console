@@ -928,12 +928,65 @@ describe('(h) who may answer', () => {
     expect(asked.map((request) => request.approvers)).toEqual([approvers]);
   });
 
-  it('an engine outage (the authorizer throws) answers nothing and leaves the request open', async () => {
+  it('an engine outage answers nothing and leaves the request open - as a verdict, or as an error the authorizer throws', async () => {
     const { id, actionId } = await pausedSession();
+    // the verdict form (what the route and portal authorizers return): the outcome is `unavailable`, never `forbidden`
+    expect(await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync', async () => ({ allowed: false, unavailable: true, decisionId: 'dec-9' })))
+      .toEqual({ kind: 'unavailable', decisionId: 'dec-9' });
+    // the thrown form (a gate's 503, or an ApprovalUnavailableError): read the same way, the id kept when it names one
     const outage = Object.assign(new Error('Authorization is temporarily unavailable'), { status: 503 });
-    await expect(resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync', async () => { throw outage; })).rejects.toBe(outage);
+    expect(await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync', async () => { throw outage; })).toEqual({ kind: 'unavailable' });
+    const named = Object.assign(new Error('unavailable'), { code: 'authorization_unavailable', decisionId: 'dec-10' });
+    expect(await resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync', async () => { throw named; })).toEqual({ kind: 'unavailable', decisionId: 'dec-10' });
     expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
     expect(executed).toEqual([]);
+  });
+
+  it('any other failure of the authorizer is a bug and propagates (nothing is recorded)', async () => {
+    const { id, actionId } = await pausedSession();
+    const bug = new Error('boom');
+    await expect(resolve(id, actionId, { decision: 'allow' }, ownerActor, 'sync', async () => { throw bug; })).rejects.toBe(bug);
+    expect((await db.findAgentPendingActionById(actionId))?.status).toBe('pending');
+  });
+
+  it('tells the authorizer what kind of request it is: an approval and a question are governed differently', async () => {
+    await createAgent({ humanInTheLoop: HITL_ON });
+    scriptModel((call) => (call === 0
+      ? { role: 'assistant', content: '', tool_calls: [toolCall('q1', 'ask_user_question', { questions: [{ question: 'Which?', header: 'H', options: [{ label: 'a' }, { label: 'b' }] }] })] }
+      : { role: 'assistant', content: 'done' }));
+    const id = String((await newConversation())._id);
+    const paused = await chat(id, 'ask');
+    const asked: ApprovalRequest[] = [];
+    await resolve(id, paused.required_action!.actions[0].id, { answers: { 'Which?': 'a' } }, stranger, 'sync', refuseAndRecord(asked));
+    expect(asked).toHaveLength(1);
+    expect(asked[0].action).toMatchObject({ kind: 'user_question', createdBy: OWNER });
+  });
+
+  it('uses the approvers setting of the agent VERSION the request was raised under, not the live config', async () => {
+    const { id, actionId } = await pausedSession({ ...HITL_ON, approvers: 'project_members' });
+    const agent = (await db.findAgentByKey(AGENT_KEY, PROJECT_ID))!;
+    // version 1 (what the paused turn ran with) accepts only the starter; the live config was loosened since
+    await db.createAgentVersion({
+      tenantId, projectId: PROJECT_ID, agentId: String(agent._id), agentKey: AGENT_KEY, version: 1,
+      snapshot: { name: 'Ops', config: { modelKey: 'gpt-4o', humanInTheLoop: { ...HITL_ON, approvers: 'owner' } }, status: 'active' },
+      publishedBy: OWNER,
+    });
+    await db.updateAgentPendingAction(actionId, { agentVersion: 1 });
+    const asked: ApprovalRequest[] = [];
+    await resolve(id, actionId, { decision: 'allow' }, stranger, 'sync', refuseAndRecord(asked));
+    expect(asked.map((request) => request.approvers)).toEqual(['owner']);
+  });
+
+  it('judges a request by the agent version it was raised under, and still can when the agent is gone', async () => {
+    const { id, actionId } = await pausedSession({ ...HITL_ON, approvers: 'owner' });
+    // the agent is deleted after the request was raised: the question is still decidable (the defaults apply)
+    const agent = await db.findAgentByKey(AGENT_KEY, PROJECT_ID);
+    await db.deleteAgent(String(agent!._id));
+    const asked: ApprovalRequest[] = [];
+    await resolve(id, actionId, { decision: 'allow' }, stranger, 'sync', refuseAndRecord(asked));
+    expect(asked).toHaveLength(1);
+    expect(asked[0].conversation).toMatchObject({ agentKey: AGENT_KEY, projectId: PROJECT_ID });
+    expect(asked[0].approvers).toBe('owner_or_admin');
   });
 });
 
@@ -1056,6 +1109,14 @@ describe('timeouts', () => {
     expect(logged.at(-1)).toMatchObject({ type: 'session.status_idle', data: { stopReason: 'cancelled' } });
     expect(hoisted.publish).not.toHaveBeenCalled();
     expect(executed).toEqual([]);
+    // the system ended it, outside the policy engine - and the audit trail says so (not as a person)
+    await vi.waitFor(() => expect(hoisted.recordAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantDbName: DB_NAME }),
+      expect.objectContaining({
+        actorType: 'system', actorUserId: 'system:timeout', event: 'agent.tool_approval.timeout', resourceId: actionId,
+        metadata: expect.objectContaining({ channel: 'timeout', status: 'expired', cancelled: true }),
+      }),
+    ));
   });
 
   it('onTimeout "deny" (default) denies and continues the turn as a background job', async () => {
@@ -1071,6 +1132,13 @@ describe('timeouts', () => {
     expect(await db.findAgentPendingActionById(actionId)).toMatchObject({
       status: 'resolved', resolvedBy: 'system:timeout', resolution: { decision: 'deny', comment: 'timed out' },
     });
+    await vi.waitFor(() => expect(hoisted.recordAuditLog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorType: 'system', actorUserId: 'system:timeout', event: 'agent.tool_approval.timeout',
+        metadata: expect.objectContaining({ decision: 'deny', status: 'resolved' }),
+      }),
+    ));
 
     const [, jobName, payload] = hoisted.publish.mock.calls.find((call) => call[1] === 'resume')!;
     expect(jobName).toBe('resume');

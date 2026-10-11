@@ -153,10 +153,6 @@ function ReasonRow({ reason, labels, ctx }: { reason: SimulateReason; labels: Ia
       title = labels.managedName(reason.cedarId, reason.name);
       detail = t('result.approvalReason.rule');
       break;
-    case 'approvalBoundary':
-      title = labels.managedName(reason.cedarId, reason.name);
-      detail = t('result.approvalReason.boundary', { approvers: ctx.approvers ? t(`result.approvers.${ctx.approvers}`) : '' });
-      break;
     default:
       title = labels.managedName(reason.cedarId, reason.name);
   }
@@ -293,13 +289,15 @@ export default function SimulateResultCard({
             <Alert color="gray" variant="light" data-testid="default-deny">
               <Stack gap={4} align="flex-start">
                 <Text size="sm">
-                  {service && level
-                    ? t(principalType === 'token' ? 'result.noRuleToken' : 'result.noRuleUser', {
-                        role,
-                        level: labels.level(level),
-                        service: labels.service(service),
-                      })
-                    : t('result.defaultDeny')}
+                  {request.action === 'agent.approve' && ctx.approvers
+                    ? t('result.approvalReason.noRule', { approvers: t(`result.approvers.${ctx.approvers}`) })
+                    : service && level
+                      ? t(principalType === 'token' ? 'result.noRuleToken' : 'result.noRuleUser', {
+                          role,
+                          level: labels.level(level),
+                          service: labels.service(service),
+                        })
+                      : t('result.defaultDeny')}
                 </Text>
                 {noRuleLink && service && level ? <ChangeLink link={noRuleLink} /> : null}
               </Stack>

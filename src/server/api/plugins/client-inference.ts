@@ -19,6 +19,7 @@ import type { IAgent } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
 import {
   resolveAgentModel,
   runAgentCompletion,
@@ -346,7 +347,25 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         if (typeof body.conversation_id === 'string') {
           const conversation = await getConversationById(auth.tenantDbName, body.conversation_id);
           if (conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId) {
+            // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
+            // `agent.session_manage_others` - as for the Responses route, whichever service gate let the token in.
+            const access = await decideSessionAccess(request, conversation, {
+              need: 'manage',
+              agent,
+              actor: { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') },
+            });
+            if (!access.ok) return sendOpenAiSessionRefusal(reply, request, access);
             const refusal = await refuseCancelPending(request, { tenantDbName: auth.tenantDbName, conversation, agent });
+            if (refusal?.unavailable) {
+              return reply.code(503).send({
+                error: {
+                  message: 'Authorization is temporarily unavailable',
+                  type: 'server_error',
+                  code: 'authorization_unavailable',
+                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+                },
+              });
+            }
             if (refusal) {
               return reply.code(403).send({
                 error: {

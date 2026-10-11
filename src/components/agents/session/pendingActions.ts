@@ -9,7 +9,6 @@
  */
 
 import type {
-    IAgentHumanInTheLoopConfig,
     IAgentMessagePendingAction,
     IAgentPendingActionResolution,
     IAgentUserQuestion,
@@ -280,34 +279,40 @@ export function composerGate(
     return policy === 'cancel_pending' ? 'cancel' : 'blocked';
 }
 
-// ── Who may answer ───────────────────────────────────────────────────────
-
-/** Which `approvers` setting limits who may answer — what the notice above an open request names. */
-export type AnswerRestriction = 'owner' | 'owner_or_admin';
-
-/** Tenant roles that administer every project (the server also counts a project-level admin). */
-const ADMIN_ROLES = new Set(['owner', 'admin', 'project_admin']);
+// ── Who may answer ──────────────────────────────────────────────────────
 
 /**
- * The restriction to tell the viewer about, or `null` when there is nothing to
- * say: the agent lets any member answer, the viewer started the session, or the
- * viewer is an admin — and also whenever the page cannot tell (no viewer, no
- * session owner).
- *
- * A notice, not a lock: the server decides at resolve time (and also counts
- * project admins, which the page does not know), so the buttons stay usable and
- * a refusal is still reported.
+ * Why the SERVER says the viewer cannot answer an open request (it decides with the policy engine's own rule and
+ * hands the verdict over with the request - the page does not guess it from the agent's setting and the viewer's
+ * role). Words each one in agents.hitl.answerBlocked*.
  */
-export function answerRestriction(input: {
-    approvers?: IAgentHumanInTheLoopConfig['approvers'];
-    viewerId?: string;
-    viewerRole?: string;
-    ownerId?: string;
-}): AnswerRestriction | null {
-    const policy = input.approvers ?? 'owner_or_admin';
-    if (policy === 'project_members') return null;
-    if (!input.viewerId || !input.ownerId) return null;
-    if (input.viewerId === input.ownerId) return null;
-    if (policy === 'owner') return 'owner';
-    return input.viewerRole && ADMIN_ROLES.has(input.viewerRole) ? null : 'owner_or_admin';
+export type AnswerBlockedReason =
+    /** Only the person who started the session may approve (the agent's setting). */
+    | 'approvers_owner'
+    /** The session's owner, workspace owners / admins and the project's admins may approve (the default setting). */
+    | 'approvers_admin'
+    /** Every member of the project may approve, and the viewer is not one. */
+    | 'approvers_member'
+    /** A question: its session's owner, and whoever may act on others' sessions, answers it. */
+    | 'session_owner'
+    /** A rule of the workspace stops the viewer. */
+    | 'policy'
+    /** The server could not check right now. */
+    | 'unavailable';
+
+/** An open request as the server lists it (`GET …/sessions/:id`, `…/actions`), with what the caller may do with it. */
+export interface ServerPendingAction {
+    id: string;
+    canResolve?: boolean;
+    resolveBlockedReason?: AnswerBlockedReason;
+}
+
+/**
+ * The reason to tell the viewer about, or `null` when there is nothing to say: they may answer every open request,
+ * or the server did not say. A notice, not a lock: the server decides again at resolve time, so the buttons stay
+ * usable and a refusal is still reported.
+ */
+export function answerBlockedReason(actions: readonly ServerPendingAction[] | undefined | null): AnswerBlockedReason | null {
+    const blocked = (actions ?? []).find((action) => action.canResolve === false);
+    return blocked ? (blocked.resolveBlockedReason ?? 'policy') : null;
 }

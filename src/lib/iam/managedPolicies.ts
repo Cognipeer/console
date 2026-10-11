@@ -10,7 +10,8 @@
  *
  *   Read   : service in readSvcs
  *   Write  : service in writeSvcs AND (service is not adminService OR service in adminSvcs)
- *            (getRequiredPermissionLevel: mutations on adminService services need admin)
+ *            (getRequiredPermissionLevel: mutations on adminService services need admin),
+ *            for every action of the group EXCEPT `agent.approve`, which is appointed (see AGENTS)
  *   Admin  : service in adminSvcs
  *   ApiToken: the owner's sets AND the token cap (scope can only narrow; `scoped`
  *            false = unscoped token = inherits the owner unchanged; scope {} =
@@ -54,24 +55,27 @@
  * Custom forbids still restrict on top: a rule that blocks a person, a group or one
  * agent wins over the list like it wins over any permit.
  *
- * AGENTS - `managed:agent:*`, `@managed("agent")`: who may answer a pending approval or
- * question (`agent.approve`) is decided by the SESSION the answer is about. The Agent
- * entity carries the people who started it (`owners`) and the agent's own `approvers`
- * setting (`owner`, `owner_or_admin`, `project_members`, agentEntities.ts); these three
- * policies read them, so nothing is stored per agent or per session.
+ * AGENTS - `managed:agent:*`, `@managed("agent")`: who may answer a pending TOOL APPROVAL
+ * (`agent.approve`: allow, deny, edit the arguments, remember for the session - and, as a side
+ * effect, cancel somebody's open request) is decided by the SESSION the answer is about. The
+ * Agent entity carries the people who started it (`owners`) and the agent's own `approvers`
+ * setting (`owner`, `owner_or_admin`, `project_members`, agentEntities.ts); these two policies
+ * read them, so nothing is stored per agent or per session.
  *
  *   agent:approve / agent:approve-token      the rule GRANTS `agent.approve` to a person, and to
  *                                            a token on behalf of its owner: whoever started the
  *                                            session; a project admin or a workspace owner / admin
  *                                            when the agent accepts admins; any member of the
  *                                            project when it accepts them
- *   agent:approve-boundary                   forbids everyone the rule does not name, so the generic
- *                                            "Write" permit (which every `agents` writer holds)
- *                                            cannot approve somebody else's request
  *
- * Token scope and the project's own limits still apply: `agent.approve` is in the Write
- * group, so the boundary forbids above cover it. Custom forbids restrict on top; a custom
- * permit cannot widen it (the agent's `approvers` setting does that).
+ * `agent.approve` is APPOINTABLE: the generic RBAC Write permits above leave it out
+ * (`action != Action::"agent.approve"`), so holding `agents:write` alone no longer answers
+ * somebody else's request. The two rules above reproduce the agent's `approvers` setting exactly,
+ * and a custom allow rule in IAM Center may name more approvers (a compliance group, say). There
+ * is deliberately NO boundary forbid on the action: custom deny rules narrow, the token-scope and
+ * project-narrowing boundaries (it is in the Write group) and the portal's access list (below)
+ * still apply on top. Answering an agent's QUESTION is not an approval: it follows the ownership
+ * of the session (`agent.session_manage_others`, agentEntities.ts).
  *
  * Written so that they cannot error: every attribute read is behind `has`, the list
  * members are typed entity references (portalEntities.ts), and a managed forbid
@@ -93,13 +97,13 @@ export const MANAGED_POLICIES: Readonly<Record<string, string>> = Object.freeze(
   [MANAGED_POLICY_IDS.userRead]:
     '@managed("rbac") permit(principal is User, action in Action::"Read", resource) when { principal.readSvcs.contains(resource.service) };',
   [MANAGED_POLICY_IDS.userWrite]:
-    '@managed("rbac") permit(principal is User, action in Action::"Write", resource) when { principal.writeSvcs.contains(resource.service) && (!resource.adminService || principal.adminSvcs.contains(resource.service)) };',
+    '@managed("rbac") permit(principal is User, action in Action::"Write", resource) when { action != Action::"agent.approve" && principal.writeSvcs.contains(resource.service) && (!resource.adminService || principal.adminSvcs.contains(resource.service)) };',
   [MANAGED_POLICY_IDS.userAdmin]:
     '@managed("rbac") permit(principal is User, action in Action::"Admin", resource) when { principal.adminSvcs.contains(resource.service) };',
   [MANAGED_POLICY_IDS.tokenRead]:
     '@managed("rbac") permit(principal is ApiToken, action in Action::"Read", resource) when { principal.owner.readSvcs.contains(resource.service) && (!principal.scoped || principal.capRead.contains(resource.service)) };',
   [MANAGED_POLICY_IDS.tokenWrite]:
-    '@managed("rbac") permit(principal is ApiToken, action in Action::"Write", resource) when { principal.owner.writeSvcs.contains(resource.service) && (!principal.scoped || principal.capWrite.contains(resource.service)) && (!resource.adminService || (principal.owner.adminSvcs.contains(resource.service) && (!principal.scoped || principal.capAdmin.contains(resource.service)))) };',
+    '@managed("rbac") permit(principal is ApiToken, action in Action::"Write", resource) when { action != Action::"agent.approve" && principal.owner.writeSvcs.contains(resource.service) && (!principal.scoped || principal.capWrite.contains(resource.service)) && (!resource.adminService || (principal.owner.adminSvcs.contains(resource.service) && (!principal.scoped || principal.capAdmin.contains(resource.service)))) };',
   [MANAGED_POLICY_IDS.tokenAdmin]:
     '@managed("rbac") permit(principal is ApiToken, action in Action::"Admin", resource) when { principal.owner.adminSvcs.contains(resource.service) && (!principal.scoped || principal.capAdmin.contains(resource.service)) };',
 });
@@ -181,13 +185,12 @@ unless {
 export const AGENT_POLICY_IDS = {
   approve: 'managed:agent:approve',
   approveToken: 'managed:agent:approve-token',
-  approveBoundary: 'managed:agent:approve-boundary',
 } as const;
 
 /**
- * "`who` may answer the pending requests of this session", for a User entity expression `who`
+ * "`who` may answer the pending tool approvals of this session", for a User entity expression `who`
  * (`principal`, or `principal.owner` for a token), laid out for reading. One predicate, written
- * once: the permits and the boundary share it, so they cannot drift apart.
+ * once for the user permit and the token permit, so they cannot drift apart.
  *
  *   - whoever started the session always may (the agent's setting never takes that away);
  *   - `project_members`: anybody who belongs to the agent's project;
@@ -218,16 +221,6 @@ when {
 permit (principal is ApiToken, action == Action::"agent.approve", resource is Agent)
 when {
   ${mayApprove('principal.owner', '  ')}
-};`,
-  [AGENT_POLICY_IDS.approveBoundary]: `@managed("agent")
-forbid (principal, action == Action::"agent.approve", resource is Agent)
-unless {
-  (principal is User && (
-    ${mayApprove('principal', '    ')}
-  ))
-  || (principal is ApiToken && (
-    ${mayApprove('principal.owner', '    ')}
-  ))
 };`,
 });
 

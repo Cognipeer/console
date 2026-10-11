@@ -144,6 +144,7 @@ export function AgentFilesPanelView({ value, onChange, agentKey, buckets, onRetr
             provider_invalid: t('bucketProviderInvalid'),
         },
         unusable: t('bucketUnusable'),
+        cannotChoose: t('bucketCannotChoose'),
         notFound: (key) => t('bucketNotFound', { key }),
     };
     const items = useMemo(

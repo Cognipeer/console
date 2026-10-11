@@ -203,6 +203,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       if (this.conversationListIndexesReady.has(dbName)) return;
       const coll = db.collection(COLLECTIONS.agentConversations);
       await Promise.all([
+        coll.createIndex({ agentKey: 1, createdBy: 1, updatedAt: -1 }, { name: 'idx_agent_creator_updatedAt' }),
         coll.createIndex({ projectId: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_createdAt' }),
         coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_agent_createdAt' }),
         coll.createIndex({ projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_status_createdAt' }),
@@ -341,11 +342,12 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     async listAgentConversations(
       agentKey: string,
-      filters?: { projectId?: string; limit?: number; skip?: number },
+      filters?: { projectId?: string; limit?: number; skip?: number; createdBy?: string },
     ): Promise<IAgentConversation[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { agentKey };
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
+      if (filters?.createdBy !== undefined) filter.createdBy = filters.createdBy;
       let cursor = db
         .collection(COLLECTIONS.agentConversations)
         .find(filter)
@@ -362,10 +364,17 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       runtimeStatus?: AgentSessionRuntimeStatus;
       limit: number;
       after?: { createdAt: Date; id: string };
+      ownOnly?: { userId: string; agentKeys?: string[] };
     }): Promise<IAgentConversationListItem[]> {
       const db = this.getTenantDb();
       const match: Record<string, unknown> = { projectId: filters.projectId };
       if (filters.agentKey) match.agentKey = filters.agentKey;
+      if (filters.ownOnly) {
+        // Other people's sessions of the restricted agents are not visible: the caller's own, and every other agent's, are.
+        const keys = filters.ownOnly.agentKeys;
+        if (keys === undefined) match.createdBy = filters.ownOnly.userId;
+        else if (keys.length > 0) match.$and = [{ $or: [{ createdBy: filters.ownOnly.userId }, { agentKey: { $nin: keys } }] }];
+      }
       // A conversation that never ran has no status: "idle" covers it.
       if (filters.runtimeStatus === 'idle') match.runtimeStatus = { $in: [null, 'idle'] };
       else if (filters.runtimeStatus) match.runtimeStatus = filters.runtimeStatus;

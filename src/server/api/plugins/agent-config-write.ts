@@ -140,11 +140,12 @@ export interface AgentConfigWriteScope {
   projectId: string;
   user?: Pick<IUser, 'role'>;
   /**
-   * Whether the caller has write access to Files (RBAC `files`). Asked only when a
-   * write sets or changes `attachments.bucketKey`: the files an agent takes land in
-   * a Document Store bucket, so naming the bucket is a Files decision.
+   * May the caller name this bucket (by key) in an agent's settings? A Files decision about THAT bucket
+   * (`file-bucket.update`, the policy engine's). Asked only when a write sets or changes
+   * `attachments.bucketKey`: the files an agent takes land in a Document Store bucket, so naming the bucket is a
+   * Files decision. A refusal's `decisionId` is quoted in the 403; an engine that cannot decide throws its 503.
    */
-  canWriteFiles: () => Promise<boolean>;
+  canNameBucket: (bucketKey: string) => Promise<{ allowed: boolean; decisionId?: string }>;
 }
 
 /** A config write refused with a 400 (`badRequest` is the body) or a 403 (`forbidden`), or accepted. */
@@ -158,19 +159,21 @@ type ConfigWriteOutcome<T> = { badRequest: Record<string, unknown> } | { forbidd
 export async function attachmentsBucketRefusal(
   next: IAgentConfig,
   previous: IAgentConfig | undefined,
-  scope: Pick<AgentConfigWriteScope, 'canWriteFiles'>,
+  scope: Pick<AgentConfigWriteScope, 'canNameBucket'>,
 ): Promise<{ forbidden: Record<string, unknown> } | null> {
   const wanted = typeof next.attachments?.bucketKey === 'string' ? next.attachments.bucketKey.trim() : '';
   if (!wanted) return null;
   const current = typeof previous?.attachments?.bucketKey === 'string' ? previous.attachments.bucketKey.trim() : '';
   if (wanted === current) return null;
-  if (await scope.canWriteFiles()) return null;
+  const verdict = await scope.canNameBucket(wanted);
+  if (verdict.allowed) return null;
   return {
     forbidden: {
       error: FILES_WRITE_REQUIRED_MESSAGE,
       type: 'files_write_required',
       code: 'files_write_required',
       field: 'attachments.bucketKey',
+      ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}),
     },
   };
 }

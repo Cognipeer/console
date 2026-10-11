@@ -182,6 +182,7 @@ export default function WebhookManagement() {
       render: (endpoint) => (
         <div className="ds-col" style={{ gap: 2, minWidth: 0 }}>
           <span className="ds-mono" style={{ fontSize: 12, fontWeight: 500, wordBreak: 'break-all' }}>{endpoint.url}</span>
+          {endpoint.urlRedacted ? <span className="ds-faint" style={{ fontSize: 11 }} data-testid="webhook-url-redacted">{t('table.urlRedacted')}</span> : null}
           {endpoint.description ? <span className="ds-faint" style={{ fontSize: 11 }}>{endpoint.description}</span> : null}
         </div>
       ),

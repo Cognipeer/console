@@ -198,6 +198,17 @@ describe('agent edge extraction', () => {
     expect(edges!.find((e) => e.kind === 'agent.browser')).toMatchObject({ toType: 'browser', by: 'id' });
   });
 
+  it('reads the bucket of the session files only while files are switched on (there is no built-in fallback storage)', () => {
+    expect(pick(extractAgentEdges({ config: { attachments: { enabled: true, bucketKey: 'agent-docs' } } })))
+      .toEqual(['agent.attachmentsBucket=agent-docs@config.attachments.bucketKey']);
+    // off (or absent) takes nothing, and a bucket named under "off" is never used
+    expect(extractAgentEdges({ config: { attachments: { enabled: false, bucketKey: 'agent-docs' } } })).toBeUndefined();
+    expect(extractAgentEdges({ config: { attachments: { bucketKey: 'agent-docs' } } })).toBeUndefined();
+    expect(extractAgentEdges({ config: { attachments: { enabled: true } } })).toBeUndefined(); // switched on without a bucket: nothing to point at
+    expect(extractAgentEdges({ config: { attachments: { enabled: true, bucketKey: 'agent-docs' } } })![0])
+      .toMatchObject({ toType: 'file-bucket', by: 'key' });
+  });
+
   it('falls back to the legacy guardrail slots only when `guardrails` is absent', () => {
     expect(pick(extractAgentEdges({ config: { inputGuardrailKey: 'in', outputGuardrailKey: 'out' } }))).toEqual([
       'agent.guardrail=in@config.inputGuardrailKey',

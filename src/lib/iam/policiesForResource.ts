@@ -4,7 +4,7 @@
  * which of the two (`scope`). The portal page shows them next to the portal's access
  * list ("policies that also apply"); the built-in ones are listed as always.
  *
- * Only portals are judged today (policyRows.policyReach); any other type answers an
+ * Portals, agents and file buckets are judged (policyRows.policyReach); any other type answers an
  * empty list rather than a guess.
  */
 

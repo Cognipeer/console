@@ -40,6 +40,8 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { filterSessionLinkedRows, refuseSessionLinked, sendSessionRefusal } from './agent-session-access';
+import { sessionOfFile } from './session-linked-files';
 
 const logger = createLogger('api:files');
 
@@ -466,8 +468,11 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
         ...(query.purpose === 'conversation' || query.purpose === 'other' ? { purpose: query.purpose } : {}),
       });
 
+      // The files a session holds are the session's: those of somebody else's session the caller may not view
+      // are left out (a caller who may view every session costs no lookup).
+      const visible = await filterSessionLinkedRows(request, scoped.items, sessionOfFile);
       return reply.code(200).send({
-        items: await withAgentIds(session.tenantDbName, projectId, scoped.items),
+        items: await withAgentIds(session.tenantDbName, projectId, visible),
         ...(scoped.folders ? { folders: scoped.folders, prefix: scoped.prefix } : {}),
         nextCursor: scoped.nextCursor,
       });
@@ -599,6 +604,12 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const query = (request.query ?? {}) as FileObjectsQuery;
 
+      // A file a session holds (`purpose: 'conversation'`) is read as the session it belongs to: its owner
+      // always may, anybody else needs `agent.session_view_others`.
+      const wanted = await getFileRecord(session.tenantDbName, session.tenantId, projectId, bucketKey, key);
+      const refusal = await refuseSessionLinked(request, sessionOfFile(wanted), 'view');
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
+
       if (query.download) {
         const variant = query.download === 'markdown' || query.variant === 'markdown'
           ? 'markdown'
@@ -668,6 +679,11 @@ export const filesApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const { projectId, session } = await requireProjectContextForRequest(request);
+      // Deleting a file a session holds is acting on the session: its owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const existing = await getFileRecord(session.tenantDbName, session.tenantId, projectId, bucketKey, key);
+      const refusal = await refuseSessionLinked(request, sessionOfFile(existing), 'manage');
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
       const deleted = await deleteFile(
         session.tenantDbName,
         session.tenantId,

@@ -91,6 +91,10 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
     }
   });
 
+  // Session files are off unless `attachments.enabled === true` AND a bucket is named (there is no built-in fallback storage).
+  const attachments = config.attachments as Doc | undefined;
+  if (attachments && attachments.enabled === true) edges.add('agent.attachmentsBucket', attachments.bucketKey, 'config.attachments.bucketKey');
+
   // Enterprise target: dropped without the enterprise build (graph.knownTypes).
   // Unlike memory, the sandbox is OFF unless enabled === true: buildAgentSandboxTools
   // returns no tools for a missing flag, so a legacy/imported config never uses its template.

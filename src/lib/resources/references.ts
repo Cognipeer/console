@@ -161,6 +161,11 @@ kind('agent.webSearchProvider', 'agent', 'provider', 'provider-assignment', 'war
   inactiveBreaks: true, requiresActive: true, targetAttribute: { key: 'type', value: 'websearch' },
 });
 
+// The bucket an agent keeps its session files in (`attachments.bucketKey`): a session file is an ordinary
+// Document Store file in that bucket, looked up in the agent's own project (inspectFileBucket). A missing or
+// disabled bucket refuses uploads (409 storage_unavailable) while the agent itself still runs: reduced, not broken.
+kind('agent.attachmentsBucket', 'agent', 'file-bucket', 'strict-project', 'warning', { inactiveBreaks: true });
+
 // The sandbox template is an enterprise type: without the enterprise build the
 // target type is not registered and the edge is dropped, never reported missing.
 // resolveTemplateIdByKey throws 'Sandbox template "<key>" not found' on the first

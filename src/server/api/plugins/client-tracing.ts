@@ -14,6 +14,7 @@ import {
   checkResourceQuota,
 } from '@/lib/quota/quotaGuard';
 import { AgentTracingService, recordTracingSessionCreated, recordTraceModelUsage } from '@/lib/services/agentTracing';
+import { filterSessionLinkedRows, refuseTracingThread, sendClientSessionRefusal } from './agent-session-access';
 import { mapOtlpToInternalModels, type OtlpExportTraceServiceRequest } from '@/lib/services/otlpMapper';
 import {
   buildResponseFormatSection,
@@ -1495,7 +1496,11 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
         skip: query.skip || '0',
       });
 
-      return reply.code(200).send(result);
+      // A thread of an agent is its session: the ones of an agent whose other people's sessions the token's
+      // owner may not view are left out (nothing to look up for the default caller).
+      const actor = { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') };
+      const threads = await filterSessionLinkedRows(request, result.threads, (row) => (typeof row.threadId === 'string' ? row.threadId : null), { actor });
+      return reply.code(200).send({ ...result, threads, total: Math.max(0, result.total - (result.threads.length - threads.length)) });
     } catch (error) {
       logger.error('Client tracing threads list error', { error });
       return reply.code(500).send({
@@ -1508,6 +1513,9 @@ export const clientTracingApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/tracing/threads/:threadId', withClientApiRequestContext(async (request, reply, auth) => {
     try {
       const { threadId } = request.params as { threadId: string };
+      const actor = { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') };
+      const refusal = await refuseTracingThread(request, threadId, { actor });
+      if (refusal) return sendClientSessionRefusal(reply, request, refusal);
       const result = await AgentTracingService.getThreadDetail(
         auth.tenantDbName,
         auth.projectId,

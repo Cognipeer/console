@@ -112,6 +112,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     // The reconciler's sweep for callbacks that never settled.
     { key: { callbackStatus: 1, updatedAt: 1 }, options: { name: 'idx_callbackStatus_updatedAt' } },
     { key: { tenantId: 1, projectId: 1, idempotencyKey: 1 }, options: { name: 'idx_tenant_project_idempotencyKey' } },
+    // A caller who may not see other people's sessions lists only the runs they queued, newest first.
+    { key: { tenantId: 1, projectId: 1, agentKey: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_tenant_project_agent_user_createdAt' } },
   ],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
@@ -184,6 +186,8 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
   agent_conversations: [
     { key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } },
+    // A caller who may not see other people's sessions lists only their own: one agent's, by creator, newest first.
+    { key: { agentKey: 1, createdBy: 1, updatedAt: -1 }, options: { name: 'idx_agent_creator_updatedAt' } },
     // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
     { key: { projectId: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_createdAt' } },
     { key: { projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_agent_createdAt' } },

@@ -214,7 +214,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(typeof row.createdAt).toBe('string');
 
       const list = await call('GET', '/api/iam/policies', A, 'reader');
-      expect(list.body.managed).toHaveLength(19); // six RBAC permits, six boundary forbids, four portal rules, three agent approval rules
+      expect(list.body.managed).toHaveLength(18); // six RBAC permits, six boundary forbids, four portal rules, two agent approval rules
       expect(list.body.managed.filter((m: any) => m.group === 'portal').map((m: any) => m.id)).toEqual([
         'managed:portal:use', 'managed:portal:use-boundary', 'managed:portal:agent', 'managed:portal:agent-boundary',
       ]);
@@ -295,10 +295,14 @@ describeForEachProvider('IAM center API', (getDb) => {
         expect(scopes(await call('GET', '/api/iam/policies?resourceType=portal&resourceId=P2', A, 'reader'))).toEqual({ [another]: 'this', [all]: 'all' });
         // one nobody wrote about: only what applies to every portal
         expect(scopes(await call('GET', '/api/iam/policies?resourceType=portal&resourceId=P3', A, 'reader'))).toEqual({ [all]: 'all' });
-        // a type the narrowing does not judge answers an empty list, not a guess
+        // an agent is judged too: the rule about the agents service applies to it, the portal rules do not
         const agent = await call('GET', '/api/iam/policies?resourceType=agent&resourceId=P1', A, 'reader');
         expect(agent.status).toBe(200);
-        expect(agent.body.custom).toEqual([]);
+        expect(scopes(agent)).toEqual({ [unrelated]: 'all' });
+        // a type the narrowing does not judge answers an empty list, not a guess
+        const model = await call('GET', '/api/iam/policies?resourceType=model&resourceId=P1', A, 'reader');
+        expect(model.status).toBe(200);
+        expect(model.body.custom).toEqual([]);
 
         // without the query it is the whole list, and no row has a scope
         const everything = await call('GET', '/api/iam/policies', A, 'reader');
@@ -513,7 +517,10 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect((await call('POST', '/api/iam/policies/compile', A, 'reader', {})).status).toBe(400);
       expect((await call('POST', '/api/iam/policies/compile', A, 'reader', { spec: memberSpec(A), cedar: 'x' })).status).toBe(400);
       expect((await call('POST', '/api/iam/policies/compile', A, 'reader', { cedar: 5 })).status).toBe(400);
-      const before = (await db.iamListAuditEvents({ tenantId: A.id, limit: 200 })).items.filter((r) => String(r.path).includes('/compile')).length;
+      // The refused calls above are audited asynchronously; let their rows land before counting, or a slow
+      // database moves them between the two counts below.
+      await new Promise((r) => setTimeout(r, 150));
+      const before =(await db.iamListAuditEvents({ tenantId: A.id, limit: 200 })).items.filter((r) => String(r.path).includes('/compile')).length;
       await call('POST', '/api/iam/policies/compile', A, 'reader', { spec: memberSpec(A) });
       await new Promise((r) => setTimeout(r, 30));
       const after = (await db.iamListAuditEvents({ tenantId: A.id, limit: 200 })).items.filter((r) => String(r.path).includes('/compile')).length;

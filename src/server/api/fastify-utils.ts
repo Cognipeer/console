@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { trustsEveryHop } from '@/lib/security/trustedProxy';
@@ -30,6 +31,7 @@ import { authorizeServiceAccess, buildServicePrincipal, quietServiceLevel, type 
 import type { EffectiveLevel } from '@/lib/iam/effective';
 import { authorizeResourceForPrincipal, type ResourceAuthzAction, type ResourceAuthzResult, type ResourceAuthzSubject } from '@/lib/iam/resourceAuthz';
 import { auditLevelOf } from '@/lib/iam/denialAudit';
+import { serviceDenialReason } from '@/lib/iam/denialReason';
 import type { IamResource } from '@/lib/iam/entities';
 import { canonicalRoute } from '@/lib/iam/routePattern';
 import { getUserAuthState, getUserIdentity, isUserDisabled } from '@/lib/services/users/userAuthState';
@@ -58,7 +60,8 @@ export interface ApiSessionContext {
   licenseType: LicenseType | string;
 }
 
-class RbacAuthorizationError extends Error {
+/** A handler-level refusal (403) or outage (503) of the policy engine, thrown so the dialect mappers answer it. */
+export class RbacAuthorizationError extends Error {
   status: number;
   /**
    * Structured refusal: `{ error, code, ... }`, where `error` is the same reason
@@ -584,6 +587,59 @@ export async function authorizeResourceForRequest(
     request.iamDecisionId = result.decisionId;
   }
   return result;
+}
+
+/**
+ * What a thrown handler-level refusal (`authorizeResourceForRequest`, `authorizeServiceForRequest`) says:
+ * the HTTP status (403 / 503) and, when it names one, the decision. Null for any other error. For a handler
+ * that catches broadly and must not read the engine's outage as a failure of its own.
+ */
+export function authorizationRefusalOf(error: unknown): { status: number; decisionId?: string } | null {
+  if (!(error instanceof RbacAuthorizationError)) return null;
+  const decisionId = typeof error.body?.decisionId === 'string' ? error.body.decisionId : undefined;
+  return { status: error.status, ...(decisionId ? { decisionId } : {}) };
+}
+
+export interface ResourceRefusalInput {
+  /** The engine action that was asked (`agent.session_view_others`...): it rides on the audit row of a 503. */
+  action: string;
+  /** The service level the question stands for (Read = 'read', Write = 'write'). */
+  level: ServicePermissionLevel;
+  /** The decision the refusal carries (the engine's); a 503 without one gets a fresh id. */
+  decisionId?: string;
+  /** The engine could not decide: a 503 with `Retry-After`, never a 403. */
+  unavailable?: boolean;
+  /** The 403 sentence (default: the generic one). */
+  message?: string;
+  /** The project the question was decided in. */
+  projectId?: string | null;
+}
+
+/**
+ * The error a handler throws (or turns into a reply) for a RESOURCE the engine refused (403, with the decision
+ * id) or could not decide (503, `Retry-After`), in the very shape the gates use - so the same dialect mappers
+ * (`sendProjectContextError`, `sendClientApiError`) answer it, and the audit hook records the 503.
+ */
+export function resourceRefusalError(request: FastifyRequest, input: ResourceRefusalInput): Error {
+  if (input.unavailable) {
+    return unavailableError(request, {
+      decisionId: input.decisionId ?? randomUUID(),
+      service: 'agents',
+      required: input.level,
+      action: input.action,
+      projectId: input.projectId,
+    });
+  }
+  const message = input.message ?? serviceDenialReason('agents', input.level);
+  if (input.decisionId) request.iamDecisionId = input.decisionId;
+  return new RbacAuthorizationError(message, 403, {
+    error: message,
+    code: 'forbidden',
+    message,
+    service: 'agents',
+    required: input.level,
+    ...(input.decisionId ? { decisionId: input.decisionId } : {}),
+  });
 }
 
 /**

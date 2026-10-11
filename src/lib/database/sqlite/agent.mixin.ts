@@ -372,13 +372,14 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
 
     async listAgentConversations(
       agentKey: string,
-      filters?: { projectId?: string; limit?: number; skip?: number },
+      filters?: { projectId?: string; limit?: number; skip?: number; createdBy?: string },
     ): Promise<IAgentConversation[]> {
       const db = this.getTenantDb();
       const conditions: string[] = ['agentKey = @agentKey'];
       const params: Record<string, unknown> = { agentKey };
 
       if (filters?.projectId !== undefined) { conditions.push('projectId = @projectId'); params.projectId = filters.projectId; }
+      if (filters?.createdBy !== undefined) { conditions.push('createdBy = @createdBy'); params.createdBy = filters.createdBy; }
 
       let sql = `SELECT * FROM ${TABLES.agentConversations} WHERE ${conditions.join(' AND ')} ORDER BY updatedAt DESC`;
       if (filters?.limit) sql += ` LIMIT ${filters.limit}`;
@@ -394,11 +395,23 @@ export function AgentMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: 
       runtimeStatus?: AgentSessionRuntimeStatus;
       limit: number;
       after?: { createdAt: Date; id: string };
+      ownOnly?: { userId: string; agentKeys?: string[] };
     }): Promise<IAgentConversationListItem[]> {
       const db = this.getTenantDb();
       const conditions: string[] = ['projectId = @projectId'];
       const params: Record<string, unknown> = { projectId: filters.projectId, limit: filters.limit };
       if (filters.agentKey) { conditions.push('agentKey = @agentKey'); params.agentKey = filters.agentKey; }
+      if (filters.ownOnly) {
+        // Other people's sessions of the restricted agents are not visible: the caller's own, and every other agent's, are.
+        params.ownOnlyUser = filters.ownOnly.userId;
+        const keys = filters.ownOnly.agentKeys;
+        if (keys === undefined) {
+          conditions.push('createdBy = @ownOnlyUser');
+        } else if (keys.length > 0) {
+          const names = keys.map((key, i) => { params[`ownOnlyKey${i}`] = key; return `@ownOnlyKey${i}`; });
+          conditions.push(`(createdBy = @ownOnlyUser OR agentKey NOT IN (${names.join(', ')}))`);
+        }
+      }
       if (filters.runtimeStatus === 'idle') {
         conditions.push("(runtimeStatus IS NULL OR runtimeStatus = 'idle')");
       } else if (filters.runtimeStatus) {

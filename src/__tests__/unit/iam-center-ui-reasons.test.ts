@@ -49,7 +49,7 @@ describe('parseBuiltInReason', () => {
 
   it('classifies every built-in policy the engine ships (none falls through to "other")', () => {
     const ids = listManagedPolicies().map((p) => p.id);
-    expect(ids.length).toBe(19);
+    expect(ids.length).toBe(18);
     for (const id of ids) {
       const parsed = parseBuiltInReason(id);
       expect(parsed.kind, id).not.toBe('other');
@@ -67,10 +67,10 @@ describe('parseBuiltInReason', () => {
     expect(parseBuiltInReason('managed:portal:something-new')).toEqual({ kind: 'other', level: null });
   });
 
-  it('knows the approval rules: the session\'s owner and the agent\'s setting admit, or nothing else can', () => {
+  it('knows the approval rules: the session\'s owner and the agent\'s setting appoint', () => {
     expect(parseBuiltInReason('managed:agent:approve')).toEqual({ kind: 'approvalRule', level: null });
     expect(parseBuiltInReason('managed:agent:approve-token')).toEqual({ kind: 'approvalRule', level: null });
-    expect(parseBuiltInReason('managed:agent:approve-boundary')).toEqual({ kind: 'approvalBoundary', level: null });
+    expect(parseBuiltInReason('managed:agent:approve-boundary')).toEqual({ kind: 'other', level: null }); // gone: approvals are appointed
     expect(parseBuiltInReason('managed:agent:something-new')).toEqual({ kind: 'other', level: null });
   });
 

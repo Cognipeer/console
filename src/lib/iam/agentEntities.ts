@@ -1,7 +1,9 @@
 /**
- * The Agent entity of the SESSION actions: answering a pending approval or question
- * (`agent.approve`) and looking at / acting on a session somebody else started
- * (`agent.session_view_others`, `agent.session_manage_others`).
+ * The Agent entity of the SESSION actions: approving a pending tool call (`agent.approve`,
+ * appointed: the managed rule names the session's owner and whoever the agent accepts, allow
+ * rules appoint more) and looking at / acting on a session somebody else started
+ * (`agent.session_view_others`, `agent.session_manage_others`). Answering a QUESTION is the
+ * second kind of action on the session, not an approval.
  *
  * Nothing is stored for them. A session belongs to the people who started it, so the
  * agent is described together with the session being asked about:

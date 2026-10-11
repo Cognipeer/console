@@ -648,7 +648,10 @@ export async function previewPolicy(tenant: IamTenant, input: PreviewInput, opti
     };
 
     // Targeted principals x the draft's actions.
-    outer: for (const ev of loaded.values()) {
+    // In the order the audience was enumerated (people first, then tokens), not the order the concurrent loads
+    // finished in: the samples a preview shows must not depend on which lookup was quicker.
+    const inOrder = targets.map((ref) => loaded.get(key(ref))).filter((ev): ev is EvaluationPrincipal => ev !== undefined);
+    outer: for (const ev of inOrder) {
       const requester: PortalRequester = { userId: ev.principal.userId, groupIds: ev.principal.groupIds };
       for (const action of actions) {
         const context = contextFor(draft.spec, ev.type, action);

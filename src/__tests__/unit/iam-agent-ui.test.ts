@@ -68,22 +68,22 @@ const SESSION_CATALOG = {
 
 const APPROVAL_RULES = [
   {
-    id: 'managed:agent:approve', name: 'People who may answer an agent\'s pending requests', description: 'The owner, or whoever the agent accepts.',
+    id: 'managed:agent:approve', name: 'People who may approve an agent\'s tool calls', description: 'The owner, or whoever the agent accepts.',
     nameKey: 'iamApi.managed.agent-approve.name', descriptionKey: 'iamApi.managed.agent-approve.description',
     group: 'agent', effect: 'permit', cedar: '@managed("agent") permit(principal is User, action == Action::"agent.approve", resource is Agent);',
   },
   {
-    id: 'managed:agent:approve-boundary', name: 'Only the rule above answers pending requests', description: 'Nobody else.',
-    nameKey: 'iamApi.managed.agent-approve-boundary.name', descriptionKey: 'iamApi.managed.agent-approve-boundary.description',
-    group: 'agent', effect: 'forbid', cedar: '@managed("agent") forbid(principal, action == Action::"agent.approve", resource is Agent);',
+    id: 'managed:agent:approve-token', name: 'API tokens approve on behalf of their owner', description: 'As their owner.',
+    nameKey: 'iamApi.managed.agent-approve-token.name', descriptionKey: 'iamApi.managed.agent-approve-token.description',
+    group: 'agent', effect: 'permit', cedar: '@managed("agent") permit(principal is ApiToken, action == Action::"agent.approve", resource is Agent);',
   },
 ];
 
 const ANN = { type: 'user', id: 'u-ann', label: 'Ann Lee', role: 'user', groups: [], tokenScope: null, status: null };
 const REFUSED = {
   allowed: false,
-  reasons: [{ cedarId: 'managed:agent:approve-boundary', policyId: null, managed: true, name: 'Only the rule above answers pending requests', effect: 'forbid' }],
-  defaultDeny: false,
+  reasons: [],
+  defaultDeny: true,
   principalSummary: ANN,
   projectId: 'p1',
   ownerSafety: false,
@@ -137,8 +137,9 @@ describe('the built-in policies', () => {
     await renderPolicies();
     const t = text();
     expect(t).toContain('Agent approvals');
-    expect(t).toContain('Who may answer a pending approval or question of an agent session is decided by the session\'s owner');
-    expect(t).toContain('Only the rule above answers pending requests');
+    expect(t).toContain('Who may approve a tool call of an agent session is decided by the session\'s owner');
+    expect(t).toContain('People who may approve an agent\'s tool calls');
+    expect(t).toContain('API tokens approve on behalf of their owner');
     expect(q('[data-testid="managed-agent-group"]')).not.toBeNull();
   });
 
@@ -171,7 +172,7 @@ describe('the Access check of answering a pending request', () => {
   it('takes the session\'s owner and the agent\'s setting, sends them, and explains the refusal in plain words', async () => {
     await renderCheck();
     await pick(q<HTMLInputElement>('input[placeholder="Search users"]')!, 'ann', 'Ann Lee');
-    await pick(q<HTMLInputElement>('input[placeholder="Search actions"]')!, 'approve', 'Agents · Approve requests');
+    await pick(q<HTMLInputElement>('input[placeholder="Search actions"]')!, 'approve', 'Agents · Approve tool calls');
     await pick(q<HTMLInputElement>('input[placeholder="Search by name, key or ID"]')!, 'sup', 'Support bot');
 
     const inputs = q('[data-testid="session-inputs"]')!;
@@ -194,8 +195,7 @@ describe('the Access check of answering a pending request', () => {
 
     const t = text();
     expect(t).toContain('Denied');
-    expect(t).toContain('Only the rule above answers pending requests');
-    expect(t).toContain('Only the person who started the session, and whoever the agent accepts as an approver (only the person who started the session), may answer its pending requests. This person is neither.');
+    expect(t).toContain('Nothing appoints this person as an approver: only the person who started the session, whoever the agent accepts (only the person who started the session) and the people your own allow rules name may approve its tool calls.');
   });
 
   it('asks for the owner only when the action is about a session, and for the setting only when it is an approval', async () => {
@@ -212,7 +212,7 @@ describe('the Access check of answering a pending request', () => {
   it('reads in Turkish with no raw translation keys', async () => {
     await renderCheck('', routes(), 'tr');
     await pick(q<HTMLInputElement>('input[placeholder="Kullanıcı ara"]')!, 'ann', 'Ann Lee');
-    await pick(q<HTMLInputElement>('input[placeholder="İşlem ara"]')!, 'approve', /İstekleri onayla/);
+    await pick(q<HTMLInputElement>('input[placeholder="İşlem ara"]')!, 'approve', /Araç çağrılarını onayla/);
     const inputs = q('[data-testid="session-inputs"]')!;
     expect(inputs.textContent).toContain('Oturumu başlatan');
     expect(text()).not.toMatch(/iamCenter\.|iamApi\./);

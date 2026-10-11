@@ -316,16 +316,15 @@ describe('loadSessionForPrincipal', () => {
     });
   });
 
-  it('fails closed: an engine that cannot answer is the gate\'s 503, never an allow', async () => {
+  it('fails closed: an engine that cannot answer is `unavailable` (the route\'s 503), never an allow and never a "no"', async () => {
     // (the gate itself needs the engine: let it pass, then take the engine away for the helper)
     const res = await app.inject({ method: 'GET', url: `/api/agents/sessions/view/${idOf('own')}`, headers: sessionHeaders('other') });
     expect(res.statusCode).toBe(200);
     hoisted.engineDown.value = true;
     const down = await asUser('other', 'GET', `/api/agents/sessions/view/${idOf('own')}`);
     expect(down.statusCode).toBe(503);
-    // the owner is still not asked, so an outage does not lock people out of their own sessions
-    // (but the gate in front of every route would have answered 503 already: see iam-enforce-gate)
-    expect(json(down)).toMatchObject({ code: 'authorization_unavailable' });
+    // (the gate in front of every route would have answered 503 already: see iam-enforce-gate)
+    expect(json(down)).toMatchObject({ reason: 'unavailable', decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
   });
 });
 
@@ -378,9 +377,24 @@ describe('ending an open request (cancelling a paused run, a new message under c
     expect(decisions()).toBe(before);
   });
 
-  it('is not an answer when the engine is down: the helper throws the 503', async () => {
+  it('is not an answer when the engine is down: the verdict says `unavailable` (the route answers 503), not a refusal', async () => {
     await asUser('starter', 'POST', `/api/agents/ending/${idOf('waiting')}`);
     hoisted.engineDown.value = true;
-    expect((await asUser('starter', 'POST', `/api/agents/ending/${idOf('waiting')}`)).statusCode).toBe(503);
+    const down = await asUser('starter', 'POST', `/api/agents/ending/${idOf('waiting')}`);
+    expect(json(down)).toMatchObject({ allowed: false, unavailable: true, decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+  });
+
+  it('an open QUESTION is the session\'s, not an approval: only open tool approvals take agent.approve', async () => {
+    const asking = await db.createAgentConversation({
+      tenantId, projectId: p1, agentKey: 'support', messages: [], createdBy: String(users.starter._id), runtimeStatus: 'requires_action',
+    } as never);
+    await db.createAgentPendingActions([{
+      tenantId, projectId: p1, agentKey: 'support', conversationId: String(asking._id), kind: 'user_question', sdkId: 'sdk-q',
+      questions: [{ question: 'Which?', header: 'H', options: [{ label: 'a' }, { label: 'b' }] }], status: 'pending', requestedAt: new Date(), createdBy: String(users.starter._id),
+    }] as never);
+    const before = decisions();
+    // nothing to approve is open: any caller who got this far may end the question (they hold the session's rights)
+    expect(json(await asUser('other', 'POST', `/api/agents/ending/${String(asking._id)}`))).toEqual({ allowed: true });
+    expect(decisions()).toBe(before);
   });
 });

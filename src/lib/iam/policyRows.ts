@@ -87,19 +87,15 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
   },
   'managed:portal:agent-boundary': {
     name: 'Only the access list runs agents in a portal',
-    description: 'In a portal, nobody can run an agent or answer its pending requests unless the portal\'s access list admits them, whatever their role or any allow rule says.',
+    description: 'In a portal, nobody can run an agent or approve its tool calls unless the portal\'s access list admits them, whatever their role or any allow rule says.',
   },
   'managed:agent:approve': {
-    name: 'People who may answer an agent\'s pending requests',
-    description: 'A person may approve a tool call or answer a question of an agent session when they started that session, or when the agent accepts them: workspace owners and admins and the admins of the agent\'s project (the default), or every member of the project. The agent\'s "who can approve" setting is the input of this rule.',
+    name: 'People who may approve an agent\'s tool calls',
+    description: 'A person may approve a tool call of an agent session (allow, deny, edit the arguments, remember it for the session) when they started that session, or when the agent accepts them: workspace owners and admins and the admins of the agent\'s project (the default), or every member of the project. The agent\'s "who can approve" setting is the input of this rule. Having Write access to Agents is not enough on its own; your own allow rules can appoint more approvers, such as a compliance group.',
   },
   'managed:agent:approve-token': {
-    name: 'API tokens answer on behalf of their owner',
-    description: 'An API token may answer a pending request exactly when its owner may. The token\'s own scope and the project limits still apply on top.',
-  },
-  'managed:agent:approve-boundary': {
-    name: 'Only the rule above answers pending requests',
-    description: 'Nobody can answer a pending request of an agent session unless the rule above names them, whatever their general access level or any allow rule says. Deny rules can still block people the rule names.',
+    name: 'API tokens approve on behalf of their owner',
+    description: 'An API token may approve a tool call exactly when its owner may. The token\'s own scope and the project limits still apply on top.',
   },
 };
 
@@ -306,17 +302,29 @@ export function countDirectReferences(policies: ReadonlyArray<Pick<IIamPolicy, '
 /**
  * How a custom policy concerns one resource: `this` (it names that very resource),
  * `all` (it applies to every resource of the kind), or null (it does not reach it).
- * Used to answer "which policies also apply to this portal" without evaluating
- * anything. Only portals are judged for now: a policy reaches a portal through
- * `portal.use` (opening it), `agent.invoke` (running its agents) or the Read / Write
- * levels that contain them, in the portal channel. A spec is exact; raw Cedar is
- * read best-effort from the entity literals and action names in its text.
+ * Used to answer "which policies also apply to this portal / agent / bucket" without
+ * evaluating anything. A spec is exact; raw Cedar is read best-effort from the entity
+ * literals and action names in its text.
+ *
+ *  - a PORTAL is reached through `portal.use` (opening it), `agent.invoke` (running its
+ *    agents) or the Read / Write levels that contain them, in the portal channel;
+ *  - an AGENT through any `agent.*` action (running it, answering its approvals, looking at
+ *    or acting on somebody else's session of it) or a level group / `agents.*` service action
+ *    that contains them, on every channel;
+ *  - a file BUCKET through any `file-bucket.*` action (naming it for an agent's files...) or a
+ *    level group / `files.*` service action.
+ * A policy whose resources are another kind's, or another service's, does not reach it.
  */
 export function policyReach(
   policy: Pick<IIamPolicy, 'cedar' | 'spec'>,
   resource: { type: string; id: string },
 ): 'this' | 'all' | null {
-  if (resource.type !== 'portal') return null;
+  if (resource.type === 'portal') return portalReach(policy, resource.id);
+  const kind = RESOURCE_REACH[resource.type];
+  return kind ? registryReach(policy, resource, kind) : null;
+}
+
+function portalReach(policy: Pick<IIamPolicy, 'cedar' | 'spec'>, id: string): 'this' | 'all' | null {
   const spec = policy.spec;
   if (spec) {
     const portalActions = spec.actions.filter((a) => a === 'portal.use' || a === 'agent.invoke' || a === 'Read' || a === 'Write');
@@ -325,15 +333,47 @@ export function policyReach(
     if (channels && channels.length > 0 && !channels.includes('portal')) return null;
     if ('any' in spec.resources && spec.resources.any === true) return 'all';
     const sel = spec.resources as { services?: string[]; resources?: Array<{ type: string; id: string }> };
-    if (sel.resources?.some((r) => r.type === 'portal' && r.id === resource.id)) return 'this';
+    if (sel.resources?.some((r) => r.type === 'portal' && r.id === id)) return 'this';
     if (sel.services?.some((service) => service === 'portals' || service === 'agents')) return 'all';
     return null;
   }
   const text = policy.cedar;
   const literal = [...text.matchAll(/\bPortal::"((?:[^"\\]|\\.)*)"/g)].map((m) => unescape(m[1]));
-  if (literal.includes(resource.id)) return 'this';
+  if (literal.includes(id)) return 'this';
   if (literal.length > 0) return null;
   return /\bAction::"(?:portal\.use|agent\.invoke|Read|Write)"|\bresource is Portal\b/.test(text) ? 'all' : null;
+}
+
+/** The registry types whose policies are judged here besides portals: their service, entity and action prefix. */
+const RESOURCE_REACH: Readonly<Record<string, { service: string; entity: string; actionPrefix: string }>> = {
+  agent: { service: 'agents', entity: 'Agent', actionPrefix: 'agent.' },
+  'file-bucket': { service: 'files', entity: 'FileBucket', actionPrefix: 'file-bucket.' },
+};
+
+const LEVEL_GROUPS: ReadonlySet<string> = new Set(['Read', 'Write', 'Admin']);
+
+function registryReach(
+  policy: Pick<IIamPolicy, 'cedar' | 'spec'>,
+  resource: { type: string; id: string },
+  kind: { service: string; entity: string; actionPrefix: string },
+): 'this' | 'all' | null {
+  const concerns = (action: string): boolean => LEVEL_GROUPS.has(action) || action.startsWith(kind.actionPrefix) || action.startsWith(`${kind.service}.`);
+  const spec = policy.spec;
+  if (spec) {
+    if (!spec.actions.some(concerns)) return null;
+    if ('any' in spec.resources && spec.resources.any === true) return 'all';
+    const sel = spec.resources as { services?: string[]; projects?: string[]; resources?: Array<{ type: string; id: string }> };
+    if (sel.resources?.some((r) => r.type === resource.type && r.id === resource.id)) return 'this';
+    if (sel.services?.includes(kind.service) || (sel.projects?.length ?? 0) > 0) return 'all';
+    return null;
+  }
+  const text = policy.cedar;
+  const named = [...text.matchAll(new RegExp(`\\b${kind.entity}::"((?:[^"\\\\]|\\\\.)*)"`, 'g'))].map((m) => unescape(m[1]));
+  if (named.includes(resource.id)) return 'this';
+  if (named.length > 0) return null;
+  const actions = [...text.matchAll(/\bAction::"((?:[^"\\]|\\.)*)"/g)].map((m) => unescape(m[1]));
+  if (actions.length > 0 && !actions.some(concerns)) return null;
+  return actions.some(concerns) || new RegExp(`\\bresource is ${kind.entity}\\b`).test(text) ? 'all' : null;
 }
 
 /**

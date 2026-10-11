@@ -104,8 +104,11 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
  * are asked by the portal runtime (enterprise overlay) with `channel: 'portal'`
  * (resourceAuthz.ts). Answering a pending approval is asked by the agent routes
  * (dashboard, API) and by the portal runtime; looking at / acting on a session
- * somebody else started is asked by the agent routes. Every other resource action is
- * evaluated by the Access check only: no request of the product asks for it yet.
+ * somebody else started is asked by the agent routes; choosing the bucket an agent
+ * keeps its session files in asks the bucket's own actions (`file-bucket.get` to list it
+ * as a choice, `file-bucket.update` to name it - saving an agent's Files settings).
+ * Every other resource action is evaluated by the Access check only: no request of the
+ * product asks for it yet.
  *
  * Pure data; whether the runtime exists in THIS build is runtimeEnforced.ts: the
  * `portal` channel exists only where the enterprise overlay registered its resolver,
@@ -118,7 +121,13 @@ export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChann
   'agent.approve': ['dashboard', 'api', 'portal'],
   'agent.session_view_others': ['dashboard', 'api'],
   'agent.session_manage_others': ['dashboard', 'api'],
+  // Where an agent keeps its session files is a Files decision about THAT bucket (agents routes ask it).
+  'file-bucket.get': ['dashboard', 'api'],
+  'file-bucket.update': ['dashboard', 'api'],
 });
+
+/** The Document Store bucket actions the agents routes ask about: choosing (listing) a bucket, and naming it in an agent's settings. */
+export const BUCKET_RESOURCE_ACTIONS: readonly string[] = Object.freeze(['file-bucket.get', 'file-bucket.update']);
 
 /**
  * The actions an agent is asked about with the SESSION it concerns: who started it

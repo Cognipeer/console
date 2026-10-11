@@ -172,11 +172,23 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
      * the transcript write for this turn may have landed after the
      * conversation was loaded, and merging into a stale copy would drop it.
      */
+    /**
+     * The session's own row, read fresh. The sandbox record lives on the conversation, so the row is only used when
+     * it is THIS agent's session in THIS project - the same scope every session route checks
+     * (api/plugins/agent-session-access.ts) - never merely whatever the id names.
+     */
+    const readOwnConversation = async (db: Awaited<ReturnType<typeof getDatabase>>): Promise<IAgentConversation | null> => {
+        if (!sessionConversationId) return null;
+        const found = await db.findAgentConversationById(sessionConversationId);
+        return found && found.agentKey === input.agentKey && found.projectId === input.projectId ? found : null;
+    };
+
     const saveRecord = async (instanceId: string): Promise<void> => {
         if (!sessionConversationId) return;
         const db = await getDatabase();
         await db.switchToTenant(input.tenantDbName);
-        const latest = await db.findAgentConversationById(sessionConversationId);
+        const latest = await readOwnConversation(db);
+        if (!latest) return;
         const now = new Date().toISOString();
         const record: ConversationSandboxRecord = {
             instanceId,
@@ -195,7 +207,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         if (sessionConversationId) {
             const db = await getDatabase();
             await db.switchToTenant(input.tenantDbName);
-            const fresh = await db.findAgentConversationById(sessionConversationId);
+            const fresh = await readOwnConversation(db);
             previous = fresh?.metadata?.sandbox as ConversationSandboxRecord | undefined;
             if (previous && (previous.lifecycle !== 'session'
                 || (config.templateKey && previous.templateKey && previous.templateKey !== config.templateKey))) {

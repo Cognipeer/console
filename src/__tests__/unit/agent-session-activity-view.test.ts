@@ -195,16 +195,31 @@ describe('SessionDetailDrawer', () => {
     expect(badges()).not.toContain('Waiting for you');
   });
 
-  it('tells someone who is not the owner that only the owner and admins can answer', async () => {
+  it('says what the SERVER says about the viewer: the reason they cannot answer, from the session it loaded', async () => {
     routes.push((url) => {
-      if (url === '/api/agents/a1/sessions/s1') return { body: { session: waiting } };
+      if (url === '/api/agents/a1/sessions/s1') {
+        return { body: { session: waiting, pendingActions: [{ id: 'act_1', canResolve: false, resolveBlockedReason: 'approvers_admin' }] } };
+      }
+      return undefined;
+    });
+    drawer();
+    await flush();
+    await flush();
+    expect(text()).toContain('Only the session owner, workspace admins and the admins of the project can approve');
+  });
+
+  it('says nothing when the server says the viewer may answer, or says nothing - the page never guesses from the viewer\'s role', async () => {
+    routes.push((url) => {
+      if (url === '/api/agents/a1/sessions/s1') return { body: { session: waiting, pendingActions: [{ id: 'act_1', canResolve: true }] } };
+      // (a different person signed in: it makes no difference to what the page says)
       if (url.includes('/api/auth/session')) return { body: { userId: 'u2', role: 'user' } };
       return undefined;
     });
-    drawer({ approvers: 'owner_or_admin' });
+    drawer();
     await flush();
     await flush();
-    expect(text()).toContain('Only the session owner and project admins can answer');
+    expect(text()).not.toContain('can approve');
+    expect(text()).not.toContain('rule of your workspace');
   });
 
   it('shows how a settled session ended, and the event log behind a disclosure', async () => {

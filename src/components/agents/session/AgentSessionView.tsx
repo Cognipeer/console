@@ -92,17 +92,17 @@ import LiveToolCalls, {
 import { consumeSse } from './consumeSse';
 import PendingActionList from './PendingActionCards';
 import {
-    answerRestriction,
+    answerBlockedReason,
     applyLocalResolution,
     cancelOpenActions,
     composerGate,
     isStaleActionRefusal,
     openActionsOf,
-    type AnswerRestriction,
+    type AnswerBlockedReason,
     type ResolveBody,
+    type ServerPendingAction,
 } from './pendingActions';
 import { sessionStatusKind } from './sessionActivityUi';
-import { useViewer } from './useViewer';
 import { interpretSessionEvent } from './sessionFollow';
 import ContextCompactionCard from './ContextCompactionCard';
 import { BudgetBanner, BudgetMeter } from './SessionBudgetControls';
@@ -248,14 +248,11 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const liveActive = sending || following;
     const openActions = useMemo(() => openActionsOf(messages), [messages]);
     const status = sessionStatusKind({ live: liveActive, openActions: openActions.length, runtimeStatus: session?.runtimeStatus });
-    // Said above the open requests when the agent limits who may answer and the viewer is not clearly one of them.
-    const viewer = useViewer();
-    const restriction = answerRestriction({
-        approvers: agent?.config?.humanInTheLoop?.approvers,
-        viewerId: viewer.userId,
-        viewerRole: viewer.role,
-        ownerId: session?.createdBy,
-    });
+    // What the SERVER says the viewer may do with the open requests (its own rule, decided by the policy engine):
+    // said above them when the viewer cannot answer, instead of guessing from the agent's setting and their role.
+    const [serverActions, setServerActions] = useState<ServerPendingAction[]>([]);
+    // (only the ones still open: an answered request has nothing left to be refused)
+    const blockedReason = answerBlockedReason(serverActions.filter((action) => openActions.some((open) => open.id === action.id)));
     // The session's spend budget (absent for a session without one), and a change to it in flight.
     const budgetView = useMemo(() => sessionBudgetView(session, messages), [session, messages]);
     const [budgetBusy, setBudgetBusy] = useState(false);
@@ -421,6 +418,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             const sessionData = await sessionRes.json();
             setAgent(agentData.agent);
             setSession(sessionData.session);
+            setServerActions(Array.isArray(sessionData.pendingActions) ? sessionData.pendingActions : []);
             // A resumed turn's version badge, tokens and cost should read "what
             // this turn actually did", which the stored record already carries
             // — nothing to recompute here.
@@ -1119,7 +1117,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 busy={liveActive || Boolean(resolvingId)}
                                                                 resolvingId={resolvingId}
                                                                 onResolve={(actionId, body) => void resolveAction(actionId, body)}
-                                                                restriction={restriction}
+                                                                blocked={blockedReason}
                                                                 budgetBannerShown={budgetBannerShown}
                                                                 budgetStops={budgetStops}
                                                             />
@@ -1401,7 +1399,7 @@ function AssistantTurn({
     busy,
     resolvingId,
     onResolve,
-    restriction,
+    blocked,
     budgetBannerShown,
     budgetStops,
 }: {
@@ -1409,7 +1407,7 @@ function AssistantTurn({
     busy: boolean;
     resolvingId: string | null;
     onResolve: (actionId: string, body: ResolveBody) => void;
-    restriction: AnswerRestriction | null;
+    blocked: AnswerBlockedReason | null;
     budgetBannerShown: boolean;
     /** The session budget stops the session instead of pausing it. */
     budgetStops: boolean;
@@ -1440,7 +1438,7 @@ function AssistantTurn({
                     busy={busy}
                     resolvingId={resolvingId}
                     onResolve={onResolve}
-                    restriction={restriction}
+                    blocked={blocked}
                 />
             ) : null}
             {message.output !== undefined ? <StructuredOutputBlock output={message.output} /> : null}

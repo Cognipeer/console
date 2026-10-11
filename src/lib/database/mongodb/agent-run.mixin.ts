@@ -415,6 +415,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       conversationId?: string;
       status?: IAgentRun['status'][];
       mode?: IAgentRun['mode'];
+      userId?: string;
       limit?: number;
     }): Promise<IAgentRun[]> {
       const db = this.getTenantDb();
@@ -423,6 +424,7 @@ export function AgentRunMixin<TBase extends Constructor<MongoDBProviderBase>>(Ba
       if (filter.conversationId) query.conversationId = filter.conversationId;
       if (filter.status && filter.status.length > 0) query.status = { $in: filter.status };
       if (filter.mode) query.mode = filter.mode;
+      if (filter.userId) query.userId = filter.userId;
       const docs = await db
         .collection<IAgentRun>(COLLECTIONS.agentRuns)
         .find(query)

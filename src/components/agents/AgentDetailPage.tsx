@@ -315,6 +315,7 @@ export default function AgentDetailPage() {
   // own route, see AgentSessionView).
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsOwnOnly, setSessionsOwnOnly] = useState(false);
   const [startSessionOpen, setStartSessionOpen] = useState(false);
   const [viewedSessionId, setViewedSessionId] = useState<string | null>(null);
   const [sessionsView, setSessionsView] = useState<'sessions' | 'runs'>('sessions');
@@ -416,6 +417,8 @@ export default function AgentDetailPage() {
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions ?? []);
+        // The caller may not view other people's sessions of this agent: the list holds only their own.
+        setSessionsOwnOnly(data.scope?.viewOthers === false);
       }
     } catch (err) {
       console.error('Failed to load sessions', err);
@@ -1097,6 +1100,7 @@ export default function AgentDetailPage() {
             {sessionsView === 'sessions' ? (
               <SessionList
                 sessions={sessions}
+                ownOnly={sessionsOwnOnly}
                 loading={sessionsLoading}
                 onOpen={(id) => setViewedSessionId(id)}
                 onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
@@ -1121,7 +1125,6 @@ export default function AgentDetailPage() {
                 : null}
               onClose={() => setViewedSessionId(null)}
               onContinue={(id) => router.push(`/dashboard/agents/${agentId}/sessions/${id}`)}
-              approvers={hitlConfig?.approvers}
               onResolved={() => void loadSessions()}
             />
           </SectionCard>

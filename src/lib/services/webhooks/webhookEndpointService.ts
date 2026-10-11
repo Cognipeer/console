@@ -18,6 +18,11 @@
  *
  * The signing secret is returned exactly twice in an endpoint's life: when it is
  * created and when it is rotated. It is stored sealed and never read back out.
+ *
+ * The receiver URL is a credential more often than not (a chat tool's incoming-webhook address carries its
+ * token in the path or the query, a callback may carry userinfo). `webhooks.read` is the right to LOOK at
+ * subscriptions, not to use them, so a reader gets the URL with the query string, the fragment and the
+ * userinfo removed (`https://host/path?…`); only `webhooks.admin` where the endpoint lives sees it whole.
  */
 
 import crypto from 'node:crypto';
@@ -76,10 +81,28 @@ export interface WebhookCapabilities {
 
 // ── Wire shapes ──────────────────────────────────────────────────────────
 
-export function serializeWebhookEndpoint(endpoint: IWebhookEndpoint) {
+/**
+ * A receiver URL as a reader may see it: scheme, host, port and path - the query string, fragment and userinfo
+ * are replaced (`?…` marks that a query string was there). Never throws; text that is no URL is cut at its first
+ * `?` or `#`, and anything with an `@` before the path loses what stands before it.
+ */
+export function redactWebhookUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const shown = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    return parsed.search || parsed.hash ? `${shown}?…` : shown;
+  } catch {
+    const cut = url.search(/[?#]/);
+    return cut >= 0 ? `${url.slice(0, cut).replace(/\/\/[^/@]*@/, '//')}?…` : url.replace(/\/\/[^/@]*@/, '//');
+  }
+}
+
+export function serializeWebhookEndpoint(endpoint: IWebhookEndpoint, options: { redactUrl?: boolean } = {}) {
   return {
     id: String(endpoint._id),
-    url: endpoint.url,
+    url: options.redactUrl ? redactWebhookUrl(endpoint.url) : endpoint.url,
+    // The page tells a reader why the address looks cut, and does not offer to edit what it cannot show.
+    ...(options.redactUrl ? { urlRedacted: true } : {}),
     description: endpoint.description || null,
     events: endpoint.events,
     projectId: endpoint.projectId ?? null,
@@ -117,6 +140,15 @@ async function inReach(scope: WebhookScope, endpoint: IWebhookEndpoint, kind: We
   if (endpoint.tenantId !== scope.tenantId) return false;
   if (endpoint.projectId && endpoint.projectId === scope.projectId) return true;
   return scope.workspaceAllows(kind);
+}
+
+/**
+ * May the caller see this endpoint's URL whole? Whoever holds `webhooks.admin` where the endpoint lives: in the
+ * project the request is made in, for an endpoint of that project; in the workspace itself, for any other.
+ */
+async function mayReadWholeUrl(scope: WebhookScope, endpoint: IWebhookEndpoint): Promise<boolean> {
+  if (endpoint.projectId && endpoint.projectId === scope.projectId) return (await scope.capabilities()).manage;
+  return scope.workspaceAllows('manage');
 }
 
 async function loadEndpoint(db: DatabaseProvider, scope: WebhookScope, id: unknown, kind: WebhookReach): Promise<IWebhookEndpoint> {
@@ -182,12 +214,16 @@ export function listWebhookEndpoints(scope: WebhookScope) {
     const endpoints = await db.listWebhookEndpoints(scope.tenantId, {
       projectScopes: await scope.workspaceAllows('read') ? [scope.projectId, null] : [scope.projectId],
     });
-    return { endpoints: endpoints.map(serializeWebhookEndpoint), capabilities: await scope.capabilities() };
+    const shown = await Promise.all(endpoints.map(async (endpoint) => serializeWebhookEndpoint(endpoint, { redactUrl: !await mayReadWholeUrl(scope, endpoint) })));
+    return { endpoints: shown, capabilities: await scope.capabilities() };
   });
 }
 
 export function getWebhookEndpoint(scope: WebhookScope, id: string) {
-  return inTenantDb(scope, async (db) => ({ endpoint: serializeWebhookEndpoint(await loadEndpoint(db, scope, id, 'read')) }));
+  return inTenantDb(scope, async (db) => {
+    const endpoint = await loadEndpoint(db, scope, id, 'read');
+    return { endpoint: serializeWebhookEndpoint(endpoint, { redactUrl: !await mayReadWholeUrl(scope, endpoint) }) };
+  });
 }
 
 export interface CreateWebhookInput {

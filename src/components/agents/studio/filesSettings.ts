@@ -101,6 +101,8 @@ export interface AttachmentBucketOption {
     reasonCode?: BucketReasonCode;
     /** The bucket's files live on the server's own disk (driver `local-filesystem`). */
     localDisk: boolean;
+    /** The server's verdict on whether THIS viewer may name the bucket (write access to it); absent = not asked. */
+    canChoose?: boolean;
 }
 
 /** Why a bucket cannot take a file — the codes the picker endpoint reports. */
@@ -129,6 +131,8 @@ export interface BucketReasonLabels {
     byCode: Partial<Record<BucketReasonCode, string>>;
     /** For a bucket that cannot be used and says no more. */
     unusable: string;
+    /** For a bucket the viewer may look at but not name (no write access to it). */
+    cannotChoose?: string;
 }
 
 /** Why a bucket cannot be chosen, in the viewer's language; the server's own sentence is the fallback. */
@@ -152,13 +156,17 @@ export function bucketPickerItems(
     storedKey: string | undefined,
     labels: BucketReasonLabels & { notFound: (key: string) => string },
 ): BucketPickerItem[] {
-    const items: BucketPickerItem[] = (buckets ?? []).map((bucket) => ({
-        value: bucket.key,
-        label: bucket.providerLabel ? `${bucket.name} · ${bucket.providerLabel}` : bucket.name,
-        disabled: !bucket.usable,
-        reason: bucketUnusableReason(bucket, labels),
-        localDisk: bucket.localDisk,
-    }));
+    const items: BucketPickerItem[] = (buckets ?? []).map((bucket) => {
+        // The bucket already chosen stays choosable (re-saving it asks nothing more); a different one needs write access to it.
+        const blocked = bucket.canChoose === false && bucket.key !== storedKey;
+        return {
+            value: bucket.key,
+            label: bucket.providerLabel ? `${bucket.name} · ${bucket.providerLabel}` : bucket.name,
+            disabled: !bucket.usable || blocked,
+            reason: bucketUnusableReason(bucket, labels) ?? (blocked ? labels.cannotChoose : undefined),
+            localDisk: bucket.localDisk,
+        };
+    });
     if (storedKey && !items.some((item) => item.value === storedKey)) {
         items.unshift({
             value: storedKey,

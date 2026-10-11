@@ -2,13 +2,14 @@
  * `agent.approve` in the engine: who may answer a pending request of an agent session.
  *
  * The managed rule (`managed:agent:*`) reads the session's owners and the agent's own
- * "who can approve" setting; the Write level the action sits in would grant it to every
- * `agents` writer, so a boundary forbids everybody the rule does not name. The table below
- * is the acceptance table: three settings x nine kinds of caller, as the old `mayResolve`
- * decided (plus what a token owned by a project admin newly gets). Then the rest of the
- * contract: custom rules narrow and never widen, the portal's list applies on top, the
- * session actions of "somebody else's session" default to today's behaviour, and the
- * compiler tells an administrator the truth about what a rule can do.
+ * "who can approve" setting. `agent.approve` sits in the Write level, but the generic RBAC
+ * Write permits leave it out: it is APPOINTED, so holding `agents:write` alone approves
+ * nothing. The table below is the acceptance table: three settings x nine kinds of caller,
+ * as the old `mayResolve` decided (plus what a token owned by a project admin newly gets).
+ * Then the rest of the contract: a custom allow rule appoints more approvers (a compliance
+ * group), custom deny rules narrow, the token and project limits and the portal's list
+ * apply on top, the session actions of "somebody else's session" default to today's
+ * behaviour, and the compiler tells an administrator the truth about what a rule can do.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,6 +32,7 @@ import { authorize, configureIamEngine, resetIamEngineForTests } from '@/lib/iam
 import { tokenPrincipal, userPrincipal, type IamPrincipal, type IamResource } from '@/lib/iam/entities';
 import { compileSpec, type PolicySpec } from '@/lib/iam/policySpec';
 import { validateCustomPolicyText } from '@/lib/iam/policyText';
+import { AGENT_POLICIES, MANAGED_POLICIES } from '@/lib/iam/managedPolicies';
 import { createPolicy, deletePolicy, listPolicies } from '@/lib/iam/store';
 import { createIamTestDb, type IamTestDb } from '../helpers/iamTestDb';
 
@@ -105,7 +107,7 @@ describe('the managed approval rule', () => {
     });
   }
 
-  it('a plain agents writer is NOT let in by the Write level (the boundary forbids everybody the rule does not name)', async () => {
+  it('a plain agents writer is NOT let in by the Write level (the generic Write permits leave agent.approve out)', async () => {
     const stranger = person('stranger');
     const generic = await authorize({
       tenant: tenant(), principal: stranger, action: 'agents.write', resource: { kind: 'service', service: 'agents' }, context: { channel: 'dashboard' },
@@ -113,7 +115,17 @@ describe('the managed approval rule', () => {
     expect(generic.allowed).toBe(true); // they may write agents...
     const result = await decide(stranger, session('owner'));
     expect(result.allowed).toBe(false); // ...and still cannot answer somebody else's request
-    expect(result.reasons).toContain('managed:agent:approve-boundary');
+    expect(result.errors).toEqual([]);
+    expect(result.reasons).toEqual([]); // nothing forbids them: nothing appoints them (a default deny)
+    // the same for a token of such a person
+    const strangersToken = tokenPrincipal({ tokenId: 't-stranger', owner: stranger, scope: null });
+    expect((await decide(strangersToken, session('owner'))).allowed).toBe(false);
+  });
+
+  it('the managed set has no boundary on the action: three agent rules less one, two permits', () => {
+    expect(Object.keys(AGENT_POLICIES)).toEqual(['managed:agent:approve', 'managed:agent:approve-token']);
+    expect(MANAGED_POLICIES['managed:rbac:user-write']).toContain('action != Action::"agent.approve"');
+    expect(MANAGED_POLICIES['managed:rbac:token-write']).toContain('action != Action::"agent.approve"');
   });
 
   it('a session nobody started (a2a-public, a schedule) is somebody else\'s: only the agent\'s setting lets anyone in', async () => {
@@ -182,24 +194,97 @@ describe('custom rules on top', () => {
     expect((await decide(person('starter'), session('owner', { id: 'a-open' }))).allowed).toBe(true);
   });
 
-  it('an allow rule cannot widen who may answer: the boundary still forbids', async () => {
-    await createPolicy(tenant(), { policyId: 'permit-all', name: 'permit all', cedar: 'permit(principal, action, resource);' }, 't');
+  it('a custom allow rule APPOINTS approvers: a compliance group answers across agents, for people and for their tokens', async () => {
+    const compiled = await compileSpec({
+      effect: 'permit', principals: { groups: ['compliance'] }, actions: ['agent.approve'], resources: { any: true },
+    });
+    expect(compiled.errors).toEqual([]);
+    expect(compiled.ok).toBe(true);
+    await createPolicy(tenant(), { policyId: 'compliance-approvers', name: 'Compliance approves', cedar: compiled.cedar, spec: compiled.spec }, 't');
     resetIamEngineForTests();
     configureIamEngine({ validateRequests: true, versionCheckMs: 5_000 });
-    const result = await decide(person('other'), session('owner'));
-    expect(result.allowed).toBe(false);
-    expect(result.reasons).toContain('managed:agent:approve-boundary');
+
+    const auditor = person('auditor', { groupIds: ['compliance'], projects: [] });
+    const allowed = await decide(auditor, session('owner'));
+    expect(allowed.errors).toEqual([]);
+    expect(allowed.allowed).toBe(true);
+    expect(allowed.reasons).toContain('custom:compliance-approvers');
+    // ...in every agent and every setting, the group is not tied to a project
+    expect((await decide(auditor, session('owner', { id: 'a2' }))).allowed).toBe(true);
+    // their token approves too, unless it is scoped away from agents
+    expect((await decide(tokenPrincipal({ tokenId: 't-aud', owner: auditor, scope: null }), session('owner'))).allowed).toBe(true);
+    expect((await decide(tokenPrincipal({ tokenId: 't-aud-r', owner: auditor, scope: { agents: 'read' } }), session('owner'))).allowed).toBe(false);
+    // somebody who is not in the group is where they were
+    expect((await decide(person('other'), session('owner'))).allowed).toBe(false);
   });
 
-  it('the compiler says so: an allow rule about agent.approve grants nobody anything', async () => {
+  it('a custom deny narrows an appointment and the managed rule alike', async () => {
+    const allow = await compileSpec({ effect: 'permit', principals: { groups: ['compliance'] }, actions: ['agent.approve'], resources: { any: true } });
+    const deny = await compileSpec({ effect: 'forbid', principals: { groups: ['compliance'] }, actions: ['agent.approve'], resources: { resources: [{ type: 'agent', id: 'a-secret' }] } });
+    await createPolicy(tenant(), { policyId: 'appoint', name: 'appoint', cedar: allow.cedar, spec: allow.spec }, 't');
+    await createPolicy(tenant(), { policyId: 'keep-out', name: 'keep out', cedar: deny.cedar, spec: deny.spec }, 't');
+    resetIamEngineForTests();
+    configureIamEngine({ validateRequests: true, versionCheckMs: 5_000 });
+    const auditor = person('auditor', { groupIds: ['compliance'], projects: [] });
+    expect((await decide(auditor, session('owner', { id: 'a-open' }))).allowed).toBe(true);
+    const refused = await decide(auditor, session('owner', { id: 'a-secret' }));
+    expect(refused.allowed).toBe(false);
+    expect(refused.reasons).toContain('custom:keep-out');
+  });
+
+  it('an appointment does not get round the limits of the request: a token scope and a project\'s own limit still forbid', async () => {
+    const allow = await compileSpec({ effect: 'permit', principals: { anyUser: true }, actions: ['agent.approve'], resources: { any: true } });
+    await createPolicy(tenant(), { policyId: 'everyone', name: 'everyone approves', cedar: allow.cedar, spec: allow.spec }, 't');
+    resetIamEngineForTests();
+    configureIamEngine({ validateRequests: true, versionCheckMs: 5_000 });
+    // project narrowing: the project's own limit for this member is below Write on agents
+    const limited = { ...person('limited'), projDeny: { read: [], write: ['agents'], admin: [] } };
+    const result = await decide(limited, session('owner'));
+    expect(result.allowed).toBe(false);
+    expect(result.reasons).toContain('managed:boundary:project-write');
+    // a token scoped to reading agents: the scope forbids
+    const scoped = await decide(tokenPrincipal({ tokenId: 't-scoped', owner: person('other'), scope: { agents: 'read' } }), session('owner'));
+    expect(scoped.allowed).toBe(false);
+    expect(scoped.reasons).toContain('managed:boundary:token-cap-write');
+  });
+
+  it('the compiler says so: an allow rule about agent.approve appoints approvers - and reminds that they need Write on Agents', async () => {
     const only = await compileSpec({ effect: 'permit', principals: { anyUser: true }, actions: ['agent.approve'], resources: { any: true } });
     expect(only.ok).toBe(true);
-    expect(only.warnings.map((w) => w.code)).toEqual(['approval_rule_grants']);
-    // when the rule also works elsewhere (the Write level at the gates) it is advice, not "this does nothing"
-    const alsoElsewhere = await compileSpec({ effect: 'permit', principals: { anyUser: true }, actions: ['agent.approve', 'agents.write'], resources: { any: true } });
-    expect(alsoElsewhere.warnings.map((w) => w.code)).toEqual(['partly_approval_rule_grants']);
+    expect(only.warnings.map((w) => w.code)).toEqual(['approval_needs_agents_write']);
+    // ...a rule that also hands out Write on agents needs no reminder
+    const withWrite = await compileSpec({ effect: 'permit', principals: { anyUser: true }, actions: ['agent.approve', 'agents.write'], resources: { any: true } });
+    expect(withWrite.warnings.map((w) => w.code)).toEqual([]);
+    // an allow rule the routes can never meet is still told so (here: resources of another kind)
+    const nowhere = await compileSpec({ effect: 'permit', principals: { anyUser: true }, actions: ['agent.approve'], resources: { services: ['models'] } });
+    expect(nowhere.warnings.map((w) => w.code)).not.toContain('approval_needs_agents_write');
+    expect(nowhere.warnings.map((w) => w.code)).toContain('session_wrong_scope');
     // a deny says nothing of the kind
-    expect((await compileSpec(forbidUser('starter'))).warnings.map((w) => w.code)).not.toContain('approval_rule_grants');
+    expect((await compileSpec(forbidUser('starter'))).warnings.map((w) => w.code)).toEqual([]);
+  });
+
+  it('the compiler says when an allow rule appoints approvers only through the Write level, which its author may not have meant', async () => {
+    const write = await compileSpec({ effect: 'permit', principals: { groups: ['editors'] }, actions: ['Write'], resources: { services: ['agents'] } });
+    expect(write.ok).toBe(true);
+    expect(write.warnings.map((w) => w.code)).toContain('write_includes_approval');
+    // naming the action, or a rule whose resources never reach an agent, says something else or nothing
+    const specific = await compileSpec({ effect: 'permit', principals: { groups: ['editors'] }, actions: ['agents.write'], resources: { services: ['agents'] } });
+    expect(specific.warnings.map((w) => w.code)).not.toContain('write_includes_approval');
+    const elsewhere = await compileSpec({ effect: 'permit', principals: { groups: ['editors'] }, actions: ['Write'], resources: { services: ['models'] } });
+    expect(elsewhere.warnings.map((w) => w.code)).not.toContain('write_includes_approval');
+    // a deny that covers the Write level narrows, it appoints nobody
+    const deny = await compileSpec({ effect: 'forbid', principals: { groups: ['editors'] }, actions: ['Write'], resources: { services: ['agents'] } });
+    expect(deny.warnings.map((w) => w.code)).not.toContain('write_includes_approval');
+  });
+
+  it('and a Write-level allow rule really does appoint them (the engine agrees with the warning)', async () => {
+    const write = await compileSpec({ effect: 'permit', principals: { groups: ['editors'] }, actions: ['Write'], resources: { services: ['agents'] } });
+    await createPolicy(tenant(), { policyId: 'editors-write', name: 'editors write', cedar: write.cedar, spec: write.spec }, 't');
+    resetIamEngineForTests();
+    configureIamEngine({ validateRequests: true, versionCheckMs: 5_000 });
+    const editor = person('editor', { groupIds: ['editors'], projects: [] });
+    expect((await decide(editor, session('owner'))).allowed).toBe(true);
+    expect((await decide(person('stranger'), session('owner'))).allowed).toBe(false);
   });
 
   it('raw Cedar about the session attributes validates against the schema (`resource.owners`, `resource.approvers`)', () => {

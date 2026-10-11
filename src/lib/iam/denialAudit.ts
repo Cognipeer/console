@@ -72,15 +72,25 @@ const MAX_TEXT = 300;
 
 const clip = (value: string | undefined): string | undefined => (value ? value.slice(0, MAX_TEXT) : undefined);
 
-/** The level of an action, from the catalog's own table: `read` for one that only looks (portal.use, session_view_others), `write` for one that acts. */
+/** The level of an action, from the catalog's own tables: `read` for one that only looks (portal.use, session_view_others, get), `write` for one that acts. */
 export function auditLevelOf(action: string): 'read' | 'write' {
   const [type, verb] = action.split('.');
-  return RESOURCE_EXTRA_VERBS.find((v) => v.type === type && v.verb === verb)?.level === 'write' ? 'write' : 'read';
+  const extra = RESOURCE_EXTRA_VERBS.find((v) => v.type === type && v.verb === verb);
+  if (extra) return extra.level === 'write' ? 'write' : 'read';
+  // The plain CRUD verbs of a registry type (`file-bucket.update`).
+  return verb === 'create' || verb === 'update' || verb === 'delete' ? 'write' : 'read';
 }
 
-/** The service a refusal is filed under: the portals' for anything the portal runtime asked, the agents' for the agent routes. */
-export function auditServiceOf(channel: string): 'portals' | 'agents' {
-  return channel === 'portal' ? 'portals' : 'agents';
+/** The services whose resources the agents routes ask about besides their own (a bucket is the Document Store's). */
+const SERVICE_OF_TYPE: Readonly<Record<string, string>> = { 'file-bucket': 'files' };
+
+/**
+ * The service a refusal is filed under: the portals' for anything the portal runtime asked, else the service of
+ * the resource the action is about (the agents' for the agent routes, the Document Store's for a bucket).
+ */
+export function auditServiceOf(channel: string, action?: string): string {
+  if (channel === 'portal') return 'portals';
+  return (action && SERVICE_OF_TYPE[action.split('.')[0]]) || 'agents';
 }
 
 /** Names of the custom policies behind a denial, while they exist (a deleted one is resolved from the changes feed later). */
@@ -108,7 +118,7 @@ async function write(entry: ResourceDenialEntry): Promise<void> {
     ...(entry.apiTokenId ? { apiTokenId: entry.apiTokenId } : {}),
     ...(entry.userRole ? { actorRole: entry.userRole } : {}),
     ...(entry.projectId ? { projectId: entry.projectId } : {}),
-    service: auditServiceOf(entry.channel),
+    service: auditServiceOf(entry.channel, entry.action),
     action: auditLevelOf(entry.action),
     event: entry.action,
     method: entry.client?.method?.toUpperCase(),

@@ -43,6 +43,8 @@ export interface SessionListFilters {
     status?: AgentSessionRuntimeStatus;
     limit: number;
     after?: { createdAt: Date; id: string };
+    /** The caller may not see other people's sessions of these agents (every agent when no keys): only their own are listed. */
+    ownOnly?: { userId: string; agentKeys?: string[] };
 }
 
 export interface SessionListPage {
@@ -61,6 +63,7 @@ export async function listSessionPage(tenantDbName: string, filters: SessionList
         ...(filters.status ? { runtimeStatus: filters.status } : {}),
         limit: filters.limit + 1,
         ...(filters.after ? { after: filters.after } : {}),
+        ...(filters.ownOnly ? { ownOnly: filters.ownOnly } : {}),
     });
     const hasMore = rows.length > filters.limit;
     const page = rows.slice(0, filters.limit);

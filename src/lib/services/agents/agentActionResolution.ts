@@ -3,8 +3,10 @@
  *
  * `resolveAgentPendingAction` is the one entry point the dashboard, the client
  * API and the portal all call. It checks who may answer (the caller's
- * `authorize`: the policy engine's `agent.approve` decision, asked by the route
- * that has the principal), records the answer, and —
+ * `authorize`, asked by the route that has the principal: the policy engine's
+ * `agent.approve` decision for a tool approval; for a QUESTION the ownership of
+ * the session - its owner always, anybody else needs `agent.session_manage_others`),
+ * records the answer, and —
  * once every action of the pause is answered — continues the SAME turn: the
  * agent is rebuilt, the stored state restored, the answers applied with the SDK
  * and the loop invoked again (`executeAgentResumeLocal`). The continuation can
@@ -74,26 +76,41 @@ export interface ResolveActor {
 }
 
 /**
- * What the policy engine is asked when somebody answers: the session (who started it) and the agent's own
- * "who can approve" setting as the paused turn ran with it. The engine decides; this is only the question.
+ * What the policy engine is asked when somebody answers: the session (who started it), the request (a tool
+ * approval or a question - they are governed differently) and the agent's own "who can approve" setting as the
+ * paused turn ran with it (the agent version the request was raised under). The engine decides; this is only
+ * the question.
  */
 export interface ApprovalRequest {
     conversation: Pick<IAgentConversation, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
-    action: Pick<IAgentPendingAction, '_id' | 'agentKey' | 'projectId' | 'createdBy'>;
+    /** `kind` absent = a tool approval (an authorizer written before questions were told apart). */
+    action: Pick<IAgentPendingAction, '_id' | 'agentKey' | 'projectId' | 'createdBy'> & Partial<Pick<IAgentPendingAction, 'kind'>>;
     approvers: ResolvedHitlConfig['approvers'];
 }
 
-/** `decisionId`: the code of the engine's refusal (also in the audit trail), for the caller to quote. */
-export type ApprovalVerdict = { allowed: true } | { allowed: false; message?: string; decisionId?: string };
+/**
+ * `decisionId`: the code of the engine's refusal (also in the audit trail), for the caller to quote.
+ * `unavailable`: the engine could not decide - nobody was refused on merit, the caller answers 503.
+ */
+export type ApprovalVerdict =
+    | { allowed: true }
+    | { allowed: false; message?: string; decisionId?: string; unavailable?: boolean };
 
 /**
  * May the caller answer this request? Supplied by the route (or the portal), the only place that has the
- * principal: it asks `agent.approve` of the engine. A refusal is `{ allowed: false }`; when the engine
- * cannot decide at all it THROWS the 503 the gate would have sent - an outage is never read as an answer.
+ * principal. A tool approval asks `agent.approve` of the engine (allow, deny, edited arguments, remember for
+ * the session); a question asks the ownership of the session (`agent.session_manage_others` for anybody but
+ * its owner). A refusal is `{ allowed: false }`; when the engine cannot decide at all the verdict says
+ * `unavailable` - an outage is never read as an answer, and never as a "no" either (the resolve outcome is
+ * `unavailable`, a 503). An authorizer that THROWS its 503 instead (an `ApprovalUnavailableError`, or any
+ * error carrying the code `authorization_unavailable`) is read the same way.
  */
 export type ApprovalAuthorizer = (request: ApprovalRequest) => Promise<ApprovalVerdict>;
 
 const FORBIDDEN_MESSAGE = 'You are not allowed to answer this request.';
+
+/** Who a request the timeout sweep ended is recorded as answered by (`resolvedBy`, the audit trail's actor). */
+const SYSTEM_TIMEOUT_ACTOR = 'system:timeout';
 
 export interface ResolveAgentActionInput {
     tenantDbName: string;
@@ -128,6 +145,8 @@ export type ResolveOutcome =
     | { kind: 'not_pending'; status: IAgentPendingAction['status'] }
     | { kind: 'expired' }
     | { kind: 'forbidden'; message: string; decisionId?: string }
+    /** The engine could not decide who may answer: 503, never a 403 - and nothing was recorded. */
+    | { kind: 'unavailable'; decisionId?: string }
     | { kind: 'invalid'; message: string }
     | { kind: 'busy' }
     /** Recorded; other requests of the same pause are still open. */
@@ -214,13 +233,42 @@ function checkAnswers(action: IAgentPendingAction, resolution: IAgentPendingActi
 
 // ── Shared bookkeeping ───────────────────────────────────────────────
 
-/** The refusal for a caller the engine does not let answer. */
+/** The refusal for a caller the engine does not let answer (or the engine's outage). */
 function forbidden(verdict: Extract<ApprovalVerdict, { allowed: false }>): ResolveOutcome {
+    if (verdict.unavailable) return { kind: 'unavailable', ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}) };
     return { kind: 'forbidden', message: verdict.message ?? FORBIDDEN_MESSAGE, ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}) };
 }
 
-/** The settings of the config the paused turn ran with. */
-async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendingAction): Promise<ResolvedHitlConfig> {
+/** An error an authorizer threw that says "the engine could not decide" (the portal's, a gate's 503). */
+function unavailableCause(error: unknown): { decisionId?: string } | null {
+    if (!error || typeof error !== 'object') return null;
+    const candidate = error as { code?: unknown; status?: unknown; body?: { code?: unknown; decisionId?: unknown }; decisionId?: unknown };
+    const isUnavailable = candidate.code === 'authorization_unavailable'
+        || candidate.body?.code === 'authorization_unavailable'
+        || candidate.status === 503;
+    if (!isUnavailable) return null;
+    const decisionId = typeof candidate.decisionId === 'string' ? candidate.decisionId
+        : typeof candidate.body?.decisionId === 'string' ? candidate.body.decisionId : undefined;
+    return decisionId ? { decisionId } : {};
+}
+
+/** Asks the caller's authorizer; its outage - returned or thrown - is the `unavailable` verdict. Anything else it throws is a bug and propagates. */
+async function askAuthorizer(authorize: ApprovalAuthorizer, request: ApprovalRequest): Promise<ApprovalVerdict> {
+    try {
+        return await authorize(request);
+    } catch (error) {
+        const cause = unavailableCause(error);
+        if (!cause) throw error;
+        return { allowed: false, unavailable: true, ...cause };
+    }
+}
+
+/**
+ * The settings of the config the paused turn ran with: the agent VERSION the request was raised under (a
+ * published version is frozen, so editing the agent later does not change who may answer an open request),
+ * else the live config. Readable even when the agent was deleted since (the defaults then apply).
+ */
+export async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendingAction): Promise<ResolvedHitlConfig> {
     const agent = await db.findAgentByKey(action.agentKey, action.projectId);
     let config: IAgentConfig | undefined = agent?.config;
     if (agent && action.agentVersion != null) {
@@ -277,6 +325,42 @@ function auditResolution(
                 argumentsEdited: edited,
                 rememberForSession: resolution.rememberForSession === true,
                 channel: actor.channel,
+            },
+        },
+    )));
+}
+
+/**
+ * The timeout sweep answers (or drops) a request by itself: no person, no principal, outside the policy engine
+ * (`agent.approve` is about people). It is audited as the system - `actorType: 'system'`, `system:timeout` - so
+ * the trail says who ended the request and why.
+ */
+function auditSystemResolution(
+    tenantDbName: string,
+    action: IAgentPendingAction,
+    outcome: { status: IAgentPendingAction['status']; resolution: IAgentPendingActionResolution },
+): void {
+    criticalFireAndForget('agent-action-timeout-audit', () => runWithTenantScope(tenantDbName, () => recordAuditLog(
+        { tenantDbName, tenantId: action.tenantId },
+        {
+            projectId: action.projectId,
+            action: 'write',
+            actorType: 'system',
+            actorUserId: SYSTEM_TIMEOUT_ACTOR,
+            event: action.kind === 'tool_approval' ? 'agent.tool_approval.timeout' : 'agent.question.timeout',
+            outcome: 'success',
+            resourceType: 'agent_pending_action',
+            resourceId: String(action._id),
+            service: 'agents',
+            metadata: {
+                agentKey: action.agentKey,
+                conversationId: action.conversationId,
+                kind: action.kind,
+                toolName: action.toolName ?? null,
+                status: outcome.status,
+                decision: outcome.resolution.decision ?? null,
+                cancelled: outcome.resolution.cancelled === true,
+                channel: 'timeout',
             },
         },
     )));
@@ -343,7 +427,7 @@ export async function checkAgentPendingActionResolution(
         const conversation = await db.findAgentConversationById(conversationId);
         if (!conversation || conversation.projectId !== projectId) return { kind: 'not_found' };
 
-        const verdict = await input.authorize({ conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
+        const verdict = await askAuthorizer(input.authorize, { conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
         if (!verdict.allowed) return forbidden(verdict);
 
         const parsed = parseResolution(action, input.body);
@@ -375,7 +459,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
         if (!conversation || conversation.projectId !== projectId) return { kind: 'not_found' };
 
         // 2. Who may answer: the policy engine's decision, asked by the caller (it has the principal).
-        const verdict = await input.authorize({ conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
+        const verdict = await askAuthorizer(input.authorize, { conversation, action, approvers: (await hitlSettingsFor(db, action)).approvers });
         if (!verdict.allowed) return forbidden(verdict);
 
         // 3. What they answered.
@@ -598,6 +682,7 @@ export async function sweepExpiredPendingActions(
                     });
                     if (!updated) continue;
                     result.expired += 1;
+                    auditSystemResolution(tenantDbName, action, { status: 'expired', resolution: { cancelled: true } });
                     snapshots.set(String(action._id), { status: 'expired', resolution: { cancelled: true } });
                     events.push({
                         type: 'action.resolved',
@@ -613,6 +698,7 @@ export async function sweepExpiredPendingActions(
                 });
                 if (!updated) continue;
                 result.denied += 1;
+                auditSystemResolution(tenantDbName, action, { status: 'resolved', resolution });
                 snapshots.set(String(action._id), { status: 'resolved', resolution });
                 events.push({
                     type: 'action.resolved',

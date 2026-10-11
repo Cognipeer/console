@@ -67,7 +67,7 @@ describe('edge kind registry', () => {
     ];
     const warnings = [
       'agent.tool', 'agent.mcp', 'agent.knowledge', 'agent.subagent', 'agent.subagentModel', 'agent.subagentKnowledge',
-      'agent.subagentTool', 'agent.subagentMcp', 'agent.memory', 'agent.skill', 'agent.browser', 'agent.webSearchProvider',
+      'agent.subagentTool', 'agent.subagentMcp', 'agent.memory', 'agent.skill', 'agent.browser', 'agent.webSearchProvider', 'agent.attachmentsBucket',
       'model.replicaProvider', 'model.semanticCacheModel', 'model.semanticCacheIndex', 'rag.reranker', 'rag.fileBucket',
       'reranker.model', 'crawler.ragModule', 'mcp.compositeMember',
     ];

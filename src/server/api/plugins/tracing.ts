@@ -7,6 +7,7 @@ import {
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { filterSessionLinkedRows, refuseTracingThread, sendSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:tracing');
 
@@ -81,7 +82,10 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         ...metadataFilter,
       });
 
-      return reply.code(200).send(result);
+      // A tracing session of an agent is a turn of somebody's session: the sessions of an agent whose other
+      // people's sessions the caller may not view are left out (nothing to look up for the default caller).
+      const visible = await filterSessionLinkedRows(request, result.sessions, (row) => row.threadId, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      return reply.code(200).send({ ...result, sessions: visible, total: Math.max(0, result.total - (result.sessions.length - visible.length)) });
     } catch (error) {
       logger.error('List tracing sessions error', { error });
       return sendProjectContextError(reply, error)
@@ -111,6 +115,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if (!result) {
         return reply.code(404).send({ error: 'Session not found' });
       }
+      const refusal = await refuseTracingThread(request, result.session.threadId, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
 
       return reply.code(200).send(result);
     } catch (error) {
@@ -126,6 +132,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { eventId, sessionId } = request.params as { eventId: string; sessionId: string };
+      const refusal = await refuseTracingThread(request, await AgentTracingService.getSessionThreadId(session.tenantDbName, projectId, sessionId), { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
       const result = await AgentTracingService.getSessionEventDetail(
         session.tenantDbName,
         projectId,
@@ -166,7 +174,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
         ...metadataFilter,
       });
 
-      return reply.code(200).send(result);
+      const threads = await filterSessionLinkedRows(request, result.threads, (row) => (typeof row.threadId === 'string' ? row.threadId : null), { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      return reply.code(200).send({ ...result, threads, total: Math.max(0, result.total - (result.threads.length - threads.length)) });
     } catch (error) {
       logger.error('List tracing threads error', { error });
       return sendProjectContextError(reply, error)
@@ -180,6 +189,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { threadId } = request.params as { threadId: string };
+      const refusal = await refuseTracingThread(request, threadId, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
       const result = await AgentTracingService.getThreadDetail(
         session.tenantDbName,
         projectId,

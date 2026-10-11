@@ -26,10 +26,8 @@ export type BuiltInKind =
   | 'portalList'
   /** `managed:portal:*-boundary`: nothing but the portal's access list opens a portal or runs its agents. */
   | 'portalBoundary'
-  /** `managed:agent:approve*`: the session's owner, or whoever the agent accepts, may answer its pending requests. */
+  /** `managed:agent:approve*`: the session's owner, or whoever the agent accepts, may approve its tool calls. */
   | 'approvalRule'
-  /** `managed:agent:approve-boundary`: nobody but the rule above answers a pending request. */
-  | 'approvalBoundary'
   | 'other';
 
 export interface BuiltInReason {
@@ -40,13 +38,13 @@ export interface BuiltInReason {
 
 const MANAGED = /^managed:(rbac|boundary):(user|token|token-cap|project)-(read|write|admin)$/;
 const PORTAL_MANAGED = /^managed:portal:(use|agent)(-boundary)?$/;
-const AGENT_MANAGED = /^managed:agent:approve(-token|-boundary)?$/;
+const AGENT_MANAGED = /^managed:agent:approve(-token)?$/;
 
 export function parseBuiltInReason(cedarId: string): BuiltInReason {
   const portal = PORTAL_MANAGED.exec(cedarId);
   if (portal) return { kind: portal[2] ? 'portalBoundary' : 'portalList', level: null };
   const agent = AGENT_MANAGED.exec(cedarId);
-  if (agent) return { kind: agent[1] === '-boundary' ? 'approvalBoundary' : 'approvalRule', level: null };
+  if (agent) return { kind: 'approvalRule', level: null };
   const match = MANAGED.exec(cedarId);
   if (!match) return { kind: 'other', level: null };
   const [, group, who, level] = match;

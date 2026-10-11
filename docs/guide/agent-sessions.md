@@ -87,7 +87,7 @@ Newest first:
 }
 ```
 
-A row is the session without its transcript (`message_count` instead) and without `pending_actions` — fetch one session to see those. The cursor marks the last row you read, so a session created while you page never shifts a row into or out of a page you already have. Which sessions a token sees follows the project, as for every other session call.
+A row is the session without its transcript (`message_count` instead) and without `pending_actions` — fetch one session to see those. The cursor marks the last row you read, so a session created while you page never shifts a row into or out of a page you already have. Which sessions a token sees follows the project, as for every other session call - and, when a rule of the workspace stops the token's owner from viewing sessions that other people started (see [Who sees a session](#who-sees-a-session)), only the sessions the owner started: the rows are cut before the page, so `limit` and `has_more` are about what the caller may see.
 
 ## Get, update, delete
 
@@ -104,3 +104,14 @@ DELETE /api/client/v1/agents/sessions/{id}
 Deleting removes the session with its files (object, markdown and record), its event log and any open approvals. It is refused with `409 agent_run_conflict` while a run (synchronous or background) is queued or running on it — cancel or wait for it first.
 
 The other calls on a session: [events](/guide/agent-session-events), [approvals and questions](/guide/agent-approvals), [files](/guide/session-files), [budget](/guide/agent-session-budgets) and [background runs](/guide/agent-background-execution).
+
+## Who sees a session
+
+A session belongs to the person who started it - for API traffic, the owner of the token that created it. That person needs only the token's own scope (Agents Read to look, Write to act). **Anybody else** needs a permission for the sessions of an agent they did not start:
+
+| | Needed for | Default |
+| --- | --- | --- |
+| **View others' sessions** (`agent.session_view_others`) | reading it: the session, its events, files, runs, tracing thread; listing it | every holder of Agents Read |
+| **Act on others' sessions** (`agent.session_manage_others`) | continuing it (also by `session_id` / `previous_response_id` in the Responses and chat completions routes, whichever service the token holds), changing its budget, uploading or deleting its files, cancelling its runs, deleting it | every holder of Agents Write |
+
+Nothing changes until a workspace narrows them with a deny rule in **Authorization → Policies**; then the session routes answer `403 session_forbidden` with a `decision_id` (replayable in the Access check) for sessions the caller may not touch, and the list calls return only the caller's own. A session that no person started - a schedule, a public A2A call, an evaluation - is always somebody else's. If the permission engine cannot decide, the answer is `503 authorization_unavailable`, never an allow.

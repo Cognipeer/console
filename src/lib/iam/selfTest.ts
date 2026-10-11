@@ -10,14 +10,15 @@
  *   1. the Cedar WASM module loads;
  *   2. the schema generated from the action catalog and the resource registry
  *      parses and is preparsed;
- *   3. the managed policy set (the RBAC permits and the boundary forbids)
- *      type-checks against that schema and is preparsed;
+ *   3. the managed policy set (the RBAC permits, the boundary forbids, the portal and
+ *      approval rules) type-checks against that schema and is preparsed;
  *   4. canned decisions come out right: an admin reads, a plain member cannot
  *      change an administration service, a token with an empty scope reads
  *      nothing, a token limited to one service reaches only that one, a
  *      portal is opened (and its agents run) by the people its access list names
- *      and by nobody else, and a pending request of an agent session is answered
- *      by the people the agent's `approvers` setting names and by nobody else,
+ *      and by nobody else, and a pending tool approval of an agent session is
+ *      approved by the people the agent's `approvers` setting appoints and by nobody else
+ *      (the generic Write permit leaves `agent.approve` out),
  *      and looking at / acting on somebody else's session is governed by the level
  *      groups (a reader looks, a writer acts, nobody without `agents` does) -
  *      with no evaluation error from any managed rule.

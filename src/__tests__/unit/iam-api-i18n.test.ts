@@ -45,7 +45,7 @@ describe.each(Object.entries(locales))('iamApi labels [%s]', (_name, messages) =
 
   it('resolves the name and description of every managed policy', () => {
     const views = listManagedPolicyViews();
-    expect(views).toHaveLength(19);
+    expect(views).toHaveLength(18);
     for (const v of views) {
       expect(typeof resolve(messages, v.nameKey), v.nameKey).toBe('string');
       expect(typeof resolve(messages, v.descriptionKey), v.descriptionKey).toBe('string');
@@ -86,7 +86,7 @@ describe.each(Object.entries(locales))('issues the policy compiler can raise [%s
     expect(codes).toEqual(expect.arrayContaining([
       'not_enforced_actions', 'partly_enforced_actions', 'admin_checked_as_write', 'trusted_proxies_unset', 'not_asked_actions', 'partly_not_asked_actions',
       'portal_access_list_grants', 'partly_portal_access_list_grants', 'portal_wrong_channel', 'portal_wrong_scope',
-      'approval_rule_grants', 'partly_approval_rule_grants', 'session_wrong_scope',
+      'approval_needs_agents_write', 'write_includes_approval', 'session_wrong_scope',
     ]));
     const missing = codes.filter((code) => typeof resolve(messages, `iamCenter.issueCodes.${code}`) !== 'string');
     expect(missing).toEqual([]);
@@ -111,8 +111,9 @@ describe.each(Object.entries(locales))('audit feed sentences [%s]', (_name, mess
     const denied = ['policy', 'tokenScope', 'project', 'noRule'].map((reason) => `denied.${reason}`); // key: `denied.${reason}`
     const portal = ['portalUse', 'portalUsePolicy', 'portalInvoke', 'portalInvokePolicy'].map((key) => `denied.${key}`); // a refusal of the portal runtime
     const sessions = ['approve', 'approvePolicy', 'sessionView', 'sessionViewPolicy', 'sessionManage', 'sessionManagePolicy'].map((key) => `denied.${key}`); // a refusal about a session of an agent
+    const buckets = ['bucketChoose', 'bucketChoosePolicy', 'bucketName', 'bucketNamePolicy'].map((key) => `denied.${key}`); // a refusal about the bucket an agent keeps its files in
     const ip = ['ipNotAllowed', 'ipNotAllowedAt']; // key: row.path ? 'ipNotAllowedAt' : 'ipNotAllowed'
-    const keys = uniq([...literal, ...denied, ...portal, ...sessions, ...ip]);
+    const keys = uniq([...literal, ...denied, ...portal, ...sessions, ...buckets, ...ip]);
     expect(keys).toEqual(expect.arrayContaining(['undeclared', 'unavailable', 'ipNotAllowed', 'policy.created', 'policy.updated', 'policy.deleted', 'settings.updated', 'token.restrictions', 'denied.noRule']));
     const missing = keys.filter((key) => typeof resolve(messages, `iamAudit.summaries.${key}`) !== 'string');
     expect(missing).toEqual([]);

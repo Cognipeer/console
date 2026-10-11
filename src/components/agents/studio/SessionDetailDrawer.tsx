@@ -29,13 +29,11 @@ import TokenStats from '@/components/common/ui/TokenStats';
 import { type PropertyRow } from '@/components/common/ui/PropertiesPanel';
 import { formatDuration, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { useTranslations } from '@/lib/i18n';
-import type { IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
 import PendingActionList from '../session/PendingActionCards';
 import SessionActivity from '../session/SessionActivity';
 import SessionStatusBadge from '../session/SessionStatusBadge';
-import { answerRestriction, isStaleActionRefusal, openActionsOf, type ResolveBody } from '../session/pendingActions';
+import { answerBlockedReason, isStaleActionRefusal, openActionsOf, type ResolveBody, type ServerPendingAction } from '../session/pendingActions';
 import { sessionStatusKind, stopReasonBadge } from '../session/sessionActivityUi';
-import { useViewer } from '../session/useViewer';
 import { formatCost } from '../session/sessionUsage';
 import { stepFailed, type ChatMessage, type SessionRecord } from '../session/sessionTypes';
 import { sessionFilesUrl, toAttachmentViews, type SessionFileItem } from '../session/sessionFilesUi';
@@ -47,8 +45,6 @@ export interface SessionDetailDrawerProps {
     session: SessionListItem | null;
     onClose: () => void;
     onContinue: (sessionId: string) => void;
-    /** The agent's `humanInTheLoop.approvers` — who may answer an open request (a notice for those who may not). */
-    approvers?: IAgentHumanInTheLoopConfig['approvers'];
     /** A request was answered here, so the session list behind the drawer is out of date. */
     onResolved?: () => void;
 }
@@ -98,10 +94,12 @@ export function toItems(messages: ChatMessage[], transcriptFiles?: TranscriptFil
     return items;
 }
 
-export default function SessionDetailDrawer({ agentId, session, onClose, onContinue, approvers, onResolved }: SessionDetailDrawerProps) {
+export default function SessionDetailDrawer({ agentId, session, onClose, onContinue, onResolved }: SessionDetailDrawerProps) {
     const th = useTranslations('agents.hitl');
     const ta = useTranslations('agents.activity');
     const [record, setRecord] = useState<SessionRecord | null>(null);
+    // What the server says the viewer may do with the open requests (its own rule, not guessed from the agent's setting).
+    const [serverActions, setServerActions] = useState<ServerPendingAction[]>([]);
     // The session's files as the server lists them: a file a message names that is not in it has expired or been deleted.
     const [files, setFiles] = useState<SessionFileItem[] | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -110,7 +108,6 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
     const [resolvingId, setResolvingId] = useState<string | null>(null);
     const [activityOpen, setActivityOpen] = useState(false);
     const loadedFor = useRef<string | undefined>(undefined);
-    const viewer = useViewer();
     const sessionId = session?._id;
 
     useEffect(() => {
@@ -134,6 +131,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                 if (cancelled) return;
                 const loaded = data.session as SessionRecord;
                 setRecord(loaded);
+                setServerActions(Array.isArray(data.pendingActions) ? (data.pendingActions as ServerPendingAction[]) : []);
                 // Which of the files its messages name still exist. Asked only when a message carries any, and
                 // beside the transcript, never part of it: a list that cannot be read only means no file is
                 // marked expired.
@@ -209,12 +207,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
         });
         // A settled session says how its last run ended; a waiting or paused one is already saying more.
         const stopBadge = status === 'idle' ? stopReasonBadge(record?.stopReason) : null;
-        const restriction = answerRestriction({
-            approvers,
-            viewerId: viewer.userId,
-            viewerRole: viewer.role,
-            ownerId: record?.createdBy,
-        });
+        const blocked = answerBlockedReason(serverActions.filter((action) => openActions.some((open) => open.id === action.id)));
 
         const properties: PropertyRow[] = [
             { key: 'created', label: 'Created', value: <Text size="sm">{session.createdAt ? new Date(session.createdAt).toLocaleString() : '—'}</Text> },
@@ -286,7 +279,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
                             busy={Boolean(resolvingId)}
                             resolvingId={resolvingId}
                             onResolve={(actionId, body) => void resolveAction(actionId, body)}
-                            restriction={restriction}
+                            blocked={blocked}
                         />
                     </Alert>
                 ) : null}
@@ -319,7 +312,7 @@ export default function SessionDetailDrawer({ agentId, session, onClose, onConti
             properties,
             ...(record ? { raw: { request: record.metadata ?? {}, response: messages } } : {}),
         };
-    }, [session, record, files, error, onContinue, agentId, approvers, viewer, th, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
+    }, [session, record, files, error, onContinue, agentId, serverActions, th, ta, resolvingId, resolveAction, activityOpen, reloadKey]);
 
     return (
         <LlmRequestDetailModal

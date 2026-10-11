@@ -216,6 +216,8 @@ function sentence(message: string): string {
 
 /** One bucket as the agent Files picker shows it. */
 export interface AttachmentBucketOption {
+    /** The bucket's registry id: what a rule that names one bucket is about. */
+    id?: string;
     key: string;
     name: string;
     providerKey: string;
@@ -231,6 +233,12 @@ export interface AttachmentBucketOption {
     reasonCode?: BucketIssue;
     /** The bucket keeps its files on the server's own disk (the `local-filesystem` driver). */
     localDisk: boolean;
+    /**
+     * May the caller name this bucket in an agent's settings? A Files decision about THAT bucket
+     * (`file-bucket.update`), not a project-wide one; absent when nobody asked (the list itself is already
+     * limited to the buckets the caller may look at).
+     */
+    canChoose?: boolean;
 }
 
 /** The project's buckets, each with what the picker needs to enable or disable it. */
@@ -263,6 +271,7 @@ export async function listAttachmentBuckets(
             inspection = { usable: true, bucket, provider };
         }
         options.push({
+            id: String(bucket._id),
             key: bucket.key,
             name: bucket.name,
             providerKey: bucket.providerKey,

@@ -34,6 +34,7 @@ const hoisted = vi.hoisted(() => ({
   requestAgentRunCancellation: vi.fn(),
   getConversationById: vi.fn(),
   ending: vi.fn(),
+  access: vi.fn(),
 }));
 
 vi.mock('@/lib/services/agents', () => ({
@@ -45,6 +46,16 @@ vi.mock('@/lib/services/agents', () => ({
 // Ending the open request of a paused run takes the engine's `agent.approve`; its own tests are
 // api/agent-session-authz.test.ts. Only the wiring is checked here.
 vi.mock('@/server/api/plugins/agent-approval-authz', () => ({ authorizeEndingOpenRequests: hoisted.ending }));
+
+// Whose session a run belongs to is the session access module's question (api/agent-session-authz.test.ts has its own tests);
+// only the wiring is checked here: the run's session, the need (view to read, manage to cancel), and the refusal's shape.
+vi.mock('@/server/api/plugins/agent-session-access', () => ({
+  decideSessionAccess: hoisted.access,
+  sendClientSessionRefusal: (reply: { code: (status: number) => { send: (body: unknown) => unknown } }, _request: unknown, refusal: { status: number; reason: string; decisionId?: string }) => (
+    reply.code(refusal.status).send({ error: { code: refusal.reason, ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}) } })
+  ),
+  sendAuthorizationUnavailable: (reply: { code: (status: number) => { send: (body: unknown) => unknown } }) => reply.code(503).send({ error: { code: 'authorization_unavailable' } }),
+}));
 
 import { getDatabase } from '@/lib/database';
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
@@ -73,6 +84,9 @@ describe('client agent runs routes', () => {
     (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(AUTH_CTX);
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(createMockDb({ runWithTenant } as never));
     hoisted.ending.mockResolvedValue({ allowed: true });
+    hoisted.access.mockResolvedValue({ ok: true, owner: true, userId: 'user-1' });
+    hoisted.getConversationById.mockReset();
+    hoisted.getConversationById.mockResolvedValue(null);
     hoisted.getAgentRunStatus.mockReset();
     app = await createFastifyApiTestApp(clientAgentRunsApiPlugin);
   });
@@ -108,6 +122,21 @@ describe('client agent runs routes', () => {
     expect(body.id).toBe('run_run-1');
     expect(body.object).toBe('agent.run');
     expect(body.status).toBe('running');
+  });
+
+  it('GET reads a run as the session it belongs to: a session somebody else started takes agent.session_view_others', async () => {
+    const run = { _id: 'run-1', mode: 'background', agentKey: 'support-agent', conversationId: 'conv-1', userId: 'user-9', status: 'succeeded', createdAt: new Date(), startedAt: null, completedAt: null, result: null, errorReason: null, errorMessage: null };
+    const conversation = { _id: 'conv-1', projectId: 'proj-1', agentKey: 'support-agent', createdBy: 'user-9' };
+    hoisted.getAgentRunStatus.mockResolvedValue(run);
+    hoisted.getConversationById.mockResolvedValue(conversation);
+    hoisted.access.mockResolvedValue({ ok: false, status: 403, reason: 'forbidden', need: 'view', decisionId: 'dec-3' });
+
+    const res = await app.inject({ method: 'GET', url: '/api/client/v1/agents/runs/run-1', headers: { authorization: '******' } });
+
+    expect(res.statusCode).toBe(403);
+    expect(parseJsonBody<{ error: { code: string; decision_id: string } }>(res.body).error).toMatchObject({ code: 'forbidden', decision_id: 'dec-3' });
+    // the question: the caller's rights to THIS session, the queuer of the run counting as its owner too
+    expect(hoisted.access).toHaveBeenCalledWith(expect.anything(), conversation, expect.objectContaining({ need: 'view', alsoOwnedBy: ['user-9'] }));
   });
 
   it('GET returns a structured 404 for a sync reservation row (an internal lock, not a caller-owned run)', async () => {
@@ -184,6 +213,26 @@ describe('client agent runs routes', () => {
       const res = await cancel();
       expect(res.statusCode).toBe(200);
       expect(hoisted.requestAgentRunCancellation).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-1');
+    });
+
+    it('cancelling is acting on the session: a refusal there stops the cancel before anything else is asked', async () => {
+      hoisted.getAgentRunStatus.mockResolvedValue({ ...paused, status: 'running' });
+      hoisted.getConversationById.mockResolvedValue(conversation);
+      hoisted.access.mockResolvedValue({ ok: false, status: 403, reason: 'forbidden', need: 'manage', decisionId: 'dec-4' });
+      const res = await cancel();
+      expect(res.statusCode).toBe(403);
+      expect(hoisted.access).toHaveBeenCalledWith(expect.anything(), conversation, expect.objectContaining({ need: 'manage' }));
+      expect(hoisted.requestAgentRunCancellation).not.toHaveBeenCalled();
+      expect(hoisted.ending).not.toHaveBeenCalled();
+    });
+
+    it('is 503 when the engine could not decide who may end the request: never a cancel, never a 403', async () => {
+      hoisted.getAgentRunStatus.mockResolvedValue(paused);
+      hoisted.getConversationById.mockResolvedValue(conversation);
+      hoisted.ending.mockResolvedValue({ allowed: false, unavailable: true, decisionId: 'dec-5' });
+      const res = await cancel();
+      expect(res.statusCode).toBe(503);
+      expect(hoisted.requestAgentRunCancellation).not.toHaveBeenCalled();
     });
 
     it('asks nothing for a run that is not paused, or for a session of another project', async () => {

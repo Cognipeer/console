@@ -43,6 +43,14 @@ export function stepFailed(step: PlaygroundStep): boolean {
     return Boolean(step.error);
 }
 
+/** Who started a session, as the server describes it (a person's name, or the kind of traffic that did). */
+export interface SessionOwnerView {
+    id: string;
+    kind: 'user' | 'schedule' | 'public_a2a' | 'evaluation' | 'redteam' | 'system' | 'unknown';
+    name?: string;
+    email?: string;
+}
+
 /** A stored session, as `GET /api/agents/:id/sessions/:sessionId` returns it. */
 export interface SessionRecord {
     _id: string;

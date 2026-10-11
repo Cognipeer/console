@@ -43,7 +43,7 @@ import {
     pickOption,
     resolvedKind,
     typeAnswer,
-    type AnswerRestriction,
+    type AnswerBlockedReason,
     type ApprovalResolveBody,
     type PendingActionView,
     type QuestionResolveBody,
@@ -361,6 +361,16 @@ function SettledAction({ action }: { action: PendingActionView }) {
     );
 }
 
+/** The sentence (`agents.hitl.*`) for each reason the server gives why the viewer cannot answer. */
+const BLOCKED_TEXT: Record<AnswerBlockedReason, string> = {
+    approvers_owner: 'blockedApproversOwner',
+    approvers_admin: 'blockedApproversAdmin',
+    approvers_member: 'blockedApproversMember',
+    session_owner: 'blockedSessionOwner',
+    policy: 'blockedPolicy',
+    unavailable: 'blockedUnavailable',
+};
+
 export interface PendingActionListProps {
     actions: PendingActionView[];
     /** A resolve call is in flight. */
@@ -369,22 +379,22 @@ export interface PendingActionListProps {
     resolvingId?: string | null;
     onResolve: (actionId: string, body: ResolveBody) => void;
     /**
-     * Who the agent lets answer, when the viewer is not clearly one of them — a
-     * notice above the open requests. The cards stay usable: the server decides.
+     * Why the server says the viewer cannot answer an open request, when it does - a notice above the open
+     * requests. The cards stay usable: the server decides again when the answer is sent.
      */
-    restriction?: AnswerRestriction | null;
+    blocked?: AnswerBlockedReason | null;
 }
 
 /** The approvals and questions a paused turn is waiting on, open ones as cards and the rest as one-liners. */
-export default function PendingActionList({ actions, busy, resolvingId, onResolve, restriction }: PendingActionListProps) {
+export default function PendingActionList({ actions, busy, resolvingId, onResolve, blocked }: PendingActionListProps) {
     const t = useTranslations('agents.hitl');
     if (actions.length === 0) return null;
     const open = actions.some((action) => action.status === 'pending');
     return (
         <Stack gap="xs" mt="xs">
-            {open && restriction ? (
-                <Alert variant="light" color="gray" icon={<IconInfoCircle size={14} />} p="xs">
-                    <Text size="xs">{restriction === 'owner' ? t('answerRestrictedOwner') : t('answerRestrictedOwnerOrAdmin')}</Text>
+            {open && blocked ? (
+                <Alert variant="light" color={blocked === 'unavailable' ? 'orange' : 'gray'} icon={<IconInfoCircle size={14} />} p="xs" data-testid="answer-blocked">
+                    <Text size="xs">{t(BLOCKED_TEXT[blocked])}</Text>
                 </Alert>
             ) : null}
             {actions.map((action) => {

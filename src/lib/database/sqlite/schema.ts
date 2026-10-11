@@ -1564,6 +1564,8 @@ export const TENANT_SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
+  -- A caller who may not see other people's sessions lists only their own: one agent's, by creator, newest first.
+  CREATE INDEX IF NOT EXISTS idx_aconv_agent_creator ON agent_conversations(agentKey, createdBy, updatedAt);
 
   -- Agent runtime state per conversation (see IAgentConversationState)
   CREATE TABLE IF NOT EXISTS agent_conversation_states (
@@ -2237,6 +2239,8 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_agent_runs_expiresAt ON agent_runs(expiresAt);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_callbackStatus_updatedAt ON agent_runs(callbackStatus, updatedAt);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project_idempotencyKey ON agent_runs(tenantId, projectId, idempotencyKey);
+  -- A caller who may not see other people's sessions lists only the runs they queued, newest first.
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_project_agent_user ON agent_runs(tenantId, projectId, agentKey, userId, createdAt);
   -- Enforces "at most one queued/running run per conversation" at the DB
   -- layer (§6/§12.14) — a partial unique index, not a read-then-write
   -- application check, so the guard is race-free (SQLite partial indexes

@@ -26,7 +26,7 @@ The turn is paused, not lost. When the request is answered, the **same turn** ca
 
 ### Who may answer: the Approve permission
 
-Answering is a permission of its own, **Agent · Approve requests** (`agent.approve`), decided by the same permission engine as everything else (**Authorization** in Settings). By default it reproduces the *Who can answer* setting of the agent:
+Approving a **tool call** (allow, deny, edit its arguments, *don't ask again this session*) is a permission of its own, **Agent · Approve tool calls** (`agent.approve`), decided by the same permission engine as everything else (**Authorization** in Settings). It is **appointed**: having Write access to Agents does not approve somebody else's request. By default a built-in rule appoints exactly the people the agent's *Who can answer* setting names:
 
 | Who can answer | Who may |
 | --- | --- |
@@ -34,11 +34,29 @@ Answering is a permission of its own, **Agent · Approve requests** (`agent.appr
 | The session owner and project admins (default) | the above, workspace owners and admins, and the admins of the agent's project |
 | Anyone with access to the agent | the above, and every member of the agent's project |
 
-The person who started the session may always answer, whatever the setting. An API token answers on behalf of its owner, and its own scope and the project's limits still apply. The same rule covers the portals (a portal's access list is checked on top).
+The person who started the session may always answer, whatever the setting. An API token answers on behalf of its owner, and its own scope and the project's limits still apply. The same rule covers the portals (a portal's access list is checked on top). The setting is read as the agent version the request was raised under, so editing the agent later does not change who may answer a request that is already open; a request of a deleted or disabled agent can still be answered under the same rule.
 
-Restricting it further is an ordinary **deny** policy in **Authorization → Policies** (pick the action *Agent · Approve requests*, choose who it applies to); a policy cannot add people the setting does not accept, and the policy editor says so. A refusal answers `403` with a `decisionId` that **Authorization → Access check** can replay. The check form takes the session's owner and the agent's setting as inputs.
+You can appoint more people, or fewer, in **Authorization → Policies**, with the action *Agent · Approve tool calls*:
 
-Ending somebody's open request is answering it with "no", so the same permission guards the places where a request is ended as a side effect: cancelling a run that is paused on an approval, and sending a new message to an agent that cancels the pending request (*A new message while waiting*). Without the permission those answer `403` instead.
+- an **allow** policy appoints approvers on top of the setting: a compliance group that approves across projects, an on-call rota. It names the people, not the sessions; combine it with *Resources* to limit it to some agents or projects. The people it names also need the Write level on Agents to reach the answer button (an answer is a `POST`); the editor says so when it applies.
+- a **deny** policy narrows: it removes a person, a group, an agent or a channel from the people the setting accepts.
+
+Token scope and the project's own limits still win over any allow policy. A refusal answers `403` with a `decisionId` that **Authorization → Access check** can replay; the check form takes the session's owner and the agent's setting as inputs.
+
+#### What it covers, and what it does not
+
+| | |
+| --- | --- |
+| Allow or deny a tool call, edit its arguments, *remember for this session* | `agent.approve` |
+| End somebody's open **approval** as a side effect: cancelling a run that is paused on it, or sending a new message to an agent that cancels the pending request (*A new message while waiting*) | `agent.approve`: ending an approval is answering it with "no" |
+| Answer a **question** | not an approval: it follows the session. The person who started the session may always answer; anybody else needs *Agent · Act on others' sessions* (`agent.session_manage_others`) |
+| The timeout sweep and the continuation that follows it | the system's, outside the permission engine; recorded in the audit log as `system` (`system:timeout`) |
+
+Restricting approvals therefore never stops people from answering their own sessions' questions.
+
+#### The page shows what the server decided
+
+The session page and the Sessions list do not guess from the viewer's role: the dashboard sends, with each open request, `canResolve` and, when it is false, `resolveBlockedReason` (`approvers_owner`, `approvers_admin`, `approvers_member`, `session_owner`, `policy`, or `unavailable` when the engine could not be asked). Rows of the Sessions list carry the same for the whole session, so the **Waiting for you** badge is only shown to somebody who could answer. It is a notice, not a lock: the server decides again when the answer is sent. If the engine cannot decide at all, answering returns `503 authorization_unavailable` (with a `decisionId`), never a `403`, and nothing is recorded.
 
 ### What is not asked about
 
@@ -108,7 +126,8 @@ The turn continues inline and the answer is a normal response (`completed`, or `
 
 | Status | Meaning |
 | --- | --- |
-| `403` | The caller does not hold the **Approve requests** permission for this session (the agent's *Who can answer* setting, and any deny policy). `action_forbidden`, with a `decision_id`. |
+| `403` | The caller may not answer this request: a tool approval needs **Approve tool calls** (the agent's *Who can answer* setting, any allow policy that appoints them, and any deny policy); a question follows the session's ownership. `action_forbidden`, with a `decision_id`. |
+| `503` | The permission engine could not decide who may answer (`authorization_unavailable`, with a `decision_id`). Nothing was recorded: retry. |
 | `404` | No such session or request in this project. |
 | `409` | Someone answered first (`action_not_pending`, with `action_status`), the request was cancelled meanwhile — a new message, a cancelled run, the timeout policy (`action_cancelled`) — or another run is active for the conversation. |
 | `410` | The request ran out of time (`action_expired`). |
@@ -135,4 +154,4 @@ A stateless call with no session has nowhere to keep a paused turn, so the same 
 
 ## Timeouts and audit
 
-Open requests are checked about every 30 seconds. Past the time you set, the agent's *When time runs out* setting applies, and the answer is recorded as given by `system:timeout`. Every answer is written to the audit log (who, what, the decision, and whether the arguments were edited), and appears in the [session events](/guide/agent-session-events) as `action.resolved`.
+Open requests are checked about every 30 seconds. Past the time you set, the agent's *When time runs out* setting applies, and the answer is recorded as given by `system:timeout`: that is the system, not a person, so it is outside the permission engine and the audit log records it with the actor type `system` (`agent.tool_approval.timeout`). Every answer a person gives is written to the audit log (who, what, the decision, and whether the arguments were edited), and appears in the [session events](/guide/agent-session-events) as `action.resolved`.

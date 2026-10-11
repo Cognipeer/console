@@ -20,6 +20,7 @@ info:
     - Requests may include an optional `request_id` for correlation.
     - `POST /messages` speaks the Anthropic Messages dialect: its errors use `{ "type": "error", "error": { "type", "message" } }` instead of `{ "error": ... }`.
     - A `403` because the token's owner, scope or project does not allow the call carries `code: "forbidden"`, `service`, `required` and a `decisionId` (also in the `X-Decision-Id` response header); OpenAI- and Anthropic-compatible endpoints carry it as `error.decision_id`. A route without an authorization declaration is refused with `code: "route_not_declared"`.
+    - A session belongs to the person who started it (for API traffic, the owner of the token). Anybody else needs `agent.session_view_others` (to read) or `agent.session_manage_others` (to change) - granted to every holder of Agents Read / Write by default, narrowed by a workspace's deny rules. That covers the session calls, its events, files and runs, and continuing it by id in `POST /responses`, `POST /agents/responses` and `POST /chat/completions`. A refusal is `403` with `error.code: "session_forbidden"` and a `decision_id`; a list (`GET /agents/sessions`) then holds only the caller's own sessions.
     - When authorization itself cannot be decided the answer is `503` with `code: "authorization_unavailable"`, a `decisionId` and a `Retry-After` header: retry the request. A call is never allowed because authorization was unavailable.
 
     ## Official SDK
@@ -413,6 +414,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/runs/{runId}/cancel:
@@ -444,6 +449,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions:
@@ -542,6 +549,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}:
@@ -564,6 +573,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
     delete:
@@ -600,6 +613,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
     patch:
@@ -651,6 +668,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}/events:
@@ -694,6 +713,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}/events/stream:
@@ -736,6 +759,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}/actions/{actionId}:
@@ -788,7 +815,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          description: The caller does not hold the `agent.approve` permission for this session - the agent's `approvers` setting does not accept them, or a deny policy names them (`action_forbidden`, with `decision_id`).
+          description: "The caller may not answer this request (`action_forbidden`, with `decision_id`). A tool approval needs `agent.approve`: the agent's `approvers` setting accepts them, or an allow policy appoints them, and no deny policy names them. A question follows the session: its owner always may, anybody else needs `agent.session_manage_others`."
           content:
             application/json:
               schema:
@@ -811,6 +838,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}/files:
@@ -842,6 +871,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
     post:
@@ -923,6 +956,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}/files/{fileId}:
@@ -960,6 +995,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}/files/{fileId}/content:
@@ -1038,6 +1077,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/{agentKey}:
@@ -23708,6 +23751,10 @@ components:
           description: "`whk_...`"
         url:
           type: string
+          description: "The receiver address. For a caller with Read on `webhooks` only, its query string, fragment and userinfo are removed (`https://host/path?…`) and `urlRedacted` is `true`; Admin sees it whole."
+        urlRedacted:
+          type: boolean
+          description: "Present and `true` when `url` is shown without its query string and userinfo."
         description:
           type: string
           nullable: true
@@ -23985,6 +24032,18 @@ components:
               summary: The feature is not part of the license
               value:
                 error: This feature is not available in your license
+    SessionForbidden:
+      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              type: permission_error
+              code: session_forbidden
+              message: This session was started by someone else, and you are not allowed to view it.
+              decision_id: 7c0f6b2e-5d1a-4c1e-9a53-0d9b8a1f2e44
     AuthorizationUnavailable:
       description: "Service unavailable — authorization could not be decided, so the call was refused (never allowed). Retry after the `Retry-After` delay."
       headers:

@@ -20,7 +20,7 @@ import StopNotice from '@/components/agents/session/StopNotice';
 import AgentExecutionPanel from '@/components/agents/studio/AgentExecutionPanel';
 import AgentHumanInTheLoopPanel from '@/components/agents/studio/AgentHumanInTheLoopPanel';
 import {
-  answerRestriction,
+  answerBlockedReason,
   isStaleActionRefusal,
   type PendingActionView,
 } from '@/components/agents/session/pendingActions';
@@ -255,43 +255,45 @@ describe('a request that is no longer open', () => {
 });
 
 describe('who may answer an open request', () => {
-  it('says nothing when the viewer is clearly allowed, or when the page cannot tell', () => {
-    expect(answerRestriction({ approvers: 'project_members', viewerId: 'u2', viewerRole: 'user', ownerId: 'u1' })).toBeNull();
-    expect(answerRestriction({ approvers: 'owner', viewerId: 'u1', viewerRole: 'user', ownerId: 'u1' })).toBeNull();
-    expect(answerRestriction({ viewerId: 'u1', viewerRole: 'user', ownerId: 'u1' })).toBeNull();
-    expect(answerRestriction({ approvers: 'owner_or_admin', viewerId: 'u2', viewerRole: 'admin', ownerId: 'u1' })).toBeNull();
-    expect(answerRestriction({ approvers: 'owner_or_admin', viewerRole: 'user', ownerId: 'u1' })).toBeNull();
-    expect(answerRestriction({ approvers: 'owner_or_admin', viewerId: 'u2', viewerRole: 'user' })).toBeNull();
+  // The server decides (the policy engine's rule) and says why when the viewer cannot; the page only words it.
+  it('says nothing when the server says the viewer may answer every open request, or says nothing at all', () => {
+    expect(answerBlockedReason(undefined)).toBeNull();
+    expect(answerBlockedReason(null)).toBeNull();
+    expect(answerBlockedReason([])).toBeNull();
+    expect(answerBlockedReason([{ id: 'a' }, { id: 'b', canResolve: true }])).toBeNull();
   });
 
-  it('names the limit when someone else looks (owner_or_admin is the default)', () => {
-    expect(answerRestriction({ viewerId: 'u2', viewerRole: 'user', ownerId: 'u1' })).toBe('owner_or_admin');
-    expect(answerRestriction({ approvers: 'owner_or_admin', viewerId: 'u2', viewerRole: 'user', ownerId: 'u1' })).toBe('owner_or_admin');
-    expect(answerRestriction({ approvers: 'owner', viewerId: 'u2', viewerRole: 'user', ownerId: 'u1' })).toBe('owner');
-    // An admin is not the owner, and `owner` means the owner.
-    expect(answerRestriction({ approvers: 'owner', viewerId: 'u2', viewerRole: 'admin', ownerId: 'u1' })).toBe('owner');
+  it('names the first reason the server gave for a request the viewer cannot answer', () => {
+    expect(answerBlockedReason([{ id: 'a', canResolve: true }, { id: 'b', canResolve: false, resolveBlockedReason: 'approvers_owner' }])).toBe('approvers_owner');
+    expect(answerBlockedReason([{ id: 'a', canResolve: false, resolveBlockedReason: 'session_owner' }, { id: 'b', canResolve: false, resolveBlockedReason: 'policy' }])).toBe('session_owner');
+    // a refusal without a reason is still a refusal: a rule of the workspace is the honest default
+    expect(answerBlockedReason([{ id: 'a', canResolve: false }])).toBe('policy');
   });
 
   const open: PendingActionView = { id: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', args: {}, status: 'pending' };
   const settled: PendingActionView = { ...open, id: 'act_2', status: 'resolved', resolution: { decision: 'allow' } };
 
   it('shows the notice above an open request, and keeps Approve usable', () => {
-    const html = render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, restriction: 'owner_or_admin' }));
-    expect(html).toContain('Only the session owner and project admins can answer');
+    const html = render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'approvers_admin' }));
+    expect(html).toContain('Only the session owner, workspace admins and the admins of the project can approve');
     expect(html).toContain('Approve');
     expect(html).not.toMatch(/<button[^>]*disabled[^>]*>(?:(?!<\/button>).)*Approve/);
-    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, restriction: 'owner' })))
-      .toContain('Only the person who started this session can answer');
+    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'approvers_owner' })))
+      .toContain('Only the person who started this session can approve');
+    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'policy' })))
+      .toContain('A rule of your workspace stops you');
+    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'session_owner' })))
+      .toContain('Only its owner');
   });
 
-  it('shows nothing extra without a restriction, or when nothing is open', () => {
-    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, restriction: null }))).not.toContain('can answer');
-    expect(render(h(PendingActionList, { actions: [settled], busy: false, onResolve: noop, restriction: 'owner' }))).not.toContain('can answer');
+  it('shows nothing extra without a reason, or when nothing is open', () => {
+    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: null }))).not.toContain('answer-blocked');
+    expect(render(h(PendingActionList, { actions: [settled], busy: false, onResolve: noop, blocked: 'approvers_owner' }))).not.toContain('answer-blocked');
   });
 
   it('is worded in Turkish', () => {
-    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, restriction: 'owner' }), 'tr'))
-      .toContain('Yalnızca bu oturumu başlatan kişi yanıtlayabilir');
+    expect(render(h(PendingActionList, { actions: [open], busy: false, onResolve: noop, blocked: 'approvers_owner' }), 'tr'))
+      .toContain('Yalnızca bu oturumu başlatan kişi onaylayabilir');
   });
 });
 
@@ -454,7 +456,7 @@ describe('strings of the session runtime', () => {
       // `evOther` is just the event type.
       activity: (key) => key !== 'evOther',
       stopNotice: () => true,
-      hitl: (key) => ['sectionTitle', 'answerRestrictedOwner', 'answerRestrictedOwnerOrAdmin'].includes(key),
+      hitl: (key) => ['sectionTitle', 'blockedApproversOwner', 'blockedApproversAdmin', 'blockedApproversMember', 'blockedSessionOwner', 'blockedPolicy', 'blockedUnavailable'].includes(key),
       budget: (key) => key.startsWith('cfg') || key === 'failedHint',
       attachments: (key) => key.startsWith('cfg'),
     };

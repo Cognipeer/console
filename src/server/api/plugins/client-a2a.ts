@@ -48,6 +48,8 @@ const ERR_TASK_NOT_FOUND = -32001;
 const ERR_UNSUPPORTED_OPERATION = -32004;
 // Not one of the spec's: a caller the policy engine does not let answer the request this call would end.
 const ERR_FORBIDDEN = -32010;
+/** The policy engine could not decide: try again (the JSON-RPC "internal error" code; nothing was refused on merit). */
+const ERR_AUTHORIZATION_UNAVAILABLE = -32603;
 
 interface A2aPart {
   kind?: string;
@@ -307,6 +309,11 @@ export async function handleA2aRpc(
           conversation: await getConversationById(ctx.tenantDbName, contextId),
           agent,
         });
+        if (refusal?.unavailable) {
+          return reply.code(200).send(jsonRpcError(rpcId, ERR_AUTHORIZATION_UNAVAILABLE, 'Authorization is temporarily unavailable', {
+            ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+          }));
+        }
         if (refusal) {
           return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, CANCEL_PENDING_FORBIDDEN_MESSAGE, {
             ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
@@ -409,6 +416,12 @@ export async function handleA2aRpc(
         // Ending a task that waits on a request is answering it with "no": the engine says whether this caller may.
         if (conversation && request.apiTokenContext) {
           const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+          if (!verdict.allowed && verdict.unavailable) {
+            return reply.code(200).send(jsonRpcError(rpcId, ERR_AUTHORIZATION_UNAVAILABLE, 'Authorization is temporarily unavailable', {
+              pending_action_ids: waitingOn,
+              ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+            }));
+          }
           if (!verdict.allowed) {
             return reply.code(200).send(jsonRpcError(rpcId, ERR_FORBIDDEN, 'You are not allowed to answer the request this task waits on.', {
               pending_action_ids: waitingOn,

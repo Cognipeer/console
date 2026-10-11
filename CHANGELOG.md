@@ -15,14 +15,29 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   the person's workspace level, an explicit level caps it.
 - A deny rule that cannot be evaluated for a request counts as a deny for that request.
 - The session payload carries `effectivePermissions`, so the navigation shows only what the active project allows.
-- Answering a pending tool approval or question of an agent session is a permission of its own, `agent.approve`.
-  By default it follows the agent's *Who can answer* setting (the person who started the session always may); a
-  deny rule in the policy editor restricts it, and it applies to the dashboard, the API and portals alike. Ending
-  somebody's open request as a side effect (cancelling a paused run, a new message to an agent that cancels pending
-  requests) takes the same permission.
+- Approving a pending tool call of an agent session is a permission of its own, `agent.approve`, and it is
+  appointed: having Write access to Agents no longer approves somebody else's request. A built-in rule appoints the
+  people the agent's *Who can answer* setting names (the person who started the session always may), an allow rule in
+  the policy editor appoints more approvers (a compliance group), a deny rule narrows; it applies to the dashboard, the
+  API and portals alike. Ending somebody's open approval as a side effect (cancelling a paused run, a new message to an
+  agent that cancels pending requests) takes the same permission; answering a question follows the session instead.
+  The timeout sweep is recorded in the audit log as `system`. When the engine cannot decide who may answer, the answer
+  is `503 authorization_unavailable` with nothing recorded. The session page and the Sessions list show the server's
+  verdict (`canResolve`, `resolveBlockedReason`) instead of guessing from a role.
 - Two more agent actions decide what somebody else may do with a session another person started:
   `agent.session_view_others` (Read) and `agent.session_manage_others` (Write). By default every holder of
   `agents` Read / Write has them, as before; the Access check takes the session's owner and the agent's setting as inputs.
+  Every path to a session's content asks the same question - the session routes, its files (also through the Document
+  Store and the client Files API), events, runs, tracing threads, Assistants threads and the continuation of a session
+  by id in the Responses and chat completions routes, whichever service gate let the token in. A list shows the caller
+  only their own sessions when a rule stops them from viewing others', cut in the database before the page; the Sessions
+  table shows who started each session.
+- Naming the bucket an agent keeps its session files in is a Files decision about that bucket (`file-bucket.update`);
+  the bucket picker lists only the buckets the caller may look at (`file-bucket.get`). A bucket that an agent names is
+  a reference of the agent in the resource graph (`agent.attachmentsBucket`), and the policy lists of an agent or a
+  bucket show the rules that reach them.
+- A reader of Webhooks (`webhooks` Read) sees an endpoint's URL without its query string and userinfo
+  (`https://host/path?…`); only Admin sees it whole.
 - Webhooks are an administration service: the policy engine is the only authority (Read to look, Admin to change),
   owners and admins hold it by default and everybody else until it is granted. Being a project admin is no longer a
   permission on webhooks by itself; grant **Webhooks** to the people or groups who should manage them. Tenant-wide

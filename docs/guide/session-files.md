@@ -38,7 +38,11 @@ A bucket an agent keeps session files in **cannot be deleted or disabled** (409)
 
 ### Who can choose the bucket
 
-Choosing or changing the bucket needs **write access to Files** (the Document Store); the list of buckets to pick from needs **read access to Files** — without it the Files section says so instead of showing an empty list. Saving the agent with the bucket it already has asks nothing of Files. An API token is held to the same rule, within its own scope.
+Choosing or changing the bucket is a Files decision about **that bucket**: the person needs write access to it (`file-bucket.update`, by default Write on *Files*; a rule on one bucket applies). The list of buckets to pick from needs **read access to Files** — without it the Files section says so instead of showing an empty list — and shows only the buckets the person may look at (`file-bucket.get`); a bucket they may see but not name is shown disabled with the reason. Saving the agent with the bucket it already has asks nothing of Files. An API token is held to the same rules, within its own scope. A refusal answers `403 files_write_required` with a `decisionId` that **Authorization → Access check** can replay; if the permission engine cannot decide, the answer is `503 authorization_unavailable`.
+
+### Who can see a session's files
+
+A session file is the session's: whoever started the session sees and manages its files; anybody else needs *Agent · View others' sessions* (read: list, open, download) or *Agent · Act on others' sessions* (upload, delete) — see [Sessions and approvals](/guide/authorization#sessions-and-approvals). The same holds when the file is reached through the Document Store or the client Files API: a bucket listing leaves out the files of sessions the caller may not view.
 
 Two things to know when you choose: **portal users get the settings of the agent's *published* version**, not the draft, so a new bucket reaches them with the next publish; and a bucket on a **server-disk** provider keeps files on one server's disk — fine for a single node, not for a cluster that scales out.
 

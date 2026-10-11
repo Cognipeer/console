@@ -67,6 +67,9 @@ export const RESOURCE_AUTHZ_ACTIONS = [
   'agent.approve',
   'agent.session_view_others',
   'agent.session_manage_others',
+  // The bucket an agent keeps its session files in (a Files decision about that bucket, asked by the agents routes).
+  'file-bucket.get',
+  'file-bucket.update',
 ] as const;
 export type ResourceAuthzAction = (typeof RESOURCE_AUTHZ_ACTIONS)[number];
 

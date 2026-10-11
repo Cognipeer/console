@@ -14,6 +14,8 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
         ...actual,
         requireProjectContextForRequest: vi.fn(),
         sendProjectContextError: vi.fn().mockReturnValue(null),
+        // Who may touch a session somebody else started is the policy engine's question (agent-session-authz.test.ts); allowed here.
+        authorizeResourceForRequest: vi.fn(async () => ({ allowed: true, source: 'engine', reasons: [], policyIds: [] })),
     };
 });
 

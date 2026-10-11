@@ -74,6 +74,7 @@ import {
   requestAgentRunCancellation,
   reserveConversationForSyncTurn,
   resolveAgentExecutionLimits,
+  runWithTenantDb,
   serializeAgentRun,
 } from '@/lib/services/agents/agentRunService';
 import type { LicenseType } from '@/lib/license/license-manager';
@@ -90,13 +91,26 @@ import {
   listConversationActions,
   listSessionEvents,
   streamSessionEvents,
+  toPublicPendingAction,
 } from './agent-session-events';
 import {
   approvalAuthorizerFor,
   authorizeEndingOpenRequests,
   CANCEL_PENDING_FORBIDDEN_MESSAGE,
+  describeAnswerAbility,
   refuseCancelPending,
+  withAnswerAbility,
+  type AnswerAbility,
 } from './agent-approval-authz';
+import {
+  decideSessionAccess,
+  loadSessionForPrincipal,
+  sendAuthorizationUnavailable,
+  sendSessionRefusal,
+  sessionListScope,
+  type SessionNeed,
+} from './agent-session-access';
+import { resolveSessionOwners, type SessionOwner } from '@/lib/services/agents/sessionOwners';
 import {
   applyStreamHeaders,
   readJsonBody,
@@ -115,7 +129,7 @@ import {
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
-import { sessionHasFilesPermission } from './files-permission';
+import { requestCanNameBucket } from './files-permission';
 
 const logger = createLogger('api:agents');
 
@@ -165,25 +179,50 @@ async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) 
 }
 
 /**
- * `requireScopedAgent` plus the session `:sessionId` names — scoped to this
- * agent and project, so an id valid for a sibling agent or project 404s. Null,
- * with the 404 already sent, when it is missing or out of scope.
+ * `requireScopedAgent` plus the session `:sessionId` names - scoped to this
+ * agent and project, so an id valid for a sibling agent or project 404s - and
+ * the caller's right to it: the person who started the session needs nothing
+ * beyond the route's own service check; anybody else needs
+ * `agent.session_view_others` (`need: 'view'`, reading) or
+ * `agent.session_manage_others` (`need: 'manage'`, changing) - agent-session-access.ts.
+ * `need: 'none'` skips that question for a route that asks its own (answering a
+ * pending request: `agent.approve`, or the session's ownership for a question).
+ * Null, with the 404 / 403 / 503 already sent, when it is missing, out of
+ * scope or not the caller's to touch.
  */
-export async function requireScopedSession(request: FastifyRequest, reply: FastifyReply) {
+export async function requireScopedSession(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: { need: SessionNeed | 'none' },
+) {
   const scoped = await requireScopedAgent(request, reply);
   if (!scoped) return null;
   const { sessionId } = request.params as { sessionId: string };
-  let found: IAgentConversation | null = null;
-  try {
-    found = await getConversationById(scoped.session.tenantDbName, sessionId);
-  } catch {
-    found = null;
+  if (options.need === 'none') {
+    let found: IAgentConversation | null = null;
+    try {
+      found = await getConversationById(scoped.session.tenantDbName, sessionId);
+    } catch {
+      found = null;
+    }
+    if (!found || found.agentKey !== scoped.agent.key || found.projectId !== scoped.projectId) {
+      void reply.code(404).send({ error: 'Session not found' });
+      return null;
+    }
+    return { ...scoped, conversation: found, owner: String(found.createdBy) === scoped.session.userId };
   }
-  if (!found || found.agentKey !== scoped.agent.key || found.projectId !== scoped.projectId) {
-    void reply.code(404).send({ error: 'Session not found' });
+  const loaded = await loadSessionForPrincipal(request, sessionId, {
+    need: options.need,
+    agentKey: scoped.agent.key,
+    agent: scoped.agent,
+    projectId: scoped.projectId,
+    actor: { tenantDbName: scoped.session.tenantDbName, projectId: scoped.projectId, userId: scoped.session.userId },
+  });
+  if (!loaded.ok) {
+    sendSessionRefusal(reply, request, loaded);
     return null;
   }
-  return { ...scoped, conversation: found };
+  return { ...scoped, conversation: loaded.conversation, owner: loaded.owner };
 }
 
 /**
@@ -193,6 +232,31 @@ export async function requireScopedSession(request: FastifyRequest, reply: Fasti
 function sendRouteError(reply: FastifyReply, error: unknown, logMessage: string, message: string) {
   logger.error(logMessage, { error });
   return sendProjectContextError(reply, error) ?? reply.code(500).send({ error: message });
+}
+
+/** The still-open requests of a session, as stored (who raised each, under which agent version). */
+function openActionsOf(tenantDbName: string, conversationId: string) {
+  return runWithTenantDb(tenantDbName, (db) => db.listAgentPendingActions(conversationId, { status: 'pending' }));
+}
+
+/**
+ * What the caller could do with the requests a waiting session holds, for its row in the table: `canResolve` is
+ * true when every open request is theirs to answer; otherwise the first reason they cannot. Nothing for a
+ * session that waits on nobody, or when the answer cannot be given (it is only a hint: the server decides again).
+ */
+async function answerabilityOfRow(
+  request: FastifyRequest,
+  tenantDbName: string,
+  agent: Pick<IAgent, '_id' | 'key'>,
+  conversation: IAgentConversation,
+  actor: { tenantDbName: string; projectId: string; userId: string },
+): Promise<{ canResolve: boolean; resolveBlockedReason?: AnswerAbility['reason'] } | null> {
+  if (conversation.runtimeStatus !== 'requires_action') return null;
+  const actions = await openActionsOf(tenantDbName, String(conversation._id));
+  if (actions.length === 0) return null;
+  const ability = await describeAnswerAbility(request, { tenantDbName, conversation, actions, agent, actor });
+  const blocked = [...ability.values()].find((entry) => !entry.canResolve);
+  return blocked ? { canResolve: false, ...(blocked.reason ? { resolveBlockedReason: blocked.reason } : {}) } : { canResolve: true };
 }
 
 /**
@@ -322,6 +386,21 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
     void reply.code(404).send({ error: 'Agent not found' });
     return null;
   }
+  // Continuing a session somebody else started is acting on it: the owner always may, anybody else needs
+  // `agent.session_manage_others`. Asked first, so a refusal does not reveal whether the session is read-only.
+  if (typeof body.conversationId === 'string') {
+    const loaded = await loadSessionForPrincipal(request, body.conversationId, {
+      need: 'manage',
+      agentKey: agent.key,
+      agent,
+      projectId,
+      actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+    });
+    if (!loaded.ok) {
+      sendSessionRefusal(reply, request, loaded);
+      return null;
+    }
+  }
   const readOnlySource = await readOnlySessionSource(session.tenantDbName, body.conversationId);
   if (readOnlySource) {
     void reply.code(409).send({ error: `This session came in via ${readOnlySource} and is read-only. Start a new session to test the agent.` });
@@ -344,6 +423,10 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
     // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it with
     // "no", so it takes the permission to answer.
     const cancelRefusal = await refuseCancelPending(request, { tenantDbName: session.tenantDbName, conversation, agent });
+    if (cancelRefusal?.unavailable) {
+      sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: cancelRefusal.decisionId });
+      return null;
+    }
     if (cancelRefusal) {
       void reply.code(403).send({
         error: CANCEL_PENDING_FORBIDDEN_MESSAGE,
@@ -445,7 +528,15 @@ function openLazyEventStream(reply: FastifyReply, enabled: boolean) {
  * session listed months later shows the same numbers it showed live, at the
  * prices that applied then rather than today's.
  */
-function summariseConversation(conversation: IAgentConversation) {
+/** How many waiting sessions of one list are checked for "could you answer it" (the rest simply do not say). */
+const WAITING_ROWS_ANSWERABILITY_LIMIT = 50;
+
+function summariseConversation(
+  conversation: IAgentConversation,
+  owner?: SessionOwner,
+  answerability?: { canResolve: boolean; resolveBlockedReason?: AnswerAbility['reason'] } | null,
+  viewerId?: string,
+) {
   let inputTokens = 0;
   let outputTokens = 0;
   let totalTokens = 0;
@@ -498,6 +589,13 @@ function summariseConversation(conversation: IAgentConversation) {
     failedCalls,
     status: hasError || failedCalls > 0 ? 'error' : stopped ? 'stopped' : turns > 0 ? 'success' : 'empty',
     source: typeof conversation.metadata?.source === 'string' ? conversation.metadata.source : undefined,
+    // Whose it is: the person who started it (a name), or the kind of traffic that did (a schedule, a public A2A call...).
+    createdBy: conversation.createdBy,
+    ...(owner ? { owner } : {}),
+    // The viewer started it (so the table can say "you" without knowing who the viewer is).
+    ...(viewerId ? { ownSession: String(conversation.createdBy) === viewerId } : {}),
+    // Waiting for an answer: whether THIS viewer could give it, as the server will decide it.
+    ...(answerability ? answerability : {}),
     // 'requires_action' = waiting on an approval / answer (the "Waiting for you" badge);
     // 'budget_paused' = the session's spend budget stopped it.
     runtimeStatus: conversation.runtimeStatus,
@@ -540,7 +638,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantId: session.tenantId,
         projectId,
         user,
-        canWriteFiles: () => sessionHasFilesPermission(session, 'write'),
+        canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
       });
       if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
@@ -620,7 +718,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantId: session.tenantId,
             projectId,
             user,
-            canWriteFiles: () => sessionHasFilesPermission(session, 'write'),
+            canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: session.tenantDbName, tenantId: session.tenantId, projectId }, bucketKey),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
@@ -1138,6 +1236,19 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const query = (request.query ?? {}) as { status?: string; limit?: string; conversationId?: string };
       const allowed = new Set(['queued', 'running', 'requires_action', 'succeeded', 'failed', 'canceled']);
       const status = (query.status ?? '').split(',').filter((value) => allowed.has(value)) as Array<'queued' | 'running' | 'requires_action' | 'succeeded' | 'failed' | 'canceled'>;
+      // A run carries the answer of somebody's session: the caller who may not view other people's sessions of
+      // this agent sees only the runs they queued, and a run of one session is the session's to read.
+      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (query.conversationId) {
+        const loaded = await loadSessionForPrincipal(request, query.conversationId, {
+          need: 'view',
+          agentKey: agent.key,
+          agent,
+          projectId,
+          actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        });
+        if (!loaded.ok) return sendSessionRefusal(reply, request, loaded);
+      }
       const runs = await listAgentRuns(session.tenantDbName, {
         tenantId: session.tenantId,
         projectId,
@@ -1145,6 +1256,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         mode: 'background',
         ...(status.length > 0 ? { status } : {}),
         ...(query.conversationId ? { conversationId: query.conversationId } : {}),
+        ...(scope.ownOnly ? { userId: scope.userId } : {}),
         limit: Math.min(Number(query.limit) || 100, 500),
       });
       return reply.code(200).send({ runs: runs.map(serializeAgentRun) });
@@ -1164,11 +1276,25 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!existing || existing.agentKey !== agent.key || existing.mode !== 'background') {
         return reply.code(404).send({ error: 'Run not found' });
       }
+      // Cancelling a run is acting on its session: the session's owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const conversation = await getConversationById(session.tenantDbName, existing.conversationId);
+      if (conversation && conversation.projectId === projectId) {
+        const access = await decideSessionAccess(request, conversation, {
+          need: 'manage',
+          agent,
+          actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+          alsoOwnedBy: [existing.userId],
+        });
+        if (!access.ok) return sendSessionRefusal(reply, request, access);
+      }
       // A run paused on an approval is ended by cancelling it, which answers the open request with "no".
       if (existing.status === 'requires_action') {
-        const conversation = await getConversationById(session.tenantDbName, existing.conversationId);
         if (conversation && conversation.projectId === projectId) {
           const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: session.tenantDbName, conversation, agent });
+          if (!verdict.allowed && verdict.unavailable) {
+            return sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
+          }
           if (!verdict.allowed) {
             return reply.code(403).send({
               error: 'This run is waiting for an approval or an answer. You are not allowed to answer it, so you cannot cancel it.',
@@ -1241,9 +1367,13 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
 
+      // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
+      // database, before the page, so a busy teammate cannot push theirs off it.
+      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
       const conversations = await listConversations(session.tenantDbName, agent.key, {
         limit: 50,
         projectId,
+        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
       });
 
       return reply.code(200).send({ conversations });
@@ -1289,15 +1419,30 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       if (!scoped) return reply;
       const { agent, projectId, session } = scoped;
 
+      // Somebody who may not view other people's sessions of this agent lists only their own - cut in the
+      // database, before the page, so a busy teammate cannot push theirs off it (one decision per request).
+      const scope = await sessionListScope(request, { agent, projectId, actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
       const sessions = await listConversations(session.tenantDbName, agent.key, {
         limit: 100,
         projectId,
+        ...(scope.ownOnly ? { createdBy: scope.userId } : {}),
       });
+      const owners = await resolveSessionOwners(sessions.map((entry) => entry.createdBy));
+      // The "waiting for you" state is per viewer: asked of the engine for the sessions that wait, not guessed.
+      const waiting = sessions.filter((entry) => entry.runtimeStatus === 'requires_action').slice(0, WAITING_ROWS_ANSWERABILITY_LIMIT);
+      const answerable = new Map<string, Awaited<ReturnType<typeof answerabilityOfRow>>>();
+      for (const entry of waiting) {
+        answerable.set(String(entry._id), await answerabilityOfRow(request, session.tenantDbName, agent, entry, { tenantDbName: session.tenantDbName, projectId, userId: session.userId }));
+      }
       // Summarised here rather than shipped whole: every record carries its
       // full transcript, and a hundred of those is megabytes of tool payloads
       // sent so the list can render a row count. The session PAGE fetches the
       // one transcript it actually shows.
-      return reply.code(200).send({ sessions: sessions.map(summariseConversation) });
+      return reply.code(200).send({
+        sessions: sessions.map((entry) => summariseConversation(entry, owners.get(entry.createdBy), answerable.get(String(entry._id)), session.userId)),
+        // Whether this is everybody's sessions of the agent or only the caller's own.
+        scope: { viewOthers: !scope.ownOnly },
+      });
     } catch (error) {
       return sendRouteError(reply, error, 'List agent sessions error', 'Failed to list sessions');
     }
@@ -1348,18 +1493,27 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedAgent(request, reply);
+      // Scope check, not just existence - a session id valid for a sibling agent (or project) in the same
+      // tenant must 404 here too - and the caller's right to read what somebody else started.
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
-      const { agent, projectId, session } = scoped;
-      const { sessionId } = request.params as { sessionId: string };
+      const { agent, session } = scoped;
+      const found = scoped.conversation;
 
-      const found = await getConversationById(session.tenantDbName, sessionId);
-      // Scope check, not just existence — a session id valid for a sibling
-      // agent (or project) in the same tenant must 404 here too.
-      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
-        return reply.code(404).send({ error: 'Session not found' });
-      }
-      return reply.code(200).send({ session: found });
+      // Whose it is, and which of its open requests THIS caller could answer (the page shows the server's
+      // verdict instead of deriving one from the agent's setting and the viewer's role).
+      const [owners, actions] = await Promise.all([
+        resolveSessionOwners([found.createdBy]),
+        openActionsOf(session.tenantDbName, String(found._id)),
+      ]);
+      const ability = await describeAnswerAbility(request, { tenantDbName: session.tenantDbName, conversation: found, actions, agent, actor: { tenantDbName: session.tenantDbName, projectId: scoped.projectId, userId: session.userId } });
+      return reply.code(200).send({
+        session: found,
+        owner: owners.get(found.createdBy) ?? null,
+        // The caller started it: nothing more than the route's own check was needed.
+        ownSession: scoped.owner,
+        pendingActions: withAnswerAbility(actions.map(toPublicPendingAction), ability),
+      });
     } catch (error) {
       return sendRouteError(reply, error, 'Get agent session error', 'Failed to load session');
     }
@@ -1372,7 +1526,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   // calls this, then that).
   app.patch('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
       if (!scoped) return reply;
       const body = readJsonBody<Record<string, unknown>>(request);
       if (body.budget === undefined) {
@@ -1406,7 +1560,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/agents/:agentId/sessions/:sessionId/continue', withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
-      scoped = await requireScopedSession(request, reply);
+      scoped = await requireScopedSession(request, reply, { need: 'manage' });
     } catch (error) {
       return sendRouteError(reply, error, 'Continue session error', 'Failed to continue the session');
     }
@@ -1498,16 +1652,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/agents/:agentId/sessions/:sessionId', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedAgent(request, reply);
+      // Deleting somebody else's session is acting on it: the owner always may, anybody else needs
+      // `agent.session_manage_others`.
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
       if (!scoped) return reply;
-      const { agent, projectId, session } = scoped;
-      const { sessionId } = request.params as { sessionId: string };
-
-      const found = await getConversationById(session.tenantDbName, sessionId);
-      if (!found || found.agentKey !== agent.key || found.projectId !== projectId) {
-        return reply.code(404).send({ error: 'Session not found' });
-      }
-      await deleteConversation(session.tenantDbName, sessionId);
+      await deleteConversation(scoped.session.tenantDbName, String(scoped.conversation._id));
       return reply.code(200).send({ success: true });
     } catch (error) {
       return sendRouteError(reply, error, 'Delete agent session error', 'Failed to delete session');
@@ -1518,7 +1667,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/sessions/:sessionId/events', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
       const body = await listSessionEvents(
         scoped.session.tenantDbName,
@@ -1534,7 +1683,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents/:agentId/sessions/:sessionId/events/stream', withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
-      scoped = await requireScopedSession(request, reply);
+      scoped = await requireScopedSession(request, reply, { need: 'view' });
     } catch (error) {
       return sendRouteError(reply, error, 'Session event stream error', 'Failed to open the event stream');
     }
@@ -1544,14 +1693,23 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/sessions/:sessionId/actions', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
       const body = await listConversationActions(
         scoped.session.tenantDbName,
         String(scoped.conversation._id),
         (request.query ?? {}) as Record<string, unknown>,
       );
-      return reply.code(200).send(body);
+      // What THIS caller could do with each open request, decided by the engine's own rule - the page shows it
+      // instead of guessing from the agent's setting and the viewer's role.
+      const ability = await describeAnswerAbility(request, {
+        tenantDbName: scoped.session.tenantDbName,
+        conversation: scoped.conversation,
+        actions: await openActionsOf(scoped.session.tenantDbName, String(scoped.conversation._id)),
+        agent: scoped.agent,
+        actor: { tenantDbName: scoped.session.tenantDbName, projectId: scoped.projectId, userId: scoped.session.userId },
+      });
+      return reply.code(200).send({ actions: withAnswerAbility(body.actions, ability) });
     } catch (error) {
       return sendRouteError(reply, error, 'List session actions error', 'Failed to list session actions');
     }
@@ -1570,7 +1728,9 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
   app.post('/agents/:agentId/sessions/:sessionId/actions/:actionId/resolve', withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
-      scoped = await requireScopedSession(request, reply);
+      // Who may answer is asked below, of the request itself: `agent.approve` for a tool approval, the session's
+      // ownership for a question - not the "view / change somebody else's session" pair this loader asks.
+      scoped = await requireScopedSession(request, reply, { need: 'none' });
     } catch (error) {
       return sendRouteError(reply, error, 'Resolve action error', 'Failed to resolve the request');
     }
@@ -1653,6 +1813,10 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       });
 
+      // The engine could not decide who may answer: 503 (never a 403), nothing was recorded.
+      if (outcome.kind === 'unavailable') {
+        return sendAuthorizationUnavailable(reply, request, 'dashboard', { action: 'agent.approve', level: 'write', decisionId: outcome.decisionId });
+      }
       const refusal = resolveRefusal(outcome);
       if (refusal) return reply.code(refusal.status).send(refusal.body);
 

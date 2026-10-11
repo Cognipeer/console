@@ -51,10 +51,10 @@ beforeEach(async () => {
 const permitAll = () => createPolicy(tenant(), { policyId: 'permit-all', name: 'permit all', cedar: 'permit(principal, action, resource);' }, 't');
 
 describe('the managed set', () => {
-  it('carries six RBAC permits, six boundary forbids, four portal rules and three agent approval rules, all valid against the schema', () => {
+  it('carries six RBAC permits, six boundary forbids, four portal rules and two agent approval rules, all valid against the schema', () => {
     expect(Object.keys(MANAGED_POLICIES)).toHaveLength(6);
     expect(Object.keys(BOUNDARY_POLICIES)).toHaveLength(6);
-    expect(Object.keys(ALL_MANAGED_POLICIES)).toHaveLength(19);
+    expect(Object.keys(ALL_MANAGED_POLICIES)).toHaveLength(18);
     const result = validatePolicies(getIamSchema().schema, { ...ALL_MANAGED_POLICIES });
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
@@ -63,7 +63,7 @@ describe('the managed set', () => {
       expect(text.startsWith('@managed("boundary") forbid')).toBe(true);
     }
     const info = listManagedPolicies();
-    expect(info.filter((p) => p.effect === 'forbid').map((p) => p.group)).toEqual([...Array(6).fill('boundary'), 'portal', 'portal', 'agent']);
+    expect(info.filter((p) => p.effect === 'forbid').map((p) => p.group)).toEqual([...Array(6).fill('boundary'), 'portal', 'portal']);
     expect(info.filter((p) => p.effect === 'permit').map((p) => p.group)).toEqual([...Array(6).fill('rbac'), 'portal', 'portal', 'agent', 'agent']);
     for (const [id, text] of Object.entries(AGENT_POLICIES)) {
       expect(id.startsWith('managed:agent:')).toBe(true);

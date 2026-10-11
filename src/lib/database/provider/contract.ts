@@ -1456,7 +1456,13 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   findAgentConversationById(id: string): Promise<IAgentConversation | null>;
   listAgentConversations(
     agentKey: string,
-    filters?: { projectId?: string; limit?: number; skip?: number },
+    filters?: {
+      projectId?: string;
+      limit?: number;
+      skip?: number;
+      /** Only the sessions this user started (the list of a caller who may not see other people's). */
+      createdBy?: string;
+    },
   ): Promise<IAgentConversation[]>;
   /**
    * A page of a project's conversations, newest created first (`createdAt`, then
@@ -1470,6 +1476,12 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     runtimeStatus?: AgentSessionRuntimeStatus;
     limit: number;
     after?: { createdAt: Date; id: string };
+    /**
+     * The caller may not see other people's sessions of these agents (`agentKeys`; every agent when absent):
+     * a row of such an agent is returned only when `userId` started it. Rows of any other agent are unaffected.
+     * Applied before the page is cut, so a busy teammate cannot push the caller's own sessions off it.
+     */
+    ownOnly?: { userId: string; agentKeys?: string[] };
   }): Promise<IAgentConversationListItem[]>;
   /** The runtime state a conversation's last turn ended in — see `IAgentConversationState`. */
   findAgentConversationState(conversationId: string): Promise<IAgentConversationState | null>;
@@ -1945,6 +1957,8 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
     conversationId?: string;
     status?: IAgentRun['status'][];
     mode?: IAgentRun['mode'];
+    /** Only the runs this user queued (the list of a caller who may not see other people's). */
+    userId?: string;
     limit?: number;
   }): Promise<IAgentRun[]>;
   /**

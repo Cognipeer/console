@@ -133,7 +133,7 @@ describe('policy rows', () => {
 
   it('describes every managed policy in plain language', () => {
     const views = listManagedPolicyViews();
-    expect(views.map((v) => v.id)).toHaveLength(19);
+    expect(views.map((v) => v.id)).toHaveLength(18);
     for (const v of views) {
       expect(v.name.length).toBeGreaterThan(5);
       expect(v.description.length).toBeGreaterThan(20);
@@ -145,7 +145,6 @@ describe('policy rows', () => {
     expect(describeManagedPolicy('managed:portal:agent-boundary')).toMatchObject({ group: 'portal', effect: 'forbid' });
     expect(describeManagedPolicy('managed:agent:approve')).toMatchObject({ group: 'agent', effect: 'permit', nameKey: 'iamApi.managed.agent-approve.name' });
     expect(describeManagedPolicy('managed:agent:approve-token')).toMatchObject({ group: 'agent', effect: 'permit' });
-    expect(describeManagedPolicy('managed:agent:approve-boundary')).toMatchObject({ group: 'agent', effect: 'forbid' });
     expect(describeManagedPolicy('managed:unknown:x')).toMatchObject({ name: 'managed:unknown:x', description: '', effect: 'permit' });
   });
 });
@@ -295,6 +294,50 @@ describe('cursors', () => {
   });
 });
 
+describe('which policies concern an agent, or a bucket an agent keeps its files in', () => {
+  const agent = { type: 'agent', id: 'A1' };
+  const bucket = { type: 'file-bucket', id: 'B1' };
+  const spec = (over: Record<string, unknown>) => policy({ cedar: 'x', spec: { effect: 'forbid', principals: { anyUser: true }, actions: ['agent.approve'], resources: { any: true }, ...over } as never });
+
+  it('an agent is reached through its own actions, the level groups and the agents service, on any channel', () => {
+    expect(policyReach(spec({}), agent)).toBe('all');
+    expect(policyReach(spec({ actions: ['agent.session_view_others'], resources: { resources: [{ type: 'agent', id: 'A1' }] } }), agent)).toBe('this');
+    expect(policyReach(spec({ resources: { resources: [{ type: 'agent', id: 'A2' }] } }), agent)).toBeNull();
+    expect(policyReach(spec({ actions: ['Write'], resources: { services: ['agents'] } }), agent)).toBe('all');
+    expect(policyReach(spec({ actions: ['agents.read'], resources: { projects: ['p1'] } }), agent)).toBe('all');
+    expect(policyReach(spec({ conditions: { channels: ['api'] } }), agent)).toBe('all');
+    // another service's rule, or another kind of resource, does not reach it
+    expect(policyReach(spec({ actions: ['models.write'] }), agent)).toBeNull();
+    expect(policyReach(spec({ resources: { services: ['models'] } }), agent)).toBeNull();
+    expect(policyReach(spec({ actions: ['agent.approve'], resources: { resources: [{ type: 'portal', id: 'A1' }] } }), agent)).toBeNull();
+  });
+
+  it('a bucket is reached through file-bucket actions, the level groups and the Files service', () => {
+    const bucketRule = (over: Record<string, unknown>) => spec({ actions: ['file-bucket.update'], ...over });
+    expect(policyReach(bucketRule({}), bucket)).toBe('all');
+    expect(policyReach(bucketRule({ resources: { resources: [{ type: 'file-bucket', id: 'B1' }] } }), bucket)).toBe('this');
+    expect(policyReach(bucketRule({ resources: { resources: [{ type: 'file-bucket', id: 'B2' }] } }), bucket)).toBeNull();
+    expect(policyReach(spec({ actions: ['files.write'], resources: { services: ['files'] } }), bucket)).toBe('all');
+    expect(policyReach(spec({ actions: ['agent.approve'] }), bucket)).toBeNull();
+  });
+
+  it('reads raw Cedar best-effort: an entity literal, else the actions and the entity type', () => {
+    const raw = (cedar: string) => policy({ cedar, spec: null });
+    expect(policyReach(raw('forbid (principal, action == Action::"agent.approve", resource == Agent::"A1");'), agent)).toBe('this');
+    expect(policyReach(raw('forbid (principal, action == Action::"agent.approve", resource == Agent::"A2");'), agent)).toBeNull();
+    expect(policyReach(raw('forbid (principal, action == Action::"agent.session_manage_others", resource is Agent);'), agent)).toBe('all');
+    expect(policyReach(raw('forbid (principal, action == Action::"models.write", resource);'), agent)).toBeNull();
+    expect(policyReach(raw('forbid (principal, action == Action::"file-bucket.update", resource == FileBucket::"B1");'), bucket)).toBe('this');
+    expect(policyReach(raw('forbid (principal, action == Action::"file-bucket.update", resource is FileBucket);'), bucket)).toBe('all');
+    expect(policyReach(raw('forbid (principal, action == Action::"agent.approve", resource);'), bucket)).toBeNull();
+  });
+
+  it('policiesReaching lists them in the order given, with how', () => {
+    const rules = [spec({ resources: { resources: [{ type: 'agent', id: 'A1' }] } }), spec({ actions: ['models.read'] }), spec({})];
+    expect(policiesReaching(rules, agent).map((r) => r.scope)).toEqual(['this', 'all']);
+  });
+});
+
 describe('which policies concern a portal', () => {
   const portal = { type: 'portal', id: 'P1' };
   const spec = (over: Record<string, unknown>) => policy({ cedar: 'x', spec: { effect: 'forbid', principals: { anyUser: true }, actions: ['portal.use'], resources: { any: true }, ...over } as never });
@@ -314,7 +357,7 @@ describe('which policies concern a portal', () => {
     expect(policyReach(spec({ resources: { services: ['models'] } }), portal)).toBeNull();
     expect(policyReach(spec({ conditions: { channels: ['dashboard', 'api'] } }), portal)).toBeNull();
     expect(policyReach(spec({ conditions: { channels: ['dashboard', 'portal'] } }), portal)).toBe('all');
-    expect(policyReach(spec({}), { type: 'agent', id: 'a1' })).toBeNull(); // only portals are judged
+    expect(policyReach(spec({}), { type: 'model', id: 'm1' })).toBeNull(); // only portals, agents and buckets are judged
   });
 
   it('reads raw Cedar best-effort: a portal literal, else the actions and the Portal type', () => {

@@ -14,6 +14,8 @@ export interface WebhookEventType {
 export interface WebhookEndpointRow {
   id: string;
   url: string;
+  /** The address is shown without its query string and userinfo: the caller may read webhooks, not change them. */
+  urlRedacted?: boolean;
   description: string | null;
   events: string[];
   /** null = every project. */

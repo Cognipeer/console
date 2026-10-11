@@ -54,6 +54,13 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { getHeaderValue, readJsonBody, withClientApiRequestContext } from '../fastify-utils';
 import { sendAgentGuardrailBlock } from './agent-config-write';
 import { approvalAuthorizerFor } from './agent-approval-authz';
+import {
+  loadSessionForPrincipal,
+  sendAuthorizationUnavailable,
+  sendClientSessionRefusal,
+  sessionListScope,
+  type SessionNeed,
+} from './agent-session-access';
 
 const logger = createLogger('api:client-agent-sessions');
 
@@ -62,24 +69,44 @@ const NOT_FOUND_BODY = apiErrorBody('not_found_error', 'Session not found', 'ses
 // The same 409 (type and code) as `agentRunConflictErrorBody()` on the Responses route.
 const RUN_CONFLICT_BODY = apiErrorBody('agent_run_conflict', 'An active run (queued or running) already exists for this conversation.');
 
-/** The conversation `:conversationId` names, in the token's project; null (404 sent) otherwise. */
+/**
+ * The conversation `:conversationId` names, in the token's project, and the caller's right to it: the token's
+ * owner who started it needs nothing beyond the route's own service check; anybody else needs
+ * `agent.session_view_others` (`need: 'view'`) or `agent.session_manage_others` (`need: 'manage'`) - decided
+ * by the policy engine as the token's owner, within the token's scope (agent-session-access.ts). `need: 'none'`
+ * skips that question for the route that asks its own (answering a pending request). Null, with the 404 / 403 /
+ * 503 already sent, when it is missing, in another project, or not the caller's to touch.
+ */
 async function requireSession(
   request: FastifyRequest,
   reply: FastifyReply,
   ctx: ApiTokenContext,
+  need: SessionNeed | 'none',
 ): Promise<IAgentConversation | null> {
   const { conversationId } = request.params as { conversationId: string };
-  let found: IAgentConversation | null = null;
-  try {
-    found = await getConversationById(ctx.tenantDbName, conversationId);
-  } catch {
-    found = null;
+  if (need === 'none') {
+    let found: IAgentConversation | null = null;
+    try {
+      found = await getConversationById(ctx.tenantDbName, conversationId);
+    } catch {
+      found = null;
+    }
+    if (!found || found.projectId !== ctx.projectId) {
+      void reply.code(404).send(NOT_FOUND_BODY);
+      return null;
+    }
+    return found;
   }
-  if (!found || found.projectId !== ctx.projectId) {
-    void reply.code(404).send(NOT_FOUND_BODY);
+  const loaded = await loadSessionForPrincipal(request, conversationId, {
+    need,
+    projectId: ctx.projectId,
+    actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+  });
+  if (!loaded.ok) {
+    sendClientSessionRefusal(reply, request, loaded);
     return null;
   }
-  return found;
+  return loaded.conversation;
 }
 
 /** The session's budget as the client API spells it, or null. */
@@ -259,12 +286,21 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
       }
       const agentKey = typeof query.agent === 'string' && query.agent.trim() ? query.agent.trim() : undefined;
 
+      // Somebody who may not view other people's sessions lists only their own - cut in the database, before the
+      // page. One decision for the named agent; without one, the project's agents are asked (once per request).
+      const named = agentKey ? await getAgentByKey(ctx.tenantDbName, agentKey, ctx.projectId) : null;
+      const scope = await sessionListScope(request, {
+        agent: named,
+        projectId: ctx.projectId,
+        actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+      });
       const page = await listSessionPage(ctx.tenantDbName, {
         projectId: ctx.projectId,
         ...(agentKey ? { agentKey } : {}),
         ...(status ? { status } : {}),
         limit,
         ...(after ? { after } : {}),
+        ...(scope.ownOnly ? { ownOnly: scope.ownOnly } : {}),
       });
       return reply.code(200).send({
         object: 'list',
@@ -281,7 +317,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Delete a session: its files, events and pending requests go with it ──
   app.delete('/client/v1/agents/sessions/:conversationId', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireSession(request, reply, ctx);
+      const conversation = await requireSession(request, reply, ctx, 'manage');
       if (!conversation) return reply;
       const conversationId = String(conversation._id);
       // A turn in flight would write its result into a session that no longer exists.
@@ -305,7 +341,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Runtime state: running / idle / waiting for an action ──
   app.get('/client/v1/agents/sessions/:conversationId', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireSession(request, reply, ctx);
+      const conversation = await requireSession(request, reply, ctx, 'view');
       if (!conversation) return reply;
       const runtime = await describeSessionRuntime(ctx.tenantDbName, conversation);
       return reply.code(200).send(serializeSession(conversation, runtime));
@@ -324,7 +360,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   // unless `resume` is false (default true).
   app.patch('/client/v1/agents/sessions/:conversationId', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireSession(request, reply, ctx);
+      const conversation = await requireSession(request, reply, ctx, 'manage');
       if (!conversation) return reply;
       const body = readJsonBody<Record<string, unknown>>(request);
       if (body.budget === undefined) {
@@ -414,7 +450,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Event log (poll) ──
   app.get('/client/v1/agents/sessions/:conversationId/events', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireSession(request, reply, ctx);
+      const conversation = await requireSession(request, reply, ctx, 'view');
       if (!conversation) return reply;
       const body = await listSessionEvents(
         ctx.tenantDbName,
@@ -433,7 +469,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/client/v1/agents/sessions/:conversationId/events/stream', withClientApiRequestContext(async (request, reply, ctx) => {
     let conversation: IAgentConversation | null;
     try {
-      conversation = await requireSession(request, reply, ctx);
+      conversation = await requireSession(request, reply, ctx, 'view');
     } catch (error) {
       logger.error('Client agent session stream error', { error });
       return reply.code(500).send(INTERNAL_ERROR_BODY);
@@ -452,7 +488,7 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   // first (409), that ran out of time (410), or that this caller may not answer (403).
   app.post('/client/v1/agents/sessions/:conversationId/actions/:actionId', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireSession(request, reply, ctx);
+      const conversation = await requireSession(request, reply, ctx, 'none');
       if (!conversation) return reply;
       const { actionId } = request.params as { actionId: string };
       // `approved_args` / `remember_for_session` (snake_case, like the rest of the client API).
@@ -507,6 +543,10 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
         },
       });
 
+      // The engine could not decide who may answer: 503 (never a 403), nothing was recorded.
+      if (outcome.kind === 'unavailable') {
+        return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: outcome.decisionId });
+      }
       const refusal = clientRefusal(outcome);
       if (refusal) return reply.code(refusal.status).send(refusal.body);
 

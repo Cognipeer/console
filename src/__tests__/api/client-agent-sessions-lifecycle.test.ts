@@ -28,6 +28,7 @@ vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue
 const hoisted = vi.hoisted(() => ({
   getConversationById: vi.fn(),
   getAgentByKey: vi.fn(),
+  listAgents: vi.fn(),
   createConversation: vi.fn(),
   deleteConversation: vi.fn(),
   listSessionPage: vi.fn(),
@@ -42,6 +43,7 @@ const hoisted = vi.hoisted(() => ({
 vi.mock('@/lib/services/agents', () => ({
   getConversationById: hoisted.getConversationById,
   getAgentByKey: hoisted.getAgentByKey,
+  listAgents: hoisted.listAgents,
   createConversation: hoisted.createConversation,
   deleteConversation: hoisted.deleteConversation,
 }));
@@ -89,6 +91,7 @@ describe('client agent session lifecycle routes', () => {
     (requireApiTokenFromHeader as ReturnType<typeof vi.fn>).mockResolvedValue(AUTH_CTX);
     (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(createMockDb({ runWithTenant } as never));
     hoisted.getAgentByKey.mockResolvedValue(AGENT);
+    hoisted.listAgents.mockResolvedValue([]);
     hoisted.createConversation.mockImplementation(async (...args: unknown[]) => created({ title: args[5] ?? 'New conversation', metadata: args[6], ...(args[7] ? { budget: args[7], spentUsd: 0 } : {}) }));
     hoisted.db.listAgentPendingActions.mockResolvedValue([]);
     hoisted.db.getAgentSessionMaxSeq.mockResolvedValue(0);

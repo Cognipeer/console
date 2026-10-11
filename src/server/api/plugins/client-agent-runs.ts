@@ -14,10 +14,20 @@ import { getAgentRunStatus, getConversationById, requestAgentRunCancellation } f
 import { agentRunNotFoundErrorBody, apiErrorBody, serializeAgentRun } from '@/lib/services/agents/agentRunService';
 import { withClientApiRequestContext } from '../fastify-utils';
 import { authorizeEndingOpenRequests } from './agent-approval-authz';
+import { decideSessionAccess, sendAuthorizationUnavailable, sendClientSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:client-agent-runs');
 
 const INTERNAL_ERROR_BODY = apiErrorBody('api_error', 'Internal error', 'internal_error');
+
+/** The conversation a run belongs to; null when it is gone (or the id is no conversation id). */
+async function findConversation(tenantDbName: string, conversationId: string) {
+  try {
+    return await getConversationById(tenantDbName, conversationId);
+  } catch {
+    return null;
+  }
+}
 
 export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
   // ── Poll status + result ──
@@ -28,6 +38,18 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       // A sync reservation is an internal lock row, not a run a caller owns.
       if (!run || run.mode !== 'background') {
         return reply.code(404).send(agentRunNotFoundErrorBody());
+      }
+      // A run is a handle on its session (its `result` is the answer): reading it is reading the session - the
+      // token's owner who queued it, or who started the session, needs nothing more; anybody else needs
+      // `agent.session_view_others`.
+      const conversation = await findConversation(ctx.tenantDbName, run.conversationId);
+      if (conversation && conversation.projectId === ctx.projectId) {
+        const access = await decideSessionAccess(request, conversation, {
+          need: 'view',
+          actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+          alsoOwnedBy: [run.userId],
+        });
+        if (!access.ok) return sendClientSessionRefusal(reply, request, access);
       }
       return reply.code(200).send(serializeAgentRun(run));
     } catch (error) {
@@ -42,10 +64,26 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       const { runId } = request.params as { runId: string };
       // A run paused on an approval is ended by cancelling it, which answers the open request with "no".
       const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, runId);
+      if (run && run.mode === 'background') {
+        const conversation = await findConversation(ctx.tenantDbName, run.conversationId);
+        // Cancelling a run is acting on its session: the owner always may, anybody else needs
+        // `agent.session_manage_others`.
+        if (conversation && conversation.projectId === ctx.projectId) {
+          const access = await decideSessionAccess(request, conversation, {
+            need: 'manage',
+            actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+            alsoOwnedBy: [run.userId],
+          });
+          if (!access.ok) return sendClientSessionRefusal(reply, request, access);
+        }
+      }
       if (run && run.mode === 'background' && run.status === 'requires_action') {
         const conversation = await getConversationById(ctx.tenantDbName, run.conversationId);
         if (conversation && conversation.projectId === ctx.projectId) {
           const verdict = await authorizeEndingOpenRequests(request, { tenantDbName: ctx.tenantDbName, conversation });
+          if (!verdict.allowed && verdict.unavailable) {
+            return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: verdict.decisionId });
+          }
           if (!verdict.allowed) {
             return reply.code(403).send(apiErrorBody(
               'permission_error',

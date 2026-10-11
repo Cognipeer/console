@@ -589,8 +589,10 @@ export function compileSpecToCedar(spec: PolicySpec, view: SpecCatalogView = cur
  *
  * A PERMIT never gains reach from the portal plane: a portal is opened by its
  * access list alone (managedPolicies.ts), so an allow rule cannot add anybody there.
- * The same goes for `agent.approve`: the managed approval rule names who may answer,
- * and an allow rule cannot add people there.
+ * `agent.approve` is different: it is APPOINTED. The managed rule names who may answer by
+ * default (the session's owner, whoever the agent accepts), and an allow rule on the dashboard
+ * / API channel appoints more approvers - so a permit that names it is effective on the
+ * SESSION plane (the portal's access list still bounds the portal channel).
  */
 export interface GateReach {
   /** Level groups and service-level actions: what the gates evaluate. */
@@ -628,8 +630,16 @@ export interface GateReach {
   unenforcedSpecific: number;
   /** The rule says something about portals on purpose (names a portal action, the portal channel or a portal): what a permit's warning is about. */
   portalExplicit: boolean;
-  /** The rule names `agent.approve`: what the "an allow rule cannot add people" advice is about. */
-  approvalExplicit: boolean;
+  /**
+   * The rule names `agent.approve` and the agent routes ask it in the rule's channels about the rule's
+   * resources: an allow rule like that APPOINTS approvers, so it is effective even though no gate sees it.
+   */
+  approvalAppoints: boolean;
+  /**
+   * The rule covers `agent.approve` only through the Write LEVEL (it does not name the action): an allow rule like that
+   * appoints approvers too, which its author may not have meant.
+   */
+  writeAppointsApprovers: boolean;
 }
 
 /** The actions of the portal itself (a rule that names one is "about portals" on purpose). */
@@ -637,14 +647,19 @@ const PORTAL_ACTIONS: readonly string[] = ['portal.use', 'agent.invoke'];
 
 /**
  * Can a resource selector match what `id` is asked about in `channel`? `null` = every resource. A portal reaches
- * the agents run through it (they are `in` it), which only matters in the portal channel.
+ * the agents run through it (they are `in` it), which only matters in the portal channel. An action asked about
+ * another kind of resource (the Document Store bucket an agent keeps its files in) is reached by that
+ * resource's service or type.
  */
-function runtimeReaches(id: string, channel: IamChannel, sel: PolicySpecResourceSelection | null): boolean {
+function runtimeReaches(id: string, channel: IamChannel, sel: PolicySpecResourceSelection | null, view: SpecCatalogView): boolean {
   if (sel === null) return true;
   const refs = sel.resources ?? [];
   if (id === 'portal.use') return !!sel.services?.includes('portals') || refs.some((r) => r.type === 'portal');
-  return !!sel.services?.includes('agents') || !!sel.projects?.length
-    || refs.some((r) => r.type === 'agent' || (channel === 'portal' && r.type === 'portal'));
+  const def = view.actions.get(id);
+  const service = def?.service ?? 'agents';
+  const type = def?.resourceType ?? 'agent';
+  return !!sel.services?.includes(service) || !!sel.projects?.length
+    || refs.some((r) => r.type === type || (channel === 'portal' && r.type === 'portal'));
 }
 
 export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatalogView()): GateReach {
@@ -671,12 +686,15 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
   // The rule's channels meet the ones the action is asked in (no channels at all = every channel).
   const appChannel = (a: { channels: IamChannel[] }) => a.channels.filter((c) => c !== 'portal').some((c) => channels.length === 0 || channels.includes(c));
 
-  const portalPlane = portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', sel));
-  const sessionPlane = sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', sel));
+  const portalPlane = portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', sel, view));
+  const approveAsked = sessionAsked.find((a) => a.id === 'agent.approve');
+  const approvalAppoints = runtimeIds.has('agent.approve') && !!approveAsked
+    && appChannel(approveAsked) && runtimeReaches('agent.approve', 'dashboard', sel, view);
+  const sessionPlane = sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', sel, view));
   const refReachable = (ref: PolicySpecResourceRef) => {
     const only = { resources: [ref] };
-    return (portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', only)))
-      || sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', only));
+    return (portalChannelOk && portalAsked.some((a) => runtimeReaches(a.id, 'portal', only, view)))
+      || sessionAsked.some((a) => appChannel(a) && runtimeReaches(a.id, 'dashboard', only, view));
   };
 
   const gateChannelOk = channels.length === 0 || channels.some((c) => c !== 'portal');
@@ -697,7 +715,9 @@ export function gateReach(spec: PolicySpec, view: SpecCatalogView = currentCatal
     sessionCovered: sessionAsked.length > 0,
     unenforcedSpecific: refs.filter((ref) => !refReachable(ref)).length,
     portalExplicit: [...runtimeIds].some((id) => PORTAL_ACTIONS.includes(id)) || channels.includes('portal') || refs.some((r) => r.type === 'portal'),
-    approvalExplicit: runtimeIds.has('agent.approve'),
+    approvalAppoints,
+    writeAppointsApprovers: !approvalAppoints && hasLevel('Write') && !!sessionAsked.find((a) => a.id === 'agent.approve')
+      && appChannel(sessionAsked.find((a) => a.id === 'agent.approve')!) && runtimeReaches('agent.approve', 'dashboard', sel, view),
   };
 }
 
@@ -785,18 +805,17 @@ function sessionSideReasons(reach: GateReach): PolicyIssue[] {
  * A deny rule is reachable through any plane. An allow rule only through the
  * gates (see GateReach); one that says something about portals but reaches nothing
  * else gets the reason `portal_access_list_grants`: a portal is opened by its
- * access list alone, so such a rule grants nobody anything. Likewise one that names
- * `agent.approve` and reaches nothing else gets `approval_rule_grants`.
+ * access list alone, so such a rule grants nobody anything. A permit that names
+ * `agent.approve` (dashboard / API) is effective: it appoints approvers.
  */
 export function inertReasons(reach: GateReach, effect: PolicyEffect = 'forbid'): PolicyIssue[] {
   if (effect === 'forbid') {
     if (reach.gatePlane || reach.portalPlane || reach.sessionPlane) return [];
     return [...gateSideReasons(reach), ...portalSideReasons(reach), ...sessionSideReasons(reach)];
   }
-  if (reach.gatePlane) return [];
-  const reasons = gateSideReasons(reach);
+  if (reach.gatePlane || reach.approvalAppoints) return [];
+  const reasons = [...gateSideReasons(reach), ...sessionSideReasons(reach)];
   if (reach.portalExplicit) reasons.push(portalGrantsIssue(false));
-  if (reach.approvalExplicit) reasons.push(approvalGrantsIssue(false));
   return reasons;
 }
 
@@ -821,21 +840,23 @@ function portalGrantsIssue(partly: boolean): PolicyIssue {
 }
 
 /**
- * What an allow rule that names `agent.approve` is told: who may answer a pending request is decided by the
- * agent's own "who can approve" setting (and the person who started the session), which an allow rule cannot widen.
+ * What an allow rule that appoints approvers (names `agent.approve`) is told: the people it names answer
+ * pending tool approvals, but only when the route lets them through at all, which takes the Write level
+ * on Agents (the answer is a POST). Advice, not an error: the rule is effective.
  */
-function approvalGrantsIssue(partly: boolean): PolicyIssue {
-  if (partly) {
-    return {
-      code: 'partly_approval_rule_grants',
-      field: 'actions',
-      message: 'Who may answer a pending request is decided by the agent\'s "who can approve" setting, so the approval part of this rule grants nobody anything. The rest of the rule still applies.',
-    };
-  }
+function writeAppointsApproversIssue(): PolicyIssue {
   return {
-    code: 'approval_rule_grants',
+    code: 'write_includes_approval',
     field: 'actions',
-    message: 'Who may answer a pending request is decided by the agent\'s "who can approve" setting. An allow rule cannot add people there: use a deny rule to block someone, or change the setting on the agent.',
+    message: 'The Write level includes approving tool calls, so the people this rule names will be able to approve tool calls of the agents it reaches. Choose specific actions if you only mean to give them write access.',
+  };
+}
+
+function approvalNeedsWriteIssue(): PolicyIssue {
+  return {
+    code: 'approval_needs_agents_write',
+    field: 'actions',
+    message: 'The people this rule names may answer pending tool approvals, but they also need the Write level on Agents to reach the answer button (they only read agents otherwise). Give them that in their group or person settings, or add Agents: Write to this rule.',
   };
 }
 
@@ -897,7 +918,9 @@ function warningsFor(spec: PolicySpec, view: SpecCatalogView): PolicyIssue[] {
   if (spec.effect === 'permit') {
     for (const reason of inert) warnings.push({ ...reason, message: reason.message.replace('would never apply', 'would never grant anything') });
     if (inert.length === 0 && reach.portalExplicit) warnings.push(portalGrantsIssue(true));
-    if (inert.length === 0 && reach.approvalExplicit) warnings.push(approvalGrantsIssue(true));
+    const grantsWrite = spec.actions.some((a) => a === 'Write' || a === 'agents.write');
+    if (inert.length === 0 && reach.approvalAppoints && !grantsWrite) warnings.push(approvalNeedsWriteIssue());
+    if (inert.length === 0 && reach.writeAppointsApprovers) warnings.push(writeAppointsApproversIssue());
   } else if (inert.length === 0) {
     if (reach.resourceActions.length > 0) {
       warnings.push({

@@ -303,6 +303,38 @@ describe('dashboard /api/webhooks', () => {
       expect((await db.findWebhookEndpointById(mine.id))?.description).toBe('Ops channel');
     });
 
+    it('Read sees the receiver address without its query string and userinfo; Admin sees it whole (it is often a credential)', async () => {
+      actAs('admin');
+      const secretUrl = 'https://user:pw@hooks.example.com/services/T0/B0?token=abc#frag';
+      const mine = json(await call('POST', '', body({ url: secretUrl }))).endpoint;
+      expect(mine.url).toBe(secretUrl);
+      expect(mine.urlRedacted).toBeUndefined();
+
+      await grant('member', 'read');
+      resetPrincipalCacheForTests();
+      actAs('member');
+      const listed = json(await call('GET', '')).endpoints[0];
+      expect(listed).toMatchObject({ id: mine.id, url: 'https://hooks.example.com/services/T0/B0?…', urlRedacted: true });
+      const got = json(await call('GET', `/${mine.id}`)).endpoint;
+      expect(got).toMatchObject({ url: 'https://hooks.example.com/services/T0/B0?…', urlRedacted: true });
+      expect(JSON.stringify([listed, got])).not.toMatch(/token=abc|user:pw|frag/);
+      // the stored address is untouched, and an administrator still sees it whole
+      expect((await db.findWebhookEndpointById(mine.id))?.url).toBe(secretUrl);
+      await grant('member', 'admin');
+      resetPrincipalCacheForTests();
+      expect(json(await call('GET', `/${mine.id}`)).endpoint.url).toBe(secretUrl);
+    });
+
+    it('a tenant-wide address is whole only for Admin in the workspace: Read of a project never reaches it', async () => {
+      const wide = await tenantWide({ url: 'https://hooks.example.com/all?key=zzz' });
+      await grant('member', 'read');
+      resetPrincipalCacheForTests();
+      actAs('member');
+      expect(json(await call('GET', `/${wide._id}`)).endpoint).toMatchObject({ url: 'https://hooks.example.com/all?…', urlRedacted: true });
+      actAs('admin');
+      expect(json(await call('GET', `/${wide._id}`)).endpoint.url).toBe('https://hooks.example.com/all?key=zzz');
+    });
+
     it('Read in the workspace also shows the tenant-wide endpoints, still read-only', async () => {
       const wide = await tenantWide();
       await grant('member', 'read');

@@ -87,6 +87,12 @@ const SESSION_ACTION_KEYS: ReadonlyMap<string, string> = new Map([
   ['agent.session_manage_others', 'sessionManage'],
 ]);
 
+/** The refusals about the bucket an agent keeps its files in (resourceAuthz.ts) and the wording key of each. */
+const BUCKET_ACTION_KEYS: ReadonlyMap<string, string> = new Map([
+  ['file-bucket.get', 'bucketChoose'],
+  ['file-bucket.update', 'bucketName'],
+]);
+
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
 const iso = (d: Date | string | undefined): string => (d ? new Date(d).toISOString() : new Date(0).toISOString());
 
@@ -179,11 +185,25 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
       const target = str(meta.resourceName) ?? str(meta.resourceId) ?? '';
       const byPolicy = policyIds.length > 0;
       const verb = SESSION_ACTION_KEYS.get(action);
-      const phrase = action === 'agent.approve' ? 'answering a pending request of agent'
+      const phrase = action === 'agent.approve' ? 'approving a tool call of agent'
         : action === 'agent.session_view_others' ? 'viewing someone else\'s session of agent'
           : 'acting on someone else\'s session of agent';
-      summary = `Denied ${whoLabel} ${phrase} "${target}" ${byPolicy ? `by policy "${names}"` : 'because no rule allows it'}`;
+      const noRule = action === 'agent.approve' ? 'because no rule appoints them' : 'because no rule allows it';
+      summary = `Denied ${whoLabel} ${phrase} "${target}" ${byPolicy ? `by policy "${names}"` : noRule}`;
       text = { key: `denied.${verb}${byPolicy ? 'Policy' : ''}`, params: { who: whoLabel, resource: target, policies: names } };
+    } else if (BUCKET_ACTION_KEYS.has(action) && str(meta.channel) !== 'portal') {
+      // A refusal about a Document Store bucket asked by the agents routes (resourceAuthz.ts): listing it as a choice
+      // for an agent's session files, or naming it in the agent's settings.
+      const kept = meta.policyNames && typeof meta.policyNames === 'object' && !Array.isArray(meta.policyNames)
+        ? (meta.policyNames as Record<string, unknown>)
+        : {};
+      const names = policyIds.map((id) => policyName.get(id) ?? str(kept[id]) ?? id).join('", "');
+      const whoLabel = who?.label ?? 'someone';
+      const target = str(meta.resourceName) ?? str(meta.resourceId) ?? '';
+      const byPolicy = policyIds.length > 0;
+      const phrase = action === 'file-bucket.get' ? 'listing bucket' : 'choosing bucket';
+      summary = `Denied ${whoLabel} ${phrase} "${target}" for an agent's files ${byPolicy ? `by policy "${names}"` : 'because no rule allows it'}`;
+      text = { key: `denied.${BUCKET_ACTION_KEYS.get(action)}${byPolicy ? 'Policy' : ''}`, params: { who: whoLabel, resource: target, policies: names } };
     } else if (str(meta.channel) === 'portal' && (action === 'portal.use' || action === 'agent.invoke')) {
       // A refusal of the portal runtime (resourceAuthz.ts): about opening one portal, or running one agent through it.
       const kept = meta.policyNames && typeof meta.policyNames === 'object' && !Array.isArray(meta.policyNames)

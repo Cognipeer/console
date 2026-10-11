@@ -43,6 +43,7 @@ import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentI
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
+  authorizationRefusalOf,
   getApiTokenContextForRequest,
   getHeaderValue,
   readJsonBody,
@@ -58,9 +59,10 @@ import {
   sendAgentGuardrailBlock,
   validateNativeConfigUpdate,
 } from './agent-config-write';
-import { tokenHasFilesPermission } from './files-permission';
+import { requestCanNameBucket } from './files-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { decideSessionAccess, sendAuthorizationUnavailable, sendClientSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:client-agents');
 
@@ -209,6 +211,15 @@ function createResponsesHandler(usePublished: boolean) {
             ? apiErrorBody('not_found_error', 'session_id does not match a session of this agent', 'session_not_found')
             : { error: 'previous_response_id does not match a valid conversation' });
         }
+        // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
+        // `agent.session_manage_others`. Whichever route the request came in on (this one is `agents`, the
+        // OpenAI-shaped `/responses` is `models`), a token only reaches a session through this check.
+        const access = await decideSessionAccess(request, conversation, {
+          need: 'manage',
+          agent,
+          actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+        });
+        if (!access.ok) return sendClientSessionRefusal(reply, request, access);
         // Waiting on an approval or an answer, and the agent refuses new
         // messages meanwhile: say so before any run is created.
         const blocking = await pendingActionsBlockingMessage(ctx.tenantDbName, conversation, agent.config);
@@ -225,6 +236,9 @@ function createResponsesHandler(usePublished: boolean) {
         // The agent cancels an open request when a new message arrives (`cancel_pending`): that is answering it
         // with "no", so it takes the permission to answer.
         const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+        if (cancelRefusal?.unavailable) {
+          return sendAuthorizationUnavailable(reply, request, 'client', { action: 'agent.approve', level: 'write', decisionId: cancelRefusal.decisionId });
+        }
         if (cancelRefusal) {
           return reply.code(403).send(apiErrorBody(
             'permission_error',
@@ -561,7 +575,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
-        canWriteFiles: async () => tokenHasFilesPermission(ctx, 'write'),
+        canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId }, bucketKey),
       });
       if ('forbidden' in prepared) return reply.code(403).send(prepared.forbidden);
       if ('badRequest' in prepared) return reply.code(400).send(prepared.badRequest);
@@ -581,6 +595,9 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(201).send({ agent: redactAgent(agent) });
     } catch (error) {
+      // The engine could not decide who may name the bucket: 503, not a failure of ours.
+      const refusal = authorizationRefusalOf(error);
+      if (refusal?.status === 503) return sendAuthorizationUnavailable(reply, request, 'client', { action: 'file-bucket.update', level: 'write', decisionId: refusal.decisionId });
       logger.error('Create client agent error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -630,7 +647,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             tenantDbName: ctx.tenantDbName,
             tenantId: ctx.tenantId,
             projectId: ctx.projectId,
-            canWriteFiles: async () => tokenHasFilesPermission(ctx, 'write'),
+            canNameBucket: (bucketKey) => requestCanNameBucket(request, { tenantDbName: ctx.tenantDbName, tenantId: ctx.tenantId, projectId: ctx.projectId }, bucketKey),
           }, existing.config);
           if ('forbidden' in checked) return reply.code(403).send(checked.forbidden);
           if ('badRequest' in checked) return reply.code(400).send(checked.badRequest);
@@ -651,6 +668,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
 
       return reply.code(200).send({ agent: redactAgent(agent) });
     } catch (error) {
+      const refusal = authorizationRefusalOf(error);
+      if (refusal?.status === 503) return sendAuthorizationUnavailable(reply, request, 'client', { action: 'file-bucket.update', level: 'write', decisionId: refusal.decisionId });
       logger.error('Update client agent error', { error });
       return reply.code(500).send({
         error: error instanceof Error ? error.message : 'Internal server error',

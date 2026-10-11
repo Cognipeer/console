@@ -56,7 +56,7 @@ function namedActions(action: ScopeJson | undefined): string[] {
 }
 
 /** Entity types the runtimes ask about: the portal, the agent (run through a portal, answered, or a session's), and the project the agent is in. */
-const RUNTIME_PLANE_TYPES: ReadonlySet<string> = new Set(['Portal', 'Agent', 'Project']);
+const RUNTIME_PLANE_TYPES: ReadonlySet<string> = new Set(['Portal', 'Agent', 'Project', 'FileBucket']);
 
 /**
  * Can a statement with this action scope match a decision of a runtime of this build

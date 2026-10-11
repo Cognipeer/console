@@ -28,7 +28,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { IAgentConversation } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { getConfig } from '@/lib/core/config';
-import { getAgentByKey, getConversationById } from '@/lib/services/agents';
+import { getAgentByKey } from '@/lib/services/agents';
 import { apiErrorBody } from '@/lib/services/agents/agentRunService';
 import { AgentAttachmentError, classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
@@ -52,7 +52,8 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { requireScopedSession } from './agents';
-import { FILES_READ_REQUIRED_MESSAGE, sessionHasFilesPermission } from './files-permission';
+import { loadSessionForPrincipal, sendClientSessionRefusal, type SessionNeed } from './agent-session-access';
+import { FILES_READ_REQUIRED_MESSAGE, requestBucketOptions, requestHasFilesRead } from './files-permission';
 
 const logger = createLogger('api:agent-session-files');
 
@@ -177,10 +178,14 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
   app.get('/agents/attachments/buckets', withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
-      if (!(await sessionHasFilesPermission(session, 'read'))) {
+      // The Document Store is the Files service's: a caller without read access to it is told so (the section
+      // shows the sentence); the list itself is cut to the buckets they may look at, each marked with whether
+      // they may name it (policy engine, per bucket).
+      if (!(await requestHasFilesRead(request))) {
         return reply.code(403).send({ error: FILES_READ_REQUIRED_MESSAGE, type: 'files_read_required', code: 'files_read_required' });
       }
-      const buckets = await listAttachmentBuckets(session.tenantDbName, session.tenantId, projectId);
+      const all = await listAttachmentBuckets(session.tenantDbName, session.tenantId, projectId);
+      const buckets = await requestBucketOptions(request, projectId, all);
       return reply.code(200).send({ buckets });
     } catch (error) {
       return sendDashboardError(reply, error, 'List attachment buckets error', 'Failed to list the buckets');
@@ -189,7 +194,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/agents/:agentId/sessions/:sessionId/files', { bodyLimit }, withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
       if (!scoped) return reply;
       const source = scoped.conversation.metadata?.source;
       if (typeof source === 'string' && source !== 'console') {
@@ -213,7 +218,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/sessions/:sessionId/files', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
       const files = await listSessionFiles(
         { tenantDbName: scoped.session.tenantDbName, tenantId: scoped.session.tenantId, projectId: scoped.projectId },
@@ -227,7 +232,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/agents/:agentId/sessions/:sessionId/files/:fileId/content', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'view' });
       if (!scoped) return reply;
       const query = readContentQuery(request);
       if (typeof query === 'string') return reply.code(400).send({ error: query });
@@ -247,7 +252,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/agents/:agentId/sessions/:sessionId/files/:fileId', withApiRequestContext(async (request, reply) => {
     try {
-      const scoped = await requireScopedSession(request, reply);
+      const scoped = await requireScopedSession(request, reply, { need: 'manage' });
       if (!scoped) return reply;
       const source = scoped.conversation.metadata?.source;
       if (typeof source === 'string' && source !== 'console') {
@@ -269,24 +274,28 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   // ── Client API ──
 
-  /** The conversation `:conversationId` names, in the token's project; null (404 sent) otherwise. */
+  /**
+   * The conversation `:conversationId` names, in the token's project, and the caller's right to it (the session's
+   * owner needs nothing more; anybody else needs `agent.session_view_others` / `agent.session_manage_others`);
+   * null (the 404 / 403 / 503 sent) otherwise.
+   */
   async function requireClientSession(
     request: FastifyRequest,
     reply: FastifyReply,
     ctx: ApiTokenContext,
+    need: SessionNeed,
   ): Promise<IAgentConversation | null> {
     const { conversationId } = request.params as { conversationId: string };
-    let found: IAgentConversation | null = null;
-    try {
-      found = await getConversationById(ctx.tenantDbName, conversationId);
-    } catch {
-      found = null;
-    }
-    if (!found || found.projectId !== ctx.projectId) {
-      void reply.code(404).send(apiErrorBody('not_found_error', 'Session not found', 'session_not_found'));
+    const loaded = await loadSessionForPrincipal(request, conversationId, {
+      need,
+      projectId: ctx.projectId,
+      actor: { tenantDbName: ctx.tenantDbName, projectId: ctx.projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+    });
+    if (!loaded.ok) {
+      sendClientSessionRefusal(reply, request, loaded);
       return null;
     }
-    return found;
+    return loaded.conversation;
   }
 
   function sendClientError(reply: FastifyReply, error: unknown, logMessage: string) {
@@ -303,7 +312,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.post('/client/v1/agents/sessions/:conversationId/files', { bodyLimit }, withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireClientSession(request, reply, ctx);
+      const conversation = await requireClientSession(request, reply, ctx, 'manage');
       if (!conversation) return reply;
       const payload = readUploadPayload(request);
       if (typeof payload === 'string') {
@@ -331,7 +340,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/client/v1/agents/sessions/:conversationId/files', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireClientSession(request, reply, ctx);
+      const conversation = await requireClientSession(request, reply, ctx, 'view');
       if (!conversation) return reply;
       const files = await listSessionFiles(clientScope(ctx), String(conversation._id));
       return reply.code(200).send({ object: 'list', data: files.map((file) => clientFile(file, String(conversation._id))) });
@@ -342,7 +351,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.get('/client/v1/agents/sessions/:conversationId/files/:fileId/content', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireClientSession(request, reply, ctx);
+      const conversation = await requireClientSession(request, reply, ctx, 'view');
       if (!conversation) return reply;
       const query = readContentQuery(request);
       if (typeof query === 'string') return reply.code(400).send(apiErrorBody('invalid_request_error', query, 'invalid_request'));
@@ -357,7 +366,7 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
 
   app.delete('/client/v1/agents/sessions/:conversationId/files/:fileId', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
-      const conversation = await requireClientSession(request, reply, ctx);
+      const conversation = await requireClientSession(request, reply, ctx, 'manage');
       if (!conversation) return reply;
       const { fileId } = request.params as { fileId: string };
       const deleted = await deleteSessionFile(clientScope(ctx), String(conversation._id), fileId, ctx.tokenRecord.userId);

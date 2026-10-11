@@ -79,7 +79,7 @@ describe('the picker’s buckets', () => {
     expect(options.map((option) => option.key)).toEqual(['archived', 'on-foreign-provider', 'on-gone-provider', 'on-off-provider', 'scratch', 'uploads']);
     const by = Object.fromEntries(options.map((option) => [option.key, option]));
     expect(by.uploads).toEqual({
-      key: 'uploads', name: 'Bucket uploads', providerKey: 's3-main', providerLabel: 'Provider s3-main', driver: 'aws-s3-files',
+      id: expect.any(String), key: 'uploads', name: 'Bucket uploads', providerKey: 's3-main', providerLabel: 'Provider s3-main', driver: 'aws-s3-files',
       bucketStatus: 'active', providerStatus: 'active', usable: true, localDisk: false,
     });
     expect(by.scratch).toMatchObject({ usable: true, driver: 'local-filesystem', localDisk: true, providerLabel: 'Server disk' });

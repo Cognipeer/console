@@ -18,6 +18,7 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
     ActionIcon,
+    Alert,
     Badge,
     Button,
     CopyButton,
@@ -42,6 +43,7 @@ import {
     IconExternalLink,
     IconCoin,
     IconHandStop,
+    IconInfoCircle,
     IconMessageCircle,
     IconPlayerPlay,
     IconPlus,
@@ -54,6 +56,8 @@ import EmptyState from '@/components/common/EmptyState';
 import { useTranslations } from '@/lib/i18n';
 import { formatDuration, formatNumber, formatRelativeTime } from '@/lib/utils/tracingUtils';
 import { formatCost } from '../session/sessionUsage';
+import type { AnswerBlockedReason } from '../session/pendingActions';
+import type { SessionOwnerView } from '../session/sessionTypes';
 import classes from './SessionList.module.css';
 
 
@@ -155,6 +159,17 @@ export interface SessionListItem {
     /** `requires_action`: the agent is waiting for an approval or an answer; `budget_paused`: it stopped on the session's spend budget. */
     runtimeStatus?: 'idle' | 'running' | 'requires_action' | 'budget_paused';
     hasContext?: boolean;
+    /** Who started it: the id, and the person's name or the kind of traffic that did (a schedule, a public A2A call...). */
+    createdBy?: string;
+    owner?: SessionOwnerView;
+    /** The viewer started it. */
+    ownSession?: boolean;
+    /**
+     * A waiting session: could THIS viewer answer what it waits on? The server's verdict (the policy engine's own
+     * rule); absent when the session waits on nobody or the server did not say.
+     */
+    canResolve?: boolean;
+    resolveBlockedReason?: AnswerBlockedReason;
 }
 
 const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
@@ -186,8 +201,26 @@ export function SessionSourceBadge({ source }: { source: string | undefined }) {
     return <Badge size="xs" variant="light" color={meta.color}>{meta.label}</Badge>;
 }
 
+/** Who a row belongs to, in words: the person's name, or the kind of traffic. */
+export function sessionOwnerText(session: Pick<SessionListItem, 'owner' | 'createdBy' | 'ownSession'>, say: (key: string) => string): string {
+    if (session.ownSession) return say('ownerYou');
+    const owner = session.owner;
+    if (!owner) return session.createdBy ?? '—';
+    switch (owner.kind) {
+        case 'user': return owner.name || owner.email || owner.id;
+        case 'schedule': return say('ownerSchedule');
+        case 'public_a2a': return say('ownerPublicA2a');
+        case 'evaluation': return say('ownerEvaluation');
+        case 'redteam': return say('ownerRedteam');
+        case 'system': return say('ownerSystem');
+        default: return owner.id;
+    }
+}
+
 export interface SessionListProps {
     sessions: SessionListItem[];
+    /** The caller sees only the sessions they started (the permission to view others' is not theirs). */
+    ownOnly?: boolean;
     loading?: boolean;
     /** Row click — shows the session (read-only). */
     onOpen: (sessionId: string) => void;
@@ -203,6 +236,7 @@ export interface SessionListProps {
 
 export default function SessionList({
     sessions,
+    ownOnly,
     loading,
     onOpen,
     onContinue,
@@ -213,6 +247,7 @@ export default function SessionList({
 }: SessionListProps) {
     const t = useTranslations('agents.hitl');
     const tb = useTranslations('agents.budget');
+    const ts = useTranslations('agents.sessionAccess');
     const [query, setQuery] = useState('');
     // Not named `window`: that shadows the global inside this component,
     // which is a trap waiting for the first line that needs the real one.
@@ -307,6 +342,11 @@ export default function SessionList({
 
     return (
         <Stack gap="sm">
+            {ownOnly ? (
+                <Alert variant="light" color="gray" p="xs" icon={<IconInfoCircle size={14} />} data-testid="sessions-own-only">
+                    <Text size="xs">{ts('ownOnlyNotice')}</Text>
+                </Alert>
+            ) : null}
             <Group justify="space-between" gap="xs" wrap="wrap">
                 <Group gap="xs" wrap="wrap">
                     <TextInput
@@ -440,6 +480,7 @@ export default function SessionList({
                             <SortHeader column="title" sort={sort} onSort={toggleSort}>Name</SortHeader>
                         </Table.Th>
                         <Table.Th w={100}>Source</Table.Th>
+                        <Table.Th w={130}>{ts('ownerColumn')}</Table.Th>
                         <Table.Th w={130}>Session ID</Table.Th>
                         <Table.Th w={70} ta="right">
                             <SortHeader column="turns" sort={sort} onSort={toggleSort} align="right">Turns</SortHeader>
@@ -474,11 +515,20 @@ export default function SessionList({
                                                 </Text>
                                             </UnstyledButton>
                                             {session.runtimeStatus === 'requires_action' ? (
-                                                <Tooltip label={t('waitingTooltip')} withArrow>
-                                                    <Badge size="xs" variant="light" color="orange" leftSection={<IconHandStop size={10} />}>
-                                                        {t('waitingBadge')}
-                                                    </Badge>
-                                                </Tooltip>
+                                                session.canResolve === false ? (
+                                                    // Waiting, but not for this viewer: the server says they could not answer it.
+                                                    <Tooltip label={ts('waitingElsewhereTooltip')} withArrow>
+                                                        <Badge size="xs" variant="light" color="gray" leftSection={<IconHandStop size={10} />}>
+                                                            {ts('waitingElsewhereBadge')}
+                                                        </Badge>
+                                                    </Tooltip>
+                                                ) : (
+                                                    <Tooltip label={t('waitingTooltip')} withArrow>
+                                                        <Badge size="xs" variant="light" color="orange" leftSection={<IconHandStop size={10} />}>
+                                                            {t('waitingBadge')}
+                                                        </Badge>
+                                                    </Tooltip>
+                                                )
                                             ) : null}
                                             {session.runtimeStatus === 'budget_paused' ? (
                                                 <Tooltip label={tb('pausedTooltip')} withArrow>
@@ -505,6 +555,11 @@ export default function SessionList({
                                     </Table.Td>
                                     <Table.Td>
                                         <SessionSourceBadge source={session.source} />
+                                    </Table.Td>
+                                    <Table.Td>
+                                        <Text size="xs" c={session.ownSession ? undefined : 'dimmed'} lineClamp={1} data-testid="session-owner">
+                                            {sessionOwnerText(session, ts)}
+                                        </Text>
                                     </Table.Td>
                                     <Table.Td>
                                         <Group gap={4} wrap="nowrap">

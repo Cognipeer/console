@@ -183,9 +183,9 @@ describeForEachProvider('agent session decisions', (getDb) => {
       expect(getIamEngineStats().resourceAuthz).toMatchObject({ decisions: 3, allows: 3, denies: 0, byAction: { 'agent.approve': { allows: 3 } } });
     });
 
-    it('refuses another member, with the approval rule as the reason, and a decision id', async () => {
+    it('refuses another member - nothing appoints them, so no rule is named - with a decision id', async () => {
       const result = await ask('other');
-      expect(result).toMatchObject({ allowed: false, source: 'engine', reasons: ['managed:agent:approve-boundary'], policyIds: [] });
+      expect(result).toMatchObject({ allowed: false, source: 'engine', reasons: [], policyIds: [] });
       expect(result.decisionId).toMatch(/^[0-9a-f-]{36}$/);
       expect(result.unavailable).toBeUndefined();
       // the agent's setting is the input: with "every member", the same person is let in
@@ -211,8 +211,9 @@ describeForEachProvider('agent session decisions', (getDb) => {
       expect(row.metadata).toMatchObject({
         iamEnforce: true, code: 'forbidden', decisionId: result.decisionId, action: 'agent.approve', channel: 'dashboard',
         resourceType: 'agent', resourceId: T.agentId, resourceName: 'support', contextProjectId: T.p1,
-        ownerId: idOf('starter'), approvers: 'owner_or_admin', source: 'engine', reasons: ['managed:agent:approve-boundary'], contextIp: '203.0.113.9',
+        ownerId: idOf('starter'), approvers: 'owner_or_admin', source: 'engine', contextIp: '203.0.113.9',
       });
+      expect(row.metadata?.reasons ?? []).toEqual([]);
       expect(row.metadata).not.toHaveProperty('portalId');
     });
 
@@ -227,7 +228,7 @@ describeForEachProvider('agent session decisions', (getDb) => {
     it('names the token as well as its owner, and applies its scope as a cap', async () => {
       const token = { id: 'tok-ci' };
       const result = await ask('other', { token });
-      expect(result).toMatchObject({ allowed: false, reasons: ['managed:agent:approve-boundary'] });
+      expect(result).toMatchObject({ allowed: false, reasons: [] });
       const [row] = (await rows({ metadata: { key: 'decisionId', value: result.decisionId! } })).items;
       expect(row).toMatchObject({ actorType: 'api_token', actorUserId: idOf('other'), apiTokenId: 'tok-ci' });
       expect(row.metadata).toMatchObject({ channel: 'api' });
@@ -279,7 +280,7 @@ describeForEachProvider('agent session decisions', (getDb) => {
       const feed = await listAuditFeed(tenant(), { kind: 'denials', limit: 20, offset: 0 });
       expect(feed.items.find((i) => i.decisionId === result.decisionId)).toMatchObject({
         service: 'agents', action: 'agent.approve', principal: { type: 'user', id: idOf('other') },
-        summary: 'Denied other answering a pending request of agent "support" by policy "Contractors do not approve"',
+        summary: 'Denied other approving a tool call of agent "support" by policy "Contractors do not approve"',
         text: { key: 'denied.approvePolicy', params: { who: 'other', resource: 'support', policies: 'Contractors do not approve' } },
       });
     });
@@ -303,8 +304,8 @@ describeForEachProvider('agent session decisions', (getDb) => {
       });
       const replay = await simulate(tenant(), decision.simulateInput);
       expect(replay).toMatchObject({
-        allowed: false, enforcedAtGate: true, defaultDeny: false,
-        reasons: [expect.objectContaining({ cedarId: 'managed:agent:approve-boundary', managed: true, effect: 'forbid' })],
+        allowed: false, enforcedAtGate: true, defaultDeny: true,
+        reasons: [],
         session: { ownerId: idOf('starter'), approvers: 'owner' },
       });
     });
@@ -383,9 +384,9 @@ describeForEachProvider('agent session decisions', (getDb) => {
     id: 'portal-1', key: 'branch', name: 'Branch', status: 'enabled',
     access: { mode: 'selected', userIds: [] as string[], groupIds: [] }, agentIds: [],
   };
-  const request = (createdBy: string, approvers: 'owner' | 'owner_or_admin' | 'project_members' = 'owner_or_admin') => ({
+  const request = (createdBy: string, approvers: 'owner' | 'owner_or_admin' | 'project_members' = 'owner_or_admin', kind: 'tool_approval' | 'user_question' = 'tool_approval') => ({
     conversation: { _id: 'c1', agentKey: 'support', projectId: T.p1, createdBy },
-    action: { _id: 'act_1', agentKey: 'support', projectId: T.p1, createdBy },
+    action: { _id: 'act_1', agentKey: 'support', projectId: T.p1, createdBy, kind },
     approvers,
   });
   const authorizer = (who: string) => portalApprovalAuthorizer({
@@ -401,16 +402,23 @@ describeForEachProvider('agent session decisions', (getDb) => {
     expect(refused).toMatchObject({ allowed: false, decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
   });
 
-  it('throws when the engine cannot decide - the portal answers "try again", never an allow', async () => {
+  it('a question follows the session\'s ownership: the person who started it answers, nobody else, and the engine is not asked', async () => {
+    registerIamPortalResolver(async () => portal);
+    expect(await authorizer('starter')(request(idOf('starter'), 'owner', 'user_question'))).toEqual({ allowed: true });
+    expect(await authorizer('admin')(request(idOf('starter'), 'owner_or_admin', 'user_question'))).toEqual({ allowed: false });
+  });
+
+  it('reports an engine that cannot decide as an `unavailable` verdict - the portal answers "try again", never an allow', async () => {
     // a request the runtime cannot even state (no person) is a refusal that says nobody decided
     const broken = portalApprovalAuthorizer({
       tenantDbName: T.dbName, tenantId: T.id, userId: '',
       portal: { id: 'portal-1', access: { mode: 'selected', userIds: [], groupIds: [] } },
       agent: { id: T.agentId },
     });
-    const error = await broken(request(idOf('starter'))).then(() => null, (e: unknown) => e);
-    expect(error).toBeInstanceOf(ApprovalUnavailableError);
-    expect(error).toMatchObject({ code: 'authorization_unavailable', decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    const verdict = await broken(request(idOf('starter')));
+    expect(verdict).toMatchObject({ allowed: false, unavailable: true, decisionId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    // the error class stays exported: an authorizer may still throw it, and the resolve service reads it the same way
+    expect(new ApprovalUnavailableError('d1')).toMatchObject({ code: 'authorization_unavailable', decisionId: 'd1' });
   });
 });
 

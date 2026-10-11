@@ -20,6 +20,8 @@ vi.mock('@/server/api/fastify-utils', async (importOriginal) => {
         ...actual,
         requireProjectContextForRequest: vi.fn(),
         sendProjectContextError: vi.fn().mockReturnValue(null),
+        // Who may touch a session somebody else started is the policy engine's question (agent-session-authz.test.ts); allowed here.
+        authorizeResourceForRequest: vi.fn(async () => ({ allowed: true, source: 'engine', reasons: [], policyIds: [] })),
     };
 });
 
@@ -57,7 +59,7 @@ vi.mock('@/lib/services/agents/agentService', () => ({
 
 import { requireProjectContextForRequest } from '@/server/api/fastify-utils';
 import { getDatabase } from '@/lib/database';
-import { executePlaygroundChat, getAgentById } from '@/lib/services/agents';
+import { executePlaygroundChat, getAgentById, getConversationById } from '@/lib/services/agents';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
 import { executePlaygroundChatLocal } from '@/lib/services/agents/agentService';
 import { agentsApiPlugin } from '@/server/api/plugins/agents';
@@ -73,6 +75,9 @@ const SESSION_CTX = {
         userId: 'user-1',
     },
 };
+
+// The session the turns continue: the signed-in user's own, of this agent and project.
+const CONVERSATION = { _id: 'conv-1', agentKey: 'field-ops', projectId: 'proj-1', createdBy: 'user-1', messages: [] };
 
 const AGENT = {
     _id: 'agent-1',
@@ -108,6 +113,7 @@ beforeEach(() => {
     deleteAgentRun.mockResolvedValue(true);
     mockFn(getDatabase).mockResolvedValue({ createAgentRun, deleteAgentRun });
     mockFn(getAgentById).mockResolvedValue(AGENT);
+    mockFn(getConversationById).mockResolvedValue(CONVERSATION);
     mockFn(executePlaygroundChatLocal).mockResolvedValue(PLAYGROUND_RESULT);
 });
 
