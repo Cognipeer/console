@@ -74,7 +74,7 @@ export function personDetail(id: string, patch: Record<string, unknown> = {}) {
       invitedAt: row.status === 'invited' ? row.createdAt : null,
       pendingInvite: row.status === 'invited',
       servicePermissions: owner ? {} : { models: 'read' },
-      managed: { directory: managed, provider: managed ? row.authProvider : null, readOnly: managed ? ['name', 'email', 'password'] : [] },
+      managed: { directory: managed, provider: managed ? row.authProvider : null, readOnly: managed ? ['name', 'email', 'password'] : [], roleFromDirectory: false },
     },
     effective: [{ service: 'models', level: 'read', sources: [{ kind: 'direct', label: 'Direct permission', level: 'read' }] }],
     groups: [{ id: 'g-eng', name: 'Engineering', source: 'local', tenantRole: 'user', removable: true }],

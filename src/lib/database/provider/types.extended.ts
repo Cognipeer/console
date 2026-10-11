@@ -1722,7 +1722,7 @@ export interface IamGroupFilter {
   q?: string;
   ids?: string[];
   /** Where the group comes from; 'local' also matches rows that have no source. */
-  sources?: Array<'local' | 'ldap'>;
+  sources?: Array<'local' | 'ldap' | 'oidc'>;
   /** Groups assigned to this project. */
   projectId?: string;
 }

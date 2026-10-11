@@ -38,6 +38,21 @@ export interface PeopleAuditActor {
   path?: string;
 }
 
+/** Who an audit row names: a person or token acting in a request, or the system (see `directoryAuditActor`). */
+export type PeopleAuditWriter = Omit<PeopleAuditActor, 'type'> & { type: PeopleAuditActor['type'] | 'system' };
+
+/**
+ * The actor of a change a directory sign-in made (`directory:oidc`, `directory:ldap`): the
+ * system, not a person. The rows it writes are the same semantic rows the screens
+ * write (`user.role.change`, `group.member.add`, `group.member.remove`).
+ */
+export function directoryAuditActor(
+  source: 'oidc' | 'ldap',
+  request?: Pick<PeopleAuditActor, 'requestId' | 'ipAddress' | 'userAgent'>,
+): PeopleAuditWriter {
+  return { type: 'system', userId: `directory:${source}`, ...(request ?? {}) };
+}
+
 export interface PeopleAuditEntry {
   event: PeopleAuditEvent;
   resourceType: 'user' | 'group' | 'token';
@@ -55,7 +70,7 @@ const SERVICE_OF: Record<PeopleAuditEntry['resourceType'], PermissionService> = 
 
 export function recordPeopleAudit(
   tenant: { tenantDbName: string; tenantId: string },
-  actor: PeopleAuditActor,
+  actor: PeopleAuditWriter,
   entry: PeopleAuditEntry,
 ): void {
   criticalFireAndForget('people-audit', () => runWithTenantScope(tenant.tenantDbName, () => recordAuditLog(

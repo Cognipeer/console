@@ -33,6 +33,7 @@ import { ensureDefaultProject } from '@/lib/services/projects/projectService';
 import { cleanupDeletedUser, setUserStatus } from '@/lib/services/users/userLifecycle';
 import { isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import { recordPeopleAudit, type PeopleAuditActor } from '@/lib/services/users/peopleAudit';
+import { isRoleManagedByDirectory } from '@/lib/services/users/roleManagement';
 import {
   canActOnPerson,
   canAdministerPeople,
@@ -249,7 +250,12 @@ export const usersApiPlugin: FastifyPluginAsync = async (app) => {
       const target = await findUserByIdSafe(db, id, session.tenantId);
       if (!target) return fail(reply, 404, 'user_not_found', 'User not found');
       const actor = { id: session.userId, role: session.userRole };
-      const person = targetOf(target);
+      // A role that follows the directory at every sign-in is not changed by hand (409 directory_managed).
+      const person = targetOf(target, {
+        roleManaged: input.role !== undefined && input.role !== target.role
+          ? await isRoleManagedByDirectory({ tenantDbName: session.tenantDbName, tenantId: session.tenantId }, target)
+          : false,
+      });
 
       // What would actually change: a value equal to the stored one is not a change.
       const patch: PersonPatch = {};

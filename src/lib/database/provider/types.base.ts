@@ -1202,9 +1202,10 @@ export interface IUserProject {
 
 // ── Groups / Teams ─────────────────────────────────────────────────────────
 
-/** Origin of a group or membership record. LDAP-sourced rows are reconciled
- *  on each directory login and must not be hand-edited in the console. */
-export type GroupSource = 'local' | 'ldap';
+/** Origin of a group or membership record. Rows that come from a directory
+ *  (`ldap`, `oidc`) are reconciled on each directory sign-in and must not be
+ *  hand-edited in the console; `local` rows are never touched by a sync. */
+export type GroupSource = 'local' | 'ldap' | 'oidc';
 
 /**
  * A named group of users within a tenant (team, department, squad, etc.).

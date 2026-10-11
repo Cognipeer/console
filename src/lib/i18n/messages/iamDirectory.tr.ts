@@ -228,6 +228,10 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     personFields:
       'Adı, e-postası ve parolası dizinde tutulduğu için burada salt okunurdur. Yine de rolünü ve erişimini değiştirebilir veya hesabı devre dışı bırakabilirsiniz.',
     fieldHint: '{provider} tarafından yönetiliyor. Değişikliği dizininizde yapın.',
+    personFieldsRole:
+      'Adı, e-postası, parolası ve rolü dizinde tutulduğu için burada salt okunurdur. Rol, her oturum açılışında dizinden yeniden belirlenir. Yine de erişimini değiştirebilir veya hesabı devre dışı bırakabilirsiniz.',
+    roleHint: 'Dizininiz tarafından yönetiliyor. Rol, her oturum açılışında dizinden belirlenir.',
+    groupHint: 'Dizininiz tarafından yönetiliyor ({source})',
   },
   matrix: {
     hint: {
@@ -561,7 +565,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     members: {
       title: 'Üyeler',
       hint: 'Gruptaki herkes, sayfa başına 50.',
-      directory: 'Bu grup dizininiz tarafından yönetiliyor. Üyeleri burada değiştirilemez.',
+      directory: 'Bu grup dizininiz tarafından yönetiliyor ({source}). Üyeleri burada değiştirilemez; verdiği yetkileri yine de düzenleyebilirsiniz.',
       addLabel: 'Üye ekle',
       add: 'Ekle',
       added: '{ok} eklendi, {skipped} atlandı',

@@ -30,6 +30,7 @@ import {
   type ProjectRef,
 } from './client';
 import { Muted } from './detailParts';
+import { providerLabel } from './managed';
 import { formatDateTime, formatRelativeTime, translateOr, type Translate } from './format';
 import styles from './PrincipalDetail.module.css';
 import { badgeVariant, statusColor } from './visuals';
@@ -76,7 +77,13 @@ export function GroupsSection({
                   variant="light"
                   color="teal"
                   leftSection={<IconUsersGroup size={14} />}
-                  rightSection={g.source && g.source !== 'local' ? <IconLock size={11} aria-label={td('badges.managedBadge')} /> : undefined}
+                  rightSection={g.source && g.source !== 'local' ? (
+                    <Tooltip label={td('managed.groupHint', { source: providerLabel(td, g.source) })} withArrow>
+                      <span style={{ display: 'inline-flex' }} data-testid="group-chip-managed">
+                        <IconLock size={11} aria-label={td('managed.groupHint', { source: providerLabel(td, g.source) })} />
+                      </span>
+                    </Tooltip>
+                  ) : undefined}
                   onClick={() => onOpen({ type: 'group', id: g.id })}
                 >
                   {g.name}

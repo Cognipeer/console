@@ -26,6 +26,20 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
   half a minute.
 - Accounts managed by a directory (LDAP, SSO) keep their name, email and password in the directory and are
   disabled rather than deleted here. A password reset is not offered for them.
+- When a directory connection (LDAP, SSO) is set to sync roles, the role of the accounts it signs in is the
+  directory's: it is shown as **Managed by your directory** and the server refuses to change it by hand
+  (`409 directory_managed`). Their access, projects and groups stay editable. Without a directory connection
+  nothing changes.
+- Upgrade note, directory role sync: a directory connection saved before this release reads as syncing roles, so
+  the first sign-in after the upgrade gives each account the role the directory says (the admin mapping, otherwise
+  the connection's default role). A role that was set here by hand and differs from it is replaced, and with an admin
+  mapping an admin who is not in it falls to the default role. To keep the roles as they are, switch **Sync role
+  from the directory** off in the connection's settings right after the upgrade, before people sign in. The workspace
+  owner is never changed. A directory can say only admin or the default role, so with the switch on a person cannot
+  be given the project admin role directly (use a group).
+- Groups can come from SSO as well as from LDAP. The members of a group that comes from a directory are the
+  directory's: adding or removing one is refused (`409 group_directory_managed`) and the group and person drawers
+  say where the group comes from. A directory group's grants, projects and policies stay editable.
 - "Programmatic user" is now **Service account**.
 - A new **My account** page lets every person see their profile, change their own password (local accounts) and
   reach their own API tokens. The API tokens page lists a person's own tokens only; owners and admins manage

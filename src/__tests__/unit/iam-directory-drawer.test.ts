@@ -20,7 +20,7 @@ import {
   type Mounted,
   type RouteHandler,
 } from '../helpers/iamCenterUi';
-import { CAPS_ADMIN, directoryRoutes, personDetail } from '../helpers/iamDirectoryFixtures';
+import { CAPS_ADMIN, directoryRoutes, groupDetail, listHandler, personDetail } from '../helpers/iamDirectoryFixtures';
 import { ACTION_DENIAL_REASONS, reasonKey } from '@/components/iam/principals/detailParts';
 import { messages } from '@/lib/i18n/messages';
 
@@ -363,5 +363,110 @@ describe('a failing detail', () => {
     await click(buttonByText('Try again'));
     await settle(150);
     expect(drawer().textContent).toContain('Engineering');
+  });
+});
+
+describe('an account or a group that comes from a directory', () => {
+  const denied = { allowed: false, reason: 'directory_managed' };
+  const ssoRoleSynced = () => {
+    const base = personDetail('u-sso');
+    return personDetail('u-sso', {
+      principal: { ...base.principal, managed: { ...(base.principal.managed as object), roleFromDirectory: true } },
+      allowedActions: { ...base.allowedActions, changeRole: denied },
+      assignableRoles: [],
+    });
+  };
+  const MEMBERS = (membershipSource: string) => ({
+    items: [{ userId: 'u-ann', label: 'Ann Lee', email: 'ann@example.com', role: 'user', status: 'active', kind: 'person', membershipSource }],
+    nextCursor: null,
+    total: 1,
+  });
+
+  it('shows the role of an account whose connection syncs roles as managed by the directory, and switches the change off', async () => {
+    await open('user:u-sso', [['GET', '/api/iam/principals/user/u-sso', () => ssoRoleSynced()]]);
+    const lock = inDrawer('[data-testid="role-managed"]');
+    expect(lock).not.toBeNull();
+    expect(lock!.getAttribute('aria-label')).toContain('Managed by your directory');
+    expect(inDrawer('[data-testid="managed-banner"]')?.textContent).toContain('role are kept in the directory');
+    expect(action('act-change-role')!.disabled).toBe(true);
+    // the rest of the account is still the admin's to manage
+    expect(action('act-disable')!.disabled).toBe(false);
+    expect(action('act-edit-access')!.disabled).toBe(false);
+  });
+
+  it('leaves the role of a directory account editable when its connection does not sync roles', async () => {
+    await open('user:u-sso');
+    expect(inDrawer('[data-testid="role-managed"]')).toBeNull();
+    expect(inDrawer('[data-testid="managed-banner"]')?.textContent).toContain('You can still change its role and access');
+    expect(action('act-change-role')!.disabled).toBe(false);
+  });
+
+  it('marks the role of such an account in the list too, and hides the change from the row menu', async () => {
+    nav.search = 'tab=principals';
+    window.history.replaceState(null, '', '/dashboard/iam?tab=principals');
+    api = installApiMock([
+      ...directoryRoutes(CAPS_ADMIN),
+      [
+        'GET',
+        '/api/iam/principals',
+        (call) => {
+          const page = listHandler()(call) as { items: Array<Record<string, any>> };
+          return {
+            ...page,
+            items: page.items.map((row) =>
+              row.id === 'u-sso' ? { ...row, roleManaged: true, allowedActions: { ...row.allowedActions, changeRole: denied } } : row,
+            ),
+          };
+        },
+      ],
+    ]);
+    mounted = await mount(createElement(PrincipalsTab, { canManage: true }));
+    await settle(250);
+    const locks = qa('[data-testid="role-managed"]');
+    expect(locks).toHaveLength(1);
+    expect(locks[0]!.closest('tr, [role="row"]')?.textContent).toContain('Sam Sso');
+  });
+
+  it.each([['oidc', 'SSO (OIDC)'], ['ldap', 'LDAP']])('says a %s group is managed by the directory and names the source', async (source, label) => {
+    const base = groupDetail('g-dir');
+    await open('group:g-dir', [
+      ['GET', '/api/iam/principals/group/g-dir', () => ({ ...base, principal: { ...base.principal, source, managed: true } })],
+      ['GET', /^\/api\/iam\/principals\/group\/[^/]+\/members$/, () => MEMBERS(source)],
+    ]);
+    const note = inDrawer('[data-testid="directory-group-note"]')?.textContent ?? '';
+    expect(note).toContain('managed by your directory');
+    expect(note).toContain(label);
+    expect(note).toContain('you can still edit what it grants');
+    // the membership says where it comes from, and nothing can be ticked
+    expect(drawer().textContent).toContain(label);
+    expect(qa('[data-testid="group-member"] input[type="checkbox"]', drawer())).toHaveLength(0);
+    expect(action('act-edit-group')!.disabled).toBe(false);
+    expect(action('act-delete-group')!.disabled).toBe(true);
+  });
+
+  it('marks, on the person, a membership of a directory group with its source, and offers no way to leave it', async () => {
+    const base = personDetail('u-ann');
+    await open('user:u-ann', [
+      [
+        'GET',
+        '/api/iam/principals/user/u-ann',
+        () => ({
+          ...base,
+          groups: [
+            { id: 'g-eng', name: 'Engineering', source: 'local', tenantRole: 'user', removable: true },
+            { id: 'g-sso', name: 'SSO team', source: 'oidc', tenantRole: null, removable: false },
+          ],
+        }),
+      ],
+    ]);
+    const chips = qa('[data-testid="group-chip"]', drawer());
+    expect(chips).toHaveLength(2);
+    expect(chips[0]!.querySelector('[data-testid="group-chip-managed"]')).toBeNull();
+    const managed = chips[1]!.querySelector('[data-testid="group-chip-managed"]');
+    expect(managed).not.toBeNull();
+    expect(managed!.querySelector('svg')!.getAttribute('aria-label')).toBe('Managed by your directory (SSO (OIDC))');
+    // only the local membership can be left from here
+    expect(qa('button[aria-label^="Remove from"]', chips[0]!)).toHaveLength(1);
+    expect(qa('button[aria-label^="Remove from"]', chips[1]!)).toHaveLength(0);
   });
 });

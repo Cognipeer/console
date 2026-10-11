@@ -330,7 +330,7 @@ export function PrincipalDetailView({
         </Button>
       </Group>
 
-      {managedBy ? <ManagedBanner provider={managedBy} fields={td('managed.personFields')} /> : null}
+      {managedBy ? <ManagedBanner provider={managedBy} fields={td(extras.managed?.roleFromDirectory ? 'managed.personFieldsRole' : 'managed.personFields')} /> : null}
 
       {error ? (
         <Alert color="red" icon={<IconAlertTriangle size={16} />} title={t('errors.detailFailed')}>

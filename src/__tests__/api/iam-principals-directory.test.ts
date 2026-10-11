@@ -395,7 +395,7 @@ describeForEachProvider('IAM directory API', (getDb) => {
       ['type=user&group=bad%20id', 'group'],
       ['type=user&project=a%2Fb', 'project'],
       ['type=user&role=admin&role=user', 'role'],
-      ['type=group&source=oidc', 'source'],
+      ['type=group&source=saml', 'source'],
       ['type=group&project=bad%20id', 'project'],
       ['type=token&status=revoked', 'status'],
       ['type=token&scoped=maybe', 'scoped'],

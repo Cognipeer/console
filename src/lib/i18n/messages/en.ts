@@ -1,4 +1,5 @@
 import { accountPageEn } from './accountPage.en';
+import { directorySyncEn } from './directorySync.en';
 import { iamDirectoryEn } from './iamDirectory.en';
 
 export const en = {
@@ -1284,6 +1285,7 @@ export const en = {
   },
   // People and access (Principals tab) and the account page: their own files, spread in here.
   iamDirectory: iamDirectoryEn,
+  directorySync: directorySyncEn,
   accountPage: accountPageEn,
   iamPrincipals: {
     segments: {

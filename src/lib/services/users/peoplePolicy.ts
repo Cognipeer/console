@@ -13,6 +13,10 @@
  *  - A directory-managed account (LDAP, SSO) keeps its name, email and password
  *    in the directory: they are read-only here, and the account is disabled
  *    rather than deleted (it would be created again at its next sign-in).
+ *  - When its directory connection also syncs roles (`roleManagedByDirectory`), the
+ *    role of such an account is the directory's too: it is recomputed at every
+ *    sign-in, so changing it by hand would be undone at once and is refused
+ *    (409 `directory_managed`). Its access and projects stay editable.
  *
  * Nothing here reads the database or the request.
  */
@@ -46,9 +50,18 @@ export interface PolicyTarget {
   status?: string | null;
   invitedBy?: string | null;
   inviteAcceptedAt?: Date | string | null;
+  /**
+   * The role of this account follows its directory at every sign-in (the connection
+   * is on and set to sync roles). A fact about the workspace's connection, not about
+   * the row: the caller asks `roleManagedPredicate` and passes the answer to `targetOf`.
+   */
+  roleManagedByDirectory?: boolean;
 }
 
-/** The facts of a stored user row the rules need (a row has `_id`, the policy speaks of `id`). */
+/**
+ * The facts of a stored user row the rules need (a row has `_id`, the policy speaks of `id`).
+ * `roleManaged` is the answer of `roleManagedPredicate` for this person.
+ */
 export function targetOf(user: {
   _id?: unknown;
   role?: string | null;
@@ -57,7 +70,7 @@ export function targetOf(user: {
   status?: string | null;
   invitedBy?: string | null;
   inviteAcceptedAt?: Date | string | null;
-}): PolicyTarget {
+}, options?: { roleManaged?: boolean }): PolicyTarget {
   return {
     id: String(user._id ?? ''),
     role: String(user.role ?? ''),
@@ -66,6 +79,7 @@ export function targetOf(user: {
     status: user.status,
     invitedBy: user.invitedBy,
     inviteAcceptedAt: user.inviteAcceptedAt,
+    ...(options?.roleManaged ? { roleManagedByDirectory: true } : {}),
   };
 }
 
@@ -170,11 +184,17 @@ export function checkRoleChange(actor: PolicyActor, target: PolicyTarget, next: 
     return refuse(403, 'admin_grant_requires_admin', 'Only owners and admins can grant or remove the admin role');
   }
   if (next === target.role) return { ok: true, noop: true };
+  // The directory sets this role at every sign-in: a hand-made change would be undone at once.
+  if (target.roleManagedByDirectory) {
+    return refuse(409, 'directory_managed', 'The role of this account follows your directory at every sign-in; change it there');
+  }
   return OK;
 }
 
 /** The roles `actor` could give `target` (empty when the role cannot be changed at all). */
 export function assignableRoles(actor: PolicyActor, target: PolicyTarget): AssignableRole[] {
+  // The role the person already has is an accepted no-op, which must not read as "can be changed".
+  if (target.roleManagedByDirectory) return [];
   return ASSIGNABLE_ROLES.filter((role) => checkRoleChange(actor, target, role).ok);
 }
 

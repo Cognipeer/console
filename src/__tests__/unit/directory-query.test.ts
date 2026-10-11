@@ -61,9 +61,11 @@ describe('people filters', () => {
 describe('group filters', () => {
   it('reads the source and the project', () => {
     expect(ok('group', { source: 'local' }).filters).toEqual({ groupSources: ['local'] });
-    expect(ok('group', { source: 'directory' }).filters).toEqual({ groupSources: ['ldap'] });
+    expect(ok('group', { source: 'directory' }).filters).toEqual({ groupSources: ['ldap', 'oidc'] });
+    expect(ok('group', { source: 'oidc' }).filters).toEqual({ groupSources: ['oidc'] });
+    expect(ok('group', { source: 'sso' }).filters).toEqual({ groupSources: ['oidc'] });
     expect(ok('group', { source: 'local,ldap', project: 'p1' }).filters).toEqual({ groupSources: ['local', 'ldap'], projectId: 'p1' });
-    expect(issues('group', { source: 'oidc' })).toEqual(['source']);
+    expect(issues('group', { source: 'saml' })).toEqual(['source']);
   });
 });
 

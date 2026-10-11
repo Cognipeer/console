@@ -452,7 +452,14 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
           width: 150,
           render: (row) =>
             row.role ? (
-              <Badge variant={badgeVariant(roleColor(row.role))} color={roleColor(row.role)} radius="sm" style={NO_SHRINK}>
+              <Badge
+                variant={badgeVariant(roleColor(row.role))}
+                color={roleColor(row.role)}
+                radius="sm"
+                style={NO_SHRINK}
+                title={row.roleManaged ? td('managed.roleHint') : undefined}
+                leftSection={row.roleManaged ? <IconLock size={11} aria-label={td('managed.roleHint')} data-testid="role-managed" /> : undefined}
+              >
                 {translateOr(t, NS, `roles.${row.role}`, row.role)}
               </Badge>
             ) : (

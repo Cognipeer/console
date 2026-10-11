@@ -10,6 +10,7 @@ import { useTranslations } from '@/lib/i18n';
 import { isAbortError } from './client';
 import { directoryApi, type GroupMemberRow, type GroupMembersPage } from './directoryApi';
 import { ErrorText, notifyError } from './errors';
+import { providerLabel } from './managed';
 import { translateOr, type Translate } from './format';
 import { PagerControls, useCursorPager } from './pager';
 import styles from './PrincipalDetail.module.css';
@@ -161,7 +162,7 @@ export default function GroupMembersSection({
     <Stack gap="sm">
       {directory ? (
         <Alert color="blue" variant="light" icon={<IconLock size={16} />} data-testid="directory-group-note">
-          {td('drawer.members.directory')}
+          {td('drawer.members.directory', { source: providerLabel(td, group.source) })}
         </Alert>
       ) : null}
 
@@ -335,7 +336,7 @@ function MemberRow({
         ) : null}
         {member.membershipSource !== 'local' ? (
           <Badge size="sm" variant="default" tt="none" leftSection={<IconLock size={10} aria-hidden />}>
-            {td('badges.sources.ldap')}
+            {providerLabel(td, member.membershipSource)}
           </Badge>
         ) : null}
         {onRemove ? (

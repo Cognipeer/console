@@ -124,6 +124,8 @@ export interface PrincipalSummary extends PrincipalRef {
   authProvider?: string;
   /** Users: name, email and password are kept in a directory, not here. */
   managed?: boolean;
+  /** Users: the directory also decides the role at every sign-in, so it is shown as managed and not editable. */
+  roleManaged?: boolean;
   createdAt?: string;
   invitedAt?: string;
   /** Groups: local or ldap (a directory group). */
@@ -175,6 +177,7 @@ export function parsePrincipalSummary(raw: unknown, fallbackType?: PrincipalType
     summary.kind = optKind(r.kind);
     summary.authProvider = optString(r.authProvider);
     summary.managed = asBool(r.managed);
+    summary.roleManaged = asBool(r.roleManaged);
     summary.createdAt = optString(r.createdAt);
     summary.invitedAt = optString(r.invitedAt);
   } else if (type === 'group') {
@@ -578,6 +581,8 @@ export interface ManagedInfo {
   directory: boolean;
   provider: string | null;
   readOnly: string[];
+  /** The role follows the directory at every sign-in (its connection syncs roles). */
+  roleFromDirectory: boolean;
 }
 
 /** One thing the viewer may or may not do to the principal, with the reason when not. */
@@ -627,6 +632,7 @@ export function parseManaged(raw: unknown): ManagedInfo | null {
     directory: r.directory === true,
     provider: asString(r.provider),
     readOnly: asArray(r.readOnly).filter((x): x is string => typeof x === 'string'),
+    roleFromDirectory: r.roleFromDirectory === true,
   };
 }
 

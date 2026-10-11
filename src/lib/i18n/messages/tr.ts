@@ -8,6 +8,7 @@
 
 import { en } from './en';
 import { accountPageTr } from './accountPage.tr';
+import { directorySyncTr } from './directorySync.tr';
 import { iamDirectoryTr } from './iamDirectory.tr';
 
 export const tr: typeof en = {
@@ -930,6 +931,7 @@ export const tr: typeof en = {
     eyebrow: 'Ayarlar · Yetkilendirme',
   },
   iamDirectory: iamDirectoryTr,
+  directorySync: directorySyncTr,
   accountPage: accountPageTr,
   iamPrincipals: {
     segments: {

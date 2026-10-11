@@ -229,6 +229,10 @@ export const iamDirectoryEn = {
     personFields:
       'Its name, email and password are kept in the directory, so they are read-only here. You can still change its role and access, or disable it.',
     fieldHint: 'Managed by {provider}. Change it in your directory.',
+    personFieldsRole:
+      'Its name, email, password and role are kept in the directory, so they are read-only here. The role is set again from the directory at every sign-in. You can still change its access, or disable it.',
+    roleHint: 'Managed by your directory. The role is set from the directory at every sign-in.',
+    groupHint: 'Managed by your directory ({source})',
   },
   matrix: {
     hint: {
@@ -562,7 +566,7 @@ export const iamDirectoryEn = {
     members: {
       title: 'Members',
       hint: 'Everyone in the group, 50 per page.',
-      directory: 'This group is managed by your directory. Its members cannot be changed here.',
+      directory: 'This group is managed by your directory ({source}). Its members cannot be changed here; you can still edit what it grants.',
       addLabel: 'Add members',
       add: 'Add',
       added: 'Added {ok}, skipped {skipped}',
