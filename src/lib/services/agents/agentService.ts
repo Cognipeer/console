@@ -28,14 +28,14 @@ import {
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption } from './agentMemoryAdapter';
-import type { IAgentConversationMessage, IAgentConversationStep, IAgentSubagent } from '@/lib/database/provider/types.domain';
+import type { IAgentConversationMessage, IAgentConversationStep, IAgentMessageVersion, IAgentSubagent } from '@/lib/database/provider/types.domain';
 import {
     buildPromptVariables,
     renderPromptTemplate,
     shouldRenderInlinePrompt,
     type RenderedPrompt,
 } from './promptVariables';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -167,6 +167,16 @@ import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/fin
 import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
 import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
 import {
+    buildClientTools,
+    checkEmbeddedClientTools,
+    clientToolErrorText,
+    clientToolMeta,
+    clientToolOutputText,
+    clientToolPolicyName,
+    resolveClientToolState,
+    type EmbeddedRunContext,
+} from './agentClientTools';
+import {
     applyToolApprovals,
     denyUnattendedTools,
     resolveHitlConfig,
@@ -190,6 +200,9 @@ import {
 } from './agentPendingActions';
 
 const logger = createLogger('agents');
+
+/** How many replaced answers a regenerated message remembers. */
+const MAX_PREVIOUS_VERSIONS = 5;
 
 const CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION =
     'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty. Each match carries a documentId — pass it to knowledge_read_document or knowledge_read_document_lines when the question needs more of that file than the matched passage.';
@@ -2504,7 +2517,7 @@ export interface AgentModelCheckResult {
  * model's own provider runtime. `lcModel` is returned as the runtime produced
  * it — not awaited.
  */
-async function buildAgentChatModel(
+export async function buildAgentChatModel(
     tenantDbName: string,
     tenantId: string,
     projectId: string,
@@ -2886,6 +2899,20 @@ export interface AgentPlaygroundChatRequest {
      * run is routed to another node.
      */
     signal?: AbortSignal;
+    /**
+     * This run is embedded in a host page that declared client tools: they are
+     * offered to the model for this run only, and a call pauses the turn as a
+     * `client_tool` pending action the page answers. Set by a host that KNOWS
+     * the embedding (a portal's embed session) — never from a client request.
+     * Needs a Session (`conversationId`) to park the paused turn on.
+     */
+    embedded?: EmbeddedRunContext;
+    /**
+     * The answer(s) this turn replaces — set when a regenerate re-runs a user
+     * message (`prepareSessionRerun`): the new assistant message keeps them as
+     * `previousVersions` (newest last, at most 5).
+     */
+    previousVersions?: IAgentMessageVersion[];
 }
 
 /**
@@ -3175,6 +3202,8 @@ async function buildLocalAgentRun(input: {
      * `deny`.
      */
     canPause?: boolean;
+    /** The host page this run is embedded in — its client tools are offered. See `AgentPlaygroundChatRequest.embedded`. */
+    embedded?: EmbeddedRunContext;
     /**
      * Whose spend this run is: every model request it makes is debited to the
      * tenant's spend limits (agentSpendLimits.ts). Absent for a build that never
@@ -3373,6 +3402,35 @@ async function buildLocalAgentRun(input: {
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
 
+    // Tools that run in the page embedding the chat. Offered only to a run that says it is
+    // embedded AND can be paused (a Session) AND has a person on the other end; they are kept
+    // out of the approval policy below, which would otherwise gate every one of them.
+    const allowedTools = sessionAllowedTools(input.conversation?.metadata);
+    let clientTools: AgentSdkToolInterface[] = [];
+    if (input.embedded && input.embedded.clientTools.length > 0) {
+        if (input.canPause === false || input.unattended || !input.conversation) {
+            logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
+        } else {
+            const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');
+            const taken = new Set<string>([
+                ...tools.map((tool) => tool.name),
+                ...(CONTROL_PLANE_TOOL_NAMES as readonly string[]),
+                ...(DELEGATION_TOOL_NAMES as readonly string[]),
+                ASK_USER_TOOL_NAME,
+            ]);
+            const offered = input.embedded.clientTools.filter((tool) => !taken.has(tool.name));
+            const checked = checkEmbeddedClientTools(offered);
+            if (!checked.ok) {
+                logger.warn('Client tools not offered: the declared list is invalid', { agentKey, problem: checked.errors[0] });
+                warnings.add(`Host page tools were not offered: ${checked.errors[0].field} ${checked.errors[0].message}`);
+            } else {
+                const built = buildClientTools({ declared: checked.tools, createToolFn: createTool, guard: toolGuard, allowedTools });
+                clientTools = built.tools;
+                toolDefinitions.push(...built.definitions);
+            }
+        }
+    }
+
     // Wrapped so a streamed turn keeps its tool calls and usage — see
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
@@ -3422,7 +3480,6 @@ async function buildLocalAgentRun(input: {
     // pauses like any other (`ask`), refuses the gated calls (`deny`: the model
     // gets an error result, the tool never runs) or runs them as they are
     // (`allow`, the owner's explicit choice).
-    const allowedTools = sessionAllowedTools(input.conversation?.metadata);
     const gatedTools = hitlMode === 'ask'
         ? applyToolApprovals(tools, hitl, allowedTools)
         : hitlMode === 'deny'
@@ -3433,7 +3490,7 @@ async function buildLocalAgentRun(input: {
         name: agent.name,
         version: input.version != null ? String(input.version) : undefined,
         model: sdkModel,
-        ...(gatedTools.length > 0 ? { tools: gatedTools } : {}),
+        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools, ...clientTools] } : {}),
         // Nobody to ask in the other modes, so the question tool is not offered.
         ...(hitlMode === 'ask' && hitl.askUserEnabled ? { humanInTheLoop: { askUser: { allowFreeText: hitl.allowFreeText } } } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
@@ -3462,7 +3519,10 @@ async function buildLocalAgentRun(input: {
         },
     });
 
-    return { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: gatedTools, costEstimator, tappedUsd: () => tappedUsd };
+    return {
+        sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        tappedUsd: () => tappedUsd,
+    };
 }
 
 /**
@@ -4597,6 +4657,7 @@ async function runPlaygroundChatTurn(
         threadId: request.conversationId,
         // A stateless call has nowhere to park a paused turn.
         canPause: Boolean(sessionConversation),
+        ...(request.embedded ? { embedded: request.embedded } : {}),
         ...(spend ? { spend } : {}),
     });
 
@@ -4738,6 +4799,7 @@ async function runPlaygroundChatTurn(
             ...(compactions.length > 0 ? { compactions } : {}),
             ...(compactedTools.length > 0 ? { compactedTools } : {}),
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+            ...(request.previousVersions?.length ? { previousVersions: request.previousVersions.slice(-MAX_PREVIOUS_VERSIONS) } : {}),
         };
 
         const costUsd = await priceAgentTurn({
@@ -4855,6 +4917,7 @@ async function persistSessionTurn(
                 ...(result.compactedTools?.length ? { compactedTools: result.compactedTools } : {}),
                 ...(result.warnings?.length ? { warnings: result.warnings } : {}),
                 ...(result.pendingActions?.length ? { pendingActions: result.pendingActions } : {}),
+                ...(result.previousVersions?.length ? { previousVersions: result.previousVersions } : {}),
                 version: result.version ?? null,
             },
         ];
@@ -4896,6 +4959,8 @@ export interface AgentResumeRequest {
     onCompaction?: (compaction: IAgentTurnCompaction) => void;
     /** Called right before the SDK loop is invoked — after this the answers are spent. */
     onInvokeStart?: () => void;
+    /** The host page this continuation answers for, when the chat is embedded — see `AgentPlaygroundChatRequest.embedded`. */
+    embedded?: EmbeddedRunContext;
     /**
      * Set to continue a session that stopped on its spend budget rather than on
      * a pause: there are no answers to apply and no new user message — the loop
@@ -5092,6 +5157,34 @@ export async function executeAgentResumeLocal(request: AgentResumeRequest): Prom
     }
 }
 
+/**
+ * What the model reads as the result of a client tool: the page's output as
+ * text, run through the agent's `tool.post` guardrails like any tool result
+ * (the page's data is not more trusted than a connector's), or the error line
+ * when the page could not do it. A result that cannot be checked is withheld.
+ */
+async function clientToolContent(
+    guard: Pick<AgentToolGuard, 'protect'>,
+    call: { name: string; args: unknown },
+    resolution: IAgentPendingActionResolution,
+): Promise<string> {
+    if (resolution.error !== undefined) return clientToolErrorText(resolution.error);
+    const text = clientToolOutputText(resolution.output);
+    try {
+        const screened = await guard.protect<Record<string, unknown>, string>(
+            { name: clientToolPolicyName(call.name), requestedName: call.name },
+            async () => text,
+        )((call.args && typeof call.args === 'object' ? call.args : {}) as Record<string, unknown>);
+        return typeof screened === 'string' ? screened : clientToolOutputText(screened);
+    } catch (error) {
+        logger.warn('A client tool result could not be checked and was withheld', {
+            tool: call.name,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return clientToolErrorText('The result could not be checked and was withheld.');
+    }
+}
+
 async function runAgentResumeTurn(
     request: AgentResumeRequest,
     scope: { events?: SessionTurnEvents },
@@ -5145,7 +5238,7 @@ async function runAgentResumeTurn(
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5154,6 +5247,7 @@ async function runAgentResumeTurn(
         agent,
         config,
         runtimeContext,
+        ...(request.embedded ? { embedded: request.embedded } : {}),
         actorId: source === 'agent' ? request.userId : `agent:${agentKey}`,
         source,
         route: source === 'agent' ? 'agent.chat' : 'agent.playground',
@@ -5194,6 +5288,13 @@ async function runAgentResumeTurn(
                 // The dashboard playground hands the agent its prompt as a message.
                 ...(source === 'agent-playground' && systemPrompt ? { systemPrompt } : {}),
             });
+        // The calls the state held BEFORE the answers went in: a client tool's step is written by
+        // the answer (below), and belongs to the message this continuation writes.
+        const priorExecutionIds = new Set(
+            (state.toolHistory ?? [])
+                .map((entry) => (entry as { executionId?: unknown }).executionId)
+                .filter((id): id is string => typeof id === 'string'),
+        );
         try {
             for (const entry of approvals) {
                 const action = bySdkId.get(entry.id)!;
@@ -5209,6 +5310,18 @@ async function runAgentResumeTurn(
             for (const entry of questions) {
                 const action = bySdkId.get(entry.id)!;
                 const resolution = action.resolution ?? {};
+                const clientTool = clientToolMeta(entry as { metadata?: Record<string, unknown> });
+                if (clientTool) {
+                    // A tool the host page ran: its result (or its failure) is the tool's result.
+                    state = resolveClientToolState(state, {
+                        sdkId: entry.id,
+                        ...(resolution.error !== undefined ? { error: resolution.error } : { output: resolution.output }),
+                        content: await clientToolContent(toolGuard, clientTool, resolution),
+                        ...(resolution.durationMs !== undefined ? { durationMs: resolution.durationMs } : {}),
+                        ...(action.resolvedBy ? { answeredBy: action.resolvedBy } : {}),
+                    });
+                    continue;
+                }
                 state = sdkAgent.resolveUserQuestion(state, {
                     id: entry.id,
                     answers: toSdkAnswerSet(entry.questions, resolution.answers),
@@ -5220,11 +5333,6 @@ async function runAgentResumeTurn(
             throw new AgentResumeError(error instanceof Error ? error.message : 'The answers could not be applied.', 400);
         }
 
-        const priorExecutionIds = new Set(
-            (state.toolHistory ?? [])
-                .map((entry) => (entry as { executionId?: unknown }).executionId)
-                .filter((id): id is string => typeof id === 'string'),
-        );
         const inputMessageCount = (state.messages ?? []).length;
         const compactions: IAgentTurnCompaction[] = [];
         const streamed = captureStreamedText(onTextChunk);

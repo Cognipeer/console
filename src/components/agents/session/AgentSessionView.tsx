@@ -108,6 +108,8 @@ import ContextCompactionCard from './ContextCompactionCard';
 import { BudgetBanner, BudgetMeter } from './SessionBudgetControls';
 import { budgetPatchBody, sessionBudgetView, shouldContinueAfterBudgetChange } from './sessionBudgetUi';
 import { AttachButton, AttachmentChips, MessageAttachments } from './SessionAttachments';
+import MessageFeedbackRow from './MessageFeedbackRow';
+import { feedbackForMessage, persistedIndexOf, screenIndexOf, type SessionMessageFeedback } from '../studio/feedbackUi';
 import {
     attachmentIds,
     checkAttachmentCandidate,
@@ -272,6 +274,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     /** Chips whose delete is still on its way: Send waits for them, or the file would go with the message. */
     const [removingFiles, setRemovingFiles] = useState<string[]>([]);
     const budgetBlocked = Boolean(budgetView?.exhausted);
+    // What people rated in this session's answers (empty until the first list arrives, and for a connected agent).
+    const [messageFeedback, setMessageFeedback] = useState<SessionMessageFeedback[]>([]);
     // The banner under the transcript that raises the budget or removes it.
     const budgetBannerShown = Boolean(budgetView && (budgetBlocked || session?.runtimeStatus === 'budget_paused') && !readOnly);
     // A budget that stops (rather than pauses) does not carry the turn on once raised: a new message does.
@@ -282,6 +286,17 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const viewportRef = useRef<HTMLDivElement>(null);
     const turnRefs = useRef<Array<HTMLDivElement | null>>([]);
     const composerRef = useRef<HTMLTextAreaElement>(null);
+
+    const loadMessageFeedback = useCallback(async () => {
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/feedback`, { cache: 'no-store' });
+            if (!res.ok) return;
+            const data = await res.json() as { feedback?: SessionMessageFeedback[] };
+            setMessageFeedback(data.feedback ?? []);
+        } catch {
+            // Ratings are an extra; the transcript stands without them.
+        }
+    }, [agentId, sessionId]);
 
     /** Jump to the end of the transcript with the cursor already in the box. */
     const continueSession = () => {
@@ -459,6 +474,26 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     useEffect(() => {
         void load();
     }, [load]);
+
+    // Ratings are read once the session is there, and again whenever a turn has settled it.
+    const sessionUpdatedAt = session?.updatedAt;
+    useEffect(() => {
+        if (!session || session.messages === undefined) return;
+        void loadMessageFeedback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [loadMessageFeedback, sessionUpdatedAt, Boolean(session)]);
+
+    // `?message=N` (from the Feedback tab) opens on that message of the stored transcript.
+    const deepLinkedMessage = searchParams.get('message');
+    const scrolledToMessage = useRef<string | null>(null);
+    useEffect(() => {
+        if (deepLinkedMessage === null || scrolledToMessage.current === deepLinkedMessage || messages.length === 0) return;
+        const target = screenIndexOf(messages, Number(deepLinkedMessage));
+        if (target < 0) return;
+        scrolledToMessage.current = deepLinkedMessage;
+        const frame = requestAnimationFrame(() => turnRefs.current[target]?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+        return () => cancelAnimationFrame(frame);
+    }, [deepLinkedMessage, messages]);
 
     useEffect(() => {
         if (viewportRef.current) {
@@ -1137,6 +1172,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                                 <MessageAttachments attachments={toAttachmentViews(msg.attachments, { agentId, sessionId, files: sessionFiles })} />
                                                             </>
                                                         )}
+                                                        {msg.role === 'assistant' ? (
+                                                            <MessageFeedbackRow rows={feedbackForMessage(messageFeedback, persistedIndexOf(messages, i))} />
+                                                        ) : null}
                                                     </>
                                                 )}
                                             </Box>

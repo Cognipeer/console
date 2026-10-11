@@ -50,6 +50,7 @@ export interface ClientPendingAction {
     args?: unknown;
     questions?: unknown[];
     allow_free_text?: boolean;
+    timeout_seconds?: number;
     status: string;
     expires_at?: string;
     requested_at?: string;
@@ -63,6 +64,7 @@ export interface PendingActionLike {
     args?: unknown;
     questions?: unknown[];
     allowFreeText?: boolean;
+    timeoutSeconds?: number;
     status: string;
     expiresAt?: string;
     requestedAt?: string;
@@ -74,10 +76,11 @@ export function toClientPendingAction(action: PendingActionLike): ClientPendingA
         kind: action.kind,
         // A question is not a tool call: the stored `toolName` of one (the SDK's
         // ask-user tool) is an internal detail and stays off the wire.
-        ...(action.toolName && action.kind === 'tool_approval' ? { tool_name: action.toolName } : {}),
+        ...(action.toolName && action.kind !== 'user_question' ? { tool_name: action.toolName } : {}),
         ...(action.args !== undefined ? { args: action.args } : {}),
         ...(action.questions ? { questions: toSnakeCaseDeep<unknown[]>(action.questions) } : {}),
         ...(action.allowFreeText !== undefined ? { allow_free_text: action.allowFreeText } : {}),
+        ...(action.timeoutSeconds !== undefined ? { timeout_seconds: action.timeoutSeconds } : {}),
         status: action.status,
         ...(action.expiresAt ? { expires_at: action.expiresAt } : {}),
         ...(action.requestedAt ? { requested_at: action.requestedAt } : {}),

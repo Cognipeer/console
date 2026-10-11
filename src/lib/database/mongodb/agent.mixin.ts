@@ -14,6 +14,10 @@ import type {
   IAgentConversationListItem,
   IAgentConversationState,
   IAgentPendingAction,
+  IAgentMessageFeedback,
+  AgentMessageFeedbackFilter,
+  AgentMessageFeedbackTotals,
+  AgentFeedbackReason,
   IAgentSessionEvent,
   IAgentVersion,
   NewAgentSessionEvent,
@@ -289,6 +293,7 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       // The session's event log and pending approvals die with it.
       await db.collection(COLLECTIONS.agentSessionEvents).deleteMany({ conversationId: id });
       await db.collection(COLLECTIONS.agentPendingActions).deleteMany({ conversationId: id });
+      await db.collection(COLLECTIONS.agentMessageFeedback).deleteMany({ conversationId: id });
       const result = await db
         .collection(COLLECTIONS.agentConversations)
         .deleteOne({ _id: new ObjectId(id) });
@@ -578,6 +583,146 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     async deleteAgentPendingActions(conversationId: string): Promise<number> {
       const db = this.getTenantDb();
       const result = await db.collection(COLLECTIONS.agentPendingActions).deleteMany({ conversationId });
+      return result.deletedCount ?? 0;
+    }
+
+    // ── Message feedback ─────────────────────────────────────────
+
+    private feedbackIndexesReady = new Set<string>();
+
+    /** Same indexes as the boot manifest (which skips collections that do not exist yet); the unique one makes the upsert race-free. */
+    private async ensureFeedbackIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.feedbackIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.agentMessageFeedback);
+      await Promise.all([
+        coll.createIndex({ conversationId: 1, messageId: 1, userId: 1 }, { name: 'idx_message_user', unique: true }),
+        coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1 }, { name: 'idx_agent_createdAt' }),
+        coll.createIndex({ portalId: 1, createdAt: -1 }, { name: 'idx_portal_createdAt' }),
+      ]);
+      this.feedbackIndexesReady.add(dbName);
+    }
+
+    private toFeedback(doc: Record<string, unknown>): IAgentMessageFeedback {
+      return { ...doc, _id: String(doc._id) } as unknown as IAgentMessageFeedback;
+    }
+
+    private feedbackFilter(filter: AgentMessageFeedbackFilter): Record<string, unknown> {
+      const query: Record<string, unknown> = { projectId: filter.projectId, agentKey: filter.agentKey };
+      if (filter.rating) query.rating = filter.rating;
+      if (filter.portalId) query.portalId = filter.portalId;
+      if (filter.reason) query.reasons = filter.reason;
+      if (filter.hasComment) query.comment = { $exists: true, $nin: [null, ''] };
+      if (filter.from || filter.to) {
+        query.createdAt = { ...(filter.from ? { $gte: filter.from } : {}), ...(filter.to ? { $lte: filter.to } : {}) };
+      }
+      return query;
+    }
+
+    async upsertAgentMessageFeedback(
+      feedback: Omit<IAgentMessageFeedback, '_id' | 'createdAt' | 'updatedAt' | 'removedAt'>,
+    ): Promise<{ feedback: IAgentMessageFeedback; created: boolean }> {
+      const db = this.getTenantDb();
+      await this.ensureFeedbackIndexes(db).catch(() => undefined);
+      const now = new Date();
+      const { conversationId, messageId, userId } = feedback;
+      const set: Record<string, unknown> = {
+        tenantId: feedback.tenantId,
+        projectId: feedback.projectId,
+        agentKey: feedback.agentKey,
+        agentVersion: feedback.agentVersion ?? null,
+        messageIndex: feedback.messageIndex,
+        channel: feedback.channel,
+        rating: feedback.rating,
+        reasons: feedback.reasons ?? [],
+        updatedAt: now,
+        removedAt: null,
+      };
+      const unset: Record<string, ''> = {};
+      if (feedback.portalId) set.portalId = feedback.portalId; else unset.portalId = '';
+      if (feedback.comment) set.comment = feedback.comment; else unset.comment = '';
+      const coll = db.collection(COLLECTIONS.agentMessageFeedback);
+      const doc = await coll.findOneAndUpdate(
+        { conversationId, messageId, userId },
+        {
+          $set: set,
+          ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}),
+          $setOnInsert: { _id: `fb_${randomUUID().replace(/-/g, '').slice(0, 24)}` as never, createdAt: now },
+        },
+        { upsert: true, returnDocument: 'after', includeResultMetadata: true },
+      );
+      const stored = doc.value as Record<string, unknown>;
+      return { feedback: this.toFeedback(stored), created: doc.lastErrorObject?.updatedExisting !== true };
+    }
+
+    async findAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<IAgentMessageFeedback | null> {
+      const doc = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).findOne({ conversationId, messageId, userId });
+      return doc ? this.toFeedback(doc) : null;
+    }
+
+    async deleteAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<boolean> {
+      const result = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).deleteOne({ conversationId, messageId, userId });
+      return (result.deletedCount ?? 0) > 0;
+    }
+
+    async listAgentMessageFeedbackByConversation(conversationId: string, options?: { userId?: string }): Promise<IAgentMessageFeedback[]> {
+      const docs = await this.getTenantDb()
+        .collection(COLLECTIONS.agentMessageFeedback)
+        .find({ conversationId, ...(options?.userId ? { userId: options.userId } : {}) })
+        .sort({ messageIndex: 1, createdAt: 1 })
+        .toArray();
+      return docs.map((doc) => this.toFeedback(doc));
+    }
+
+    async listAgentMessageFeedback(
+      filter: AgentMessageFeedbackFilter,
+      options?: { limit?: number; skip?: number },
+    ): Promise<{ items: IAgentMessageFeedback[]; total: number }> {
+      const coll = this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback);
+      const query = this.feedbackFilter(filter);
+      const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
+      const skip = Math.max(0, options?.skip ?? 0);
+      const [total, docs] = await Promise.all([
+        coll.countDocuments(query),
+        coll.find(query).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).toArray(),
+      ]);
+      return { items: docs.map((doc) => this.toFeedback(doc)), total };
+    }
+
+    async aggregateAgentMessageFeedback(filter: AgentMessageFeedbackFilter): Promise<AgentMessageFeedbackTotals> {
+      const coll = this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback);
+      const query = this.feedbackFilter(filter);
+      const [counts] = await coll.aggregate<{ up: number; down: number; withComment: number }>([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            up: { $sum: { $cond: [{ $eq: ['$rating', 'up'] }, 1, 0] } },
+            down: { $sum: { $cond: [{ $eq: ['$rating', 'down'] }, 1, 0] } },
+            withComment: { $sum: { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$comment', ''] } }, 0] }, 1, 0] } },
+          },
+        },
+      ]).toArray();
+      const reasonRows = await coll.aggregate<{ _id: string; cnt: number }>([
+        { $match: query },
+        { $unwind: '$reasons' },
+        { $group: { _id: '$reasons', cnt: { $sum: 1 } } },
+      ]).toArray();
+      const reasons: Partial<Record<AgentFeedbackReason, number>> = {};
+      for (const row of reasonRows) reasons[row._id as AgentFeedbackReason] = row.cnt;
+      return { up: counts?.up ?? 0, down: counts?.down ?? 0, withComment: counts?.withComment ?? 0, reasons };
+    }
+
+    async markAgentMessageFeedbackRemoved(conversationId: string, fromIndex: number, at: Date = new Date()): Promise<number> {
+      const result = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).updateMany(
+        { conversationId, messageIndex: { $gte: fromIndex }, $or: [{ removedAt: null }, { removedAt: { $exists: false } }] },
+        { $set: { removedAt: at } },
+      );
+      return result.modifiedCount;
+    }
+
+    async deleteAgentMessageFeedbackByConversation(conversationId: string): Promise<number> {
+      const result = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).deleteMany({ conversationId });
       return result.deletedCount ?? 0;
     }
   };

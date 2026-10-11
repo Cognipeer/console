@@ -739,7 +739,7 @@ paths:
       tags:
         - Agent Sessions
       summary: Answer a pending approval or question
-      description: "Answers a tool approval or a question the agent paused on (the `required_action.actions` of a `requires_action` response, or `pending_actions` of the session). The turn continues from where it paused: inline, answered in the Responses shape (which is `requires_action` again if it paused again, or while other requests of the same pause are still open), or - with `background: true` or the `X-Cognipeer-Background` header - as a background run (`202`).\n\nBody for a `tool_approval`: `decision` (`allow` | `deny`), optional `comment`, `approved_args` (an object that must satisfy the tool's schema; the tool then runs with these arguments) and `remember_for_session` (do not ask again for this tool in this session). Body for a `user_question`: `answers` (question text -> value, or a list of values for a multi-select) or `cancelled: true` to skip it.\n\nWho may answer is the agent's `approvers` setting (owner, owner or admin, or any project member); the owner of the session is the user who started it."
+      description: "Answers a tool approval or a question the agent paused on (the `required_action.actions` of a `requires_action` response, or `pending_actions` of the session). The turn continues from where it paused: inline, answered in the Responses shape (which is `requires_action` again if it paused again, or while other requests of the same pause are still open), or - with `background: true` or the `X-Cognipeer-Background` header - as a background run (`202`).\n\nBody for a `tool_approval`: `decision` (`allow` | `deny`), optional `comment`, `approved_args` (an object that must satisfy the tool's schema; the tool then runs with these arguments) and `remember_for_session` (do not ask again for this tool in this session). Body for a `user_question`: `answers` (question text -> value, or a list of values for a multi-select) or `cancelled: true` to skip it. Body for a `client_tool` (a tool that runs in the page a portal chat is embedded in, answered by that page): `output` (any JSON, at most 64 KB) or `error` (text; the model reads it as the tool failing).\n\nWho may answer is the agent's `approvers` setting (owner, owner or admin, or any project member); the owner of the session is the user who started it."
       operationId: resolveAgentSessionAction
       parameters:
         - $ref: "#/components/parameters/AgentSessionId"
@@ -13420,7 +13420,7 @@ components:
           $ref: "#/components/schemas/AgentSummary"
     AgentActionResolution:
       type: object
-      description: "The answer to a pending action. For a `tool_approval` send `decision` (and optionally the rest); for a `user_question` send `answers`, or `cancelled: true` to skip it. `approvedArgs` / `rememberForSession` are accepted as aliases of `approved_args` / `remember_for_session`."
+      description: "The answer to a pending action. For a `tool_approval` send `decision` (and optionally the rest); for a `user_question` send `answers`, or `cancelled: true` to skip it; for a `client_tool` send `output`, or `error` when the page could not do it. `approvedArgs` / `rememberForSession` are accepted as aliases of `approved_args` / `remember_for_session`."
       properties:
         decision:
           type: string
@@ -13450,6 +13450,11 @@ components:
         cancelled:
           type: boolean
           description: "User question. Skip the question; the model is told it was not answered."
+        output:
+          description: "Client tool. The page's result: any JSON value, at most 64 KB (`400` over that, and the request stays open). The model reads it as the tool's result, after the agent's `tool.post` guardrails."
+        error:
+          type: string
+          description: "Client tool. The page could not run the tool. At most 1000 characters; the model reads it as the tool failing."
         background:
           type: boolean
           description: Continue the turn as a background run (`202`). Same as the `X-Cognipeer-Background` header.
@@ -13457,7 +13462,7 @@ components:
           $ref: "#/components/schemas/AgentRuntimeContext"
     AgentPendingAction:
       type: object
-      description: "A request the agent paused on: a tool call that needs approval, or a question for the user."
+      description: "A request the agent paused on: a tool call that needs approval, a question for the user, or a tool call that the page embedding the chat has to run."
       properties:
         id:
           type: string
@@ -13467,13 +13472,17 @@ components:
           enum:
             - tool_approval
             - user_question
+            - client_tool
         tool_name:
           type: string
-          description: "`tool_approval` only: the tool the model wants to call, as it is named to the model. A `user_question` never carries it."
+          description: "`tool_approval` and `client_tool`: the tool the model wants to call, as it is named to the model. A `user_question` never carries it."
         args:
           type: object
           additionalProperties: true
-          description: "`tool_approval`: the arguments the model proposed."
+          description: "`tool_approval` and `client_tool`: the arguments the model proposed."
+        timeout_seconds:
+          type: integer
+          description: "`client_tool`: how long the page may take; after that (plus a few seconds) the call is answered with an error and the turn goes on."
         questions:
           type: array
           description: "`user_question`: the questions to answer."
@@ -13598,7 +13607,7 @@ components:
         - max_cost_usd
     AgentSessionEvent:
       type: object
-      description: "One event of the session's log. `data` depends on `type` (field names snake_case):\n\n- `user.message` `{ content }`\n- `session.status_running` `{ trigger: message | resume | timeout }`\n- `agent.tool_use` `{ tool_call_id, name, args, subagent? }`\n- `agent.tool_result` `{ tool_call_id, name, ok, duration_ms?, error?, subagent? }`\n- `agent.compaction` `{ at, messages_compressed?, tokens_before?, tokens_after?, ... }`\n- `action.required` `{ action_id, kind, tool_name? (tool_approval only), args?, questions?, allow_free_text?, expires_at? }`\n- `action.resolved` `{ action_id, kind, decision?, cancelled?, expired?, resolved_by, channel: dashboard | api | portal | timeout | system }`\n- `agent.message` `{ content, message_index?, stop_reason?, usage? }`\n- `session.usage` `{ turn_cost_usd, spent_usd, budget: { max_cost_usd, on_reach } }` after every turn of a session with a budget\n- `budget.reached` `{ spent_usd, max_cost_usd }`\n- `session.status_idle` `{ stop_reason, pending_action_ids?, detail? }`\n- `session.error` `{ message, code? }`\n- `session.work_done` `{}` right after an idle with `stop_reason: end_turn`\n\nOn the stream only: `agent.message.delta` `{ text }` (no `seq`, never stored)."
+      description: "One event of the session's log. `data` depends on `type` (field names snake_case):\n\n- `user.message` `{ content }`\n- `session.status_running` `{ trigger: message | resume | timeout }`\n- `agent.tool_use` `{ tool_call_id, name, args, subagent? }`\n- `agent.tool_result` `{ tool_call_id, name, ok, duration_ms?, error?, subagent?, source? (client: the page ran it) }`\n- `agent.compaction` `{ at, messages_compressed?, tokens_before?, tokens_after?, ... }`\n- `action.required` `{ action_id, kind, tool_name? (tool_approval and client_tool), args?, questions?, allow_free_text?, timeout_seconds? (client_tool), expires_at? }`\n- `action.resolved` `{ action_id, kind, tool_name? (client_tool), decision?, cancelled?, expired?, ok?, duration_ms?, timed_out? (client_tool), resolved_by, channel: dashboard | api | portal | timeout | system }`\n- `session.truncated` `{ reason: truncate | regenerate | edit, kept_messages, removed_messages, removed_from, cancelled_actions, by, channel }` when messages were cut from the transcript (a regenerate or an edit in a portal)\n- `agent.message` `{ content, message_index?, stop_reason?, usage? }`\n- `session.usage` `{ turn_cost_usd, spent_usd, budget: { max_cost_usd, on_reach } }` after every turn of a session with a budget\n- `budget.reached` `{ spent_usd, max_cost_usd }`\n- `session.status_idle` `{ stop_reason, pending_action_ids?, detail? }`\n- `session.error` `{ message, code? }`\n- `session.work_done` `{}` right after an idle with `stop_reason: end_turn`\n\nOn the stream only: `agent.message.delta` `{ text }` (no `seq`, never stored)."
       properties:
         seq:
           type: integer
@@ -14299,6 +14308,31 @@ components:
           type: string
           format: date-time
           description: When the agent was created.
+        experience:
+          type: object
+          description: "Only on the single-agent lookup, and only when the agent set any. What a chat surface shows around the agent: a Markdown welcome text and the suggested first messages."
+          properties:
+            welcome:
+              type: string
+              description: "Markdown. May use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`; a surface fills them in."
+            starters:
+              type: array
+              description: At most 6.
+              items:
+                type: object
+                properties:
+                  text:
+                    type: string
+                    description: The message the starter puts in the composer.
+                  label:
+                    type: string
+                    description: A shorter text for the chip.
+                  auto_send:
+                    type: boolean
+                    description: Send the message at once instead of only filling the composer.
+                required:
+                  - text
+                  - auto_send
         attachments:
           type: object
           description: "Only on the single-agent lookup. What a client needs before it offers an attach button: whether the agent takes files right now, its limits, and whether its model reads images."

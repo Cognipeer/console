@@ -28,7 +28,7 @@ import {
     TextInput,
     Textarea,
 } from '@mantine/core';
-import { IconCheck, IconHandStop, IconHelp, IconInfoCircle, IconX } from '@tabler/icons-react';
+import { IconCheck, IconHandStop, IconHelp, IconInfoCircle, IconPlugConnected, IconX } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import {
     answerText,
@@ -45,6 +45,7 @@ import {
     typeAnswer,
     type AnswerRestriction,
     type ApprovalResolveBody,
+    type ClientToolResolveBody,
     type PendingActionView,
     type QuestionResolveBody,
     type ResolveBody,
@@ -312,6 +313,52 @@ export function QuestionCard({
     );
 }
 
+/**
+ * A tool the page embedding the chat is running: nothing for the viewer to
+ * decide. It waits for the page's answer (or its timeout); the one thing Studio
+ * offers is to give up on it, which the model reads as the tool failing.
+ */
+function ClientToolCard({
+    action,
+    busy,
+    resolving,
+    onResolve,
+}: CardProps & { onResolve: (body: ClientToolResolveBody) => void }) {
+    const t = useTranslations('agents.hitl');
+    return (
+        <Paper withBorder radius="md" p="sm" className={classes.card}>
+            <Stack gap="xs">
+                <Group gap={6} wrap="wrap">
+                    <Badge size="xs" variant="light" color="blue" leftSection={<IconPlugConnected size={10} />}>
+                        {t('clientToolWaiting')}
+                    </Badge>
+                    <Text size="sm" fw={600} ff="monospace">{action.toolName ?? '—'}</Text>
+                    {action.timeoutSeconds ? <Badge size="xs" variant="outline" color="gray">{t('clientToolTimeout', { seconds: action.timeoutSeconds })}</Badge> : null}
+                </Group>
+                {action.args !== undefined ? (
+                    <Box>
+                        <Text size="10px" c="dimmed" tt="uppercase" fw={600} mb={2}>{t('arguments')}</Text>
+                        <Code block className={classes.args}>{formatArgs(action.args)}</Code>
+                    </Box>
+                ) : null}
+                <Text size="xs" c="dimmed">{t('clientToolHint')}</Text>
+                <Group justify="flex-end">
+                    <Button
+                        size="xs"
+                        variant="default"
+                        color="gray"
+                        disabled={busy}
+                        loading={resolving && busy}
+                        onClick={() => onResolve({ error: t('clientToolGivenUp') })}
+                    >
+                        {t('clientToolGiveUp')}
+                    </Button>
+                </Group>
+            </Stack>
+        </Paper>
+    );
+}
+
 /** One line for an action that is no longer open. */
 function SettledAction({ action }: { action: PendingActionView }) {
     const t = useTranslations('agents.hitl');
@@ -328,8 +375,10 @@ function SettledAction({ action }: { action: PendingActionView }) {
         skipped: t('skipped'),
         expired: t('expired'),
         cancelled: t('cancelled'),
+        tool_ran: t('clientToolRan'),
+        tool_failed: action.resolution?.timedOut ? t('clientToolTimedOut') : t('clientToolFailed'),
     }[kind];
-    const tone = kind === 'approved' || kind === 'approved_edited' || kind === 'answered'
+    const tone = kind === 'approved' || kind === 'approved_edited' || kind === 'answered' || kind === 'tool_ran'
         ? classes.settledApproved
         : kind === 'denied' ? classes.settledDenied : '';
     const answers = kind === 'answered' ? action.resolution?.answers : undefined;
@@ -338,7 +387,7 @@ function SettledAction({ action }: { action: PendingActionView }) {
         <Paper withBorder radius="md" px="sm" py={6} className={`${classes.card} ${classes.settled} ${tone}`}>
             <Stack gap={2}>
                 <Group gap={6} wrap="wrap">
-                    {kind === 'denied' || kind === 'expired' || kind === 'cancelled'
+                    {kind === 'denied' || kind === 'expired' || kind === 'cancelled' || kind === 'tool_failed'
                         ? <IconX size={13} />
                         : <IconCheck size={13} />}
                     <Text size="xs" fw={600}>{label}</Text>
@@ -389,6 +438,17 @@ export default function PendingActionList({ actions, busy, resolvingId, onResolv
             ) : null}
             {actions.map((action) => {
                 if (action.status !== 'pending') return <SettledAction key={action.id} action={action} />;
+                if (action.kind === 'client_tool') {
+                    return (
+                        <ClientToolCard
+                            key={action.id}
+                            action={action}
+                            busy={busy}
+                            resolving={resolvingId === action.id}
+                            onResolve={(body) => onResolve(action.id, body)}
+                        />
+                    );
+                }
                 return action.kind === 'user_question' ? (
                     <QuestionCard
                         key={action.id}

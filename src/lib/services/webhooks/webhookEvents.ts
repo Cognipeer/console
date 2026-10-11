@@ -12,7 +12,7 @@ export const WEBHOOK_TEST_EVENT = 'webhook.test';
 export interface WebhookEventDefinition {
   type: string;
   /** UI grouping and the `prefix.*` family. */
-  group: 'session' | 'action' | 'budget' | 'agent_run' | 'schedule';
+  group: 'session' | 'action' | 'budget' | 'feedback' | 'agent_run' | 'schedule';
 }
 
 /** Every event type publishers emit today. The data of each is ids and small fields only. */
@@ -21,6 +21,7 @@ export const WEBHOOK_EVENT_CATALOG: readonly WebhookEventDefinition[] = [
   { type: 'session.work_done', group: 'session' },
   { type: 'action.required', group: 'action' },
   { type: 'budget.reached', group: 'budget' },
+  { type: 'feedback.recorded', group: 'feedback' },
   { type: 'agent_run.succeeded', group: 'agent_run' },
   { type: 'agent_run.failed', group: 'agent_run' },
   { type: 'agent_run.canceled', group: 'agent_run' },

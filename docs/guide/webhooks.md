@@ -19,6 +19,7 @@ Anyone else (a plain project member, or a token whose owner is one) gets a 403 o
 | `session.work_done` | `conversationId`, `agentKey` |
 | `action.required` | `conversationId`, `agentKey`, `actionId`, `kind` |
 | `budget.reached` | `conversationId`, `agentKey`, `spentUsd`, `maxCostUsd` |
+| `feedback.recorded` | `conversationId`, `agentKey`, `messageId`, `messageIndex`, `rating` (`up`, `down`, or `null` when withdrawn), `reasons`, `hasComment`, `channel`, `portalId`, `withdrawn?`: a person rated an answer ([feedback](/guide/agent-feedback-and-experience)). The comment itself is never sent. |
 | `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId`, `conversationId`, `agentKey` |
 | `schedule.fired`, `schedule.failed` | `scheduleId`, `agentKey`, `trigger`, `conversationId?`, `error?` |
 | `webhook.test` | none (sent by **Send test event**) |

@@ -46,6 +46,12 @@ import {
 } from './agentRunService';
 import { resolveHitlConfig, type ResolvedHitlConfig } from './agentHumanInTheLoop';
 import {
+    CLIENT_TOOL_UNANSWERED_MESSAGE,
+    digestForAudit,
+    parseClientToolAnswer,
+    type EmbeddedRunContext,
+} from './agentClientTools';
+import {
     actionResolvedEventData,
     AgentResumeError,
     blockingPendingActions,
@@ -81,12 +87,18 @@ export interface ResolveAgentActionInput {
     actionId: string;
     /** When the route names the agent, the action must belong to it. */
     agentKey?: string;
-    /** The request body: `{decision, comment?, approvedArgs?, rememberForSession?}` or `{answers, cancelled?}`. */
+    /** The request body: `{decision, comment?, approvedArgs?, rememberForSession?}`, `{answers, cancelled?}` or, for a client tool, `{output}` / `{error}`. */
     body: Record<string, unknown>;
     actor: ResolveActor;
     /** `background`: queue the continuation as a run instead of running it inline. */
     mode: 'sync' | 'background';
     runtimeContext?: AgentRuntimeContext;
+    /**
+     * The host page this answer comes from, when the chat is embedded in one: its
+     * declared client tools stay on offer to the continuation (it may call another).
+     * Only a host that knows the embedding sets this — never a client request.
+     */
+    embedded?: EmbeddedRunContext;
     /** Live callbacks for `?stream=1`. */
     stream?: {
         onToolEvent?: (event: AgentToolCallEvent) => void;
@@ -128,6 +140,27 @@ export function mayResolve(
     return isOwner || actor.isAdmin;
 }
 
+/**
+ * A page's result goes into the model's context as a tool result, so it is the
+ * word of whoever answers. Only the person the chat belongs to — the page they
+ * are looking at — may supply it; an administrator or another project member
+ * (whom `approvers` lets approve a tool) may only give the call up, with an
+ * error. Without this, anyone allowed to approve could put words in the model's
+ * mouth in somebody else's session.
+ */
+export function mayAnswerClientTool(
+    actor: Pick<ResolveActor, 'userId'>,
+    conversation: Pick<IAgentConversation, 'createdBy'>,
+    action: Pick<IAgentPendingAction, 'createdBy'>,
+    resolution: IAgentPendingActionResolution,
+): boolean {
+    if (resolution.error !== undefined) return true;
+    return Boolean(actor.userId)
+        && (actor.userId === String(conversation.createdBy) || actor.userId === action.createdBy);
+}
+
+const CLIENT_TOOL_OWNER_ONLY = 'Only the person this chat belongs to can answer for the page. You can give the call up instead.';
+
 // ── Reading the request ───────────────────────────────────────────────
 
 type Parsed =
@@ -140,6 +173,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /** The request body as a resolution — or the 400 message. */
 export function parseResolution(action: IAgentPendingAction, body: Record<string, unknown>): Parsed {
+    if (action.kind === 'client_tool') return parseClientToolAnswer(body);
     if (action.kind === 'tool_approval') {
         const decision = body.decision;
         if (decision !== 'allow' && decision !== 'deny') return { ok: false, message: '`decision` must be "allow" or "deny"' };
@@ -220,7 +254,7 @@ async function hitlSettingsFor(db: DatabaseProvider, action: IAgentPendingAction
 async function writeSessionEvents(
     db: DatabaseProvider,
     scope: { tenantId: string; projectId: string; agentKey: string; conversationId: string; tenantDbName?: string },
-    events: Array<{ type: 'action.resolved' | 'session.status_idle'; data: Record<string, unknown> }>,
+    events: Array<{ type: 'action.resolved' | 'session.status_idle' | 'agent.tool_result'; data: Record<string, unknown> }>,
 ): Promise<void> {
     if (events.length === 0) return;
     const writer = createSessionEventWriter({ db, ...scope });
@@ -245,7 +279,9 @@ function auditResolution(
             actorEmail: actor.email,
             actorRole: actor.role,
             apiTokenId: actor.apiTokenId,
-            event: action.kind === 'tool_approval' ? 'agent.tool_approval.resolve' : 'agent.question.resolve',
+            event: action.kind === 'tool_approval'
+                ? 'agent.tool_approval.resolve'
+                : action.kind === 'client_tool' ? 'agent.client_tool.resolve' : 'agent.question.resolve',
             ipAddress: input.audit?.ipAddress,
             userAgent: input.audit?.userAgent,
             requestId: input.audit?.requestId,
@@ -263,9 +299,37 @@ function auditResolution(
                 argumentsEdited: edited,
                 rememberForSession: resolution.rememberForSession === true,
                 channel: actor.channel,
+                // A client tool's arguments and result are the page's data: the trail keeps a digest, not the content.
+                ...(action.kind === 'client_tool'
+                    ? {
+                        ok: resolution.error === undefined,
+                        timedOut: resolution.timedOut === true,
+                        durationMs: resolution.durationMs ?? null,
+                        args: digestForAudit(action.args),
+                        ...(resolution.error === undefined ? { output: digestForAudit(resolution.output) } : {}),
+                    }
+                    : {}),
             },
         },
     )));
+}
+
+/** The tool's result in the session log, as the SDK would have written it for a tool that ran in the server. */
+function clientToolResultEvent(
+    action: IAgentPendingAction,
+    resolution: IAgentPendingActionResolution,
+): { type: 'agent.tool_result'; data: Record<string, unknown> } {
+    return {
+        type: 'agent.tool_result',
+        data: {
+            toolCallId: action.toolCallId ?? action.sdkId,
+            name: action.toolName ?? 'client_tool',
+            ok: resolution.error === undefined,
+            ...(resolution.durationMs !== undefined ? { durationMs: resolution.durationMs } : {}),
+            ...(resolution.error !== undefined ? { error: resolution.error } : {}),
+            source: 'client',
+        },
+    };
 }
 
 /** Puts a just-recorded answer back to `pending` (the continuation could not start). */
@@ -336,6 +400,9 @@ export async function checkAgentPendingActionResolution(
 
         const parsed = parseResolution(action, input.body);
         if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
+        if (action.kind === 'client_tool' && !mayAnswerClientTool(actor, conversation, action, parsed.resolution)) {
+            return { kind: 'forbidden', message: CLIENT_TOOL_OWNER_ONLY };
+        }
         const answersProblem = checkAnswers(action, parsed.resolution);
         return answersProblem ? { kind: 'invalid', message: answersProblem } : null;
     });
@@ -372,8 +439,15 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
         const parsed = parseResolution(action, input.body);
         if (!parsed.ok) return { kind: 'invalid', message: parsed.message };
         const { resolution } = parsed;
+        if (action.kind === 'client_tool' && !mayAnswerClientTool(actor, conversation, action, resolution)) {
+            return { kind: 'forbidden', message: CLIENT_TOOL_OWNER_ONLY };
+        }
         const answersProblem = checkAnswers(action, resolution);
         if (answersProblem) return { kind: 'invalid', message: answersProblem };
+        // How long the page took, from the moment the call was asked of it.
+        if (action.kind === 'client_tool') {
+            resolution.durationMs = Math.max(0, Date.now() - new Date(action.requestedAt).getTime());
+        }
         const edited = Boolean(resolution.approvedArgs && !isDeepStrictEqual(resolution.approvedArgs, action.args));
         if (edited && action.toolName) {
             const checked = await validateApprovedArgs({
@@ -430,15 +504,21 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             const messages = updateMessageSnapshots(conversation.messages ?? [], snapshots);
             await db.updateAgentConversation(conversationId, { messages, ...(metadata ? { metadata } : {}) });
 
-            await writeSessionEvents(db, { tenantId, projectId, agentKey: action.agentKey, conversationId }, [{
-                type: 'action.resolved',
-                data: actionResolvedEventData(action, {
-                    ...(resolution.decision ? { decision: resolution.decision } : {}),
-                    ...(resolution.cancelled ? { cancelled: true } : {}),
-                    resolvedBy: actor.userId,
-                    channel: actor.channel,
-                }),
-            }]);
+            await writeSessionEvents(db, { tenantId, projectId, agentKey: action.agentKey, conversationId }, [
+                ...(action.kind === 'client_tool' ? [clientToolResultEvent(action, resolution)] : []),
+                {
+                    type: 'action.resolved' as const,
+                    data: actionResolvedEventData(action, {
+                        ...(resolution.decision ? { decision: resolution.decision } : {}),
+                        ...(resolution.cancelled ? { cancelled: true } : {}),
+                        ...(action.kind === 'client_tool'
+                            ? { ok: resolution.error === undefined, durationMs: resolution.durationMs, ...(resolution.timedOut ? { timedOut: true } : {}) }
+                            : {}),
+                        resolvedBy: actor.userId,
+                        channel: actor.channel,
+                    }),
+                },
+            ]);
             auditResolution(input, action, resolution, edited);
 
             // 6. Other requests of the same pause still open: wait for them.
@@ -485,6 +565,7 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     userId: actor.userId,
                     trigger: 'resume',
                     runtimeContext: input.runtimeContext,
+                    ...(input.embedded ? { embedded: input.embedded } : {}),
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),
@@ -578,11 +659,14 @@ export async function sweepExpiredPendingActions(
             }
             const hitl = await hitlSettingsFor(db, first);
             const scope = { tenantDbName, tenantId: first.tenantId, projectId: first.projectId, agentKey: first.agentKey, conversationId };
-            const events: Array<{ type: 'action.resolved' | 'session.status_idle'; data: Record<string, unknown> }> = [];
+            const events: Array<{ type: 'action.resolved' | 'session.status_idle' | 'agent.tool_result'; data: Record<string, unknown> }> = [];
             const snapshots = new Map<string, { status: IAgentPendingAction['status']; resolution?: IAgentPendingActionResolution }>();
+            // A page that never answered is a failed tool call the model reads and goes on from, whatever
+            // the agent's `onTimeout` says about approvals: the answer is spent, so `cancel` does not apply.
+            let resolvedAny = false;
 
             for (const action of actions) {
-                if (hitl.onTimeout === 'cancel') {
+                if (hitl.onTimeout === 'cancel' && action.kind !== 'client_tool') {
                     const updated = await db.updateAgentPendingAction(String(action._id), {
                         status: 'expired', resolvedAt: now, resolvedBy: 'system:timeout', resolution: { cancelled: true },
                     });
@@ -597,18 +681,27 @@ export async function sweepExpiredPendingActions(
                 }
                 const resolution: IAgentPendingActionResolution = action.kind === 'tool_approval'
                     ? { decision: 'deny', comment: 'timed out' }
-                    : { cancelled: true };
+                    : action.kind === 'client_tool'
+                        ? {
+                            error: CLIENT_TOOL_UNANSWERED_MESSAGE,
+                            timedOut: true,
+                            durationMs: Math.max(0, now.getTime() - new Date(action.requestedAt).getTime()),
+                        }
+                        : { cancelled: true };
                 const updated = await db.updateAgentPendingAction(String(action._id), {
                     status: 'resolved', resolvedAt: now, resolvedBy: 'system:timeout', resolution,
                 });
                 if (!updated) continue;
                 result.denied += 1;
+                resolvedAny = true;
                 snapshots.set(String(action._id), { status: 'resolved', resolution });
+                if (action.kind === 'client_tool') events.push(clientToolResultEvent(action, resolution));
                 events.push({
                     type: 'action.resolved',
                     data: actionResolvedEventData(action, {
                         ...(resolution.decision ? { decision: resolution.decision } : {}),
                         ...(resolution.cancelled ? { cancelled: true } : {}),
+                        ...(action.kind === 'client_tool' ? { ok: false, durationMs: resolution.durationMs, timedOut: true } : {}),
                         expired: true,
                         resolvedBy: 'system:timeout',
                         channel: 'timeout',
@@ -627,7 +720,7 @@ export async function sweepExpiredPendingActions(
                 continue;
             }
 
-            if (hitl.onTimeout === 'cancel') {
+            if (hitl.onTimeout === 'cancel' && !resolvedAny) {
                 await dropPausedSnapshot(db, conversationId);
                 await db.updateAgentConversationRuntime(conversationId, {
                     runtimeStatus: 'idle', stopReason: 'cancelled', pendingActionIds: [],
