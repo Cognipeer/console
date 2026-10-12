@@ -29,7 +29,10 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
 
   const db = await getDatabase();
   const tenantSlug = h.get('x-tenant-slug') ?? '';
-  const tenantRecord = await db.findTenantById(tenantId).catch(() => null);
+  // The account menu names the workspace; a failed lookup must never keep the dashboard from opening.
+  const tenantRecord = await (async () => {
+    try { return await db.findTenantById(tenantId); } catch { return null; }
+  })();
   await db.switchToTenant(tenantDbName);
   const user = await db.findUserById(userId);
 
