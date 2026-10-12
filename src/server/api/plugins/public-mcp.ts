@@ -31,6 +31,7 @@ import {
 import {
   createSseSession,
   encodeSseEndpointEvent,
+  getRemoteSseSession,
   getSseSession,
   removeSseSession,
   sendSseResponse,
@@ -143,15 +144,22 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
   const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };
   const query = (request.query ?? {}) as { sessionId?: string };
   const sessionId = query.sessionId;
-  const session = sessionId ? getSseSession(sessionId) : null;
+  let isSse = Boolean(sessionId && getSseSession(sessionId));
 
   const resolved = await resolvePublicServer(tenantId, endpointSlug);
   if (!resolved) {
     return reply.code(404).send({ error: 'Not found' });
   }
   const { tenant, server } = resolved;
+  // The stream may be held by another node: accept the session only when its
+  // registered owner is this very server/tenant (a foreign sessionId must never
+  // route a response into someone else's stream).
+  if (sessionId && !isSse) {
+    const remote = await getRemoteSseSession(sessionId);
+    isSse = Boolean(remote && remote.serverKey === server.key && remote.tenantId === server.tenantId);
+  }
   const exposure = resolveExposure(server);
-  const requiredProtocol = session && sessionId ? 'sse' : 'streamable-http';
+  const requiredProtocol = isSse ? 'sse' : 'streamable-http';
   if (!exposure.protocols.includes(requiredProtocol)) {
     return reply.code(403).send({ error: `${requiredProtocol} access is disabled for this MCP server` });
   }
@@ -173,9 +181,14 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
     return reply.code(400).send(jsonRpcError(id, -32600, 'Invalid Request: method is required'));
   }
 
-  const respond = (payload: Record<string, unknown>) => {
-    if (session && sessionId) {
-      sendSseResponse(sessionId, payload);
+  const respond = async (payload: Record<string, unknown>) => {
+    if (isSse && sessionId) {
+      try {
+        await sendSseResponse(sessionId, payload);
+      } catch (error) {
+        logger.error('Public MCP SSE relay publish failed', { sessionId, error });
+        return reply.code(502).send(jsonRpcError((payload.id as string | number | null | undefined) ?? null, -32603, 'SSE relay unavailable'));
+      }
       return reply.code(202).send();
     }
     return reply.code(200).send(payload);
@@ -213,7 +226,7 @@ async function handlePublicMessage(request: FastifyRequest, reply: FastifyReply)
       server,
       toolName,
       args,
-      session && sessionId ? 'sse' : 'jsonrpc',
+      isSse ? 'sse' : 'jsonrpc',
       sessionId ?? undefined,
     );
 
