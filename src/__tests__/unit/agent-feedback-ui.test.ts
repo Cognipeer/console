@@ -1,6 +1,5 @@
 /**
- * Studio's side of the experience settings, feedback and client tools: how the
- * Experience section edits the stored object, what the Feedback tab asks for and
+ * Studio's side of feedback and client tools: what the Feedback tab asks for and
  * draws, how a session shows a rating and a tool the host page runs, and that
  * every string exists in both languages. (createElement, not JSX: the suite only
  * collects `.test.ts`.)
@@ -13,21 +12,8 @@ import { join } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MantineProvider } from '@mantine/core';
 import { I18nProvider } from '@/lib/i18n';
-import AgentExperiencePanel from '@/components/agents/studio/AgentExperiencePanel';
 import MessageFeedbackRow from '@/components/agents/session/MessageFeedbackRow';
 import PendingActionList from '@/components/agents/session/PendingActionCards';
-import {
-  acceptsPageTools,
-  addStarter,
-  experienceForSave,
-  experienceSaveErrors,
-  moveStarter,
-  patchExperience,
-  removeStarter,
-  setAcceptsPageTools,
-  updateStarter,
-  AGENT_STARTERS_MAX,
-} from '@/components/agents/studio/experienceSettings';
 import {
   DEFAULT_FEEDBACK_FILTER,
   FEEDBACK_REASON_ORDER,
@@ -39,7 +25,6 @@ import {
   screenIndexOf,
   type SessionMessageFeedback,
 } from '@/components/agents/studio/feedbackUi';
-import { CONFIG_SECTION_KEYS, CONFIG_SECTION_TITLES, changedConfigSections, configSectionTitle } from '@/components/agents/studio/configSections';
 import {
   applyLocalResolution,
   openActionsOf,
@@ -57,114 +42,6 @@ import { tr } from '@/lib/i18n/messages/tr';
 const render = (node: ReactNode, locale: 'en' | 'tr' = 'en') =>
   renderToStaticMarkup(h(MantineProvider, null, h(I18nProvider, { locale, children: node })));
 const noop = () => undefined;
-
-describe('editing the Experience section', () => {
-  it('nothing in, nothing out: an untouched agent stores no experience', () => {
-    expect(patchExperience(undefined, {})).toBeUndefined();
-    expect(patchExperience(undefined, { welcome: '  ' })).toBeUndefined();
-    expect(patchExperience(undefined, { starters: [] })).toBeUndefined();
-    expect(experienceForSave(undefined)).toBeUndefined();
-    expect(experienceForSave({ starters: [{ text: '  ' }] })).toBeUndefined();
-  });
-
-  it('a welcome text and starters are edited in place', () => {
-    let value = patchExperience(undefined, { welcome: 'Hi {{user.firstName}}' });
-    expect(value).toEqual({ welcome: 'Hi {{user.firstName}}' });
-    value = addStarter(value);
-    value = updateStarter(value, 0, { text: 'What can you do?', label: 'Abilities', autoSend: true });
-    value = addStarter(value);
-    value = updateStarter(value, 1, { text: 'Show my invoices' });
-    expect(value?.starters).toEqual([{ text: 'What can you do?', label: 'Abilities', autoSend: true }, { text: 'Show my invoices' }]);
-
-    // Turning a switch off or clearing a label removes the key rather than storing false / empty.
-    value = updateStarter(value, 0, { autoSend: false, label: '' });
-    expect(value?.starters?.[0]).toEqual({ text: 'What can you do?' });
-
-    value = moveStarter(value, 1, 0);
-    expect(value?.starters?.map((starter) => starter.text)).toEqual(['Show my invoices', 'What can you do?']);
-    expect(moveStarter(value, 0, 9)).toBe(value);
-    value = removeStarter(value, 0);
-    expect(value?.starters?.map((starter) => starter.text)).toEqual(['What can you do?']);
-    expect(removeStarter(removeStarter(value, 0), 0)).toEqual({ welcome: 'Hi {{user.firstName}}' });
-  });
-
-  it('cannot add past the limit', () => {
-    let value = undefined as ReturnType<typeof addStarter>;
-    for (let i = 0; i < AGENT_STARTERS_MAX + 3; i += 1) value = addStarter(value);
-    expect(value?.starters).toHaveLength(AGENT_STARTERS_MAX);
-  });
-
-  it('saves without a blank starter that is still being typed, and says what would stop a save', () => {
-    const value = { welcome: ' Hello ', starters: [{ text: 'one ' }, { text: '' }, { text: 'x'.repeat(600) }] };
-    expect(experienceForSave(value)).toEqual({ welcome: 'Hello', starters: [{ text: 'one' }, { text: 'x'.repeat(600) }] });
-    expect(experienceSaveErrors(experienceForSave(value))).toEqual([{ field: 'experience.starters.1.text', code: 'starter_text_too_long' }]);
-    expect(experienceSaveErrors(value).map((issue) => issue.code)).toEqual(['starter_text_required', 'starter_text_too_long']);
-    expect(experienceSaveErrors({ starters: [{ text: 'ok', label: 'y'.repeat(100) }] })[0]).toMatchObject({ code: 'starter_label_too_long' });
-    expect(experienceSaveErrors({ welcome: 'w'.repeat(3000) })[0]).toMatchObject({ code: 'welcome_too_long' });
-    expect(experienceSaveErrors(undefined)).toEqual([]);
-  });
-
-  it('is its own Configure section, flagged when it differs from the published version', () => {
-    expect(CONFIG_SECTION_KEYS.experience).toEqual(['experience']);
-    expect(CONFIG_SECTION_TITLES.experience).toBe('Experience');
-    expect(configSectionTitle('experience', (key) => (key === 'experience.sectionTitle' ? 'Deneyim' : key))).toBe('Deneyim');
-    const published = { modelKey: 'm' };
-    expect([...changedConfigSections({ modelKey: 'm', experience: { welcome: 'Hi' } }, published)]).toEqual(['experience']);
-    expect([...changedConfigSections({ modelKey: 'm', experience: {} }, published)]).toEqual([]);
-  });
-
-  it('renders the welcome box, the starters and the preview in both languages', () => {
-    const value = { welcome: 'Hi', starters: [{ text: 'What can you do?', label: 'Abilities' }, { text: 'Second' }] };
-    const english = render(h(AgentExperiencePanel, { value, onChange: noop }));
-    expect(english).toContain('Welcome text');
-    expect(english).toContain('Conversation starters');
-    expect(english).toContain('{{user.firstName}}');
-    expect(english).toContain('Send at once');
-    expect(english).toContain('Abilities');
-    expect(english).toContain('How the chips look');
-    const turkish = render(h(AgentExperiencePanel, { value, onChange: noop }), 'tr');
-    expect(turkish).toContain('Karşılama metni');
-    expect(turkish).toContain('Konuşma başlatıcıları');
-    expect(turkish).not.toContain('Welcome text');
-  });
-
-  it('the opt-in to tools from the page is off by default and leaves nothing behind when it is off', () => {
-    expect(acceptsPageTools(undefined)).toBe(false);
-    expect(acceptsPageTools({ welcome: 'Hi' })).toBe(false);
-    expect(setAcceptsPageTools(undefined, false)).toBeUndefined();
-
-    const on = setAcceptsPageTools(undefined, true);
-    expect(on).toEqual({ clientTools: { enabled: true } });
-    expect(acceptsPageTools(on)).toBe(true);
-    // Only the switch set: it is a real setting, so it is saved.
-    expect(experienceForSave(on)).toEqual({ clientTools: { enabled: true } });
-
-    // Beside a welcome text the two are kept apart; turning it off drops the key, not `enabled: false`.
-    const both = setAcceptsPageTools({ welcome: 'Hi' }, true);
-    expect(both).toEqual({ welcome: 'Hi', clientTools: { enabled: true } });
-    expect(setAcceptsPageTools(both, false)).toEqual({ welcome: 'Hi' });
-    expect(setAcceptsPageTools(on, false)).toBeUndefined();
-    // Editing the rest keeps the switch.
-    expect(patchExperience(both, { welcome: 'Hello' })).toEqual({ welcome: 'Hello', clientTools: { enabled: true } });
-    expect(patchExperience({ clientTools: { enabled: false } }, {})).toBeUndefined();
-  });
-
-  it('renders the opt-in switch with its warning in both languages', () => {
-    const english = render(h(AgentExperiencePanel, { value: undefined, onChange: noop }));
-    expect(english).toContain('Accept tools from the page that embeds this agent');
-    expect(english).toContain('untrusted input');
-    const turkish = render(h(AgentExperiencePanel, { value: { clientTools: { enabled: true } }, onChange: noop }), 'tr');
-    expect(turkish).toContain('Bu agent’ı gömen sayfanın araçlarını kabul et');
-    expect(turkish).toContain('güvenilmeyen girdi');
-    expect(turkish).not.toContain('Accept tools from the page');
-  });
-
-  it('shows the problems of a refused save only when asked', () => {
-    const value = { starters: [{ text: '' }] };
-    expect(render(h(AgentExperiencePanel, { value, onChange: noop }))).not.toContain('Write the message this starter puts in the box.');
-    expect(render(h(AgentExperiencePanel, { value, onChange: noop, showErrors: true }))).toContain('Write the message this starter puts in the box.');
-  });
-});
 
 describe('the Feedback tab\'s queries and bars', () => {
   it('a filter becomes the query the routes read', () => {
@@ -297,7 +174,6 @@ describe('strings', () => {
   const placeholders = (text: string) => [...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
 
   it.each([
-    ['experience', en.agents.experience, tr.agents.experience],
     ['feedback', en.agents.feedback, tr.agents.feedback],
   ])('%s has the same keys and placeholders in English and Turkish, none empty, translated', (_name, english, turkish) => {
     const a = flatten(english);
@@ -328,7 +204,6 @@ describe('strings', () => {
     const lookup = (language: typeof en | typeof tr, key: string) =>
       key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], language);
     const files = [
-      'components/agents/studio/AgentExperiencePanel.tsx',
       'components/agents/studio/AgentFeedbackPanel.tsx',
       'components/agents/session/MessageFeedbackRow.tsx',
       'components/agents/session/PendingActionCards.tsx',

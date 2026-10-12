@@ -59,7 +59,7 @@ Each event:
 | `session.status_idle` | `stop_reason`, `pending_action_ids?`, `detail?` |
 | `session.error` | `message`, `code?` |
 | `session.work_done` | none; right after an idle with `stop_reason: end_turn` |
-| `session.truncated` | `reason` (`truncate`, `regenerate` or `edit`), `kept_messages`, `removed_messages`, `removed_from`, `cancelled_actions`, `by`, `channel`: messages were cut from the transcript ([details](/guide/agent-feedback-and-experience)) |
+| `session.truncated` | `reason` (`truncate`, `regenerate` or `edit`), `kept_messages`, `removed_messages`, `removed_from`, `cancelled_actions`, `by`, `channel`: messages were cut from the transcript ([details](/guide/agent-feedback)) |
 
 A turn is bracketed by `session.status_running` and `session.status_idle`. A new event type can appear in a future version: ignore the ones you do not know.
 

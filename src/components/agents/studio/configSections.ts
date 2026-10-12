@@ -19,7 +19,6 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
     execution: 'Execution',
     files: 'Files',
     hitl: 'Approvals & questions',
-    experience: 'Experience',
     advanced: 'Runtime',
     output: 'Structured output',
 };
@@ -31,7 +30,6 @@ export const CONFIG_SECTION_TITLES: Record<string, string> = {
 export const CONFIG_SECTION_TITLE_KEYS: Record<string, string> = {
     files: 'attachments.sectionTitle',
     hitl: 'hitl.sectionTitle',
-    experience: 'experience.sectionTitle',
 };
 
 /** A section's heading in the viewer's language — `translate` is `useTranslations('agents')`. */
@@ -50,7 +48,6 @@ export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
     execution: ['execution'],
     files: ['attachments'],
     hitl: ['humanInTheLoop'],
-    experience: ['experience'],
     advanced: ['runtime'],
     output: ['structuredOutput'],
 };

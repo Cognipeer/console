@@ -14370,31 +14370,6 @@ components:
           type: string
           format: date-time
           description: When the agent was created.
-        experience:
-          type: object
-          description: "Only on the single-agent lookup, and only when the agent set any. What a chat surface shows around the agent: a Markdown welcome text and the suggested first messages."
-          properties:
-            welcome:
-              type: string
-              description: "Markdown. May use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`; a surface fills them in."
-            starters:
-              type: array
-              description: At most 6.
-              items:
-                type: object
-                properties:
-                  text:
-                    type: string
-                    description: The message the starter puts in the composer.
-                  label:
-                    type: string
-                    description: A shorter text for the chip.
-                  auto_send:
-                    type: boolean
-                    description: Send the message at once instead of only filling the composer.
-                required:
-                  - text
-                  - auto_send
         attachments:
           type: object
           description: "Only on the single-agent lookup. What a client needs before it offers an attach button: whether the agent takes files right now, its limits, and whether its model reads images."

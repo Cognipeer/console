@@ -39,7 +39,6 @@ import { pendingActionsBlockingMessage } from '@/lib/services/agents/agentAction
 import { extractResponseUserInput, namedFileIds, storeResponseInputFiles } from '@/lib/services/agents/responseInputFiles';
 import { attachmentsAvailability, attachmentsUnavailableMessage } from '@/lib/services/agents/sessionFiles';
 import { describeAgentAttachments } from '@/lib/services/agents/agentAttachmentInfo';
-import { toClientExperience } from '@/lib/services/agents/agentExperience';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
@@ -533,8 +532,6 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: agent.key,
           name: agent.name,
           status: agent.status,
-          // What a chat surface shows around the agent (welcome text, suggested first messages).
-          ...(toClientExperience(agent.config) ? { experience: toClientExperience(agent.config) } : {}),
           ...(attachments ? {
             attachments: {
               enabled: attachments.enabled,

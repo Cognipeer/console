@@ -25,8 +25,9 @@
  * What a page answers is USER INPUT. The person controls their browser, so a
  * tool such as `get_user_role` hands them a way to steer an agent that believes
  * the value. Three things follow, and none of them is optional:
- *  - the agent's author opts in (`config.experience.clientTools.enabled`, checked
- *    by the caller): an agent nobody opened to host tools never gets one;
+ *  - the embedding's admin lists the agents that may take tools from the page (the
+ *    caller passes the declared tools only for those): an agent nobody opened to
+ *    host tools never gets one;
  *  - the model is told, in the tool's description and on every result it reads,
  *    that the value is untrusted ({@link CLIENT_TOOL_UNTRUSTED_NOTICE});
  *  - the agent's approval policy applies to the call like to any tool of the

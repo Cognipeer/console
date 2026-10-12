@@ -26,7 +26,6 @@ import {
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
-import { validateExperienceConfig } from './agentExperience';
 import { normalizeAttachmentsFolder } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 
@@ -91,8 +90,6 @@ function checkEnum(issues: Issues, field: string, value: unknown, allowed: Set<s
  */
 export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValidation {
     const issues: Issues = { errors: [], warnings: [] };
-    // What a chat surface shows around the agent applies to a connected agent as well.
-    issues.errors.push(...validateExperienceConfig(config).errors);
     if (config.kind === 'external') return issues;
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });

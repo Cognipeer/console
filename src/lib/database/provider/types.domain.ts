@@ -2497,45 +2497,6 @@ export interface IAgentConfig {
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
   /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
-  /**
-   * What a chat surface (a portal, a widget) shows around this agent: the
-   * welcome text and the suggested first messages. Absent = nothing extra.
-   */
-  experience?: IAgentExperienceConfig;
-}
-
-/** A suggested first message shown on an empty conversation. */
-export interface IAgentStarter {
-  /** The message the starter puts in the composer (or sends). */
-  text: string;
-  /** Short chip label; defaults to the text. */
-  label?: string;
-  /** Send the message at once instead of only filling the composer. Default false. */
-  autoSend?: boolean;
-}
-
-/** `IAgentConfig.experience` — what a chat surface shows around the agent. */
-export interface IAgentExperienceConfig {
-  /** At most 6. */
-  starters?: IAgentStarter[];
-  /** Markdown welcome text; may use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`. */
-  welcome?: string;
-  /**
-   * Tools the page that embeds a chat may hand this agent (a portal's embed
-   * settings declare them). The agent's author opts in here: absent, or
-   * `enabled` not true, = the agent never gets a tool from a page.
-   */
-  clientTools?: IAgentClientToolsConfig;
-}
-
-/**
- * `IAgentExperienceConfig.clientTools`. What such a tool returns is typed by the
- * end user's browser, so it reaches the model marked as untrusted and the agent's
- * approval policy applies to the call unless the embedding's admin exempts the tool.
- */
-export interface IAgentClientToolsConfig {
-  /** Accept tools from the embedding page. Default false. */
-  enabled?: boolean;
 }
 
 /** Whether a tool call waits for a person first. */

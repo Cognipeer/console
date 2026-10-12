@@ -145,9 +145,9 @@ Over A2A, a paused task reports the state `input-required` with the requests in 
 
 ## Tools the page runs (`client_tool`)
 
-A chat that is embedded in a host page (a portal's widget) can let the agent use tools **that run in the page** — read what is selected, open a record — without any server-side connector. Two people have to agree before an agent gets one:
+A chat that is embedded in a host page (a portal's widget) can let the agent use tools **that run in the page** — read what is selected, open a record — without any server-side connector. Two settings of the embedding have to agree before an agent gets one:
 
-- **The agent's author opts in.** *Build → Configure → Experience → Tools from the page* (`config.experience.clientTools.enabled`) is off by default. An agent that did not turn it on never receives a tool from a page, whatever the embedding declares; the run carries a warning saying so.
+- **The embedding's admin lists the agents.** A portal passes the declared tools only to the agents its admin allowed for the page's tools (off by default, per agent). An agent that is not on that list never receives a tool from a page, whatever the embedding declares.
 - **The embedding's admin declares the tools** (name, description, input schema, timeout, and what to do about approval, below). Only those are offered, and only on a run that says it is embedded. Nothing declares them from a client request: they are never offered over the plain API.
 
 ::: warning What a page returns is user input

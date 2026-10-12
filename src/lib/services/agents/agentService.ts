@@ -178,7 +178,6 @@ import {
     resolveClientToolState,
     type EmbeddedRunContext,
 } from './agentClientTools';
-import { agentAcceptsClientTools } from './agentExperience';
 import {
     applyToolApprovals,
     denyUnattendedTools,
@@ -3454,18 +3453,15 @@ async function buildLocalAgentRun(input: {
     cleanupTasks.push(sandboxTools.cleanup);
 
     // Tools that run in the page embedding the chat. Offered only to a run that says it is
-    // embedded AND can be paused (a Session) AND has a person on the other end AND whose
-    // author opted in (`experience.clientTools.enabled`): what such a tool returns is typed
-    // in the end user's browser. They are kept out of the approval pass below, which only
+    // embedded AND can be paused (a Session) AND has a person on the other end. The caller
+    // (a portal) passes the declared tools only for an agent its admin allowed: what such a
+    // tool returns is typed in the end user's browser. They are kept out of the approval pass below, which only
     // knows the tools built above; their own approval follows the agent's policy (see
     // `clientToolNeedsApproval`), unless the embedding's admin exempted the tool.
     const allowedTools = sessionAllowedTools(input.conversation?.metadata);
     let clientTools: AgentSdkToolInterface[] = [];
     if (input.embedded && input.embedded.clientTools.length > 0) {
-        if (!agentAcceptsClientTools(config)) {
-            logger.debug('Client tools not offered: the agent does not accept tools from the page', { agentKey });
-            warnings.add('Host page tools were not offered: this agent does not accept tools from the page (Configure → Experience).');
-        } else if (input.canPause === false || input.unattended || !input.conversation) {
+        if (input.canPause === false || input.unattended || !input.conversation) {
             logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
         } else {
             const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');

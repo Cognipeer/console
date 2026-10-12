@@ -124,13 +124,10 @@ const selectionScript = () => (call: number, messages: Array<{ role: string; con
   return { role: 'assistant', content: `you selected: ${String(toolMessage?.content ?? '')}` };
 };
 
-/** The author's opt-in: without it an agent never receives a tool from a page. */
-const ACCEPTS_PAGE_TOOLS: Pick<IAgentConfig, 'experience'> = { experience: { clientTools: { enabled: true } } };
-
 async function createAgent(config: Partial<IAgentConfig> = {}) {
   await db.createAgent({
     tenantId, projectId: PROJECT_ID, key: AGENT_KEY, name: 'Host agent',
-    config: { modelKey: 'gpt-4o', ...ACCEPTS_PAGE_TOOLS, ...config }, status: 'active', createdBy: OWNER,
+    config: { modelKey: 'gpt-4o', ...config }, status: 'active', createdBy: OWNER,
   });
 }
 
@@ -213,25 +210,6 @@ describe('client tools are offered only to an embedded run', () => {
     await executePlaygroundChatLocal({
       tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, userMessage: 'hi', embedded: EMBEDDED,
     });
-    expect(model.offered.flat()).not.toContain('get_selection');
-  });
-
-  it('an agent whose author did not opt in never gets a tool from a page, and the run says why', async () => {
-    await createAgent({ experience: undefined });
-    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
-    const result = await chat(String((await newConversation())._id), 'hi', { embedded: EMBEDDED });
-    expect(model.offered.flat()).not.toContain('get_selection');
-    expect(result.warnings?.join(' ')).toContain('does not accept tools from the page');
-  });
-
-  it.each([
-    ['an experience without the switch', { welcome: 'Hi' }],
-    ['the switch off', { clientTools: { enabled: false } }],
-    ['an empty switch object', { clientTools: {} }],
-  ])('%s is the same as no opt-in', async (_label, experience) => {
-    await createAgent({ experience });
-    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
-    await chat(String((await newConversation())._id), 'hi', { embedded: EMBEDDED });
     expect(model.offered.flat()).not.toContain('get_selection');
   });
 

@@ -41,14 +41,6 @@ export {
 export { normalizeA2aMetadataUpdate } from './a2aExposure';
 
 // What a chat surface (a portal, an embedded widget) builds on.
-export {
-  agentAcceptsClientTools,
-  resolveAgentExperience,
-  renderWelcomeTemplate,
-  escapeForMarkdown,
-  AGENT_STARTERS_MAX,
-} from './agentExperience';
-export type { ResolvedAgentExperience, WelcomeVariables } from './agentExperience';
 
 export {
   checkEmbeddedClientTools,

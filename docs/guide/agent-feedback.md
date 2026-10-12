@@ -1,19 +1,6 @@
-# Feedback, welcome text and message actions
+# Feedback, titles and message actions
 
-What a chat surface — a portal, an embedded widget — builds on top of an agent: the text and suggested first messages it greets people with, the thumbs people give an answer, a title for each conversation, and the actions on a message (regenerate, edit). The surface decides what to switch on; the pieces below are the console's part.
-
-## Experience: welcome text and starters
-
-**Build → Experience** (`config.experience`) holds what a surface shows on an empty conversation:
-
-| Setting | |
-| --- | --- |
-| Welcome text | Markdown (links, lists, bold), up to 2000 characters. May use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`; the surface fills them in on the server, escaping each value, so a person's display name cannot add a link or an image to a greeting. Any other `{{…}}` is left as written. |
-| Starters | Up to 6 suggested first messages: `text` (up to 500 characters), an optional shorter chip `label`, and `autoSend` (off: the click only fills the message box so the person can edit first). |
-
-An agent that sets neither shows nothing extra. A portal shows the **published** version, and may override both for itself. The single-agent lookup of the client API returns them as `experience` (`welcome`, `starters[]` with `auto_send`).
-
-The same section holds one setting that is about what the agent may receive rather than what it shows: **Tools from the page** (`config.experience.clientTools.enabled`, off by default). An agent only gets tools that run in the embedding page when its author turns this on; what such a tool returns is typed in the person's browser, so it reaches the model as untrusted input and the agent's approval policy applies to the calls. See [Tools the page runs](/guide/agent-approvals#tools-the-page-runs-client-tool).
+What a chat surface — a portal, an embedded widget, your own client — builds on top of an agent: the thumbs people give an answer, a title for each conversation, and the actions on a message (regenerate, edit). The surface decides what to switch on; the pieces below are the console's part. Welcome text and suggested first messages belong to the surface, not to the agent: a portal sets them for itself.
 
 ## Feedback
 
