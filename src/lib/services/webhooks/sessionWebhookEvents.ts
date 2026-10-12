@@ -20,33 +20,6 @@ export interface SessionWebhookScope {
   conversationId: string;
 }
 
-/** The most a webhook carries of a client tool's arguments; beyond it they are left out (`argsTruncated`) and read from the session. */
-const CLIENT_TOOL_ARGS_MAX_BYTES = 16 * 1024;
-
-/**
- * What a receiver needs to RUN a client tool - and nothing of the other kinds
- * of request: an approval's arguments or a question stay out of a webhook (they
- * are for a person to read in the dashboard). A client tool's arguments are
- * the very thing the receiver was subscribed to act on, and it answers on
- * `answerPath` with `{ output }` or `{ error }`.
- */
-function clientToolDetail(data: Record<string, unknown>, conversationId: string): Record<string, unknown> {
-  let argsFit = true;
-  let args: unknown = data.args;
-  try {
-    argsFit = args === undefined || Buffer.byteLength(JSON.stringify(args), 'utf8') <= CLIENT_TOOL_ARGS_MAX_BYTES;
-  } catch {
-    argsFit = false;
-  }
-  return {
-    toolName: data.toolName ?? null,
-    ...(argsFit ? { args: args ?? {} } : { argsTruncated: true }),
-    ...(data.timeoutSeconds !== undefined ? { timeoutSeconds: data.timeoutSeconds } : {}),
-    ...(data.expiresAt !== undefined ? { expiresAt: data.expiresAt } : {}),
-    answerPath: `/api/client/v1/agents/sessions/${conversationId}/actions/${String(data.actionId ?? '')}`,
-  };
-}
-
 /** The webhook events a stored batch of session events maps to (usually none). */
 export function sessionWebhookEvents(
   events: readonly LoggedEvent[],
@@ -64,17 +37,7 @@ export function sessionWebhookEvents(
         out.push({ type: 'session.work_done', data: base });
         break;
       case 'action.required':
-        out.push({
-          type: 'action.required',
-          data: {
-            ...base,
-            actionId: event.data.actionId ?? null,
-            kind: event.data.kind ?? null,
-            // The tool's name is not sensitive; an approval's arguments are, so only a client tool carries them.
-            ...(event.data.kind === 'tool_approval' && event.data.toolName ? { toolName: event.data.toolName } : {}),
-            ...(event.data.kind === 'client_tool' ? clientToolDetail(event.data, scope.conversationId) : {}),
-          },
-        });
+        out.push({ type: 'action.required', data: { ...base, actionId: event.data.actionId ?? null, kind: event.data.kind ?? null } });
         break;
       case 'budget.reached':
         out.push({

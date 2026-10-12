@@ -33,10 +33,10 @@ Agents → Webhooks shows only what the person may do: without Admin the page is
 | --- | --- |
 | `session.idled` | `sessionId`, `conversationId`, `agentKey`, `stopReason` |
 | `session.work_done` | `sessionId`, `conversationId`, `agentKey` |
-| `action.required` | `sessionId`, `conversationId`, `agentKey`, `actionId`, `kind`; a `tool_approval` adds `toolName`; a `client_tool` adds what the receiver needs to run it: `toolName`, `args` (left out with `argsTruncated: true` above 16 KB), `timeoutSeconds`, `expiresAt` and `answerPath` — answer with `POST <answerPath>` and `{ "output": … }` or `{ "error": "…" }`. An approval's arguments and a question never leave in a webhook. |
+| `action.required` | `sessionId`, `conversationId`, `agentKey`, `actionId`, `kind`. Nothing of the request itself travels in a webhook: read it with `GET /api/client/v1/agents/sessions/{sessionId}` (`pending_actions`) and answer on `POST …/actions/{actionId}`. |
 | `budget.reached` | `sessionId`, `conversationId`, `agentKey`, `spentUsd`, `maxCostUsd` |
 | `feedback.recorded` | `sessionId`, `conversationId`, `agentKey`, `messageId`, `messageIndex`, `rating` (`up`, `down`, or `null` when withdrawn), `reasons`, `hasComment`, `channel`, `portalId`, `withdrawn?`: a person rated an answer ([feedback](/guide/agent-feedback)). The comment itself is never sent. |
-| `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId`, `sessionId`, `conversationId`, `agentKey`; `agent_run.requires_action` adds `clientToolCalls[]` (`actionId`, `toolName`, `args`, `timeoutSeconds`, `expiresAt`, `answerPath`) when the run waits on client tools |
+| `agent_run.succeeded`, `agent_run.failed`, `agent_run.canceled`, `agent_run.requires_action` | `runId`, `sessionId`, `conversationId`, `agentKey` |
 | `schedule.fired`, `schedule.failed` | `scheduleId`, `agentKey`, `trigger`, `conversationId?`, `error?` |
 | `webhook.test` | none (sent by **Send test event**) |
 

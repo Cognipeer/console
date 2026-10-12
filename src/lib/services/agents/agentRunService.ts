@@ -1342,22 +1342,6 @@ export function signAgentRunCallback(secret: string, body: string, timestamp = M
 
 type AgentRunCallbackEvent = AgentRunCallbackJobPayload['event'];
 
-/** The client tool calls a paused run's result is waiting on, as `{ clientToolCalls }` - or nothing. */
-function openClientToolCalls(result: unknown, conversationId: string): Record<string, unknown> {
-  const actions = (result as { required_action?: { actions?: Array<Record<string, unknown>> } } | null | undefined)?.required_action?.actions;
-  const calls = (actions ?? [])
-    .filter((action) => action.kind === 'client_tool' && action.status === 'pending')
-    .map((action) => ({
-      actionId: action.id,
-      toolName: action.tool_name ?? null,
-      args: action.args ?? {},
-      ...(action.timeout_seconds !== undefined ? { timeoutSeconds: action.timeout_seconds } : {}),
-      ...(action.expires_at !== undefined ? { expiresAt: action.expires_at } : {}),
-      answerPath: `/api/client/v1/agents/sessions/${conversationId}/actions/${String(action.id)}`,
-    }));
-  return calls.length > 0 ? { clientToolCalls: calls } : {};
-}
-
 export async function fireAgentRunCallback(
   run: IAgentRun,
   event: AgentRunCallbackEvent,
@@ -1375,8 +1359,6 @@ export async function fireAgentRunCallback(
       sessionId: run.conversationId,
       conversationId: run.conversationId,
       agentKey: run.agentKey,
-      // A run waiting on client tools says which calls to run (the same details `action.required` carries).
-      ...(event === 'requires_action' ? openClientToolCalls(data.result, run.conversationId) : {}),
     },
   });
   if (!run.callbackUrl) return;
