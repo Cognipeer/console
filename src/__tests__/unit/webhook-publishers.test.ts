@@ -58,7 +58,7 @@ describe('session event writer', () => {
     expect(calls().map((c) => c.type)).toEqual(['session.idled', 'session.work_done']);
     expect(calls()[0]).toMatchObject({
       tenantDbName: 'tenant_acme', projectId: 'p-1',
-      data: { conversationId: 'conv-1', agentKey: 'bot', stopReason: 'end_turn' },
+      data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'bot', stopReason: 'end_turn' },
     });
   });
 
@@ -99,12 +99,12 @@ describe('a turn', () => {
     ]);
   });
 
-  it('stopping for an approval publishes action.required (ids only) and an idle of requires_action — no work_done', async () => {
+  it('stopping for an approval publishes action.required (ids and the tool name only) and an idle of requires_action — no work_done', async () => {
     const events = turn();
     events.emitInTurn('action.required', { actionId: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec', args: { cmd: 'ls' } });
     await events.finish({ stopReason: 'requires_action', content: '', pendingActionIds: ['act_1'] });
     expect(calls().map((c) => c.type)).toEqual(['action.required', 'session.idled']);
-    expect(calls()[0].data).toEqual({ conversationId: 'conv-1', agentKey: 'bot', actionId: 'act_1', kind: 'tool_approval' });
+    expect(calls()[0].data).toEqual({ sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'bot', actionId: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec' });
     expect(calls()[1].data.stopReason).toBe('requires_action');
   });
 

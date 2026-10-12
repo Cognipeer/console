@@ -171,6 +171,26 @@ describe('parameters (env)', () => {
 describe('session log events that are webhook events', () => {
   const scope = { agentKey: 'support', conversationId: 'conv-1' };
 
+  it('a client tool call carries what the receiver needs to run it, and an approval never carries its arguments', () => {
+    const [call] = sessionWebhookEvents([
+      { type: 'action.required', data: { actionId: 'act_9', kind: 'client_tool', toolName: 'lookup_order', args: { id: 'A-1' }, timeoutSeconds: 20, expiresAt: '2026-10-12T12:00:35.000Z' } },
+    ], scope);
+    expect(call.data).toEqual({
+      sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', actionId: 'act_9', kind: 'client_tool',
+      toolName: 'lookup_order', args: { id: 'A-1' }, timeoutSeconds: 20, expiresAt: '2026-10-12T12:00:35.000Z',
+      answerPath: '/api/client/v1/agents/sessions/conv-1/actions/act_9',
+    });
+    const [big] = sessionWebhookEvents([
+      { type: 'action.required', data: { actionId: 'act_10', kind: 'client_tool', toolName: 'x', args: { blob: 'y'.repeat(20_000) } } },
+    ], scope);
+    expect(big.data.argsTruncated).toBe(true);
+    expect(big.data).not.toHaveProperty('args');
+    const [approval] = sessionWebhookEvents([
+      { type: 'action.required', data: { actionId: 'act_11', kind: 'tool_approval', toolName: 'sandbox_exec', args: { cmd: 'rm -rf' } } },
+    ], scope);
+    expect(JSON.stringify(approval.data)).not.toContain('rm -rf');
+  });
+
   it('maps idle, work_done, action.required and budget.reached to thin event data', () => {
     const events = sessionWebhookEvents([
       { type: 'agent.message', data: { content: 'secret text that must not leave' } },
@@ -182,10 +202,10 @@ describe('session log events that are webhook events', () => {
     ], scope);
 
     expect(events).toEqual([
-      { type: 'action.required', data: { conversationId: 'conv-1', agentKey: 'support', actionId: 'act_1', kind: 'tool_approval' } },
-      { type: 'budget.reached', data: { conversationId: 'conv-1', agentKey: 'support', spentUsd: 1.5, maxCostUsd: 1 } },
-      { type: 'session.idled', data: { conversationId: 'conv-1', agentKey: 'support', stopReason: 'end_turn' } },
-      { type: 'session.work_done', data: { conversationId: 'conv-1', agentKey: 'support' } },
+      { type: 'action.required', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', actionId: 'act_1', kind: 'tool_approval', toolName: 'sandbox_exec' } },
+      { type: 'budget.reached', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', spentUsd: 1.5, maxCostUsd: 1 } },
+      { type: 'session.idled', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', stopReason: 'end_turn' } },
+      { type: 'session.work_done', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support' } },
     ]);
   });
 
