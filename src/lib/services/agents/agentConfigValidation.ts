@@ -94,6 +94,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     if (config.kind === 'external') return issues;
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });
+    checkAdditionalModelsShape(issues, config);
     if (config.systemPrompt && config.promptKey) {
         issues.warnings.push({
             field: 'promptKey',
@@ -350,6 +351,38 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
     return issues;
 }
 
+export const MAX_ADDITIONAL_MODELS = 10;
+
+/** `additionalModels`: a list of at most 10 distinct models, none of them the main one. */
+function checkAdditionalModelsShape(issues: Issues, config: IAgentConfig): void {
+    const list = config.additionalModels;
+    if (list === undefined || list === null) return;
+    if (!Array.isArray(list)) {
+        issues.errors.push({ field: 'additionalModels', message: 'must be a list' });
+        return;
+    }
+    if (list.length > MAX_ADDITIONAL_MODELS) {
+        issues.errors.push({ field: 'additionalModels', message: `An agent can offer at most ${MAX_ADDITIONAL_MODELS} additional models` });
+    }
+    const seen = new Set<string>();
+    list.forEach((entry, index) => {
+        const field = `additionalModels[${index}]`;
+        const key = entry && typeof entry === 'object' && typeof entry.modelKey === 'string' ? entry.modelKey.trim() : '';
+        if (!key) {
+            issues.errors.push({ field: `${field}.modelKey`, message: 'Pick a model' });
+            return;
+        }
+        if (key === config.modelKey) {
+            issues.errors.push({ field: `${field}.modelKey`, message: `"${key}" is already the main model` });
+        } else if (seen.has(key)) {
+            issues.errors.push({ field: `${field}.modelKey`, message: `Model "${key}" is listed twice` });
+        }
+        seen.add(key);
+        if (entry.label !== undefined && typeof entry.label !== 'string') issues.errors.push({ field: `${field}.label`, message: 'must be text' });
+        if (entry.description !== undefined && typeof entry.description !== 'string') issues.errors.push({ field: `${field}.description`, message: 'must be text' });
+    });
+}
+
 function checkBindingShape(issues: Issues, field: string, binding: IAgentToolBinding): void {
     if (!binding || typeof binding !== 'object') {
         issues.errors.push({ field, message: 'Invalid tool binding' });
@@ -458,6 +491,21 @@ export async function validateAgentConfig(input: {
 
     const wantsCost = isNumber(config.runtime?.limits?.maxCostUsd) && config.runtime!.limits!.maxCostUsd! > 0;
     if (config.modelKey) await checkModel('modelKey', config.modelKey, wantsCost);
+    for (const [index, entry] of (config.additionalModels ?? []).entries()) {
+        const key = typeof entry?.modelKey === 'string' ? entry.modelKey.trim() : '';
+        if (!key || key === config.modelKey) continue; // the shape pass reported it
+        const field = `additionalModels[${index}].modelKey`;
+        await checkModel(field, key, wantsCost);
+        const model = await db.findModelByKey(key, projectId).catch(() => null);
+        if (!model || model.category !== 'llm') continue;
+        // A Dynamic LLM routes on its own rules; only a plain model can be known to lack a capability.
+        if (model.supportsToolCalls === false && ((config.toolBindings?.length ?? 0) > 0 || config.knowledgeEngineKey)) {
+            issues.warnings.push({ field, message: `Model "${key}" does not support tool calls, but this agent uses tools` });
+        }
+        if (model.isMultimodal === false && config.attachments?.enabled === true) {
+            issues.warnings.push({ field, message: `Model "${key}" does not accept images, but this agent takes attachments` });
+        }
+    }
 
     if (!config.systemPrompt && config.promptKey) {
         const prompt = await db.findPromptByKey(config.promptKey, projectId).catch(() => null);

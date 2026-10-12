@@ -54,7 +54,7 @@ describe('the managed set', () => {
   it('carries six RBAC permits, six boundary forbids, eight portal rules and two agent approval rules, all valid against the schema', () => {
     expect(Object.keys(MANAGED_POLICIES)).toHaveLength(6);
     expect(Object.keys(BOUNDARY_POLICIES)).toHaveLength(6);
-    expect(Object.keys(ALL_MANAGED_POLICIES)).toHaveLength(22);
+    expect(Object.keys(ALL_MANAGED_POLICIES)).toHaveLength(23);
     const result = validatePolicies(getIamSchema().schema, { ...ALL_MANAGED_POLICIES });
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
@@ -64,7 +64,7 @@ describe('the managed set', () => {
     }
     const info = listManagedPolicies();
     expect(info.filter((p) => p.effect === 'forbid').map((p) => p.group)).toEqual([...Array(6).fill('boundary'), ...Array(4).fill('portal')]);
-    expect(info.filter((p) => p.effect === 'permit').map((p) => p.group)).toEqual([...Array(6).fill('rbac'), ...Array(4).fill('portal'), 'agent', 'agent']);
+    expect(info.filter((p) => p.effect === 'permit').map((p) => p.group)).toEqual([...Array(6).fill('rbac'), ...Array(4).fill('portal'), 'agent', 'agent', 'agent']);
     for (const [id, text] of Object.entries(AGENT_POLICIES)) {
       expect(id.startsWith('managed:agent:')).toBe(true);
       expect(text.startsWith('@managed("agent")')).toBe(true);

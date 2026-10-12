@@ -45,6 +45,8 @@ export interface SessionTurnEventsOptions {
    */
   userMessage?: string | (() => string);
   trigger: 'message' | 'resume' | 'timeout';
+  /** The model the turn runs on, for an agent that offers several (rides on `session.status_running`). */
+  model?: { modelKey: string; reason: string };
   bus?: SessionEventBus;
   /**
    * True once this turn has been given up on (its deadline passed, or it was
@@ -143,7 +145,7 @@ export function startSessionTurnEvents(options: SessionTurnEventsOptions): Sessi
         ?? (typeof options.userMessage === 'function' ? options.userMessage() : options.userMessage);
       writer.emit('user.message', { content: text });
     }
-    writer.emit('session.status_running', { trigger: options.trigger });
+    writer.emit('session.status_running', { trigger: options.trigger, ...(options.model ? { model: options.model } : {}) });
   };
   // A turn that resumes a pause has no message to hold back.
   if (options.userMessage === undefined) ensureStarted();

@@ -565,6 +565,8 @@ export interface ResourceRequestAuthzInput {
    */
   projectId?: string | null;
   rbac?: SessionRbacHint;
+  /** The additional model a run was asked to use (`agent.use_model`): policy context `model`. */
+  model?: string;
   /** The answer shapes a response (a list's scope) rather than refuses a request: a "no" leaves no decision id, log or audit row. */
   quiet?: boolean;
 }
@@ -614,6 +616,7 @@ export async function authorizeResourceForRequest(
       userAgent: typeof userAgent === 'string' ? userAgent : undefined,
       method: request.method,
       path: principal.path,
+      ...(input.model ? { model: input.model } : {}),
     },
     // The 503 below is audited by the response hook with the same decision id.
     auditUnavailable: false,

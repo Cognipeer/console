@@ -87,6 +87,7 @@ import AgentMemoryPanel, { type MemoryStoreOption } from './studio/AgentMemoryPa
 import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
+import AgentAdditionalModels from './studio/AgentAdditionalModels';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentConfig,
@@ -95,6 +96,7 @@ import type {
   IAgentExecutionConfig,
   IAgentClientToolSurfaces,
   IAgentHumanInTheLoopConfig,
+  IAgentAdditionalModel,
   IAgentClientToolConfig,
   IAgentRuntimeConfig,
   IAgentSkillPolicy,
@@ -239,6 +241,7 @@ export default function AgentDetailPage() {
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
+  const [additionalModels, setAdditionalModels] = useState<IAgentAdditionalModel[]>([]);
   const [prompts, setPrompts] = useState<PromptOption[]>([]);
   const [ragModules, setRagModules] = useState<RagModule[]>([]);
   const [guardrails, setGuardrails] = useState<GuardrailBindingOption[]>([]);
@@ -372,6 +375,7 @@ export default function AgentDetailPage() {
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
+        setAdditionalModels(cfg.additionalModels ?? []);
         setRuntimeConfig(cfg.runtime ?? {});
         setStructuredOutput(cfg.structuredOutput);
         setSubagents(cfg.subagents ?? []);
@@ -590,6 +594,10 @@ export default function AgentDetailPage() {
     const values = configForm.values;
     const nextConfig: Record<string, unknown> = {
       modelKey: values.modelKey,
+      // Never the main model (the picker hides it, and a model switched to main drops out of the list).
+      additionalModels: additionalModels.filter((entry) => entry.modelKey !== values.modelKey).length > 0
+        ? additionalModels.filter((entry) => entry.modelKey !== values.modelKey)
+        : undefined,
       // No temperature / maxTokens. The form used to send 0.7 and 4096 on
       // every save, so every agent was silently capped at 4096 output tokens
       // and pinned to a temperature — settings nobody chose and, once the
@@ -891,6 +899,22 @@ export default function AgentDetailPage() {
           }))}
           searchable
           {...configForm.getInputProps('modelKey')}
+        />
+
+        <AgentAdditionalModels
+          value={additionalModels}
+          onChange={setAdditionalModels}
+          models={models}
+          mainModelKey={configForm.values.modelKey}
+          labels={{
+            title: t('config.additionalModels'),
+            description: t('config.additionalModelsDescription'),
+            placeholder: t('config.additionalModelsPlaceholder'),
+            label: t('config.additionalModelLabel'),
+            labelPlaceholder: t('config.additionalModelLabelPlaceholder'),
+            descriptionLabel: t('config.additionalModelDescription'),
+            descriptionPlaceholder: t('config.additionalModelDescriptionPlaceholder'),
+          }}
         />
 
         {/* Prompt configuration (mode / template / managed prompt) lives in

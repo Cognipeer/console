@@ -109,6 +109,10 @@ const MANAGED_TEXT: Record<string, { name: string; description: string }> = {
     name: 'People who may approve an agent\'s tool calls',
     description: 'A person may approve a tool call of an agent session (allow, deny, edit the arguments, remember it for the session) when they started that session, or when the agent accepts them: workspace owners and admins and the admins of the agent\'s project (the default), or every member of the project. The agent\'s "who can approve" setting is the input of this rule. Having Write access to Agents is not enough on its own; your own allow rules can appoint more approvers, such as a compliance group.',
   },
+  'managed:agent:use-model': {
+    name: 'Everyone who can run an agent may pick its additional models',
+    description: 'An agent can offer additional models next to its main one. By default the people and API tokens that reach the agent may choose any model on its list; the list on the agent is the limit. Write a deny rule on the action agent.use_model (with a condition on context.model) to keep a model for some people only. The main model is never asked about.',
+  },
   'managed:agent:approve-token': {
     name: 'API tokens approve on behalf of their owner',
     description: 'An API token may approve a tool call exactly when its owner may. The token\'s own scope and the project limits still apply on top.',

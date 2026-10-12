@@ -2418,9 +2418,23 @@ export interface IAgentAttachmentsConfig {
   carryRecentImages?: number;
 }
 
+/** One extra model an agent offers next to its main one. */
+export interface IAgentAdditionalModel {
+  modelKey: string;
+  /** What a picker shows; the model's name when omitted. */
+  label?: string;
+  description?: string;
+}
+
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
+  /**
+   * Further models a caller may pick for a run (`model` on the client API, `agent_model` on the
+   * OpenAI-compatible surfaces). Max 10, unique, never the main `modelKey`. The main model is
+   * always usable; these are checked by `agent.use_model` (see `resolveAgentRunModel`).
+   */
+  additionalModels?: IAgentAdditionalModel[];
   systemPrompt?: string;
   promptKey?: string;
   /**

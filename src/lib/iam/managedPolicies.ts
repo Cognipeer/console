@@ -271,6 +271,7 @@ when {
 export const AGENT_POLICY_IDS = {
   approve: 'managed:agent:approve',
   approveToken: 'managed:agent:approve-token',
+  useModel: 'managed:agent:use-model',
 } as const;
 
 /**
@@ -308,6 +309,11 @@ permit (principal is ApiToken, action == Action::"agent.approve", resource is Ag
 when {
   ${mayApprove('principal.owner', '  ')}
 };`,
+  // Running an agent on one of its additional models. The agent's own list bounds the choice; this rule only keeps the
+  // default "usable by everyone who reaches the run" so that nothing changes until an administrator writes a forbid on
+  // `context.model`. It names ONE action: it grants nothing else, and the main model is never asked about.
+  [AGENT_POLICY_IDS.useModel]: `@managed("agent")
+permit (principal, action == Action::"agent.use_model", resource is Agent);`,
 });
 
 /** Every managed policy a tenant policy set starts with: the RBAC permits, the boundary forbids, the portal access rules and the agent approval rules. */

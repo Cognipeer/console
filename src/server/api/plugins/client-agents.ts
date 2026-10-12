@@ -30,6 +30,8 @@ import {
   serializeAgentRun,
   validateCallbackRequest,
 } from '@/lib/services/agents/agentRunService';
+import { resolveAgentConfig } from '@/lib/services/agents/agentService';
+import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
 import { toClientErrorBody } from '@/lib/services/agents/clientWire';
@@ -62,6 +64,14 @@ import {
 import { requestCanNameBucket } from './files-permission';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import {
+  AgentModelError,
+  advertisedModelsForRequest,
+  rememberSessionModel,
+  requestedAgentModel,
+  resolveRunModelForRequest,
+  sendAgentModelError,
+} from './agent-model-authz';
 import { decideSessionAccess, sendAuthorizationUnavailable, sendClientSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:client-agents');
@@ -275,6 +285,26 @@ function createResponsesHandler(usePublished: boolean) {
         }
       }
 
+      // Which of the agent's models this run uses (`agent_model` / header; the sticky model of the session otherwise).
+      // The config that will run decides the list: the published one for /agents/responses or a pinned version.
+      let modelChoice: AgentModelChoice | undefined;
+      const askedModel = requestedAgentModel(request, body);
+      if (askedModel || agent.config.additionalModels?.length || sessionConversation?.metadata?.activeModel) {
+        const runConfig = usePublished || requestedVersion !== undefined
+          ? (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId, requestedVersion)).config
+          : agent.config;
+        if (askedModel || runConfig.additionalModels?.length) {
+          try {
+            modelChoice = await resolveRunModelForRequest(request, {
+              agent, config: runConfig, projectId: ctx.projectId, requested: askedModel, conversation: sessionConversation,
+            });
+          } catch (error) {
+            if (error instanceof AgentModelError) return sendAgentModelError(reply, request, error);
+            throw error;
+          }
+        }
+      }
+
       // Effective execution limits: min(env ceiling, tenant quota, the
       // agent's own Execution settings). Execution settings are operational
       // and apply without publishing, so they are read from the live agent.
@@ -360,6 +390,8 @@ function createResponsesHandler(usePublished: boolean) {
         conversationId = String(conversation._id);
         sessionConversation = conversation;
       }
+      // A queued run reads the choice from its session, so it is stored before the run is created.
+      if (modelChoice && sessionConversation) await rememberSessionModel(ctx.tenantDbName, sessionConversation, modelChoice);
 
       // Files in the request become files of the session this turn runs on.
       let attachments: string[] = [];
@@ -438,6 +470,7 @@ function createResponsesHandler(usePublished: boolean) {
           ...(attachments.length > 0 ? { attachments } : {}),
           version: requestedVersion,
           runtimeContext,
+          ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
         },
         syncTimeoutMs: limits.syncTimeoutMs,
       });
@@ -450,7 +483,7 @@ function createResponsesHandler(usePublished: boolean) {
 
       const { _conversation_messages, ...responseBody } = syncOutcome.response;
       void _conversation_messages;
-      return reply.code(200).send(responseBody);
+      return reply.code(200).send(modelChoice ? { ...responseBody, cognipeer: { agent_model: modelChoice.modelKey } } : responseBody);
     } catch (error) {
       if (error instanceof AgentGuardrailBlockedError) {
         // Info, not error: a refused prompt is policy working as configured.
@@ -511,6 +544,13 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Agent not found' });
       }
 
+      // The models a caller may pick, when the agent offers more than its main one (those they may not use are left out).
+      const models = await advertisedModelsForRequest(request, {
+        agent: { ...agent, config: (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId).catch(() => null))?.config ?? agent.config },
+        tenantDbName: ctx.tenantDbName,
+        projectId: ctx.projectId,
+      }).catch(() => undefined);
+
       // What a client needs to decide whether to offer an attach button (and to warn about an image).
       const attachments = await describeAgentAttachments({
         tenantDbName: ctx.tenantDbName,
@@ -532,6 +572,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
           key: agent.key,
           name: agent.name,
           status: agent.status,
+          ...(models ? { models } : {}),
           ...(attachments ? {
             attachments: {
               enabled: attachments.enabled,

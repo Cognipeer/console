@@ -92,6 +92,10 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
   // somebody ELSE may do with it. They sit in the Read / Write groups, so by default every
   // `agents` reader / writer holds them (today's behaviour) and a deny rule narrows them.
   { type: 'agent', verb: 'approve', level: 'write' },
+  // Running an agent on one of its ADDITIONAL models (the caller chose it; the main model is never asked). Read level: the
+  // managed rule (managedPolicies.ts) permits it to everyone who reaches the run, an administrator narrows it with a forbid
+  // on `context.model`.
+  { type: 'agent', verb: 'use_model', level: 'read' },
   { type: 'agent', verb: 'session_view_others', level: 'read' },
   { type: 'agent', verb: 'session_manage_others', level: 'write' },
   { type: 'tool', verb: 'execute', level: 'write' },
@@ -123,6 +127,7 @@ export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChann
   'portal.conversations_view': ['dashboard', 'api'],
   'agent.invoke': ['portal'],
   'agent.approve': ['dashboard', 'api', 'portal'],
+  'agent.use_model': ['dashboard', 'api', 'portal'],
   'agent.session_view_others': ['dashboard', 'api'],
   'agent.session_manage_others': ['dashboard', 'api'],
   // Where an agent keeps its session files is a Files decision about THAT bucket (agents routes ask it).

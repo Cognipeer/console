@@ -133,7 +133,7 @@ describe('policy rows', () => {
 
   it('describes every managed policy in plain language', () => {
     const views = listManagedPolicyViews();
-    expect(views.map((v) => v.id)).toHaveLength(22);
+    expect(views.map((v) => v.id)).toHaveLength(23);
     for (const v of views) {
       expect(v.name.length).toBeGreaterThan(5);
       expect(v.description.length).toBeGreaterThan(20);

@@ -189,6 +189,7 @@ import {
     resolveHitlRunMode,
     sessionAllowedTools,
 } from './agentHumanInTheLoop';
+import { additionalModelKeys, applyAgentModelChoice, type AgentModelChoice } from './agentModelSelection';
 import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
 import {
     AgentResumeError,
@@ -2801,6 +2802,12 @@ export interface AgentChatRequest {
      * unless `humanInTheLoop.unattended` is `allow`.
      */
     answersClientTools?: boolean;
+    /**
+     * The model the route resolved for this turn (`resolveAgentRunModel`; the policy decision was the
+     * route's). Must be the agent's main model or on its `additionalModels`, otherwise the main model runs.
+     * A background turn takes the choice stored on its session instead.
+     */
+    modelKey?: string;
     /** Request a specific published version (API/SDK) */
     version?: number;
     /** When true, use the published version (default for API/SDK calls) */
@@ -3232,6 +3239,8 @@ async function runExternalAgentTurn(input: {
  * production will run. The two differ only in the inputs below.
  */
 async function buildLocalAgentRun(input: {
+    /** Which of the agent's models this run uses and why; tagged on the trace. */
+    modelChoice?: AgentModelChoice;
     db: Awaited<ReturnType<typeof getDatabase>>;
     tenantDbName: string;
     tenantId: string;
@@ -3568,7 +3577,9 @@ async function buildLocalAgentRun(input: {
     const skills = await buildAgentSkills(tenantDbName, projectId, config.skills);
     const outputSchema = resolveStructuredOutputSchema(config.structuredOutput);
     const skillPolicy = resolveAgentSkillPolicy(config);
-    const tracingMetadata = buildTracingMetadata(runtimeContext);
+    const tracingMetadata = input.modelChoice
+        ? { ...buildTracingMetadata(runtimeContext), agentModel: input.modelChoice.modelKey, agentModelReason: input.modelChoice.reason }
+        : buildTracingMetadata(runtimeContext);
     const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
     const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model, sessionBudgetActive);
     if (sessionBudgetActive && !costEstimator) {
@@ -3963,6 +3974,14 @@ async function runAgentChatTurn(
         throw new Error(`Conversation "${conversationId}" not found`);
     }
 
+    // Which model this turn runs on (the agent's additional models). Recorded only for agents that offer
+    // some; the config the rest of the turn reads then names that model as its own.
+    const offersModels = config.kind !== 'external' && additionalModelKeys(config).length > 0;
+    const modelChoice: AgentModelChoice | undefined = offersModels
+        ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: conversation.metadata, background: Boolean(request.runId) })
+        : undefined;
+    if (modelChoice && modelChoice.modelKey !== config.modelKey) config = { ...config, modelKey: modelChoice.modelKey };
+
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
     // Checked before the event log opens: a refusal must not mark the session
@@ -4004,6 +4023,7 @@ async function runAgentChatTurn(
         ...(request.runId ? { runId: request.runId } : {}),
         userMessage: () => rewriteLedger.resolve(userMessage),
         trigger: 'message',
+        ...(modelChoice ? { model: modelChoice } : {}),
         superseded: () => request.cancellationCell?.abandoned === true,
     });
     scope.events = turnEvents;
@@ -4103,6 +4123,7 @@ async function runAgentChatTurn(
         unattended: request.unattended,
         ...(request.answersClientTools ? { answersClientTools: true } : {}),
         ...(spend ? { spend } : {}),
+        ...(modelChoice ? { modelChoice } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -5342,7 +5363,11 @@ async function runAgentResumeTurn(
         }
     }
     const loaded = (pausedRun ?? continued)!;
-    const { conversation, agent, config, version } = loaded;
+    const { conversation, agent, version } = loaded;
+    // A turn that paused resumes on the model it ran with (stored on the session when the request was authorized).
+    const config: IAgentConfig = additionalModelKeys(loaded.config).length > 0
+        ? { ...loaded.config, modelKey: applyAgentModelChoice(loaded.config, { sessionMetadata: conversation.metadata, background: true }).modelKey }
+        : loaded.config;
     const paused = pausedRun?.paused ?? null;
     const approvals = pausedRun?.approvals ?? [];
     const questions = pausedRun?.questions ?? [];

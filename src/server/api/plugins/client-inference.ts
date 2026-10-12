@@ -20,6 +20,7 @@ import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import { CANCEL_PENDING_FORBIDDEN_MESSAGE, approvalAuthorizerFor, refuseCancelPending } from './agent-approval-authz';
 import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
+import { AgentModelError, requestedAgentModel, resolveAgentConfigForModels, resolveRunModelForRequest, sendOpenAiAgentModelError } from './agent-model-authz';
 import {
   resolveAgentModel,
   runAgentCompletion,
@@ -196,7 +197,31 @@ async function handleAgentChatCompletion(input: {
     source: 'api',
   });
 
+  // Which of the agent's models answers (`agent_model` in the body - `extra_body` for OpenAI SDKs - or the
+  // `x-cognipeer-agent-model` header; the session's last model otherwise). `model` stays the agent's id.
+  let modelChoice: Awaited<ReturnType<typeof resolveRunModelForRequest>> | undefined;
+  const askedModel = requestedAgentModel(request, body);
+  if (askedModel || agent.config.additionalModels?.length) {
+    try {
+      const runConfig = await resolveAgentConfigForModels(auth.tenantDbName, agent, auth.projectId, typeof body.version === 'number' ? body.version : undefined);
+      if (askedModel || runConfig.additionalModels?.length) {
+        const conversation = typeof body.conversation_id === 'string'
+          ? await getConversationById(auth.tenantDbName, body.conversation_id).catch(() => null)
+          : null;
+        modelChoice = await resolveRunModelForRequest(request, {
+          agent, config: runConfig, projectId: auth.projectId, requested: askedModel,
+          conversation: conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId ? conversation : null,
+        });
+      }
+    } catch (error) {
+      if (error instanceof AgentModelError) return sendOpenAiAgentModelError(reply, error);
+      throw error;
+    }
+  }
+  const cognipeer = modelChoice ? { cognipeer: { agent_model: modelChoice.modelKey } } : {};
+
   const common = {
+    ...(modelChoice ? { modelChoice } : {}),
     agent,
     model,
     messages: body.messages as OpenAiMessage[] | undefined,
@@ -251,7 +276,7 @@ async function handleAgentChatCompletion(input: {
         error: { message: result.error, type: 'invalid_request_error' },
       });
     }
-    return reply.code(200).send(toChatCompletion({ id, model, ...result }));
+    return reply.code(200).send({ ...toChatCompletion({ id, model, ...result }), ...cognipeer });
   }
 
   applyStreamHeaders(reply);
@@ -306,7 +331,7 @@ async function handleAgentChatCompletion(input: {
         toolCallsSent = true;
       }
     }
-    if (!toolCallsSent) send(toChatChunk({ id, model, finish: true, stopReason }));
+    if (!toolCallsSent) send({ ...toChatChunk({ id, model, finish: true, stopReason }), ...cognipeer });
   } catch (error) {
     const classified = logAgentRouteError(logger, 'Agent chat completion stream failed', error);
     send({ error: toClientErrorBody(classified.error) });

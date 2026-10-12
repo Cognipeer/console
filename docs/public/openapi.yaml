@@ -297,6 +297,12 @@ paths:
       description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) or `session_id` (a session created with `POST /agents/sessions`, or any session id) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponsePublished
       parameters:
+        - name: X-Cognipeer-Agent-Model
+          in: header
+          required: false
+          description: "Same as the body field `agent_model`; the body wins."
+          schema:
+            type: string
         - name: X-Cognipeer-Background
           in: header
           required: false
@@ -8395,6 +8401,12 @@ paths:
       description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) or `session_id` for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponseDraft
       parameters:
+        - name: X-Cognipeer-Agent-Model
+          in: header
+          required: false
+          description: "Same as the body field `agent_model`; the body wins."
+          schema:
+            type: string
         - name: X-Cognipeer-Background
           in: header
           required: false
@@ -13528,6 +13540,20 @@ components:
         modelKey:
           type: string
           description: Key of the model to run on. Required for native agents.
+        additionalModels:
+          type: array
+          maxItems: 10
+          description: "Further models a caller may pick for a run (`agent_model`). Unique, never the main `modelKey`, each a model of the agent's project (a Dynamic LLM is allowed). Who may use each is decided by the `agent.use_model` policy action; by default everyone who can run the agent."
+          items:
+            type: object
+            required: [modelKey]
+            properties:
+              modelKey:
+                type: string
+              label:
+                type: string
+              description:
+                type: string
         connection:
           $ref: "#/components/schemas/AgentConnectionInput"
         temperature:
@@ -14200,6 +14226,13 @@ components:
         model:
           type: string
           description: Agent key that produced the response.
+        cognipeer:
+          type: object
+          description: Present when the agent offers several models.
+          properties:
+            agent_model:
+              type: string
+              description: Key of the model that answered (the agent's main model or one of its additional models).
         output:
           type: array
           description: Ordered output items (reasoning and/or assistant messages).
@@ -14323,6 +14356,9 @@ components:
         model:
           type: string
           description: Agent key identifying the agent to run.
+        agent_model:
+          type: string
+          description: "Which of the agent's models answers this turn: its main model or one listed in `models` on the agent. Omit to use the session's last choice, else the main model. Not listed: `400` `model_not_allowed`. Listed but not permitted to the caller by the `agent.use_model` policy action: `403` `model_forbidden` (with `decision_id`). The main model is never checked. The `X-Cognipeer-Agent-Model` header does the same; the body wins."
         input:
           description: "User message: a plain string, or an array of message items. The text and files (`input_file`, `input_image`) of the most recent `user` item are used."
           oneOf:
@@ -14516,6 +14552,25 @@ components:
           description: Optional agent description.
         config:
           $ref: "#/components/schemas/AgentConfig"
+        models:
+          type: array
+          description: "Only on the single-agent lookup, and only when the agent offers additional models. The main model first (`default: true`); models the caller may not use (`agent.use_model`) are left out; absent when fewer than two remain. Pick one with `agent_model` on a run."
+          items:
+            type: object
+            required: [key, label, default]
+            properties:
+              key:
+                type: string
+                description: Model key to send as `agent_model`.
+              label:
+                type: string
+                description: Display name (the model's name unless the agent sets a label).
+              description:
+                type: string
+                description: When to choose it, as the agent's author wrote it.
+              default:
+                type: boolean
+                description: True for the agent's main model.
         status:
           type: string
           enum:
@@ -16349,8 +16404,11 @@ components:
       properties:
         model:
           type: string
-          description: Model key configured in the dashboard (e.g., gpt-4, gpt-3.5-turbo).
+          description: Model key configured in the dashboard (e.g., gpt-4, gpt-3.5-turbo). Can also name an agent (`agent:<key>` or the bare key).
           example: gpt-4
+        agent_model:
+          type: string
+          description: "When `model` names an agent that offers several models: which one answers (OpenAI SDKs: `extra_body`). The `X-Cognipeer-Agent-Model` header does the same; the body wins. Errors: `400` `model_not_allowed` (not offered by the agent), `403` `model_forbidden` (the `agent.use_model` policy action refuses it, with `decision_id`). The response `model` stays the agent; the answering model is `cognipeer.agent_model`."
         messages:
           type: array
           description: Ordered list of messages that make up the conversation.

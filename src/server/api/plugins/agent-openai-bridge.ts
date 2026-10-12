@@ -1,3 +1,5 @@
+import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
+import { rememberSessionModel } from './agent-model-authz';
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
 /**
  * An agent, answered as an OpenAI chat completion.
@@ -330,6 +332,8 @@ export interface RunAgentCompletionInput {
     onTextChunk?: (text: string) => void;
     /** What answering a client tool call needs (the `tool` messages of the request). */
     answer?: ToolAnswerContext;
+    /** The agent's model this run uses, resolved and authorized by the route (`agent_model`). */
+    modelChoice?: AgentModelChoice;
 }
 
 /** Why a request to answer a tool call was refused, as the chat-completions error. */
@@ -380,7 +384,11 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
     const conversation = await resolveConversation(input.conversationId, input.agent, input.ctx, 'api');
     if ('error' in conversation) return { error: conversation.error, status: 404 };
 
+    // A queued or later turn of this session reads the choice from it.
+    if (input.modelChoice) await rememberSessionModel(input.ctx.tenantDbName, conversation.conversationId, input.modelChoice);
+
     const result = await executeAgentChatExclusive({
+        ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
         agentKey: input.agent.key,
         conversationId: conversation.conversationId,
         projectId: input.ctx.projectId,

@@ -75,6 +75,8 @@ export const RESOURCE_AUTHZ_ACTIONS = [
   'portal.conversations_view',
   'agent.invoke',
   'agent.approve',
+  // Running an agent on one of its additional models (context.model names it); the main model is never asked.
+  'agent.use_model',
   'agent.session_view_others',
   'agent.session_manage_others',
   // The bucket an agent keeps its session files in (a Files decision about that bucket, asked by the agents routes).
@@ -109,6 +111,8 @@ export interface ResourceAuthzClient {
    * those two roles only, so a caller who sets it without being one gains nothing. An allowed test session is audited.
    */
   test?: boolean;
+  /** The additional model the run was asked to use (policy context `model`); set for `agent.use_model` only. */
+  model?: string;
 }
 
 /** Who is asking, as far as the resource builder needs to know (to cut a long access list down to the requester's slice). */
@@ -416,6 +420,7 @@ async function decide(input: Decision): Promise<ResourceAuthzResult> {
       // The portal has no project; a request of the dashboard or the API runs in one.
       ...(input.channel !== 'portal' && principal.contextProjectId ? { projectId: principal.contextProjectId } : {}),
       ip: input.client?.ip,
+      ...(input.client?.model ? { model: input.client.model } : {}),
       method: input.client?.method,
       path: input.client?.path,
       // The runtime's own flags (portal channel only: a dashboard or API request carries none).

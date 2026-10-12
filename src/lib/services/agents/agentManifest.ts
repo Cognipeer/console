@@ -93,6 +93,9 @@ function collectBindingDependencies(
 export function collectManifestDependencies(spec: IAgentConfig): AgentManifestDependency[] {
     const out: AgentManifestDependency[] = [];
     if (spec.modelKey) out.push({ type: 'model', key: spec.modelKey, usedBy: 'spec.modelKey' });
+    for (const [index, extra] of (spec.additionalModels ?? []).entries()) {
+        if (extra?.modelKey) out.push({ type: 'model', key: extra.modelKey, usedBy: `spec.additionalModels[${index}]` });
+    }
     if (spec.promptKey) out.push({ type: 'prompt', key: spec.promptKey, usedBy: 'spec.promptKey' });
     for (const skill of spec.skills ?? []) out.push({ type: 'skill', key: skill, usedBy: 'spec.skills' });
     if (spec.knowledgeEngineKey) {

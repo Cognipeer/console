@@ -21,6 +21,8 @@ export const SERVER_OWNED_CONVERSATION_METADATA_KEYS: readonly string[] = Object
     'channel',
     // The session's machine.
     'sandbox',
+    // The model the session's last turn was authorized to run on (agentModelSelection.ts).
+    'activeModel',
     // The Assistants API's own bookkeeping (pending messages, run history).
     'assistantsApi',
     // The Sessions API's namespace for what its clients attach (a flat map of short strings).

@@ -190,7 +190,7 @@ describeForEachProvider('IAM center API', (getDb) => {
     expect(actions.find((a: any) => a.id === 'agents.read')).toMatchObject({ kind: 'service', level: 'read', service: 'agents', labelKey: 'iamApi.action.service.read', labelParams: { service: 'agents' } });
     expect(actions.find((a: any) => a.id === 'agent.invoke')).toMatchObject({ kind: 'resource', level: 'write', resourceType: 'agent', verb: 'invoke', service: 'agents' });
     expect(resourceTypes.find((t: any) => t.type === 'agent')).toMatchObject({ service: 'agents', labelKey: 'resources.types.agent' });
-    expect(contextAttrs).toEqual(['projectId', 'channel', 'ip', 'now', 'method', 'path', 'embedded', 'test']);
+    expect(contextAttrs).toEqual(['projectId', 'channel', 'ip', 'now', 'method', 'path', 'embedded', 'test', 'model']);
     expect(channels).toEqual(['dashboard', 'api', 'portal']);
   });
 
@@ -214,7 +214,7 @@ describeForEachProvider('IAM center API', (getDb) => {
       expect(typeof row.createdAt).toBe('string');
 
       const list = await call('GET', '/api/iam/policies', A, 'reader');
-      expect(list.body.managed).toHaveLength(22); // six RBAC permits, six boundary forbids, eight portal rules, two agent approval rules
+      expect(list.body.managed).toHaveLength(23); // six RBAC permits, six boundary forbids, eight portal rules, two agent approval rules, one agent model rule
       expect(list.body.managed.filter((m: any) => m.group === 'portal').map((m: any) => m.id)).toEqual([
         'managed:portal:use', 'managed:portal:use-boundary', 'managed:portal:agent', 'managed:portal:agent-boundary',
         'managed:portal:network-boundary', 'managed:portal:agent-network-boundary', 'managed:portal:test-use', 'managed:portal:test-agent',
