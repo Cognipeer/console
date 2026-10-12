@@ -28,6 +28,8 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
   }
 
   const db = await getDatabase();
+  const tenantSlug = h.get('x-tenant-slug') ?? '';
+  const tenantRecord = await db.findTenantById(tenantId).catch(() => null);
   await db.switchToTenant(tenantDbName);
   const user = await db.findUserById(userId);
 
@@ -63,6 +65,8 @@ export default async function DashboardRouteLayout({ children }: DashboardRouteL
         name: user.name || (email ? email.split('@')[0] : 'Account'),
         email,
         licenseType,
+        tenantName: tenantRecord?.companyName || tenantSlug,
+        tenantSlug,
         role,
         servicePermissions: normalizeServicePermissions(user.servicePermissions),
       }}
