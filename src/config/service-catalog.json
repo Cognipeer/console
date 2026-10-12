@@ -24,6 +24,17 @@
       "aliases": ["alibaba", "aliyun", "bailian", "dashscope", "qwen", "decision model", "systemone"]
     },
     {
+      "id": "typesafe",
+      "driver": "typesafe",
+      "name": "TypeSafe (Jev)",
+      "tagline": "Jev decision model: typed choice / yes-no / score answers",
+      "description": "TypeSafe Jev, the System One decision model at api.typesafe.ai. Text only, priced per input token.",
+      "domains": ["model", "decision"],
+      "color": "#6d5efc",
+      "tags": ["managed", "decision"],
+      "aliases": ["jev", "typesafe", "typesafe.ai", "system one", "systemone", "decision model"]
+    },
+    {
       "id": "anthropic",
       "driver": "openai-compatible",
       "name": "Anthropic",

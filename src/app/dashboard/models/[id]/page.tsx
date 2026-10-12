@@ -54,6 +54,7 @@ import TtsPlayground from '@/components/playground/TtsPlayground';
 import OcrPlayground from '@/components/playground/OcrPlayground';
 import ImagePlayground from '@/components/playground/ImagePlayground';
 import EmbeddingPlayground from '@/components/playground/EmbeddingPlayground';
+import DecisionPlayground from '@/components/playground/DecisionPlayground';
 import ReplicaPoolPanel from '@/components/models/ReplicaPoolPanel';
 import RoutingAnalyticsPanel from '@/components/models/RoutingAnalyticsPanel';
 import PageContainer from '@/components/common/ui/PageContainer';
@@ -736,14 +737,16 @@ export default function ModelDetailPage() {
             ? '/api/client/v1/audio/speech'
             : model.category === 'ocr'
               ? '/api/client/v1/ocr'
-              : '/api/client/v1/embeddings';
+              : model.category === 'decision'
+                ? '/api/client/v1/decisions'
+                : '/api/client/v1/embeddings';
   const endpointUrl = `${endpointBase}${endpointPath}`;
 
   const dynamic = dynamicConfigOf(model);
   const isDynamic = Boolean(dynamic);
 
   // A Dynamic LLM has no real provider runtime, so its playground would error.
-  const playgroundCategories = ['llm', 'stt', 'tts', 'ocr', 'image', 'embedding'] as const;
+  const playgroundCategories = ['llm', 'stt', 'tts', 'ocr', 'image', 'embedding', 'decision'] as const;
   const hasPlayground =
     !isDynamic && (playgroundCategories as readonly string[]).includes(model.category);
 
@@ -1009,6 +1012,10 @@ export default function ModelDetailPage() {
 
       {tab === 'playground' && model.category === 'image' ? (
         <ImagePlayground modelKey={model.key} />
+      ) : null}
+
+      {tab === 'playground' && model.category === 'decision' ? (
+        <DecisionPlayground modelKey={model.key} />
       ) : null}
 
       {tab === 'playground' && model.category === 'embedding' ? (

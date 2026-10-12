@@ -98,6 +98,24 @@ export function createOpenAiNativeDecisionRuntime(opts: {
   });
 }
 
+export const TYPESAFE_SYSTEMONE_URL = 'https://api.typesafe.ai/v1/systemone';
+
+/** TypeSafe Jev: the System One wire format on a fixed host (no tenant-supplied URL). */
+export function createTypeSafeNativeDecisionRuntime(opts: {
+  apiKey: string;
+  modelId: string;
+  url?: string;
+}): DecisionRuntime {
+  return createNativeRuntime({
+    provider: 'typesafe',
+    vendor: 'TypeSafe',
+    url: opts.url ?? TYPESAFE_SYSTEMONE_URL,
+    headers: { Authorization: `Bearer ${opts.apiKey}` },
+    buildBody: (request) => buildSystemOneBody(opts.modelId, request, 'TypeSafe'),
+    normalize: (raw, request) => normalizeSystemOneResponse(raw, request, 'TypeSafe'),
+  });
+}
+
 export function createAlibabaNativeDecisionRuntime(opts: {
   apiKey: string;
   workspaceId: string;

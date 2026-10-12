@@ -21,6 +21,13 @@ import type {
   TtsSynthesizeInput,
 } from '@/lib/providers';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import { handleDecisionRequest } from '@/lib/services/models/decisionService';
+import {
+  DecisionRequestError,
+  parseDecisionRequest,
+} from '@/lib/providers/contracts/decisionHelpers';
+import { DecisionBackendError } from '@/lib/providers/contracts/structuredDecisionRuntime';
+import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
@@ -355,6 +362,56 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Image generation failed',
         });
+    }
+  }));
+
+  // ─── Decision playground ────────────────────────────────────────────
+  // Same request shape as POST /client/v1/decisions, minus the client token and
+  // quota lifecycle: the dashboard session authenticates, and the call still goes
+  // through handleDecisionRequest (guardrails, usage log, cost).
+  // @test-skip: a thin adapter over handleDecisionRequest, which client-decisions-fastify.test.ts covers; there is no dashboard-session API harness yet.
+  app.post('/dashboard/playground/decisions', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const parsed = parseDecisionRequest(readJsonBody<unknown>(request));
+
+      const outcome = await handleDecisionRequest({
+        tenantDbName: session.tenantDbName,
+        projectId,
+        request: parsed,
+      });
+
+      const { result } = outcome;
+      return reply.code(200).send({
+        id: `dec_${outcome.requestId.replace(/-/g, '')}`,
+        model: parsed.model,
+        answers: result.answers,
+        ...(result.rationale !== undefined ? { rationale: result.rationale } : {}),
+        usage: {
+          input_tokens: outcome.usage.inputTokens,
+          output_tokens: outcome.usage.outputTokens,
+        },
+        cost: outcome.cost,
+        latency_ms: outcome.latencyMs,
+        backend: result.backend,
+      });
+    } catch (error) {
+      if (error instanceof DecisionRequestError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      if (error instanceof GuardrailBlockError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      logger.error('Playground decision error', { error });
+      const projectError = sendProjectContextError(reply, error);
+      if (projectError) return projectError;
+      if (error instanceof DecisionBackendError) {
+        return reply.code(502).send({ error: error.message });
+      }
+      const normalized = normalizeInferenceError(error);
+      return reply.code(normalized.status).send({
+        error: normalized.error?.message ?? 'Decision failed',
+      });
     }
   }));
 

@@ -17,6 +17,7 @@ import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
 import { DECISION_CAPABILITIES } from './structuredDecisionRuntime';
 import {
   createAlibabaNativeDecisionRuntime,
+  createTypeSafeNativeDecisionRuntime,
   createOpenAiNativeDecisionRuntime,
   selectDecisionRuntime,
 } from './nativeDecisionRuntime';
@@ -1377,8 +1378,64 @@ export const AlibabaModelStudioProviderContract: ProviderContract<ModelProviderR
   },
 };
 
+interface TypeSafeCredentials {
+  apiKey: string;
+}
+
+/**
+ * TypeSafe's Jev (a "System One" model) at api.typesafe.ai. Like Alibaba's it is
+ * a classifier, not a chat model, so the driver serves `decision` natively only.
+ * Text input only; priced per input token (output is free).
+ */
+export const TypeSafeModelProviderContract: ProviderContract<ModelProviderRuntime, TypeSafeCredentials, Record<string, never>> = {
+  id: 'typesafe',
+  version: '1.0.0',
+  domains: ['model', 'decision'],
+  display: {
+    label: 'TypeSafe (Jev)',
+    description: 'TypeSafe Jev, a System One decision model: typed choice / yes-no / score answers with probabilities, text input only. Use model id jev-latest.',
+  },
+  capabilities: {
+    'model.categories': ['decision'],
+    'decision.question_types': ['choice', 'boolean', 'score'],
+    'decision.supports.image': false,
+    'decision.native': true,
+  },
+  form: {
+    sections: [
+      {
+        title: 'Credentials',
+        fields: [
+          {
+            name: 'apiKey',
+            label: 'API Key',
+            type: 'password',
+            required: true,
+            description: 'From console.typesafe.ai.',
+          },
+        ],
+      },
+    ],
+  },
+  createRuntime: ({ credentials }) => {
+    const apiKey = ensureValue(credentials.apiKey, 'TypeSafe API key is required.');
+    const runtime: ModelProviderRuntime = {
+      createDecisionRuntime: (config) =>
+        selectDecisionRuntime({
+          runtime,
+          config,
+          provider: 'typesafe',
+          structured: false,
+          native: (c) => createTypeSafeNativeDecisionRuntime({ apiKey, modelId: c.modelId }),
+        }),
+    };
+    return runtime;
+  },
+};
+
 export const MODEL_PROVIDER_CONTRACTS = [
   AlibabaModelStudioProviderContract,
+  TypeSafeModelProviderContract,
   AnthropicModelProviderContract,
   OpenAiModelProviderContract,
   OpenAiCompatibleModelProviderContract,
