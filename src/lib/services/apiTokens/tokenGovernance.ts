@@ -24,6 +24,15 @@ export interface TokenOwnerFacts {
   canLogin?: boolean | null;
 }
 
+/**
+ * An external account (a person of a host application whose identity a trusted issuer vouched for) holds no API tokens,
+ * whoever asks: minting one in its name is refused with this body.
+ */
+export const EXTERNAL_TOKEN_OWNER_REFUSAL = {
+  error: 'External users cannot hold API tokens',
+  code: 'external_user',
+} as const;
+
 /** The signed-in caller of a token route. */
 export interface TokenActor {
   userId: string;

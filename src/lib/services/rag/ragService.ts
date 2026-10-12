@@ -1442,6 +1442,8 @@ export async function queryRag(
       metadata: {
         embeddingMs,
         vectorLatencyMs,
+        // an application's token acted for the person in `userId` (the token is `apiTokenId`)
+        ...(attribution.via ? { via: attribution.via } : {}),
         ...(useReranker ? {
           reranked: true,
           rerankerKey: ragModule.rerankerKey,

@@ -3,6 +3,7 @@ import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import { getProjectLevelsSince, ignoredProjectLevels } from '@/lib/iam/projectLevels';
+import { dropTokenDelegation } from '@/lib/iam/tokenDelegation';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
 import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
@@ -524,6 +525,11 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // A host application's person belongs to no project.
+      if (target.kind === 'external') {
+        return reply.code(400).send({ error: 'External users cannot be project members', code: 'external_user' });
+      }
+
       const role: ProjectRole = (body.role === 'project_admin') ? 'project_admin' : 'member';
 
       const userProject = await access.db.upsertUserProject({
@@ -928,6 +934,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Token not found' });
       }
       await invalidateApiTokenAuthCache(target.token.tokenHash);
+      // what the token was set up to act for goes with it (nothing reads it any more; this only tidies, and keeps the sealed secrets from outliving it)
+      await dropTokenDelegation(session.tenantDbName, id);
 
       return reply.code(200).send({ message: 'API token deleted successfully' });
     } catch (error) {

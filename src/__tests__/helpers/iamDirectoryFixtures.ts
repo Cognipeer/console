@@ -74,7 +74,7 @@ export function personDetail(id: string, patch: Record<string, unknown> = {}) {
       invitedAt: row.status === 'invited' ? row.createdAt : null,
       pendingInvite: row.status === 'invited',
       servicePermissions: owner ? {} : { models: 'read' },
-      managed: { directory: managed, provider: managed ? row.authProvider : null, readOnly: managed ? ['name', 'email', 'password'] : [] },
+      managed: { directory: managed, provider: managed ? row.authProvider : null, readOnly: managed ? ['name', 'email', 'password'] : [], roleFromDirectory: false },
     },
     effective: [{ service: 'models', level: 'read', sources: [{ kind: 'direct', label: 'Direct permission', level: 'read' }] }],
     groups: [{ id: 'g-eng', name: 'Engineering', source: 'local', tenantRole: 'user', removable: true }],
@@ -200,6 +200,9 @@ export function listHandler(options: { withActions?: boolean } = {}): RouteHandl
   };
 }
 
+/** The activity of a person who has done nothing lately: what the drawer's Activity section starts from. */
+export const EMPTY_ACTIVITY = { windowDays: 30, usage: [], usageTruncated: false, events: [], hasMoreEvents: false };
+
 export function directoryRoutes(caps: unknown = CAPS_ADMIN): Array<[string, string | RegExp, RouteHandler]> {
   return [
     ['GET', '/api/iam/capabilities', () => caps],
@@ -215,6 +218,7 @@ export function directoryRoutes(caps: unknown = CAPS_ADMIN): Array<[string, stri
         return personDetail(id);
       },
     ],
+    ['GET', /^\/api\/iam\/principals\/user\/[^/]+\/activity$/, () => EMPTY_ACTIVITY],
     ['GET', '/api/projects', () => PROJECTS],
     ['GET', '/api/iam/catalog', () => jsonResponse({ error: 'not under test' }, 404)],
   ];

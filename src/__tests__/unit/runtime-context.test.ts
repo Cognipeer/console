@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { runWithRequestContext } from '@/lib/core/requestContext';
 import {
   buildRuntimeContextFromRequest,
   collectRuntimeHeadersFromHttpHeaders,
@@ -166,5 +167,30 @@ describe('buildRuntimeContextFromRequest', () => {
 
   it('returns undefined when the caller offered nothing', () => {
     expect(buildRuntimeContextFromRequest(undefined, {}, { source: 'api' })).toBeUndefined();
+  });
+});
+
+describe('buildRuntimeContextFromRequest: a call an application made for a person', () => {
+  const via = { kind: 'delegated' as const, issuer: 'https://idp.bank.example' };
+
+  it('stamps the person, the application token and how it came about - from the request being served, never from the caller', () => {
+    const ctx = runWithRequestContext({ userId: 'person-1', apiTokenId: 'app-token', actorType: 'api_token', via }, () =>
+      buildRuntimeContextFromRequest(
+        // a caller cannot write the stamp itself
+        { headers: { 'X-From-Body': '1' }, via: { kind: 'delegated', issuer: 'https://evil.example' }, userId: 'someone-else', tokenId: 'other' } as never,
+        {},
+        { userId: 'person-1', tokenId: 'app-token', source: 'api' },
+      ),
+    );
+    expect(ctx).toMatchObject({ userId: 'person-1', tokenId: 'app-token', source: 'api', via });
+    // (without the request scope there is nothing to stamp)
+    expect(buildRuntimeContextFromRequest(undefined, {}, { userId: 'person-1', tokenId: 'app-token', source: 'api' })).not.toHaveProperty('via');
+  });
+
+  it('leaves via off a call nobody acted for', () => {
+    const ctx = runWithRequestContext({ userId: 'owner-1', apiTokenId: 'app-token', actorType: 'api_token' }, () =>
+      buildRuntimeContextFromRequest(undefined, {}, { userId: 'owner-1', tokenId: 'app-token', source: 'api' }),
+    );
+    expect(ctx).toEqual({ userId: 'owner-1', tokenId: 'app-token', source: 'api' });
   });
 });

@@ -38,6 +38,7 @@ import {
   type PolicyActor,
 } from '@/lib/services/users/peoplePolicy';
 import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
+import { roleManagedPredicate } from '@/lib/services/users/roleManagement';
 import { normalizeServicePermissions, type UserServicePermissions } from '@/lib/security/rbac';
 import {
   AUTH_PROVIDERS,
@@ -96,7 +97,7 @@ export interface DirectoryFilters {
   sort?: UserSort;
   dir?: SortDirection;
   // groups
-  groupSources?: Array<'local' | 'ldap'>;
+  groupSources?: Array<'local' | 'ldap' | 'oidc'>;
   // tokens
   tokenStatus?: 'active' | 'expired';
   ownerId?: string;
@@ -145,10 +146,12 @@ const USER_SOURCES: Record<string, AuthProvider[]> = {
   sso: ['oidc', 'saml'],
   directory: ['ldap', 'oidc', 'saml'],
 };
-const GROUP_SOURCES: Record<string, Array<'local' | 'ldap'>> = {
+const GROUP_SOURCES: Record<string, Array<'local' | 'ldap' | 'oidc'>> = {
   local: ['local'],
   ldap: ['ldap'],
-  directory: ['ldap'],
+  oidc: ['oidc'],
+  sso: ['oidc'],
+  directory: ['ldap', 'oidc'],
 };
 
 /**
@@ -190,7 +193,7 @@ export function parseDirectoryFilters(type: PrincipalType, raw: Record<string, u
       else filters.roles = roles as TenantRole[];
     }
     filters.status = choice('status', ['active', 'disabled', 'invited'] as const);
-    filters.kind = choice('kind', ['person', 'service'] as const);
+    filters.kind = choice('kind', ['person', 'service', 'external'] as const);
     const source = single(raw, 'source');
     if (source === null) bad('source', 'Must be a comma separated list of sources');
     else if (source !== undefined) {
@@ -251,6 +254,8 @@ export interface DirectoryUserItem extends PrincipalListItem {
   kind: UserKind;
   authProvider: AuthProvider;
   managed: boolean;
+  /** The directory also decides the role (its connection syncs roles): the role is shown as managed, not editable. */
+  roleManaged: boolean;
   createdAt: string | null;
   invitedAt: string | null;
   allowedActions: AllowedActions;
@@ -287,6 +292,11 @@ export interface DirectoryPage {
   items: DirectoryItem[];
   hasMore: boolean;
   total?: number;
+  /**
+   * People list, when the total was asked for: how many external accounts the workspace has (people of host
+   * applications whose identity a trusted issuer vouched for), whatever the filters say.
+   */
+  externalTotal?: number;
 }
 
 /** The provider filter a person-list request stands for. */
@@ -304,7 +314,13 @@ export function userFilterOf(tenantId: string, request: Pick<DirectoryRequest, '
   } else if (request.status === 'invited') {
     filter.invited = true;
   }
-  if (request.kind) filter.canLogin = request.kind === 'person';
+  // A person can sign in; a service account cannot and is not external; an external account is its own kind.
+  if (request.kind === 'external') {
+    filter.external = true;
+  } else if (request.kind) {
+    filter.canLogin = request.kind === 'person';
+    filter.external = false;
+  }
   if (request.providers) filter.authProviders = request.providers;
   if (request.groupId) filter.groupId = request.groupId;
   if (request.projectId) filter.projectId = request.projectId;
@@ -324,13 +340,16 @@ export async function listDirectory(
   return runWithTenantScope(tenant.tenantDbName, async (db) => {
     if (request.type === 'user') {
       const filter = userFilterOf(tenant.tenantId, request);
-      const [res, total] = await Promise.all([
+      const [res, total, externalTotal] = await Promise.all([
         db.iamListUsers({ ...filter, ...page, sort: request.sort, dir: request.dir }),
         request.count ? db.iamCountUsers(filter) : Promise.resolve(undefined),
+        request.count ? db.countExternalUsers() : Promise.resolve(undefined),
       ]);
+      const roleManaged = await roleManagedPredicate(tenant, res.items);
       return {
         hasMore: res.hasMore,
         ...(total !== undefined ? { total } : {}),
+        ...(externalTotal !== undefined ? { externalTotal } : {}),
         items: res.items.map((user): DirectoryUserItem => ({
           type: 'user',
           id: String(user._id),
@@ -343,9 +362,10 @@ export async function listDirectory(
           kind: userKind(user),
           authProvider: providerOf(user),
           managed: isDirectoryManaged(user),
+          roleManaged: roleManaged(user),
           createdAt: iso(user.createdAt),
           invitedAt: iso(user.invitedAt),
-          allowedActions: computeAllowedActions(viewer, targetOf(user)),
+          allowedActions: computeAllowedActions(viewer, targetOf(user, { roleManaged: roleManaged(user) })),
         })),
       };
     }
@@ -541,7 +561,8 @@ export async function augmentPrincipalDetail(
     // a person
     const user = await db.findUserById(ref.id).catch(() => null);
     if (!user || String(user.tenantId) !== String(tenant.tenantId)) return { principal: {}, extra: {} };
-    const target = targetOf(user);
+    const roleFromDirectory = await roleManagedPredicate(tenant, [user]).then((managed) => managed(user));
+    const target = targetOf(user, { roleManaged: roleFromDirectory });
 
     const groupIds = detail.groups.map((group) => group.id);
     const groupDocs = groupIds.length > 0
@@ -605,6 +626,8 @@ export async function augmentPrincipalDetail(
           directory: isDirectoryManaged(user),
           provider: providerOf(user),
           readOnly: isDirectoryManaged(user) ? [...DIRECTORY_READ_ONLY_FIELDS] : [],
+          // the role follows the directory at every sign-in (the connection syncs roles)
+          roleFromDirectory,
         },
       },
       extra,
@@ -624,8 +647,8 @@ export interface GroupMemberRow {
   role: string | null;
   status: ListStatus | null;
   kind: UserKind | null;
-  /** Where the membership comes from (a directory group's members are the directory's). */
-  membershipSource: 'local' | 'ldap';
+  /** Where the membership comes from (a directory group's members are the directory's): the group's own source. */
+  membershipSource: 'local' | 'ldap' | 'oidc' | 'delegated';
   /** The membership points at an account that no longer exists: it can still be removed. */
   missing?: true;
 }
@@ -663,7 +686,9 @@ export async function listGroupMembers(
       ? await db.iamListUsers({ tenantId: tenant.tenantId, ids: ids.items, limit: Math.max(1, ids.items.length) })
       : { items: [] as IUser[], hasMore: false };
     const byId = new Map(people.items.map((user) => [String(user._id), user]));
-    const membershipSource = isGroupDirectoryManaged(group) ? 'ldap' as const : 'local' as const;
+    const membershipSource = group.source === 'oidc' ? 'oidc' as const
+      : group.source === 'delegated' ? 'delegated' as const
+        : isGroupDirectoryManaged(group) ? 'ldap' as const : 'local' as const;
     return {
       hasMore: ids.hasMore,
       total: counts[groupId] ?? 0,

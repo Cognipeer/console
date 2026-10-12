@@ -56,6 +56,12 @@ const iamTables = () =>
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'iam_%' ORDER BY name")
     .all()).map((r) => r.name);
 
+const userColumns = () =>
+  ((env.db as unknown as { getTenantDb(): { prepare(s: string): { all(): Array<{ name: string }> } } })
+    .getTenantDb()
+    .prepare('PRAGMA table_info(users)')
+    .all()).map((r) => r.name);
+
 describe('reads create nothing', () => {
   it('reading, listing and deleting in a pristine workspace runs no DDL', async () => {
     await env.db.runWithTenant(TENANT, async () => {
@@ -99,6 +105,32 @@ describe('writes create what they need and nothing more', () => {
     expect(iamTables()).toEqual(['iam_meta', 'iam_policies']);
     const ids = (await env.db.runWithTenant(TENANT, () => env.db.iamDocList('iam_meta'))).map((d) => d.id);
     expect(ids).toEqual(['policy_version']);
+  });
+
+  it('what the user store reads creates nothing; the first external account creates the identity collection and no column', async () => {
+    const base = { tenantId: env.tenantId, password: 'h', role: 'user' as const, licenseId: 'FREE', features: [] as string[] };
+    await env.db.runWithTenant(TENANT, async () => {
+      const member = await env.db.createUser({ ...base, email: 'm@lazy.example', name: 'M' });
+      await env.db.findUserById(String(member._id));
+      await env.db.findUserByEmail('m@lazy.example');
+      await env.db.listUsers();
+      await env.db.listUsers({ includeExternal: true });
+      await env.db.iamListUsers({ tenantId: env.tenantId, limit: 10 });
+      await env.db.iamListUsers({ tenantId: env.tenantId, external: false, limit: 10 });
+      await env.db.iamCountUsers({ tenantId: env.tenantId, external: true });
+      await env.db.countExternalUsers();
+      await env.db.findUsersByExternalIdentity('https://idp.lazy.example', 'nobody');
+      await env.db.deleteUser(String(member._id));
+    });
+    expect(iamTables()).toEqual([]);
+
+    await env.db.runWithTenant(TENANT, () => env.db.createUser({
+      ...base, email: '', name: 'E', canLogin: false, kind: 'external', externalIds: { 'https://idp.lazy.example': 'sub-1' },
+    }));
+    expect(iamTables()).toEqual(['iam_identities']);
+    // (the kind and the external identities are documents, not columns of the users table)
+    expect(userColumns()).not.toContain('kind');
+    expect(userColumns()).not.toContain('externalIds');
   });
 
   it('the retired shadow collection is never created', async () => {

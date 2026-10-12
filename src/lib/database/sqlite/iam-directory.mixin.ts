@@ -29,6 +29,7 @@ import type {
 } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { identitySql, type IdentitySql } from './userIdentity';
 
 const MAX_PAGE = 200;
 const MAX_IDS = 500;
@@ -56,7 +57,7 @@ function inList(prefix: string, values: readonly string[], params: Record<string
 // Each returns the WHERE conditions, or null when the filter can match nothing
 // (an empty id list), so the caller skips the query.
 
-function userFilter(query: IamUserFilter, params: Record<string, unknown>): string[] | null {
+function userFilter(query: IamUserFilter, params: Record<string, unknown>, identity: IdentitySql): string[] | null {
   params.tenantId = query.tenantId;
   const where = ['tenantId = @tenantId'];
   if (query.q?.trim()) {
@@ -74,6 +75,9 @@ function userFilter(query: IamUserFilter, params: Record<string, unknown>): stri
   // A row without the flag can sign in.
   if (query.canLogin === true) where.push('(canLogin IS NULL OR canLogin != 0)');
   else if (query.canLogin === false) where.push('canLogin = 0');
+  // An account without an identity document is a member (userIdentity.ts).
+  if (query.external === true) where.push(identity.external);
+  else if (query.external === false) where.push(identity.member);
   if (query.authProviders?.length) {
     const parts: string[] = [];
     const named = query.authProviders.filter((provider) => provider !== 'local');
@@ -187,21 +191,23 @@ export function IamDirectoryMixin<TBase extends Constructor<SQLiteProviderBase>>
       const db = this.getTenantDb();
       const limit = clampLimit(query.limit);
       const params: Record<string, unknown> = { lim: limit + 1, off: clampOffset(query.offset) };
-      const where = userFilter(query, params);
+      const identity = identitySql(db);
+      const where = userFilter(query, params, identity);
       if (!where) return { items: [], hasMore: false };
       const column = USER_SORT_COLUMN[query.sort ?? 'name'] ?? USER_SORT_COLUMN.name;
       const dir = query.dir === 'desc' ? 'DESC' : 'ASC';
       const rows = db
-        .prepare(`SELECT * FROM ${TABLES.users} WHERE ${where.join(' AND ')} ORDER BY ${column} ${dir}, id ${dir} LIMIT @lim OFFSET @off`)
+        .prepare(`SELECT ${TABLES.users}.*${identity.column} FROM ${TABLES.users} WHERE ${where.join(' AND ')} ORDER BY ${column} ${dir}, id ${dir} LIMIT @lim OFFSET @off`)
         .all(params) as SqliteRow[];
       return this.iamPage(rows, limit, (row) => ({ ...this.iamMap().mapUserRow(row), password: '' }));
     }
 
     async iamCountUsers(filter: IamUserFilter): Promise<number> {
       const params: Record<string, unknown> = {};
-      const where = userFilter(filter, params);
+      const db = this.getTenantDb();
+      const where = userFilter(filter, params, identitySql(db));
       if (!where) return 0;
-      const row = this.getTenantDb()
+      const row = db
         .prepare(`SELECT COUNT(*) AS c FROM ${TABLES.users} WHERE ${where.join(' AND ')}`)
         .get(params) as SqliteRow | undefined;
       return Number(row?.c) || 0;

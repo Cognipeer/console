@@ -99,7 +99,9 @@ describe('formatAuditText', () => {
       ...['policy', 'tokenScope', 'project', 'noRule'].flatMap((r) => [`denied.${r}`, `denied.${r}NoLevel`]),
       'policy.created', 'policy.updated', 'policy.deleted',
       'settings.updated', 'settings.lifetimeDays', 'settings.lifetimeUnlimited', 'settings.expiryRequired', 'settings.expiryOptional',
-      'token.restrictions', 'tokenRestrictions.expiry', 'tokenRestrictions.ip',
+      'token.restrictions', 'token.delegation', 'tokenRestrictions.expiry', 'tokenRestrictions.ip',
+      ...['notEnabled', 'invalid', 'expired', 'untrustedKey', 'replayed', 'unknownPerson', 'disabled', 'seatLimit', 'conflict', 'privileged', 'project', 'unavailable']
+        .map((reason) => `delegationRefused.${reason}`),
     ];
     for (const locale of ['en', 'tr'] as const) {
       for (const key of keys) expect(lookup(locale, `iamAudit.summaries.${key}`), `${locale} ${key}`).toBeTruthy();

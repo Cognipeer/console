@@ -232,7 +232,24 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   ): Promise<IUser>;
   updateUser(id: string, data: Partial<IUser>): Promise<IUser | null>;
   deleteUser(id: string): Promise<boolean>;
-  listUsers(): Promise<IUser[]>;
+  /**
+   * The workspace's people. Accounts of kind `external` (people of a host application whose identity a trusted issuer
+   * vouched for) are left out unless `includeExternal` asks for them: every member list and picker means the workspace's
+   * own people.
+   */
+  listUsers(options?: { includeExternal?: boolean }): Promise<IUser[]>;
+  /**
+   * The accounts that hold this identity (`externalIds[issuer] === subject`), oldest first (at most a handful - normally
+   * one; a second is the loser of a race between two first sign-ins). Not indexed: callers cache the answer.
+   */
+  findUsersByExternalIdentity(issuer: string, subject: string): Promise<IUser[]>;
+  /**
+   * Record `externalIds[issuer] = subject` on an account unless it already holds another subject for that issuer:
+   * `linked` (written), `already` (it held exactly this one) or `conflict` (it holds a different one) or `not_found`.
+   */
+  linkUserExternalIdentity(userId: string, issuer: string, subject: string): Promise<'linked' | 'already' | 'conflict' | 'not_found'>;
+  /** How many `external` accounts the workspace has. */
+  countExternalUsers(): Promise<number>;
 
   // Project membership (UserProject — replaces user.projectIds)
   findUserProject(userId: string, projectId: string): Promise<IUserProject | null>;

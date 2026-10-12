@@ -109,6 +109,104 @@ An API token acts as its owner, with three refinements:
 
 Expiry rules and IP allowlists are part of [Authentication](/guide/authentication#expiry-and-the-tenant-token-policy). The tenant-wide metrics export (`GET /api/metrics`) refuses a token that carries a service scope, because a per-service cap cannot be honoured on an export that spans every module: use an unscoped token for the scraper.
 
+## Acting for a user (verified identity)
+
+An application that signs its own users in can let them use the console API **as themselves** instead of as the application. The application keeps calling with its API token and adds a signed statement about the person the call is for. The console checks the statement, finds the person's account and runs the call as that person: their access, their limits and their name in the logs. The token stays the actor, and its scope and project still cap the person.
+
+```text
+ application backend                         console
+ ───────────────────                         ───────
+ Authorization: Bearer <app token>      →    1. the token is authenticated as always
+ X-Cognipeer-User-Token: <signed jwt>   →    2. the statement is verified (issuer, audience, signature, expiry)
+                                             3. the person is found (or created)
+                                             4. the call runs as the person, capped by the token's scope and project
+```
+
+Without the header nothing changes: the token acts as its owner. **With the header the owner is never the fallback:** if the statement is not accepted the call is refused, so an application that forgot to configure something fails loudly instead of acting with the wrong access.
+
+### Setting it up
+
+Open the token in **Settings → IAM center → Principals → API tokens** (or the API Tokens page) and use the **Acting for users** section, or call the [API](#api). Only owners and admins can set it up, and the usual "never upward" rule applies: an admin cannot set it up on the owner's token. It is an access-rule change, so it is written to the audit trail with what it was and what it became (never a key or a secret).
+
+| Setting | Meaning |
+|---|---|
+| **Issuer** | The `iss` the statement must carry, compared exactly. |
+| **Audience** | The `aud` it must name (one or several). |
+| **Algorithms** | `HS256`, `RS256` or `ES256`, pinned: a statement signed with anything else is refused, and `none` is never accepted. The key material must belong to the pinned algorithms. |
+| **Keys** | `HS256`: one or more shared secrets of at least 32 characters, each with a key id (`kid`) so you can rotate. `RS256` / `ES256`: a key set URL (JWKS, https only; fetched through the outbound network guard, at most 256 KB, cached for ten minutes and read again at most every 30 seconds when a statement names an unknown `kid`) and/or a PEM public key or certificate. A private key is refused. Shared secrets are sealed at rest and never shown again. |
+| **Longest token age / clock skew** | Optional. With a maximum age, a statement issued for longer than that (or issued longer ago than that) is refused. Skew defaults to 60 seconds. |
+| **Find the person** | By **identity** (issuer + subject) and/or by **verified email address**. |
+| **When nobody matches** | `none` refuses; `external` creates an [external account](#external-accounts); `person` creates an ordinary person managed by the identity provider (no password). |
+| **Group map** | Optional: identity provider group → console group. See [Groups](#groups-that-follow-the-statement). |
+| **Allow administrators** | Off by default. |
+
+### The statement
+
+A compact JWT (`Authorization`-style `Bearer ` in front of it is accepted). It is reused across calls until it expires, so it is **not** single-use here; keep its lifetime short and set a maximum age.
+
+| Claim | Meaning |
+|---|---|
+| `iss`, `aud`, `sub`, `iat`, `exp` | Required. `sub` identifies the person at the issuer. |
+| `email`, `email_verified` | The address, and whether the issuer vouches for it (a boolean). Only a verified address can match or create a person. |
+| `name` | Display name. |
+| `groups` | Strings only (at most 100). |
+| `ctx` | Optional context of the application (at most 4 KB). It is signed but is data the console does not vouch for. |
+
+### Finding the person
+
+1. **By identity**: the account that holds this issuer's subject.
+2. **By verified email**, members only: an account with that address, when the issuer says the address is verified. With "by identity" also enabled this **links** the account to the subject, so the next call needs no address and the address cannot be taken over later: an account already linked to *another* subject of the issuer is a conflict (`409`-style refusal, code `conflict`). An external account is never found by address, and a service account is not a person an issuer can vouch for.
+3. **Nobody**: create one as configured, or refuse.
+
+A member's own profile (name, email) is never rewritten from a statement; an external account's profile follows the statement. A disabled account is refused. Creating an account counts toward the licence user limit (`seat_limit`), whichever kind. Finding an account by identity scans the workspace's accounts (there is no index), so each node remembers which account an identity resolved to (the account itself is read again on every call) and, for 30 seconds, that nobody holds an identity: an account made for the person elsewhere is recognized within that time.
+
+### External accounts
+
+An account of kind **external** is a person of a host application. It cannot sign in to the dashboard, cannot own API tokens, always has the User role, is never added to a project itself, is left out of member lists and pickers, and is found only by its identity. The IAM center lists these accounts with an **External** badge and a counter; their memberships come only from the group map, so **what an external person can open comes from the delegated groups they are in**: give those groups access to the project the token is bound to (see [The project](#what-the-person-gets)). An external person who is in no such group is refused with `project_not_accessible`.
+
+### What the person gets
+
+- **Access.** The engine decides with the person as principal: their role, own permissions, groups and project levels, then the **token's scope** and **project** as caps. A custom policy about the person (including one written through the visual editor, which also matches the tokens that act as them) applies. A policy about the *token's owner* (typically a service account) does not apply to the people the token acts for; a policy about the *token itself* still does.
+- **Limits.** Usage limits and quotas for a person count the person, not the application and not their colleagues. Limits on the token are shared by everyone it acts for.
+- **The project.** The call runs in the project the token is bound to, and the person must be able to open that project themselves, exactly as they would in the dashboard: a project they are a member of, a project one of their groups is assigned to (for an external person, a delegated group an administrator assigned to it), or any project for a person whose own role is administrator (an administrator only through a group needs access to the project like anybody else). Otherwise the call is refused with `403` and `project_not_accessible`; the person is never moved to another project they can open. The refusal does not undo what the statement already did: an account that was created or linked stays, with the groups the claim names, so assigning the project to one of those groups lets the next call in. The check is made on every call, so taking a membership or a group's project away applies at once on this node (other nodes within about 15 seconds). A call without the header is decided as before.
+- **Owners and administrators.** The workspace owner can never be acted for. An administrator (also one through a group that grants the role) can be acted for only when **Allow administrators** is on. The rule is applied before anything is written for the account: a refused owner or administrator is not linked to the statement's subject, and their groups are left alone.
+- **Logs and traces.** Usage rows, request logs, runs and traces record the **person as the subject** (`userId`) and the **application token as the actor** (`apiTokenId`). Records that have a metadata field also keep `via: { kind: "delegated", issuer }` (audit rows, RAG query logs, agent runs and trace tags `via` / `viaIssuer`). The runtime context of an agent run carries `userId` = the person and `tokenId` = the application token. The person's drawer in the IAM center has an **Activity** section: usage by service (with the tokens it came through) and the audit rows they are the subject of.
+
+### Refusals
+
+Every refusal carries a **decision id** (body, `X-Decision-Id` header, audit row), in the JSON, OpenAI and Anthropic dialects (`error.code`, `error.decision_id`).
+
+| Status | `code` | Meaning |
+|---|---|---|
+| 401 | `delegation_not_enabled` | The header was sent but the token is not set up (or it is switched off). |
+| 401 | `invalid_assertion` | Malformed, wrong algorithm, bad signature, wrong issuer or audience, missing or odd claims, several headers, an empty header. |
+| 401 | `expired` | Past `exp` (plus skew), or older than the maximum age. |
+| 401 | `untrusted_key` | No trusted key could verify it: none configured for the algorithm, an unknown `kid`, an unreadable key, a key set that could not be fetched. |
+| 401 | `unknown_principal` | Nobody matches and the token does not create accounts (or a person needs a verified address). |
+| 401 | `disabled` | The person's account is disabled. |
+| 401 | `seat_limit` | Creating the account would exceed the licence user limit. |
+| 401 | `conflict` | The address belongs to an account linked to another identity of the issuer, or to an existing account when a person would be created. |
+| 403 | `delegation_refused` | The person is the workspace owner, or an administrator and **Allow administrators** is off. |
+| 403 | `project_not_accessible` | The person cannot open the project the token is bound to: no membership of their own or of a group they are in (an external person needs a delegated group that was given the project). |
+| 503 | `delegation_unavailable` | The stores could not answer. Retry; never treated as allowed. |
+
+The audit row of a refused call is attributed to the application token alone (never to the account the token belongs to) and carries `metadata.code: "delegation_refused"` with the typed reason (`project_not_accessible` included) in `metadata.reasons`.
+
+An endpoint that authenticates on its own and does not act for users refuses a request that carries the header with `400` and `code: "user_token_not_supported"`, rather than answer as the token's owner.
+
+### Groups that follow the statement
+
+With a **group map**, the person's memberships follow the statement's `groups` claim, but only in groups **created for that issuer**: they are created the first time somebody arrives with the claim, are marked as managed by a directory (their members cannot be edited by hand) and carry no grants. A local group, or a group of an LDAP or SSO directory, is never filled or emptied from a statement, whatever its name. A group that has been given a workspace role or service permissions is not filled either: an application must not hand out what a group grants. Leaving the claim (or removing the mapping) removes the membership. Every change is written to the audit trail with the issuer as the actor. Attach policies, limits and project access to these groups like to any other group: an external person can open a project only through such a group.
+
+### Recommendations
+
+- Send the statement from your application's **backend**, together with the application token, and never from a browser: the token is a secret, and `X-Cognipeer-User-Token` is deliberately not among the headers a browser is allowed to send across origins.
+- Prefer `RS256` or `ES256` with a key set over a shared secret: the console then holds no secret that can mint statements.
+- Give the token a **scope** (the screen warns when it has none): the people it acts for are then capped by it. Bind it to a **project**, and give the people (or their delegated groups) access to that project: a person who cannot open it is refused.
+- Set a **maximum token age** and keep statements short-lived.
+- Leave **Allow administrators** off.
+- Remember that matching by verified email trusts the issuer's `email_verified`. Turn it off if the issuer does not verify addresses.
+
 ## The IAM center
 
 **Settings → IAM center** gathers the tools. Viewing needs `read` on the `iam` service and changing needs `admin`; owners and admins have both.
@@ -117,7 +215,7 @@ Expiry rules and IP allowlists are part of [Authentication](/guide/authenticatio
 |---|---|
 | **Overview** | Engine status, policy counts and the latest denials, and anything that needs attention: custom statements that could not be applied, routes without a declaration, times authorization was unavailable. |
 | **Policies** | The built-in and custom policies: create, edit, enable, disable, preview. |
-| **Principals** | Every person and API token with their effective level per service and where each level comes from (role, direct grant, group, token scope, project limit, policy). |
+| **Principals** | Every person and API token with their effective level per service and where each level comes from (role, direct grant, group, token scope, project limit, policy). A person's drawer also shows their recent **Activity**; people of host applications carry an **External** badge. |
 | **Access check** | "Can this person or token do this, and which rule decides?" and the lookup of a decision id. |
 | **Audit** | Denials and policy changes, with CSV export. |
 | **Limits** | Usage and spending limits for groups, projects and agent runs. |
@@ -268,6 +366,7 @@ The **Principals** tab lists every person and token with their effective levels,
 Every refusal carries a **decision id** so that the person who was refused and the person who investigates talk about the same event:
 
 - a `403` from the permission gate has `decisionId` in the body and an `X-Decision-Id` header; OpenAI- and Anthropic-compatible routes put it in `error.decision_id`;
+- a refusal to [act for a user](#acting-for-a-user-verified-identity) (401, 403 or 503) carries one too, in the same places;
 - paste it into the IAM center (**Access check** → decision id), or call `GET /api/iam/decisions/{decisionId}`: you get the audit row and a ready-to-run access check that reproduces the decision, the policies that decided it by name (with whether each is still in force) and, for a portal refusal, the action, the portal or agent and the channel;
 - a decision resolves while its audit row is in the 30-day window the Denials feed looks at.
 
@@ -331,6 +430,7 @@ The proxy must append the client address to `X-Forwarded-For` (nginx: `proxy_set
 | A custom policy | At once on the server that saved it, within 5 seconds on the others. |
 | Project assignments, and group membership as custom policies and API tokens see it | At once on the server that handled the change; within 15 seconds on the others. |
 | A token's scope, expiry or IP allowlist | On the next call on the server that handled the change; within 60 seconds on the others. |
+| A token's *acting for users* setup | At once on the server that saved it; within 10 seconds on the others. The account a person resolves to is read again on every call. |
 
 ## What policies do not govern
 
@@ -352,6 +452,8 @@ The IAM API is part of the dashboard API: it authenticates with the session cook
 | `POST /api/iam/simulate` | The Access check. Read-only. For a portal, ask `portal.use` on the resource `{ "kind": "resource", "type": "portal", "id": ... }`, or `agent.invoke` on an agent with `context: { "channel": "portal", "portalId": ... }`; the answer includes the portal's name, mode and the number of people and groups on its list. |
 | `GET /api/iam/decisions/{decisionId}` | A refusal the caller saw, as an access check. |
 | `GET /api/iam/principals`, `GET /api/iam/principals/{type}/{id}` | People and tokens with their effective levels. |
+| `GET /api/iam/principals/user/{id}/activity` | A person's recent activity: usage by service over `days` (default 30, at most 90) and the latest `limit` audit rows they are the subject of. |
+| `GET /api/tokens/{id}/delegation`, `PUT /api/tokens/{id}/delegation`, `DELETE /api/tokens/{id}/delegation` | The [acting-for-users](#acting-for-a-user-verified-identity) setup of an API token. Owners and admins only, never upward. `PUT` takes `{ enabled, trust: { issuer, audience, algorithms, keys: { hsSecrets: [{ kid, secret? }], pem?, jwksUrl? }, maxTokenAgeSeconds?, clockSkewSeconds? }, mapping: { matchBy, jit, groupMap? }, allowPrivileged }`; a key id without a `secret` keeps the stored one. Secrets are never returned. |
 | `GET /api/iam/audit`, `GET /api/iam/audit/export` | Denials and policy changes (`kind=denials` or `changes`). |
 | `GET /api/iam/settings`, `PUT /api/iam/settings` | Tenant API token rules. |
 | `GET /api/iam/engine/stats` | Engine health, decision counters, the workspace's policy set, undeclared routes. |

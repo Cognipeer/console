@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
     removeGroupMember: vi.fn(),
     listUserProjectsByUser: vi.fn(),
     deleteUserProjectsByUser: vi.fn(),
+    iamDocDelete: vi.fn(),
   },
   recordAuditLog: vi.fn(),
   invalidateUserAuthState: vi.fn(),
@@ -296,6 +297,9 @@ describe('revokeUserApiTokens', () => {
     expect(h.db.deleteApiToken).toHaveBeenCalledWith('b', 'u2');
     expect(h.invalidateApiTokenAuthCache).toHaveBeenCalledWith('hash-a');
     expect(h.invalidateApiTokenAuthCache).toHaveBeenCalledWith('hash-b');
+    // what each token was set up to act for goes with it
+    expect(h.db.iamDocDelete).toHaveBeenCalledWith('iam_delegations', 'a');
+    expect(h.db.iamDocDelete).toHaveBeenCalledWith('iam_delegations', 'b');
   });
 
   it('hashes a legacy plaintext token so its cache entry is still evicted', async () => {
@@ -313,6 +317,9 @@ describe('revokeUserApiTokens', () => {
     h.db.deleteApiToken.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce(true);
     await expect(revokeUserApiTokens('tenant_acme', 'u2')).resolves.toEqual({ revoked: 1, failed: 1, revokedIds: ['b'] });
     expect(h.invalidateApiTokenAuthCache).toHaveBeenCalledWith('hash-b');
+    // (only the token that was deleted loses its delegation)
+    expect(h.db.iamDocDelete).toHaveBeenCalledTimes(1);
+    expect(h.db.iamDocDelete).toHaveBeenCalledWith('iam_delegations', 'b');
   });
 
   it('a user with no tokens is a no-op', async () => {

@@ -150,7 +150,8 @@ export async function issueSessionForAuthenticatedUser(
   // Last line of defense for every authenticator (local, LDAP, SSO): a
   // disabled account never gets a session, whatever vouched for it. Same
   // generic failure as a wrong password — no account enumeration.
-  if (isUserDisabled(authenticatedUser)) {
+  // An external account (a person of a host application) never gets a dashboard session either.
+  if (isUserDisabled(authenticatedUser) || authenticatedUser.kind === 'external') {
     return reply.code(401).send({ error: 'Invalid email or password' });
   }
 

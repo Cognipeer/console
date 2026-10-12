@@ -219,6 +219,18 @@ A token that mints another token (`POST /api/client/v1/users/:id/tokens`) cannot
 widen its own network scope: the new token inherits the minting token's ranges
 unless it asks for a subset of them.
 
+### Acting for a user
+
+An application that signs its own users in can send a signed statement about the person a call is for in the `X-Cognipeer-User-Token` header, next to its API token:
+
+```bash
+curl https://gateway.example.com/api/client/v1/models \
+  -H "Authorization: Bearer cpeer_abc123..." \
+  -H "X-Cognipeer-User-Token: eyJhbGciOiJSUzI1NiIs..."
+```
+
+The call then runs as that person (their access, limits and name in the logs), capped by the token's scope and project; the person must be able to open that project themselves, or the call is refused with `403` and `code: "project_not_accessible"`. The token must be set up for it by an owner or admin; sending the header to a token that is not set up is refused with `401` and `code: "delegation_not_enabled"`, never answered as the token's owner. See [Acting for a user](/guide/authorization#acting-for-a-user-verified-identity).
+
 ### Permission denials
 
 A call that the permission gate refuses (the caller's level on the route's

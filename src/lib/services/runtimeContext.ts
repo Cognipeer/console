@@ -21,6 +21,8 @@ export interface RuntimeConnectionOverride {
   headers?: Record<string, string>;
 }
 
+import { getRequestContext, type RequestVia } from '@/lib/core/requestContext';
+
 export interface AgentRuntimeContext {
   /** Headers offered to every outbound target (still subject to per-target policy). */
   headers?: Record<string, string>;
@@ -36,6 +38,11 @@ export interface AgentRuntimeContext {
   userId?: string;
   tokenId?: string;
   source?: 'api' | 'realtime' | 'a2a' | 'mcp' | 'playground' | 'portal';
+  /**
+   * Stamped by the server, never read from a caller: the call acts for `userId` (the subject) on behalf of an application whose
+   * API token is `tokenId` (the actor), a person a trusted issuer vouched for.
+   */
+  via?: RequestVia;
 }
 
 /** Per-record passthrough policy (stored on the target record). */
@@ -196,10 +203,14 @@ export function buildRuntimeContextFromRequest(
   // context would mislead, and that case is a documented part of this
   // function's contract.
   if (!merged && !caller.userId && !caller.tokenId) return undefined;
+  // `via` is never read from what the caller sent (parseRuntimeContext ignores it): only the request being served knows how it
+  // came to act for this person.
+  const via = getRequestContext()?.via;
   return {
     ...(merged ?? {}),
     ...(caller.userId ? { userId: caller.userId } : {}),
     ...(caller.tokenId ? { tokenId: caller.tokenId } : {}),
+    ...(via && caller.userId ? { via } : {}),
     source: caller.source,
   };
 }

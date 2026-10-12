@@ -64,7 +64,7 @@ import GroupMembersSection from './GroupMembersSection';
 import GroupShell from './GroupShell';
 import { ManagedBanner } from './managed';
 import MembershipShell from './MembershipShell';
-import { GroupsSection, ProjectsSection, UserTokensSection, type ProjectRowHandlers } from './PersonSections';
+import { ActivitySection, GroupsSection, ProjectsSection, UserTokensSection, type ProjectRowHandlers } from './PersonSections';
 import { MATRIX_SERVICES } from './permissionModel';
 import { useServiceLabels } from './serviceLabels';
 import type { EditKind } from './listState';
@@ -141,6 +141,7 @@ const NO_EXTRAS: PrincipalExtras = {
   scoped: null,
   authProvider: null,
   canLogin: null,
+  kind: null,
   source: null,
   tenantRole: null,
   email: null,
@@ -330,7 +331,7 @@ export function PrincipalDetailView({
         </Button>
       </Group>
 
-      {managedBy ? <ManagedBanner provider={managedBy} fields={td('managed.personFields')} /> : null}
+      {managedBy ? <ManagedBanner provider={managedBy} fields={td(extras.managed?.roleFromDirectory ? 'managed.personFieldsRole' : 'managed.personFields')} /> : null}
 
       {error ? (
         <Alert color="red" icon={<IconAlertTriangle size={16} />} title={t('errors.detailFailed')}>
@@ -476,6 +477,11 @@ export function PrincipalDetailView({
                 onRevoke={handlers?.revokeOwnedToken}
                 reasonText={reasonText}
               />
+            </Section>
+          ) : null}
+          {type === 'user' ? (
+            <Section title={td('drawer.activity.title')} hint={td('drawer.activity.hint')} testId="section-activity">
+              <ActivitySection userId={id} locale={locale} />
             </Section>
           ) : null}
           {type === 'user' && !tokens && detail.tokensHidden ? (

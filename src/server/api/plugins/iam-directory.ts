@@ -6,6 +6,7 @@
  *   GET /iam/principals/:type/:id?projectId=                        effective permissions, groups, projects, policies,
  *                                                                   what the viewer may do with the principal
  *   GET /iam/principals/group/:id/members?limit=&cursor=            one page of a group's members
+ *   GET /iam/principals/user/:id/activity?days=&limit=              what a person did lately: usage by service, the audit rows they are the subject of
  *   POST /iam/principals/user/:id/preview                           the effect of a draft role / permissions (stores nothing)
  *   GET /iam/capabilities                                           what the signed-in person may do in the center
  *   GET /iam/audit?kind=denials|changes&from&to&principalType&principalId&service&limit&cursor
@@ -30,6 +31,7 @@ import {
   type DirectoryViewer,
 } from '@/lib/iam/directory';
 import { ASSIGNABLE_ROLES, isAssignableRole } from '@/lib/iam/identity';
+import { ACTIVITY_DEFAULT_DAYS, ACTIVITY_DEFAULT_EVENTS, ACTIVITY_MAX_DAYS, ACTIVITY_MAX_EVENTS, getPersonActivity } from '@/lib/iam/activity';
 import { authz } from '@/lib/iam/routeAuthz';
 import { checkRateLimit, type RateLimitConfig } from '@/lib/services/auth/rateLimiter';
 import { canAdministerPeople, isOwnerOrAdmin } from '@/lib/services/users/peoplePolicy';
@@ -199,6 +201,7 @@ export const iamDirectoryApiPlugin: FastifyPluginAsync = async (app) => {
         items: page.items,
         nextCursor: paged ? encodeCursor(next) : null,
         ...(page.total !== undefined ? { total: page.total } : {}),
+        ...(page.externalTotal !== undefined ? { externalTotal: page.externalTotal } : {}),
         ...(page.hasMore && !paged ? { warnings: ['paging_capped'] } : {}),
       });
     } catch (error) {
@@ -235,6 +238,24 @@ export const iamDirectoryApiPlugin: FastifyPluginAsync = async (app) => {
     } catch (error) {
       if (error instanceof PrincipalError) return fail(reply, error.code === 'principal_not_found' ? 404 : 400, error.code, error.message);
       return internal(reply, 'Failed to load the principal', error);
+    }
+  }));
+
+  // What a person did lately across the services (the "Activity" section of their drawer): read-only, bounded in time.
+  app.get('/iam/principals/user/:id/activity', withApiRequestContext(async (request, reply) => {
+    const session = requireSessionContext(request);
+    const { id } = request.params as { id: string };
+    if (!isSafeId(id)) return fail(reply, 404, 'principal_not_found', 'Person not found');
+    const query = request.query as Record<string, unknown>;
+    try {
+      const activity = await getPersonActivity(tenantOf(session), id, {
+        days: intParam(query.days, ACTIVITY_DEFAULT_DAYS, 1, ACTIVITY_MAX_DAYS),
+        eventLimit: intParam(query.limit, ACTIVITY_DEFAULT_EVENTS, 1, ACTIVITY_MAX_EVENTS),
+      });
+      if (!activity) return fail(reply, 404, 'principal_not_found', 'Person not found');
+      return reply.send(activity);
+    } catch (error) {
+      return internal(reply, 'Failed to read the activity of the person', error);
     }
   }));
 
