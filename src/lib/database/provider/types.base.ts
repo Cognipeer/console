@@ -541,7 +541,15 @@ export type DynamicRoutingSignal =
   | 'predictedOutputTokens' // output tokens predicted from this router's history
   | 'ioRatio' // predicted output / input token ratio
   | 'complexityScore' // expected level index from `config.complexity` (a decision model scoring the request)
-  | 'keyword'; // regex / substring match on the latest user message
+  | 'keyword' // regex / substring match on the latest user message
+  // Caller context (who is asking / through which door). Missing = no match.
+  | 'channel' // dashboard | portal | api | embed | a2a | schedule | playground
+  | 'userId'
+  | 'groupIds' // matches when ANY of the caller's groups is listed
+  | 'agentKey'
+  | 'portalKey'
+  | 'apiTokenId'
+  | 'projectId';
 
 export type DynamicRoutingOperator =
   // numeric signals
@@ -549,12 +557,14 @@ export type DynamicRoutingOperator =
   // boolean signals
   | 'isTrue' | 'isFalse'
   // keyword (text) signal
-  | 'contains' | 'matches';
+  | 'contains' | 'matches'
+  // caller-context signals: value is a list (array or comma-separated string)
+  | 'in' | 'not_in';
 
 export interface IDynamicRoutingCondition {
   signal: DynamicRoutingSignal;
   operator: DynamicRoutingOperator;
-  value?: string | number | boolean;
+  value?: string | number | boolean | string[];
 }
 
 /**

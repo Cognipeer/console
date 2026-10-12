@@ -21,6 +21,7 @@ import {
   IconActivity,
   IconAlertTriangle,
   IconBolt,
+  IconArrowsSplit,
   IconBrain,
   IconChartBar,
   IconCoins,
@@ -215,10 +216,19 @@ export default function ModelsPage() {
 
   // The model type is driven by the left sub-nav via the `?type=` query param.
   const typeParam = searchParams.get('type');
+  // `?type=dynamic` narrows the list to Dynamic LLM routers (an `llm` view).
+  const dynamicOnly = typeParam === 'dynamic';
   const activeType: CategoryFilter =
     typeParam && MODEL_TYPE_KEYS.includes(typeParam as ModelCategory)
       ? (typeParam as ModelCategory)
       : 'all';
+  const setKindFilter = (kind: string) => {
+    const next = new URLSearchParams(searchParams.toString());
+    if (kind === 'dynamic') next.set('type', 'dynamic');
+    else if (next.get('type') === 'dynamic') next.delete('type');
+    const qs = next.toString();
+    router.replace(qs ? `/dashboard/models?${qs}` : '/dashboard/models');
+  };
   const dynamicCreateRequested = searchParams.get('create') === 'dynamic';
 
   useEffect(() => {
@@ -386,6 +396,7 @@ export default function ModelsPage() {
   const filtered = useMemo(() => {
     return models.filter((m) => {
       if (activeType !== 'all' && m.category !== activeType) return false;
+      if (dynamicOnly && !dynamicConfigOf(m)) return false;
       if (capability === 'multimodal' && !modelTakesImages(m)) return false;
       if (capability === 'tools' && !m.supportsToolCalls) return false;
       if (providerFilter !== 'all' && m.providerKey !== providerFilter) return false;
@@ -400,10 +411,10 @@ export default function ModelsPage() {
       }
       return true;
     });
-  }, [models, activeType, capability, query, providerFilter]);
+  }, [models, activeType, dynamicOnly, capability, query, providerFilter]);
 
   const modelsCtl = useTableControls(filtered, {
-    filterKey: `${activeType}|${capability}|${query}|${providerFilter}`,
+    filterKey: `${activeType}|${dynamicOnly}|${capability}|${query}|${providerFilter}`,
   });
 
   const handleDeleteModel = async (model: ModelDto) => {
@@ -454,6 +465,11 @@ export default function ModelsPage() {
     void loadDashboard();
   };
 
+  const openDynamicCreate = () => {
+    setDynamicEdit(null);
+    setDynamicModalOpen(true);
+  };
+
   const closeDynamicModal = () => {
     setDynamicModalOpen(false);
     if (!dynamicCreateRequested && !dynamicEditRequested) return;
@@ -469,13 +485,17 @@ export default function ModelsPage() {
     <PageContainer>
       <PageHeader
         eyebrow={
-          activeType === 'all'
+          dynamicOnly
+            ? 'Build · Models · Dynamic LLM'
+            : activeType === 'all'
             ? 'Build · Models'
             : `Build · Models · ${TYPE_LABELS[activeType]}`
         }
-        title={activeType === 'all' ? tNav('models') : TYPE_LABELS[activeType]}
+        title={dynamicOnly ? 'Dynamic LLM' : activeType === 'all' ? tNav('models') : TYPE_LABELS[activeType]}
         subtitle={
-          activeType === 'all'
+          dynamicOnly
+            ? `Virtual models that route each request to a concrete model · ${filteredCount} of ${modelCount} models.`
+            : activeType === 'all'
             ? `Manage inference endpoints across providers. ${modelCount} deployed in this project.`
             : `${TYPE_LABELS[activeType]} endpoints · ${filteredCount} of ${modelCount} models.`
         }
@@ -491,13 +511,23 @@ export default function ModelsPage() {
             >
               Browse providers
             </Button>
+            {!dynamicOnly ? (
+              <Button
+                variant="default"
+                size="sm"
+                leftSection={<IconArrowsSplit size={14} stroke={1.7} />}
+                onClick={openDynamicCreate}
+              >
+                New Dynamic LLM
+              </Button>
+            ) : null}
             <Button
               color="teal"
               size="sm"
               leftSection={<IconPlus size={14} stroke={1.7} />}
-              onClick={() => setCreateModalOpen(true)}
+              onClick={dynamicOnly ? openDynamicCreate : () => setCreateModalOpen(true)}
             >
-              {t('actions.create')}
+              {dynamicOnly ? 'New Dynamic LLM' : t('actions.create')}
             </Button>
           </>
         }
@@ -551,6 +581,16 @@ export default function ModelsPage() {
             placeholder: 'Filter by name, key, or model id…',
           }}
           filters={[
+            {
+              value: dynamicOnly ? 'dynamic' : 'all',
+              onChange: setKindFilter,
+              ariaLabel: 'Filter by model kind',
+              width: 150,
+              options: [
+                { value: 'all', label: 'All kinds' },
+                { value: 'dynamic', label: 'Dynamic LLM' },
+              ],
+            },
             {
               value: capability,
               onChange: (v) => setCapability(v as CapabilityFilter),

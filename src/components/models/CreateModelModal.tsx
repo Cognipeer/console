@@ -26,7 +26,7 @@ import {
   isMultimodalFor,
   shownInputModalities,
 } from '@/components/models/inputModalities';
-import FormShell, {
+import {
   Checklist,
   ChipPicker,
   FormField,
@@ -37,6 +37,7 @@ import FormShell, {
   ToggleList,
   ToggleRow,
 } from '@/components/common/ui/FormShell';
+import ModelFormLayout, { ModelFormPanel, type ModelFormSection } from './ModelFormLayout';
 import {
   detectUnsupportedParams,
   parseRequestDefaults,
@@ -600,11 +601,22 @@ export default function CreateModelModal({
   );
 
   const noProviders = availableProviders.length === 0;
+  const sections: ModelFormSection[] = [
+    { id: 'general', label: 'General', done: validIdentity },
+    { id: 'provider', label: 'Provider & connection', done: validProvider },
+    { id: 'pricing', label: 'Pricing', done: validPricing },
+    { id: 'capabilities', label: 'Capabilities' },
+    { id: 'limits', label: 'Limits' },
+  ];
+  const dirty = opened && Boolean(formValues.name || formValues.key || formValues.modelId);
   const canSubmit = !noProviders && validProvider && validIdentity && validPricing;
 
   return (
-    <FormShell
+    <ModelFormLayout
       open={opened}
+      sections={sections}
+      dirty={dirty}
+      resetKey={opened ? 1 : 0}
       onClose={onClose}
       icon={<IconBrain size={16} />}
       title="Deploy model"
@@ -619,6 +631,7 @@ export default function CreateModelModal({
         onClick: submit,
       }}
     >
+      <ModelFormPanel id="provider">
       <FormSection
         number={1}
         title="Provider"
@@ -691,7 +704,9 @@ export default function CreateModelModal({
           </>
         )}
       </FormSection>
+      </ModelFormPanel>
 
+      <ModelFormPanel id="general">
       <FormSection
         number={2}
         title="Identity"
@@ -743,7 +758,9 @@ export default function CreateModelModal({
           </FormField>
         </FormRow>
       </FormSection>
+      </ModelFormPanel>
 
+      <ModelFormPanel id="capabilities">
       {CAPABILITY_CATEGORIES.includes(formValues.category) && (
       <FormSection
         number={3}
@@ -884,6 +901,9 @@ export default function CreateModelModal({
         </FormSection>
       )}
 
+      </ModelFormPanel>
+
+      <ModelFormPanel id="pricing">
       <FormSection
         number={4}
         title="Pricing"
@@ -1005,6 +1025,9 @@ export default function CreateModelModal({
         )}
       </FormSection>
 
+      </ModelFormPanel>
+
+      <ModelFormPanel id="limits">
       <FormSection
         number={5}
         title="Default parameters"
@@ -1103,6 +1126,7 @@ export default function CreateModelModal({
           />
         </ToggleList>
       </FormSection>
-    </FormShell>
+      </ModelFormPanel>
+    </ModelFormLayout>
   );
 }

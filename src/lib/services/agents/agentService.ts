@@ -5,6 +5,7 @@
  * Uses agent-sdk for runtime execution with automatic tracing.
  */
 
+import { channelFromSource, runWithRoutingCaller, type RoutingCallerContext } from '@/lib/services/models/routingCallerContext';
 import { randomUUID } from 'node:crypto';
 
 import { createLogger } from '@/lib/core/logger';
@@ -2818,6 +2819,13 @@ export interface AgentChatRequest {
      */
     runtimeContext?: AgentRuntimeContext;
     /**
+     * Who is asking and through which door (portal key, group ids, ...), for
+     * Dynamic LLM caller conditions. Plain data. Fields left out are derived
+     * from the request: agentKey, projectId, userId, the channel from
+     * `runtimeContext.source`, the API token from `runtimeContext.tokenId`.
+     */
+    callerContext?: RoutingCallerContext;
+    /**
      * Incremental answer text — internal agents (model token stream) and
      * connected agents (SSE) alike. Functions cannot cross the job queue, so
      * a run routed to another node replays its chunks over the cluster stream
@@ -3905,12 +3913,26 @@ function toAgentChatResponse(input: {
  * Wraps the turn so a throw — from anywhere in it — is recorded as a
  * `session.error` on the conversation's event log before it propagates.
  */
+/** The caller identity a run's model calls carry (Dynamic LLM caller conditions). */
+export function routingCallerOf(request: AgentChatRequest): RoutingCallerContext {
+    const synthetic = !request.userId || request.userId.startsWith('system:') || request.userId === 'a2a-public';
+    const runtime = request.runtimeContext;
+    return {
+        channel: channelFromSource(runtime?.source) ?? (request.unattended ? 'api' : 'dashboard'),
+        agentKey: request.agentKey,
+        projectId: request.projectId,
+        ...(synthetic ? {} : { userId: request.userId }),
+        ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
+        ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
+    };
+}
+
 export async function executeAgentChatLocal(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runAgentChatTurn(request, scope);
+        return await runWithRoutingCaller(routingCallerOf(request), () => runAgentChatTurn(request, scope));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;

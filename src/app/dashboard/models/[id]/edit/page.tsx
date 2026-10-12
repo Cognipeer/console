@@ -25,19 +25,18 @@ import {
   Textarea,
   Title,
 } from '@mantine/core';
-import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
+import ModelFormLayout, { ModelFormPanel, type ModelFormSection } from '@/components/models/ModelFormLayout';
+import { SummaryGroup, SummaryKV } from '@/components/common/ui/FormShell';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import {
   IconArrowLeft,
-  IconBook,
+  IconBrain,
   IconDeviceFloppy,
-  IconRefresh,
   IconShield,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
 import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
-import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 import {
   detectUnsupportedParams,
@@ -186,14 +185,13 @@ interface EmbeddingModelOption {
 export default function EditModelPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelEdit');
   const tWizard = useTranslations('modelWizard');
   const tNouns = useTranslations('common.confirm.nouns');
   const confirmKeyChange = useConfirmKeyChange();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [, setRefreshing] = useState(false);
   const [model, setModel] = useState<ModelDetailDto | null>(null);
   const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>([]);
   const [vectorProviders, setVectorProviders] = useState<VectorProviderOption[]>([]);
@@ -203,6 +201,9 @@ export default function EditModelPage() {
   const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
   // Held as text so a half-typed JSON object doesn't get thrown away on rerender.
   const [requestDefaultsText, setRequestDefaultsText] = useState('');
+  // Dirty tracking: a snapshot of every editable value right after each load.
+  const [loadVersion, setLoadVersion] = useState(0);
+  const [baseline, setBaseline] = useState<string | null>(null);
   // What the model can be sent, when someone set it; null = detected from the model id.
   const [inputModalities, setInputModalities] = useState<ModelInputModality[] | null>(null);
 
@@ -238,6 +239,14 @@ export default function EditModelPage() {
       modelId: (value) => (!value ? tWizard('validation.modelId') : null),
     },
   });
+
+  const snapshot = JSON.stringify([form.values, requestDefaultsText, inputModalities]);
+  useEffect(() => {
+    if (loadVersion > 0) setBaseline(snapshot);
+    // The baseline is the state right after a load, not after every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadVersion]);
+  const dirty = baseline !== null && baseline !== snapshot;
 
   const selectedProvider = useMemo(
     () =>
@@ -373,6 +382,7 @@ export default function EditModelPage() {
         semanticCacheSimilarityThreshold: cache?.similarityThreshold ?? 0.92,
         semanticCacheTtlSeconds: cache?.ttlSeconds ?? 3600,
       });
+      setLoadVersion((v) => v + 1);
 
       if (providerResponse.ok) {
         const providerData = await providerResponse.json();
@@ -617,47 +627,48 @@ export default function EditModelPage() {
     );
   }
 
-  return (
-    <PageContainer>
-      <PageHeader
-        eyebrow="Build · Edit model"
-        title={t('title', { name: model.name })}
-        subtitle={t('subtitle')}
-        actions={
-          <>
-            <Button
-              onClick={() => openDocs('api-client')}
-              variant="light"
-              size="xs"
-              leftSection={<IconBook size={14} />}
-            >
-              Docs
-            </Button>
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconRefresh size={14} />}
-              loading={refreshing || loading}
-              onClick={() => loadModel(false)}
-            >
-              {t('actions.reload')}
-            </Button>
-            <Button
-              type="submit"
-              form="model-edit-form"
-              size="xs"
-              leftSection={<IconDeviceFloppy size={14} />}
-              loading={saving}
-            >
-              {t('actions.save')}
-            </Button>
-          </>
-        }
-      />
+  const editSections: ModelFormSection[] = [
+    { id: 'general', label: 'General', done: Boolean(form.values.name) },
+    { id: 'provider', label: 'Provider & connection', done: Boolean(form.values.providerKey && form.values.modelId) },
+    { id: 'pricing', label: 'Pricing' },
+    { id: 'capabilities', label: 'Capabilities' },
+    { id: 'limits', label: 'Limits' },
+  ];
 
-      <Card withBorder radius="md" padding="lg">
+  return (
+    <>
+    <ModelFormLayout
+      open
+      onClose={() => router.push(`/dashboard/models/${model._id}`)}
+      icon={<IconBrain size={16} />}
+      title={t('title', { name: model.name })}
+      subtitle={t('subtitle')}
+      sections={editSections}
+      dirty={dirty}
+      resetKey={loadVersion}
+      footerStatus={model.key}
+      summary={
+        <>
+          <SummaryGroup title="Model">
+            <SummaryKV label="Name" value={form.values.name || '—'} />
+            <SummaryKV label="Key" value={form.values.key || '—'} mono />
+            <SummaryKV label="Category" value={model.category} />
+            <SummaryKV label="Provider" value={selectedProvider?.label ?? (form.values.providerKey || '—')} />
+            <SummaryKV label="Model id" value={form.values.modelId || '—'} mono />
+          </SummaryGroup>
+        </>
+      }
+      primaryAction={{
+        label: t('actions.save'),
+        icon: <IconDeviceFloppy size={13} />,
+        loading: saving,
+        disabled: !dirty,
+        onClick: () => void form.onSubmit(handleSubmit)(),
+      }}
+    >
         <form id="model-edit-form" onSubmit={form.onSubmit(handleSubmit)}>
           <Stack gap="lg">
+            <ModelFormPanel id="general">
             <Grid>
               <Grid.Col span={{ base: 12, md: 6 }}>
                 <TextInput
@@ -690,6 +701,11 @@ export default function EditModelPage() {
                   {...form.getInputProps('description')}
                 />
               </Grid.Col>
+            </Grid>
+            </ModelFormPanel>
+
+            <ModelFormPanel id="provider">
+            <Grid>
               <Grid.Col span={12}>
                 {modelProviders.length > 0 ? (
                   <Select
@@ -718,7 +734,9 @@ export default function EditModelPage() {
                 />
               </Grid.Col>
             </Grid>
+            </ModelFormPanel>
 
+            <ModelFormPanel id="pricing">
             <Grid>
               <Grid.Col span={{ base: 12, md: 6 }}>
                 <TextInput
@@ -770,7 +788,9 @@ export default function EditModelPage() {
                 </Grid.Col>
               </Grid>
             </Paper>
+            </ModelFormPanel>
 
+            <ModelFormPanel id="limits">
             <Grid>
               <Grid.Col span={{ base: 12, md: 4 }}>
                 <NumberInput
@@ -803,7 +823,9 @@ export default function EditModelPage() {
                 />
               </Grid.Col>
             </Grid>
+            </ModelFormPanel>
 
+            <ModelFormPanel id="capabilities">
             <ModelInputModalitiesField
               value={inputModalities}
               inferred={inferredModalities}
@@ -827,7 +849,9 @@ export default function EditModelPage() {
                 {...form.getInputProps('supportsStructuredOutputs', { type: 'checkbox' })}
               />
             </Group>
+            </ModelFormPanel>
 
+            <ModelFormPanel id="provider">
             {model.category === 'llm' && (
               <Card withBorder radius="md" padding="md">
                 <Stack gap="sm">
@@ -904,6 +928,9 @@ export default function EditModelPage() {
               </Card>
             )}
 
+            </ModelFormPanel>
+
+            <ModelFormPanel id="limits">
             {/* Semantic Cache section - only for LLM models */}
             {model.category === 'llm' && (
               <Card withBorder radius="md" padding="md">
@@ -1003,7 +1030,9 @@ export default function EditModelPage() {
                 </Stack>
               </Card>
             )}
+            </ModelFormPanel>
 
+            <ModelFormPanel id="capabilities">
             {/*
               * Guardrails — the binding LIST, not the two `Select`s this card
               * used to be. One slot per direction cannot compose two reusable
@@ -1084,17 +1113,10 @@ export default function EditModelPage() {
               </Card>
             )}
 
-            <Group justify="flex-end">
-              <Button type="submit" loading={saving} leftSection={<IconDeviceFloppy size={16} />}>
-                {t('actions.save')}
-              </Button>
-              <Button component={Link} href={`/dashboard/models/${model._id}`} variant="default">
-                {t('actions.cancel')}
-              </Button>
-            </Group>
+            </ModelFormPanel>
           </Stack>
         </form>
-      </Card>
+    </ModelFormLayout>
 
       {/*
         * Mounted unconditionally rather than behind `guardrailModalOpen` so the
@@ -1117,6 +1139,6 @@ export default function EditModelPage() {
           setModel((current) => (current ? { ...current, guardrails: bindings } : current));
         }}
       />
-    </PageContainer>
+    </>
   );
 }

@@ -184,6 +184,11 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
         projectId,
         stream: Boolean(body.stream),
         tenantDbName,
+        callerContext: {
+          channel: 'playground',
+          projectId,
+          userId: context.session.userId,
+        },
       });
 
       if (result.stream) {
