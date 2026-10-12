@@ -726,6 +726,27 @@ export default function ModelDetailPage() {
     }
   };
 
+  const isDynamicModel = Boolean(model && dynamicConfigOf(model));
+  // A router's editor needs the models it can route to.
+  useEffect(() => {
+    if (!editOpen || !isDynamicModel) return;
+    let cancelled = false;
+    void fetch('/api/models', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const all = (data.models ?? []) as Array<{ key: string; name: string; category: string; settings?: Record<string, unknown> }>;
+        setRouterCandidates({
+          llm: all.filter((m) => m.category === 'llm' && !dynamicConfigOf(m)).map((m) => ({ key: m.key, name: m.name })),
+          decision: all.filter((m) => m.category === 'decision').map((m) => ({ key: m.key, name: m.name })),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [editOpen, isDynamicModel]);
+
   if (loading) {
     return <ModelDetailSkeleton />;
   }
@@ -767,26 +788,6 @@ export default function ModelDetailPage() {
   const dynamic = dynamicConfigOf(model);
   const isDynamic = Boolean(dynamic);
 
-  // A router's editor needs the models it can route to.
-  useEffect(() => {
-    if (!editOpen || !dynamic) return;
-    let cancelled = false;
-    void fetch('/api/models', { cache: 'no-store' })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (cancelled || !data) return;
-        const all = (data.models ?? []) as Array<{ key: string; name: string; category: string; settings?: Record<string, unknown> }>;
-        setRouterCandidates({
-          llm: all.filter((m) => m.category === 'llm' && !dynamicConfigOf(m)).map((m) => ({ key: m.key, name: m.name })),
-          decision: all.filter((m) => m.category === 'decision').map((m) => ({ key: m.key, name: m.name })),
-        });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per open
-  }, [editOpen, Boolean(dynamic)]);
 
   // A Dynamic LLM has no real provider runtime, so its playground would error.
   const playgroundCategories = ['llm', 'stt', 'tts', 'ocr', 'image', 'embedding', 'decision'] as const;
