@@ -242,6 +242,98 @@ export function parseGroupMembersPage(raw: unknown): GroupMembersPage {
   return { items, nextCursor: asString(r.nextCursor), total: total === null ? null : Math.max(0, Math.floor(total)) };
 }
 
+// ── activity of a person ──────────────────────────────────────────────────
+
+export interface ActivityUsageRow {
+  service: string;
+  requests: number;
+  errors: number;
+  totalTokens: number;
+  costUsd: number;
+  lastDay: string;
+  /** The application tokens the calls came through. */
+  viaTokens: Array<{ id: string; label: string; requests: number }>;
+}
+
+export interface ActivityEventRow {
+  id: string;
+  at: string;
+  service: string;
+  event: string;
+  method: string | null;
+  path: string | null;
+  outcome: string;
+  statusCode: number | null;
+  decisionId: string | null;
+  /** The application token that made the call for the person. */
+  viaToken: { id: string; label: string } | null;
+  /** Who vouched for the person when an application acted for them. */
+  issuer: string | null;
+}
+
+export interface PersonActivityView {
+  windowDays: number;
+  usage: ActivityUsageRow[];
+  usageTruncated: boolean;
+  events: ActivityEventRow[];
+  hasMoreEvents: boolean;
+}
+
+export function parsePersonActivity(raw: unknown): PersonActivityView {
+  const r = asRecord(raw);
+  const num = (value: unknown): number => {
+    const n = asNumber(value);
+    return n === null ? 0 : n;
+  };
+  const usage = asArray(r.usage).flatMap((entry): ActivityUsageRow[] => {
+    const e = asRecord(entry);
+    const service = asString(e.service);
+    if (!service) return [];
+    return [{
+      service,
+      requests: num(e.requests),
+      errors: num(e.errors),
+      totalTokens: num(e.totalTokens),
+      costUsd: num(e.costUsd),
+      lastDay: asString(e.lastDay) ?? '',
+      viaTokens: asArray(e.viaTokens).flatMap((via) => {
+        const v = asRecord(via);
+        const id = asId(v.id);
+        return id ? [{ id, label: asString(v.label) ?? id, requests: num(v.requests) }] : [];
+      }),
+    }];
+  });
+  const events = asArray(r.events).flatMap((entry): ActivityEventRow[] => {
+    const e = asRecord(entry);
+    const id = asId(e.id);
+    const at = asString(e.at);
+    if (!id || !at) return [];
+    const viaToken = asRecord(e.viaToken);
+    const via = asRecord(e.via);
+    const statusCode = asNumber(e.statusCode);
+    return [{
+      id,
+      at,
+      service: asString(e.service) ?? '',
+      event: asString(e.event) ?? '',
+      method: asString(e.method),
+      path: asString(e.path),
+      outcome: asString(e.outcome) ?? 'success',
+      statusCode: statusCode === null ? null : Math.floor(statusCode),
+      decisionId: asString(e.decisionId),
+      viaToken: asId(viaToken.id) ? { id: asId(viaToken.id) as string, label: asString(viaToken.label) ?? (asId(viaToken.id) as string) } : null,
+      issuer: via.kind === 'delegated' ? asString(via.issuer) : null,
+    }];
+  });
+  return {
+    windowDays: num(r.windowDays) || 30,
+    usage,
+    usageTruncated: r.usageTruncated === true,
+    events,
+    hasMoreEvents: r.hasMoreEvents === true,
+  };
+}
+
 // ── access preview ────────────────────────────────────────────────────────
 
 export interface AccessPreviewChange {
@@ -481,6 +573,15 @@ export const directoryApi = {
     return parseGroupMembersPage(
       await call('GET', `/api/iam/principals/group/${seg(groupId)}/members`, {
         query: { limit: options.limit, cursor: options.cursor },
+        signal: options.signal,
+      }),
+    );
+  },
+
+  async activity(userId: string, options: { days?: number; limit?: number; signal?: AbortSignal } = {}): Promise<PersonActivityView> {
+    return parsePersonActivity(
+      await call('GET', `/api/iam/principals/user/${seg(userId)}/activity`, {
+        query: { days: options.days, limit: options.limit },
         signal: options.signal,
       }),
     );

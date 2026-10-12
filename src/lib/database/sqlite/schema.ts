@@ -318,24 +318,10 @@ export const TENANT_SCHEMA_SQL = `
     disabledAt TEXT,
     disabledBy TEXT,
     disabledReason TEXT,
-    kind TEXT,
-    source TEXT,
-    externalIdentities TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_users_emailLower ON users(emailLower);
-
-  -- Who an external account is in a host application's directory (token issuer + subject): one account per identity.
-  -- The users row keeps the list for reading; this table is what makes the lookup indexed and unique.
-  CREATE TABLE IF NOT EXISTS user_external_identities (
-    issuer TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    userId TEXT NOT NULL,
-    createdAt TEXT NOT NULL,
-    PRIMARY KEY (issuer, subject)
-  );
-  CREATE INDEX IF NOT EXISTS idx_user_external_identities_user ON user_external_identities(userId);
 
   -- General audit logs
   CREATE TABLE IF NOT EXISTS audit_logs (

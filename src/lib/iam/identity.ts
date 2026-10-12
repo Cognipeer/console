@@ -69,9 +69,9 @@ export function isGroupDirectoryManaged(group: { source?: unknown }): boolean {
 export type UserKind = 'person' | 'service' | 'external';
 
 /**
- * An EXTERNAL account is a person of a host application who uses a portal's embed (`kind === 'external'`): they cannot sign in
- * either, but they are not a service account. A service account is an identity that cannot sign in (`canLogin === false`); a
- * missing flag means it can.
+ * An EXTERNAL account is a person of a host application whose identity a trusted issuer vouched for (`kind === 'external'`):
+ * they cannot sign in either, but they are not a service account. A service account is an identity that cannot sign in
+ * (`canLogin === false`); a missing flag means it can.
  */
 export function userKind(user: { canLogin?: boolean | null; kind?: string | null }): UserKind {
   if (user.kind === 'external') return 'external';

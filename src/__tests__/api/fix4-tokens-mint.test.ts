@@ -51,7 +51,7 @@ const USERS: Record<string, Record<string, unknown>> = {
   'pa-1': { _id: 'pa-1', role: 'project_admin', tenantId: TENANT },
   'user-1': { _id: 'user-1', role: 'user', tenantId: TENANT, canLogin: true },
   'svc-1': { _id: 'svc-1', role: 'user', tenantId: TENANT, canLogin: false, email: '' },
-  // A host application's person who uses a portal's embed: no sign-in, no tokens.
+  // A person of a host application whose identity a trusted issuer vouched for: no sign-in, no tokens.
   'ext-1': { _id: 'ext-1', role: 'user', tenantId: TENANT, canLogin: false, kind: 'external', email: 'v@host.example.com' },
 };
 

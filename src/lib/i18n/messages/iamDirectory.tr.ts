@@ -30,7 +30,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
       service: 'Servis hesabı',
       external: 'Harici',
     },
-    externalHint: 'Bir portalı gömülü girişle kullanan, bir ana uygulamanın kişisi. Panele giriş yapamaz, API token\'ı tutamaz ve koltuk olarak sayılmaz.',
+    externalHint: 'Kimliğini güvenilen bir sağlayıcının doğruladığı, bir ana uygulamanın kişisi. Panele giriş yapamaz, API token\'ı tutamaz ve hiçbir projeye katılmaz.',
     sources: {
       local: 'Yerel',
       directory: 'Dizin',
@@ -69,7 +69,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     noMatchesFilters: 'Bu filtrelerle eşleşen kayıt yok. Hepsini görmek için filtreleri sıfırlayın.',
     inviteFirst: 'İlk kişiyi davet edin',
     externalCount: '{count} harici',
-    externalCountHint: 'Bir portalı gömülü girişle kullanan ana uygulama kişileri. Koltuk değil, portal kullanıcısıdır. Listelemek için seçin.',
+    externalCountHint: 'Kimliğini güvenilen bir sağlayıcının doğruladığı ana uygulama kişileri. Üye listelerinde ve seçicilerde görünmezler. Listelemek için seçin.',
     tokenNote: 'Yönetebildiğiniz tüm API token\'ları. Kendi token\'larınız API Token\'ları sayfasında da listelenir.',
   },
   filters: {
@@ -130,7 +130,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     directory_managed: 'Bu hesap dizininiz tarafından yönetiliyor. Değişikliği orada yapın veya burada devre dışı bırakın.',
     no_pending_invite: 'Bu hesap için bekleyen bir davet yok.',
     account_disabled: 'Bu hesap devre dışı.',
-    external_user: 'Bu harici bir hesap: ana uygulamayı izler, kişisel izni yoktur, hiçbir projeye katılmaz ve API token\'ı tutmaz.',
+    external_user: 'Bu harici bir hesap: onu doğrulayan sağlayıcıyı izler, kişisel izni yoktur, hiçbir projeye katılmaz ve API token\'ı tutmaz.',
   },
   confirm: {
     disable: {
@@ -222,7 +222,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     already_in_state: 'Zaten o durumda.',
     not_a_member: 'O grubun üyesi değil.',
     no_pending_invite: 'Bu hesap için bekleyen bir davet yok.',
-    external_user: 'Bu harici bir hesap (bir portalı kullanan ana uygulama kişisi). Her zaman Kullanıcı rolündedir, hiçbir projeye katılmaz ve API token\'ı tutamaz.',
+    external_user: 'Bu harici bir hesap (bir ana uygulamanın kişisi). Her zaman Kullanıcı rolündedir, hiçbir projeye katılmaz ve API token\'ı tutamaz.',
     unauthorized: 'Oturumunuzun süresi doldu. Yeniden giriş yapın.',
     notFound: 'Bu kayıt artık mevcut değil.',
     generic: 'Bir şeyler ters gitti. Tekrar deneyin.',
@@ -234,6 +234,10 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     personFields:
       'Adı, e-postası ve parolası dizinde tutulduğu için burada salt okunurdur. Yine de rolünü ve erişimini değiştirebilir veya hesabı devre dışı bırakabilirsiniz.',
     fieldHint: '{provider} tarafından yönetiliyor. Değişikliği dizininizde yapın.',
+    personFieldsRole:
+      'Adı, e-postası, parolası ve rolü dizinde tutulduğu için burada salt okunurdur. Rol, her oturum açılışında dizinden yeniden belirlenir. Yine de erişimini değiştirebilir veya hesabı devre dışı bırakabilirsiniz.',
+    roleHint: 'Dizininiz tarafından yönetiliyor. Rol, her oturum açılışında dizinden belirlenir.',
+    groupHint: 'Dizininiz tarafından yönetiliyor ({source})',
   },
   matrix: {
     hint: {
@@ -567,7 +571,7 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     members: {
       title: 'Üyeler',
       hint: 'Gruptaki herkes, sayfa başına 50.',
-      directory: 'Bu grup dizininiz tarafından yönetiliyor. Üyeleri burada değiştirilemez.',
+      directory: 'Bu grup dizininiz tarafından yönetiliyor ({source}). Üyeleri burada değiştirilemez; verdiği yetkileri yine de düzenleyebilirsiniz.',
       addLabel: 'Üye ekle',
       add: 'Ekle',
       added: '{ok} eklendi, {skipped} atlandı',
@@ -604,6 +608,28 @@ export const iamDirectoryTr: typeof iamDirectoryEn = {
     },
     token: {
       project: 'Proje',
+    },
+    activity: {
+      title: 'Etkinlik',
+      hint: 'Bu kişinin son zamanlarda yaptıkları; bir uygulamanın onun adına yaptığı çağrılar dahil.',
+      loading: 'Etkinlik yükleniyor…',
+      failed: 'Etkinlik yüklenemedi.',
+      usageTitle: 'Son {days} günde kullanım',
+      noUsage: 'Bu dönemde çağrı yok.',
+      service: 'Servis',
+      requests: 'Çağrı',
+      errors: 'Hata',
+      tokens: 'Token',
+      last: 'Son',
+      through: 'Üzerinden',
+      usageTruncated: 'Okunabilenden fazlası var; toplamlar alt sınırdır.',
+      eventsTitle: 'Son işlemler',
+      noEvents: 'Bu dönemde kayıtlı işlem yok.',
+      moreEvents: 'Gösterilenden fazla işlem var. Hepsi denetim kaydında.',
+      outcomes: { success: 'Yapıldı', failure: 'Başarısız', denied: 'Reddedildi' },
+      via: '{label} ile',
+      viaToken: 'Bir uygulamanın API tokenı bu kişi adına işlem yaptı.',
+      viaIssuer: 'Bir uygulamanın API tokenı bu kişi adına işlem yaptı; kişiyi {issuer} doğruladı.',
     },
   },
   bulk: {

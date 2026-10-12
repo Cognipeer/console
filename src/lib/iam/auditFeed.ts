@@ -10,6 +10,7 @@
 
 import { RBAC_SERVICE_DEFINITIONS } from '@/lib/security/rbac';
 import { runWithTenantScope, type IAuditLog } from '@/lib/database';
+import { TOKEN_DELEGATION_EVENT } from '@/lib/services/apiTokens/delegationAudit';
 import { deniedActionOf, IAM_CHANGE_RESOURCE_TYPES } from './audit';
 import { resolvePrincipalLabels } from './labels';
 import { listPolicies } from './store';
@@ -69,6 +70,38 @@ export interface AuditFeedItem {
 
 /** Edits of a token's expiry / IP allowlist are access-rule changes too (written by apiTokens/restrictionAudit.ts, service `tokens`). */
 export const TOKEN_RESTRICTIONS_EVENT = 'token.restrictions.updated';
+/** So are the edits of what a token may act for (apiTokens/delegationAudit.ts, service `tokens`). */
+export { TOKEN_DELEGATION_EVENT };
+
+/** The sentence of a call that tried to act for a person and was not let in, by the typed reason (static keys: the i18n guard reads this file). */
+const DELEGATION_SENTENCES: Record<string, string> = {
+  delegation_not_enabled: 'delegationRefused.notEnabled',
+  invalid_assertion: 'delegationRefused.invalid',
+  expired: 'delegationRefused.expired',
+  untrusted_key: 'delegationRefused.untrustedKey',
+  replayed: 'delegationRefused.replayed',
+  unknown_principal: 'delegationRefused.unknownPerson',
+  disabled: 'delegationRefused.disabled',
+  seat_limit: 'delegationRefused.seatLimit',
+  conflict: 'delegationRefused.conflict',
+  delegation_refused: 'delegationRefused.privileged',
+  project_not_accessible: 'delegationRefused.project',
+  delegation_unavailable: 'delegationRefused.unavailable',
+};
+const DELEGATION_ENGLISH: Record<string, string> = {
+  'delegationRefused.notEnabled': 'the token is not set up to act for users',
+  'delegationRefused.invalid': 'the user token was not accepted',
+  'delegationRefused.expired': 'the user token has expired',
+  'delegationRefused.untrustedKey': 'no trusted key could verify the user token',
+  'delegationRefused.replayed': 'the user token was already used',
+  'delegationRefused.unknownPerson': 'nobody matches the person in the user token',
+  'delegationRefused.disabled': 'the person\'s account is disabled',
+  'delegationRefused.seatLimit': 'the licence user limit has been reached',
+  'delegationRefused.conflict': 'the person\'s account is linked to another identity',
+  'delegationRefused.privileged': 'owners and administrators cannot be acted for',
+  'delegationRefused.project': 'the person has no access to the token\'s project',
+  'delegationRefused.unavailable': 'acting for users was temporarily unavailable',
+};
 
 const ADMIN_SERVICES: ReadonlySet<string> = new Set(RBAC_SERVICE_DEFINITIONS.filter((d) => d.adminService).map((d) => d.id));
 /** Without a start date a feed looks at this long: the audit table can hold millions of rows. */
@@ -170,6 +203,13 @@ async function denials(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
     } else if (code === 'authorization_unavailable') {
       summary = `Refused ${route}: authorization was temporarily unavailable`;
       text = { key: 'unavailable', params: { route } };
+    } else if (code === 'delegation_refused') {
+      // reasons[0] is the typed reason (delegation_not_enabled, invalid_assertion, ... delegation_refused for an owner or admin)
+      const reason = reasons[0] ?? 'delegation_refused';
+      const key = DELEGATION_SENTENCES[reason] ?? 'delegationRefused.invalid';
+      const whoLabel = who?.label ?? 'a token';
+      summary = `Refused ${whoLabel} acting for a person: ${DELEGATION_ENGLISH[key]}`;
+      text = { key, params: { who: whoLabel } };
     } else if (code === 'ip_not_allowed') {
       const from = row.ipAddress ?? 'this address';
       summary = `Blocked: ${who?.label ?? 'a token'} is not allowed from ${from} (IP allowlist)${row.path ? `: ${route}` : ''}`.replace(/\s+/g, ' ').trim();
@@ -269,6 +309,14 @@ function describeChange(row: IAuditLog): { summary: string; text?: AuditFeedText
     case 'iam.policy.create': return { summary: `Created policy ${name}${flags ? ` (${flags})` : ''}`, text: { key: 'policy.created', params: policyParams } };
     case 'iam.policy.update': return { summary: `Updated policy ${name}${flags ? ` (${flags})` : ''}`, text: { key: 'policy.updated', params: policyParams } };
     case 'iam.policy.delete': return { summary: `Deleted policy ${name}`, text: { key: 'policy.deleted', params: policyParams } };
+    case TOKEN_DELEGATION_EVENT: {
+      const label = str(m.label) ?? String(row.resourceId ?? '');
+      const change = str(m.change) ?? 'updated';
+      return {
+        summary: `${change === 'removed' ? 'Removed' : change === 'created' ? 'Set up' : 'Changed'} the delegation of token "${label}" (acting for users)`,
+        text: { key: 'token.delegation', params: { label, change } },
+      };
+    }
     case TOKEN_RESTRICTIONS_EVENT: {
       const after = (m.after ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
       const before = (m.before ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
@@ -326,7 +374,7 @@ async function changes(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
     service: 'iam',
     outcome: 'success',
     resourceTypes: [...IAM_CHANGE_RESOURCE_TYPES],
-    alsoEvents: [TOKEN_RESTRICTIONS_EVENT],
+    alsoEvents: [TOKEN_RESTRICTIONS_EVENT, TOKEN_DELEGATION_EVENT],
     // for this segment the principal filter means "who made the change"
     actorUserId: q.principalType === 'user' ? q.principalId : undefined,
     limit: q.limit,
@@ -341,7 +389,7 @@ async function changes(tenant: IamTenant, q: AuditFeedQuery): Promise<AuditFeedP
       kind: 'changes',
       principal: null,
       actor: row.actorEmail ?? row.actorUserId,
-      service: row.event === TOKEN_RESTRICTIONS_EVENT ? 'tokens' : 'iam',
+      service: row.event === TOKEN_RESTRICTIONS_EVENT || row.event === TOKEN_DELEGATION_EVENT ? 'tokens' : 'iam',
       action: row.event,
       route: row.path,
       method: row.method,

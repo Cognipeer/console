@@ -122,7 +122,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         },
         'users',
         // a count, not the whole table
-        await db.iamCountUsers({ tenantId: auth.tenantId, external: false }),
+        await db.iamCountUsers({ tenantId: auth.tenantId }),
       );
       if (!quota.allowed) return reply.code(429).send({ error: quota.reason || 'User quota exceeded' });
 

@@ -300,22 +300,6 @@ export function policyReferences(policy: Pick<IIamPolicy, 'cedar' | 'spec'>): Po
   return refs;
 }
 
-/**
- * The ids of the groups a policy names: the groups of a spec's principals, and every `Group::"x"` literal of its Cedar
- * (which also covers raw Cedar and conditions). No Cedar parse, so it is cheap enough to run over every policy of a workspace.
- */
-export function policyGroupIds(policy: Pick<IIamPolicy, 'cedar' | 'spec'>): Set<string> {
-  const ids = new Set<string>();
-  const principals = policy.spec?.principals as { groups?: unknown } | undefined;
-  if (Array.isArray(principals?.groups)) {
-    for (const id of principals.groups) if (typeof id === 'string') ids.add(id);
-  }
-  for (const match of String(policy.cedar ?? '').matchAll(ENTITY_RE)) {
-    if (match[1] === 'Group') ids.add(unescape(match[2]));
-  }
-  return ids;
-}
-
 /** How many custom policies mention each principal directly (`user:<id>` / `group:<id>` / `token:<id>`). */
 export function countDirectReferences(policies: ReadonlyArray<Pick<IIamPolicy, 'cedar' | 'spec'>>): Map<string, number> {
   const counts = new Map<string, number>();

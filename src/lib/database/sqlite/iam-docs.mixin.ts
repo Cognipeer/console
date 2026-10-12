@@ -27,48 +27,62 @@ function assertCollection(collection: string): asserts collection is IamCollecti
   }
 }
 
+/**
+ * Write path: the collection's table on this tenant handle, created on first use. Exported for the code that keeps small
+ * per-record documents next to its own tables through the same lazily created collections (the identity documents of
+ * `user.mixin.ts`); everything else goes through the `iamDoc*` methods below.
+ */
+export function ensureIamCollectionTable(db: Database.Database, collection: IamCollectionName): void {
+  assertCollection(collection);
+  let ensured = ensuredHandles.get(db);
+  if (!ensured) {
+    ensured = new Set();
+    ensuredHandles.set(db, ensured);
+  }
+  if (!ensured.has(collection)) {
+    // `collection` is validated against a fixed whitelist above, so it is
+    // safe to interpolate as an identifier.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS ${collection} (
+         id TEXT PRIMARY KEY,
+         data TEXT NOT NULL,
+         updatedAt TEXT NOT NULL
+       )`,
+    );
+    ensured.add(collection);
+  }
+}
+
+/** Read path: whether the collection's table exists on this tenant handle. Never runs DDL. */
+export function iamCollectionTableExists(db: Database.Database, collection: IamCollectionName): boolean {
+  assertCollection(collection);
+  if (ensuredHandles.get(db)?.has(collection)) return true;
+  const row = db
+    .prepare(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .get(collection);
+  if (!row) return false;
+  let ensured = ensuredHandles.get(db);
+  if (!ensured) {
+    ensured = new Set();
+    ensuredHandles.set(db, ensured);
+  }
+  ensured.add(collection);
+  return true;
+}
+
 export function IamDocsMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class IamDocsOps extends Base {
     /** Returns the tenant handle with the collection's table guaranteed to exist. */
     private iamTable(collection: IamCollectionName): Database.Database {
-      assertCollection(collection);
       const db = this.getTenantDb();
-      let ensured = ensuredHandles.get(db);
-      if (!ensured) {
-        ensured = new Set();
-        ensuredHandles.set(db, ensured);
-      }
-      if (!ensured.has(collection)) {
-        // `collection` is validated against a fixed whitelist above, so it is
-        // safe to interpolate as an identifier.
-        db.exec(
-          `CREATE TABLE IF NOT EXISTS ${collection} (
-             id TEXT PRIMARY KEY,
-             data TEXT NOT NULL,
-             updatedAt TEXT NOT NULL
-           )`,
-        );
-        ensured.add(collection);
-      }
+      ensureIamCollectionTable(db, collection);
       return db;
     }
 
     /** Read path: the handle when the table exists, else null. Never runs DDL. */
     private iamTableIfExists(collection: IamCollectionName): Database.Database | null {
-      assertCollection(collection);
       const db = this.getTenantDb();
-      if (ensuredHandles.get(db)?.has(collection)) return db;
-      const row = db
-        .prepare(`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?`)
-        .get(collection);
-      if (!row) return null;
-      let ensured = ensuredHandles.get(db);
-      if (!ensured) {
-        ensured = new Set();
-        ensuredHandles.set(db, ensured);
-      }
-      ensured.add(collection);
-      return db;
+      return iamCollectionTableExists(db, collection) ? db : null;
     }
 
     private mapIamRow(row: SqliteRow): IIamDoc {

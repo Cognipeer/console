@@ -61,9 +61,11 @@ describe('people filters', () => {
 describe('group filters', () => {
   it('reads the source and the project', () => {
     expect(ok('group', { source: 'local' }).filters).toEqual({ groupSources: ['local'] });
-    expect(ok('group', { source: 'directory' }).filters).toEqual({ groupSources: ['ldap'] });
+    expect(ok('group', { source: 'directory' }).filters).toEqual({ groupSources: ['ldap', 'oidc'] });
+    expect(ok('group', { source: 'oidc' }).filters).toEqual({ groupSources: ['oidc'] });
+    expect(ok('group', { source: 'sso' }).filters).toEqual({ groupSources: ['oidc'] });
     expect(ok('group', { source: 'local,ldap', project: 'p1' }).filters).toEqual({ groupSources: ['local', 'ldap'], projectId: 'p1' });
-    expect(issues('group', { source: 'oidc' })).toEqual(['source']);
+    expect(issues('group', { source: 'saml' })).toEqual(['source']);
   });
 });
 
@@ -112,7 +114,7 @@ describe('the provider query a request becomes', () => {
   });
 
   it('turns a kind into whether the account can sign in', () => {
-    // an external account (a host application's person who uses a portal) cannot sign in either, but is neither of these
+    // an external account (a host application's person) cannot sign in either, but is neither of these
     expect(filter({ kind: 'person' })).toEqual({ tenantId: 't1', canLogin: true, external: false });
     expect(filter({ kind: 'service' })).toEqual({ tenantId: 't1', canLogin: false, external: false });
     expect(filter({ kind: 'external' })).toEqual({ tenantId: 't1', external: true });

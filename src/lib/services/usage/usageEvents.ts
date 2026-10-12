@@ -14,7 +14,7 @@
  * primary source for usage/spend reports.
  */
 
-import { getRequestContext } from '@/lib/core/requestContext';
+import { getRequestContext, type RequestVia } from '@/lib/core/requestContext';
 import type {
   IUsageAttributionFields,
   ModelUsageStatus,
@@ -26,6 +26,12 @@ import { bufferUsageIncrement } from './usageRollup';
 export interface UsageAttribution extends IUsageAttributionFields {
   requestId?: string;
   projectId?: string;
+  /**
+   * Set when an application's API token acted for the person in `userId` (`apiTokenId` is the application's token). Not a column
+   * of any log: a log that has a metadata field keeps it there as `via`; the others are already complete with the three
+   * attribution columns.
+   */
+  via?: RequestVia;
 }
 
 /** Request origin derived from the actor: 1:1 mapping today, kept as its own
@@ -77,6 +83,7 @@ export function resolveUsageAttribution(
     actorType: overrides?.actorType ?? ctx?.actorType,
     requestId: overrides?.requestId ?? ctx?.requestId,
     projectId: overrides?.projectId ?? ctx?.projectId,
+    via: overrides?.via ?? ctx?.via,
   };
 }
 
@@ -137,5 +144,6 @@ export function recordUsageEvent(event: UsageEventInput): UsageAttribution {
     actorType: attribution.actorType,
     requestId: attribution.requestId,
     projectId: attribution.projectId,
+    ...(attribution.via ? { via: attribution.via } : {}),
   };
 }

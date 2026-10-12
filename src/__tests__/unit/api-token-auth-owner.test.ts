@@ -62,7 +62,7 @@ describe('requireApiTokenFromHeader: owner state', () => {
     expect(error.message).toBe('API token owner is disabled');
   });
 
-  it('rejects an external owner (a host application person who uses a portal) with 401', async () => {
+  it('rejects an external owner (a host application person) with 401', async () => {
     h.db.findUserById.mockResolvedValue({ _id: 'u1', kind: 'external', canLogin: false });
     const error = await rejection();
     expect(error.status).toBe(401);

@@ -36,7 +36,8 @@ export function isUserDisabled(user: Pick<IUser, 'status'> | null | undefined): 
 
 /**
  * True when the account may not authenticate by any route: no login capability, disabled, or an EXTERNAL account
- * (a person of a host application who uses a portal's embed - they never sign in to the dashboard, whatever vouches for them).
+ * (a person of a host application whose identity a trusted issuer vouched for - they never sign in to the dashboard,
+ * whatever vouches for them).
  */
 export function isUserLoginBlocked(user: Pick<IUser, 'canLogin' | 'status'> & { kind?: IUser['kind'] }): boolean {
   return user.canLogin === false || user.kind === 'external' || isUserDisabled(user);

@@ -13,10 +13,14 @@
  *  - A directory-managed account (LDAP, SSO) keeps its name, email and password
  *    in the directory: they are read-only here, and the account is disabled
  *    rather than deleted (it would be created again at its next sign-in).
- *  - An EXTERNAL account (a host application's person who uses a portal's embed) is the
- *    host's: its profile follows the token, it always has the User role and no personal
- *    permissions, it joins no group that grants access, holds no API token and belongs
- *    to no project. Disabling it and deleting it stay available.
+ *  - When its directory connection also syncs roles (`roleManagedByDirectory`), the
+ *    role of such an account is the directory's too: it is recomputed at every
+ *    sign-in, so changing it by hand would be undone at once and is refused
+ *    (409 `directory_managed`). Its access and projects stay editable.
+ *  - An EXTERNAL account (a person of a host application whose identity a trusted issuer
+ *    vouched for) is the issuer's: its profile follows the assertions, it always has the
+ *    User role and no personal permissions, it joins no group that grants access, holds no
+ *    API token and belongs to no project. Disabling it and deleting it stay available.
  *
  * Nothing here reads the database or the request.
  */
@@ -47,14 +51,23 @@ export interface PolicyTarget {
   role: string;
   canLogin?: boolean | null;
   authProvider?: string | null;
-  /** `external`: a host application's person who uses a portal's embed. */
+  /** `external`: a person of a host application whose identity a trusted issuer vouched for. */
   kind?: string | null;
   status?: string | null;
   invitedBy?: string | null;
   inviteAcceptedAt?: Date | string | null;
+  /**
+   * The role of this account follows its directory at every sign-in (the connection
+   * is on and set to sync roles). A fact about the workspace's connection, not about
+   * the row: the caller asks `roleManagedPredicate` and passes the answer to `targetOf`.
+   */
+  roleManagedByDirectory?: boolean;
 }
 
-/** The facts of a stored user row the rules need (a row has `_id`, the policy speaks of `id`). */
+/**
+ * The facts of a stored user row the rules need (a row has `_id`, the policy speaks of `id`).
+ * `roleManaged` is the answer of `roleManagedPredicate` for this person.
+ */
 export function targetOf(user: {
   _id?: unknown;
   role?: string | null;
@@ -64,7 +77,7 @@ export function targetOf(user: {
   status?: string | null;
   invitedBy?: string | null;
   inviteAcceptedAt?: Date | string | null;
-}): PolicyTarget {
+}, options?: { roleManaged?: boolean }): PolicyTarget {
   return {
     id: String(user._id ?? ''),
     role: String(user.role ?? ''),
@@ -74,6 +87,7 @@ export function targetOf(user: {
     status: user.status,
     invitedBy: user.invitedBy,
     inviteAcceptedAt: user.inviteAcceptedAt,
+    ...(options?.roleManaged ? { roleManagedByDirectory: true } : {}),
   };
 }
 
@@ -186,6 +200,10 @@ export function checkRoleChange(actor: PolicyActor, target: PolicyTarget, next: 
   if (isExternal(target)) {
     return refuse(409, 'external_user', 'An external account always has the User role');
   }
+  // The directory sets this role at every sign-in: a hand-made change would be undone at once.
+  if (target.roleManagedByDirectory) {
+    return refuse(409, 'directory_managed', 'The role of this account follows your directory at every sign-in; change it there');
+  }
   return OK;
 }
 
@@ -193,6 +211,8 @@ export function checkRoleChange(actor: PolicyActor, target: PolicyTarget, next: 
 export function assignableRoles(actor: PolicyActor, target: PolicyTarget): AssignableRole[] {
   // An external account has the User role and no other; there is nothing to choose.
   if (isExternal(target)) return [];
+  // The role the person already has is an accepted no-op, which must not read as "can be changed".
+  if (target.roleManagedByDirectory) return [];
   return ASSIGNABLE_ROLES.filter((role) => checkRoleChange(actor, target, role).ok);
 }
 
@@ -210,7 +230,7 @@ export function checkPermissionsEdit(actor: PolicyActor, target: PolicyTarget): 
     return refuse(403, 'higher_privileges', 'You cannot change the permissions of an account with more privileges than yours');
   }
   if (isExternal(target)) {
-    return refuse(409, 'external_user', 'An external account has no personal permissions; what it may do comes from the portals it uses');
+    return refuse(409, 'external_user', 'An external account has no personal permissions; what it may do comes from the groups and policies that apply to it');
   }
   return OK;
 }

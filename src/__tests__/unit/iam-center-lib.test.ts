@@ -17,7 +17,6 @@ import {
   describeManagedPolicy,
   listManagedPolicyViews,
   policiesReaching,
-  policyGroupIds,
   policyReach,
   policyReferences,
   summarizeEffect,
@@ -172,17 +171,6 @@ describe('who a policy mentions', () => {
     expect(policyReferences(policy({ cedar: 'permit(principal, action, resource);' })).any).toBe(true);
     expect(policyReferences(policy({ cedar: 'permit(principal is User, action, resource);' }))).toMatchObject({ any: false, anyUser: true, anyToken: false });
     expect(policyReferences(policy({ cedar: 'permit(principal is ApiToken, action, resource);' }))).toMatchObject({ anyUser: false, anyToken: true });
-  });
-
-  it('lists the groups a policy names without parsing it: a spec\'s principals and every group literal of the Cedar', () => {
-    expect([...policyGroupIds(policy({
-      cedar: 'x', spec: { effect: 'forbid', principals: { users: ['u1'], groups: ['g1', 'g2'] }, actions: ['Read'], resources: { any: true } },
-    }))].sort()).toEqual(['g1', 'g2']);
-    expect([...policyGroupIds(policy({
-      cedar: 'forbid(principal in Group::"g-ops", action, resource) when { principal in Group::"g\\"q" || principal == User::"u1" };',
-    }))].sort()).toEqual(['g"q', 'g-ops']);
-    expect(policyGroupIds(policy({ cedar: 'permit(principal, action, resource);' })).size).toBe(0);
-    expect(policyGroupIds(policy({ cedar: 'x', spec: { effect: 'permit', principals: { any: true }, actions: ['Read'], resources: { any: true } } })).size).toBe(0);
   });
 
   it('counts direct references per principal', () => {

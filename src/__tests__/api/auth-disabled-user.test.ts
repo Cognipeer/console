@@ -60,7 +60,7 @@ const activeUser = {
   projectIds: [],
 };
 const disabledUser = { ...activeUser, status: 'disabled' as const, disabledAt: new Date() };
-// A host application's person who uses a portal's embed: never signs in to the dashboard, by any door.
+// A person of a host application whose identity a trusted issuer vouched for: never signs in to the dashboard, by any door.
 const externalUser = { ...activeUser, _id: 'ext-1', kind: 'external' as const, canLogin: false, password: '!external-account' };
 
 describe('disabled users and the auth routes', () => {

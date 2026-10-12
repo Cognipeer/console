@@ -83,6 +83,7 @@ export function IdentityBadges({
   const external = extras.kind === 'external' || summary.kind === 'external';
   const serviceAccount = !external && (extras.canLogin === false || summary.kind === 'service');
   const directoryUser = type === 'user' && (extras.managed?.directory === true || summary.managed === true);
+  const roleManaged = type === 'user' && (extras.managed?.roleFromDirectory === true || summary.roleManaged === true);
 
   return (
     <Group gap={6} mt={6} wrap="wrap">
@@ -92,7 +93,13 @@ export function IdentityBadges({
         </Badge>
       ) : null}
       {roleText && summary.role ? (
-        <Badge variant={badgeVariant(roleColor(summary.role))} color={roleColor(summary.role)} radius="sm">
+        <Badge
+          variant={badgeVariant(roleColor(summary.role))}
+          color={roleColor(summary.role)}
+          radius="sm"
+          title={roleManaged ? td('managed.roleHint') : undefined}
+          leftSection={roleManaged ? <IconLock size={11} aria-label={td('managed.roleHint')} data-testid="role-managed" /> : undefined}
+        >
           {roleText}
         </Badge>
       ) : null}

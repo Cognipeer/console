@@ -233,16 +233,22 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   updateUser(id: string, data: Partial<IUser>): Promise<IUser | null>;
   deleteUser(id: string): Promise<boolean>;
   /**
-   * The workspace's people. Accounts of kind `external` (people of a host application who use a portal's embed) are left
-   * out unless `includeExternal` asks for them: every picker and every seat count means the workspace's own people.
+   * The workspace's people. Accounts of kind `external` (people of a host application whose identity a trusted issuer
+   * vouched for) are left out unless `includeExternal` asks for them: every member list and picker means the workspace's
+   * own people.
    */
   listUsers(options?: { includeExternal?: boolean }): Promise<IUser[]>;
   /**
-   * The account that holds this identity (token issuer + subject), or null: an `external` account, or a member an
-   * earlier verified sign-in linked to it.
+   * The accounts that hold this identity (`externalIds[issuer] === subject`), oldest first (at most a handful - normally
+   * one; a second is the loser of a race between two first sign-ins). Not indexed: callers cache the answer.
    */
-  findUserByExternalIdentity(issuer: string, subject: string): Promise<IUser | null>;
-  /** How many `external` accounts the workspace has (the portal users' counter; they are not console seats). */
+  findUsersByExternalIdentity(issuer: string, subject: string): Promise<IUser[]>;
+  /**
+   * Record `externalIds[issuer] = subject` on an account unless it already holds another subject for that issuer:
+   * `linked` (written), `already` (it held exactly this one) or `conflict` (it holds a different one) or `not_found`.
+   */
+  linkUserExternalIdentity(userId: string, issuer: string, subject: string): Promise<'linked' | 'already' | 'conflict' | 'not_found'>;
+  /** How many `external` accounts the workspace has. */
   countExternalUsers(): Promise<number>;
 
   // Project membership (UserProject — replaces user.projectIds)

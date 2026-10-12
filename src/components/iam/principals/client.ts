@@ -118,12 +118,14 @@ export interface PrincipalSummary extends PrincipalRef {
   // What the directory list adds. Left `undefined` (not null) when a server does not send them.
   /** Users: the sign-in address. */
   email?: string;
-  /** Users: a person, or a service account (cannot sign in). */
+  /** Users: a person, a service account (cannot sign in) or an external account (a host application's person). */
   kind?: 'person' | 'service' | 'external';
   /** Users: where the account lives: local, ldap, oidc or saml. */
   authProvider?: string;
   /** Users: name, email and password are kept in a directory, not here. */
   managed?: boolean;
+  /** Users: the directory also decides the role at every sign-in, so it is shown as managed and not editable. */
+  roleManaged?: boolean;
   createdAt?: string;
   invitedAt?: string;
   /** Groups: local or ldap (a directory group). */
@@ -175,6 +177,7 @@ export function parsePrincipalSummary(raw: unknown, fallbackType?: PrincipalType
     summary.kind = optKind(r.kind);
     summary.authProvider = optString(r.authProvider);
     summary.managed = asBool(r.managed);
+    summary.roleManaged = asBool(r.roleManaged);
     summary.createdAt = optString(r.createdAt);
     summary.invitedAt = optString(r.invitedAt);
   } else if (type === 'group') {
@@ -218,7 +221,7 @@ export interface PrincipalPage {
   nextCursor: string | null;
   /** Exact size of the filtered view, when it was asked for. */
   total?: number;
-  /** People list, when the total was asked for: the workspace's external accounts (a host application's people who use a portal's embed). */
+  /** People list, when the total was asked for: the workspace's external accounts (people of host applications). */
   externalTotal?: number;
 }
 
@@ -553,7 +556,7 @@ export interface PrincipalExtras {
   /** Users: `local`, `ldap`, `oidc` or `saml`; `canLogin === false` is a service account (or an external one, see `kind`). */
   authProvider: string | null;
   canLogin: boolean | null;
-  /** Users: a person, a service account, or an external account (a host application's person who uses a portal's embed). */
+  /** Users: a person, a service account, or an external account (a host application's person). */
   kind: 'person' | 'service' | 'external' | null;
   /** Groups: `local` or `ldap` (directory), and the tenant role every member gets. */
   source: string | null;
@@ -584,6 +587,8 @@ export interface ManagedInfo {
   directory: boolean;
   provider: string | null;
   readOnly: string[];
+  /** The role follows the directory at every sign-in (its connection syncs roles). */
+  roleFromDirectory: boolean;
 }
 
 /** One thing the viewer may or may not do to the principal, with the reason when not. */
@@ -633,6 +638,7 @@ export function parseManaged(raw: unknown): ManagedInfo | null {
     directory: r.directory === true,
     provider: asString(r.provider),
     readOnly: asArray(r.readOnly).filter((x): x is string => typeof x === 'string'),
+    roleFromDirectory: r.roleFromDirectory === true,
   };
 }
 

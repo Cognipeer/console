@@ -27,7 +27,6 @@ export const TABLES = {
   tenants: 'tenants',
   tenantUserDirectory: 'tenant_user_directory',
   users: 'users',
-  userExternalIdentities: 'user_external_identities',
   auditLogs: 'audit_logs',
   projects: 'projects',
   apiTokens: 'api_tokens',
@@ -1045,11 +1044,6 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.users, 'disabledAt', 'disabledAt TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledBy', 'disabledBy TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledReason', 'disabledReason TEXT');
-    // External accounts (people of a host application who use a portal's embed). All nullable with no default:
-    // NULL reads back as "a member" (kind) and "no identities", so existing rows need no backfill.
-    this.ensureTableColumn(db, TABLES.users, 'kind', 'kind TEXT');
-    this.ensureTableColumn(db, TABLES.users, 'source', 'source TEXT');
-    this.ensureTableColumn(db, TABLES.users, 'externalIdentities', 'externalIdentities TEXT');
     // Quota group scope: 'perMember' | 'shared'. Nullable with no default — a
     // NULL is read back as `undefined`, which the guard treats as perMember, and
     // only `scope = 'group'` rows carry it, so existing rows need no backfill.
@@ -1133,8 +1127,6 @@ export class SQLiteProviderBase {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_groups_externalId
         ON ${TABLES.groups}(tenantId, externalId);
-      CREATE INDEX IF NOT EXISTS idx_users_kind
-        ON ${TABLES.users}(kind);
       CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_startedAt
         ON ${TABLES.agentTracingSessions}(projectId, startedAt DESC);
       CREATE INDEX IF NOT EXISTS idx_tracing_sessions_project_createdAt

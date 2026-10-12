@@ -22,6 +22,10 @@ export type PeopleAuditEvent =
   | 'user.bulk'
   | 'group.member.add'
   | 'group.member.remove'
+  // verified identities (lib/iam/delegatedIdentity.ts): an account created for one, an account linked to one, a group created for an issuer
+  | 'user.jit.create'
+  | 'user.identity.link'
+  | 'group.jit.create'
   | 'token.revoke';
 
 export interface PeopleAuditActor {
@@ -36,6 +40,21 @@ export interface PeopleAuditActor {
   /** The request that caused the change, as the generic audit row would have recorded it. */
   method?: string;
   path?: string;
+}
+
+/** Who an audit row names: a person or token acting in a request, or the system (see `directoryAuditActor`). */
+export type PeopleAuditWriter = Omit<PeopleAuditActor, 'type'> & { type: PeopleAuditActor['type'] | 'system' };
+
+/**
+ * The actor of a change a directory sign-in made (`directory:oidc`, `directory:ldap`): the
+ * system, not a person. The rows it writes are the same semantic rows the screens
+ * write (`user.role.change`, `group.member.add`, `group.member.remove`).
+ */
+export function directoryAuditActor(
+  source: 'oidc' | 'ldap',
+  request?: Pick<PeopleAuditActor, 'requestId' | 'ipAddress' | 'userAgent'>,
+): PeopleAuditWriter {
+  return { type: 'system', userId: `directory:${source}`, ...(request ?? {}) };
 }
 
 export interface PeopleAuditEntry {
@@ -55,7 +74,7 @@ const SERVICE_OF: Record<PeopleAuditEntry['resourceType'], PermissionService> = 
 
 export function recordPeopleAudit(
   tenant: { tenantDbName: string; tenantId: string },
-  actor: PeopleAuditActor,
+  actor: PeopleAuditWriter,
   entry: PeopleAuditEntry,
 ): void {
   criticalFireAndForget('people-audit', () => runWithTenantScope(tenant.tenantDbName, () => recordAuditLog(

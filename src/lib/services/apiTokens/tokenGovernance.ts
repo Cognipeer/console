@@ -25,8 +25,8 @@ export interface TokenOwnerFacts {
 }
 
 /**
- * An external account (a host application's person who uses a portal's embed) holds no API tokens, whoever asks:
- * minting one in its name is refused with this body.
+ * An external account (a person of a host application whose identity a trusted issuer vouched for) holds no API tokens,
+ * whoever asks: minting one in its name is refused with this body.
  */
 export const EXTERNAL_TOKEN_OWNER_REFUSAL = {
   error: 'External users cannot hold API tokens',

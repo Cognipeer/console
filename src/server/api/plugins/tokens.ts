@@ -11,6 +11,17 @@ import { recordPeopleAudit } from '@/lib/services/users/peopleAudit';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
 import { MAX_ALLOWED_IP_RANGES } from '@/lib/services/apiTokens/ipAllowlist';
 import { recordTokenRestrictionChange, type TokenRestrictionChange } from '@/lib/services/apiTokens/restrictionAudit';
+import { recordTokenDelegationChange } from '@/lib/services/apiTokens/delegationAudit';
+import { authz } from '@/lib/iam/routeAuthz';
+import {
+  deleteTokenDelegation,
+  delegationAuditSnapshot,
+  dropTokenDelegation,
+  getTokenDelegation,
+  parseDelegationInput,
+  putTokenDelegation,
+  toDelegationView,
+} from '@/lib/iam/tokenDelegation';
 import {
   canActOnTokensOf,
   EXTERNAL_TOKEN_OWNER_REFUSAL,
@@ -629,6 +640,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
             continue;
           }
           await invalidateApiTokenAuthCache(target.token.tokenHash);
+          await dropTokenDelegation(session.tenantDbName, id);
           recordPeopleAudit(session, actor, {
             event: 'token.revoke',
             resourceType: 'token',
@@ -710,6 +722,122 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
+  // ── acting for users ────────────────────────────────────────────────────────────────────────────────────────────
+  // What an application's token may do on behalf of the people the application vouches for (lib/iam/tokenDelegation.ts).
+  // Owners and admins only - by the live account, never the session's claim - and never upward: the same rule as every other
+  // edit of someone's token (the owner touches everyone's, an admin everyone's but the owner's). Setting it up lets the
+  // token act as OTHER accounts, so it is an access-rule change: it is audited with what it was and what it became (no secrets).
+
+  /** The token the caller may set up delegation for, or the reply that says why not. */
+  const delegationTarget = async (
+    request: FastifyRequest,
+    reply: Parameters<Parameters<typeof withApiRequestContext>[0]>[1],
+  ) => {
+    const session = requireSessionContext(request);
+    const live = request.rbacUser;
+    if (!live || (live.role !== 'owner' && live.role !== 'admin')) {
+      reply.code(403).send({ error: 'Only owners and admins can set up acting for users', code: 'forbidden' });
+      return null;
+    }
+    const { id } = request.params as { id: string };
+    const db = await getDatabase();
+    const target = await resolveManageableToken(db, { tenantId: session.tenantId, userId: session.userId, userRole: live.role }, id);
+    if (!target.ok) {
+      if (target.reason === 'forbidden') reply.code(403).send({ error: 'Forbidden', code: 'higher_privileges' });
+      else reply.code(404).send({ error: 'Token not found', code: 'token_not_found' });
+      return null;
+    }
+    return { session, live, db, token: target.token, tokenId: String(id) };
+  };
+
+  const auditDelegation = (
+    request: FastifyRequest,
+    ctx: { session: ReturnType<typeof requireSessionContext>; live: { role: string }; token: IApiToken; tokenId: string },
+    change: 'created' | 'updated' | 'removed',
+    before: Record<string, unknown> | null,
+    after: Record<string, unknown> | null,
+  ) => {
+    const userAgent = request.headers['user-agent'];
+    try {
+      recordTokenDelegationChange({
+        tenantId: ctx.session.tenantId,
+        tenantDbName: ctx.session.tenantDbName,
+        actorUserId: ctx.session.userId,
+        actorEmail: ctx.session.userEmail,
+        actorRole: ctx.live.role,
+        requestId: request.apiRequestId,
+        ipAddress: getClientIp(request),
+        userAgent: typeof userAgent === 'string' ? userAgent : undefined,
+        method: request.method,
+        path: canonicalizeRequestPathname(request.raw.url),
+        tokenId: ctx.tokenId,
+        label: ctx.token.label,
+        ownerUserId: String(ctx.token.userId),
+        projectId: ctx.token.projectId ? String(ctx.token.projectId) : undefined,
+        change,
+        before,
+        after,
+      });
+    } catch (error) {
+      logger.warn('Could not audit a token delegation change', { error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  app.get('/tokens/:id/delegation', { config: authz.service('tokens', 'admin') }, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await delegationTarget(request, reply);
+      if (!ctx) return reply;
+      const stored = await getTokenDelegation(ctx.session.tenantDbName, ctx.tokenId);
+      return reply.code(200).send({
+        delegation: stored ? toDelegationView(stored) : null,
+        // A token that acts for people is only as narrow as its own scope: the screen says so for an unscoped one.
+        tokenScoped: ctx.token.servicePermissions !== null && ctx.token.servicePermissions !== undefined,
+      });
+    } catch (error) {
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.put('/tokens/:id/delegation', { config: { ...authz.service('tokens', 'admin'), skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await delegationTarget(request, reply);
+      if (!ctx) return reply;
+      const body = readBodyObject(request);
+      if (!body) {
+        return reply.code(400).send({ error: 'The request body must be a JSON object', code: 'invalid_body' });
+      }
+      const before = await getTokenDelegation(ctx.session.tenantDbName, ctx.tokenId);
+      const parsed = parseDelegationInput(body, before?.config ?? null);
+      if (!parsed.ok) {
+        return reply.code(400).send({ error: parsed.problems[0]?.message ?? 'Invalid settings', code: 'invalid_body', problems: parsed.problems });
+      }
+      const stored = await putTokenDelegation(ctx.session.tenantDbName, ctx.tokenId, parsed.config, ctx.session.userId);
+      auditDelegation(request, ctx, before ? 'updated' : 'created', delegationAuditSnapshot(before?.config ?? null), delegationAuditSnapshot(parsed.config));
+      return reply.code(200).send({
+        delegation: toDelegationView(stored),
+        tokenScoped: ctx.token.servicePermissions !== null && ctx.token.servicePermissions !== undefined,
+      });
+    } catch (error) {
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.delete('/tokens/:id/delegation', { config: { ...authz.service('tokens', 'admin'), skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
+    try {
+      const ctx = await delegationTarget(request, reply);
+      if (!ctx) return reply;
+      const before = await getTokenDelegation(ctx.session.tenantDbName, ctx.tokenId);
+      const deleted = await deleteTokenDelegation(ctx.session.tenantDbName, ctx.tokenId);
+      if (deleted) auditDelegation(request, ctx, 'removed', delegationAuditSnapshot(before?.config ?? null), null);
+      return reply.code(200).send({ deleted });
+    } catch (error) {
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
   app.delete('/tokens/:id', withApiRequestContext(async (request, reply) => {
     try {
       const { id } = request.params as { id: string };
@@ -755,6 +883,8 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       await invalidateApiTokenAuthCache(tokenHash);
+      // what the token was set up to act for goes with it (nothing reads it any more; this only tidies)
+      await dropTokenDelegation(session.tenantDbName, id);
 
       return reply.code(200).send({ message: 'API token deleted successfully' });
     } catch (error) {

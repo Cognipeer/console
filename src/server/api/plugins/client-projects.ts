@@ -183,7 +183,7 @@ export const clientProjectsApiPlugin: FastifyPluginAsync = async (app) => {
       if (target.role === 'owner' || target.role === 'admin') {
         return reply.code(400).send({ error: 'Owners and admins are implicitly assigned to all projects' });
       }
-      // A host application's person who uses a portal's embed belongs to no project.
+      // A host application's person belongs to no project.
       if (target.kind === 'external') {
         return reply.code(400).send({ error: 'External users cannot be project members', code: 'external_user' });
       }

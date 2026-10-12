@@ -12,6 +12,7 @@ import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
 import type { IUser } from '@/lib/database';
+import { dropTokenDelegation } from '@/lib/iam/tokenDelegation';
 import type { PermissionService } from '@/lib/security/rbac';
 import { recordAuditLog } from '@/lib/services/audit/auditService';
 import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
@@ -220,6 +221,8 @@ export async function revokeUserApiTokens(
       if (deleted) {
         revoked += 1;
         revokedIds.push(tokenId);
+        // what the token was set up to act for goes with it (best effort: nothing reads it any more)
+        await dropTokenDelegation(tenantDbName, tokenId);
       }
       // Legacy rows may carry only the plaintext token; hash it so the cache
       // entry the auth path would have written is still found.

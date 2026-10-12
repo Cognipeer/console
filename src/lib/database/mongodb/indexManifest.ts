@@ -56,16 +56,6 @@ export const MAIN_DB_INDEXES: Record<string, IndexDef[]> = {
  * intentionally omitted to avoid duplicate/conflicting index names.
  */
 export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
-  // External accounts (people of a host application who use a portal's embed): found again by the identity the host's
-  // token names (issuer + subject, a multikey index over the identities array), and counted by kind.
-  users: [
-    {
-      key: { 'externalIdentities.issuer': 1, 'externalIdentities.subject': 1 },
-      // Unique per identity, so two first sign-ins of the same person cannot create two accounts (members have none: partial).
-      options: { name: 'idx_external_identity', unique: true, partialFilterExpression: { 'externalIdentities.issuer': { $exists: true } } },
-    },
-    { key: { kind: 1 }, options: { name: 'idx_kind' } },
-  ],
   audit_logs: [
     { key: { createdAt: -1 }, options: { name: 'idx_createdAt' } },
     { key: { service: 1, action: 1, createdAt: -1 }, options: { name: 'idx_service_action_createdAt' } },

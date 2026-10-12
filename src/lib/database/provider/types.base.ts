@@ -130,12 +130,6 @@ export interface IPromptComment {
   updatedAt?: Date;
 }
 
-/** One identity of a person in a host application's directory (token issuer + subject). */
-export interface IUserExternalIdentity {
-  issuer: string;
-  subject: string;
-}
-
 export interface IUser {
   _id?: ObjectId | string;
   /** May be an empty string for a "Programmatic User" (canLogin=false) — a deliberate design choice to avoid a SQLite NOT NULL migration, not a bug. */
@@ -165,21 +159,18 @@ export interface IUser {
   /** Stable identifier from the external directory (e.g. LDAP entry DN). */
   externalId?: string;
   /**
-   * What kind of account this is. Missing means `member` (every row written before this field existed): a person of the
-   * workspace. `external` is a person of a HOST APPLICATION who reached a portal through its embed with an identity the host
-   * signed: no password, no dashboard sign-in, no API tokens, left out of the workspace's pickers and seat counts, listed in
-   * the Authorization center with a badge. See lib/services/users/externalUsers.ts.
+   * What kind of account this is. Missing means `member` (every row written before this field existed): a person of
+   * the workspace. `external` is a person of a HOST APPLICATION whose identity a trusted issuer vouched for (see
+   * lib/iam/delegatedIdentity.ts): no password, no dashboard sign-in, no API tokens, left out of the workspace's member
+   * lists and pickers, always the User role, listed in the Authorization center with a badge.
    */
   kind?: 'member' | 'external';
-  /** How an `external` account came to be (`portal-embed`); absent for members. */
-  source?: string;
   /**
-   * The identities an account holds in host applications' directories: the issuer of the signed token and the subject
-   * (`sub`) it names. An `external` account is created with one; a member gets one (at most one per issuer) when a host's
-   * token with a VERIFIED email first matches them, so the same person is found again by identity at their next sign-in.
-   * Indexed. Not the LDAP / SSO `externalId` above.
+   * The identities this account has at issuers whose signed assertions the workspace trusts: issuer -> subject (`sub`).
+   * Not the LDAP / SSO `externalId` above. At most one subject per issuer; the account is found again by it
+   * (`findUsersByExternalIdentity`). Not indexed: the lookup scans the workspace's accounts, so callers cache what it finds.
    */
-  externalIdentities?: IUserExternalIdentity[];
+  externalIds?: Record<string, string>;
   invitedBy?: string;
   invitedAt?: Date;
   inviteAcceptedAt?: Date;
@@ -1278,9 +1269,13 @@ export interface IUserProject {
 
 // ── Groups / Teams ─────────────────────────────────────────────────────────
 
-/** Origin of a group or membership record. LDAP-sourced rows are reconciled
- *  on each directory login and must not be hand-edited in the console. */
-export type GroupSource = 'local' | 'ldap';
+/** Origin of a group or membership record. Rows that come from a directory
+ *  (`ldap`, `oidc`) are reconciled on each directory sign-in and must not be
+ *  hand-edited in the console; `local` rows are never touched by a sync.
+ *  `delegated`: a group created for the issuer of verified identity assertions,
+ *  whose members follow the assertions' group claim (lib/iam/delegatedGroups.ts);
+ *  like a directory group it is not edited by hand. */
+export type GroupSource = 'local' | 'ldap' | 'oidc' | 'delegated';
 
 /**
  * A named group of users within a tenant (team, department, squad, etc.).
@@ -1318,10 +1313,8 @@ export interface IGroupMember {
   /** Whether the user can manage group membership. */
   role: 'admin' | 'member';
   /** Where the membership came from. LDAP-sourced rows are reconciled on
-   *  directory login; local rows are never touched by the sync. Defaults to 'local'.
-   *  `portal-embed`: added from the groups claim of a host application's token (external users, see
-   *  lib/services/users/externalUsers.ts); only those rows are ever removed by that sync. */
-  source?: GroupSource | 'portal-embed';
+   *  directory login; local rows are never touched by the sync. Defaults to 'local'. */
+  source?: GroupSource;
   addedBy?: string;
   createdAt?: Date;
 }

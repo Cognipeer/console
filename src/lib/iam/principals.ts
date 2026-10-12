@@ -28,6 +28,7 @@ import { probeServiceLevel } from './effective';
 import { buildEnforcePrincipalWithNarrowing } from './enforce';
 import { userPrincipal, type IamPrincipal } from './entities';
 import { groupToGrant, loadUserGroups } from './groupGrants';
+import { userKind } from './identity';
 import { listPolicies } from './store';
 import { countDirectReferences, policyReferences, toPolicyRows, type PolicyRow } from './policyRows';
 import { getDefaultProjectId, narrowLevel, type NarrowingResult } from './projectNarrowing';
@@ -621,6 +622,7 @@ export async function getPrincipalDetail(
         email: evaluation.user.email || '',
         authProvider: evaluation.user.authProvider ?? 'local',
         canLogin: evaluation.user.canLogin !== false,
+        kind: userKind(evaluation.user),
       }
     : {
         type: 'token',

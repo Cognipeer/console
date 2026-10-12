@@ -103,10 +103,14 @@ import type { FastifyInstance } from 'fastify';
  *     `.test` (the two flags only the portal runtime may set), `simulatePortalView`
  *     and the `group` audience of the Access check (`@/lib/iam/viewAs`,
  *     `@/lib/iam/simulate`), `validatePortalNetworks` / `checkPortalNetwork`
- *     (`@/lib/iam/portalNetworks`), and external users: `IUser.kind` /
- *     `.source` / `.externalIdentities`, `findUserByExternalIdentity`,
- *     `countExternalUsers`, `listUsers({ includeExternal })` and
- *     `resolveExternalUser` (`@/lib/services/users/externalUsers`). An overlay that
+ *     (`@/lib/iam/portalNetworks`), and the people of a host application, which
+ *     are the shared verified-identity core (not an embed-only model): the
+ *     assertion check `verifyIdentityAssertion` / `validateIdentityAssertionTrust`
+ *     (`@/lib/iam/identityAssertion`), the resolver `resolveDelegatedPrincipal` /
+ *     `validateDelegatedMapping` (`@/lib/iam/delegatedIdentity`), and the data
+ *     they rest on: `IUser.kind` / `.externalIds`, `findUsersByExternalIdentity`,
+ *     `linkUserExternalIdentity`, `countExternalUsers` and
+ *     `listUsers({ includeExternal })`. An overlay that
  *     passes `networks` to the policy engine against a tree without them would run
  *     its portal unrestricted, which is why the pairing is checked at the seam.
  */

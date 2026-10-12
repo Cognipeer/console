@@ -80,7 +80,9 @@ describe('parseListState', () => {
   it('token statuses are active|expired (invited and disabled are people statuses)', () => {
     expect(parseListState('token', read('status=invited')).status).toBe('');
     expect(parseListState('user', read('status=expired')).status).toBe('');
-    expect(parseListState('group', read('source=oidc')).source).toBe('');
+    // a group comes from this workspace, LDAP or single sign-on; "saml" names an account source, not a group's
+    expect(parseListState('group', read('source=saml')).source).toBe('');
+    expect(parseListState('group', read('source=oidc')).source).toBe('oidc');
     expect(parseListState('group', read('source=directory')).source).toBe('directory');
   });
 });

@@ -6,7 +6,7 @@
  * Effective permissions are the union of a user's direct grants and the grants
  * of every group they belong to (highest level wins — see lib/security/rbac).
  *
- * Owner/admin only. Directory-sourced groups (`source: 'ldap'`) have their
+ * Owner/admin only. Directory-sourced groups (`source: 'ldap'` or `'oidc'`) have their
  * membership reconciled by the external-auth sync and reject manual membership
  * edits / deletion here; their grants remain editable.
  */
@@ -264,7 +264,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
       }
       if (isGroupDirectoryManaged(group)) {
-        return reply.code(409).send({ error: 'Directory-synced groups are managed by LDAP and cannot be deleted here', code: 'group_directory_managed' });
+        return reply.code(409).send({ error: 'Directory-synced groups are managed by the directory and cannot be deleted here', code: 'group_directory_managed' });
       }
 
       await db.deleteGroupMembersByGroup(id);
@@ -299,7 +299,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
       }
       if (isGroupDirectoryManaged(group)) {
-        return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by LDAP', code: 'group_directory_managed' });
+        return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by the directory', code: 'group_directory_managed' });
       }
 
       const target = await findUserByIdSafe(db, userId, session.tenantId);
@@ -344,7 +344,7 @@ export const groupsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ error: 'Group not found', code: 'group_not_found' });
       }
       if (isGroupDirectoryManaged(group)) {
-        return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by LDAP', code: 'group_directory_managed' });
+        return reply.code(409).send({ error: 'Membership of directory-synced groups is managed by the directory', code: 'group_directory_managed' });
       }
 
       const removed = await db.removeGroupMember(id, userId);

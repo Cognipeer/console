@@ -113,7 +113,10 @@ describe.each(Object.entries(locales))('audit feed sentences [%s]', (_name, mess
     const sessions = ['approve', 'approvePolicy', 'approveInPortal', 'approveInPortalPolicy', 'sessionView', 'sessionViewPolicy', 'sessionManage', 'sessionManagePolicy'].map((key) => `denied.${key}`); // a refusal about a session of an agent
     const buckets = ['bucketChoose', 'bucketChoosePolicy', 'bucketName', 'bucketNamePolicy'].map((key) => `denied.${key}`); // a refusal about the bucket an agent keeps its files in
     const ip = ['ipNotAllowed', 'ipNotAllowedAt']; // key: row.path ? 'ipNotAllowedAt' : 'ipNotAllowed'
-    const keys = uniq([...literal, ...denied, ...portal, ...sessions, ...buckets, ...ip]);
+    // a call that tried to act for a person and was refused: one sentence per typed reason (DELEGATION_SENTENCES)
+    const delegation = [...source.matchAll(/'(delegationRefused\.[A-Za-z]+)'/g)].map((m) => m[1]);
+    expect(delegation.length).toBeGreaterThanOrEqual(12);
+    const keys = uniq([...literal, ...denied, ...portal, ...sessions, ...buckets, ...ip, ...delegation]);
     expect(keys).toEqual(expect.arrayContaining(['undeclared', 'unavailable', 'ipNotAllowed', 'policy.created', 'policy.updated', 'policy.deleted', 'settings.updated', 'token.restrictions', 'denied.noRule']));
     const missing = keys.filter((key) => typeof resolve(messages, `iamAudit.summaries.${key}`) !== 'string');
     expect(missing).toEqual([]);
@@ -126,7 +129,7 @@ describe.each(Object.entries(locales))('audit feed sentences [%s]', (_name, mess
   });
 
   it('names every code a denial can carry, "authorization unavailable" included', () => {
-    for (const code of ['forbidden', 'route_not_declared', 'ip_not_allowed', 'authorization_unavailable']) {
+    for (const code of ['forbidden', 'route_not_declared', 'ip_not_allowed', 'authorization_unavailable', 'delegation_refused']) {
       expect(typeof resolve(messages, `iamAudit.codes.${code}`), code).toBe('string');
     }
   });
