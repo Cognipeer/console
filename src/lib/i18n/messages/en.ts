@@ -1198,6 +1198,7 @@ export const en = {
         use: 'Use a {type}',
         approve: 'Approve the tool calls of a {type}',
         session_view_others: 'View sessions of a {type} that others started',
+        conversations_view: 'View the conversations of a {type}',
         session_manage_others: 'Act on sessions of a {type} that others started',
       },
     },

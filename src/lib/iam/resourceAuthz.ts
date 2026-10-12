@@ -71,6 +71,8 @@ let lastUnusableLogAt = 0;
 
 export const RESOURCE_AUTHZ_ACTIONS = [
   'portal.use',
+  // The conversations tab of a portal (dashboard, API): reading what its people said.
+  'portal.conversations_view',
   'agent.invoke',
   'agent.approve',
   'agent.session_view_others',

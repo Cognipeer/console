@@ -1007,6 +1007,7 @@ export const tr: typeof en = {
         use: 'Kullan: {type}',
         approve: '{type} araç çağrılarını onayla',
         session_view_others: 'Başkalarının başlattığı {type} oturumlarını görüntüle',
+        conversations_view: '{type} konuşmalarını görüntüle',
         session_manage_others: 'Başkalarının başlattığı {type} oturumlarında işlem yap',
       },
     },

@@ -85,6 +85,9 @@ export const RESOURCE_CRUD_VERBS: ReadonlyArray<{ verb: string; level: ActionLev
 /** Execution verbs bound to one specific resource type. */
 export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; level: ActionLevel }> = [
   { type: 'agent', verb: 'invoke', level: 'write' },
+  // Reading what the people of a portal said to its agents. Admin level on purpose: it is not part of the portal's Read or
+  // Write group, so only those who hold the portals Admin level (owners and administrators) have it until a policy grants it.
+  { type: 'portal', verb: 'conversations_view', level: 'admin' },
   // Session verbs. A session is the conversation of one person with an agent; these decide what
   // somebody ELSE may do with it. They sit in the Read / Write groups, so by default every
   // `agents` reader / writer holds them (today's behaviour) and a deny rule narrows them.
@@ -117,6 +120,7 @@ export const RESOURCE_EXTRA_VERBS: ReadonlyArray<{ type: string; verb: string; l
  */
 export const RUNTIME_ENFORCED_ACTIONS: Readonly<Record<string, readonly IamChannel[]>> = Object.freeze({
   'portal.use': ['portal'],
+  'portal.conversations_view': ['dashboard', 'api'],
   'agent.invoke': ['portal'],
   'agent.approve': ['dashboard', 'api', 'portal'],
   'agent.session_view_others': ['dashboard', 'api'],
