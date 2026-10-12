@@ -278,6 +278,17 @@
       "aliases": ["s3", "minio", "s3-compatible"]
     },
     {
+      "id": "mongodb-gridfs-files",
+      "driver": "mongodb-gridfs-files",
+      "name": "MongoDB GridFS",
+      "tagline": "File storage inside MongoDB",
+      "description": "Store files in MongoDB GridFS — no S3 or volume needed. Reuses the app's own MongoDB connection when DB_PROVIDER=mongodb, or point it at a separate MongoDB.",
+      "domains": ["file"],
+      "color": "#47a248",
+      "tags": ["self-hosted"],
+      "aliases": ["gridfs", "mongo-files", "mongodb-files"]
+    },
+    {
       "id": "local-filesystem",
       "driver": "local-filesystem",
       "name": "Local filesystem",
