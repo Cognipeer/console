@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDb } from '../helpers/db.mock';
 
-vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 import { getDatabase } from '@/lib/database';
 import { authApiPlugin } from '@/server/api/plugins/auth';
@@ -94,10 +101,25 @@ describe('auth misc routes', () => {
         authenticated: boolean;
         role: string;
         projectCount: number;
+        effectivePermissions: Record<string, string> | null;
+        effectiveProjectId: string | null;
       }>(res.body);
       expect(body.authenticated).toBe(true);
       expect(body.role).toBe('owner');
       expect(body.projectCount).toBe(2);
+      // what the engine allows the user, for navigation: an owner reaches admin level everywhere
+      expect(body.effectivePermissions).toMatchObject({ agents: 'admin', models: 'admin', members: 'admin', iam: 'admin' });
+      expect(Object.values(body.effectivePermissions ?? {}).every((level) => level === 'admin')).toBe(true);
+      expect(body).toHaveProperty('effectiveProjectId');
+    });
+
+    it('still answers when the engine cannot say what the user may do: the levels are null', async () => {
+      // the levels are a hint for the menu; they must never cost the user the session itself
+      db.listProjects.mockRejectedValue(new Error('projects unavailable'));
+      const res = await session(validHeaders);
+      expect(res.statusCode).toBe(200);
+      const body = parseJsonBody<{ authenticated: boolean; effectivePermissions: unknown; effectiveProjectId: unknown }>(res.body);
+      expect(body).toMatchObject({ authenticated: true, effectivePermissions: null, effectiveProjectId: null });
     });
 
     it('returns mustChangePassword flag', async () => {

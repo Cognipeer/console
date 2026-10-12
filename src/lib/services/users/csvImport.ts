@@ -239,11 +239,16 @@ export async function importProgrammaticUsers(args: {
   /** Tenant licence type, stored on the record exactly as the invite route does. */
   licenseId: string;
   createdBy?: string;
+  /**
+   * The workspace's users, when the caller has just read them (the route does, for the quota
+   * arithmetic): the import then does not read the table a second time.
+   */
+  existing?: ReadonlyArray<{ name?: string | null; email?: string | null }>;
   /** Re-checked mid-batch with the live user count (existing + created so far). */
   checkQuota?: (currentCount: number) => Promise<{ allowed: boolean; reason?: string }>;
 }): Promise<CsvImportOutcome> {
   const db = await getDatabase();
-  const existing = await db.listUsers();
+  const existing = args.existing ?? await db.listUsers();
   const byEmail = new Set(existing.filter((u) => u.email).map((u) => String(u.email).toLowerCase()));
   const byName = new Set(existing.map((u) => String(u.name ?? '').toLowerCase()));
 

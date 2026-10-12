@@ -21,8 +21,12 @@ Before you run Cognipeer Console outside local development, do the following:
 - set `PROVIDER_ENCRYPTION_SECRET` explicitly instead of relying on the JWT fallback,
 - keep `.env.local` and runtime secrets out of version control,
 - review CORS settings before exposing `/api/client/*` endpoints to browsers,
-- use HTTPS and trusted ingress or reverse proxies,
+- use HTTPS and trusted ingress or reverse proxies, and list them in `TRUSTED_PROXIES` so IP allowlists and IP rules see the real client address,
 - separate dev, staging, and production credentials.
+
+## Access Control
+
+One policy engine decides every request of every workspace. Roles, per-user and group permissions, project member permissions and API token scopes are turned into decisions by built-in policies that custom policies cannot cross; a request the engine cannot decide is refused (`503`), never allowed. The workspace owner can always repair the policies. See [Authorization](/guide/authorization), and [Upgrading to the policy engine](/guide/upgrading-to-the-policy-engine) before moving an existing installation.
 
 ## Secret Handling
 

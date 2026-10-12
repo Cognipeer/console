@@ -11,6 +11,9 @@ version line and cover both the community and enterprise channels.
   open-source release
 - [Enterprise releases](/releases/enterprise) — the `-saas` sequence
 
+Changes that are merged and not yet part of a release are listed under *Unreleased* in the repository's
+[`CHANGELOG.md`](https://github.com/Cognipeer/cognipeer-console/blob/main/CHANGELOG.md).
+
 This page previously documented the community edition's original `1.0.0` and
 `1.1.0` numbering. That numbering was retired when the community edition adopted
 the platform version line at `v1.2.14-community`; its content now lives under

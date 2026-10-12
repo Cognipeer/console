@@ -33,6 +33,15 @@ All application configuration is managed through the central `getConfig()` funct
 | `JWT_EXPIRES_IN` | JWT token expiry | `7d` |
 | `PROVIDER_ENCRYPTION_SECRET` | Encryption key for provider credentials | Falls back to `JWT_SECRET` |
 
+### Network & Authorization
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TRUSTED_PROXIES` | Comma-separated IPs / CIDRs of the reverse proxies or load balancers allowed to set `X-Forwarded-For`. Token IP allowlists and the IP condition of access policies use the address resolved through them; unset, they use the direct connection address and ignore forwarded headers. | — |
+| `IAM_VALIDATE_REQUESTS` | Set to `1` to validate every authorization request against the engine's schema (diagnostics; adds about 0.1 ms per decision). | off |
+
+There is no switch for the authorization engine itself: it decides every request. See [Authorization](/guide/authorization).
+
 ### Registration
 
 | Variable | Description | Default |

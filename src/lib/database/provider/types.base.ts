@@ -158,6 +158,19 @@ export interface IUser {
   authProvider?: 'local' | 'ldap' | 'oidc' | 'saml';
   /** Stable identifier from the external directory (e.g. LDAP entry DN). */
   externalId?: string;
+  /**
+   * What kind of account this is. Missing means `member` (every row written before this field existed): a person of
+   * the workspace. `external` is a person of a HOST APPLICATION whose identity a trusted issuer vouched for (see
+   * lib/iam/delegatedIdentity.ts): no password, no dashboard sign-in, no API tokens, left out of the workspace's member
+   * lists and pickers, always the User role, listed in the Authorization center with a badge.
+   */
+  kind?: 'member' | 'external';
+  /**
+   * The identities this account has at issuers whose signed assertions the workspace trusts: issuer -> subject (`sub`).
+   * Not the LDAP / SSO `externalId` above. At most one subject per issuer; the account is found again by it
+   * (`findUsersByExternalIdentity`). Not indexed: the lookup scans the workspace's accounts, so callers cache what it finds.
+   */
+  externalIds?: Record<string, string>;
   invitedBy?: string;
   invitedAt?: Date;
   inviteAcceptedAt?: Date;
@@ -234,6 +247,13 @@ export interface IApiToken {
   lastUsed?: Date;
   createdAt?: Date;
   expiresAt?: Date;
+  /**
+   * Optional network allowlist: CIDR ranges (IPv4 / IPv6; a bare address means
+   * /32 or /128) the token may authenticate from. `null` / `undefined` / `[]`
+   * = unrestricted, which is every token minted before this field existed.
+   * Enforced in token authentication, before anything else is decided.
+   */
+  allowedIpRanges?: string[] | null;
 }
 
 export interface ITenantUserDirectoryEntry {
@@ -897,10 +917,30 @@ export interface IFileRecord {
   markdownError?: string;
   markdownSize?: number;
   markdownContentType?: string;
+  /** Set on a file uploaded to an agent session (stored in the bucket the agent's `attachments.bucketKey` names); absent on every other file. */
+  purpose?: 'conversation';
+  conversationId?: string;
+  agentKey?: string;
+  /** When the retention cleanup removes the file (session files only). */
+  expiresAt?: Date | null;
+  /** Who uploaded it (session files); `createdBy` stays the principal the file service was called as. */
+  uploadedBy?: string;
   createdBy: string;
   updatedBy?: string;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+/** Which files a listing keeps: only session files, or only the ones uploaded some other way. */
+export type FileListPurpose = 'conversation' | 'other';
+
+/** One page of a bucket seen as folders: the sub-folders and the files directly in the folder. */
+export interface IFileEntriesPage {
+  /** Full folder paths (each ends with `/`), in key order. */
+  folders: string[];
+  items: IFileRecord[];
+  /** Pass back as `cursor` for the next page; absent on the last page. */
+  nextCursor?: string;
 }
 
 export interface ISemanticCacheConfig {
@@ -1229,9 +1269,13 @@ export interface IUserProject {
 
 // ── Groups / Teams ─────────────────────────────────────────────────────────
 
-/** Origin of a group or membership record. LDAP-sourced rows are reconciled
- *  on each directory login and must not be hand-edited in the console. */
-export type GroupSource = 'local' | 'ldap';
+/** Origin of a group or membership record. Rows that come from a directory
+ *  (`ldap`, `oidc`) are reconciled on each directory sign-in and must not be
+ *  hand-edited in the console; `local` rows are never touched by a sync.
+ *  `delegated`: a group created for the issuer of verified identity assertions,
+ *  whose members follow the assertions' group claim (lib/iam/delegatedGroups.ts);
+ *  like a directory group it is not edited by hand. */
+export type GroupSource = 'local' | 'ldap' | 'oidc' | 'delegated';
 
 /**
  * A named group of users within a tenant (team, department, squad, etc.).

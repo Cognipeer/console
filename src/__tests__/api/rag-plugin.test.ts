@@ -58,15 +58,6 @@ vi.mock('@/lib/services/projects/projectContext', () => ({
   requireProjectContext: vi.fn(),
 }));
 
-// Bypass RBAC enforcement — the runtime path tries to load a real user.
-vi.mock('@/lib/security/rbac', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/security/rbac')>('@/lib/security/rbac');
-  return {
-    ...actual,
-    getPermissionServiceForPath: () => null,
-  };
-});
-
 /**
  * The re-index service is stubbed: starting a real run enqueues a background
  * job that would embed documents. What these routes owe the caller is the
@@ -114,7 +105,9 @@ import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const TENANT_DB_NAME = 'rag_plugin_tenant';
 const TENANT_ID = 'tenant-rag-1';
-const USER_ID = 'user-rag-1';
+// The id of the workspace owner created in beforeAll: the authorization engine
+// decides every request from the user row, so the caller has to exist.
+let USER_ID = 'pending';
 const MODULE_KEY = 'plugin-test-module';
 
 const REQUEST_HEADERS = {
@@ -157,9 +150,21 @@ beforeAll(async () => {
     slug: 'rag-plugin-test',
     dbName: TENANT_DB_NAME,
     licenseType: 'FREE',
-    ownerId: USER_ID,
+    ownerId: 'pending',
   });
   await db.switchToTenant(TENANT_DB_NAME);
+  const owner = await db.createUser({
+    tenantId: TENANT_ID,
+    email: 'tester@example.com',
+    name: 'Tester',
+    password: '$2b$10$x',
+    role: 'owner',
+    licenseId: 'FREE',
+    features: [],
+  });
+  USER_ID = String(owner._id);
+  REQUEST_HEADERS['x-user-id'] = USER_ID;
+  JSON_HEADERS['x-user-id'] = USER_ID;
 
   app = await createFastifyApiTestApp(ragApiPlugin);
 }, 30_000);

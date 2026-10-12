@@ -47,6 +47,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import ModelPlayground from '@/components/playground/ModelPlayground';
 import SttPlayground from '@/components/playground/SttPlayground';
@@ -94,6 +95,7 @@ import { resolveBindings } from '@/lib/services/guardrail/hooks/binding';
 import { HOOK_IDS } from '@/lib/services/guardrail/hooks/contract';
 import type { HookId } from '@/lib/services/guardrail/hooks/contract';
 import type { IDynamicRoutingConfig, IDynamicRoutingTarget } from '@/lib/database';
+import { modelTakesImages } from '@/components/models/inputModalities';
 
 interface ModelPricing {
   currency?: string;
@@ -122,6 +124,8 @@ interface ModelDetailDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** What the model resolves to (an explicit choice, else detected from its id). */
+  capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, unknown>;
@@ -464,6 +468,8 @@ export default function ModelDetailPage() {
   const { push: navigate } = useNavigationFeedback();
   const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelDetail');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
 
   const [model, setModel] = useState<ModelDetailDto | null>(null);
   const [usage, setUsage] = useState<UsageAggregateDto | null>(null);
@@ -675,17 +681,24 @@ export default function ModelDetailPage() {
 
   const handleDelete = async () => {
     if (!model || deleting) return;
-    const confirmed = window.confirm(t('actions.deleteConfirm'));
-    if (!confirmed) return;
     setDeleting(true);
     try {
-      const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-      if (!response.ok) {
-        const error = await response
-          .json()
-          .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
-        throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
-      }
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.model'),
+        name: model.name,
+        type: 'model',
+        id: String(model._id),
+        action: async () => {
+          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+          if (!response.ok) {
+            const error = await response
+              .json()
+              .catch(() => ({ error: t('notifications.deleteErrorMessage') }));
+            throw new Error(error.error ?? t('notifications.deleteErrorMessage'));
+          }
+        },
+      });
+      if (!deleted) return;
       notifications.show({
         title: t('notifications.deleteSuccessTitle'),
         message: t('notifications.deleteSuccessMessage'),
@@ -819,7 +832,7 @@ export default function ModelDetailPage() {
               ) : (
                 <span className="ds-badge">{model.category}</span>
               )}
-              {model.isMultimodal ? (
+              {modelTakesImages(model) ? (
                 <span className="ds-badge ds-badge-info">vision</span>
               ) : null}
               {model.supportsToolCalls ? (
@@ -959,6 +972,7 @@ export default function ModelDetailPage() {
       />
 
       {tab === 'overview' ? (
+        <>
         <OverviewTab
           model={model}
           usage={usage}
@@ -982,6 +996,10 @@ export default function ModelDetailPage() {
             openLogModal();
           }}
         />
+        <div style={{ marginTop: 'var(--mantine-spacing-md)' }}>
+          <ResourceUsageSection type="model" id={String(model._id)} />
+        </div>
+        </>
       ) : null}
 
       {tab === 'playground' && model.category === 'llm' ? (

@@ -173,7 +173,7 @@ export interface AgentCompletionUsage {
  * precise reason travels in the non-OpenAI `stop_reason` field.
  */
 export function agentFinishReason(stopReason: AgentChatResponse['stop_reason']): 'stop' | 'length' {
-    return stopReason === 'limit' ? 'length' : 'stop';
+    return stopReason === 'limit' || stopReason === 'budget_reached' ? 'length' : 'stop';
 }
 
 /** The OpenAI chat-completion envelope, filled from an agent run. */
@@ -270,6 +270,10 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         usePublished: true,
         userId: input.ctx.userId,
         userMessage,
+        // The chat-completions wire has no way to answer an approval: a gated
+        // tool follows the agent's `humanInTheLoop.unattended` setting (deny by
+        // default; `pause` leaves the session waiting in Studio).
+        unattended: true,
         ...(input.version !== undefined ? { version: input.version } : {}),
         ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
         ...(input.onTextChunk ? { onTextChunk: input.onTextChunk } : {}),

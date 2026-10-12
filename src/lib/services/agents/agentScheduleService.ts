@@ -14,6 +14,9 @@ import type { IAgent, IAgentSchedule } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { computeNextRun, validateSchedule } from '@/lib/services/crawler/schedulePlanner';
 
+import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
+
+import { classifyAgentRunError } from './agentErrors';
 import { createConversation, executeAgentChat } from './agentService';
 
 const logger = createLogger('agent-schedule');
@@ -126,44 +129,71 @@ export interface ScheduleRunResult {
  * would change behaviour the moment somebody opened the playground.
  */
 export async function runAgentSchedule(ctx: RunScheduleContext): Promise<ScheduleRunResult> {
-    const conversation = await createConversation(
-        ctx.tenantDbName,
-        ctx.tenantId,
-        ctx.projectId,
-        ctx.userId,
-        ctx.agent.key,
-        `${ctx.schedule.name} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
-        { source: 'schedule' },
-    );
+    let conversationId: string | undefined;
+    try {
+        const conversation = await createConversation(
+            ctx.tenantDbName,
+            ctx.tenantId,
+            ctx.projectId,
+            ctx.userId,
+            ctx.agent.key,
+            `${ctx.schedule.name} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+            { source: 'schedule' },
+        );
+        conversationId = String(conversation._id);
 
-    const response = await executeAgentChat({
+        const response = await executeAgentChat({
+            tenantDbName: ctx.tenantDbName,
+            tenantId: ctx.tenantId,
+            projectId: ctx.projectId,
+            agentKey: ctx.agent.key,
+            conversationId,
+            userMessage: ctx.schedule.message,
+            userId: ctx.userId,
+            usePublished: true,
+            // No one is watching a scheduled run: a gated tool follows the agent's
+            // `humanInTheLoop.unattended` setting (deny by default).
+            unattended: true,
+            runtimeContext: {
+                source: 'api',
+                userId: ctx.userId,
+                // Schedule variables reach the prompt through exactly the same path
+                // a live caller's metadata does, so a prompt cannot behave one way
+                // on a schedule and another way in production.
+                metadata: {
+                    ...(ctx.schedule.variables ?? {}),
+                    scheduleId: ctx.schedule.id,
+                    scheduleName: ctx.schedule.name,
+                    trigger: ctx.trigger,
+                },
+            },
+        });
+
+        const result = { conversationId, content: extractResponseText(response) };
+        await publishScheduleEvent(ctx, 'schedule.fired', { conversationId });
+        return result;
+    } catch (error) {
+        await publishScheduleEvent(ctx, 'schedule.failed', {
+            ...(conversationId ? { conversationId } : {}),
+            error: classifyAgentRunError(error, { exposeInternal: false }).error.message,
+        });
+        throw error;
+    }
+}
+
+/** Webhook subscriptions hear about every fire, scheduled or run by hand. Never throws. */
+async function publishScheduleEvent(
+    ctx: RunScheduleContext,
+    type: 'schedule.fired' | 'schedule.failed',
+    data: Record<string, unknown>,
+): Promise<void> {
+    await publishWebhookEvent({
         tenantDbName: ctx.tenantDbName,
         tenantId: ctx.tenantId,
         projectId: ctx.projectId,
-        agentKey: ctx.agent.key,
-        conversationId: String(conversation._id),
-        userMessage: ctx.schedule.message,
-        userId: ctx.userId,
-        usePublished: true,
-        runtimeContext: {
-            source: 'api',
-            userId: ctx.userId,
-            // Schedule variables reach the prompt through exactly the same path
-            // a live caller's metadata does, so a prompt cannot behave one way
-            // on a schedule and another way in production.
-            metadata: {
-                ...(ctx.schedule.variables ?? {}),
-                scheduleId: ctx.schedule.id,
-                scheduleName: ctx.schedule.name,
-                trigger: ctx.trigger,
-            },
-        },
+        type,
+        data: { scheduleId: ctx.schedule.id, agentKey: ctx.agent.key, trigger: ctx.trigger, ...data },
     });
-
-    return {
-        conversationId: String(conversation._id),
-        content: extractResponseText(response),
-    };
 }
 
 /** Records the outcome of a fire back onto the schedule. */

@@ -28,14 +28,14 @@ import {
 } from './agentRuntimeConfig';
 import { buildAgentSkills } from './agentSkillService';
 import { buildAgentMemoryOption } from './agentMemoryAdapter';
-import type { IAgentConversationMessage, IAgentConversationStep, IAgentSubagent } from '@/lib/database/provider/types.domain';
+import type { IAgentConversationMessage, IAgentConversationStep, IAgentMessageVersion, IAgentSubagent } from '@/lib/database/provider/types.domain';
 import {
     buildPromptVariables,
     renderPromptTemplate,
     shouldRenderInlinePrompt,
     type RenderedPrompt,
 } from './promptVariables';
-import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
+import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
@@ -102,9 +102,55 @@ import {
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
 import { withAssembledStream } from './assembledStream';
+import { createImageAwareTokenCounter } from './imageTokenCounter';
+import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import { withModelUsageLogging } from './modelUsageTap';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
-import { annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
+import { toClientPendingAction, type ClientPendingAction } from './clientWire';
+import {
+    agentTakesAttachments,
+    assembleTurnAttachments,
+    attachmentsAvailability,
+    attachmentsUnavailableMessage,
+    buildSessionFileTools,
+    buildUserTurnContent,
+    conversationFileFacts,
+    createSessionImageSource,
+    deleteConversationFiles,
+    findUnsentSessionFiles,
+    resolveAttachmentsConfig,
+    resolveTurnAttachments,
+    sessionFileToolDefinitions,
+    stripAttachmentBlock,
+    NO_ATTACHMENTS,
+    type AssembledAttachments,
+} from './sessionFiles';
+import { neutralizeAttachmentMarker } from './sessionAttachmentText';
+import { resolveModelCapabilities } from '@/lib/services/models/modelCapabilities';
+import {
+    agentSpendSettler,
+    assertAgentTurnSpendAllowed,
+    resolveAgentSpendScope,
+    type AgentSpendScope,
+} from './agentSpendLimits';
+import {
+    activeSessionBudget,
+    agentSessionBudget,
+    budgetStopDetail,
+    endsInAnswer,
+    isSessionBudgetBreach,
+    planSessionBudget,
+    sessionBudgetInvokeOptions,
+    startSessionSpendAccount,
+    withSessionSpend,
+    settleSessionBudget,
+    type SessionBudgetPlan,
+    type SessionBudgetSettlement,
+} from './sessionBudget';
+import { addSessionTurnSpend, recordSessionTurnSpend } from './sessionBudgetService';
+import { enforceAgentRunQuota, settleAgentRun, type AgentRunCaller } from './agentQuota';
+import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { buildAgentSandboxTools, destroyConversationSandbox } from './agentSandboxTools';
 import { sealAgentConfigSecrets } from './agentSandboxSecrets';
 import {
@@ -113,13 +159,53 @@ import {
     compactedToolResults,
     compactionFromEvent,
     describeTurnOutcome,
+    buildContinueInputState,
     loadConversationState,
     saveConversationState,
     type AgentStopReason,
+    type AgentTurnOutcome,
 } from './agentTurnState';
 import { isTruncatedFinishReason, normalizeFinishReason } from '@/lib/shared/finishReason';
+import { toSessionStopReason, type SessionStopReason } from './sessionEvents';
+import { startSessionTurnEvents, type SessionTurnEvents } from './sessionTurnEvents';
+import {
+    buildClientTools,
+    checkEmbeddedClientTools,
+    clientToolErrorText,
+    clientToolMeta,
+    clientToolOutputText,
+    clientToolPolicyName,
+    resolveClientToolState,
+    type EmbeddedRunContext,
+} from './agentClientTools';
+import { agentAcceptsClientTools } from './agentExperience';
+import {
+    applyToolApprovals,
+    denyUnattendedTools,
+    resolveHitlConfig,
+    resolveHitlRunMode,
+    sessionAllowedTools,
+} from './agentHumanInTheLoop';
+import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
+import {
+    AgentResumeError,
+    PAUSE_UNAVAILABLE_WARNING,
+    actionRequiredEventData,
+    assertNoBlockingPending,
+    cancelPendingForNewMessage,
+    openPause,
+    parsePausedState,
+    toMessagePendingAction,
+    toPublicPendingAction,
+    toSdkAnswerSet,
+    type OpenedPause,
+    type PublicPendingAction,
+} from './agentPendingActions';
 
 const logger = createLogger('agents');
+
+/** How many replaced answers a regenerated message remembers. */
+const MAX_PREVIOUS_VERSIONS = 5;
 
 const CONSOLE_AGENT_KNOWLEDGE_SEARCH_DESCRIPTION =
     'PRIMARY retrieval tool. For factual, product, policy, API, docs, or troubleshooting questions, call this tool BEFORE drafting the final answer. Use the user question (or a focused rewrite) as query. If results are empty/insufficient, then answer briefly with uncertainty. Each match carries a documentId — pass it to knowledge_read_document or knowledge_read_document_lines when the question needs more of that file than the matched passage.';
@@ -917,7 +1003,8 @@ function persistedUserTurn(input: {
 }): string {
     const entry = input.result.messages?.[input.index];
     const fromResult = entry?.role === 'user' ? agentMessageText(entry.content) : '';
-    return input.ledger.resolve(fromResult || input.fallback);
+    // What the turn added for attached files (sessionFiles.ts) is not the person's text.
+    return stripAttachmentBlock(input.ledger.resolve(fromResult || input.fallback));
 }
 
 /**
@@ -1258,21 +1345,24 @@ export const __testables = {
     buildAgentGuardrailPlugins,
     MessageRewriteLedger,
     persistedUserTurn,
+    firstTurnTitle,
 };
 
 /**
  * `limits.maxCostUsd` is enforced by the SDK only through a `costEstimator`;
- * without one the limit did nothing at all. Built only when the limit is set,
- * from the pricing of the agent's model and of every sub-agent model override
- * — a delegated call spends from the same budget.
+ * without one the limit did nothing at all. Built only when the limit is set —
+ * or the session has a spend budget, which rides on the same SDK limit — from
+ * the pricing of the agent's model and of every sub-agent model override: a
+ * delegated call spends from the same budget.
  */
 async function buildAgentCostEstimator(
     tenantDbName: string,
     projectId: string,
     config: IAgentConfig,
     primary: { key?: string; modelId?: string; pricing?: IModelPricing | null },
+    sessionBudgetActive = false,
 ): Promise<ReturnType<typeof buildCostEstimator>> {
-    if (!(Number(config.runtime?.limits?.maxCostUsd) > 0)) return undefined;
+    if (!sessionBudgetActive && !(Number(config.runtime?.limits?.maxCostUsd) > 0)) return undefined;
     const { calculateCost } = await import('@/lib/services/models/usageLogger');
     const models: Array<{ names: Array<string | undefined>; pricing?: IModelPricing | null }> = [
         { names: [primary.key, primary.modelId], pricing: primary.pricing },
@@ -1284,7 +1374,7 @@ async function buildAgentCostEstimator(
     }
     const estimator = buildCostEstimator(models, primary.pricing, calculateCost);
     if (!estimator) {
-        logger.warn('maxCostUsd is set but the agent model has no pricing; the cost limit cannot be enforced', {
+        logger.warn('A cost limit is set but the agent model has no pricing; the cost limit cannot be enforced', {
             modelKey: primary.key,
         });
     }
@@ -1336,10 +1426,15 @@ function extractAgentReasoning(result: AgentSdkInvokeResult): string | undefined
  * it was sent for prompt rendering, not for a tracing filter, and object/array
  * values would need a shape decision this call site should not make silently.
  */
-function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undefined): Record<string, string> | undefined {
+export function buildTracingMetadata(runtimeContext: AgentRuntimeContext | undefined): Record<string, string> | undefined {
     if (!runtimeContext) return undefined;
     const out: Record<string, string> = {};
     if (runtimeContext.source) out.source = runtimeContext.source;
+    // An application's token acted for the person: the tags let the Traces views filter calls made on someone's behalf.
+    if (runtimeContext.via) {
+        out.via = runtimeContext.via.kind;
+        out.viaIssuer = runtimeContext.via.issuer;
+    }
     const meta = runtimeContext.metadata;
     for (const key of ['trigger', 'scheduleId', 'scheduleName']) {
         const value = meta?.[key];
@@ -1385,6 +1480,10 @@ type BuildSubagentsInput = {
     zod: typeof import('zod').z;
     guard: AgentToolGuard;
     runtimeContext?: AgentRuntimeContext;
+    /** Who a sub-agent model's spend is attributed to (tenant spend limits). */
+    spend?: AgentSpendScope;
+    /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
+    images?: SessionImagesOptions;
 };
 
 /**
@@ -1485,7 +1584,7 @@ async function buildAgentSubagents(
 
         let childModel: unknown;
         if (modelKey) {
-            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey);
+            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images);
         }
 
         subagents.push({
@@ -1537,6 +1636,8 @@ async function buildSubagentModel(
     tenantId: string,
     projectId: string,
     modelKey: string,
+    spend?: AgentSpendScope,
+    images?: SessionImagesOptions,
 ): Promise<unknown> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
@@ -1550,11 +1651,14 @@ async function buildSubagentModel(
             options: agentChatModelOptions(model),
         });
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        return withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        const tapped = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
             tenantDbName,
             model,
             route: 'agent.subagent',
+            ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
         });
+        // A sub-agent can be handed the parent's context, image references included.
+        return images ? withSessionImages(tapped, images) : tapped;
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
             modelKey,
@@ -2421,7 +2525,7 @@ export interface AgentModelCheckResult {
  * model's own provider runtime. `lcModel` is returned as the runtime produced
  * it — not awaited.
  */
-async function buildAgentChatModel(
+export async function buildAgentChatModel(
     tenantDbName: string,
     tenantId: string,
     projectId: string,
@@ -2487,9 +2591,10 @@ export async function checkAgentModel(
  * `console` sessions — the ones a person started from the dashboard to try the
  * agent — can be continued from the UI; the rest are real traffic (or a
  * run's own bookkeeping) and are shown read-only. Records written before this
- * existed carry no source.
+ * existed carry no source. `portal` is end-user traffic through an enterprise
+ * portal page (/p/<key>): real usage, so read-only in the Studio like the rest.
  */
-export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'schedule' | 'evaluation' | 'redteam';
+export type AgentConversationSource = 'console' | 'api' | 'a2a' | 'schedule' | 'evaluation' | 'redteam' | 'portal';
 
 export async function createConversation(
     tenantDbName: string,
@@ -2500,9 +2605,18 @@ export async function createConversation(
     title?: string,
     /** Session-level context — applied to every turn, see `executePlaygroundChatLocal`. */
     metadata?: Record<string, unknown>,
+    /**
+     * The session's spend budget. Absent = the agent's own default
+     * (`execution.sessionBudget`); `null` = none, whatever the agent's default.
+     */
+    budget?: IAgentSessionBudget | null,
 ): Promise<IAgentConversation> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
+
+    const sessionBudget = budget === undefined
+        ? agentSessionBudget((await db.findAgentByKey(agentKey, projectId))?.config)
+        : budget ?? undefined;
 
     return db.createAgentConversation({
         tenantId,
@@ -2511,6 +2625,7 @@ export async function createConversation(
         title: title || 'New conversation',
         messages: [],
         ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
+        ...(sessionBudget ? { budget: sessionBudget, spentUsd: 0 } : {}),
         createdBy: userId,
     });
 }
@@ -2521,17 +2636,19 @@ export async function getConversationById(
 ): Promise<IAgentConversation | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    return db.findAgentConversationById(conversationId);
+    const conversation = await db.findAgentConversationById(conversationId);
+    // A "running" session whose turn died (process crash) reads as ended.
+    return conversation ? withSessionSpend(await normalizeStaleRunningStatus(db, conversation)) : null;
 }
 
 export async function listConversations(
     tenantDbName: string,
     agentKey: string,
-    filters?: { projectId?: string; limit?: number; skip?: number },
+    filters?: { projectId?: string; limit?: number; skip?: number; createdBy?: string },
 ): Promise<IAgentConversation[]> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    return db.listAgentConversations(agentKey, filters);
+    return normalizeStaleRunningStatuses(db, await db.listAgentConversations(agentKey, filters));
 }
 
 export async function deleteConversation(
@@ -2545,6 +2662,8 @@ export async function deleteConversation(
     if (conversation?.metadata?.sandbox) {
         await destroyConversationSandbox({ tenantDbName, tenantId: conversation.tenantId, conversation });
     }
+    // So do the files attached to it (object, markdown and row).
+    if (conversation) await deleteConversationFiles(tenantDbName, conversation);
     return db.deleteAgentConversation(conversationId);
 }
 
@@ -2569,6 +2688,13 @@ export interface AgentRunCancellationCell {
     deadlineAt?: number;
     /** Flipped to `true` asynchronously by an external caller (e.g. a background worker's cancel poll). */
     cancelled: boolean;
+    /**
+     * Set when the run was finalized WITHOUT waiting for this turn to stop (its
+     * ceiling passed while a call hung): the conversation is free for a newer turn
+     * and this one is only running out. It writes nothing mid-turn from then on, and
+     * its end is recorded only if no newer turn took the session (`runtimeTurnId`).
+     */
+    abandoned?: boolean;
 }
 
 /** True once a deadline has passed or an explicit cancel has been recorded. */
@@ -2650,7 +2776,20 @@ export interface AgentChatRequest {
     agentKey: string;
     conversationId: string;
     userMessage: string;
+    /** Ids of the conversation's files this message attaches (uploaded to the session first). */
+    attachments?: string[];
     userId: string;
+    /** The background run executing this turn, when there is one — stamped on its session events. */
+    runId?: string;
+    /**
+     * No interactive user on this turn (a schedule, an eval or red-team case, an
+     * OpenAI-shaped or Assistants client). An approval-gated tool call or a
+     * question then follows the agent's `humanInTheLoop.unattended` setting —
+     * `deny` (default: the call fails, the run goes on), `pause` (waits for
+     * Studio, like an attended run) or `allow` (runs without approval) — rather
+     * than parking on a prompt no one will see.
+     */
+    unattended?: boolean;
     /** Request a specific published version (API/SDK) */
     version?: number;
     /** When true, use the published version (default for API/SDK calls) */
@@ -2715,6 +2854,8 @@ export interface AgentPlaygroundChatRequest {
     projectId: string;
     agentKey: string;
     userMessage: string;
+    /** Ids of the session's files this message attaches (a Session only; uploaded to it first). */
+    attachments?: string[];
     /**
      * Previous messages for context. Ignored (and the DB history loaded
      * instead) whenever `conversationId` is set — a caller-supplied history
@@ -2767,6 +2908,20 @@ export interface AgentPlaygroundChatRequest {
      * run is routed to another node.
      */
     signal?: AbortSignal;
+    /**
+     * This run is embedded in a host page that declared client tools: they are
+     * offered to the model for this run only, and a call pauses the turn as a
+     * `client_tool` pending action the page answers. Set by a host that KNOWS
+     * the embedding (a portal's embed session) — never from a client request.
+     * Needs a Session (`conversationId`) to park the paused turn on.
+     */
+    embedded?: EmbeddedRunContext;
+    /**
+     * The answer(s) this turn replaces — set when a regenerate re-runs a user
+     * message (`prepareSessionRerun`): the new assistant message keeps them as
+     * `previousVersions` (newest last, at most 5).
+     */
+    previousVersions?: IAgentMessageVersion[];
 }
 
 /**
@@ -2822,11 +2977,13 @@ export interface AgentChatResponse {
      * `incomplete` when a run limit, a cancellation or a pause ended the run
      * before a final answer — see `incomplete_details` and `stop_reason`.
      */
-    status: 'completed' | 'failed' | 'incomplete';
+    status: 'completed' | 'failed' | 'incomplete' | 'requires_action';
     /** OpenAI Responses convention: why the response is `incomplete`. */
     incomplete_details?: { reason: string } | null;
-    /** How the agent run ended; `completed` for a normal final answer. */
-    stop_reason?: AgentStopReason;
+    /** How the agent run ended; `completed` for a normal final answer, `requires_action` while it waits on a person. */
+    stop_reason?: AgentStopReason | 'requires_action' | 'budget_reached';
+    /** Present when `status` is `requires_action`: the approvals / questions to resolve. */
+    required_action?: { type: 'agent_actions'; actions: ClientPendingAction[] };
     /** The runtime's own wording for a non-`completed` stop, e.g. which limit. */
     stop_detail?: string;
     usage: ResponseUsage;
@@ -2851,7 +3008,7 @@ export interface AgentChatResponse {
  * is OpenAI's own value, so a stock client recognizes the output-token cap;
  * the rest are this API's, named after the limit that fired.
  */
-export function incompleteReason(stopReason: AgentStopReason, stopDetail?: string): string {
+export function incompleteReason(stopReason: AgentStopReason | 'budget_reached', stopDetail?: string): string {
     if (stopReason === 'limit') {
         if (stopDetail?.startsWith('maxTotalOutputTokens')) return 'max_output_tokens';
         if (stopDetail?.startsWith('maxCostUsd')) return 'max_cost';
@@ -2905,33 +3062,75 @@ export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
     };
 }
 
+/**
+ * Who a run is for, as the agent-run quota (domain `agent`) sees it. The
+ * runtime context carries the identity the server stamped on the request — the
+ * dashboard user, a portal user, an API token and its owner — so a run entry
+ * point that has no `userId` field of its own is still attributed.
+ */
+function agentRunCallerOf(request: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    userId?: string;
+    runtimeContext?: AgentRuntimeContext;
+}): AgentRunCaller {
+    return {
+        tenantDbName: request.tenantDbName,
+        tenantId: request.tenantId,
+        projectId: request.projectId,
+        agentKey: request.agentKey,
+        userId: request.userId || request.runtimeContext?.userId,
+        tokenId: request.runtimeContext?.tokenId,
+    };
+}
+
 export async function executeAgentChat(
     request: AgentChatRequest,
 ): Promise<AgentChatResponse> {
+    // Agent-run quota: refuse before any work, count the tokens after. This is
+    // the one place every sync entry point passes (see agentQuota.ts); the
+    // queue consumer and background worker call the Local variant instead, so
+    // a run is never counted twice.
+    const caller = agentRunCallerOf(request);
+    await enforceAgentRunQuota(caller);
+
     // The callback and the signal cannot be serialized over the queue —
     // stripped from the payload, kept on the local fast path, and bridged by
     // the cluster stream relay when the run is routed.
     const payload = { ...request };
     delete payload.onTextChunk;
     delete payload.signal;
-    return routeInstanceCall(
-        {
-            entityType: 'agent',
-            entityId: agentEntityId(request.tenantId, request.agentKey),
-            jobName: 'chat',
-        },
-        payload as unknown as QueuePayload,
-        () => executeAgentChatLocal(request),
-        {
-            relay: agentRelayOptions(request),
-            // A routed turn with a ceiling waits exactly as long as the ceiling
-            // allows and is never retried: the queue default (60s, 3 attempts)
-            // cut long turns off early and could re-run a turn's tool calls.
-            ...(request.cancellationCell?.deadlineAt !== undefined
-                ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
-                : {}),
-        },
-    );
+    // What the run's model calls spend is tallied as they happen, so a run that fails or
+    // is aborted late is still charged (see runUsage.ts).
+    const usage = createRunUsageSink();
+    let response: AgentChatResponse;
+    try {
+        response = await runWithUsageSink(usage, () => routeInstanceCall(
+            {
+                entityType: 'agent',
+                entityId: agentEntityId(request.tenantId, request.agentKey),
+                jobName: 'chat',
+            },
+            payload as unknown as QueuePayload,
+            () => executeAgentChatLocal(request),
+            {
+                relay: agentRelayOptions(request),
+                // A routed turn with a ceiling waits exactly as long as the ceiling
+                // allows and is never retried: the queue default (60s, 3 attempts)
+                // cut long turns off early and could re-run a turn's tool calls.
+                ...(request.cancellationCell?.deadlineAt !== undefined
+                    ? { timeoutMs: Math.max(1_000, request.cancellationCell.deadlineAt - Date.now()), attempts: 1 }
+                    : {}),
+            },
+        ));
+    } catch (error) {
+        settleAgentRun(caller, usage);
+        throw error;
+    }
+    settleAgentRun(caller, usage, response.usage?.total_tokens);
+    return response;
 }
 
 /**
@@ -3042,8 +3241,38 @@ async function buildLocalAgentRun(input: {
     memoryConversationId?: string;
     threadId?: string;
     onMessageRewrite?: (rewrite: PluginMessageRewrite) => void;
+    /**
+     * No interactive user on this run (see `AgentChatRequest.unattended`). The
+     * agent's `humanInTheLoop.unattended` setting then decides what a gated
+     * tool call or a question does: deny it, pause for Studio, or run it.
+     */
+    unattended?: boolean;
+    /**
+     * False when there is no conversation to park a paused turn on (a stateless
+     * playground call). `pause` cannot be honoured there, so it behaves as
+     * `deny`.
+     */
+    canPause?: boolean;
+    /** The host page this run is embedded in — its client tools are offered. See `AgentPlaygroundChatRequest.embedded`. */
+    embedded?: EmbeddedRunContext;
+    /**
+     * Whose spend this run is: every model request it makes is debited to the
+     * tenant's spend limits (agentSpendLimits.ts). Absent for a build that never
+     * calls the model (reading a tool's schema).
+     */
+    spend?: AgentSpendScope;
 }) {
     const { db, tenantDbName, tenantId, projectId, agentKey, agent, config, runtimeContext, actorId, source } = input;
+    const hitl = resolveHitlConfig(config.humanInTheLoop);
+    const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
+
+    // What this run's priced model requests add up to (sub-agent models too),
+    // read by the caller to keep the session budget true even when the turn is
+    // never persisted.
+    let tappedUsd = 0;
+    const spend: AgentSpendScope | undefined = input.spend
+        ? { ...input.spend, observe: (cost) => { if (Number.isFinite(cost.totalCost) && cost.totalCost > 0) tappedUsd += cost.totalCost; } }
+        : undefined;
 
     if (!config.modelKey) throw new Error('Agent has no model configured');
     const { model, lcModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
@@ -3168,6 +3397,43 @@ async function buildLocalAgentRun(input: {
         toolDefinitions.push(...memoryToolDefinitions(allowWrites));
     }
 
+    // Files attached to the session: the agent can list them and read them page
+    // by page — for what was too long to put in the turn, and for earlier
+    // uploads. Offered whenever the conversation holds a file. While it holds an
+    // image and the model takes images, the agent can also look at the image
+    // again (`session_files_view_image`).
+    const modelTakesImages = resolveModelCapabilities(model).inputModalities.includes('image');
+    const filesCfg = resolveAttachmentsConfig(config.attachments);
+    const sessionFilesScope = { tenantDbName, tenantId, projectId };
+    let sessionImages: SessionImagesOptions | undefined;
+    if (input.conversation) {
+        const conversationId = String(input.conversation._id);
+        const facts = agentTakesAttachments(config)
+            ? await conversationFileFacts(db, conversationId)
+            : { any: false, images: false };
+        const viewImage = facts.images && modelTakesImages;
+        if (facts.any) {
+            tools.push(...buildSessionFileTools({
+                createToolFn: createTool,
+                zod: z,
+                guard: toolGuard,
+                scope: sessionFilesScope,
+                conversationId,
+                readPageChars: filesCfg.readPageChars,
+                viewImage,
+            }));
+            toolDefinitions.push(...sessionFileToolDefinitions(filesCfg.readPageChars, { viewImage }));
+        }
+        // Images in this session's context are references; the bytes are read at the model call.
+        // Wrapped even for an agent that no longer takes files: its saved state can still hold references.
+        sessionImages = {
+            source: createSessionImageSource(sessionFilesScope, conversationId),
+            maxImages: filesCfg.maxImages,
+            maxBytes: filesCfg.maxBytes,
+            viewImageTool: viewImage,
+        };
+    }
+
     // Sandbox access (Enterprise). Provisioned on first use; cleaned up with
     // the other bound tools once the run is over. A conversation keeps a
     // persistent sandbox across its turns, a stateless call gets a throwaway one.
@@ -3187,16 +3453,61 @@ async function buildLocalAgentRun(input: {
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
 
+    // Tools that run in the page embedding the chat. Offered only to a run that says it is
+    // embedded AND can be paused (a Session) AND has a person on the other end AND whose
+    // author opted in (`experience.clientTools.enabled`): what such a tool returns is typed
+    // in the end user's browser. They are kept out of the approval pass below, which only
+    // knows the tools built above; their own approval follows the agent's policy (see
+    // `clientToolNeedsApproval`), unless the embedding's admin exempted the tool.
+    const allowedTools = sessionAllowedTools(input.conversation?.metadata);
+    let clientTools: AgentSdkToolInterface[] = [];
+    if (input.embedded && input.embedded.clientTools.length > 0) {
+        if (!agentAcceptsClientTools(config)) {
+            logger.debug('Client tools not offered: the agent does not accept tools from the page', { agentKey });
+            warnings.add('Host page tools were not offered: this agent does not accept tools from the page (Configure → Experience).');
+        } else if (input.canPause === false || input.unattended || !input.conversation) {
+            logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
+        } else {
+            const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');
+            const taken = new Set<string>([
+                ...tools.map((tool) => tool.name),
+                ...(CONTROL_PLANE_TOOL_NAMES as readonly string[]),
+                ...(DELEGATION_TOOL_NAMES as readonly string[]),
+                ASK_USER_TOOL_NAME,
+            ]);
+            const offered = input.embedded.clientTools.filter((tool) => !taken.has(tool.name));
+            const checked = checkEmbeddedClientTools(offered);
+            if (!checked.ok) {
+                logger.warn('Client tools not offered: the declared list is invalid', { agentKey, problem: checked.errors[0] });
+                warnings.add(`Host page tools were not offered: ${checked.errors[0].field} ${checked.errors[0].message}`);
+            } else {
+                const built = buildClientTools({
+                    declared: checked.tools,
+                    createToolFn: createTool,
+                    guard: toolGuard,
+                    allowedTools,
+                    approvalPolicy: hitl,
+                });
+                clientTools = built.tools;
+                toolDefinitions.push(...built.definitions);
+            }
+        }
+    }
+
     // Wrapped so a streamed turn keeps its tool calls and usage — see
     // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const sdkModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+    const tappedModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
         tenantDbName,
         model,
         route: input.route,
         agentKey,
+        ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
     });
+    // Outermost: whatever the SDK sends the model passes through the image resolver first
+    // (sessionImages.ts), so the SDK, the saved state and the traces only ever see references.
+    const sdkModel = sessionImages ? withSessionImages(tappedModel, sessionImages) : tappedModel;
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
     const { subagents, cleanupTasks: subagentCleanupTasks } = await buildAgentSubagents({
@@ -3208,6 +3519,8 @@ async function buildLocalAgentRun(input: {
         zod: z,
         guard: toolGuard,
         runtimeContext,
+        ...(spend ? { spend } : {}),
+        ...(sessionImages ? { images: sessionImages } : {}),
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
@@ -3215,13 +3528,34 @@ async function buildLocalAgentRun(input: {
     const outputSchema = resolveStructuredOutputSchema(config.structuredOutput);
     const skillPolicy = resolveAgentSkillPolicy(config);
     const tracingMetadata = buildTracingMetadata(runtimeContext);
-    const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model);
+    const sessionBudgetActive = Boolean(activeSessionBudget(input.conversation));
+    const costEstimator = await buildAgentCostEstimator(tenantDbName, projectId, config, model, sessionBudgetActive);
+    if (sessionBudgetActive && !costEstimator) {
+        // A budget nothing can measure would let the session spend without
+        // limit, so the turn is refused rather than run unmetered.
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: source === 'agent' ? 'chat' : 'playground' });
+        throw new Error('Session budget cannot be enforced: the agent model has no pricing set. Set the model pricing or remove the session budget.');
+    }
+
+    // Tool approval: the SDK pauses a call whose tool carries `needsApproval`.
+    // Only the tools built above are gated — the SDK's own (todo, context,
+    // delegation, skills…) are not in this list. A run nobody can answer either
+    // pauses like any other (`ask`), refuses the gated calls (`deny`: the model
+    // gets an error result, the tool never runs) or runs them as they are
+    // (`allow`, the owner's explicit choice).
+    const gatedTools = hitlMode === 'ask'
+        ? applyToolApprovals(tools, hitl, allowedTools)
+        : hitlMode === 'deny'
+            ? denyUnattendedTools(tools, hitl, allowedTools)
+            : tools;
 
     const sdkAgent = createSmartAgent({
         name: agent.name,
         version: input.version != null ? String(input.version) : undefined,
         model: sdkModel,
-        ...(tools.length > 0 ? { tools } : {}),
+        ...(gatedTools.length + clientTools.length > 0 ? { tools: [...gatedTools, ...clientTools] } : {}),
+        // Nobody to ask in the other modes, so the question tool is not offered.
+        ...(hitlMode === 'ask' && hitl.askUserEnabled ? { humanInTheLoop: { askUser: { allowFreeText: hitl.allowFreeText } } } : {}),
         // Omitted entirely when empty: an empty array and no key mean the same
         // thing to the host, and the shorter option object is what every other
         // conditional field here does.
@@ -3236,6 +3570,9 @@ async function buildLocalAgentRun(input: {
         ...(memory ? { memory } : {}),
         ...(costEstimator ? { costEstimator } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
+        // An image counts as an image, not as the characters of its bytes — the SDK would
+        // otherwise compact a conversation on the strength of one photo.
+        tokenCounter: createImageAwareTokenCounter(),
         tracing: {
             enabled: true,
             mode: 'batched',
@@ -3245,7 +3582,10 @@ async function buildLocalAgentRun(input: {
         },
     });
 
-    return { sdkAgent, model, systemPrompt, cleanupTasks, warnings };
+    return {
+        sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
+        tappedUsd: () => tappedUsd,
+    };
 }
 
 /**
@@ -3287,11 +3627,156 @@ export function agentMayStreamAnswer(config: GuardrailBindingSource): boolean {
     return resolveBindings(config, 'output.pre').length === 0;
 }
 
-/** The first exchange of a "New conversation" names it after what was asked. */
-function firstTurnTitle(conversation: IAgentConversation, messageCount: number, userText: string): string | undefined {
-    return conversation.title === 'New conversation' && messageCount <= 2
-        ? userText.substring(0, 80)
-        : conversation.title;
+/**
+ * The runtime context a turn runs with: the session's own (`metadata.runtimeContext`,
+ * entered once when the session was started) UNDER the caller's, so a
+ * per-message value still wins. Headers and metadata merge key by key.
+ */
+function mergeSessionRuntimeContext(
+    conversation: Pick<IAgentConversation, 'metadata'> | null | undefined,
+    requestContext: AgentRuntimeContext | undefined,
+): AgentRuntimeContext | undefined {
+    const sessionContext = conversation?.metadata?.runtimeContext as AgentRuntimeContext | undefined;
+    if (!sessionContext) return requestContext;
+    return {
+        ...sessionContext,
+        ...requestContext,
+        headers: { ...sessionContext.headers, ...requestContext?.headers },
+        metadata: { ...sessionContext.metadata, ...requestContext?.metadata },
+    };
+}
+
+/**
+ * The files a message attaches, checked against the session BEFORE anything
+ * runs (a refusal must not mark the session running or leave tools open).
+ * Throws `AgentAttachmentError`; empty when the message attaches nothing.
+ *
+ * That is the files it names, plus — when the agent's `attachNewUploads` is on
+ * (the default) — the files uploaded to the session that no message has carried
+ * yet. Every channel that starts a turn gets that here, so "create a session,
+ * upload, ask" works the same from the dashboard, the Responses API, a
+ * background run or a portal.
+ */
+async function resolveMessageAttachments(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    conversation: IAgentConversation | null;
+    config: IAgentConfig;
+    fileIds: string[] | undefined;
+}): Promise<IFileRecord[]> {
+    const named = input.fileIds ?? [];
+    const availability = attachmentsAvailability(input.config);
+    if (named.length > 0) {
+        if (!input.conversation) {
+            throw new AgentAttachmentError(400, 'attachment_not_found', 'Attachments belong to a session; start one and upload the files to it first.');
+        }
+        if (!availability.available) {
+            throw new AgentAttachmentError(403, 'attachments_disabled', attachmentsUnavailableMessage(availability.reason));
+        }
+    }
+    const scope = { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId };
+    const records = input.conversation && named.length > 0
+        ? await resolveTurnAttachments(scope, String(input.conversation._id), named)
+        : [];
+
+    if (input.conversation && availability.available && availability.cfg.attachNewUploads) {
+        const carried = new Set(records.map((record) => String(record._id)));
+        for (const record of await findUnsentSessionFiles(scope, input.conversation)) {
+            if (!carried.has(String(record._id))) records.push(record);
+        }
+    }
+    return records;
+}
+
+/**
+ * The attached files made ready for the model — in the turn, or readable with
+ * the session file tools, images as parts when the model takes them. Never
+ * fails the turn: what could not be read is a warning.
+ */
+async function assembleMessageAttachments(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    records: IFileRecord[];
+    config: IAgentConfig;
+    model: Parameters<typeof resolveModelCapabilities>[0];
+    warnings: Set<string>;
+}): Promise<AssembledAttachments> {
+    if (input.records.length === 0) return NO_ATTACHMENTS;
+    const assembled = await assembleTurnAttachments({
+        scope: { tenantDbName: input.tenantDbName, tenantId: input.tenantId, projectId: input.projectId },
+        records: input.records,
+        cfg: resolveAttachmentsConfig(input.config.attachments),
+        supportsVision: resolveModelCapabilities(input.model).inputModalities.includes('image'),
+    });
+    for (const warning of assembled.warnings) input.warnings.add(warning);
+    return assembled;
+}
+
+/**
+ * How the files of EARLIER messages reach the model again (`buildTurnInputState`):
+ * a transcript replay rebuilds each message with its attachments, and the last
+ * `attachments.carryRecentImages` messages with images are shown again when the
+ * agent's own context no longer holds them. Absent for a stateless call, which
+ * has no session and so no files.
+ */
+async function earlierAttachments(input: {
+    db: Awaited<ReturnType<typeof getDatabase>>;
+    conversation: IAgentConversation | null;
+    config: IAgentConfig;
+    model: Parameters<typeof resolveModelCapabilities>[0];
+}): Promise<NonNullable<Parameters<typeof buildTurnInputState>[0]['attachments']> | undefined> {
+    if (!input.conversation) return undefined;
+    const cfg = resolveAttachmentsConfig(input.config.attachments);
+    const supportsVision = resolveModelCapabilities(input.model).inputModalities.includes('image');
+    const carryRecentImages = supportsVision && agentTakesAttachments(input.config) ? cfg.carryRecentImages : 0;
+    let availableFileIds: Set<string> | undefined;
+    if (carryRecentImages > 0 && input.conversation.messages?.some((message) => message.attachments?.length)) {
+        try {
+            const records = await input.db.listFileRecordsByConversation(String(input.conversation._id));
+            availableFileIds = new Set(records.map((record) => String(record._id)));
+        } catch (error) {
+            logger.debug('Could not list the session files to carry images from', { error: error instanceof Error ? error.message : String(error) });
+        }
+    }
+    // The window the SDK builds each request from: a picture counts as still seen only inside it.
+    const { policy, lastTurnsToKeep } = resolveAgentRuntimeOptions(input.config).context ?? {};
+    const window = policy && lastTurnsToKeep ? { policy, lastTurnsToKeep } : undefined;
+    return { supportsVision, carryRecentImages, ...(availableFileIds ? { availableFileIds } : {}), ...(window ? { window } : {}) };
+}
+
+/**
+ * The first exchange of a "New conversation" names it after what was asked — or,
+ * when the message is files alone, after the first file. A message with neither
+ * leaves the title as it was (an empty title would read as a broken session).
+ */
+function firstTurnTitle(
+    conversation: Pick<IAgentConversation, 'title'>,
+    messageCount: number,
+    userText: string,
+    attachments?: ReadonlyArray<{ name: string }>,
+): string | undefined {
+    const untitled = !conversation.title || conversation.title === 'New conversation';
+    if (!untitled || messageCount > 2) return conversation.title;
+    if (userText.trim()) return userText.substring(0, 80);
+    const fileName = attachments?.find((file) => file.name.trim())?.name.trim();
+    return fileName ? fileName.substring(0, 80) : conversation.title;
+}
+
+/**
+ * The session stop reason of a turn. A pause that could be opened is
+ * `requires_action`; one that could not (state too large to keep) has nothing to
+ * wait on, so the session is not left "waiting".
+ */
+function sessionStopReason(
+    outcome: AgentStopReason,
+    pause: OpenedPause | null | undefined,
+    settlement?: SessionBudgetSettlement,
+): SessionStopReason {
+    if (settlement?.reached) return 'budget_reached';
+    if (outcome === 'paused') return pause ? 'requires_action' : 'end_turn';
+    return toSessionStopReason(outcome);
 }
 
 /**
@@ -3306,12 +3791,15 @@ function toAgentChatResponse(input: {
     content: string;
     messages: IAgentConversation['messages'];
     reasoning?: string;
-    outcome?: { stopReason: AgentStopReason; stopDetail?: string };
+    outcome?: { stopReason: AgentStopReason | 'budget_reached'; stopDetail?: string };
     usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
     outputParsed?: unknown;
     outputError?: string;
+    /** The approvals / questions the turn paused on — makes the response `requires_action`. */
+    pendingActions?: PublicPendingAction[];
 }): AgentChatResponse {
     const { reasoning, outcome, usage } = input;
+    const requiresAction = (input.pendingActions?.length ?? 0) > 0;
     const responseId = `resp_${input.conversationId}`;
     const msgId = `msg_${Date.now().toString(36)}`;
     const reasoningId = `rs_${Date.now().toString(36)}`;
@@ -3328,8 +3816,13 @@ function toAgentChatResponse(input: {
                 : []),
             { id: msgId, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: input.content }] },
         ],
-        status: stopped ? 'incomplete' : 'completed',
-        ...(stopped
+        status: requiresAction ? 'requires_action' : stopped ? 'incomplete' : 'completed',
+        ...(requiresAction
+            ? {
+                stop_reason: 'requires_action' as const,
+                required_action: { type: 'agent_actions' as const, actions: input.pendingActions!.map(toClientPendingAction) },
+            }
+            : stopped
             ? {
                 incomplete_details: { reason: incompleteReason(stopped.stopReason, stopped.stopDetail) },
                 stop_reason: stopped.stopReason,
@@ -3350,9 +3843,27 @@ function toAgentChatResponse(input: {
     };
 }
 
-/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+/**
+ * Local (non-routed) implementation. Exported so the queue consumer can call it.
+ *
+ * Wraps the turn so a throw — from anywhere in it — is recorded as a
+ * `session.error` on the conversation's event log before it propagates.
+ */
 export async function executeAgentChatLocal(
     request: AgentChatRequest,
+): Promise<AgentChatResponse> {
+    const scope: { events?: SessionTurnEvents } = {};
+    try {
+        return await runAgentChatTurn(request, scope);
+    } catch (error) {
+        await scope.events?.fail(error).catch(() => undefined);
+        throw error;
+    }
+}
+
+async function runAgentChatTurn(
+    request: AgentChatRequest,
+    scope: { events?: SessionTurnEvents },
 ): Promise<AgentChatResponse> {
     const {
         tenantDbName,
@@ -3360,8 +3871,11 @@ export async function executeAgentChatLocal(
         projectId,
         agentKey,
         conversationId,
-        userMessage,
     } = request;
+    // The block that separates the person's words from what the turn adds for
+    // attached files must not be something the person can type: the transcript
+    // is cut at it (`persistedUserTurn`).
+    const userMessage = neutralizeAttachmentMarker(request.userMessage);
 
     // 1. Load agent config (use published version for API/SDK calls)
     const db = await getDatabase();
@@ -3391,7 +3905,7 @@ export async function executeAgentChatLocal(
     }
 
     // 2. Load conversation
-    const conversation = await db.findAgentConversationById(conversationId);
+    let conversation = await db.findAgentConversationById(conversationId);
     // findAgentConversationById resolves purely by _id — it has no projectId
     // parameter — so without this check, any caller who can produce another
     // project's conversationId (a previous_response_id / A2A contextId / any
@@ -3403,6 +3917,62 @@ export async function executeAgentChatLocal(
     if (!conversation || conversation.projectId !== projectId) {
         throw new Error(`Conversation "${conversationId}" not found`);
     }
+
+    // A message that arrives while the session waits on an approval or a
+    // question is refused (or cancels the request) per the agent's own setting.
+    // Checked before the event log opens: a refusal must not mark the session
+    // idle or write an error into it.
+    const hitlSettings = resolveHitlConfig(config.humanInTheLoop);
+    await assertNoBlockingPending(db, conversation, hitlSettings);
+
+    // The files this message attaches must be files of this session.
+    const attachedRecords = await resolveMessageAttachments({
+        tenantDbName, tenantId, projectId, conversation, config, fileIds: request.attachments,
+    });
+
+    // A context given when the session was created (`POST /client/v1/agents/sessions`) applies to its API turns too.
+    const turnRuntimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
+
+    // The session's own budget and the tenant's spend limit, for a turn that
+    // calls a model (a connected agent spends nothing here). Refused before the
+    // event log opens, like the check above.
+    const callsModel = !(config.kind === 'external' && config.connection);
+    const budgetPlan = callsModel ? planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd) : null;
+    // Every turn adds its spend to the session's total — with a budget or without one.
+    const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
+    const spend = callsModel && config.modelKey
+        ? await resolveAgentSpendScope({ tenantDbName, tenantId, projectId, userId: request.userId })
+        : undefined;
+    if (spend) await assertAgentTurnSpendAllowed(spend, config);
+
+    // The session event log for this turn. The ledger collects what `input.pre`
+    // rewrote on the wire: step 6 persists the redacted user turn rather than
+    // the raw one, and the log's `user.message` carries the same text.
+    const rewriteLedger = new MessageRewriteLedger();
+    const turnEvents = startSessionTurnEvents({
+        db,
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        conversationId,
+        ...(request.runId ? { runId: request.runId } : {}),
+        userMessage: () => rewriteLedger.resolve(userMessage),
+        trigger: 'message',
+        superseded: () => request.cancellationCell?.abandoned === true,
+    });
+    scope.events = turnEvents;
+    if (hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+        conversation = await cancelPendingForNewMessage(db, conversation, turnEvents.emit);
+    }
+    // Text deltas ride the caller's own stream callback: a caller that did not
+    // ask for text must not switch the model call into streaming mode.
+    const onTextChunk = request.onTextChunk
+        ? (text: string) => {
+            turnEvents.onText(text);
+            request.onTextChunk?.(text);
+        }
+        : undefined;
 
     // 2b. Connected (external) agent — see `runExternalAgentTurn`.
     if (config.kind === 'external' && config.connection) {
@@ -3421,9 +3991,9 @@ export async function executeAgentChatLocal(
             connection: config.connection,
             history: (conversation.messages || []).map((m) => ({ role: m.role, content: m.content })),
             userMessage,
-            runtimeContext: request.runtimeContext,
+            runtimeContext: turnRuntimeContext,
             source: 'agent',
-            onTextChunk: request.onTextChunk,
+            onTextChunk,
             signal: request.signal,
             // A cancelled turn is still written to the conversation below.
             persistPartial: true,
@@ -3440,12 +4010,20 @@ export async function executeAgentChatLocal(
         // §12.12: a deadline/cancel decision made about this turn while the
         // external HTTP call was in flight must not be overwritten by a late
         // write once it finally returns.
-        if (!isCancellationCellTripped(request.cancellationCell)) {
+        const externalSuperseded = isCancellationCellTripped(request.cancellationCell);
+        if (!externalSuperseded) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
                 title: firstTurnTitle(conversation, updatedMessages.length, turn.userMessage),
             });
         }
+        await turnEvents.finish({
+            stopReason: toSessionStopReason(turn.cancelled || externalSuperseded ? 'cancelled' : 'completed'),
+            content: turn.content,
+            messageIndex: updatedMessages.length - 1,
+            userMessage: turn.userMessage,
+            ...(externalOutcome?.stopDetail ? { detail: externalOutcome.stopDetail } : {}),
+        });
 
         return toAgentChatResponse({
             conversationId,
@@ -3458,11 +4036,8 @@ export async function executeAgentChatLocal(
         });
     }
 
-    // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`. The
-    // ledger collects what `input.pre` rewrote on the wire, so step 6 can
-    // persist the redacted user turn rather than the raw one.
-    const rewriteLedger = new MessageRewriteLedger();
-    const { sdkAgent, model, cleanupTasks, warnings } = await buildLocalAgentRun({
+    // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -3470,7 +4045,7 @@ export async function executeAgentChatLocal(
         agentKey,
         agent,
         config,
-        runtimeContext: request.runtimeContext,
+        runtimeContext: turnRuntimeContext,
         actorId: request.userId,
         source: 'agent',
         route: 'agent.chat',
@@ -3480,6 +4055,8 @@ export async function executeAgentChatLocal(
         memoryConversationId: conversationId,
         threadId: conversationId,
         onMessageRewrite: (rewrite) => rewriteLedger.record(rewrite),
+        unattended: request.unattended,
+        ...(spend ? { spend } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -3487,27 +4064,45 @@ export async function executeAgentChatLocal(
     // transcript when there is none — see agentTurnState.ts.
     const now = new Date();
     const carried = await loadConversationState(db, conversation);
+    const attached = await assembleMessageAttachments({
+        tenantDbName, tenantId, projectId, records: attachedRecords, config, model, warnings,
+    });
     const inputState = buildTurnInputState({
         carried,
         transcript: conversation.messages || [],
         userMessage,
+        userContent: buildUserTurnContent(userMessage, attached),
+        attachments: await earlierAttachments({ db, conversation, config, model }),
     });
     const userTurnIndex = inputState.messages.length - 1;
+    // Tool calls the carried state already holds belong to earlier turns.
+    const priorExecutionIds = new Set(
+        (carried?.toolHistory ?? [])
+            .map((entry) => (entry as { executionId?: unknown }).executionId)
+            .filter((id): id is string => typeof id === 'string'),
+    );
 
     try {
         // 5. Invoke
         const compactions: IAgentTurnCompaction[] = [];
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
-        const streamed = captureStreamedText(request.onTextChunk);
+        const streamed = captureStreamedText(onTextChunk);
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
-                if (event.type === 'summarization') compactions.push(compactionFromEvent(event));
+                if (event.type === 'summarization') {
+                    const compaction = compactionFromEvent(event);
+                    compactions.push(compaction);
+                    turnEvents.onCompaction(compaction);
+                    return;
+                }
+                turnEvents.onSdkEvent(event);
             },
             ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
             ...(request.cancellationCell?.deadlineAt !== undefined
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
                 : {}),
+            ...sessionBudgetInvokeOptions(budgetPlan),
         };
 
         const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(inputState, liveInvokeConfig)
@@ -3531,6 +4126,12 @@ export async function executeAgentChatLocal(
                 { role: 'assistant', content: streamed.text(), ...outcome, timestamp: new Date() },
             ];
             logger.info('Agent chat aborted by caller mid-call (not persisted)', { agentKey, conversationId });
+            await turnEvents.finish({
+                stopReason: 'cancelled',
+                content: streamed.text(),
+                detail: outcome.stopDetail,
+                userMessage: rewriteLedger.resolve(userMessage),
+            });
             return toAgentChatResponse({
                 conversationId,
                 priorMessageCount: conversation.messages?.length ?? 0,
@@ -3567,34 +4168,26 @@ export async function executeAgentChatLocal(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const outcome = describeTurnOutcome(result, inputState.messages.length);
+        const turnOutcome = describeTurnOutcome(result, inputState.messages.length);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        // What the turn cost: kept on the message (the session's running total
+        // is the sum of these) and, with a session budget, checked against it.
+        const turnCostUsd = usage
+            ? await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage })
+            : undefined;
+        if (usage && turnCostUsd !== undefined) usage.costUsd = turnCostUsd;
+        const budget = budgetPlan
+            ? settleSessionBudget(budgetPlan, turnCostUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
+            : undefined;
+        const outcome = budgetAwareOutcome(turnOutcome, budget);
         const outputParsed = result.output;
         const outputError = result.outputError ? describeStructuredOutputError(result.outputError) : undefined;
         const compactedTools = compactions.length > 0
             ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
-
-        // 6. Update conversation with new messages — the REWRITTEN user turn,
-        // and the title cut from the same string.
-        const updatedMessages: IAgentConversation['messages'] = [
-            ...(conversation.messages || []),
-            { role: 'user', content: persistedUserMessage, timestamp: now },
-            {
-                role: 'assistant',
-                content: outcome.content,
-                ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
-                ...(outcome.stopReason !== 'completed'
-                    ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
-                    : {}),
-                ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
-                ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
-                ...(usage ? { usage } : {}),
-                ...(outputParsed !== undefined ? { output: outputParsed } : {}),
-                ...(outputError ? { outputError } : {}),
-                timestamp: new Date(),
-            },
-        ];
+        // The same per-call detail a dashboard session stores, so a conversation
+        // started over the API shows its tool calls when it is opened there.
+        const steps = extractPlaygroundSteps(result, priorExecutionIds);
 
         // §12.12: the deadline (sync ceiling, §5) or an async cancel flag
         // (background mode, §7 step 6) may have already decided this turn's
@@ -3602,11 +4195,62 @@ export async function executeAgentChatLocal(
         // result here must never overwrite that decision by persisting
         // anyway, however complete the answer looks.
         const supersededByDeadlineOrCancel = isCancellationCellTripped(request.cancellationCell);
+
+        // The run stopped for a person: keep what it needs to continue.
+        let pause: OpenedPause | null = null;
+        if (outcome.stopReason === 'paused' && !supersededByDeadlineOrCancel) {
+            pause = await openPause(db, {
+                state: result.state,
+                source: 'agent',
+                tenantId,
+                projectId,
+                agentKey,
+                conversationId,
+                ...(request.runId ? { runId: request.runId } : {}),
+                hitl,
+                agentVersion: resolvedVersion,
+                usePublished: Boolean(request.usePublished || request.version !== undefined),
+                createdBy: request.userId,
+            });
+            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+        }
+
+        // 6. Update conversation with new messages — the REWRITTEN user turn,
+        // and the title cut from the same string.
+        const updatedMessages: IAgentConversation['messages'] = [
+            ...(conversation.messages || []),
+            {
+                role: 'user',
+                content: persistedUserMessage,
+                ...(attached.attachments.length > 0 ? { attachments: attached.attachments } : {}),
+                timestamp: now,
+            },
+            {
+                role: 'assistant',
+                content: outcome.content,
+                ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+                ...(steps.length > 0 ? { steps } : {}),
+                ...(outcome.stopReason !== 'completed'
+                    ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
+                    : {}),
+                ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+                ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+                ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
+                ...(usage ? { usage } : {}),
+                ...(outputParsed !== undefined ? { output: outputParsed } : {}),
+                ...(outputError ? { outputError } : {}),
+                timestamp: new Date(),
+            },
+        ];
+
         if (!supersededByDeadlineOrCancel) {
             await db.updateAgentConversation(conversationId, {
                 messages: updatedMessages,
-                title: firstTurnTitle(conversation, updatedMessages.length, persistedUserMessage),
+                title: firstTurnTitle(conversation, updatedMessages.length, persistedUserMessage, attached.attachments),
             });
+            // The turn's cost joins the session total; added, not set, so a turn
+            // that overlaps this one cannot erase it (see `addSessionTurnSpend`).
+            await addSessionTurnSpend({ db, conversationId, plan: spendAccount, spentUsd: budget?.turnCostUsd ?? turnCostUsd ?? 0 });
             await saveConversationState(db, {
                 conversationId,
                 tenantId,
@@ -3614,6 +4258,7 @@ export async function executeAgentChatLocal(
                 agentKey,
                 state: result.state,
                 messageCount: updatedMessages.length,
+                ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
             });
         }
 
@@ -3625,6 +4270,20 @@ export async function executeAgentChatLocal(
             ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
         });
 
+        for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
+        await turnEvents.finish({
+            // A turn the deadline or an async cancel already decided was not
+            // persisted; the log says what the caller was told.
+            stopReason: supersededByDeadlineOrCancel ? 'cancelled' : sessionStopReason(outcome.stopReason, pause, budget),
+            ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
+            content: outcome.content,
+            messageIndex: updatedMessages.length - 1,
+            userMessage: persistedUserMessage,
+            ...(usage ? { usage: { ...usage } } : {}),
+            ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+            ...(budget && !supersededByDeadlineOrCancel ? { budget } : {}),
+        });
+
         return toAgentChatResponse({
             conversationId,
             priorMessageCount: conversation.messages?.length ?? 0,
@@ -3633,12 +4292,14 @@ export async function executeAgentChatLocal(
             content: outcome.content,
             messages: updatedMessages,
             reasoning: assistantReasoning,
-            outcome,
+            outcome: budget?.reached ? { stopReason: 'budget_reached', stopDetail: outcome.stopDetail } : outcome,
             usage,
             outputParsed,
             outputError,
+            ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
         });
     } finally {
+        await recordSessionTurnSpend({ db, conversationId, plan: spendAccount, tappedUsd: tappedUsd() });
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'chat' });
     }
 }
@@ -3650,6 +4311,12 @@ export async function executeAgentChatLocal(
 export async function executePlaygroundChat(
     request: AgentPlaygroundChatRequest,
 ): Promise<AgentPlaygroundChatResult> {
+    // Agent-run quota (domain `agent`): this is the entry the dashboard chat,
+    // portals and realtime voice share; the caller is the one the server
+    // stamped into the runtime context. See agentQuota.ts.
+    const caller = agentRunCallerOf(request);
+    await enforceAgentRunQuota(caller);
+
     // Callbacks and the signal can't serialize over the queue — kept out of
     // the payload (the local fast path still receives the full request) and
     // bridged by the cluster stream relay when the run is routed.
@@ -3658,16 +4325,25 @@ export async function executePlaygroundChat(
     delete payload.onTextChunk;
     delete payload.onCompaction;
     delete payload.signal;
-    return routeInstanceCall(
-        {
-            entityType: 'agent',
-            entityId: agentEntityId(request.tenantId, request.agentKey),
-            jobName: 'playground',
-        },
-        payload as unknown as QueuePayload,
-        () => executePlaygroundChatLocal(request),
-        { relay: agentRelayOptions(request) },
-    );
+    const usage = createRunUsageSink();
+    let result: AgentPlaygroundChatResult;
+    try {
+        result = await runWithUsageSink(usage, () => routeInstanceCall(
+            {
+                entityType: 'agent',
+                entityId: agentEntityId(request.tenantId, request.agentKey),
+                jobName: 'playground',
+            },
+            payload as unknown as QueuePayload,
+            () => executePlaygroundChatLocal(request),
+            { relay: agentRelayOptions(request) },
+        ));
+    } catch (error) {
+        settleAgentRun(caller, usage);
+        throw error;
+    }
+    settleAgentRun(caller, usage, result.usage?.totalTokens);
+    return result;
 }
 
 
@@ -3705,6 +4381,15 @@ export function extractPlaygroundSteps(
     const history = (result.state as { toolHistory?: Array<Record<string, unknown>> } | undefined)?.toolHistory;
     if (!Array.isArray(history)) return [];
 
+    // Calls an approval answered "deny" (the SDK marks the approval `rejected` and the call
+    // `rejected` too): a decision, not a failure. A call a guardrail blocked is also `rejected`
+    // in the history but has no approval behind it.
+    const deniedCallIds = new Set<string>();
+    const approvals = (result.state as { pendingApprovals?: Array<{ toolCallId?: unknown; metadata?: { resolution?: unknown } }> } | undefined)?.pendingApprovals;
+    for (const approval of Array.isArray(approvals) ? approvals : []) {
+        if (approval?.metadata?.resolution === 'rejected' && typeof approval.toolCallId === 'string') deniedCallIds.add(approval.toolCallId);
+    }
+
     // tool_call_id → the text of the assistant message that issued it.
     const narrations = new Map<string, string>();
     const messages = (result.state as { messages?: unknown[] } | undefined)?.messages;
@@ -3738,7 +4423,12 @@ export function extractPlaygroundSteps(
             ? output as Record<string, unknown>
             : undefined;
         const sniffedError = Boolean(record?.error) || record?.ok === false;
-        const failed = status === 'error' || status === 'rejected' || sniffedError;
+        const deniedByUser = status === 'rejected' && (
+            (typeof entry.tool_call_id === 'string' && deniedCallIds.has(entry.tool_call_id))
+            // The SDK words a reviewer's refusal `Rejected: <comment>`; a policy block carries its own reason.
+            || (typeof output === 'string' && output.startsWith('Rejected: ') && entry.rawOutput === null)
+        );
+        const failed = !deniedByUser && (status === 'error' || status === 'rejected' || sniffedError);
         const errorText = failed
             ? (status === 'rejected' ? 'Blocked before the tool ran.' : undefined)
                 ?? (record?.error ? String(record.error) : undefined)
@@ -3760,6 +4450,7 @@ export function extractPlaygroundSteps(
             // so the transcript, the Events tab and the per-tool failure
             // count all agree with the error text above.
             ...(failed ? { status: 'error' as const } : status ? { status } : {}),
+            ...(deniedByUser ? { deniedByUser: true } : {}),
             ...(entry.fromCache === true ? { fromCache: true } : {}),
             ...(entry.summarized === true ? { summarized: true } : {}),
             ...(typeof entry.originalTokenCount === 'number'
@@ -3797,6 +4488,57 @@ async function priceTurn(
     }
 }
 
+/**
+ * What a turn cost, for the session budget. With a budget in force this is the
+ * SDK's own per-request usage priced by the cost estimator — the figure the
+ * budget was enforced against, sub-agent models at their own prices — and
+ * otherwise (or when the SDK reported no per-request usage) the turn's total
+ * usage at the primary model's price.
+ */
+async function priceAgentTurn(input: {
+    plan: SessionBudgetPlan | null;
+    result: Pick<AgentSdkInvokeResult, 'state'>;
+    costEstimator: ReturnType<typeof buildCostEstimator>;
+    pricing: IModelPricing | null | undefined;
+    usage: AgentPlaygroundChatResult['usage'];
+}): Promise<number | undefined> {
+    const perRequest = (input.result.state as {
+        usage?: {
+            perRequest?: Array<{
+                modelName?: string;
+                usage?: {
+                    prompt_tokens?: number;
+                    completion_tokens?: number;
+                    prompt_tokens_details?: { cached_tokens?: number };
+                    completion_tokens_details?: { reasoning_tokens?: number };
+                };
+            }>;
+        };
+    } | undefined)?.usage?.perRequest;
+    if (input.plan && input.costEstimator && Array.isArray(perRequest) && perRequest.length > 0) {
+        let cost = 0;
+        for (const request of perRequest) {
+            cost += input.costEstimator({
+                modelName: request.modelName,
+                inputTokens: Number(request.usage?.prompt_tokens) || 0,
+                outputTokens: Number(request.usage?.completion_tokens) || 0,
+                cachedInputTokens: Number(request.usage?.prompt_tokens_details?.cached_tokens) || 0,
+                reasoningTokens: Number(request.usage?.completion_tokens_details?.reasoning_tokens) || 0,
+            }) || 0;
+        }
+        return cost;
+    }
+    return priceTurn(input.pricing, input.usage);
+}
+
+/**
+ * The turn's outcome as it is reported when the SESSION budget stopped it: the
+ * SDK's `limit` becomes `budget_reached`, with the budget's own wording.
+ */
+function budgetAwareOutcome(outcome: AgentTurnOutcome, settlement: SessionBudgetSettlement | undefined): AgentTurnOutcome {
+    return settlement?.reached ? { ...outcome, stopDetail: budgetStopDetail(settlement) } : outcome;
+}
+
 function describeStructuredOutputError(error: unknown): string {
     if (typeof error === 'string') return error;
     const record = error as { message?: unknown; issues?: unknown } | null;
@@ -3804,9 +4546,26 @@ function describeStructuredOutputError(error: unknown): string {
     return JSON.stringify(error);
 }
 
-/** Local (non-routed) implementation. Exported so the queue consumer can call it. */
+/**
+ * Local (non-routed) implementation. Exported so the queue consumer can call it.
+ * A Session turn (one with a `conversationId`) is recorded in the conversation's
+ * event log; a throw from anywhere in it becomes a `session.error` there.
+ */
 export async function executePlaygroundChatLocal(
     request: AgentPlaygroundChatRequest,
+): Promise<AgentPlaygroundChatResult> {
+    const scope: { events?: SessionTurnEvents } = {};
+    try {
+        return await runPlaygroundChatTurn(request, scope);
+    } catch (error) {
+        await scope.events?.fail(error).catch(() => undefined);
+        throw error;
+    }
+}
+
+async function runPlaygroundChatTurn(
+    request: AgentPlaygroundChatRequest,
+    scope: { events?: SessionTurnEvents },
 ): Promise<AgentPlaygroundChatResult> {
     const { tenantDbName, tenantId, projectId, agentKey, userMessage } = request;
 
@@ -3828,28 +4587,6 @@ export async function executePlaygroundChatLocal(
         }
         sessionConversation = found;
     }
-    const history = sessionConversation
-        ? sessionConversation.messages.map((m) => ({ role: m.role, content: m.content }))
-        : request.history;
-    // A Session resumes from the state its last turn ended in (tool results,
-    // summaries, plan) — the text transcript alone lost all of that. A
-    // stateless call has only the history it was handed.
-    const carried = sessionConversation ? await loadConversationState(db, sessionConversation) : null;
-
-    // Context entered when the session was started applies to every turn in it.
-    // Merged UNDER the request's own context so a per-message override still
-    // wins — and merged per-key rather than wholesale, or setting one header on
-    // one turn would silently drop the session's whole context for that turn.
-    const sessionContext = sessionConversation?.metadata?.runtimeContext as AgentRuntimeContext | undefined;
-    const runtimeContext: AgentRuntimeContext | undefined = sessionContext
-        ? {
-            ...sessionContext,
-            ...request.runtimeContext,
-            headers: { ...sessionContext.headers, ...request.runtimeContext?.headers },
-            metadata: { ...sessionContext.metadata, ...request.runtimeContext?.metadata },
-        }
-        : request.runtimeContext;
-
     // The draft unless a version is asked for. Reading the published snapshot
     // is what makes "does my change actually help?" answerable in one screen.
     let config = agent.config;
@@ -3860,6 +4597,77 @@ export async function executePlaygroundChatLocal(
         config = snapshot.snapshot.config;
         ranVersion = request.version;
     }
+
+    // A message that arrives while the session waits on an approval or a
+    // question is refused (or cancels the request) per the agent's own setting.
+    // Checked before the event log opens: a refusal must not mark the session
+    // idle or write an error into it.
+    const hitlSettings = resolveHitlConfig(config.humanInTheLoop);
+    if (sessionConversation) await assertNoBlockingPending(db, sessionConversation, hitlSettings);
+
+    // The files this message attaches must be files of this session.
+    const attachedRecords = await resolveMessageAttachments({
+        tenantDbName, tenantId, projectId, conversation: sessionConversation, config, fileIds: request.attachments,
+    });
+
+    // The session's own budget (a Session only — a stateless call has none) and
+    // the tenant's spend limit, for a turn that calls a model. Refused before the
+    // event log opens, like the check above.
+    const callsModel = !(config.kind === 'external' && config.connection);
+    const budgetPlan = callsModel && sessionConversation
+        ? planSessionBudget(sessionConversation, config.runtime?.limits?.maxCostUsd)
+        : null;
+    // Every turn of a Session adds its spend to the session's total — with a budget or without one.
+    const spendAccount = sessionConversation ? (budgetPlan ?? startSessionSpendAccount(sessionConversation)) : null;
+    const spend = callsModel && config.modelKey
+        ? await resolveAgentSpendScope({
+            tenantDbName, tenantId, projectId,
+            userId: request.runtimeContext?.userId ?? (sessionConversation ? String(sessionConversation.createdBy) : undefined),
+        })
+        : undefined;
+    if (spend) await assertAgentTurnSpendAllowed(spend, config);
+    // Keeps each message's `attachments`: a replay of the transcript shows the model the files again.
+    const history = sessionConversation
+        ? sessionConversation.messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+        }))
+        : request.history;
+    // Only a persisted Session has an event log; a stateless call has nowhere to put one.
+    const turnEvents = sessionConversation
+        ? startSessionTurnEvents({
+            db,
+            tenantDbName,
+            tenantId,
+            projectId,
+            agentKey,
+            conversationId: String(sessionConversation._id),
+            userMessage,
+            trigger: 'message',
+        })
+        : undefined;
+    scope.events = turnEvents;
+    if (sessionConversation && hitlSettings.onUserMessageWhilePending === 'cancel_pending') {
+        sessionConversation = await cancelPendingForNewMessage(db, sessionConversation, turnEvents?.emit);
+    }
+    // Text deltas ride the caller's own stream callback (see `runAgentChatTurn`).
+    const onTextChunk = turnEvents && request.onTextChunk
+        ? (text: string) => {
+            turnEvents.onText(text);
+            request.onTextChunk?.(text);
+        }
+        : request.onTextChunk;
+    // A Session resumes from the state its last turn ended in (tool results,
+    // summaries, plan) — the text transcript alone lost all of that. A
+    // stateless call has only the history it was handed.
+    const carried = sessionConversation ? await loadConversationState(db, sessionConversation) : null;
+
+    // Context entered when the session was started applies to every turn in it.
+    // Merged UNDER the request's own context so a per-message override still
+    // wins — and merged per-key rather than wholesale, or setting one header on
+    // one turn would silently drop the session's whole context for that turn.
+    const runtimeContext = mergeSessionRuntimeContext(sessionConversation, request.runtimeContext);
 
     // Connected (external) agent — see `runExternalAgentTurn`. `content` is
     // the guarded answer: the only copy for a stateless call, and what a
@@ -3877,7 +4685,7 @@ export async function executePlaygroundChatLocal(
             userMessage,
             runtimeContext,
             source: 'agent-playground',
-            onTextChunk: request.onTextChunk,
+            onTextChunk,
             signal: request.signal,
             persistPartial: Boolean(sessionConversation),
         });
@@ -3890,14 +4698,20 @@ export async function executePlaygroundChatLocal(
                 : {}),
         };
         if (sessionConversation) {
-            await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
+            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, externalResult);
+            await turnEvents?.finish({
+                stopReason: toSessionStopReason(cancelled ? 'cancelled' : 'completed'),
+                content,
+                ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
+                ...(externalResult.stopDetail ? { detail: externalResult.stopDetail } : {}),
+            });
         }
 
         logger.info('Connected agent playground chat completed', { agentKey });
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -3919,13 +4733,22 @@ export async function executePlaygroundChatLocal(
         // A session's turns group under one Observability thread, the same way
         // API turns do — the agent Sessions drawer renders that thread.
         threadId: request.conversationId,
+        // A stateless call has nowhere to park a paused turn.
+        canPause: Boolean(sessionConversation),
+        ...(request.embedded ? { embedded: request.embedded } : {}),
+        ...(spend ? { spend } : {}),
     });
 
+    const attached = await assembleMessageAttachments({
+        tenantDbName, tenantId, projectId, records: attachedRecords, config, model, warnings,
+    });
     const inputState = buildTurnInputState({
         carried,
         transcript: history || [],
         userMessage,
+        userContent: buildUserTurnContent(userMessage, attached),
         systemPrompt,
+        attachments: await earlierAttachments({ db, conversation: sessionConversation, config, model }),
     });
     const priorExecutionIds = new Set(
         (carried?.toolHistory ?? [])
@@ -3936,14 +4759,16 @@ export async function executePlaygroundChatLocal(
     // Surface progress to the caller (best-effort; never fails the run).
     const { onToolEvent, onCompaction, signal } = request;
     const compactions: IAgentTurnCompaction[] = [];
-    const streamed = captureStreamedText(request.onTextChunk);
+    const streamed = captureStreamedText(onTextChunk);
     const invokeConfig = {
         onEvent: (event: AgentSdkEvent) => {
+            turnEvents?.onSdkEvent(event);
             if (event.type === 'summarization') {
                 // Collected for the turn record either way; forwarded live
                 // so a session shows the compaction as it happens.
                 const compaction = compactionFromEvent(event);
                 compactions.push(compaction);
+                turnEvents?.onCompaction(compaction);
                 try {
                     onCompaction?.(compaction);
                 } catch (callbackError) {
@@ -3969,6 +4794,7 @@ export async function executePlaygroundChatLocal(
         ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
         // The SDK checks it between steps and hands it to the model call.
         ...(signal ? { cancellationToken: signal } : {}),
+        ...sessionBudgetInvokeOptions(budgetPlan),
     };
 
     const invokeStartedAt = Date.now();
@@ -4000,7 +4826,13 @@ export async function executePlaygroundChatLocal(
                     tenantDbName, tenantId, projectId, config, hook: 'output.pre', text: aborted.content,
                     source: 'agent-playground',
                 });
-                await persistSessionTurn(db, sessionConversation, userMessage, aborted);
+                const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, aborted, attached.attachments);
+                await turnEvents?.finish({
+                    stopReason: 'cancelled',
+                    content: aborted.content,
+                    ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
+                    detail: CALLER_ABORT_DETAIL,
+                });
             }
             return aborted;
         }
@@ -4015,10 +4847,13 @@ export async function executePlaygroundChatLocal(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const outcome = describeTurnOutcome(result, inputState.messages.length);
+        const turnOutcome = describeTurnOutcome(result, inputState.messages.length);
         const compactedTools = compactions.length > 0
             ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
+
+        // Priced below; the session budget (if any) is settled once the cost is known.
+        let outcome: AgentTurnOutcome = turnOutcome;
 
         logger.info('Playground chat completed', {
             agentKey,
@@ -4042,16 +4877,49 @@ export async function executePlaygroundChatLocal(
             ...(compactions.length > 0 ? { compactions } : {}),
             ...(compactedTools.length > 0 ? { compactedTools } : {}),
             ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+            ...(request.previousVersions?.length ? { previousVersions: request.previousVersions.slice(-MAX_PREVIOUS_VERSIONS) } : {}),
         };
 
-        const costUsd = await priceTurn(model.pricing, playgroundResult.usage);
+        const costUsd = await priceAgentTurn({
+            plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage: playgroundResult.usage,
+        });
         if (costUsd !== undefined && playgroundResult.usage) {
             playgroundResult.usage.costUsd = costUsd;
         }
+        const budget = budgetPlan
+            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
+            : undefined;
+        if (budget?.reached) {
+            outcome = budgetAwareOutcome(turnOutcome, budget);
+            // A turn that finished on its own keeps its answer unmarked: the
+            // session (stop reason, status, events) says the budget was reached.
+            if (outcome.stopReason !== 'completed') playgroundResult.stopDetail = outcome.stopDetail;
+        }
 
         if (sessionConversation) {
-            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult);
+            // The run stopped for a person: keep what it needs to continue.
+            let pause: OpenedPause | null = null;
+            if (outcome.stopReason === 'paused') {
+                pause = await openPause(db, {
+                    state: result.state,
+                    source: 'agent-playground',
+                    tenantId,
+                    projectId,
+                    agentKey,
+                    conversationId: String(sessionConversation._id),
+                    hitl,
+                    agentVersion: ranVersion,
+                    usePublished: ranVersion !== null,
+                    createdBy: runtimeContext?.userId ?? String(sessionConversation.createdBy),
+                });
+                if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
+                else playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
+            }
+            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult, attached.attachments);
             if (messageCount !== undefined) {
+                await addSessionTurnSpend({
+                    db, conversationId: String(sessionConversation._id), plan: spendAccount, spentUsd: budget?.turnCostUsd ?? costUsd ?? 0,
+                });
                 await saveConversationState(db, {
                     conversationId: String(sessionConversation._id),
                     tenantId,
@@ -4059,12 +4927,26 @@ export async function executePlaygroundChatLocal(
                     agentKey,
                     state: result.state,
                     messageCount,
+                    ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
                 });
             }
+            for (const action of pause?.actions ?? []) turnEvents?.emitInTurn('action.required', actionRequiredEventData(action));
+            await turnEvents?.finish({
+                stopReason: sessionStopReason(outcome.stopReason, pause, budget),
+                ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
+                content: playgroundResult.content,
+                ...(messageCount !== undefined ? { messageIndex: messageCount - 1 } : {}),
+                ...(playgroundResult.usage ? { usage: { ...playgroundResult.usage } } : {}),
+                ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+                ...(budget ? { budget } : {}),
+            });
         }
 
         return playgroundResult;
     } finally {
+        if (sessionConversation) {
+            await recordSessionTurnSpend({ db, conversationId: String(sessionConversation._id), plan: spendAccount, tappedUsd: tappedUsd() });
+        }
         await runBoundToolCleanup(cleanupTasks, { agentKey, mode: 'playground' });
     }
 }
@@ -4084,12 +4966,19 @@ async function persistSessionTurn(
     conversation: IAgentConversation,
     userMessage: string,
     result: AgentPlaygroundChatResult,
+    /** Files the user message attaches. */
+    attachments?: IAgentMessageAttachment[],
 ): Promise<number | undefined> {
     try {
         const now = new Date();
         const messages: IAgentConversation['messages'] = [
             ...conversation.messages,
-            { role: 'user', content: userMessage, timestamp: now },
+            {
+                role: 'user',
+                content: userMessage,
+                ...(attachments && attachments.length > 0 ? { attachments } : {}),
+                timestamp: now,
+            },
             {
                 role: 'assistant',
                 content: result.content,
@@ -4105,6 +4994,8 @@ async function persistSessionTurn(
                 ...(result.compactions?.length ? { compactions: result.compactions } : {}),
                 ...(result.compactedTools?.length ? { compactedTools: result.compactedTools } : {}),
                 ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+                ...(result.pendingActions?.length ? { pendingActions: result.pendingActions } : {}),
+                ...(result.previousVersions?.length ? { previousVersions: result.previousVersions } : {}),
                 version: result.version ?? null,
             },
         ];
@@ -4113,9 +5004,7 @@ async function persistSessionTurn(
             // First exchange in a freshly-created "New session" names itself
             // after what was actually asked, same convention the live chat
             // path already uses for its conversation titles.
-            title: (!conversation.title || conversation.title === 'New conversation') && messages.length <= 2
-                ? userMessage.substring(0, 80)
-                : conversation.title,
+            title: firstTurnTitle(conversation, messages.length, userMessage, attachments),
         });
         return messages.length;
     } catch (error) {
@@ -4123,5 +5012,593 @@ async function persistSessionTurn(
             conversationId: String(conversation._id),
             error: error instanceof Error ? error.message : String(error),
         });
+    }
+}
+
+
+// ── Continuing a paused turn ────────────────────────────────────────────
+
+export interface AgentResumeRequest {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    conversationId: string;
+    /** Who drives the continuation (the approver, or the turn's owner for a timeout). */
+    userId: string;
+    trigger: 'resume' | 'timeout';
+    /** The background run executing this continuation, when there is one. */
+    runId?: string;
+    runtimeContext?: AgentRuntimeContext;
+    cancellationCell?: AgentRunCancellationCell;
+    signal?: AbortSignal;
+    onToolEvent?: (event: AgentToolCallEvent) => void;
+    onTextChunk?: (text: string) => void;
+    onCompaction?: (compaction: IAgentTurnCompaction) => void;
+    /** Called right before the SDK loop is invoked — after this the answers are spent. */
+    onInvokeStart?: () => void;
+    /** The host page this continuation answers for, when the chat is embedded — see `AgentPlaygroundChatRequest.embedded`. */
+    embedded?: EmbeddedRunContext;
+    /**
+     * Set to continue a session that stopped on its spend budget rather than on
+     * a pause: there are no answers to apply and no new user message — the loop
+     * is invoked on the state the session ended in and the model carries on from
+     * its last tool results. `source` is the surface it belongs to (the
+     * dashboard's playground or the live API); `usePublished` / `version` pick
+     * the config the way a normal turn does.
+     */
+    continuation?: {
+        source: 'agent' | 'agent-playground';
+        usePublished?: boolean;
+        version?: number;
+    };
+}
+
+export interface AgentResumeResult {
+    /** The new assistant message, in the dashboard playground's shape. */
+    result: AgentPlaygroundChatResult;
+    /** The same turn in the Responses shape (`requires_action` when it paused again). */
+    response: AgentChatResponse;
+    stopReason: SessionStopReason;
+}
+
+/** What a continuation reads back about the pause it continues. */
+async function loadPausedRun(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    request: Pick<AgentResumeRequest, 'projectId' | 'agentKey' | 'conversationId'>,
+) {
+    const conversation = await db.findAgentConversationById(request.conversationId);
+    if (!conversation || conversation.projectId !== request.projectId || conversation.agentKey !== request.agentKey) {
+        throw new Error(`Conversation "${request.conversationId}" not found`);
+    }
+    const stored = await db.findAgentConversationState(request.conversationId);
+    const paused = stored?.pausedSnapshot ? parsePausedState(stored.pausedSnapshot) : null;
+    if (!paused) {
+        throw new AgentResumeError('This run can no longer be continued: its paused state was not found.', 409, { stateLost: true });
+    }
+    const actions = await db.listAgentPendingActions(request.conversationId);
+    const bySdkId = new Map(actions.map((action) => [action.sdkId, action]));
+    const approvals = (paused.state.pendingApprovals ?? []).filter((entry) => entry.status === 'pending');
+    const questions = (paused.state.pendingUserQuestions ?? []).filter((entry) => entry.status === 'pending');
+    if (approvals.length + questions.length === 0) {
+        throw new AgentResumeError('This run is not waiting for anything.', 409, { stateLost: true });
+    }
+    const open = [...approvals, ...questions].filter((entry) => bySdkId.get(entry.id)?.status !== 'resolved');
+    if (open.length > 0) throw new AgentResumeError('Not every pending action has been answered yet.');
+    const anchor = bySdkId.get(approvals[0]?.id ?? questions[0].id)!;
+
+    const agent = await db.findAgentByKey(request.agentKey, request.projectId);
+    if (!agent) throw new Error(`Agent "${request.agentKey}" not found`);
+    // The same agent the paused turn ran: its pinned version, or the draft.
+    let config: IAgentConfig = agent.config;
+    const version = anchor.agentVersion ?? null;
+    if (version !== null) {
+        const snapshot = await db.findAgentVersion(String(agent._id), version);
+        if (!snapshot) throw new Error(`Version ${version} not found for agent "${request.agentKey}"`);
+        config = snapshot.snapshot.config;
+    }
+    return { conversation, agent, config, version, paused, approvals, questions, bySdkId };
+}
+
+/**
+ * What continuing a budget-stopped session reads back: the conversation, the
+ * config the continuation runs with, and the state the session ended in. Refuses
+ * (409) a session that did not stop on its budget, is waiting for a person, or
+ * has no stored state to carry on from.
+ */
+async function loadContinuationRun(
+    db: Awaited<ReturnType<typeof getDatabase>>,
+    request: Pick<AgentResumeRequest, 'tenantDbName' | 'projectId' | 'agentKey' | 'conversationId'>,
+    continuation: NonNullable<AgentResumeRequest['continuation']>,
+) {
+    const conversation = await db.findAgentConversationById(request.conversationId);
+    if (!conversation || conversation.projectId !== request.projectId || conversation.agentKey !== request.agentKey) {
+        throw new Error(`Conversation "${request.conversationId}" not found`);
+    }
+    if (conversation.runtimeStatus === 'requires_action') {
+        throw new AgentResumeError('This session is waiting for an approval or an answer. Resolve it first.');
+    }
+    if (conversation.runtimeStatus === 'running') {
+        throw new AgentResumeError('This session is running a turn right now.');
+    }
+    // `error`: an earlier attempt to continue failed — the stored state is untouched, so try again.
+    if (conversation.stopReason !== 'budget_reached' && conversation.stopReason !== 'error') {
+        throw new AgentResumeError('This session did not stop on its budget, so there is nothing to continue.');
+    }
+    const carried = await loadConversationState(db, conversation);
+    if (!carried || !carried.messages?.length) {
+        throw new AgentResumeError('This session can no longer be continued: its stored state was not found.');
+    }
+    // A transcript that already ends in the agent's own answer has nothing left to do
+    // (the turn that crossed the budget can have finished with it).
+    if (endsInAnswer(carried)) {
+        throw new AgentResumeError('This session already ended with an answer, so there is nothing to continue.');
+    }
+
+    let agent: IAgent;
+    let config: IAgentConfig;
+    let version: number | null = null;
+    if (continuation.usePublished || continuation.version !== undefined) {
+        const resolved = await resolveAgentConfig(request.tenantDbName, request.agentKey, request.projectId, continuation.version);
+        agent = resolved.agent;
+        config = resolved.config;
+        version = resolved.resolvedVersion;
+    } else {
+        const found = await db.findAgentByKey(request.agentKey, request.projectId);
+        if (!found) throw new Error(`Agent "${request.agentKey}" not found`);
+        agent = found;
+        config = found.config;
+    }
+    return { conversation, agent, config, version, carried };
+}
+
+/**
+ * Do reviewer-edited arguments satisfy the tool's own schema? Checked before a
+ * resolution is recorded (the caller answers 400), because the SDK itself would
+ * only notice at execution. Builds the agent to read the tool's schema, so it
+ * runs only when a reviewer actually changed the arguments.
+ */
+export async function validateApprovedArgs(input: {
+    tenantDbName: string;
+    tenantId: string;
+    projectId: string;
+    agentKey: string;
+    conversationId: string;
+    userId: string;
+    toolName: string;
+    approvedArgs: Record<string, unknown>;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+    const db = await getDatabase();
+    await db.switchToTenant(input.tenantDbName);
+    const conversation = await db.findAgentConversationById(input.conversationId);
+    if (!conversation || conversation.projectId !== input.projectId) throw new Error(`Conversation "${input.conversationId}" not found`);
+    const agent = await db.findAgentByKey(input.agentKey, input.projectId);
+    if (!agent) throw new Error(`Agent "${input.agentKey}" not found`);
+
+    const built = await buildLocalAgentRun({
+        db,
+        tenantDbName: input.tenantDbName,
+        tenantId: input.tenantId,
+        projectId: input.projectId,
+        agentKey: input.agentKey,
+        agent,
+        config: agent.config,
+        actorId: input.userId,
+        source: 'agent',
+        route: 'agent.chat',
+        userId: input.userId,
+        conversation,
+        memoryConversationId: input.conversationId,
+        threadId: input.conversationId,
+    });
+    try {
+        const tool = built.tools.find((candidate) => candidate.name === input.toolName);
+        // A tool this agent no longer has cannot be validated; the resume reports it.
+        if (!tool) return { ok: true };
+        const { validateToolArgs } = await import('@cognipeer/agent-sdk');
+        const checked = validateToolArgs(tool, input.approvedArgs);
+        return checked.ok ? { ok: true } : { ok: false, message: checked.message };
+    } finally {
+        await runBoundToolCleanup(built.cleanupTasks, { agentKey: input.agentKey, mode: 'chat' });
+    }
+}
+
+/**
+ * Continues a session that stopped on its spend budget, after the budget was
+ * raised: the same smart loop, invoked on the state the session ended in with no
+ * new user message. The result is a NEW assistant message, like a resume.
+ */
+export function executeAgentContinueLocal(
+    request: Omit<AgentResumeRequest, 'trigger' | 'continuation'> & {
+        continuation: NonNullable<AgentResumeRequest['continuation']>;
+    },
+): Promise<AgentResumeResult> {
+    return executeAgentResumeLocal({ ...request, trigger: 'resume' });
+}
+
+/**
+ * Continues a paused turn once every pending action is answered: the agent is
+ * rebuilt from the config the paused turn used, the stored state is restored,
+ * each resolution is applied with the SDK (`resolveToolApproval` /
+ * `resolveUserQuestion`) and the same smart loop is invoked again — so an
+ * approved tool runs, a denied one reaches the model as a refusal, and the
+ * turn can finish or pause again. The result is a NEW assistant message; there
+ * is no new user message.
+ */
+export async function executeAgentResumeLocal(request: AgentResumeRequest): Promise<AgentResumeResult> {
+    const scope: { events?: SessionTurnEvents } = {};
+    try {
+        return await runAgentResumeTurn(request, scope);
+    } catch (error) {
+        await scope.events?.fail(error).catch(() => undefined);
+        throw error;
+    }
+}
+
+/**
+ * What the model reads as the result of a client tool: the page's output as
+ * text, run through the agent's `tool.post` guardrails like any tool result
+ * (the page's data is user input, so it is no more trusted than a connector's),
+ * or the error line when the page could not do it. A result that cannot be
+ * checked is withheld. The untrusted notice is added where the answer is applied
+ * (`resolveClientToolState`), after the guardrails have seen the plain text.
+ */
+async function clientToolContent(
+    guard: Pick<AgentToolGuard, 'protect'>,
+    call: { name: string; args: unknown },
+    resolution: IAgentPendingActionResolution,
+): Promise<string> {
+    if (resolution.error !== undefined) return clientToolErrorText(resolution.error);
+    const text = clientToolOutputText(resolution.output);
+    try {
+        const screened = await guard.protect<Record<string, unknown>, string>(
+            { name: clientToolPolicyName(call.name), requestedName: call.name },
+            async () => text,
+        )((call.args && typeof call.args === 'object' ? call.args : {}) as Record<string, unknown>);
+        return typeof screened === 'string' ? screened : clientToolOutputText(screened);
+    } catch (error) {
+        logger.warn('A client tool result could not be checked and was withheld', {
+            tool: call.name,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return clientToolErrorText('The result could not be checked and was withheld.');
+    }
+}
+
+async function runAgentResumeTurn(
+    request: AgentResumeRequest,
+    scope: { events?: SessionTurnEvents },
+): Promise<AgentResumeResult> {
+    const { tenantDbName, tenantId, projectId, agentKey, conversationId } = request;
+    const db = await getDatabase();
+    await db.switchToTenant(tenantDbName);
+
+    // A pause to continue — or, for a budget-stopped session, the state it ended in.
+    let pausedRun: Awaited<ReturnType<typeof loadPausedRun>> | null = null;
+    let continued: Awaited<ReturnType<typeof loadContinuationRun>> | null = null;
+    if (request.continuation) {
+        continued = await loadContinuationRun(db, request, request.continuation);
+    } else {
+        try {
+            pausedRun = await loadPausedRun(db, request);
+        } catch (error) {
+            // The state this run would continue from is gone: the session is not
+            // waiting for anything any more, so it must not keep saying it is.
+            if (error instanceof AgentResumeError && error.stateLost) {
+                await db.updateAgentConversationRuntime(conversationId, {
+                    runtimeStatus: 'idle', stopReason: 'error', pendingActionIds: [],
+                }).catch(() => undefined);
+            }
+            throw error;
+        }
+    }
+    const loaded = (pausedRun ?? continued)!;
+    const { conversation, agent, config, version } = loaded;
+    const paused = pausedRun?.paused ?? null;
+    const approvals = pausedRun?.approvals ?? [];
+    const questions = pausedRun?.questions ?? [];
+    const bySdkId = pausedRun?.bySdkId ?? new Map<string, IAgentPendingAction>();
+    const source: 'agent' | 'agent-playground' = paused?.source ?? request.continuation!.source;
+    const startedAt = Date.now();
+
+    // The session's own budget and the tenant's spend limit, before the model is
+    // called. A refusal here comes before `onInvokeStart`, so a pause's answers
+    // are not spent and can be given again once the limit is lifted.
+    const budgetPlan = planSessionBudget(conversation, config.runtime?.limits?.maxCostUsd);
+    const spendAccount = budgetPlan ?? startSessionSpendAccount(conversation);
+    // A continued pause is the spend of whoever started the turn, not of the approver.
+    const anchorAction = bySdkId.get(approvals[0]?.id ?? questions[0]?.id ?? '');
+    const spend = config.modelKey
+        ? await resolveAgentSpendScope({
+            tenantDbName, tenantId, projectId, userId: anchorAction?.createdBy ?? request.userId,
+        })
+        : undefined;
+    if (spend) await assertAgentTurnSpendAllowed(spend, config);
+
+    // Same merge as a playground turn: the session's context under the caller's.
+    const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
+
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd } = await buildLocalAgentRun({
+        db,
+        tenantDbName,
+        tenantId,
+        projectId,
+        agentKey,
+        agent,
+        config,
+        runtimeContext,
+        ...(request.embedded ? { embedded: request.embedded } : {}),
+        actorId: source === 'agent' ? request.userId : `agent:${agentKey}`,
+        source,
+        route: source === 'agent' ? 'agent.chat' : 'agent.playground',
+        userId: request.userId,
+        version,
+        conversation,
+        memoryConversationId: conversationId,
+        threadId: conversationId,
+        ...(spend ? { spend } : {}),
+    });
+
+    try {
+        const turnEvents = startSessionTurnEvents({
+            db,
+            tenantDbName,
+            tenantId,
+            projectId,
+            agentKey,
+            conversationId,
+            ...(request.runId ? { runId: request.runId } : {}),
+            trigger: request.trigger,
+            superseded: () => request.cancellationCell?.abandoned === true,
+        });
+        scope.events = turnEvents;
+        const onTextChunk = request.onTextChunk
+            ? (text: string) => {
+                turnEvents.onText(text);
+                request.onTextChunk?.(text);
+            }
+            : undefined;
+
+        // Apply every answer with the SDK, then run the loop again. A budget-stopped
+        // session has no answers: it carries on from the state it ended in.
+        let state = paused
+            ? paused.state
+            : buildContinueInputState({
+                carried: continued!.carried,
+                // The dashboard playground hands the agent its prompt as a message.
+                ...(source === 'agent-playground' && systemPrompt ? { systemPrompt } : {}),
+            });
+        // The calls the state held BEFORE the answers went in: a client tool's step is written by
+        // the answer (below), and belongs to the message this continuation writes.
+        const priorExecutionIds = new Set(
+            (state.toolHistory ?? [])
+                .map((entry) => (entry as { executionId?: unknown }).executionId)
+                .filter((id): id is string => typeof id === 'string'),
+        );
+        try {
+            for (const entry of approvals) {
+                const action = bySdkId.get(entry.id)!;
+                const resolution = action.resolution ?? {};
+                state = sdkAgent.resolveToolApproval(state, {
+                    id: entry.id,
+                    approved: resolution.decision === 'allow',
+                    ...(resolution.approvedArgs ? { approvedArgs: resolution.approvedArgs } : {}),
+                    ...(action.resolvedBy ? { decidedBy: action.resolvedBy } : {}),
+                    ...(resolution.comment ? { comment: resolution.comment } : {}),
+                });
+            }
+            for (const entry of questions) {
+                const action = bySdkId.get(entry.id)!;
+                const resolution = action.resolution ?? {};
+                const clientTool = clientToolMeta(entry as { metadata?: Record<string, unknown> });
+                if (clientTool) {
+                    // A tool the host page ran: its result (or its failure) is the tool's result.
+                    state = resolveClientToolState(state, {
+                        sdkId: entry.id,
+                        ...(resolution.error !== undefined ? { error: resolution.error } : { output: resolution.output }),
+                        content: await clientToolContent(toolGuard, clientTool, resolution),
+                        ...(resolution.durationMs !== undefined ? { durationMs: resolution.durationMs } : {}),
+                        ...(action.resolvedBy ? { answeredBy: action.resolvedBy } : {}),
+                    });
+                    continue;
+                }
+                state = sdkAgent.resolveUserQuestion(state, {
+                    id: entry.id,
+                    answers: toSdkAnswerSet(entry.questions, resolution.answers),
+                    cancelled: resolution.cancelled === true,
+                    ...(action.resolvedBy ? { answeredBy: action.resolvedBy } : {}),
+                });
+            }
+        } catch (error) {
+            throw new AgentResumeError(error instanceof Error ? error.message : 'The answers could not be applied.', 400);
+        }
+
+        const inputMessageCount = (state.messages ?? []).length;
+        const compactions: IAgentTurnCompaction[] = [];
+        const streamed = captureStreamedText(onTextChunk);
+        const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
+        const invokeConfig = {
+            onEvent: (event: AgentSdkEvent) => {
+                turnEvents.onSdkEvent(event);
+                if (event.type === 'summarization') {
+                    const compaction = compactionFromEvent(event);
+                    compactions.push(compaction);
+                    turnEvents.onCompaction(compaction);
+                    try {
+                        request.onCompaction?.(compaction);
+                    } catch (callbackError) {
+                        logger.warn('onCompaction callback failed', { agentKey, error: callbackError });
+                    }
+                    return;
+                }
+                if (!request.onToolEvent || event.type !== 'tool_call' || !event.name) return;
+                if (event.phase !== 'start' && event.phase !== 'success' && event.phase !== 'error') return;
+                try {
+                    request.onToolEvent({
+                        phase: event.phase,
+                        name: event.name,
+                        id: event.id,
+                        ...(event.args !== undefined ? { args: event.args } : {}),
+                        ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
+                        ...(event.error?.message ? { error: event.error.message } : {}),
+                    });
+                } catch (callbackError) {
+                    logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
+                }
+            },
+            ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
+            ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
+            ...(request.cancellationCell?.deadlineAt !== undefined
+                ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
+                : {}),
+            ...sessionBudgetInvokeOptions(budgetPlan),
+        };
+
+        request.onInvokeStart?.();
+        const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(state, invokeConfig)
+            .catch((error: unknown) => {
+                if (request.signal?.aborted) return null;
+                throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
+            })
+            .finally(() => cancellationBridge.stop());
+
+        const messageCountBefore = conversation.messages?.length ?? 0;
+        if (!settled) {
+            const aborted: AgentPlaygroundChatResult = {
+                content: streamed.text(),
+                latencyMs: Date.now() - startedAt,
+                version,
+                stopReason: 'cancelled',
+                stopDetail: CALLER_ABORT_DETAIL,
+            };
+            await turnEvents.finish({ stopReason: 'cancelled', content: aborted.content, detail: CALLER_ABORT_DETAIL });
+            return {
+                result: aborted,
+                response: toAgentChatResponse({
+                    conversationId,
+                    priorMessageCount: messageCountBefore,
+                    agentName: agent.name,
+                    version,
+                    content: aborted.content,
+                    messages: conversation.messages ?? [],
+                    outcome: { stopReason: 'cancelled', stopDetail: CALLER_ABORT_DETAIL },
+                }),
+                stopReason: 'cancelled',
+            };
+        }
+        const result = settled;
+
+        const blocked = guardrailBlockedError(result);
+        if (blocked) throw blocked;
+
+        const assistantReasoning = extractAgentReasoning(result);
+        const turnOutcome = describeTurnOutcome(result, inputMessageCount);
+        const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
+        const compactedTools = compactions.length > 0
+            ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
+            : [];
+        const steps = extractPlaygroundSteps(result, priorExecutionIds);
+        const costUsd = await priceAgentTurn({ plan: budgetPlan, result, costEstimator, pricing: model.pricing, usage });
+        if (costUsd !== undefined && usage) usage.costUsd = costUsd;
+        const budget = budgetPlan
+            ? settleSessionBudget(budgetPlan, costUsd, isSessionBudgetBreach(budgetPlan, turnOutcome), turnOutcome.stopReason)
+            : undefined;
+        const outcome = budgetAwareOutcome(turnOutcome, budget);
+
+        const superseded = isCancellationCellTripped(request.cancellationCell);
+        let pause: OpenedPause | null = null;
+        if (outcome.stopReason === 'paused' && !superseded) {
+            const firstAction = anchorAction;
+            pause = await openPause(db, {
+                state: result.state,
+                source,
+                tenantId,
+                projectId,
+                agentKey,
+                conversationId,
+                ...(request.runId ? { runId: request.runId } : {}),
+                hitl,
+                agentVersion: version,
+                usePublished: firstAction?.usePublished ?? request.continuation?.usePublished ?? false,
+                createdBy: firstAction?.createdBy ?? request.userId,
+            });
+            if (!pause) warnings.add(PAUSE_UNAVAILABLE_WARNING);
+        }
+
+        const assistantMessage: IAgentConversation['messages'][number] = {
+            role: 'assistant',
+            content: outcome.content,
+            timestamp: new Date(),
+            ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+            ...(steps.length > 0 ? { steps } : {}),
+            ...(outcome.stopReason !== 'completed'
+                ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
+                : {}),
+            ...(compactions.length > 0 ? { compactions, ...(compactedTools.length > 0 ? { compactedTools } : {}) } : {}),
+            ...(warnings.size > 0 ? { warnings: [...warnings] } : {}),
+            ...(pause ? { pendingActions: pause.actions.map(toMessagePendingAction) } : {}),
+            ...(usage ? { usage } : {}),
+            ...(result.output !== undefined ? { output: result.output } : {}),
+            ...(result.outputError ? { outputError: describeStructuredOutputError(result.outputError) } : {}),
+            latencyMs: Date.now() - startedAt,
+            version,
+        };
+        const messages = [...(conversation.messages ?? []), assistantMessage];
+
+        if (!superseded) {
+            await db.updateAgentConversation(conversationId, { messages });
+            await addSessionTurnSpend({ db, conversationId, plan: spendAccount, spentUsd: budget?.turnCostUsd ?? costUsd ?? 0 });
+            await saveConversationState(db, {
+                conversationId,
+                tenantId,
+                projectId,
+                agentKey,
+                state: result.state,
+                messageCount: messages.length,
+                ...(pause ? { pausedSnapshot: pause.snapshot } : {}),
+            });
+        }
+        logger.info(superseded ? 'Agent resume completed but superseded (not persisted)' : 'Agent resume completed', {
+            agentKey,
+            conversationId,
+            persisted: !superseded,
+            ...(outcome.stopReason !== 'completed' ? { stopReason: outcome.stopReason, stopDetail: outcome.stopDetail } : {}),
+        });
+
+        for (const action of pause?.actions ?? []) turnEvents.emitInTurn('action.required', actionRequiredEventData(action));
+        const stopReason: SessionStopReason = superseded ? 'cancelled' : sessionStopReason(outcome.stopReason, pause, budget);
+        await turnEvents.finish({
+            stopReason,
+            ...(pause ? { pendingActionIds: pause.actions.map((action) => String(action._id)) } : {}),
+            content: outcome.content,
+            messageIndex: messages.length - 1,
+            ...(usage ? { usage: { ...usage } } : {}),
+            ...(outcome.stopDetail ? { detail: outcome.stopDetail } : {}),
+            ...(budget && !superseded ? { budget } : {}),
+        });
+
+        const { timestamp: _timestamp, role: _role, ...playground } = assistantMessage;
+        void _timestamp; void _role;
+        return {
+            result: playground,
+            response: toAgentChatResponse({
+                conversationId,
+                priorMessageCount: messageCountBefore,
+                agentName: agent.name,
+                version,
+                content: outcome.content,
+                messages,
+                reasoning: assistantReasoning,
+                outcome: budget?.reached ? { stopReason: 'budget_reached', stopDetail: outcome.stopDetail } : outcome,
+                usage,
+                outputParsed: result.output,
+                outputError: result.outputError ? describeStructuredOutputError(result.outputError) : undefined,
+                ...(pause ? { pendingActions: pause.actions.map(toPublicPendingAction) } : {}),
+            }),
+            stopReason,
+        };
+    } finally {
+        await recordSessionTurnSpend({ db, conversationId, plan: spendAccount, tappedUsd: tappedUsd() });
+        await runBoundToolCleanup(cleanupTasks, { agentKey, mode: source === 'agent' ? 'chat' : 'playground' });
     }
 }

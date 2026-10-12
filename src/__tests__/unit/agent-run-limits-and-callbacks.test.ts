@@ -291,6 +291,7 @@ describe('ids and serialization', () => {
       id: 'run_r1',
       object: 'agent.run',
       status: 'failed',
+      stop_reason: null,
       agent: 'support-agent',
       conversation_id: 'conv-1',
       result: null,

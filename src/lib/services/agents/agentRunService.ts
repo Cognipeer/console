@@ -29,11 +29,15 @@ import type { IAgentConfig, IAgentRun } from '@/lib/database';
 import { getQueue, type QueuePayload } from '@/lib/core/queue';
 import { getThisNodeName } from '@/lib/core/cluster/nodeRegistry';
 import { runWithRequestContext } from '@/lib/core/requestContext';
-import { assertPublicUrl, safeFetch } from '@/lib/security/outboundFetch';
+import { assertPublicUrl } from '@/lib/security/outboundFetch';
+import { sendSignedWebhook, signWebhookBody } from '@/lib/services/webhooks/webhookDeliverer';
+import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { resolveEffectiveLimits, type QuotaContext } from '@/lib/quota/quotaGuard';
 import { getUserAuthState } from '@/lib/services/users/userAuthState';
 import { classifyAgentRunError } from './agentErrors';
+import { enforceAgentRunQuota, settleAgentRun } from './agentQuota';
+import { createRunUsageSink, runWithUsageSink } from './runUsage';
 import { openAgentCallbackSecret } from './agentSandboxSecrets';
 import {
   executeAgentChat,
@@ -41,7 +45,12 @@ import {
   type AgentChatRequest,
   type AgentChatResponse,
   type AgentRunCancellationCell,
+  executeAgentContinueLocal,
+  executeAgentResumeLocal,
 } from './agentService';
+import { createSessionEventWriter, toSessionStopReason, type SessionEventType } from './sessionEvents';
+import { cancelPendingForNewMessage } from './agentPendingActions';
+import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 
 const logger = createLogger('agent-run');
@@ -95,6 +104,8 @@ function delaySentinel<T>(ms: number, sentinel: T): { promise: Promise<T>; clear
 const TIMEOUT_SENTINEL = Symbol('agent-run-deadline-timeout');
 /** Wins the race the instant a cancel request is OBSERVED (tight poll), not when `invoke()` settles. */
 const CANCEL_SENTINEL = Symbol('agent-run-cancel-observed');
+/** The turn stopped on its own while the worker waited for it. */
+const TURN_SETTLED = Symbol('agent-run-turn-settled');
 
 /**
  * How often the worker checks `cancelRequestedAt`, independent of the slower
@@ -139,9 +150,15 @@ export function serializeAgentRun(run: IAgentRun) {
     id: publicAgentRunId(run),
     object: 'agent.run' as const,
     status: run.status,
+    // How the agent turn ended (`end_turn` / `limit` / `requires_action` /
+    // `cancelled` / `error`). Null while the run is active and on rows from
+    // before the field existed.
+    stop_reason: run.stopReason ?? null,
     agent: run.agentKey,
     conversation_id: run.conversationId,
-    result: run.status === 'succeeded' ? run.result ?? null : null,
+    // A paused run's result is the Responses-shaped `requires_action` body: the
+    // actions to resolve ride in its `required_action`.
+    result: run.status === 'succeeded' || run.status === 'requires_action' ? run.result ?? null : null,
     error: run.status === 'failed' || run.status === 'canceled'
       ? { type: run.errorReason ?? 'agent_error', message: run.errorMessage ?? null }
       : null,
@@ -469,6 +486,190 @@ export async function runSyncAgentTurn(input: RunSyncAgentTurnInput): Promise<Sy
   });
 }
 
+// ── Continuing a paused turn in the background ───────────────────────────
+
+/** The run owner of a continuation the timeout sweep starts — a synthetic actor, like the scheduler's. */
+export const RESUME_TIMEOUT_ACTOR = 'system:agent-timeout';
+
+/**
+ * Marks a `resume` run that continues a session which stopped on its spend
+ * budget rather than a pause: it carries no action ids to apply. Stored in the
+ * run's `resumeActionIds`, so the queue, requeue and finalize paths that already
+ * treat a run with `resumeActionIds` as a continuation need no new column.
+ */
+export const CONTINUE_RUN_MARKER = 'budget_continue';
+
+export type QueueAgentRunResumeOutcome =
+  | { kind: 'queued'; run: IAgentRun }
+  | { kind: 'conflict' };
+
+/**
+ * Queues a background run that continues a paused turn (every action it waited
+ * on is answered). A paused background run is put back in the queue under its
+ * own id; a turn that paused inside a synchronous call has no run, so a new
+ * one is created for it. `conflict` = another run holds the conversation.
+ */
+export async function queueAgentRunResume(input: {
+  tenantDbName: string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  conversationId: string;
+  userId: string;
+  resumeActionIds: string[];
+  apiTokenId?: string;
+  actorType?: IAgentRun['actorType'];
+  /** Which config a budget continuation runs with (a pause's answers carry their own). */
+  usePublished?: boolean;
+  version?: number;
+  runtimeContext?: AgentRuntimeContext;
+}): Promise<QueueAgentRunResumeOutcome> {
+  const db = await withTenantDb(input.tenantDbName);
+  const cfg = getConfig();
+  let run: IAgentRun | null = null;
+  try {
+    const [paused] = await db.listAgentRuns({
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      status: ['requires_action'],
+      mode: 'background',
+      limit: 1,
+    });
+    if (paused) run = await db.requeueAgentRunForResume(String(paused._id), input.tenantId, input.resumeActionIds);
+    if (!run) {
+      run = await db.createAgentRun({
+        mode: 'background',
+        tenantId: input.tenantId,
+        tenantDbName: input.tenantDbName,
+        projectId: input.projectId,
+        agentKey: input.agentKey,
+        conversationId: input.conversationId,
+        // The turn continues from its stored state; there is no new message.
+        userMessage: '',
+        resumeActionIds: input.resumeActionIds,
+        ...(input.usePublished !== undefined ? { usePublished: input.usePublished } : {}),
+        ...(input.version !== undefined ? { version: input.version } : {}),
+        ...(input.runtimeContext ? { runtimeContext: sealRuntimeContext(input.runtimeContext) } : {}),
+        status: 'queued',
+        callbackAttempts: 0,
+        maxDurationMs: cfg.agent.backgroundMaxDurationMs,
+        userId: input.userId,
+        ...(input.apiTokenId ? { apiTokenId: input.apiTokenId } : {}),
+        actorType: input.actorType ?? (input.userId.startsWith('system:') ? 'system' : 'user'),
+        expiresAt: new Date(Date.now() + cfg.agent.runRetentionDays * 86_400_000),
+      });
+    }
+  } catch (error) {
+    if (error instanceof AgentRunConflictError) return { kind: 'conflict' };
+    throw error;
+  }
+  await publishAgentRunJob(run);
+  return { kind: 'queued', run };
+}
+
+/**
+ * Queues a background run that continues a session which stopped on its spend
+ * budget (after the budget was raised). Same row, queue and worker as a resumed
+ * pause; the run has no new user message and applies no answers.
+ */
+export async function queueAgentRunContinue(input: Omit<Parameters<typeof queueAgentRunResume>[0], 'resumeActionIds'>) {
+  await assertQueuedTurnSpendAllowed(input);
+  return queueAgentRunResume({ ...input, resumeActionIds: [CONTINUE_RUN_MARKER] });
+}
+
+/**
+ * A continuation ran inline (the dashboard answered while a background run was
+ * paused): settle that run's row. Still waiting → it keeps `requires_action`
+ * with the fresh actions; otherwise it ends `succeeded` like any finished run.
+ */
+export async function settlePausedAgentRuns(
+  tenantDbName: string,
+  scope: { tenantId: string; projectId: string; conversationId: string },
+  response: AgentChatResponse,
+): Promise<void> {
+  const db = await withTenantDb(tenantDbName);
+  const paused = await db.listAgentRuns({ ...scope, status: ['requires_action'], mode: 'background', limit: 5 });
+  const { _conversation_messages: _omitted, ...body } = response;
+  void _omitted;
+  for (const run of paused) {
+    const runId = String(run._id);
+    const result = { ...body, id: `resp_${runId}` } as unknown as Record<string, unknown>;
+    if (response.status === 'requires_action') {
+      await db.finalizeAgentRun(runId, scope.tenantId, { status: 'requires_action', result, stopReason: 'requires_action' });
+      continue;
+    }
+    const finalized = await db.finalizeAgentRun(runId, scope.tenantId, {
+      status: 'succeeded',
+      result,
+      stopReason: toSessionStopReason(response.stop_reason),
+      completedAt: new Date(),
+      runtimeContext: null,
+    });
+    if (finalized) {
+      await fireAgentRunCallback(finalized, 'succeeded', { result }).catch((error) => {
+        logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+      });
+    }
+  }
+}
+
+/**
+ * A paused run is cancelled: its open requests are cancelled and the conversation
+ * is idle again — and the log and the webhook subscribers hear about it the way
+ * they do when a new message cancels the requests (`action.resolved` per request,
+ * then `session.status_idle`), so a consumer is not left believing the session
+ * still waits.
+ */
+async function dropPausedConversation(db: DatabaseProvider, run: IAgentRun): Promise<void> {
+  const runId = String(run._id);
+  try {
+    const conversation = await db.findAgentConversationById(run.conversationId);
+    // Only a session that still waits on this pause is reset: one a newer message
+    // has moved on (or that is idle already) is not this run's to touch.
+    if (!conversation || conversation.runtimeStatus !== 'requires_action') return;
+
+    const events: Array<{ type: SessionEventType; data: Record<string, unknown> }> = [];
+    await cancelPendingForNewMessage(
+      db,
+      conversation,
+      (type, data) => { events.push({ type, data: data ?? {} }); },
+      'system:run_cancelled',
+    ).catch((error) => {
+      logger.warn('Could not cancel the open requests of a cancelled run', {
+        runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+
+    // The status goes in BEFORE the idle frame is published, so a follower that
+    // reloads the session on it never reads 'requires_action'.
+    await db.updateAgentConversationRuntime(run.conversationId, {
+      runtimeStatus: 'idle',
+      stopReason: 'cancelled',
+      pendingActionIds: [],
+    });
+    const writer = createSessionEventWriter({
+      db,
+      tenantDbName: run.tenantDbName,
+      tenantId: run.tenantId,
+      projectId: run.projectId,
+      agentKey: run.agentKey,
+      conversationId: run.conversationId,
+      runId,
+    });
+    for (const event of events) writer.emit(event.type, event.data);
+    writer.emit('session.status_idle', { stopReason: 'cancelled' });
+    await writer.close();
+    await db.updateAgentConversationRuntime(run.conversationId, { lastEventSeq: writer.lastSeq() });
+  } catch (error) {
+    logger.warn('Could not reset the conversation of a cancelled paused run', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 // ── §7: background execution ─────────────────────────────────────────────
 
 export interface CreateBackgroundAgentRunInput {
@@ -478,6 +679,14 @@ export interface CreateBackgroundAgentRunInput {
   agentKey: string;
   conversationId: string;
   userMessage: string;
+  /** Ids of the conversation files the message attaches. */
+  attachments?: string[];
+  /**
+   * The part of `attachments` that identifies the request for idempotency: the
+   * files the caller named by id. A file sent inline is stored under a new id
+   * on every attempt, so it cannot be part of what makes a retry "the same".
+   */
+  idempotencyAttachments?: string[];
   userId: string;
   version?: number;
   usePublished?: boolean;
@@ -513,13 +722,15 @@ interface AgentRunJobPayload extends QueuePayload {
 }
 
 function idempotencyRequestHash(
-  input: Pick<CreateBackgroundAgentRunInput, 'agentKey' | 'userMessage' | 'version' | 'idempotencyConversationScope'>,
+  input: Pick<CreateBackgroundAgentRunInput, 'agentKey' | 'userMessage' | 'idempotencyAttachments' | 'version' | 'idempotencyConversationScope'>,
 ): string {
   const material = JSON.stringify({
     agentKey: input.agentKey,
     conversationScope: input.idempotencyConversationScope ?? null,
     userMessage: input.userMessage,
     version: input.version ?? null,
+    // Only when present: a request without attachments hashes as it always did.
+    ...(input.idempotencyAttachments?.length ? { attachments: [...input.idempotencyAttachments].sort() } : {}),
   });
   return crypto.createHash('sha256').update(material).digest('hex');
 }
@@ -556,6 +767,7 @@ export async function lookupIdempotentAgentRun(input: {
   projectId: string;
   agentKey: string;
   userMessage: string;
+  idempotencyAttachments?: string[];
   version?: number;
   idempotencyKey: string;
   idempotencyConversationScope: string | null;
@@ -600,6 +812,20 @@ export async function createBackgroundAgentRun(
     if (existing) return resolveIdempotencyClash();
   }
 
+  // Agent-run quota (domain `agent`). Counted HERE, once, for the whole
+  // background run: the worker executes `executeAgentChatLocal`, which does not
+  // count again, and a caller over its limit gets the 429 now rather than a run
+  // that fails later. After the idempotency lookup so a replay is never newly
+  // refused. Throws `AgentQuotaExceededError` (classified as a 429).
+  await enforceAgentRunQuota({
+    tenantDbName: input.tenantDbName,
+    tenantId: input.tenantId,
+    projectId: input.projectId,
+    agentKey: input.agentKey,
+    userId: input.userId,
+    tokenId: input.apiTokenId,
+  });
+
   const expiresAt = new Date(Date.now() + cfg.agent.runRetentionDays * 86_400_000);
 
   let run: IAgentRun;
@@ -612,6 +838,7 @@ export async function createBackgroundAgentRun(
       agentKey: input.agentKey,
       conversationId: input.conversationId,
       userMessage: input.userMessage,
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
       version: input.version ?? null,
       usePublished: input.usePublished,
       runtimeContext: sealRuntimeContext(input.runtimeContext),
@@ -701,6 +928,23 @@ export async function requestAgentRunCancellation(
   const db = await withTenantDb(tenantDbName);
   const owned = await db.getAgentRunById(runId, tenantId, projectId);
   if (!owned || owned.mode !== 'background') return { kind: 'not_found' };
+  if (owned.status === 'requires_action') {
+    // Paused for a person: nothing is executing, so cancelling settles the run
+    // and drops the open requests.
+    const cancelled = await db.finalizeAgentRun(runId, tenantId, {
+      status: 'canceled',
+      errorReason: 'canceled_by_caller',
+      stopReason: 'cancelled',
+      completedAt: new Date(),
+      runtimeContext: null,
+    });
+    if (!cancelled) return { kind: 'already_terminal', run: owned };
+    await dropPausedConversation(db, owned);
+    await fireAgentRunCallback(cancelled, 'canceled', {}).catch((error) => {
+      logger.warn('Could not queue the canceled callback', { runId, error: error instanceof Error ? error.message : String(error) });
+    });
+    return { kind: 'accepted', run: cancelled };
+  }
   if (owned.status !== 'queued' && owned.status !== 'running') {
     return { kind: 'already_terminal', run: owned };
   }
@@ -722,11 +966,13 @@ function buildRequestFromRun(run: IAgentRun, cancellationCell: AgentRunCancellat
     agentKey: run.agentKey,
     conversationId: run.conversationId,
     userMessage: run.userMessage,
+    ...(run.attachments?.length ? { attachments: run.attachments } : {}),
     userId: run.userId ?? '',
     version: run.version ?? undefined,
     usePublished: run.usePublished,
     runtimeContext: openSealed<AgentRuntimeContext>(run.runtimeContext?.sealed),
     cancellationCell,
+    runId: String(run._id),
   };
 }
 
@@ -786,11 +1032,30 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
 
     const finalize = async (
       status: 'succeeded' | 'failed' | 'canceled',
-      data: Pick<IAgentRun, 'errorReason' | 'errorMessage' | 'result'>,
+      data: Pick<IAgentRun, 'errorReason' | 'errorMessage' | 'result' | 'stopReason'>,
       callbackData: Record<string, unknown> = {},
     ) => {
+      // A failed / canceled run says so; a succeeded one passes how its turn ended.
+      const stopReason = data.stopReason
+        ?? (status === 'failed' ? 'error' : status === 'canceled' ? 'cancelled' : undefined);
       // The sealed caller headers are only needed while the turn runs.
-      const finalized = await db.finalizeAgentRun(runId, tenantId, { ...data, status, completedAt: new Date(), runtimeContext: null });
+      const finalized = await db.finalizeAgentRun(runId, tenantId, {
+        ...data,
+        ...(stopReason ? { stopReason } : {}),
+        status,
+        completedAt: new Date(),
+        runtimeContext: null,
+        resumeActionIds: null,
+      });
+      // A continuation that died leaves the conversation marked as waiting;
+      // its requests are answered, so there is nothing left to wait for.
+      if (finalized && status !== 'succeeded' && claimed.resumeActionIds?.length) {
+        await db.updateAgentConversationRuntime(claimed.conversationId, {
+          runtimeStatus: 'idle',
+          stopReason: status === 'canceled' ? 'cancelled' : 'error',
+          pendingActionIds: [],
+        }).catch(() => undefined);
+      }
       if (finalized) {
         await fireAgentRunCallback(finalized, status, callbackData).catch((error) => {
           logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
@@ -840,6 +1105,9 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
     const cancellationCell: AgentRunCancellationCell = { cancelled: false, deadlineAt };
 
     let resolveCancelObserved: (() => void) | undefined;
+    // Set when the CALLER asked for the cancel (the poll saw `cancelRequestedAt`);
+    // losing the row to the reconciler also trips the cell, but is not that.
+    let cancelRequestedByCaller = false;
     const cancelObservedPromise = new Promise<typeof CANCEL_SENTINEL>((resolve) => {
       resolveCancelObserved = () => resolve(CANCEL_SENTINEL);
     });
@@ -874,7 +1142,8 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
         try {
           const current = await db.getAgentRunById(runId, tenantId, claimed.projectId);
           if (current?.cancelRequestedAt && !cancellationCell.cancelled) {
-            logger.info('Cancel request observed; finalizing without waiting for invoke()', { runId });
+            logger.info('Cancel request observed; stopping the turn', { runId });
+            cancelRequestedByCaller = true;
             markSuperseded();
           }
         } catch (error) {
@@ -896,10 +1165,23 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
 
     try {
       const request = buildRequestFromRun(claimed, cancellationCell);
+      // The tokens the turn's model calls spend are tallied as they happen, so a run that
+      // fails, times out or is cancelled is still charged for them (runUsage.ts).
+      const usage = createRunUsageSink();
+      const quotaCaller = {
+        tenantDbName: claimed.tenantDbName,
+        tenantId: claimed.tenantId,
+        projectId: claimed.projectId,
+        agentKey: claimed.agentKey,
+        userId: claimed.userId,
+        tokenId: claimed.apiTokenId,
+      };
       // Attribution: usage recorded by the turn reads the request context,
       // which a queue worker otherwise has none of. A rejection settles as a
       // value, so the race can finalize it instead of throwing past the timers.
-      const invokePromise = runWithRequestContext(
+      const resuming = Boolean(claimed.resumeActionIds?.length);
+      const continuingBudget = claimed.resumeActionIds?.includes(CONTINUE_RUN_MARKER) === true;
+      const invokePromise = runWithUsageSink(usage, () => runWithRequestContext(
         {
           tenantId: claimed.tenantId,
           projectId: claimed.projectId,
@@ -908,22 +1190,77 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
           actorType: claimed.actorType ?? 'api_token',
           source: 'api',
         },
-        () => executeAgentChatLocal(request),
-      ).then(
+        // A run queued to continue a paused turn picks that turn up where it
+        // stopped; everything around it (heartbeat, ceiling, cancel, finalize,
+        // callback) is the same.
+        () => continuingBudget
+          ? executeAgentContinueLocal({
+            tenantDbName: request.tenantDbName,
+            tenantId: request.tenantId,
+            projectId: request.projectId,
+            agentKey: request.agentKey,
+            conversationId: request.conversationId,
+            userId: request.userId,
+            runId,
+            runtimeContext: request.runtimeContext,
+            cancellationCell,
+            continuation: {
+              source: 'agent',
+              ...(request.usePublished !== undefined ? { usePublished: request.usePublished } : {}),
+              ...(request.version !== undefined ? { version: request.version } : {}),
+            },
+          }).then((continued) => continued.response)
+          : resuming
+          ? executeAgentResumeLocal({
+            tenantDbName: request.tenantDbName,
+            tenantId: request.tenantId,
+            projectId: request.projectId,
+            agentKey: request.agentKey,
+            conversationId: request.conversationId,
+            userId: request.userId,
+            trigger: request.userId === RESUME_TIMEOUT_ACTOR ? 'timeout' : 'resume',
+            runId,
+            runtimeContext: request.runtimeContext,
+            cancellationCell,
+          }).then((resumed) => resumed.response)
+          : executeAgentChatLocal(request),
+      )).then(
         (response) => ({ ok: true as const, response }),
         (error: unknown) => ({ ok: false as const, error }),
       );
 
       const raced = await Promise.race([invokePromise, deadlineTimer.promise, cancelObservedPromise]);
-      stopAllTimers();
 
       if (raced === CANCEL_SENTINEL || (cancellationCell.cancelled && raced !== TIMEOUT_SENTINEL)) {
+        // The cancel cannot interrupt a tool or model call already in flight
+        // (§12.2): the turn keeps going until its next checkpoint, and its tail
+        // still writes — its events, the session's runtime fields, its spend.
+        // The conversation stays reserved until that tail has landed: this row
+        // keeps the slot (the heartbeat keeps running, so the reconciler leaves it
+        // alone) and a message sent meanwhile gets the usual conflict instead of
+        // starting a second turn the old one then writes over. The run's own
+        // ceiling bounds the wait, so a hung call cannot hold the slot for good.
+        if (cancelRequestedByCaller) {
+          clearInterval(cancelPollTimer);
+          const waited = await Promise.race([invokePromise.then(() => TURN_SETTLED), deadlineTimer.promise]);
+          // The ceiling won: the slot is given up with the turn still hanging.
+          if (waited !== TURN_SETTLED) cancellationCell.abandoned = true;
+        }
+        stopAllTimers();
+        // What the turn's model calls spent counts, including the tail that
+        // landed while the slot was held.
+        settleAgentRun(quotaCaller, usage);
         await finalize('canceled', { errorReason: 'canceled_by_caller' });
         return;
       }
+      stopAllTimers();
 
       if (raced === TIMEOUT_SENTINEL) {
+        settleAgentRun(quotaCaller, usage);
         cancellationCell.cancelled = true;
+        // Finalized without waiting: the turn may still be inside a call and must not
+        // write over whatever starts on the freed conversation.
+        cancellationCell.abandoned = true;
         const minutes = Math.round(maxDurationMs / 60_000);
         await finalize('failed', {
           errorReason: 'max_duration_exceeded',
@@ -933,6 +1270,7 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
       }
 
       if (!raced.ok) {
+        settleAgentRun(quotaCaller, usage);
         logger.warn('Background agent turn failed', {
           runId,
           error: raced.error instanceof Error ? raced.error.message : String(raced.error),
@@ -942,9 +1280,30 @@ export async function runAgentJobLocal(payload: AgentRunJobPayload): Promise<voi
         return;
       }
 
+      settleAgentRun(quotaCaller, usage, raced.response.usage?.total_tokens);
+
       const { _conversation_messages: _omitted, ...responseWithoutTranscript } = raced.response;
       const responseWithRunId: AgentChatResponse = { ...responseWithoutTranscript, id: `resp_${runId}` };
-      await finalize('succeeded', { result: responseWithRunId as unknown as Record<string, unknown> }, { result: responseWithRunId });
+      if (responseWithRunId.status === 'requires_action') {
+        // Paused for a person: not terminal. The run waits as `requires_action`
+        // (the conversation's slot is free) until the actions are resolved.
+        const paused = await db.finalizeAgentRun(runId, tenantId, {
+          status: 'requires_action',
+          result: responseWithRunId as unknown as Record<string, unknown>,
+          stopReason: 'requires_action',
+          resumeActionIds: null,
+        });
+        if (paused) {
+          await fireAgentRunCallback(paused, 'requires_action', { result: responseWithRunId }).catch((error) => {
+            logger.warn('Could not queue the run callback', { runId, error: error instanceof Error ? error.message : String(error) });
+          });
+        }
+        return;
+      }
+      await finalize('succeeded', {
+        result: responseWithRunId as unknown as Record<string, unknown>,
+        stopReason: toSessionStopReason(responseWithRunId.stop_reason),
+      }, { result: responseWithRunId });
     } catch (error) {
       stopAllTimers();
       logger.error('Agent run worker failed unexpectedly', {
@@ -972,22 +1331,48 @@ interface AgentRunCallbackJobPayload extends QueuePayload {
   projectId: string;
   conversationId: string;
   callbackUrl: string;
-  event: 'succeeded' | 'failed' | 'canceled';
+  event: 'succeeded' | 'failed' | 'canceled' | 'requires_action';
   data: Record<string, unknown>;
 }
 
-/** `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>` — the crawler/OCR webhook scheme. */
+/** `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>` — the crawler/OCR webhook scheme (shared with webhook subscriptions). */
 export function signAgentRunCallback(secret: string, body: string, timestamp = Math.floor(Date.now() / 1000)): string {
-  const signature = crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
-  return `t=${timestamp},v1=${signature}`;
+  return signWebhookBody(secret, body, timestamp);
 }
+
+type AgentRunCallbackEvent = AgentRunCallbackJobPayload['event'];
 
 export async function fireAgentRunCallback(
   run: IAgentRun,
-  event: 'succeeded' | 'failed' | 'canceled',
+  event: AgentRunCallbackEvent,
   data: Record<string, unknown>,
 ): Promise<void> {
+  // Webhook subscriptions hear about every run transition, whether or not the
+  // run carries a callback of its own. Never throws.
+  await publishWebhookEvent({
+    tenantDbName: run.tenantDbName,
+    tenantId: run.tenantId,
+    projectId: run.projectId,
+    type: `agent_run.${event}`,
+    data: { runId: publicAgentRunId(run), conversationId: run.conversationId, agentKey: run.agentKey },
+  });
   if (!run.callbackUrl) return;
+  // A new event starts a new count: a run that was `requires_action` (callback
+  // delivered) and later finishes owes a fresh `succeeded` callback, and the
+  // reconciler keys off `pending` / `failed` to find callbacks that never made it.
+  await runWithTenantDb(run.tenantDbName, (db) => db.updateAgentRunCallback(String(run._id), run.tenantId, {
+    callbackStatus: 'pending',
+    callbackAttempts: 0,
+  })).catch(() => undefined);
+  await enqueueAgentRunCallback(run, event, data, { attempts: CALLBACK_ATTEMPTS, backoffMs: CALLBACK_BACKOFF_MS });
+}
+
+async function enqueueAgentRunCallback(
+  run: IAgentRun,
+  event: AgentRunCallbackEvent,
+  data: Record<string, unknown>,
+  options: { attempts: number; backoffMs?: number },
+): Promise<void> {
   const queue = await getQueue();
   const payload: AgentRunCallbackJobPayload = {
     runId: String(run._id),
@@ -995,14 +1380,42 @@ export async function fireAgentRunCallback(
     tenantDbName: run.tenantDbName,
     projectId: run.projectId,
     conversationId: run.conversationId,
-    callbackUrl: run.callbackUrl,
+    callbackUrl: run.callbackUrl!,
     event,
     data,
   };
-  await queue.publish(AGENT_RUN_QUEUE, CALLBACK_JOB_NAME, payload, {
-    attempts: CALLBACK_ATTEMPTS,
-    backoffMs: CALLBACK_BACKOFF_MS,
-  });
+  await queue.publish(AGENT_RUN_QUEUE, CALLBACK_JOB_NAME, payload, options);
+}
+
+/** Callbacks are sent at most this many times per event before the reconciler stops trying. */
+export const AGENT_RUN_CALLBACK_MAX_ATTEMPTS = CALLBACK_ATTEMPTS;
+
+/**
+ * Queues one more delivery of a callback that never settled (the queue lost
+ * the job, or it ran out of retries early). The event and its data are
+ * rebuilt from the run row — the receiver sees the same stable event id as
+ * the first try. One attempt per call: the reconciler's tick is the retry cadence.
+ */
+export async function redeliverAgentRunCallback(run: IAgentRun): Promise<boolean> {
+  if (!run.callbackUrl) return false;
+  const event: AgentRunCallbackEvent | null = run.status === 'succeeded' ? 'succeeded'
+    : run.status === 'failed' ? 'failed'
+      : run.status === 'canceled' ? 'canceled'
+        : run.status === 'requires_action' ? 'requires_action'
+          : null;
+  if (!event) return false;
+  const data: Record<string, unknown> = event === 'succeeded' || event === 'requires_action'
+    ? { result: run.result ?? null }
+    : event === 'failed'
+      ? { errorReason: run.errorReason ?? 'agent_error', ...(run.errorMessage ? { message: run.errorMessage } : {}) }
+      : {};
+  // Touch the row first, so the next tick does not queue it again while this one is in flight.
+  await runWithTenantDb(run.tenantDbName, (db) => db.updateAgentRunCallback(String(run._id), run.tenantId, {
+    callbackStatus: run.callbackStatus === 'failed' ? 'failed' : 'pending',
+    callbackAttempts: run.callbackAttempts ?? 0,
+  })).catch(() => undefined);
+  await enqueueAgentRunCallback(run, event, data, { attempts: 1 });
+  return true;
 }
 
 /**
@@ -1022,37 +1435,33 @@ export async function deliverAgentRunCallbackJob(
     // Stable per run+event, so a receiver can dedupe retries and queue redeliveries.
     const eventId = `evt_${payload.runId}_${payload.event}`;
 
+    const body = JSON.stringify({
+      id: eventId,
+      event: eventName,
+      createdAt: new Date().toISOString(),
+      runId: publicRunId,
+      conversationId: payload.conversationId,
+      data: payload.data,
+    });
+    const result = await sendSignedWebhook({
+      url: payload.callbackUrl,
+      body,
+      eventName,
+      eventId,
+      userAgent: 'cognipeer-agent-runs/1.0',
+      secret: openSealed<string>(current?.callbackSecret),
+      timeoutMs: CALLBACK_TIMEOUT_MS,
+    });
     let deliveryError: Error | undefined;
-    try {
-      const body = JSON.stringify({
-        id: eventId,
-        event: eventName,
-        createdAt: new Date().toISOString(),
-        runId: publicRunId,
-        conversationId: payload.conversationId,
-        data: payload.data,
-      });
-      const headers: Record<string, string> = {
-        'content-type': 'application/json',
-        'user-agent': 'cognipeer-agent-runs/1.0',
-        'x-cognipeer-event': eventName,
-        'x-cognipeer-event-id': eventId,
-      };
-      const secret = openSealed<string>(current?.callbackSecret);
-      if (secret) headers['x-cognipeer-signature'] = signAgentRunCallback(secret, body);
-
-      const response = await safeFetch(payload.callbackUrl, { method: 'POST', headers, body }, { timeoutMs: CALLBACK_TIMEOUT_MS });
-      await response.body?.cancel().catch(() => undefined);
-      if (response.status < 200 || response.status >= 300) {
-        throw new Error(`Callback endpoint answered HTTP ${response.status}`);
-      }
-    } catch (error) {
-      deliveryError = error instanceof Error ? error : new Error(`Agent-run webhook delivery failed for run ${payload.runId}`);
+    if (!result.ok) {
+      deliveryError = new Error(result.statusCode !== undefined
+        ? `Callback endpoint answered HTTP ${result.statusCode}`
+        : result.error ?? `Agent-run webhook delivery failed for run ${payload.runId}`);
       logger.warn('Agent-run webhook delivery attempt failed', {
         runId: payload.runId,
         event: payload.event,
         attempt: nextAttempts,
-        error: error instanceof Error ? error.message : String(error),
+        error: result.error,
       });
     }
 
@@ -1070,7 +1479,9 @@ export async function deliverAgentRunCallbackJob(
 /** Queues a run's job — at submit, and again from the reconciler for a queued run no worker picked up. */
 export async function publishAgentRunJob(run: IAgentRun): Promise<void> {
   const queue = await getQueue();
-  await queue.publish(AGENT_RUN_QUEUE, 'run', {
+  // A run queued to continue a paused turn is a `resume` job; the worker
+  // dispatches on the row either way, so a requeue by the reconciler stays right.
+  await queue.publish(AGENT_RUN_QUEUE, run.resumeActionIds?.length ? 'resume' : 'run', {
     runId: String(run._id),
     tenantId: run.tenantId,
     tenantDbName: run.tenantDbName,

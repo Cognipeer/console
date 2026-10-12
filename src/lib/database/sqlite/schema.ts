@@ -437,6 +437,7 @@ export const TENANT_SCHEMA_SQL = `
     projectId TEXT,
     scope TEXT NOT NULL,
     scopeId TEXT,
+    groupMode TEXT,
     domain TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 100,
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -743,6 +744,11 @@ export const TENANT_SCHEMA_SQL = `
     markdownError TEXT,
     markdownSize INTEGER,
     markdownContentType TEXT,
+    purpose TEXT,
+    conversationId TEXT,
+    agentKey TEXT,
+    expiresAt TEXT,
+    uploadedBy TEXT,
     createdBy TEXT NOT NULL,
     updatedBy TEXT,
     createdAt TEXT NOT NULL,
@@ -1547,10 +1553,19 @@ export const TENANT_SCHEMA_SQL = `
     metadata TEXT DEFAULT '{}',
     createdBy TEXT NOT NULL,
     createdAt TEXT NOT NULL,
-    updatedAt TEXT NOT NULL
+    updatedAt TEXT NOT NULL,
+    runtimeStatus TEXT,
+    stopReason TEXT,
+    pendingActionIds TEXT,
+    lastEventSeq INTEGER,
+    budget TEXT,
+    spentUsd REAL,
+    runtimeTurnId TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_aconv_agent ON agent_conversations(agentKey);
   CREATE INDEX IF NOT EXISTS idx_aconv_project ON agent_conversations(projectId);
+  -- A caller who may not see other people's sessions lists only their own: one agent's, by creator, newest first.
+  CREATE INDEX IF NOT EXISTS idx_aconv_agent_creator ON agent_conversations(agentKey, createdBy, updatedAt);
 
   -- Agent runtime state per conversation (see IAgentConversationState)
   CREATE TABLE IF NOT EXISTS agent_conversation_states (
@@ -1560,11 +1575,123 @@ export const TENANT_SCHEMA_SQL = `
     projectId TEXT,
     agentKey TEXT NOT NULL,
     snapshot TEXT NOT NULL,
+    pausedSnapshot TEXT,
     messageCount INTEGER NOT NULL DEFAULT 0,
     sizeBytes INTEGER NOT NULL DEFAULT 0,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
+
+  -- Append-only session event log (see IAgentSessionEvent). Retention is swept
+  -- by the agent-run reconciler (no TTL in SQLite).
+  CREATE TABLE IF NOT EXISTS agent_session_events (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentKey TEXT NOT NULL,
+    conversationId TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '{}',
+    runId TEXT,
+    createdAt TEXT NOT NULL,
+    expiresAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_ase_conversation_seq ON agent_session_events(conversationId, seq);
+  CREATE INDEX IF NOT EXISTS idx_ase_expiresAt ON agent_session_events(expiresAt);
+
+  -- Tool approvals / questions a turn paused on (see IAgentPendingAction).
+  CREATE TABLE IF NOT EXISTS agent_pending_actions (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentKey TEXT NOT NULL,
+    conversationId TEXT NOT NULL,
+    runId TEXT,
+    kind TEXT NOT NULL,
+    sdkId TEXT NOT NULL,
+    toolCallId TEXT,
+    toolName TEXT,
+    args TEXT,
+    questions TEXT,
+    allowFreeText INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    requestedAt TEXT NOT NULL,
+    expiresAt TEXT,
+    resolvedAt TEXT,
+    resolvedBy TEXT,
+    resolution TEXT,
+    agentVersion INTEGER,
+    usePublished INTEGER,
+    createdBy TEXT,
+    clientTool TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_apa_conversation_status ON agent_pending_actions(conversationId, status);
+  CREATE INDEX IF NOT EXISTS idx_apa_status_expiresAt ON agent_pending_actions(status, expiresAt);
+  CREATE INDEX IF NOT EXISTS idx_apa_tenant_project_status ON agent_pending_actions(tenantId, projectId, status);
+
+  -- A person's rating of an assistant message (see IAgentMessageFeedback).
+  CREATE TABLE IF NOT EXISTS agent_message_feedback (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    agentKey TEXT NOT NULL,
+    agentVersion INTEGER,
+    conversationId TEXT NOT NULL,
+    messageId TEXT NOT NULL,
+    messageIndex INTEGER NOT NULL DEFAULT 0,
+    userId TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'dashboard',
+    portalId TEXT,
+    rating TEXT NOT NULL,
+    reasons TEXT NOT NULL DEFAULT '[]',
+    comment TEXT,
+    removedAt TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_amf_message_user ON agent_message_feedback(conversationId, messageId, userId);
+  CREATE INDEX IF NOT EXISTS idx_amf_agent_created ON agent_message_feedback(projectId, agentKey, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_amf_portal_created ON agent_message_feedback(portalId, createdAt);
+
+  -- Outgoing webhook subscriptions and the deliveries owed to them (IWebhookEndpoint / IWebhookDelivery).
+  CREATE TABLE IF NOT EXISTS webhook_endpoints (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    url TEXT NOT NULL,
+    description TEXT,
+    events TEXT NOT NULL DEFAULT '[]',
+    secretSealed TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    disabledReason TEXT,
+    failingSince TEXT,
+    createdBy TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_whk_tenant_project ON webhook_endpoints(tenantId, projectId);
+
+  CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id TEXT PRIMARY KEY,
+    tenantId TEXT NOT NULL,
+    projectId TEXT,
+    endpointId TEXT NOT NULL,
+    eventId TEXT NOT NULL,
+    eventType TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    nextAttemptAt TEXT,
+    lastStatusCode INTEGER,
+    lastError TEXT,
+    lastDurationMs INTEGER,
+    createdAt TEXT NOT NULL,
+    deliveredAt TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_whd_status_nextAttemptAt ON webhook_deliveries(status, nextAttemptAt);
+  CREATE INDEX IF NOT EXISTS idx_whd_endpoint_createdAt ON webhook_deliveries(endpointId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_whd_tenant_eventId ON webhook_deliveries(tenantId, eventId);
 
   -- Agent skills (a project-scoped library, like prompts/tools — see IAgentSkill)
   CREATE TABLE IF NOT EXISTS agent_skills (
@@ -2103,6 +2230,7 @@ export const TENANT_SCHEMA_SQL = `
     agentKey TEXT NOT NULL,
     conversationId TEXT NOT NULL,
     userMessage TEXT NOT NULL,
+    attachments TEXT,
     version INTEGER,
     usePublished INTEGER,
     runtimeContext TEXT,
@@ -2110,6 +2238,8 @@ export const TENANT_SCHEMA_SQL = `
     idempotencyRequestHash TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     errorReason TEXT,
+    stopReason TEXT,
+    resumeActionIds TEXT,
     result TEXT,
     errorMessage TEXT,
     cancelRequestedAt TEXT,
@@ -2132,7 +2262,10 @@ export const TENANT_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project ON agent_runs(tenantId, projectId);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_status_heartbeat ON agent_runs(status, heartbeatAt);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_expiresAt ON agent_runs(expiresAt);
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_callbackStatus_updatedAt ON agent_runs(callbackStatus, updatedAt);
   CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_project_idempotencyKey ON agent_runs(tenantId, projectId, idempotencyKey);
+  -- A caller who may not see other people's sessions lists only the runs they queued, newest first.
+  CREATE INDEX IF NOT EXISTS idx_agent_runs_project_agent_user ON agent_runs(tenantId, projectId, agentKey, userId, createdAt);
   -- Enforces "at most one queued/running run per conversation" at the DB
   -- layer (§6/§12.14) — a partial unique index, not a read-then-write
   -- application check, so the guard is race-free (SQLite partial indexes

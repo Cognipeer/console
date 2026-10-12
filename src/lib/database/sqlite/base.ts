@@ -6,6 +6,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { foldSearchText } from '@/lib/shared/searchFold';
 import Database from 'better-sqlite3';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { warnGlobalTenantFallback } from '../tenantScopeGuard';
@@ -89,6 +90,11 @@ export const TABLES = {
   agentVersions: 'agent_versions',
   agentConversations: 'agent_conversations',
   agentConversationStates: 'agent_conversation_states',
+  agentSessionEvents: 'agent_session_events',
+  agentPendingActions: 'agent_pending_actions',
+  agentMessageFeedback: 'agent_message_feedback',
+  webhookEndpoints: 'webhook_endpoints',
+  webhookDeliveries: 'webhook_deliveries',
   agentSkills: 'agent_skills',
   vectorCounters: 'vector_counters',
   vectorMigrations: 'vector_migrations',
@@ -129,6 +135,25 @@ export const TABLES = {
   llmPools: 'llm_pools',
 } as const;
 
+// ── Search functions ─────────────────────────────────────────────────
+
+/**
+ * Functions the directory searches call. SQLite's own `LIKE` folds the case of
+ * ASCII letters only, so searching "şule" or "özlem" never found "Şule" or
+ * "Özlem", while MongoDB's case-insensitive `$regex` (Unicode aware) did.
+ * `iam_fold(x) LIKE iam_fold(pattern)` folds with `foldSearchText` on both sides:
+ * the JavaScript Unicode mapping, with the four letters of the Turkish i family
+ * (I, İ, i, ı) meeting at "i" - so "istanbul" finds "İstanbul" and "ısparta"
+ * finds "ISPARTA", which a plain `toLowerCase()` gets wrong - and the two
+ * backends answer the same (the Mongo side is `foldedRegexSource`). Accents are
+ * NOT stripped (neither backend does): "sule" does not find "Şule" on either.
+ * Deterministic, so SQLite may cache it within a statement.
+ */
+function registerSearchFunctions(db: Database.Database): void {
+  db.function('iam_fold', { deterministic: true }, (value: unknown) =>
+    value === null || value === undefined ? null : foldSearchText(String(value)));
+}
+
 // ── Base class ───────────────────────────────────────────────────────
 
 export class SQLiteProviderBase {
@@ -157,6 +182,7 @@ export class SQLiteProviderBase {
     this.mainDb = new Database(mainPath);
     this.mainDb.pragma('journal_mode = WAL');
     this.mainDb.pragma('foreign_keys = ON');
+    registerSearchFunctions(this.mainDb);
     this.mainDb.exec(MAIN_SCHEMA_SQL);
     this.applyMainMigrations(this.mainDb);
 
@@ -195,6 +221,7 @@ export class SQLiteProviderBase {
     const db = new Database(tenantPath);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
+    registerSearchFunctions(db);
     db.exec(TENANT_SCHEMA_SQL);
     this.applyTenantMigrations(db);
     this.applyTenantIndexes(db);
@@ -303,6 +330,9 @@ export class SQLiteProviderBase {
     // Session user that minted the token — differs from `userId` when an
     // admin mints on behalf of another (e.g. login-disabled) user.
     this.ensureTableColumn(db, TABLES.apiTokens, 'createdBy', 'createdBy TEXT');
+    // Optional per-token network allowlist (JSON array of CIDR strings). Legacy
+    // rows read as NULL = unrestricted, so nothing changes for existing tokens.
+    this.ensureTableColumn(db, TABLES.apiTokens, 'allowedIpRanges', 'allowedIpRanges TEXT');
   }
 
   private applyTenantMigrations(db: Database.Database): void {
@@ -1014,6 +1044,10 @@ export class SQLiteProviderBase {
     this.ensureTableColumn(db, TABLES.users, 'disabledAt', 'disabledAt TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledBy', 'disabledBy TEXT');
     this.ensureTableColumn(db, TABLES.users, 'disabledReason', 'disabledReason TEXT');
+    // Quota group scope: 'perMember' | 'shared'. Nullable with no default — a
+    // NULL is read back as `undefined`, which the guard treats as perMember, and
+    // only `scope = 'group'` rows carry it, so existing rows need no backfill.
+    this.ensureTableColumn(db, TABLES.quotaPolicies, 'groupMode', 'groupMode TEXT');
     // PII v2 (NLP/dictionary/NER layers): opt-in detection config living
     // alongside categories/customPatterns. Absent/null on old rows, which
     // `mapPiiPolicyRow` reads back as `undefined` — the detector's default
@@ -1027,6 +1061,40 @@ export class SQLiteProviderBase {
     // Sealed HMAC secret for agent-run callbacks (agentRunService).
     this.ensureTableColumn(db, TABLES.agentRuns, 'callbackSecret', 'callbackSecret TEXT');
     this.ensureTableColumn(db, TABLES.agentRuns, 'maxDurationMs', 'maxDurationMs INTEGER');
+    this.ensureTableColumn(db, TABLES.agentRuns, 'stopReason', 'stopReason TEXT');
+    this.ensureTableColumn(db, TABLES.agentRuns, 'resumeActionIds', 'resumeActionIds TEXT');
+    // Conversation files that ride the message of a (background) run.
+    this.ensureTableColumn(db, TABLES.agentRuns, 'attachments', 'attachments TEXT');
+    // Session files: ordinary file records tagged with the conversation they belong
+    // to. Indexed here (not in the schema SQL) because an older table has no such
+    // column until the lines above add it.
+    this.ensureTableColumn(db, TABLES.files, 'purpose', 'purpose TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'conversationId', 'conversationId TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'agentKey', 'agentKey TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'expiresAt', 'expiresAt TEXT');
+    this.ensureTableColumn(db, TABLES.files, 'uploadedBy', 'uploadedBy TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_files_purpose_expiresAt ON ${TABLES.files}(purpose, expiresAt)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_files_conversationId ON ${TABLES.files}(conversationId)`);
+    // A bucket's objects by key: the lookup of one object, the prefix / folder
+    // listing (a key range), and what the bucket delete guard counts.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_files_bucket_key ON ${TABLES.files}(providerKey, bucketKey, key)`);
+    // Agent runtime (session events / human-in-the-loop): runtime fields on the
+    // conversation and the paused SDK state. All nullable; absent = idle / not paused.
+    this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeStatus', 'runtimeStatus TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'stopReason', 'stopReason TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'pendingActionIds', 'pendingActionIds TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'lastEventSeq', 'lastEventSeq INTEGER');
+    // Session spend budget (JSON) and the running total of what the session's turns cost.
+    this.ensureTableColumn(db, TABLES.agentConversations, 'budget', 'budget TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'spentUsd', 'spentUsd REAL');
+    this.ensureTableColumn(db, TABLES.agentConversations, 'runtimeTurnId', 'runtimeTurnId TEXT');
+    this.ensureTableColumn(db, TABLES.agentConversationStates, 'pausedSnapshot', 'pausedSnapshot TEXT');
+    // A client tool call a host page has to answer: its timeout (JSON).
+    this.ensureTableColumn(db, TABLES.agentPendingActions, 'clientTool', 'clientTool TEXT');
+    // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_created ON ${TABLES.agentConversations}(projectId, createdAt DESC, id DESC)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_agent_created ON ${TABLES.agentConversations}(projectId, agentKey, createdAt DESC, id DESC)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_aconv_project_status_created ON ${TABLES.agentConversations}(projectId, runtimeStatus, createdAt DESC, id DESC)`);
     // One run per Idempotency-Key per project, race-free (two concurrent
     // requests with the same key must not both execute).
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_idempotency_unique

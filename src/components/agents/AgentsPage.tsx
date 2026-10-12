@@ -7,9 +7,6 @@ import {
   Button,
   Group,
   Menu,
-  Modal,
-  Stack,
-  Text,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -22,6 +19,7 @@ import {
   IconTrash,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
 import StatusBadge from '@/components/common/ui/StatusBadge';
@@ -88,6 +86,8 @@ interface Provider {
 export default function AgentsPage() {
   const router = useRouter();
   const t = useTranslations('agents');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [models, setModels] = useState<Model[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -95,7 +95,6 @@ export default function AgentsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
@@ -154,28 +153,26 @@ export default function AgentsPage() {
     router.push(`/dashboard/agents/${agentId}`);
   };
 
-  const handleDelete = async () => {
-    if (!deleteTarget) return;
-    try {
-      const res = await fetch(`/api/agents/${deleteTarget._id}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        notifications.show({
-          title: t('notifications.deleted'),
-          message: t('notifications.deletedDesc', { name: deleteTarget.name }),
-          color: 'teal',
+  const handleDelete = async (target: Agent) => {
+    const deleted = await deleteResource({
+      noun: tConfirm('nouns.agent'),
+      name: target.name,
+      type: 'agent',
+      id: String(target._id),
+      action: async () => {
+        const res = await fetch(`/api/agents/${target._id}`, {
+          method: 'DELETE',
         });
-        setDeleteTarget(null);
-        void loadAgents();
-      }
-    } catch {
-      notifications.show({
-        title: t('notifications.error'),
-        message: t('notifications.deleteFailed'),
-        color: 'red',
-      });
-    }
+        if (!res.ok) throw new Error(t('notifications.deleteFailed'));
+      },
+    });
+    if (!deleted) return;
+    notifications.show({
+      title: t('notifications.deleted'),
+      message: t('notifications.deletedDesc', { name: target.name }),
+      color: 'teal',
+    });
+    void loadAgents();
   };
 
   // Model options come from the agents actually listed, so the filter never
@@ -457,7 +454,7 @@ export default function AgentsPage() {
             label: t('actions.delete'),
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(agent),
+            onClick: () => void handleDelete(agent),
           },
         ]}
       />
@@ -481,24 +478,6 @@ export default function AgentsPage() {
         onCreated={handleCreated}
       />
 
-      <Modal
-        opened={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
-        title={t('deleteModal.title')}
-        size="sm"
-      >
-        <Stack gap="md">
-          <Text size="sm">{t('deleteModal.message')}</Text>
-          <Group justify="flex-end">
-            <Button variant="default" onClick={() => setDeleteTarget(null)}>
-              {t('deleteModal.cancel')}
-            </Button>
-            <Button color="red" onClick={handleDelete}>
-              {t('deleteModal.delete')}
-            </Button>
-          </Group>
-        </Stack>
-      </Modal>
     </PageContainer>
   );
 }

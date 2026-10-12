@@ -23,14 +23,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   };
 });
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
@@ -50,11 +50,21 @@ vi.mock('@/server/api/plugins/guardrail-bindings', () => ({
   resolveConfigGuardrailBindings: vi.fn().mockResolvedValue([]),
 }));
 
+// Running a thread sends a message; under cancel_pending that cancels the session's open request, which takes the
+// engine's `agent.approve` (api/agent-session-authz.test.ts). Only the wiring is checked here.
+const cancelPending = vi.hoisted(() => vi.fn());
+vi.mock('@/server/api/plugins/agent-approval-authz', () => ({
+  refuseCancelPending: cancelPending,
+  CANCEL_PENDING_FORBIDDEN_MESSAGE: 'sending a message would cancel the open request',
+}));
+const exclusive = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/services/agents/agentRunService', () => ({ executeAgentChatExclusive: exclusive }));
+
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { getPermissionServiceForPath, authorizeServiceRequest } from '@/lib/security/rbac';
 import { getAgentByKey, getConversationById } from '@/lib/services/agents';
 import { clientAssistantsApiPlugin } from '@/server/api/plugins/client-assistants';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp } from '../helpers/fastify-api';
 
 const AUTH_CTX_PROJECT_A = {
@@ -90,10 +100,9 @@ async function buildApp() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  cancelPending.mockResolvedValue(null);
   mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX_PROJECT_A);
-  mockFn(getDatabase).mockResolvedValue({ runWithTenant });
-  mockFn(getPermissionServiceForPath).mockReturnValue(null);
-  mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+  mockFn(getDatabase).mockResolvedValue(createMockDb({ runWithTenant } as never));
 });
 
 describe('client Assistants API — thread ownership across projects', () => {
@@ -129,5 +138,39 @@ describe('client Assistants API — thread ownership across projects', () => {
     // The agent lookup backing loadThreadOr404 must be scoped to the
     // conversation's own project, not left unscoped.
     expect(getAgentByKey).toHaveBeenCalledWith('tenant_acme', 'support-bot', 'proj-a');
+  });
+});
+
+describe('client Assistants API — running a thread that waits on an open request', () => {
+  const waiting = {
+    ...CONVERSATION_IN_PROJECT_B,
+    projectId: 'proj-a',
+    runtimeStatus: 'requires_action',
+    metadata: { assistantsApi: { pendingMessages: [{ id: 'p1', role: 'user', content: 'never mind', created_at: 1 }] } },
+  };
+  const run = async () => {
+    mockFn(getConversationById).mockResolvedValue(waiting);
+    mockFn(getAgentByKey).mockResolvedValue({ _id: 'agent-1', key: 'support-bot', status: 'active', config: { humanInTheLoop: { onUserMessageWhilePending: 'cancel_pending' } } });
+    const app = await buildApp();
+    return app.inject({ method: 'POST', url: '/api/client/v1/threads/thread_conv-1/runs', headers: { authorization: 'Bearer tok' }, payload: {} });
+  };
+
+  it('is 403 (with the decision id) for a token the engine does not let answer it, and nothing runs', async () => {
+    cancelPending.mockResolvedValue({ decisionId: 'dec-6' });
+    const res = await run();
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body)).toMatchObject({ error: expect.stringContaining('would cancel'), decision_id: 'dec-6' });
+    expect(exclusive).not.toHaveBeenCalled();
+    expect(cancelPending).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ tenantDbName: 'tenant_acme', conversation: waiting, agent: expect.objectContaining({ key: 'support-bot' }) }),
+    );
+  });
+
+  it('runs for a token that may answer', async () => {
+    exclusive.mockResolvedValue({ status: 'completed', usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } });
+    const res = await run();
+    expect(res.statusCode).toBe(200);
+    expect(exclusive).toHaveBeenCalledTimes(1);
   });
 });

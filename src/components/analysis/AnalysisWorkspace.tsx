@@ -10,8 +10,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button, Group } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconClipboardText,
   IconMessages,
@@ -58,6 +60,8 @@ function pct(value?: number | null): string {
 
 export default function AnalysisWorkspace({ section }: { section: AnalysisSection }) {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tq = useTranslations('common.confirm.qos');
   const [definitions, setDefinitions] = useState<AnalysisDefinitionView[]>([]);
   const [conversations, setConversations] = useState<AnalysisConversationView[]>([]);
   const [runs, setRuns] = useState<AnalysisRunView[]>([]);
@@ -69,8 +73,6 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
   const [editDefinition, setEditDefinition] = useState<AnalysisDefinitionView | null>(null);
   const [runModalDef, setRunModalDef] = useState<AnalysisDefinitionView | null>(null);
   const [ingestModal, setIngestModal] = useState(false);
-  const [deleteItem, setDeleteItem] = useState<{ kind: AnalysisSection; id: string; name: string } | null>(null);
-  const [deleting, setDeleting] = useState(false);
 
   const loadAll = async () => {
     setRefreshing(true);
@@ -124,21 +126,21 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
     return null;
   };
 
-  const confirmDelete = async () => {
-    if (!deleteItem) return;
-    const path = deleteItem.kind === 'definitions' ? 'definitions' : 'conversations';
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/analysis/${path}/${deleteItem.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Deleted', message: `"${deleteItem.name}" was deleted`, color: 'red' });
-      setDeleteItem(null);
-      await loadAll();
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-    } finally {
-      setDeleting(false);
-    }
+  const confirmDelete = async (item: { kind: AnalysisSection; id: string; name: string }) => {
+    const path = item.kind === 'definitions' ? 'definitions' : 'conversations';
+    const isDefinition = item.kind === 'definitions';
+    const done = await deleteResource({
+      noun: tq(isDefinition ? 'nouns.analysisDefinition' : 'nouns.conversation'),
+      name: item.name,
+      ...(isDefinition ? { type: 'analysis-definition', id: item.id } : {}),
+      action: async () => {
+        const res = await fetch(`/api/analysis/${path}/${item.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(tq('deleteFailed'));
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Deleted', message: `"${item.name}" was deleted`, color: 'red' });
+    await loadAll();
   };
 
   const definitionsCtl = useTableControls(definitions, {
@@ -255,7 +257,7 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
             { id: 'run', label: 'Run analysis', icon: <IconPlayerPlay size={14} />, onClick: () => setRunModalDef(d) },
             { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => setEditDefinition(d) },
             { divider: true },
-            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteItem({ kind: 'definitions', id: d.id, name: d.name }) },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDelete({ kind: 'definitions', id: d.id, name: d.name }) },
           ]}
         />
       )}
@@ -279,7 +281,7 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
             primaryAction: { label: 'Ingest conversations', icon: <IconUpload size={14} />, onClick: () => setIngestModal(true) },
           }}
           rowActions={(c) => [
-            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteItem({ kind: 'conversations', id: c.id, name: c.name || c.key }) },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDelete({ kind: 'conversations', id: c.id, name: c.name || c.key }) },
           ]}
         />
       )}
@@ -303,14 +305,6 @@ export default function AnalysisWorkspace({ section }: { section: AnalysisSectio
           }}
         />
       )}
-
-      <Modal opened={deleteItem !== null} onClose={() => setDeleteItem(null)} title="Delete" centered size="sm">
-        <Text size="sm" mb="lg">Delete <strong>{deleteItem?.name}</strong>? This action cannot be undone.</Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteItem(null)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>Delete</Button>
-        </Group>
-      </Modal>
 
       <CreateDefinitionModal
         opened={definitionModal || !!editDefinition}

@@ -15,6 +15,7 @@ import { IconUserPlus, IconBolt, IconCheck, IconLock } from '@tabler/icons-react
 import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
 import { useTranslations } from '@/lib/i18n';
+import { assignIfPortal, buildChangePasswordPath, safeReturnTo } from '@/lib/security/returnTo';
 
 type RegistrationMode = 'open' | 'beta' | 'disabled';
 
@@ -62,7 +63,10 @@ export default function RegisterPage() {
 
         if (response.ok) {
           const data = (await response.json()) as { mustChangePassword?: boolean };
-          router.push(data.mustChangePassword ? '/change-password' : '/dashboard');
+          // Already signed in: honour a return-to link (validated), else the dashboard.
+          const returnTo = safeReturnTo(new URLSearchParams(window.location.search).get('returnTo'));
+          const dest = data.mustChangePassword ? buildChangePasswordPath(returnTo) : returnTo;
+          if (!assignIfPortal(dest)) router.push(dest);
           return;
         }
       } catch {

@@ -48,6 +48,7 @@ import {
   IconVariable,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
 import { Playground } from '@/components/playground';
 import type { PromptView, PromptVersionView, PromptCommentView } from '@/lib/services/prompts';
 import PromptEditorModal from '@/components/prompts/PromptEditorModal';
@@ -72,6 +73,8 @@ export default function PromptDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const t = useTranslations('promptDetail');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const [prompt, setPrompt] = useState<PromptView | null>(null);
   const [versions, setVersions] = useState<PromptVersionView[]>([]);
   const [comments, setComments] = useState<PromptCommentView[]>([]);
@@ -239,17 +242,20 @@ export default function PromptDetailPage() {
   const handleDeleteComment = async (commentId: string) => {
     if (!promptId) return;
 
-    try {
-      const response = await fetch(`/api/prompts/${promptId}/comments/${commentId}`, {
-        method: 'DELETE',
-      });
-
-      if (response.ok) {
-        setComments((prev) => prev.filter((c) => c.id !== commentId));
-      }
-    } catch (error) {
-      console.error('Failed to delete comment:', error);
-    }
+    const deleted = await deleteResource({
+      noun: tConfirm('nouns.promptComment'),
+      extraWarning: tConfirm('extras.promptCommentGone'),
+      action: async () => {
+        const response = await fetch(`/api/prompts/${promptId}/comments/${commentId}`, {
+          method: 'DELETE',
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => null);
+          throw new Error(body?.error || 'Failed to delete comment');
+        }
+      },
+    });
+    if (deleted) setComments((prev) => prev.filter((c) => c.id !== commentId));
   };
 
   if (loading) {
@@ -644,6 +650,11 @@ export default function PromptDetailPage() {
 
         <Tabs.Panel value="usage" pt="md">
           <Stack gap="md">
+            {promptId ? (
+              <Paper withBorder radius="lg" p="lg">
+                <ResourceUsageSection type="prompt" id={String(promptId)} />
+              </Paper>
+            ) : null}
             <Paper withBorder radius="lg" p="lg">
               <Group gap={8} mb="sm">
                 <ThemeIcon variant="light" color="teal" radius="md">

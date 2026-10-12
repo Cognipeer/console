@@ -47,9 +47,11 @@ import { ModelUsageSkeleton } from '@/components/models/ModelSkeletons';
 import { useTableControls } from '@/components/common/ui/useTableControls';
 import StatusBadge from '@/components/common/ui/StatusBadge';
 import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
+import { modelTakesImages } from '@/components/models/inputModalities';
 import CreateDynamicModelModal, {
   type CandidateModel,
   type DynamicModelInit,
@@ -151,6 +153,8 @@ interface ModelDto {
   category: 'llm' | 'embedding' | 'rerank' | 'stt' | 'tts' | 'ocr' | 'image' | 'moderation' | 'decision';
   modelId: string;
   isMultimodal?: boolean;
+  /** What the model resolves to (an explicit choice, else detected from its id). */
+  capabilities?: { inputModalities?: string[] };
   supportsToolCalls?: boolean;
   pricing: ModelPricing;
   settings: Record<string, unknown>;
@@ -199,6 +203,8 @@ export default function ModelsPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const t = useTranslations('models');
+  const tConfirm = useTranslations('common.confirm');
+  const deleteResource = useDeleteResource();
   const tNav = useTranslations('navigation');
   const router = useRouter();
   const { push: navigate } = useNavigationFeedback();
@@ -301,6 +307,7 @@ export default function ModelsPage() {
       category: model.category,
       modelId: model.modelId,
       isMultimodal: model.isMultimodal,
+      capabilities: (model as { capabilities?: { inputModalities?: string[] } }).capabilities,
       supportsToolCalls: model.supportsToolCalls,
       pricing: model.pricing as ModelPricing,
       settings: model.settings ?? {},
@@ -340,7 +347,7 @@ export default function ModelsPage() {
   const counts = useMemo(() => {
     const llm = models.filter((m) => m.category === 'llm').length;
     const embedding = models.filter((m) => m.category === 'embedding').length;
-    const multimodal = models.filter((m) => m.isMultimodal).length;
+    const multimodal = models.filter(modelTakesImages).length;
     return { all: models.length, llm, embedding, multimodal };
   }, [models]);
 
@@ -379,7 +386,7 @@ export default function ModelsPage() {
   const filtered = useMemo(() => {
     return models.filter((m) => {
       if (activeType !== 'all' && m.category !== activeType) return false;
-      if (capability === 'multimodal' && !m.isMultimodal) return false;
+      if (capability === 'multimodal' && !modelTakesImages(m)) return false;
       if (capability === 'tools' && !m.supportsToolCalls) return false;
       if (providerFilter !== 'all' && m.providerKey !== providerFilter) return false;
       if (query) {
@@ -400,15 +407,22 @@ export default function ModelsPage() {
   });
 
   const handleDeleteModel = async (model: ModelDto) => {
-    const confirmed = window.confirm(t('actions.deleteConfirm'));
-    if (!confirmed) return;
-    setDeletingModelId(model._id);
     try {
-      const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
-        throw new Error(error.error ?? 'Failed to delete model');
-      }
+      const deleted = await deleteResource({
+        noun: tConfirm('nouns.model'),
+        name: model.name,
+        type: 'model',
+        id: model._id,
+        action: async () => {
+          setDeletingModelId(model._id);
+          const response = await fetch(`/api/models/${model._id}`, { method: 'DELETE' });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({ error: 'Failed to delete model' }));
+            throw new Error(error.error ?? 'Failed to delete model');
+          }
+        },
+      });
+      if (!deleted) return;
       setModels((current) => current.filter((m) => m._id !== model._id));
       void loadDashboard();
       notifications.show({
@@ -1019,7 +1033,7 @@ function modelColumns(
           ) : (
             <span className="ds-badge">{m.category}</span>
           )}
-          {m.isMultimodal ? (
+          {modelTakesImages(m) ? (
             <span className="ds-badge ds-badge-info" title={t('list.capabilities.multimodal')}>
               vision
             </span>

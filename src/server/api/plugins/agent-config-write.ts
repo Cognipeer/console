@@ -23,8 +23,14 @@ import {
 } from '@/lib/services/agents/agentConfigValidation';
 // By path: the agents barrel does not export the error class.
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
+import {
+  bucketNamingRefusal,
+  type BucketNamingRefusal,
+  type CanNameBucket,
+} from '@/lib/services/agents/attachmentsBucketAccess';
 import { readJsonBody } from '../fastify-utils';
 import { carriedGuardrailFields, resolveConfigGuardrailBindings } from './guardrail-bindings';
+import { FILES_WRITE_REQUIRED_MESSAGE } from './files-permission';
 
 /**
  * A guardrail refusal is a policy decision, not a server fault: answered with
@@ -138,10 +144,42 @@ export interface AgentConfigWriteScope {
   tenantId: string;
   projectId: string;
   user?: Pick<IUser, 'role'>;
+  /**
+   * May the caller name this bucket (by key) in an agent's settings? A Files decision about THAT bucket
+   * (`file-bucket.update`, the policy engine's). Asked only when a write sets or changes
+   * `attachments.bucketKey`: the files an agent takes land in a Document Store bucket, so naming the bucket is a
+   * Files decision. A refusal's `decisionId` is quoted in the 403; an engine that cannot decide throws its 503.
+   */
+  canNameBucket: CanNameBucket;
 }
 
-/** A config write refused with a 400 (`badRequest` is the body), or accepted. */
-type ConfigWriteOutcome<T> = { badRequest: Record<string, unknown> } | T;
+/** A config write refused with a 400 (`badRequest` is the body) or a 403 (`forbidden`), or accepted. */
+type ConfigWriteOutcome<T> = { badRequest: Record<string, unknown> } | { forbidden: Record<string, unknown> } | T;
+
+/** The 403 body for a write that named a bucket its caller may not name (`bucketNamingRefusal` found it). */
+export function bucketNamingForbiddenBody(refusal: Pick<BucketNamingRefusal, 'decisionId'>): Record<string, unknown> {
+  return {
+    error: FILES_WRITE_REQUIRED_MESSAGE,
+    type: 'files_write_required',
+    code: 'files_write_required',
+    field: 'attachments.bucketKey',
+    ...(refusal.decisionId ? { decisionId: refusal.decisionId } : {}),
+  };
+}
+
+/**
+ * The 403 for a write that picks or changes the bucket session files go to
+ * without write access to Files, else null. Re-saving the bucket already stored
+ * (any other edit of the agent) asks nothing of Files.
+ */
+export async function attachmentsBucketRefusal(
+  next: IAgentConfig,
+  previous: IAgentConfig | undefined,
+  scope: Pick<AgentConfigWriteScope, 'canNameBucket'>,
+): Promise<{ forbidden: Record<string, unknown> } | null> {
+  const refusal = await bucketNamingRefusal(next, previous, scope.canNameBucket);
+  return refusal ? { forbidden: bucketNamingForbiddenBody(refusal) } : null;
+}
 
 /**
  * A new agent's config, as both create routes store it: normalized, guardrail
@@ -169,6 +207,8 @@ export async function prepareNewAgentConfig(
     config,
   });
   if (validation.errors.length > 0) return { badRequest: invalidConfigBody(validation) };
+  const refusal = await attachmentsBucketRefusal(config, undefined, scope);
+  if (refusal) return refusal;
   return { config, warnings: validation.warnings };
 }
 
@@ -188,6 +228,8 @@ export async function validateNativeConfigUpdate(
   cfg: Record<string, unknown>,
   agentKey: string,
   scope: AgentConfigWriteScope,
+  /** The config stored now: re-saving its bucket is not a change. */
+  previous?: IAgentConfig,
 ): Promise<ConfigWriteOutcome<{ warnings: AgentConfigIssue[] }>> {
   // The config replaces the stored one wholesale, so the projected legacy
   // slots must be written on the SAME object — leaving them out would clear
@@ -206,6 +248,8 @@ export async function validateNativeConfigUpdate(
     agentKey,
   });
   if (validation.errors.length > 0) return { badRequest: invalidConfigBody(validation) };
+  const refusal = await attachmentsBucketRefusal(config, previous, scope);
+  if (refusal) return refusal;
   return { warnings: validation.warnings };
 }
 
@@ -216,11 +260,11 @@ export async function validateNativeConfigUpdate(
  */
 export async function publishValidatedAgent(
   request: FastifyRequest,
-  scope: AgentConfigWriteScope,
+  scope: Pick<AgentConfigWriteScope, 'tenantDbName' | 'tenantId' | 'projectId'>,
   agent: Pick<IAgent, 'config' | 'key'>,
   agentId: string,
   userId: string,
-): Promise<ConfigWriteOutcome<{ version: IAgentVersion }>> {
+): Promise<{ badRequest: Record<string, unknown> } | { version: IAgentVersion }> {
   const validation = await validateAgentConfig({
     tenantDbName: scope.tenantDbName,
     tenantId: scope.tenantId,

@@ -26,6 +26,10 @@ Every state-changing action on the console — provider edits, model deployments
 
 Columns surface the actor, the action, the resource type and ID, and the timestamp. Use the filters at the top to narrow by actor, action, or resource type when responding to a compliance question or investigating a configuration drift.
 
+### Refused requests
+
+Every request the authorization engine refuses is written to the audit log, `GET` included: a `403` because the caller lacks a permission, and a `503` because the engine could not decide at all. The **Audit** tab of the **IAM center** lists them as **Denials** (last 30 days by default, CSV export included) next to the policy changes, and a refusal's decision id opens in the **Access check** with the rule that decided it. `GET /api/iam/engine/stats` returns the engine's health and counters (`enforce.unavailable`, `enforce.undeclaredDenies`) and the `authorization-engine` entry of `GET /api/health/ready` reports `ok`, `degraded` or `down`. See [Authorization](/guide/authorization#check-access).
+
 ## License
 
 The License screen shows what the current installation is allowed to do — plan tier, configured project budget versus active projects, expiry, and the signed license key payload.

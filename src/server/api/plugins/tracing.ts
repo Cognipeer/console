@@ -1,12 +1,14 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { AgentTracingService } from '@/lib/services/agentTracing';
+import { resolveTraceSession } from '@/lib/services/agents/traceSession';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
   requireProjectContextForRequest,
   sendProjectContextError,
   withApiRequestContext,
 } from '../fastify-utils';
+import { offsetPageOf, pageOfVisibleRows, refuseTracingThread, sendSessionRefusal } from './agent-session-access';
 
 const logger = createLogger('api:tracing');
 
@@ -67,21 +69,38 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if ('error' in metadataFilter) {
         return reply.code(400).send({ error: metadataFilter.error });
       }
-      const result = await AgentTracingService.listSessions(session.tenantDbName, projectId, {
-        agent: query.agent,
-        from: query.from,
-        limit: query.limit || '50',
-        query: query.query,
-        skip: query.skip || '0',
-        status: query.status,
-        to: query.to,
-        // Only sessions with truncatedEvents > 0 (a truncated/cut-off model
-        // response somewhere in the session).
-        truncated: query.truncated === 'true' ? true : undefined,
-        ...metadataFilter,
+      // A tracing session of an agent is a turn of somebody's session: the sessions of an agent whose other
+      // people's sessions the caller may not view are left out. The default caller gets one plain read; a
+      // restricted caller's page is filled from further reads, so it is not short while the list goes on.
+      const { skip, limit } = offsetPageOf(query);
+      let latest: Awaited<ReturnType<typeof AgentTracingService.listSessions>> | undefined;
+      const page = await pageOfVisibleRows(request, {
+        start: skip,
+        limit,
+        minBatch: 25,
+        threadIdOf: (row: { threadId?: string | null }) => row.threadId,
+        actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        fetchPage: async (position, size) => {
+          latest = await AgentTracingService.listSessions(session.tenantDbName, projectId, {
+            agent: query.agent,
+            from: query.from,
+            limit: String(size),
+            query: query.query,
+            skip: String(position),
+            status: query.status,
+            to: query.to,
+            // Only sessions with truncatedEvents > 0 (a truncated/cut-off model
+            // response somewhere in the session).
+            truncated: query.truncated === 'true' ? true : undefined,
+            ...metadataFilter,
+          });
+          const total = latest.total;
+          return { rows: latest.sessions, after: (consumed) => (position + consumed >= total ? null : position + consumed) };
+        },
       });
-
-      return reply.code(200).send(result);
+      if (!page.restricted && latest) return reply.code(200).send(latest);
+      // A restricted caller's total cannot be known without reading everything: say where the next page starts instead.
+      return reply.code(200).send({ sessions: page.rows, hasMore: page.next !== null, nextSkip: page.next });
     } catch (error) {
       logger.error('List tracing sessions error', { error });
       return sendProjectContextError(reply, error)
@@ -111,6 +130,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if (!result) {
         return reply.code(404).send({ error: 'Session not found' });
       }
+      const refusal = await refuseTracingThread(request, result.session.threadId, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
 
       return reply.code(200).send(result);
     } catch (error) {
@@ -126,6 +147,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { eventId, sessionId } = request.params as { eventId: string; sessionId: string };
+      const refusal = await refuseTracingThread(request, await AgentTracingService.getSessionThreadId(session.tenantDbName, projectId, sessionId), { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
       const result = await AgentTracingService.getSessionEventDetail(
         session.tenantDbName,
         projectId,
@@ -155,18 +178,31 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       if ('error' in metadataFilter) {
         return reply.code(400).send({ error: metadataFilter.error });
       }
-      const result = await AgentTracingService.listThreads(session.tenantDbName, projectId, {
-        agent: query.agent,
-        from: query.from,
-        limit: query.limit || '50',
-        skip: query.skip || '0',
-        status: query.status,
-        threadId: query.threadId,
-        to: query.to,
-        ...metadataFilter,
+      const { skip, limit } = offsetPageOf(query);
+      let latest: Awaited<ReturnType<typeof AgentTracingService.listThreads>> | undefined;
+      const page = await pageOfVisibleRows(request, {
+        start: skip,
+        limit,
+        minBatch: 25,
+        threadIdOf: (row: { threadId?: unknown }) => (typeof row.threadId === 'string' ? row.threadId : null),
+        actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId },
+        fetchPage: async (position, size) => {
+          latest = await AgentTracingService.listThreads(session.tenantDbName, projectId, {
+            agent: query.agent,
+            from: query.from,
+            limit: String(size),
+            skip: String(position),
+            status: query.status,
+            threadId: query.threadId,
+            to: query.to,
+            ...metadataFilter,
+          });
+          const total = latest.total;
+          return { rows: latest.threads, after: (consumed) => (position + consumed >= total ? null : position + consumed) };
+        },
       });
-
-      return reply.code(200).send(result);
+      if (!page.restricted && latest) return reply.code(200).send(latest);
+      return reply.code(200).send({ threads: page.rows, hasMore: page.next !== null, nextSkip: page.next });
     } catch (error) {
       logger.error('List tracing threads error', { error });
       return sendProjectContextError(reply, error)
@@ -180,6 +216,8 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const { threadId } = request.params as { threadId: string };
+      const refusal = await refuseTracingThread(request, threadId, { actor: { tenantDbName: session.tenantDbName, projectId, userId: session.userId } });
+      if (refusal) return sendSessionRefusal(reply, request, refusal);
       const result = await AgentTracingService.getThreadDetail(
         session.tenantDbName,
         projectId,
@@ -196,6 +234,27 @@ export const tracingApiPlugin: FastifyPluginAsync = async (app) => {
       return sendProjectContextError(reply, error)
         ?? reply.code(500).send({
           error: error instanceof Error ? error.message : 'Failed to fetch thread',
+        });
+    }
+  }));
+
+  // The agent session a thread belongs to (the thread id is the conversation's id), so the
+  // request inspector can draw a recorded `session-file://` picture from the session's content
+  // route. It only names the session; opening a file is checked again by that route.
+  app.get('/tracing/threads/:threadId/session', withApiRequestContext(async (request, reply) => {
+    try {
+      const { projectId, session } = await requireProjectContextForRequest(request);
+      const { threadId } = request.params as { threadId: string };
+      const ref = await resolveTraceSession({ tenantDbName: session.tenantDbName, projectId, threadId });
+      if (!ref) {
+        return reply.code(404).send({ error: 'This thread is not an agent session' });
+      }
+      return reply.code(200).send(ref);
+    } catch (error) {
+      logger.error('Get tracing thread session error', { error });
+      return sendProjectContextError(reply, error)
+        ?? reply.code(500).send({
+          error: error instanceof Error ? error.message : 'Failed to resolve the thread session',
         });
     }
   }));

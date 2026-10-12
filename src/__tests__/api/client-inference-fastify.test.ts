@@ -17,14 +17,14 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
   };
 });
 
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-}));
-
-vi.mock('@/lib/security/rbac', () => ({
-  getPermissionServiceForPath: vi.fn(),
-  authorizeServiceRequest: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 vi.mock('@/lib/core/lifecycle', () => ({
   isShuttingDown: vi.fn().mockReturnValue(false),
@@ -62,11 +62,11 @@ vi.mock('@/lib/quota/quotaGuard', () => ({
 
 import { requireApiTokenFromHeader } from '@/lib/services/apiTokenAuth';
 import { getDatabase } from '@/lib/database';
-import { authorizeServiceRequest, getPermissionServiceForPath } from '@/lib/security/rbac';
 import { handleChatCompletion } from '@/lib/services/models/inferenceService';
 import { OutputTokenLimitError } from '@/lib/services/models/openaiErrors';
 import { settleUsageBudget } from '@/lib/quota/quotaGuard';
 import { clientInferenceApiPlugin } from '@/server/api/plugins/client-inference';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 const AUTH_CTX = {
@@ -90,11 +90,7 @@ describe('Fastify client inference errors', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({
-      runWithTenant: <T>(_tenantDbName: string, operation: () => T) => operation(),
-    });
-    mockFn(getPermissionServiceForPath).mockReturnValue('models');
-    mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
     app = await createFastifyApiTestApp(clientInferenceApiPlugin);
   });
 
@@ -179,11 +175,7 @@ describe('Fastify client inference — streaming budget settlement (F-05)', () =
   beforeEach(async () => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({
-      runWithTenant: <T>(_tenantDbName: string, operation: () => T) => operation(),
-    });
-    mockFn(getPermissionServiceForPath).mockReturnValue('models');
-    mockFn(authorizeServiceRequest).mockReturnValue({ allowed: true });
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
     app = await createFastifyApiTestApp(clientInferenceApiPlugin);
   });
 

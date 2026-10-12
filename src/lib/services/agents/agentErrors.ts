@@ -16,6 +16,44 @@
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
 import { AgentRunConflictError } from '@/lib/database/provider/errors';
 
+export const AGENT_QUOTA_EXCEEDED_CODE = 'agent_quota_exceeded';
+
+/**
+ * A caller is over an agent-run limit (quota domain `agent`, see agentQuota.ts).
+ * `classifyAgentRunError` answers it like every other quota refusal: HTTP 429
+ * with an error of type `rate_limit_error` — here with the code
+ * `agent_quota_exceeded`.
+ */
+export class AgentQuotaExceededError extends Error {
+    readonly code = AGENT_QUOTA_EXCEEDED_CODE;
+
+    constructor(message: string) {
+        super(message);
+        this.name = 'AgentQuotaExceededError';
+    }
+}
+
+/**
+ * Logs a failed agent run at the level it deserves. A refusal by a usage limit is
+ * policy working as configured — and repeats on every request for as long as a
+ * person stays over it — so it is an info line without a stack; anything else
+ * is an error.
+ */
+export function logAgentRunFailure(
+    logger: {
+        info: (message: string, meta?: Record<string, unknown>) => unknown;
+        error: (message: string, meta?: Record<string, unknown>) => unknown;
+    },
+    message: string,
+    error: unknown,
+): void {
+    if (error instanceof AgentQuotaExceededError) {
+        logger.info(`${message}: usage limit reached`, { code: error.code, reason: error.message });
+        return;
+    }
+    logger.error(message, { error });
+}
+
 export interface AgentRunErrorBody {
     message: string;
     /**
@@ -28,6 +66,80 @@ export interface AgentRunErrorBody {
      */
     type: string;
     code?: string | null;
+    /** `pending_action` only: the approvals / questions the session is waiting on. */
+    pendingActionIds?: string[];
+    /** `budget_reached` only: what the session has spent and what its budget is (USD). */
+    spentUsd?: number;
+    maxCostUsd?: number;
+}
+
+/**
+ * A new message arrived while the conversation waits on an approval or a
+ * question and the agent's policy (`onUserMessageWhilePending: 'reject'`) is to
+ * refuse it. Answered 409 `{ error: { type: 'pending_action', pendingActionIds } }`.
+ */
+export class AgentPendingActionError extends Error {
+    readonly status = 409;
+    readonly pendingActionIds: string[];
+
+    constructor(pendingActionIds: string[]) {
+        super('This session is waiting for an approval or an answer. Resolve it before sending a new message.');
+        this.name = 'AgentPendingActionError';
+        this.pendingActionIds = pendingActionIds;
+    }
+}
+
+/**
+ * The session has used up its own spend budget (`conversation.budget`), so the
+ * model is not called. Answered 402 `{ error: { type: 'budget_reached', spentUsd, maxCostUsd } }`.
+ */
+export class AgentBudgetReachedError extends Error {
+    readonly status = 402;
+    readonly spentUsd: number;
+    readonly maxCostUsd: number;
+
+    constructor(spentUsd: number, maxCostUsd: number) {
+        super(`This session has reached its budget ($${formatUsd(spentUsd)} of $${formatUsd(maxCostUsd)}). Raise or remove the budget to go on.`);
+        this.name = 'AgentBudgetReachedError';
+        this.spentUsd = spentUsd;
+        this.maxCostUsd = maxCostUsd;
+    }
+}
+
+function formatUsd(value: number): string {
+    return value >= 1 ? value.toFixed(2) : value.toFixed(4);
+}
+
+/**
+ * A refused upload or attachment: too large, too many, a type the agent does not
+ * take, a file that is not part of the session, or attachments switched off.
+ * `status` is the HTTP answer; `code` says which rule (`file_too_large`,
+ * `too_many_files`, `unsupported_file_type`, `attachment_not_found`,
+ * `attachments_disabled`, `quota_exceeded`).
+ */
+export class AgentAttachmentError extends Error {
+    readonly status: number;
+    readonly code: string;
+
+    constructor(status: number, code: string, message: string) {
+        super(message);
+        this.name = 'AgentAttachmentError';
+        this.status = status;
+        this.code = code;
+    }
+}
+
+/**
+ * The tenant's daily / monthly spend limit is used up, so the turn does not
+ * start. Answered 429 in the gateway's own error shape (`rate_limit_error`).
+ */
+export class AgentSpendLimitError extends Error {
+    readonly status = 429;
+
+    constructor(reason: string) {
+        super(reason);
+        this.name = 'AgentSpendLimitError';
+    }
 }
 
 export interface ClassifiedAgentRunError {
@@ -39,6 +151,7 @@ export interface ClassifiedAgentRunError {
 const CONFIG_ERRORS: Array<{ pattern: RegExp; status: number; code: string }> = [
     { pattern: /^Agent has no model configured/, status: 409, code: 'agent_model_missing' },
     { pattern: /^Model ".*" not found/, status: 409, code: 'agent_model_not_found' },
+    { pattern: /^Session budget cannot be enforced/, status: 409, code: 'session_budget_unenforceable' },
     { pattern: /^Configured model is not compatible with chat/, status: 409, code: 'agent_model_incompatible' },
     { pattern: /^Provider runtime does not support chat model creation/, status: 409, code: 'agent_provider_unsupported' },
     { pattern: /^Provider ".*" (not found|is not available)/i, status: 409, code: 'agent_provider_not_found' },
@@ -76,6 +189,52 @@ export function classifyAgentRunError(
     },
 ): ClassifiedAgentRunError {
     const message = error instanceof Error ? error.message : String(error ?? '');
+
+    // The caller is over a quota policy: the same answer the model, vector and
+    // file endpoints give (429, `rate_limit_error`), so a client handles one shape.
+    if (error instanceof AgentQuotaExceededError) {
+        return {
+            status: 429,
+            error: { message: error.message, type: 'rate_limit_error', code: error.code },
+        };
+    }
+
+    if (error instanceof AgentPendingActionError) {
+        return {
+            status: 409,
+            error: {
+                message: error.message,
+                type: 'pending_action',
+                code: 'pending_action',
+                pendingActionIds: error.pendingActionIds,
+            },
+        };
+    }
+
+    if (error instanceof AgentAttachmentError) {
+        return {
+            status: error.status,
+            error: { message: error.message, type: error.status === 429 ? 'rate_limit_error' : 'invalid_request_error', code: error.code },
+        };
+    }
+
+    if (error instanceof AgentBudgetReachedError) {
+        return {
+            status: 402,
+            error: {
+                message: error.message,
+                type: 'budget_reached',
+                code: 'budget_reached',
+                spentUsd: error.spentUsd,
+                maxCostUsd: error.maxCostUsd,
+            },
+        };
+    }
+
+    // Same shape the inference path answers a refused budget with.
+    if (error instanceof AgentSpendLimitError) {
+        return { status: 429, error: { message: error.message, type: 'rate_limit_error', code: 'spend_limit_exceeded' } };
+    }
 
     // Another turn (sync or background) already holds this conversation.
     if (error instanceof AgentRunConflictError) {

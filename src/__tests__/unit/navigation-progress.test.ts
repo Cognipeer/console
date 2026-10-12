@@ -177,11 +177,11 @@ describe('prefetch policy', () => {
       '/dashboard/projects/p1/settings?tab=members',
       'http://localhost:3000/dashboard/projects/p1',
       '/dashboard/projects',
-      '/dashboard/members',
+      // The IAM center has a server layout that decides per person who may open it.
+      '/dashboard/iam',
+      '/dashboard/iam?tab=principals',
       '/dashboard/providers',
       '/dashboard/providers/openai',
-      '/dashboard/tenant-settings',
-      '/dashboard/tenant-settings/projects/p1',
     ];
     for (const href of gated) {
       expect(resolveIntentPrefetchKind(href, CURRENT, 'full')).toBe('auto');
@@ -195,6 +195,7 @@ describe('prefetch policy', () => {
 
   it('matches gated routes by whole path segment', () => {
     expect(resolveIntentPrefetchKind('/dashboard/projects-archive', CURRENT, 'full')).toBe('full');
+    expect(resolveIntentPrefetchKind('/dashboard/iam-archive', CURRENT, 'full')).toBe('full');
     expect(resolveIntentPrefetchKind('/dashboard/membership', CURRENT, 'full')).toBe('full');
     expect(
       resolveIntentPrefetchKind('/dashboard/models', 'http://localhost:3000/dashboard/projects/p1', 'full'),

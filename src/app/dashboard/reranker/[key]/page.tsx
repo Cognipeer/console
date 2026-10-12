@@ -16,6 +16,7 @@ import {
   IconDeviceFloppy,
   IconPlayerPlay,
 } from '@tabler/icons-react';
+import { ResourceUsageSection } from '@/components/common/confirm';
 import DetailShell, {
   DetailCard,
   DetailTwoCol,
@@ -615,6 +616,9 @@ export default function RerankerDetailPage({
           )}
         </DetailCard>
       ) : null}
+      <DetailCard>
+        <ResourceUsageSection type="reranker" id={reranker._id} />
+      </DetailCard>
     </DetailShell>
   );
 }

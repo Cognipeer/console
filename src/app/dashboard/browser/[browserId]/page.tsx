@@ -34,6 +34,8 @@ import {
 import { useDisclosure } from '@mantine/hooks';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { ResourceUsageSection, useConfirm, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconAlertCircle,
   IconCamera,
@@ -112,6 +114,9 @@ export default function BrowserDetailPage() {
   const params = useParams<{ browserId: string }>();
   const { push: navigate } = useNavigationFeedback();
   const browserId = params?.browserId ?? '';
+  const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
+  const tSafe = useTranslations('common.confirm.dataSafety');
 
   const [browser, setBrowser] = useState<BrowserView | null>(null);
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
@@ -370,14 +375,29 @@ export default function BrowserDetailPage() {
   };
 
   const handleCloseSession = async (s: BrowserSessionView) => {
-    await fetch(`/api/browser/sessions/${s.sessionKey}`, { method: 'DELETE' });
-    await loadAll();
+    await confirmAction({
+      title: tSafe('closeSession.title'),
+      message: tSafe('closeSession.message'),
+      confirmLabel: tSafe('closeSession.confirm'),
+      tone: 'warning',
+      action: async () => {
+        const res = await fetch(`/api/browser/sessions/${s.sessionKey}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error((await res.text()) || 'Failed to close session');
+        await loadAll();
+      },
+    });
   };
 
   const handleDeleteSession = async (s: BrowserSessionView) => {
-    if (!confirm('Delete this session?')) return;
-    await fetch(`/api/browser/sessions/by-id/${s.id}`, { method: 'DELETE' });
-    await loadAll();
+    await deleteResource({
+      noun: tSafe('nouns.browserSession'),
+      name: s.name || s.sessionKey,
+      action: async () => {
+        const res = await fetch(`/api/browser/sessions/by-id/${s.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error((await res.text()) || 'Failed to delete session');
+        await loadAll();
+      },
+    });
   };
 
   if (loading) {
@@ -776,6 +796,10 @@ export default function BrowserDetailPage() {
         onClose={mcpHandlers.close}
         browserKey={browser?.key ?? ''}
       />
+
+      <Paper withBorder p="md" radius="lg" mt="md">
+        <ResourceUsageSection type="browser" id={browser.id} />
+      </Paper>
     </DetailShell>
   );
 }

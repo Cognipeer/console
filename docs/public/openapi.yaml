@@ -12,12 +12,21 @@ info:
     ## Authentication
     All endpoints require a Bearer token: `Authorization: Bearer <token>`.
 
+    ### Acting for a user
+    An application that signs its own users in can add `X-Cognipeer-User-Token: <jwt>`, a statement about the person the call is for signed by an issuer the workspace trusts (claims `iss`, `aud`, `sub`, `iat`, `exp`; optional `email`, `email_verified`, `name`, `groups`). The call then runs as that person, capped by the token's scope and project (which the person must be able to open themselves), and the token stays the actor in the logs. The token must have been set up for it by an owner or admin in the dashboard. Without the header nothing changes; with the header the token's owner is never the fallback.
+
+    A refused statement is answered `401` with `code` one of `delegation_not_enabled`, `invalid_assertion`, `expired`, `untrusted_key`, `unknown_principal`, `disabled`, `seat_limit` or `conflict`; a person who may not be acted for (the workspace owner, or an administrator the setup does not allow) with `403` and `code: "delegation_refused"`; a person who cannot open the project the token is bound to (no membership of their own or of one of their groups) with `403` and `code: "project_not_accessible"`; an unreadable store with `503` and `code: "delegation_unavailable"` (retry). An endpoint that does not act for users answers a request that carries the header with `400` and `code: "user_token_not_supported"`. Every one carries a `decisionId` (`X-Decision-Id` header; `error.decision_id` in the OpenAI- and Anthropic-compatible dialects).
+
     ## Conventions
     - Content-Type is `application/json` unless a request is a file upload (`multipart/form-data`) or a response is binary/streamed.
     - Successful responses are typically wrapped as `{ "data": ... }`; OpenAI-compatible endpoints (chat, embeddings, moderations, responses) return the provider-shaped object directly.
     - Errors return `{ "error": "..." }` (string or object).
+    - Field names: the agent endpoints (Responses, runs, sessions and their events, actions and files) are `snake_case`, like the OpenAI Responses format they extend; resource-management endpoints (files, prompts, members, webhooks, ...) use `camelCase`. A request body that is `snake_case` here also accepts the `camelCase` spelling of the same field where the schema says so.
     - Requests may include an optional `request_id` for correlation.
     - `POST /messages` speaks the Anthropic Messages dialect: its errors use `{ "type": "error", "error": { "type", "message" } }` instead of `{ "error": ... }`.
+    - A `403` because the token's owner, scope or project does not allow the call carries `code: "forbidden"`, `service`, `required` and a `decisionId` (also in the `X-Decision-Id` response header); OpenAI- and Anthropic-compatible endpoints carry it as `error.decision_id`. A route without an authorization declaration is refused with `code: "route_not_declared"`.
+    - A session belongs to the person who started it (for API traffic, the owner of the token). Anybody else needs `agent.session_view_others` (to read) or `agent.session_manage_others` (to change) - granted to every holder of Agents Read / Write by default, narrowed by a workspace's deny rules. That covers the session calls, its events, files and runs, and continuing it by id in `POST /responses`, `POST /agents/responses` and `POST /chat/completions` (continuing needs both permissions, since the reply is written from what the session holds). A refusal is `403` with `error.code: "session_forbidden"` and a `decision_id`; a list (`GET /agents/sessions`) then holds only the caller's own sessions.
+    - When authorization itself cannot be decided the answer is `503` with `code: "authorization_unavailable"`, a `decisionId` and a `Retry-After` header: retry the request. A call is never allowed because authorization was unavailable.
 
     ## Official SDK
     For TypeScript/JavaScript integrations, use the official [Cognipeer Console SDK](https://cognipeer.github.io/console-sdk/).
@@ -55,6 +64,10 @@ tags:
     description: Spend reporting and budget management
   - name: Agents
     description: Agent discovery, OpenAI-compatible Responses execution, and A2A protocol
+  - name: Agent Sessions
+    description: "The runtime state of an agent conversation: what it is waiting for, its event log, approvals and questions, spend budget and attached files"
+  - name: Webhooks
+    description: Signed event subscriptions for agents, runs and sessions
   - name: Tools
     description: OpenAPI-backed tools and action execution
   - name: MCP
@@ -117,7 +130,9 @@ paths:
         Supported methods:
         - `message/send` — send a user message. `params.message.parts` must contain text. Omit `params.message.contextId` to start a new conversation, or supply a prior `contextId` (equal to the conversation id) to continue one. Returns a terminal `completed` task whose `id` encodes the conversation and assistant-message index and whose artifacts carry the assistant reply text. Optional caller-supplied runtime headers may be provided via `params.message.metadata.runtime_context`.
         - `tasks/get` — retrieve a previously completed task by its `params.id`; rebuilds the task from the stored conversation.
-        - `tasks/cancel` — always rejected (`-32004`): tasks complete synchronously and cannot be canceled.
+        - `tasks/cancel` — not supported, always rejected (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that is waiting for an approval or an answer (`input-required`) is ended by answering its requests through `POST /agents/sessions/{conversationId}/actions/{actionId}` (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids in `error.data.pending_action_ids`.
+
+        A turn that pauses for a tool approval or a question is reported as an `input-required` task; the requests to answer ride in `metadata.pendingActions` (same item shape as `required_action.actions` of the Responses API) and are answered through `POST /agents/sessions/{conversationId}/actions/{actionId}`, the `contextId` being the conversation id.
 
         Protocol-level failures (parse error, invalid params, unknown method, internal error) are returned as HTTP 200 with a JSON-RPC error object. HTTP 400/404 are returned before dispatch when the target agent is inactive or not exposed.
       operationId: invokeAgentA2a
@@ -279,7 +294,7 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (published version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the PUBLISHED version of the agent. The agent is identified by the `model` field (agent key). Pass `input` as a plain string or an array of message items; use `previous_response_id` (`resp_{conversationId}`) or `session_id` (a session created with `POST /agents/sessions`, or any session id) to continue a prior conversation, and `version` to pin a specific published version. The gateway tracks conversation history server-side. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponsePublished
       parameters:
         - name: X-Cognipeer-Background
@@ -304,7 +319,7 @@ paths:
               $ref: "#/components/schemas/AgentResponsesRequest"
       responses:
         "200":
-          description: "Synchronous mode: the completed agent response in OpenAI Responses format. Background mode with a replayed `Idempotency-Key`: the existing `AgentRun` (no new run is queued)."
+          description: "Synchronous mode: the agent response in OpenAI Responses format - `completed`, `incomplete` (a limit, a cancellation or the session budget stopped it), or `requires_action` when the agent paused for a tool approval or a question (`required_action`; answer it, the turn then continues). Background mode with a replayed `Idempotency-Key`: the existing `AgentRun` (no new run is queued)."
           content:
             application/json:
               schema:
@@ -321,10 +336,29 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: "The session has used up its own spend budget and its budget is set to `stop`, or is paused on it (`budget_reached`, with `spent_usd` and `max_cost_usd`). The model is not called. Raise or remove the budget with `PATCH /agents/sessions/{conversationId}`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: budget_reached
+                  message: This session has reached its budget ($1.0200 of $1.0000). Raise or remove the budget to go on.
+                  code: budget_reached
+                  spent_usd: 1.02
+                  max_cost_usd: 1
+        "403":
+          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`) and the request carries `input_file` / `input_image` parts (earlier releases ignored those parts and ran the text; nothing runs now), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: "Another run (synchronous or background) is already active for this conversation (`agent_run_conflict`), or the `Idempotency-Key` was already used with a different request (`idempotency_key_conflict`)."
+          description: "Another run (synchronous or background) is already active for this conversation (`agent_run_conflict`), the `Idempotency-Key` was already used with a different request (`idempotency_key_conflict`), or the session is waiting for an approval or an answer and the agent refuses new messages meanwhile (`pending_action`, with `pending_action_ids`: answer them with `POST /agents/sessions/{conversationId}/actions/{actionId}`)."
           content:
             application/json:
               schema:
@@ -334,8 +368,20 @@ paths:
                   type: agent_run_conflict
                   message: An active run (queued or running) already exists for this conversation.
                   code: agent_run_conflict
+        "413":
+          description: "A file of the request is larger than the agent's file size limit (`file_too_large`), including an `https` `image_url` that is."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: "A file of the request is of a type the agent does not take (`unsupported_file_type`), or an `https` `image_url` did not answer with an `image/*` `Content-Type`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
-          description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`)."
+          description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`). Also: the tenant's daily or monthly spend limit is used up (`spend_limit_exceeded`): agent spend counts toward tenant spend limits."
           content:
             application/json:
               schema:
@@ -353,7 +399,7 @@ paths:
       tags:
         - Agents
       summary: Get a background agent run
-      description: "Poll the status and result of a background agent run started with `POST /responses` or `POST /agents/responses` in background mode. Accepts the run id as returned (`run_{id}`); the run's `resp_{id}` form is accepted too. Runs are resolved within the token's project only. `result` is populated once `status` is `succeeded`; `error` once it is `failed` or `canceled`."
+      description: "Poll the status and result of a background agent run started with `POST /responses` or `POST /agents/responses` in background mode. Accepts the run id as returned (`run_{id}`); the run's `resp_{id}` form is accepted too. Runs are resolved within the token's project only. `result` is populated once `status` is `succeeded`, and while it is `requires_action` (a run that paused for a tool approval or a question: answer it with `POST /agents/sessions/{conversationId}/actions/{actionId}` and the same run carries on); `error` once it is `failed` or `canceled`. `stop_reason` says how the agent turn ended."
       operationId: getAgentRun
       parameters:
         - name: runId
@@ -373,6 +419,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/runs/{runId}/cancel:
@@ -380,7 +430,7 @@ paths:
       tags:
         - Agents
       summary: Cancel a background agent run
-      description: "Cooperative cancel. A `queued` run is canceled immediately (`status: canceled`, `error.type: canceled_by_caller`). A `running` run gets `cancel_requested_at` stamped and stops before its next step; tool or model calls already in flight are not interrupted. Poll `GET /agents/runs/{runId}` for the final status. Runs already `succeeded`, `failed` or `canceled` return `409` (`agent_run_already_terminal`)."
+      description: "Cooperative cancel. A `queued` run is canceled immediately (`status: canceled`, `error.type: canceled_by_caller`). A `running` run gets `cancel_requested_at` stamped and stops before its next step; tool or model calls already in flight are not interrupted. Poll `GET /agents/runs/{runId}` for the final status. A run paused in `requires_action` is canceled at once and its open requests are dropped - which is answering them with \"no\", so it needs the same `agent.approve` permission as answering them (`403`, `action_forbidden`, with `decision_id`, otherwise). Runs already `succeeded`, `failed` or `canceled` return `409` (`agent_run_already_terminal`)."
       operationId: cancelAgentRun
       parameters:
         - name: runId
@@ -398,10 +448,671 @@ paths:
                 $ref: "#/components/schemas/AgentRun"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions:
+    post:
+      tags:
+        - Agent Sessions
+      summary: Start an agent session
+      description: "Creates an empty session for an agent without sending a message: nothing runs and nothing is spent. Use it to upload files to the session before the first message (`POST /agents/sessions/{conversationId}/files`), to give it a budget, or to tag it with `metadata`; then send messages with `session_id` on `POST /agents/responses`. The session belongs to the token's owner and is marked as coming from the API. The same agent and budget rules as the first turn of a Responses call apply."
+      operationId: createAgentSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentSessionCreateRequest"
+      responses:
+        "201":
+          description: "The new session: `runtime_status: idle`, no messages."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSession"
+        "400":
+          description: "`agent` missing, the agent is not active, or `title`, `metadata` or `budget` is invalid (`invalid_metadata`, `invalid_budget`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The agent's own session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No agent with that key in the token's project (`agent_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      tags:
+        - Agent Sessions
+      summary: List agent sessions
+      description: "The sessions of the token's project, newest created first. A row is the session without its transcript (`message_count` instead) and without `pending_actions`; `GET /agents/sessions/{conversationId}` has those. Page with `next_cursor`: it marks the last row you read, so sessions created while you page never shift a row into or out of a page you already have."
+      operationId: listAgentSessions
+      parameters:
+        - name: agent
+          in: query
+          required: false
+          description: Only this agent's sessions (its key).
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: "Only sessions in this runtime state. `idle` includes a session that has not run yet."
+          schema:
+            type: string
+            enum:
+              - idle
+              - running
+              - requires_action
+              - budget_paused
+        - name: limit
+          in: query
+          required: false
+          description: Page size, 1 to 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: after
+          in: query
+          required: false
+          description: The `next_cursor` of the previous page.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One page of sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSessionList"
+        "400":
+          description: "`limit` outside 1..100 (`invalid_limit`), an unknown `status` (`invalid_status`), or an `after` this API did not issue (`invalid_cursor`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}:
+    get:
+      tags:
+        - Agent Sessions
+      summary: Get an agent session
+      description: "The runtime state of a conversation (a session): whether it is idle, running, waiting for an approval or an answer (`requires_action`) or paused on its spend budget (`budget_paused`), why the last turn stopped, the requests it is waiting on, its budget and what it has spent. The session id is the conversation id, i.e. the `{conversationId}` of the `resp_{conversationId}` an agent response returns. Sessions are resolved within the token's project only."
+      operationId: getAgentSession
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Agent Sessions
+      summary: Delete an agent session
+      description: "Deletes the session with its files (object, markdown and record), its event log and any open approvals or questions. Refused while a run (synchronous or background) is queued or running on it."
+      operationId: deleteAgentSession
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      responses:
+        "200":
+          description: The session was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    type: string
+                    enum:
+                      - agent.session
+                  deleted:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A run is queued or running on this session (`agent_run_conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags:
+        - Agent Sessions
+      summary: Set, raise or remove a session's spend budget
+      description: "Adds, changes or removes the session's spend budget. A budget may be added later, raised, lowered or removed with `null`; the new `max_cost_usd` must be greater than what the session has already spent (`400` otherwise). When the agent has a session budget of its own, API clients are bound to it: they may lower it but not raise it past the agent's default or remove it, unless the agent's settings allow client overrides (`403` `budget_override_forbidden`).\n\nIf the session was paused on its budget (`runtime_status: budget_paused`) and `resume` is not `false`, the turn carries on without a new user message as a background run and the response is `202` with that `AgentRun`. Otherwise the response is the updated session."
+      operationId: updateAgentSession
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentSessionUpdateRequest"
+      responses:
+        "200":
+          description: The updated session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSession"
+        "202":
+          description: The session was paused on its budget and is continuing as a background run. Poll `GET /agents/runs/{runId}`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "400":
+          description: "`budget` missing or invalid (`invalid_budget`), `resume` is not a boolean, the new budget is not above what the session has spent, or the agent has background execution disabled (needed to continue a paused session)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The agent's own session budget binds API clients and this change would remove it or raise it above the agent's default (`budget_override_forbidden`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Another run (queued or running) is already active for this conversation (`agent_run_conflict`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/events:
+    get:
+      tags:
+        - Agent Sessions
+      summary: List a session's events
+      description: "The session's append-only event log, oldest first. Poll it with `after` set to the `last_seq` of the previous page. Events are kept for `AGENT_SESSION_EVENT_RETENTION_DAYS` (default 30). `data` is truncated (`_truncated: true`) when an event is larger than 16 KB. See `AgentSessionEvent` for the event types."
+      operationId: listAgentSessionEvents
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: after
+          in: query
+          required: false
+          description: Return events with a `seq` greater than this. Default 0 (from the start).
+          schema:
+            type: integer
+            minimum: 0
+        - name: types
+          in: query
+          required: false
+          description: Comma-separated event types to return (e.g. `agent.message,session.status_idle`).
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Default 100, at most 1000.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        "200":
+          description: A page of events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSessionEventList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/events/stream:
+    get:
+      tags:
+        - Agent Sessions
+      summary: Follow a session's events (SSE)
+      description: "Server-Sent Events. Replays the stored events after `after` (or the `Last-Event-ID` header a browser `EventSource` sends when it reconnects), then follows the session live, so a client that was not holding the original request can watch a turn in progress. Each stored event is one frame: `id: <seq>`, `event: <type>`, and a JSON `data:` line shaped like an item of the event list (`seq`, `type`, `data`, `run_id`, `created_at`). Live-only `agent.message.delta` frames (`data.text`, the model's text as it is written) have no `id` and are never stored or replayed; they are emitted only for a turn whose starter streams the model (for example the dashboard's chat stream), so a turn started with `POST /agents/responses` shows the finished `agent.message` without deltas. `: ping` comments are sent every 15 seconds; the stream ends after one hour or when the client closes it - reconnect with the last `id` to carry on."
+      operationId: streamAgentSessionEvents
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: after
+          in: query
+          required: false
+          description: Resume after this `seq`. `Last-Event-ID` is used when this is absent.
+          schema:
+            type: integer
+            minimum: 0
+        - name: types
+          in: query
+          required: false
+          description: Comma-separated event types to send.
+          schema:
+            type: string
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: The `id` of the last frame received; resumes after it.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: An SSE stream of session events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: "id: 12\nevent: action.required\ndata: {\"seq\":12,\"type\":\"action.required\",\"data\":{\"action_id\":\"act_0123\",\"kind\":\"tool_approval\",\"tool_name\":\"sandbox_exec\"},\"run_id\":\"run_3f9c1b7e\",\"created_at\":\"2026-10-01T12:00:00.000Z\"}\n\n"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/actions/{actionId}:
+    post:
+      tags:
+        - Agent Sessions
+      summary: Answer a pending approval or question
+      description: "Answers a tool approval or a question the agent paused on (the `required_action.actions` of a `requires_action` response, or `pending_actions` of the session). The turn continues from where it paused: inline, answered in the Responses shape (which is `requires_action` again if it paused again, or while other requests of the same pause are still open), or - with `background: true` or the `X-Cognipeer-Background` header - as a background run (`202`).\n\nBody for a `tool_approval`: `decision` (`allow` | `deny`), optional `comment`, `approved_args` (an object that must satisfy the tool's schema; the tool then runs with these arguments) and `remember_for_session` (do not ask again for this tool in this session). Body for a `user_question`: `answers` (question text -> value, or a list of values for a multi-select) or `cancelled: true` to skip it. Body for a `client_tool` (a tool that runs in the page a portal chat is embedded in, answered by that page): `output` (any JSON, at most 64 KB) or `error` (text; the model reads it as the tool failing).\n\nWho may answer is the `agent.approve` permission, decided by the permission engine: the person who started the session always may; workspace owners and admins and the admins of the agent's project may when the agent's `approvers` setting is `owner_or_admin` (the default); every member of the project may when it is `project_members`. An API token answers on behalf of its owner, within its scope. A deny policy can take the permission away from whoever it names."
+      operationId: resolveAgentSessionAction
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: actionId
+          in: path
+          required: true
+          description: The id of the pending action.
+          schema:
+            type: string
+        - name: X-Cognipeer-Background
+          in: header
+          required: false
+          description: Continue the turn as a background run. Same rules as for `POST /agents/responses`.
+          schema:
+            type: string
+            example: "true"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentActionResolution"
+      responses:
+        "200":
+          description: "The turn continued inline. The Responses-shaped result; `status` is `requires_action` when it paused again or other requests of the same pause are still open."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentResponse"
+        "202":
+          description: The continuation was queued as a background run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "400":
+          description: "The answer is not valid (`invalid_resolution`): missing `decision` or `answers`, `approved_args` that do not fit the tool, free text where the agent allows only the offered options. The request stays open. Also: background execution is disabled for the agent."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The caller may not answer this request (`action_forbidden`, with `decision_id`). A tool approval needs `agent.approve`: the agent's `approvers` setting accepts them, or an allow policy appoints them, and no deny policy names them. A question follows the session: its owner always may, anybody else needs `agent.session_manage_others`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "The session or the request was not found (`session_not_found`, `action_not_found`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "Someone already answered it (`action_not_pending`, with `action_status`), it was cancelled meanwhile — by a new message, a cancelled run or the timeout policy (`action_cancelled`) — or another run is active for the conversation (`agent_run_conflict`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "410":
+          description: The request ran out of time (`action_expired`), including one that was already swept as expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/files:
+    get:
+      tags:
+        - Agent Sessions
+      summary: List a session's files
+      description: The files attached to the session, oldest first.
+      operationId: listAgentSessionFiles
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+      responses:
+        "200":
+          description: The session's files.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    enum:
+                      - list
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentSessionFile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags:
+        - Agent Sessions
+      summary: Upload a file to a session
+      description: "Attaches a file to the session. Send the file as the raw request body with its MIME type as `Content-Type` and its name in `?name=`. A small file can also go as a JSON body `{ \"name\", \"content_type\", \"data\" }` with base64 (or a data URL) `data`; a `.json` file goes as `application/octet-stream` and its name still says what it is. The file is converted to markdown (the original is kept) and counts toward the project's file quotas. What a session accepts is the agent's `attachments` setting (Configure -> Files): bucket, folder, size, count, types, retention. The file is stored in the agent's bucket at `<folder>/<agentKey>/<sessionId>/<name>`. A file nobody has sent yet goes with the session's next message; or name it in the message with an `input_file` / `input_image` part of the Responses API (or the `attachments` list of the dashboard chat)."
+      operationId: uploadAgentSessionFile
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: name
+          in: query
+          required: false
+          description: The file's name. Required for a raw body.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          application/pdf:
+            schema:
+              type: string
+              format: binary
+          text/plain:
+            schema:
+              type: string
+              format: binary
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentSessionFileJsonUpload"
+      responses:
+        "201":
+          description: The stored file.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentSessionFile"
+        "400":
+          description: No name, an empty body or `data`, or invalid JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The agent takes no attachments (`attachments_disabled`): files are off for it, or on with no bucket chosen (`Files are not set up for this agent.`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "The session already holds the agent's maximum number of files (`too_many_files`), or the bucket the agent keeps its files in cannot take a file now - it was deleted, disabled, or its provider is gone, inactive or not assigned to the project (`storage_unavailable`, naming the bucket)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: The file is larger than the agent's limit (`file_too_large`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: The agent does not accept this file type (`unsupported_file_type`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: A file quota or rate limit is exceeded (`quota_exceeded`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/files/{fileId}:
+    delete:
+      tags:
+        - Agent Sessions
+      summary: Delete a session file
+      description: Deletes a file of this session (the object, its markdown and the record). A file of another session is not found.
+      operationId: deleteAgentSessionFile
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: fileId
+          in: path
+          required: true
+          description: The id of the file.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The file was deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  object:
+                    type: string
+                    enum:
+                      - agent.session.file
+                  deleted:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/files/{fileId}/content:
+    get:
+      tags:
+        - Agent Sessions
+      summary: Read a session file
+      description: >-
+        Returns the file's bytes: the original, or the markdown the platform converted it to
+        (`variant=markdown`, only for a file whose `conversion_status` is `succeeded`). The response
+        carries the file's own `Content-Type` and a sanitised `Content-Disposition`; pictures open in
+        place (`inline`), everything else is offered as a download (`attachment`). SVG, HTML and other
+        active types are always a download, whatever `disposition` asks. The response is
+        `Cache-Control: private` with `X-Content-Type-Options: nosniff`. A file of another session is not found.
+        A single `Range: bytes=…` is honoured (`206 Partial Content` with `Content-Range`); several ranges
+        or another unit are ignored and the whole file is returned, and a range that starts past the end
+        answers `416`. Every answer carries `Accept-Ranges: bytes`.
+      operationId: getAgentSessionFileContent
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: fileId
+          in: path
+          required: true
+          description: The id of the file.
+          schema:
+            type: string
+        - name: variant
+          in: query
+          required: false
+          description: "`original` (default), or `markdown` for the text version."
+          schema:
+            type: string
+            enum:
+              - original
+              - markdown
+        - name: disposition
+          in: query
+          required: false
+          description: "`inline` to open in place or `attachment` to download. Defaults to `inline` for pictures and `attachment` for everything else; a type that could run code in the browser is always `attachment`."
+          schema:
+            type: string
+            enum:
+              - inline
+              - attachment
+        - name: Range
+          in: header
+          required: false
+          description: "One byte range, e.g. `bytes=0-1023`, `bytes=1024-` or `bytes=-512`."
+          schema:
+            type: string
+      responses:
+        "206":
+          description: The requested byte range of the file.
+          headers:
+            Content-Range:
+              description: "`bytes <start>-<end>/<size>`."
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "416":
+          description: The range starts past the end of the file (`Content-Range: bytes */<size>`).
+        "200":
+          description: The file's bytes.
+          headers:
+            Accept-Ranges:
+              description: "`bytes`."
+              schema:
+                type: string
+            Content-Disposition:
+              description: "`inline` or `attachment`, with a sanitised `filename` and the real name in `filename*`."
+              schema:
+                type: string
+            Cache-Control:
+              description: "`private, max-age=60`."
+              schema:
+                type: string
+            X-Content-Type-Options:
+              description: "`nosniff`."
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: "`variant` or `disposition` is not one of the allowed values."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: "The file has no text version (`markdown_unavailable`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/SessionForbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
   /agents/{agentKey}:
@@ -3411,7 +4122,7 @@ paths:
       tags:
         - Files
       summary: List files in bucket
-      description: List files in a specific bucket with cursor-based pagination and optional search filtering.
+      description: "List files in a specific bucket with cursor-based pagination and optional search filtering. Without `prefix` this is the flat list of every file. With `prefix` it lists one folder like an object store with a `/` delimiter: the files directly in it (`files`) and its sub-folders (`folders`), derived from the file keys, in key order."
       operationId: listFiles
       parameters:
         - name: bucketKey
@@ -3423,9 +4134,24 @@ paths:
         - name: search
           in: query
           required: false
-          description: Search term to filter files.
+          description: Search term to filter files. With `prefix`, it searches everything under the prefix, however deep (no `folders`).
           schema:
             type: string
+        - name: prefix
+          in: query
+          required: false
+          description: "A folder path inside the bucket (for example `agent-sessions/support-bot/`); a trailing `/` is added when missing. Empty (`prefix=`) is the bucket root. Present: list that folder (files and `folders`)."
+          schema:
+            type: string
+        - name: purpose
+          in: query
+          required: false
+          description: "`conversation` keeps only files attached to agent sessions; `other` only the rest."
+          schema:
+            type: string
+            enum:
+              - conversation
+              - other
         - name: limit
           in: query
           required: false
@@ -3451,6 +4177,16 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/FileObject"
+                  folders:
+                    type: array
+                    description: "Only with `prefix`: the sub-folders of that folder, each a full path ending in `/`."
+                    items:
+                      type: string
+                    example:
+                      - agent-sessions/support-bot/
+                  prefix:
+                    type: string
+                    description: "Only with `prefix`: the folder listed, normalised."
                   count:
                     type: integer
                     example: 12
@@ -7548,7 +8284,7 @@ paths:
       tags:
         - Agents
       summary: Invoke an agent (draft version)
-      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
+      description: Invoke an agent using the OpenAI Responses API request/response format, running the DRAFT (current unpublished) version of the agent. Identical request/response shape to `POST /agents/responses`, but executes the draft configuration for testing. The agent is identified by the `model` field (agent key). Use `previous_response_id` (`resp_{conversationId}`) or `session_id` for multi-turn conversations and `version` to pin a published version. In synchronous mode (the default) this endpoint returns a single completed response object; it does not stream. To run a long turn in the background instead, set the `X-Cognipeer-Background` header to `true` or the body field `background` to `true` (precedence is header, then body, then the agent's `execution.defaultMode`); the call then returns `202` with an `AgentRun` to poll via `GET /agents/runs/{runId}` or to be notified about through `callback_url`.
       operationId: invokeAgentResponseDraft
       parameters:
         - name: X-Cognipeer-Background
@@ -7573,7 +8309,7 @@ paths:
               $ref: "#/components/schemas/AgentResponsesRequest"
       responses:
         "200":
-          description: "Synchronous mode: the completed agent response in OpenAI Responses format. Background mode with a replayed `Idempotency-Key`: the existing `AgentRun` (no new run is queued)."
+          description: "Synchronous mode: the agent response in OpenAI Responses format - `completed`, `incomplete` (a limit, a cancellation or the session budget stopped it), or `requires_action` when the agent paused for a tool approval or a question (`required_action`; answer it, the turn then continues). Background mode with a replayed `Idempotency-Key`: the existing `AgentRun` (no new run is queued)."
           content:
             application/json:
               schema:
@@ -7590,10 +8326,29 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: "The session has used up its own spend budget and its budget is set to `stop`, or is paused on it (`budget_reached`, with `spent_usd` and `max_cost_usd`). The model is not called. Raise or remove the budget with `PATCH /agents/sessions/{conversationId}`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: budget_reached
+                  message: This session has reached its budget ($1.0200 of $1.0000). Raise or remove the budget to go on.
+                  code: budget_reached
+                  spent_usd: 1.02
+                  max_cost_usd: 1
+        "403":
+          description: "The agent takes no attachments (`attachments_disabled`: files are off, or on with no bucket - `Files are not set up for this agent.`) and the request carries `input_file` / `input_image` parts (earlier releases ignored those parts and ran the text; nothing runs now), or its session budget binds API clients and the requested `budget` would raise or remove it (`budget_override_forbidden`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          description: "Another run (synchronous or background) is already active for this conversation (`agent_run_conflict`), or the `Idempotency-Key` was already used with a different request (`idempotency_key_conflict`)."
+          description: "Another run (synchronous or background) is already active for this conversation (`agent_run_conflict`), the `Idempotency-Key` was already used with a different request (`idempotency_key_conflict`), or the session is waiting for an approval or an answer and the agent refuses new messages meanwhile (`pending_action`, with `pending_action_ids`: answer them with `POST /agents/sessions/{conversationId}/actions/{actionId}`)."
           content:
             application/json:
               schema:
@@ -7603,8 +8358,20 @@ paths:
                   type: agent_run_conflict
                   message: An active run (queued or running) already exists for this conversation.
                   code: agent_run_conflict
+        "413":
+          description: "A file of the request is larger than the agent's file size limit (`file_too_large`), including an `https` `image_url` that is."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: "A file of the request is of a type the agent does not take (`unsupported_file_type`), or an `https` `image_url` did not answer with an `image/*` `Content-Type`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
-          description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`)."
+          description: "Background mode: the tenant or project already has the configured maximum of queued/running background runs (`agent_run_concurrency_limit`). Also: the tenant's daily or monthly spend limit is used up (`spend_limit_exceeded`): agent spend counts toward tenant spend limits."
           content:
             application/json:
               schema:
@@ -11509,6 +12276,340 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
+  /webhooks:
+    get:
+      tags:
+        - Webhooks
+      summary: List webhook endpoints
+      description: "The webhook endpoints of the token's project. Needs the `webhooks` permission (Read to list, Admin for every call that changes something) held by the token's owner and allowed by the token's own scope: it is an administration service, so owners and admins hold it by default and everybody else until it is granted (`403` otherwise, with a `decisionId`). A token never reaches endpoints of other projects or tenant-wide endpoints, whoever owns it. The signing secret is never returned here."
+      operationId: listWebhooks
+      responses:
+        "200":
+          description: The endpoints, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoints:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WebhookEndpoint"
+                  capabilities:
+                    type: object
+                    description: What the caller may do here, as the permission engine decides it (the Webhooks page shows its controls from this).
+                    properties:
+                      manage:
+                        type: boolean
+                        description: The caller holds Admin on `webhooks` in this project (create, edit, test, rotate, redeliver, delete).
+                      workspaceScope:
+                        type: boolean
+                        description: ...and in the workspace itself, so an endpoint for every project or for another project is in reach. Always `false` for a token.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags:
+        - Webhooks
+      summary: Create a webhook endpoint
+      description: "Subscribes a URL to events. The URL must be `http(s)` and resolve to a public address (checked now and again on every delivery). The response carries the signing `secret` once; it is stored sealed and cannot be read back, only rotated. At most 50 endpoints per tenant."
+      operationId: createWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookCreateRequest"
+      responses:
+        "201":
+          description: The endpoint, with its secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint:
+                    $ref: "#/components/schemas/WebhookEndpointWithSecret"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: The tenant already has the maximum number of endpoints (`limit_reached`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /webhooks/deliveries/{deliveryId}/redeliver:
+    post:
+      tags:
+        - Webhooks
+      summary: Send a delivery again
+      description: "Puts a settled delivery back in the queue (same event id, the endpoint's current URL and secret). `409` when the endpoint is disabled (`endpoint_disabled`) or the delivery is still waiting to be sent (`delivery_pending`)."
+      operationId: redeliverWebhookDelivery
+      parameters:
+        - name: deliveryId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: The delivery, queued again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivery:
+                    $ref: "#/components/schemas/WebhookDelivery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /webhooks/events:
+    get:
+      tags:
+        - Webhooks
+      summary: List webhook event types
+      description: "The event types an endpoint can subscribe to. Needs the `webhooks` permission (Read). A subscription lists exact types and/or `prefix.*` patterns (`agent_run.*`); `*` subscribes to everything. `webhook.test` is only ever sent by the test call."
+      operationId: listWebhookEventTypes
+      responses:
+        "200":
+          description: The catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          example: session.idled
+                        group:
+                          type: string
+                          enum:
+                            - session
+                            - action
+                            - budget
+                            - agent_run
+                            - schedule
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /webhooks/{id}:
+    get:
+      tags:
+        - Webhooks
+      summary: Get a webhook endpoint
+      description: "Needs the `webhooks` permission (Read), like every webhook route (`403` otherwise, whether or not the endpoint exists). A caller who holds it asking for an endpoint outside the token's reach (another project's, or a tenant-wide one) gets `404`."
+      operationId: getWebhook
+      parameters:
+        - $ref: "#/components/parameters/WebhookId"
+      responses:
+        "200":
+          description: The endpoint.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint:
+                    $ref: "#/components/schemas/WebhookEndpoint"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      tags:
+        - Webhooks
+      summary: Update a webhook endpoint
+      description: "Edit `url`, `description`, `events` or `status`. Setting `status` back to `active` re-checks the address and restarts the failing streak; setting it to `disabled` fails the deliveries still queued for it."
+      operationId: updateWebhook
+      parameters:
+        - $ref: "#/components/parameters/WebhookId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookUpdateRequest"
+      responses:
+        "200":
+          description: The updated endpoint.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint:
+                    $ref: "#/components/schemas/WebhookEndpoint"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Webhooks
+      summary: Delete a webhook endpoint
+      description: Deletes the endpoint and its stored deliveries.
+      operationId: deleteWebhook
+      parameters:
+        - $ref: "#/components/parameters/WebhookId"
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /webhooks/{id}/deliveries:
+    get:
+      tags:
+        - Webhooks
+      summary: List an endpoint's deliveries
+      description: The events sent (or owed) to the endpoint, newest first. Settled deliveries are kept for `WEBHOOK_DELIVERY_RETENTION_DAYS` (default 30).
+      operationId: listWebhookDeliveries
+      parameters:
+        - $ref: "#/components/parameters/WebhookId"
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - pending
+              - delivered
+              - failed
+        - name: limit
+          in: query
+          required: false
+          description: Default 50, at most 200.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - name: skip
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: A page of deliveries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deliveries:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WebhookDelivery"
+                  hasMore:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /webhooks/{id}/rotate-secret:
+    post:
+      tags:
+        - Webhooks
+      summary: Rotate the signing secret
+      description: Generates a new signing secret and returns it once. The old secret stops working at once.
+      operationId: rotateWebhookSecret
+      parameters:
+        - $ref: "#/components/parameters/WebhookId"
+      responses:
+        "200":
+          description: The endpoint, with its new secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint:
+                    $ref: "#/components/schemas/WebhookEndpointWithSecret"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /webhooks/{id}/test:
+    post:
+      tags:
+        - Webhooks
+      summary: Send a test event
+      description: Sends a `webhook.test` event to the endpoint now and returns the delivery (what the receiver answered).
+      operationId: testWebhook
+      parameters:
+        - $ref: "#/components/parameters/WebhookId"
+      responses:
+        "200":
+          description: The recorded delivery of the test event.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivery:
+                    $ref: "#/components/schemas/WebhookDelivery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /websearch/providers:
     get:
       tags:
@@ -11652,6 +12753,21 @@ components:
     AegisPostDecisionDeprecated:
       deprecated: true
       description: "Deprecated post-stage (`tool.post`) decision alias; read `x-cognipeer-guardrail` on the post hook's own response instead. Removed in v3."
+      schema:
+        type: string
+  parameters:
+    AgentSessionId:
+      name: conversationId
+      in: path
+      required: true
+      description: "The session (conversation) id: the `{conversationId}` of the `resp_{conversationId}` an agent response returns."
+      schema:
+        type: string
+    WebhookId:
+      name: id
+      in: path
+      required: true
+      description: The webhook endpoint id (`whk_...`).
       schema:
         type: string
   schemas:
@@ -12065,6 +13181,23 @@ components:
           description: JSON-RPC / A2A error code (e.g. -32601 method not found, -32602 invalid params, -32001 task not found, -32004 unsupported operation, -32603 internal error, -32700 parse error).
         message:
           type: string
+        data:
+          type: object
+          additionalProperties: true
+          description: "Machine-readable detail. `type` and `code` classify an internal error (for example `pending_action`, `budget_reached`, `agent_run_conflict`). `pending_action_ids` lists the approvals / questions to answer when `message/send` is refused because the task is waiting on them (and on `tasks/cancel` for such a task); `spent_usd` and `max_cost_usd` accompany `budget_reached`."
+          properties:
+            type:
+              type: string
+            code:
+              type: string
+            pending_action_ids:
+              type: array
+              items:
+                type: string
+            spent_usd:
+              type: number
+            max_cost_usd:
+              type: number
     AgentA2aRpcParams:
       type: object
       description: Method-dependent JSON-RPC params. `message` is used by `message/send`; `id` is used by `tasks/get` and `tasks/cancel`.
@@ -12119,7 +13252,7 @@ components:
           $ref: "#/components/schemas/AgentA2aRpcError"
     AgentA2aTask:
       type: object
-      description: A completed A2A task returned by `message/send` and `tasks/get`.
+      description: "An A2A task returned by `message/send` and `tasks/get`: `completed`, or `input-required` when the turn paused for an approval or a question (the requests to answer are in `metadata.pendingActions`, same item shape as `required_action.actions` of the Responses API)."
       properties:
         kind:
           type: string
@@ -12139,12 +13272,13 @@ components:
             $ref: "#/components/schemas/AgentA2aArtifact"
     AgentA2aTaskStatus:
       type: object
-      description: Terminal task status.
+      description: Task status. `completed` is terminal; `input-required` means the task waits for a person (answer its requests through the session actions endpoint, then the turn continues).
       properties:
         state:
           type: string
           enum:
             - completed
+            - input-required
         timestamp:
           type: string
           format: date-time
@@ -12346,21 +13480,468 @@ components:
       properties:
         agent:
           $ref: "#/components/schemas/AgentSummary"
+    AgentActionResolution:
+      type: object
+      description: "The answer to a pending action. For a `tool_approval` send `decision` (and optionally the rest); for a `user_question` send `answers`, or `cancelled: true` to skip it; for a `client_tool` send `output`, or `error` when the page could not do it. `approvedArgs` / `rememberForSession` are accepted as aliases of `approved_args` / `remember_for_session`."
+      properties:
+        decision:
+          type: string
+          enum:
+            - allow
+            - deny
+          description: "Tool approval: let the tool run, or refuse it. The model reads a refusal as the tool's result and goes on."
+        comment:
+          type: string
+          description: Tool approval. Why; shown to the model when the call is denied.
+        approved_args:
+          type: object
+          additionalProperties: true
+          description: "Tool approval. Run the tool with these arguments instead of the ones the model proposed. Must be a JSON object that satisfies the tool's schema (`400` otherwise, and the request stays open)."
+        remember_for_session:
+          type: boolean
+          description: "Tool approval, with `decision: allow`. Do not ask again for this tool in this session."
+        answers:
+          type: object
+          description: "User question. The question text -> the chosen value, or a list of values for a multi-select question. Free text is accepted only when the request has `allow_free_text`."
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+        cancelled:
+          type: boolean
+          description: "User question. Skip the question; the model is told it was not answered."
+        output:
+          description: "Client tool. The page's result: any JSON value, at most 64 KB (`400` over that, and the request stays open). The model reads it as the tool's result, after the agent's `tool.post` guardrails, marked as untrusted user input (it must never carry an authorization decision)."
+        error:
+          type: string
+          description: "Client tool. The page could not run the tool. At most 1000 characters; the model reads it as the tool failing."
+        background:
+          type: boolean
+          description: Continue the turn as a background run (`202`). Same as the `X-Cognipeer-Background` header.
+        runtime_context:
+          $ref: "#/components/schemas/AgentRuntimeContext"
+    AgentPendingAction:
+      type: object
+      description: "A request the agent paused on: a tool call that needs approval, a question for the user, or a tool call that the page embedding the chat has to run."
+      properties:
+        id:
+          type: string
+          description: "Action id (`act_...`). Pass it to `POST /agents/sessions/{conversationId}/actions/{actionId}`."
+        kind:
+          type: string
+          enum:
+            - tool_approval
+            - user_question
+            - client_tool
+        tool_name:
+          type: string
+          description: "`tool_approval` and `client_tool`: the tool the model wants to call, as it is named to the model. A `user_question` never carries it."
+        args:
+          type: object
+          additionalProperties: true
+          description: "`tool_approval` and `client_tool`: the arguments the model proposed."
+        timeout_seconds:
+          type: integer
+          description: "`client_tool`: how long the page may take; after that (plus a few seconds) the call is answered with an error and the turn goes on."
+        questions:
+          type: array
+          description: "`user_question`: the questions to answer."
+          items:
+            $ref: "#/components/schemas/AgentUserQuestion"
+        allow_free_text:
+          type: boolean
+          description: "`user_question`: whether an answer other than the offered options is accepted."
+        status:
+          type: string
+          enum:
+            - pending
+            - resolved
+            - expired
+            - cancelled
+        expires_at:
+          type: string
+          format: date-time
+          description: When the request times out (the agent's `timeoutMinutes`). Absent when it never expires.
+        requested_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - kind
+        - status
+    AgentRequiredAction:
+      type: object
+      description: What the agent is waiting for, when a response is `requires_action`.
+      properties:
+        type:
+          type: string
+          enum:
+            - agent_actions
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentPendingAction"
+    AgentSession:
+      type: object
+      description: A conversation with an agent and its runtime state.
+      properties:
+        id:
+          type: string
+          description: The conversation id (the `{conversationId}` of `resp_{conversationId}`).
+        object:
+          type: string
+          enum:
+            - agent.session
+        agent:
+          type: string
+          description: Agent key.
+        title:
+          type: string
+          nullable: true
+          description: The session's title; the first message names a session that has none.
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: The string pairs the client gave when it created the session (`{}` for a session it did not create with `POST /agents/sessions`).
+        runtime_status:
+          type: string
+          enum:
+            - idle
+            - running
+            - requires_action
+            - budget_paused
+          description: "`requires_action`: waiting for an approval or an answer. `budget_paused`: the session's spend budget was reached; raise or remove it to go on."
+        stop_reason:
+          type: string
+          nullable: true
+          enum:
+            - end_turn
+            - requires_action
+            - limit
+            - cancelled
+            - error
+            - budget_reached
+          description: Why the last turn stopped. Null before the first turn.
+        pending_actions:
+          type: array
+          description: The requests the session is waiting on (empty unless `runtime_status` is `requires_action`).
+          items:
+            $ref: "#/components/schemas/AgentPendingAction"
+        last_event_seq:
+          type: integer
+          description: The `seq` of the newest stored event. Start `events/stream` from here to follow what happens next.
+        budget:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AgentSessionBudget"
+        spent_usd:
+          type: number
+          description: What the session's turns have cost so far, in USD.
+    AgentSessionBudget:
+      type: object
+      description: A cap on what a whole session may spend, across all of its turns. Unlike the per-turn `runtime.limits.maxCostUsd`, it is summed over the life of the conversation. A turn can overshoot by at most one model request.
+      properties:
+        max_cost_usd:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+          description: The budget in USD.
+        on_reach:
+          type: string
+          enum:
+            - pause
+            - stop
+          default: pause
+          description: "`pause`: the session waits (`runtime_status: budget_paused`) and carries on without a new message once the budget is raised or removed. `stop`: further messages are refused with `402` (`budget_reached`)."
+      required:
+        - max_cost_usd
+    AgentSessionEvent:
+      type: object
+      description: "One event of the session's log. `data` depends on `type` (field names snake_case):\n\n- `user.message` `{ content }`\n- `session.status_running` `{ trigger: message | resume | timeout }`\n- `agent.tool_use` `{ tool_call_id, name, args, subagent? }`\n- `agent.tool_result` `{ tool_call_id, name, ok, duration_ms?, error?, subagent?, source? (client: the page ran it) }`\n- `agent.compaction` `{ at, messages_compressed?, tokens_before?, tokens_after?, ... }`\n- `action.required` `{ action_id, kind, tool_name? (tool_approval and client_tool), args?, questions?, allow_free_text?, timeout_seconds? (client_tool), expires_at? }`\n- `action.resolved` `{ action_id, kind, tool_name? (client_tool), decision?, cancelled?, expired?, ok?, duration_ms?, timed_out? (client_tool), resolved_by, channel: dashboard | api | portal | timeout | system }`\n- `session.truncated` `{ reason: truncate | regenerate | edit, kept_messages, removed_messages, removed_from, cancelled_actions, by, channel }` when messages were cut from the transcript (a regenerate or an edit in a portal)\n- `agent.message` `{ content, message_index?, stop_reason?, usage? }`\n- `session.usage` `{ turn_cost_usd, spent_usd, budget: { max_cost_usd, on_reach } }` after every turn of a session with a budget\n- `budget.reached` `{ spent_usd, max_cost_usd }`\n- `session.status_idle` `{ stop_reason, pending_action_ids?, detail? }`\n- `session.error` `{ message, code? }`\n- `session.work_done` `{}` right after an idle with `stop_reason: end_turn`\n\nOn the stream only: `agent.message.delta` `{ text }` (no `seq`, never stored)."
+      properties:
+        seq:
+          type: integer
+          description: Position in the session's log; unique and ascending. Absent on live-only frames.
+        type:
+          type: string
+          example: agent.tool_use
+        data:
+          type: object
+          additionalProperties: true
+          description: Larger than 16 KB it is cut and carries `_truncated`.
+        run_id:
+          type: string
+          description: "The run the event belongs to, spelled as the runs API spells it (`run_<id>`, as returned by a background call and accepted by `GET /agents/runs/{runId}`). Absent on events written outside a run."
+          example: run_3f9c1b7e-2d4a-4b8e-9a51-0c6d7e8f9a10
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - type
+        - data
+        - created_at
+    AgentSessionEventList:
+      type: object
+      properties:
+        object:
+          type: string
+          enum:
+            - list
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentSessionEvent"
+        has_more:
+          type: boolean
+        last_seq:
+          type: integer
+          description: The `seq` of the last event returned, or the `after` you sent when there were none. Pass it as `after` next time.
+    AgentSessionCreateRequest:
+      type: object
+      properties:
+        agent:
+          type: string
+          description: Key of an active agent of the token's project.
+        title:
+          type: string
+          maxLength: 200
+          description: Optional title. Default `New conversation`.
+        metadata:
+          type: object
+          maxProperties: 16
+          additionalProperties:
+            type: string
+            maxLength: 512
+          description: "Up to 16 string pairs (keys up to 64 characters, values up to 512), returned as the session's `metadata`. Never read by the agent."
+        budget:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AgentSessionBudget"
+          description: "A spend budget for the session (`null` = none, overriding the agent's default; absent = the agent's default). Subject to the agent's own budget when it binds API clients (`403`, `budget_override_forbidden`)."
+        runtime_context:
+          $ref: "#/components/schemas/AgentRuntimeContext"
+      required:
+        - agent
+    AgentSessionSummary:
+      type: object
+      description: A session as a list shows it - without its transcript or pending requests.
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          enum:
+            - agent.session
+        agent:
+          type: string
+        title:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        message_count:
+          type: integer
+          description: How many messages the session holds.
+        runtime_status:
+          type: string
+          enum:
+            - idle
+            - running
+            - requires_action
+            - budget_paused
+        stop_reason:
+          type: string
+          nullable: true
+        last_event_seq:
+          type: integer
+        budget:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AgentSessionBudget"
+        spent_usd:
+          type: number
+          nullable: true
+          description: "The session's stored running total, in USD. `null` for a session that last ran before the total was kept (a list does not load the transcript to add it up): `GET /agents/sessions/{conversationId}` has the figure."
+    AgentSessionList:
+      type: object
+      properties:
+        object:
+          type: string
+          enum:
+            - list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentSessionSummary"
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `after` for the next page. Null on the last page.
+    AgentSessionFile:
+      type: object
+      description: A file attached to a session.
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          enum:
+            - agent.session.file
+        session_id:
+          type: string
+        name:
+          type: string
+        mime_type:
+          type: string
+        size:
+          type: integer
+          description: Bytes.
+        conversion_status:
+          type: string
+          enum:
+            - pending
+            - succeeded
+            - failed
+            - skipped
+          description: "`succeeded`: the text could be read, so the agent sees it. `failed` / `skipped`: only the original exists and the agent can see that the file is there, not what is in it. `pending`: still converting."
+        conversion_error:
+          type: string
+        bucket_key:
+          type: string
+          description: The Document Store bucket the file is stored in (the agent's `attachments.bucketKey` when it was uploaded).
+        path:
+          type: string
+          description: "The object's path inside that bucket: `<folder>/<agentKey>/<sessionId>/<unique name>`."
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: When the file is deleted (the agent's `attachments.retentionDays`).
+        content_url:
+          type: string
+          description: "Where the file's bytes are served (`GET /agents/sessions/{conversationId}/files/{fileId}/content`), as a path on the API's origin (it starts with `/api/client/v1`)."
+    AgentSessionFileJsonUpload:
+      type: object
+      description: A small file as JSON.
+      properties:
+        name:
+          type: string
+        content_type:
+          type: string
+          description: The MIME type. `contentType` is accepted too.
+        data:
+          type: string
+          description: The bytes, base64 or a `data:` URL.
+      required:
+        - name
+        - data
+    AgentSessionUpdateRequest:
+      type: object
+      properties:
+        budget:
+          description: "The new budget; `null` removes it. Required."
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AgentSessionBudget"
+        resume:
+          type: boolean
+          default: true
+          description: "When the session is paused on its budget, carry on as a background run once the budget is changed. `false` only changes the budget."
+        runtime_context:
+          $ref: "#/components/schemas/AgentRuntimeContext"
+      required:
+        - budget
+    AgentUserQuestion:
+      type: object
+      properties:
+        question:
+          type: string
+        header:
+          type: string
+          description: A short label.
+        multi_select:
+          type: boolean
+          description: More than one option may be chosen.
+        placeholder:
+          type: string
+        required:
+          type: boolean
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              value:
+                type: string
+              description:
+                type: string
+            required:
+              - label
+      required:
+        - question
     AgentInputContentPart:
       type: object
-      description: A structured content part within a message item.
+      description: "A structured content part within a message item. `input_text` carries the message text; `input_file` and `input_image` attach files to the session the request runs on (see `POST /agents/sessions/{conversationId}/files`). A message may have files and no text."
       properties:
         type:
           type: string
           enum:
             - input_text
-          description: Content part type; only `input_text` is read.
+            - input_file
+            - input_image
         text:
           type: string
-          description: The text content of the part.
+          description: "`input_text`: the text content of the part."
+        file_id:
+          type: string
+          description: "`input_file` / `input_image`: a file already uploaded to the session you continue with `previous_response_id`. A `file_id` without `previous_response_id` is rejected (`400`, `attachment_not_found`)."
+        file_data:
+          type: string
+          description: "`input_file`: the bytes as base64 or a `data:` URL. Uploaded to the session first."
+        filename:
+          type: string
+          description: "`input_file`: the name for `file_data`."
+        image_url:
+          description: "`input_image`: a `data:` URL (uploaded to the session) or an `https` URL (fetched, private addresses refused, within the agent's size limit and uploaded). A fetched URL must answer with an `image/*` `Content-Type`; anything else is refused with `415` (`unsupported_file_type`). The OpenAI `{ \"url\": ... }` object form is accepted too."
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                url:
+                  type: string
       required:
         - type
-        - text
     AgentInputMessage:
       type: object
       description: A single message item. The most recent item with role `user` is used as the user message.
@@ -12473,6 +14054,33 @@ components:
           enum:
             - completed
             - failed
+            - incomplete
+            - requires_action
+          description: "`incomplete`: a run limit, a cancellation or the session's spend budget ended the run before a final answer (see `incomplete_details` and `stop_reason`). `requires_action`: the agent paused for a tool approval or a question; see `required_action`."
+        stop_reason:
+          type: string
+          enum:
+            - completed
+            - limit
+            - cancelled
+            - requires_action
+            - budget_reached
+          description: How the run ended.
+        stop_detail:
+          type: string
+          description: The runtime's own wording for a non-`completed` stop, e.g. which limit.
+        incomplete_details:
+          type: object
+          nullable: true
+          description: Present when `status` is `incomplete`.
+          properties:
+            reason:
+              type: string
+              description: "`max_output_tokens`, `max_cost`, `max_duration`, `run_limit`, `cancelled` or `budget_reached`."
+        required_action:
+          allOf:
+            - $ref: "#/components/schemas/AgentRequiredAction"
+          description: "Present when `status` is `requires_action`: the approvals and questions to answer with `POST /agents/sessions/{conversationId}/actions/{actionId}`. Nothing paused before, so an agent that does not use approvals or questions never returns this."
         usage:
           $ref: "#/components/schemas/AgentResponseUsage"
         created_at:
@@ -12559,7 +14167,7 @@ components:
           type: string
           description: Agent key identifying the agent to run.
         input:
-          description: "User message: a plain string, or an array of message items."
+          description: "User message: a plain string, or an array of message items. The text and files (`input_file`, `input_image`) of the most recent `user` item are used."
           oneOf:
             - type: string
             - type: array
@@ -12569,6 +14177,19 @@ components:
           type: string
           nullable: true
           description: ID (`resp_{conversationId}`) from a previous response, to continue a multi-turn conversation.
+        session_id:
+          type: string
+          nullable: true
+          description: "Continue this session (for example one created with `POST /agents/sessions`, with files already uploaded to it). Same session as `previous_response_id` and `conversation`: give one, or several that agree (`400 session_conflict` when they name different sessions). `404 session_not_found` for a session of another agent or project. `file_id` input parts may name a file of this session."
+        conversation:
+          nullable: true
+          description: "OpenAI-style alias of `session_id`: a session id, or an object `{ \"id\": \"...\" }`."
+          oneOf:
+            - type: string
+            - type: object
+              properties:
+                id:
+                  type: string
         version:
           type: integer
           minimum: 1
@@ -12576,6 +14197,12 @@ components:
           description: Specific published version to run (positive integer).
         runtime_context:
           $ref: "#/components/schemas/AgentRuntimeContext"
+        budget:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AgentSessionBudget"
+          description: "A spend budget for the session this request STARTS (`null` = none, overriding the agent's default). Ignored when the request continues a session with `previous_response_id` (not applied and not validated, so a client may send its default budget on every call): change that one with `PATCH /agents/sessions/{conversationId}`. When the agent has a session budget of its own, a client may lower it but not raise or remove it (`403`, `budget_override_forbidden`)."
         background:
           type: boolean
           description: "Run the turn in background mode (mirrors the OpenAI Responses API field). Only a JSON boolean is honoured. The `X-Cognipeer-Background` header takes precedence over this field, and this field takes precedence over the agent's `execution.defaultMode`, so `false` forces a synchronous call on an agent that runs in the background by default. Background mode returns `202` with an `AgentRun`; it is rejected with `400` (`agent_background_disabled`) when the agent has background execution disabled."
@@ -12583,7 +14210,7 @@ components:
           type: string
           format: uri
           maxLength: 2048
-          description: "Background mode only (ignored for synchronous calls). `http`/`https` URL that must resolve to a public address; it receives a `POST` when the run finishes with `succeeded`, `failed` or `canceled` (headers `X-Cognipeer-Event: agent_run.<status>` and `X-Cognipeer-Event-Id`; retried with backoff). When omitted, the agent's default callback from its Execution settings is used. An invalid value is rejected with `400` (`invalid_callback`)."
+          description: "Background mode only (ignored for synchronous calls). `http`/`https` URL that must resolve to a public address; it receives a `POST` when the run finishes with `succeeded`, `failed` or `canceled`, or pauses with `requires_action` (headers `X-Cognipeer-Event: agent_run.<status>` and `X-Cognipeer-Event-Id`; retried with backoff). When omitted, the agent's default callback from its Execution settings is used. An invalid value is rejected with `400` (`invalid_callback`)."
         callback_secret:
           type: string
           minLength: 16
@@ -12608,9 +14235,22 @@ components:
           enum:
             - queued
             - running
+            - requires_action
             - succeeded
             - failed
             - canceled
+          description: "`requires_action` is not terminal: the run paused for a tool approval or a question and continues (as `queued`, then `running`) once every request is answered. A run stopped by a limit still ends `succeeded`, with `stop_reason: limit`."
+        stop_reason:
+          type: string
+          nullable: true
+          enum:
+            - end_turn
+            - requires_action
+            - limit
+            - cancelled
+            - error
+            - budget_reached
+          description: How the agent turn ended. Null while the run is active and on runs from before the field existed.
         agent:
           type: string
           description: Agent key the run invokes.
@@ -12620,7 +14260,7 @@ components:
         result:
           type: object
           nullable: true
-          description: "The same response a synchronous call returns, with `id` set to `resp_{runId}`. Populated only when `status` is `succeeded`. Either `run_{id}` or `resp_{id}` can be passed back as `previous_response_id` to continue the conversation."
+          description: "The same response a synchronous call returns, with `id` set to `resp_{runId}`. Populated when `status` is `succeeded`, and when it is `requires_action` (the response then carries `required_action`). Either `run_{id}` or `resp_{id}` can be passed back as `previous_response_id` to continue the conversation."
           allOf:
             - $ref: "#/components/schemas/AgentResponse"
         error:
@@ -12730,6 +14370,52 @@ components:
           type: string
           format: date-time
           description: When the agent was created.
+        experience:
+          type: object
+          description: "Only on the single-agent lookup, and only when the agent set any. What a chat surface shows around the agent: a Markdown welcome text and the suggested first messages."
+          properties:
+            welcome:
+              type: string
+              description: "Markdown. May use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`; a surface fills them in."
+            starters:
+              type: array
+              description: At most 6.
+              items:
+                type: object
+                properties:
+                  text:
+                    type: string
+                    description: The message the starter puts in the composer.
+                  label:
+                    type: string
+                    description: A shorter text for the chip.
+                  auto_send:
+                    type: boolean
+                    description: Send the message at once instead of only filling the composer.
+                required:
+                  - text
+                  - auto_send
+        attachments:
+          type: object
+          description: "Only on the single-agent lookup. What a client needs before it offers an attach button: whether the agent takes files right now, its limits, and whether its model reads images."
+          properties:
+            enabled:
+              type: boolean
+              description: Files are switched on for the agent AND its bucket can take a file now.
+            max_files:
+              type: integer
+              description: Files one session holds (0 while files are off).
+            max_file_size_mb:
+              type: number
+              description: Largest file in MB (0 while files are off).
+            allowed_mime_types:
+              type: array
+              items:
+                type: string
+              description: Accepted MIME types (`image/*` allowed); empty = any.
+            accepts_images:
+              type: boolean
+              description: "The agent's model accepts image input. When false, an attached image is replaced by a note saying so. A chat model with no stored setting is taken to accept images when its id belongs to a known vision family."
     AgentUpdateInput:
       type: object
       additionalProperties: true
@@ -15761,6 +17447,41 @@ components:
                 code:
                   type: string
                   nullable: true
+                decision_id:
+                  type: string
+                  format: uuid
+                  description: On a refusal by the permission gate in the OpenAI- or Anthropic-compatible dialect — the decision id.
+                pending_action_ids:
+                  type: array
+                  description: "`pending_action` only: the requests the session is waiting on."
+                  items:
+                    type: string
+                spent_usd:
+                  type: number
+                  description: "`budget_reached` only: what the session has spent."
+                max_cost_usd:
+                  type: number
+                  description: "`budget_reached` only: the session's budget."
+                action_status:
+                  type: string
+                  description: "`action_not_pending`, `action_cancelled` and `action_expired` only: the state the request is in (`resolved`, `expired`, `cancelled`)."
+        code:
+          type: string
+          description: "Machine-readable reason on a refusal: `forbidden`, `route_not_declared`, `authorization_unavailable`, `ip_not_allowed`."
+        message:
+          type: string
+          description: Repeats `error` on a refusal by the permission gate.
+        service:
+          type: string
+          description: The permission service that refused the call (`models`, `prompts`, ...).
+        required:
+          type: string
+          enum: [read, write, admin]
+          description: The level the route needed on `service`.
+        decisionId:
+          type: string
+          format: uuid
+          description: Identifies the refusal (also the `X-Decision-Id` header).
     EvalItemScore:
       type: object
       description: One scorer's result for a single item.
@@ -21646,7 +23367,7 @@ components:
             $ref: "#/components/schemas/TracingThreadSession"
     TracingThreadList:
       type: object
-      description: Paginated list of tracing threads.
+      description: Paginated list of tracing threads. A caller who may not view other people's agent sessions gets a page filled with their own threads and `hasMore` / `nextSkip` in place of `total` (which cannot be known without reading every thread).
       properties:
         threads:
           type: array
@@ -21654,6 +23375,14 @@ components:
             $ref: "#/components/schemas/TracingThread"
         total:
           type: number
+          description: Number of threads. Absent for a caller held to their own sessions.
+        hasMore:
+          type: boolean
+          description: Whether another page follows. Only for a caller held to their own sessions.
+        nextSkip:
+          type: integer
+          nullable: true
+          description: The `skip` the next page starts at; null when the list ends. Only for a caller held to their own sessions.
     TracingThreadSession:
       type: object
       description: A session belonging to a thread.
@@ -22017,6 +23746,175 @@ components:
           minItems: 1
           items:
             $ref: "#/components/schemas/VectorUpsertItem"
+    WebhookCreateRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: "`http` or `https`, resolving to a public address."
+        description:
+          type: string
+          maxLength: 500
+        events:
+          type: array
+          minItems: 1
+          description: Event types and/or `prefix.*` patterns (`*` for everything). See `GET /webhooks/events`.
+          items:
+            type: string
+          example:
+            - session.idled
+            - agent_run.*
+        projectId:
+          type: string
+          nullable: true
+          description: "Omitted: the token's project. Another project, or `null` / `\"*\"` for every project, needs the `webhooks` permission in the workspace itself and is refused (`403`) for an API token."
+      required:
+        - url
+        - events
+    WebhookDelivery:
+      type: object
+      description: One event owed to one endpoint.
+      properties:
+        id:
+          type: string
+          description: "`whd_...`"
+        endpointId:
+          type: string
+        eventId:
+          type: string
+          description: "`evt_...`; also the `webhook-id` header. Stable across retries and redeliveries."
+        eventType:
+          type: string
+        status:
+          type: string
+          enum:
+            - pending
+            - delivered
+            - failed
+        attempts:
+          type: integer
+        nextAttemptAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "When the next attempt becomes due. A lower bound: due deliveries are sent by a sweep that runs about every 30 seconds, so the attempt lands at or a little after this time."
+        lastStatusCode:
+          type: integer
+          nullable: true
+        lastError:
+          type: string
+          nullable: true
+          description: "Why the last attempt failed, for example `Endpoint answered HTTP 500`, `Timed out after 10000 ms` (the receiver did not answer within `WEBHOOK_TIMEOUT_MS`) or a connection error."
+        lastDurationMs:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        deliveredAt:
+          type: string
+          format: date-time
+          nullable: true
+        payload:
+          $ref: "#/components/schemas/WebhookEventPayload"
+    WebhookEndpoint:
+      type: object
+      properties:
+        id:
+          type: string
+          description: "`whk_...`"
+        url:
+          type: string
+          description: "The receiver address. For a caller with Read on `webhooks` only, its query string, fragment and userinfo are removed and every path segment longer than eight characters is replaced by `…` (`https://host/services/T0000/…?…`), and `urlRedacted` is `true`; Admin sees it whole."
+        urlRedacted:
+          type: boolean
+          description: "Present and `true` when `url` is shown without its query string and userinfo."
+        description:
+          type: string
+          nullable: true
+        events:
+          type: array
+          items:
+            type: string
+        projectId:
+          type: string
+          nullable: true
+          description: The project the endpoint is for; null = every project of the tenant.
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        disabledReason:
+          type: string
+          nullable: true
+          enum:
+            - manual
+            - redirect
+            - blocked_address
+            - sustained_failure
+          description: "Why it was switched off. `redirect`: the receiver answered 3xx (redirects are not followed). `blocked_address`: the address resolves to a private or blocked network. `sustained_failure`: failing continuously for longer than `WEBHOOK_AUTO_DISABLE_HOURS`."
+        failingSince:
+          type: string
+          format: date-time
+          nullable: true
+          description: Start of the current unbroken run of failed deliveries; any 2xx clears it.
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+    WebhookEndpointWithSecret:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEndpoint"
+        - type: object
+          properties:
+            secret:
+              type: string
+              description: "The signing secret (`whsec_...`). Returned only when the endpoint is created or its secret is rotated."
+    WebhookEventPayload:
+      type: object
+      description: "The body POSTed to the endpoint. Thin: ids and a few small fields; fetch details through the API. Headers: `x-cognipeer-event`, `x-cognipeer-event-id`, `webhook-id` (the event id; deduplicate on it) and `x-cognipeer-signature: t=<unix>,v1=<hex HMAC-SHA256(secret, \"<t>.<raw body>\")>`."
+      properties:
+        id:
+          type: string
+          description: "`evt_...`"
+        type:
+          type: string
+          description: "`session.idled` (`conversationId`, `agentKey`, `stopReason`), `session.work_done` (`conversationId`, `agentKey`), `action.required` (`conversationId`, `agentKey`, `actionId`, `kind`), `budget.reached` (`conversationId`, `agentKey`, `spentUsd`, `maxCostUsd`), `agent_run.succeeded` / `failed` / `canceled` / `requires_action` (`runId`, `conversationId`, `agentKey`), `schedule.fired` / `failed` (`scheduleId`, `agentKey`, `trigger`, `conversationId?`, `error?`), `webhook.test`."
+        createdAt:
+          type: string
+          format: date-time
+        projectId:
+          type: string
+          nullable: true
+        data:
+          type: object
+          additionalProperties: true
+    WebhookUpdateRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        description:
+          type: string
+        events:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
     WebSearchProvider:
       type: object
       description: A web search instance visible to the token.
@@ -22185,13 +24083,63 @@ components:
           example:
             error: Invalid API token
     Forbidden:
-      description: Forbidden — the feature is not enabled for this token, project, or license tier.
+      description: "Forbidden — the token's owner, scope or project does not allow the call, the route has no authorization declaration, the call comes from an address the token does not allow, or the feature is not enabled for this license tier. A refusal by the permission gate carries `code`, `service`, `required` and `decisionId`, and the `X-Decision-Id` header."
+      headers:
+        X-Decision-Id:
+          description: Identifies the refusal. Resolve it in the IAM center (Access check) or with `GET /api/iam/decisions/{decisionId}`. Present on refusals by the permission gate.
+          schema:
+            type: string
+            format: uuid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            permission:
+              summary: The token's owner lacks the level the route needs
+              value:
+                error: "Forbidden: models requires write permission"
+                message: "Forbidden: models requires write permission"
+                code: forbidden
+                service: models
+                required: write
+                decisionId: 7c0f6b2e-5d1a-4c1e-9a53-0d9b8a1f2e44
+            license:
+              summary: The feature is not part of the license
+              value:
+                error: This feature is not available in your license
+    SessionForbidden:
+      description: "Forbidden - the session was started by someone else and the token's owner may not touch it: reading it needs `agent.session_view_others`, changing it `agent.session_manage_others` (both are granted to every holder of Agents Read / Write until a workspace restricts them with a deny rule). `error.code` is `session_forbidden`, with the `decision_id` of the refusal (replay it in the IAM center's Access check). A token also needs the matching level on the Agents service itself (`403` from the permission gate, see `Forbidden`)."
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
           example:
-            error: This feature is not available in your license
+            error:
+              type: permission_error
+              code: session_forbidden
+              message: This session was started by someone else, and you are not allowed to view it.
+              decision_id: 7c0f6b2e-5d1a-4c1e-9a53-0d9b8a1f2e44
+    AuthorizationUnavailable:
+      description: "Service unavailable — authorization could not be decided, so the call was refused (never allowed). Retry after the `Retry-After` delay."
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+        X-Decision-Id:
+          description: Identifies the refusal for support.
+          schema:
+            type: string
+            format: uuid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: Authorization is temporarily unavailable
+            code: authorization_unavailable
+            decisionId: 0b6f2c3e-8d41-4f0a-b7c2-6a1d9e5f3c70
     NotFound:
       description: The requested resource was not found.
       content:

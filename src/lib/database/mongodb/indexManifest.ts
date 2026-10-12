@@ -109,7 +109,11 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
     },
     { key: { status: 1, heartbeatAt: 1 }, options: { name: 'idx_status_heartbeat' } },
     { key: { expiresAt: 1 }, options: { name: 'idx_expiresAt' } },
+    // The reconciler's sweep for callbacks that never settled.
+    { key: { callbackStatus: 1, updatedAt: 1 }, options: { name: 'idx_callbackStatus_updatedAt' } },
     { key: { tenantId: 1, projectId: 1, idempotencyKey: 1 }, options: { name: 'idx_tenant_project_idempotencyKey' } },
+    // A caller who may not see other people's sessions lists only the runs they queued, newest first.
+    { key: { tenantId: 1, projectId: 1, agentKey: 1, userId: 1, createdAt: -1 }, options: { name: 'idx_tenant_project_agent_user_createdAt' } },
   ],
   rag_chunks: [
     { key: { documentId: 1, chunkIndex: 1 }, options: { name: 'idx_doc_chunk' } },
@@ -180,8 +184,45 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   ],
   reranker_run_logs: [{ key: { rerankerKey: 1, createdAt: -1 }, options: { name: 'idx_reranker_createdAt' } }],
   websearch_run_logs: [{ key: { searchKey: 1, createdAt: -1 }, options: { name: 'idx_search_createdAt' } }],
-  agent_conversations: [{ key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } }],
+  agent_conversations: [
+    { key: { agentKey: 1, updatedAt: -1 }, options: { name: 'idx_agent_updatedAt' } },
+    // A caller who may not see other people's sessions lists only their own: one agent's, by creator, newest first.
+    { key: { agentKey: 1, createdBy: 1, updatedAt: -1 }, options: { name: 'idx_agent_creator_updatedAt' } },
+    // The client API's session list: a project's sessions newest first (optionally one agent's, or one status).
+    { key: { projectId: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_createdAt' } },
+    { key: { projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_agent_createdAt' } },
+    { key: { projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, options: { name: 'idx_project_status_createdAt' } },
+  ],
   agent_conversation_states: [{ key: { conversationId: 1 }, options: { name: 'uniq_conversationId', unique: true } }],
+  // Append-only session event log. The unique pair is the sequence guard; the
+  // TTL index (expireAfterSeconds 0 = "at expiresAt") is the retention. The
+  // agent mixin also ensures both on its first write — names/keys IDENTICAL.
+  agent_session_events: [
+    { key: { conversationId: 1, seq: 1 }, options: { name: 'uniq_conversation_seq', unique: true } },
+    { key: { expiresAt: 1 }, options: { name: 'ttl_expiresAt', expireAfterSeconds: 0 } },
+  ],
+  // Tool approvals / questions a turn paused on (human-in-the-loop).
+  agent_pending_actions: [
+    { key: { conversationId: 1, status: 1 }, options: { name: 'idx_conversation_status' } },
+    { key: { status: 1, expiresAt: 1 }, options: { name: 'idx_status_expiresAt' } },
+    { key: { tenantId: 1, projectId: 1, status: 1 }, options: { name: 'idx_tenant_project_status' } },
+  ],
+  // A person's rating of an assistant message: one per person per message, listed
+  // per agent (newest first), per conversation and per portal.
+  agent_message_feedback: [
+    { key: { conversationId: 1, messageId: 1, userId: 1 }, options: { name: 'idx_message_user', unique: true } },
+    { key: { projectId: 1, agentKey: 1, createdAt: -1 }, options: { name: 'idx_agent_createdAt' } },
+    { key: { portalId: 1, createdAt: -1 }, options: { name: 'idx_portal_createdAt' } },
+  ],
+  // Outgoing webhooks: endpoints are listed per tenant/project; deliveries are
+  // swept by (status, nextAttemptAt) and read per endpoint, newest first.
+  webhook_endpoints: [{ key: { tenantId: 1, projectId: 1 }, options: { name: 'idx_tenant_project' } }],
+  webhook_deliveries: [
+    { key: { status: 1, nextAttemptAt: 1 }, options: { name: 'idx_status_nextAttemptAt' } },
+    { key: { endpointId: 1, createdAt: -1 }, options: { name: 'idx_endpoint_createdAt' } },
+    { key: { tenantId: 1, eventId: 1 }, options: { name: 'idx_tenant_eventId' } },
+    { key: { status: 1, createdAt: 1 }, options: { name: 'idx_status_createdAt' } },
+  ],
   agent_versions: [{ key: { agentId: 1, version: -1 }, options: { name: 'idx_agent_version' } }],
   mcp_request_logs: [
     { key: { serverKey: 1, createdAt: -1 }, options: { name: 'idx_server_createdAt' } },
@@ -207,7 +248,12 @@ export const TENANT_DB_INDEXES: Record<string, IndexDef[]> = {
   ],
   memory_items: [{ key: { storeKey: 1, createdAt: -1 }, options: { name: 'idx_store_createdAt' } }],
   alert_events: [{ key: { ruleId: 1, firedAt: -1 }, options: { name: 'idx_rule_firedAt' } }],
-  files: [{ key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } }],
+  files: [
+    { key: { providerKey: 1, bucketKey: 1, key: 1 }, options: { name: 'idx_provider_bucket_key' } },
+    // Session files: the retention sweep, and a session's own files.
+    { key: { purpose: 1, expiresAt: 1 }, options: { name: 'idx_purpose_expiresAt' } },
+    { key: { conversationId: 1 }, options: { name: 'idx_conversationId' } },
+  ],
   config_audit_logs: [{ key: { createdAt: -1 }, options: { name: 'idx_createdAt' } }],
   // ── Sandbox (enterprise) — created only in tenant DBs that have them ──
   sandbox_instances: [

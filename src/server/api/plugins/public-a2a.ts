@@ -18,10 +18,15 @@ import type { FastifyPluginAsync } from 'fastify';
 import type { DatabaseProvider, IAgent, ITenant } from '@/lib/database';
 import { getDatabase } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
+import { authz } from '@/lib/iam/routeAuthz';
 import { resolveA2aExposure } from '@/lib/services/agents/a2aExposure';
 import { buildAgentCard, externalBaseUrl, handleA2aRpc } from './client-a2a';
 
 const logger = createLogger('api:public-a2a');
+
+const PUBLIC_SLUG_AUTHZ = authz.self(
+  'unauthenticated by design: addressed by tenant id + random endpoint slug; the handler 404s unless the agent exposes A2A with accessMode public',
+);
 
 /** Attribution identity stamped on conversations/usage from public A2A calls. */
 const PUBLIC_A2A_USER_ID = 'a2a-public';
@@ -69,7 +74,7 @@ async function resolvePublicAgent(
 }
 
 export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/public/a2a/:tenantId/:endpointSlug/.well-known/agent-card.json', async (request, reply) => {
+  app.get('/public/a2a/:tenantId/:endpointSlug/.well-known/agent-card.json', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
     try {
       const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };
       const resolved = await resolvePublicAgent(tenantId, endpointSlug);
@@ -84,7 +89,7 @@ export const publicA2aApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.post('/public/a2a/:tenantId/:endpointSlug', async (request, reply) => {
+  app.post('/public/a2a/:tenantId/:endpointSlug', { config: PUBLIC_SLUG_AUTHZ }, async (request, reply) => {
     try {
       const { tenantId, endpointSlug } = request.params as { tenantId: string; endpointSlug: string };
       const resolved = await resolvePublicAgent(tenantId, endpointSlug);

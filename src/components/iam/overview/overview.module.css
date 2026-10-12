@@ -1,0 +1,15 @@
+/*
+ * The first row of the Overview has three cards. SimpleGrid gives it two
+ * columns between the `md` and `xl` breakpoints of the theme (1024px and 1440px:
+ * most laptops), which would leave the third card alone beside an empty cell, so
+ * it takes the whole row there, and goes back to its own column at `xl`.
+ */
+.wide {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 90em) {
+  .wide {
+    grid-column: auto;
+  }
+}

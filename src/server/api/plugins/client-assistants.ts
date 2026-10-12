@@ -37,7 +37,7 @@
  */
 import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { randomUUID } from 'node:crypto';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
@@ -58,6 +58,7 @@ import {
   updateAgentRecord,
 } from '@/lib/services/agents';
 import { AgentGuardrailBlockedError } from '@/lib/services/agents/agentService';
+import { mergeClientConversationMetadata } from '@/lib/services/agents/conversationMetadata';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
 import {
   getApiTokenContextForRequest,
@@ -65,6 +66,8 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { decideSessionAccess, SESSION_FORBIDDEN_MESSAGE, sessionRefusalError, type SessionNeed } from './agent-session-access';
 
 const logger = createLogger('api:client-assistants');
 
@@ -340,12 +343,28 @@ export function extractMessageText(input: unknown): string | null {
   return null;
 }
 
+/** A refusal of `loadThreadOr404`: the status and sentence, and for an engine refusal the body and headers the gates use. */
+interface ThreadError {
+  code: number;
+  message: string;
+  body?: Record<string, unknown>;
+  headers?: Record<string, string>;
+}
+
+/**
+ * The thread `rawThreadId` names, its assistant, and the caller's right to it: the token's owner who started the
+ * thread needs nothing beyond the route's own service check; anybody else needs `agent.session_view_others`
+ * (`need: 'view'`) or `agent.session_manage_others` (`need: 'manage'`) - a thread is an agent session
+ * (agent-session-access.ts).
+ */
 async function loadThreadOr404(
-  tenantDbName: string,
+  request: FastifyRequest,
+  ctx: Awaited<ReturnType<typeof getApiTokenContextForRequest>>,
   rawThreadId: string,
-  projectId: string,
-): Promise<{ conversation: IAgentConversation; agent: IAgent } | { error: { code: number; message: string } }> {
+  need: SessionNeed,
+): Promise<{ conversation: IAgentConversation; agent: IAgent } | { error: ThreadError }> {
   const conversationId = conversationIdFromThreadId(rawThreadId);
+  const { tenantDbName, projectId } = ctx;
   const conversation = await getConversationById(tenantDbName, conversationId);
   // getConversationById resolves purely by _id (findAgentConversationById has
   // no projectId parameter at all) — without this check, a caller who can
@@ -359,7 +378,29 @@ async function loadThreadOr404(
   }
   const agent = await getAgentByKey(tenantDbName, conversation.agentKey, conversation.projectId);
   if (!agent) return { error: { code: 404, message: 'Thread references an assistant that no longer exists' } };
+  const access = await decideSessionAccess(request, conversation, {
+    need,
+    agent,
+    actor: { tenantDbName, projectId, userId: String(ctx.tokenRecord.userId ?? '') },
+  });
+  if (!access.ok) {
+    const refusal = sessionRefusalError(request, access) as Error & { headers?: Record<string, string> };
+    return {
+      error: {
+        code: access.status,
+        message: access.status === 503 ? 'Authorization is temporarily unavailable' : SESSION_FORBIDDEN_MESSAGE[access.need],
+        ...(access.decisionId ? { body: { decision_id: access.decisionId } } : {}),
+        ...(refusal.headers ? { headers: refusal.headers } : {}),
+      },
+    };
+  }
   return { conversation, agent };
+}
+
+/** The reply to a thread that could not be handed to the caller. */
+function sendThreadError(reply: FastifyReply, error: ThreadError) {
+  for (const [name, value] of Object.entries(error.headers ?? {})) void reply.header(name, value);
+  return reply.code(error.code).send({ error: error.message, ...(error.body ?? {}) });
 }
 
 export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
@@ -575,8 +616,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
       return reply.code(200).send(threadObject(loaded.conversation));
     } catch (error) {
       logger.error('Retrieve thread error', { error });
@@ -588,25 +629,22 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const body = readJsonBody<Record<string, unknown>>(request);
       const db = await getDatabase();
       await db.switchToTenant(ctx.tenantDbName);
       const conversationId = conversationIdFromThreadId(rawId);
-      if (body.metadata && typeof body.metadata === 'object') {
-        const merged = { ...(loaded.conversation.metadata ?? {}), ...(body.metadata as Record<string, unknown>) };
-        // The Assistants bookkeeping namespace is server-owned; a caller
-        // patching `metadata` must not be able to erase pending messages or
-        // run history it never knew existed.
-        merged.assistantsApi = readAssistantsMetadata(loaded.conversation);
-        // Same for the thread's sandbox record: the run path owns it, and a
-        // caller-supplied `sandbox` key would point the thread at someone
-        // else's machine (or drop it).
-        const sandboxRecord = (loaded.conversation.metadata as Record<string, unknown> | undefined)?.sandbox;
-        if (sandboxRecord === undefined) delete merged.sandbox;
-        else merged.sandbox = sandboxRecord;
+      if (body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)) {
+        // The column also holds the server's own bookkeeping: the Assistants namespace (pending messages, run
+        // history), the thread's sandbox record, and the settings a run is configured by - the session's tool
+        // allow-list among them, which only resolving an approval writes. The server keeps those as they are;
+        // every other key is the caller's.
+        const merged = mergeClientConversationMetadata(
+          loaded.conversation.metadata as Record<string, unknown> | undefined,
+          body.metadata as Record<string, unknown>,
+        );
         await db.updateAgentConversation(conversationId, { metadata: merged });
       }
       const refreshed = await getConversationById(ctx.tenantDbName, conversationId);
@@ -621,8 +659,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
       const deleted = await deleteConversation(ctx.tenantDbName, conversationIdFromThreadId(rawId));
       return reply.code(200).send({ id: rawId, object: 'thread.deleted', deleted });
     } catch (error) {
@@ -637,8 +675,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const body = readJsonBody<Record<string, unknown>>(request);
       const text = extractMessageText(body.content);
@@ -677,8 +715,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const conversationId = conversationIdFromThreadId(rawId);
       const query = request.query as { limit?: string; order?: string };
@@ -697,8 +735,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, messageId: rawMessageId } = request.params as { threadId: string; messageId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const conversationId = conversationIdFromThreadId(rawId);
       const merged = mergedMessages(loaded.conversation);
@@ -742,6 +780,22 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       };
     }
 
+    // Running the thread sends a message; under `cancel_pending` that cancels an open request of the session,
+    // which takes the permission to answer it.
+    const cancelRefusal = await refuseCancelPending(request, { tenantDbName: ctx.tenantDbName, conversation, agent });
+    if (cancelRefusal?.unavailable) {
+      return {
+        status: 503,
+        body: { error: 'Authorization is temporarily unavailable', ...(cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : {}) },
+      };
+    }
+    if (cancelRefusal) {
+      return {
+        status: 403,
+        body: { error: CANCEL_PENDING_FORBIDDEN_MESSAGE, ...(cancelRefusal.decisionId ? { decision_id: cancelRefusal.decisionId } : {}) },
+      };
+    }
+
     const record: RunRecord = {
       id: runId(),
       status: 'completed',
@@ -766,6 +820,9 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
         userId: ctx.tokenRecord.userId,
         userMessage: toRun.content,
         runtimeContext,
+        // The Assistants wire has no way to answer an approval: a gated tool
+        // follows the agent's `humanInTheLoop.unattended` setting (deny by default).
+        unattended: true,
       });
 
       // `executeAgentChat` just persisted the (user, assistant) pair itself —
@@ -814,8 +871,9 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      // A run is a new turn in the session: changing it and viewing it.
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'continue');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const body = readJsonBody<Record<string, unknown>>(request);
       const outcome = await runThread(ctx, request, conversationIdFromThreadId(rawId), loaded.conversation, loaded.agent, body);
@@ -855,8 +913,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId } = request.params as { threadId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
       const query = request.query as { limit?: string; order?: string };
@@ -874,8 +932,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, runId: rawRunId } = request.params as { threadId: string; runId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
       const run = runs.find((r) => r.id === rawRunId);
@@ -893,8 +951,8 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
       const { threadId: rawId, runId: rawRunId } = request.params as { threadId: string; runId: string };
-      const loaded = await loadThreadOr404(ctx.tenantDbName, rawId, ctx.projectId);
-      if ('error' in loaded) return reply.code(loaded.error.code).send({ error: loaded.error.message });
+      const loaded = await loadThreadOr404(request, ctx, rawId, 'view');
+      if ('error' in loaded) return sendThreadError(reply, loaded.error);
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
       const run = runs.find((r) => r.id === rawRunId);

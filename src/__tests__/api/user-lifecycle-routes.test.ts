@@ -64,6 +64,9 @@ const USERS: Record<string, Record<string, unknown>> = {
     invitedBy: 'owner-1',
   },
   'foreign-1': { _id: 'foreign-1', role: 'user', tenantId: 'other', email: 'f@x.test', name: 'Foreign' },
+  'admin-2': { _id: 'admin-2', role: 'admin', tenantId: TENANT, email: 'admin2@acme.test', name: 'Admin Two' },
+  'ldap-1': { _id: 'ldap-1', role: 'user', tenantId: TENANT, email: 'ldap@acme.test', name: 'Lena Ldap', authProvider: 'ldap' },
+  'sso-admin': { _id: 'sso-admin', role: 'admin', tenantId: TENANT, email: 'sso@acme.test', name: 'Sam Sso', authProvider: 'oidc' },
 };
 
 type UserReply = { user: Record<string, unknown> };
@@ -114,6 +117,13 @@ describe('user lifecycle routes (/api/users)', () => {
       expect((await post('/users/nobody/disable', ADMIN)).statusCode).toBe(404);
       expect((await post('/users/foreign-1/disable', ADMIN)).statusCode).toBe(404);
       expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
+    it('says why with a stable code', async () => {
+      const code = async (path: string, hdrs: Record<string, string>) => parseJsonBody<{ code: string }>((await post(path, hdrs)).body).code;
+      expect(await code('/users/admin-1/disable', ADMIN)).toBe('self_not_allowed');
+      expect(await code('/users/owner-1/disable', ADMIN)).toBe('owner_immutable');
+      expect(await code('/users/nobody/disable', ADMIN)).toBe('user_not_found');
     });
 
     it('disables, returns the serialized user with lifecycle fields, and audits', async () => {
@@ -240,12 +250,133 @@ describe('user lifecycle routes (/api/users)', () => {
     });
   });
 
+  describe('DELETE /users/:id (what it takes with it, and who may)', () => {
+    const del = (id: string, hdrs: Record<string, string> = ADMIN) =>
+      app.inject({ method: 'DELETE', url: `/api/users/${id}`, headers: bare(hdrs) });
+
+    it('removes the group and project memberships of the deleted person and reports what went', async () => {
+      db.deleteUser.mockResolvedValue(true);
+      db.listApiTokens.mockResolvedValue([{ _id: 'tok-1', userId: 'member-1', tokenHash: 'a'.repeat(64) }] as never);
+      db.deleteApiToken.mockResolvedValue(true);
+      db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g-1', userId: 'member-1' }, { groupId: 'g-2', userId: 'member-1' }] as never);
+      db.removeGroupMember.mockResolvedValue(true);
+      db.listUserProjectsByUser.mockResolvedValue([{ projectId: 'p-1' }, { projectId: 'p-2' }, { projectId: 'p-3' }] as never);
+
+      const res = await del('member-1');
+      expect(res.statusCode).toBe(200);
+      expect(db.removeGroupMember).toHaveBeenCalledWith('g-1', 'member-1');
+      expect(db.removeGroupMember).toHaveBeenCalledWith('g-2', 'member-1');
+      expect(db.deleteUserProjectsByUser).toHaveBeenCalledWith('member-1');
+      expect(parseJsonBody<{ message: string; cleanup: Record<string, number> }>(res.body)).toEqual({
+        message: 'User deleted successfully',
+        cleanup: { revokedTokens: 1, removedGroupMemberships: 2, removedProjectMemberships: 3 },
+      });
+    });
+
+    it('leaves a row of the audit trail that names the person and the cleanup, and no generic one', async () => {
+      db.deleteUser.mockResolvedValue(true);
+      db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g-1', userId: 'member-1' }] as never);
+      db.removeGroupMember.mockResolvedValue(true);
+      await del('member-1');
+      await vi.waitFor(() => expect(h.recordAuditLog).toHaveBeenCalledTimes(1));
+      expect(h.recordAuditLog.mock.calls[0][1]).toMatchObject({
+        event: 'user.delete', service: 'members', resourceType: 'user', resourceId: 'member-1', actorUserId: 'admin-1',
+        metadata: { targetName: 'Member', targetRole: 'user', cleanup: { revokedTokens: 0, removedGroupMemberships: 1, removedProjectMemberships: 0 } },
+      });
+    });
+
+    it('still succeeds when the membership cleanup fails', async () => {
+      db.deleteUser.mockResolvedValue(true);
+      // (the gate reads the caller's own groups too: only the deleted person's lookups fail)
+      db.listGroupMembersByUser.mockImplementation(async (userId: string) => {
+        if (userId === 'member-1') throw new Error('db down');
+        return [] as never;
+      });
+      db.listUserProjectsByUser.mockRejectedValue(new Error('db down'));
+      const res = await del('member-1');
+      expect(res.statusCode).toBe(200);
+      expect(parseJsonBody<{ cleanup: Record<string, number> }>(res.body).cleanup).toMatchObject({ removedGroupMemberships: 0, removedProjectMemberships: 0 });
+    });
+
+    it('refuses the account of a directory (disable it instead) and deletes nothing', async () => {
+      for (const id of ['ldap-1', 'sso-admin']) {
+        const res = await del(id, OWNER_H);
+        expect(res.statusCode, id).toBe(409);
+        expect(parseJsonBody<{ code: string; error: string }>(res.body)).toMatchObject({ code: 'directory_managed' });
+      }
+      expect(db.deleteUser).not.toHaveBeenCalled();
+      expect(db.listApiTokens).not.toHaveBeenCalled();
+    });
+
+    it('refuses yourself, the owner and an id nobody has, each with its own code', async () => {
+      const self = await del('admin-1');
+      expect([self.statusCode, parseJsonBody<{ code: string }>(self.body).code]).toEqual([400, 'self_not_allowed']);
+      const owner = await del('owner-1');
+      expect([owner.statusCode, parseJsonBody<{ code: string }>(owner.body).code]).toEqual([403, 'owner_immutable']);
+      const nobody = await del('nobody');
+      expect([nobody.statusCode, parseJsonBody<{ code: string }>(nobody.body).code]).toEqual([404, 'user_not_found']);
+      const foreign = await del('foreign-1');
+      expect(foreign.statusCode).toBe(404);
+      expect(db.deleteUser).not.toHaveBeenCalled();
+    });
+
+    it('reads an id the database cannot parse as "no such person", never as a server error', async () => {
+      db.findUserById.mockImplementation(async (id: string) => {
+        if (id === 'not-an-id') throw Object.assign(new Error('input must be a 24 character hex string, 12 byte Uint8Array, or an integer'), { name: 'BSONError' });
+        return (USERS[id] ? { ...USERS[id] } : null) as never;
+      });
+      const res = await del('not-an-id');
+      expect(res.statusCode).toBe(404);
+      expect(db.deleteUser).not.toHaveBeenCalled();
+    });
+
+    it('lets an admin delete another admin, as before', async () => {
+      db.deleteUser.mockResolvedValue(true);
+      expect((await del('admin-2')).statusCode).toBe(200);
+    });
+  });
+
+  describe('PATCH /users/:id/permissions', () => {
+    const patchPermissions = (id: string, payload: string, hdrs: Record<string, string> = ADMIN) =>
+      app.inject({ method: 'PATCH', url: `/api/users/${id}/permissions`, headers: hdrs, payload });
+
+    it('refuses a body without the permission map instead of wiping the overrides', async () => {
+      for (const payload of ['{}', '{"servicePermissions":null}', '{"servicePermissions":[]}', '{"servicePermissions":"all"}', '{"permissions":{"agents":"read"}}']) {
+        const res = await patchPermissions('member-1', payload);
+        expect(res.statusCode, payload).toBe(400);
+        expect(parseJsonBody<{ code: string }>(res.body).code).toBe('invalid_body');
+      }
+      expect(db.updateUser).not.toHaveBeenCalled();
+    });
+
+    it('still accepts an explicit empty map (clear the overrides), clamped to what the admin holds', async () => {
+      const cleared = await patchPermissions('member-1', '{"servicePermissions":{}}');
+      expect(cleared.statusCode).toBe(200);
+      expect(db.updateUser).toHaveBeenCalledWith('member-1', { servicePermissions: {} });
+      const granted = await patchPermissions('member-1', '{"servicePermissions":{"agents":"write","nonsense":"admin"}}');
+      expect(granted.statusCode).toBe(200);
+      expect(db.updateUser).toHaveBeenLastCalledWith('member-1', { servicePermissions: { agents: 'write' } });
+    });
+
+    it('audits what was granted by service, and never touches the owner', async () => {
+      await patchPermissions('member-1', '{"servicePermissions":{"rag":"read","agents":"write"}}');
+      await vi.waitFor(() => expect(h.recordAuditLog).toHaveBeenCalledTimes(1));
+      expect(h.recordAuditLog.mock.calls[0][1]).toMatchObject({
+        event: 'user.permissions.update', resourceId: 'member-1', metadata: { services: ['agents', 'rag'] },
+      });
+      const owner = await patchPermissions('owner-1', '{"servicePermissions":{"agents":"read"}}');
+      expect([owner.statusCode, parseJsonBody<{ code: string }>(owner.body).code]).toEqual([403, 'owner_immutable']);
+      const none = await patchPermissions('nobody', '{"servicePermissions":{}}');
+      expect([none.statusCode, parseJsonBody<{ code: string }>(none.body).code]).toEqual([404, 'user_not_found']);
+    });
+  });
+
   describe('POST /users/:id/invitation-link', () => {
     it('refuses a disabled user like a canLogin=false one', async () => {
       db.findTenantById.mockResolvedValue({ _id: TENANT, slug: 'acme' } as never);
       const res = await app.inject({ method: 'POST', url: '/api/users/off-1/invitation-link', headers: bare(ADMIN) });
       expect(res.statusCode).toBe(404);
-      expect(parseJsonBody<{ error: string }>(res.body).error).toBe('Pending invitation not found');
+      expect(parseJsonBody<{ error: string; code: string }>(res.body)).toMatchObject({ error: 'Pending invitation not found', code: 'no_pending_invite' });
     });
   });
 });
@@ -280,5 +411,25 @@ describe('GET /projects/:projectId/member-candidates', () => {
     expect(res.statusCode).toBe(200);
     const ids = parseJsonBody<{ users: Array<{ _id: string }> }>(res.body).users.map((u) => u._id);
     expect(ids.sort()).toEqual(['u-a', 'u-c']);
+  });
+
+  it('finds people by their Turkish names the way they are typed: İ, I, i and ı are one letter', async () => {
+    db.listUsers.mockResolvedValue([
+      { _id: 'u-1', role: 'user', email: 'ismail@acme.test', name: 'İsmail Işık', projectIds: [] },
+      { _id: 'u-2', role: 'user', email: 'irmak@acme.test', name: 'IRMAK ISPARTA', projectIds: [] },
+      { _id: 'u-3', role: 'user', email: 'tc1@acme.test', name: 'Tülin Çiçek', projectIds: [] },
+    ] as never);
+    const find = async (q: string) => {
+      const res = await app.inject({
+        method: 'GET', url: `/api/projects/proj-1/member-candidates?q=${encodeURIComponent(q)}`, headers: bare(OWNER_H),
+      });
+      expect(res.statusCode).toBe(200);
+      return parseJsonBody<{ users: Array<{ _id: string }> }>(res.body).users.map((u) => u._id);
+    };
+    for (const q of ['ismail', 'İSMAİL', 'ısmaıl']) expect(await find(q), q).toEqual(['u-1']);
+    for (const q of ['ışık', 'IŞIK', 'işik']) expect(await find(q), q).toEqual(['u-1']);
+    for (const q of ['ısparta', 'ISPARTA', 'isparta']) expect(await find(q), q).toEqual(['u-2']);
+    for (const q of ['çiçek', 'ÇİÇEK']) expect(await find(q), q).toEqual(['u-3']);
+    expect(await find('cicek')).toEqual([]); // accents are not stripped
   });
 });

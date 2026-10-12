@@ -20,6 +20,7 @@ import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconCertificate, IconCheck, IconCopy, IconRefresh, IconTrash } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useConfirm } from '@/components/common/confirm';
 
 type LicenseResponse = {
   canManage: boolean;
@@ -51,6 +52,8 @@ export default function LicenseManagement() {
   const [saving, setSaving] = useState(false);
   const [resetting, setResetting] = useState(false);
   const t = useTranslations('license');
+  const tq = useTranslations('common.confirm.qos');
+  const { confirmAction } = useConfirm();
   const tNotifications = useTranslations('notifications');
   const tCommon = useTranslations('common');
 
@@ -119,13 +122,27 @@ export default function LicenseManagement() {
   };
 
   const resetLicense = async () => {
-    setResetting(true);
     try {
-      const response = await fetch('/api/license', { method: 'DELETE' });
-      const body = await response.json();
-      if (!response.ok) {
-        throw new Error(body?.error || t('errors.reset'));
-      }
+      const done = await confirmAction({
+        title: tq('resetLicenseTitle'),
+        message: tq('resetLicenseMessage'),
+        tone: 'danger',
+        confirmLabel: tq('resetLicenseConfirm'),
+        // The dialog shows its own progress; the button spinner only covers the request.
+        action: async () => {
+          setResetting(true);
+          try {
+            const response = await fetch('/api/license', { method: 'DELETE' });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              throw new Error(body?.error || t('errors.reset'));
+            }
+          } finally {
+            setResetting(false);
+          }
+        },
+      });
+      if (!done) return;
       notifications.show({
         color: 'green',
         message: t('messages.reset'),
@@ -138,8 +155,6 @@ export default function LicenseManagement() {
         message: error instanceof Error ? error.message : t('errors.reset'),
         title: tNotifications('errorTitle'),
       });
-    } finally {
-      setResetting(false);
     }
   };
 

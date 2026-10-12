@@ -480,8 +480,9 @@ Each of these is behaviour in the current code, not a caveat about the future.
 - **`/responses` and `/agents/responses` need different permissions.** RBAC maps `/api/client/v1/agents*`
   to the `agents` service and `/api/client/v1/responses` to `models`. A token owner with `agents:write`
   but no `models:write` can call the published endpoint and gets 403 on the draft one.
-- **A2A endpoints have no RBAC mapping at all**, so a token that passes authentication reaches them.
-  Access control there is the A2A toggle and the access mode, nothing else.
+- **A2A endpoints are gated by the `agents` service too.** `/api/client/v1/a2a/...` is mapped to
+  `agents` (`read` for the agent card, `write` to send a message), on top of the A2A toggle and the
+  access mode, which decide whether an agent is exposed and to whom.
 - **Agents that are not `active` return 400** — `Agent is not active` — from every invocation endpoint
   (`/responses`, `/agents/responses` and A2A alike).
 - **`version` must be a positive integer**, or the request is rejected with 400 before anything runs.

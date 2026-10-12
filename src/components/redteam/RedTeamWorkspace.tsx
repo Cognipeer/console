@@ -8,8 +8,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconBug,
   IconPencil,
@@ -64,6 +66,8 @@ function pct(value?: number): string {
 
 export default function RedTeamWorkspace({ section }: { section: RedTeamSection }) {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tq = useTranslations('common.confirm.qos');
   const [campaigns, setCampaigns] = useState<RedTeamCampaignView[]>([]);
   const [runs, setRuns] = useState<RedTeamRunView[]>([]);
   const [probes, setProbes] = useState<ProbeCatalogView[]>([]);
@@ -75,12 +79,8 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
   const [scanCampaign, setScanCampaign] = useState<RedTeamCampaignView | null>(null);
 
   const [campaignModal, setCampaignModal] = useState(false);
-  const [deleteItem, setDeleteItem] = useState<{ id: string; name: string } | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [probeModal, setProbeModal] = useState(false);
   const [editingProbe, setEditingProbe] = useState<CustomProbeView | null>(null);
-  const [deleteProbe, setDeleteProbe] = useState<{ id: string; name: string } | null>(null);
-  const [deletingProbe, setDeletingProbe] = useState(false);
 
   const loadAll = async () => {
     setRefreshing(true);
@@ -129,36 +129,37 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
   }, [hasActive]);
 
 
-  const confirmDelete = async () => {
-    if (!deleteItem) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/redteam/campaigns/${deleteItem.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Deleted', message: `"${deleteItem.name}" was deleted`, color: 'red' });
-      setDeleteItem(null);
-      await loadAll();
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-    } finally {
-      setDeleting(false);
-    }
+  const confirmDelete = async (item: { id: string; name: string }) => {
+    const done = await deleteResource({
+      noun: tq('nouns.redteamCampaign'),
+      name: item.name,
+      type: 'redteam-campaign',
+      id: item.id,
+      action: async () => {
+        const res = await fetch(`/api/redteam/campaigns/${item.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(tq('deleteFailed'));
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Deleted', message: `"${item.name}" was deleted`, color: 'red' });
+    await loadAll();
   };
 
-  const confirmDeleteProbe = async () => {
-    if (!deleteProbe) return;
-    setDeletingProbe(true);
-    try {
-      const res = await fetch(`/api/redteam/custom-probes/${deleteProbe.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Deleted', message: `"${deleteProbe.name}" was deleted`, color: 'red' });
-      setDeleteProbe(null);
-      await loadAll();
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-    } finally {
-      setDeletingProbe(false);
-    }
+  const confirmDeleteProbe = async (item: { id: string; name: string }) => {
+    const done = await deleteResource({
+      noun: tq('nouns.customProbe'),
+      name: item.name,
+      type: 'redteam-custom-probe',
+      id: item.id,
+      extraWarning: 'Campaigns referencing it will fail until the reference is removed.',
+      action: async () => {
+        const res = await fetch(`/api/redteam/custom-probes/${item.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(tq('deleteFailed'));
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Deleted', message: `"${item.name}" was deleted`, color: 'red' });
+    await loadAll();
   };
 
   const totalVulnerable = runs.reduce((n, r) => n + (r.aggregate?.vulnerable ?? 0), 0);
@@ -294,7 +295,7 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
             },
             { id: 'open', label: 'Open', icon: <IconPencil size={14} />, onClick: () => router.push(`/dashboard/redteam/campaigns/${c.id}`) },
             { divider: true },
-            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteItem({ id: c.id, name: c.name }) },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDelete({ id: c.id, name: c.name }) },
           ]}
         />
       )}
@@ -340,22 +341,12 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
           rowActions={(p) => [
             { id: 'edit', label: 'Edit', icon: <IconPencil size={14} />, onClick: () => { setEditingProbe(p); setProbeModal(true); } },
             { divider: true },
-            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => setDeleteProbe({ id: p.id, name: p.name }) },
+            { id: 'delete', label: 'Delete', icon: <IconTrash size={14} />, color: 'red', onClick: () => void confirmDeleteProbe({ id: p.id, name: p.name }) },
           ]}
         />
       )}
 
       {section === 'api' && <RedTeamApiUsage campaignKey={campaigns[0]?.key} />}
-
-      <Modal opened={deleteItem !== null} onClose={() => setDeleteItem(null)} title="Delete" centered size="sm">
-        <Text size="sm" mb="lg">
-          Delete <strong>{deleteItem?.name}</strong>? This action cannot be undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteItem(null)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>Delete</Button>
-        </Group>
-      </Modal>
 
       <CreateCampaignModal
         opened={campaignModal}
@@ -381,16 +372,6 @@ export default function RedTeamWorkspace({ section }: { section: RedTeamSection 
         onClose={() => { setProbeModal(false); setEditingProbe(null); }}
         onSaved={() => { void loadAll(); }}
       />
-
-      <Modal opened={deleteProbe !== null} onClose={() => setDeleteProbe(null)} title="Delete custom probe" centered size="sm">
-        <Text size="sm" mb="lg">
-          Delete <strong>{deleteProbe?.name}</strong>? Campaigns referencing it will fail until the reference is removed.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteProbe(null)}>Cancel</Button>
-          <Button color="red" loading={deletingProbe} onClick={confirmDeleteProbe}>Delete</Button>
-        </Group>
-      </Modal>
     </PageContainer>
   );
 }

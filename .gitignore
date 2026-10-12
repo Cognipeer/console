@@ -46,10 +46,15 @@ yarn-error.log*
 .env*
 !.env.example
 
-# runtime data (SQLite databases, vectors, agent bundles)
+# runtime data (SQLite databases, vectors, agent bundles, uploaded files).
+# `data/files/` holds tenant files (the built-in file provider, session
+# attachments); it must never be committable. Nothing under the root data/
+# directory is tracked, so the last rule covers any other runtime directory.
 data/sqlite/
 data/vectors/
 data/agent-bundles/
+data/files/
+/data/
 
 # VitePress build output
 docs/.vitepress/dist/

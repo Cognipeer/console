@@ -138,6 +138,8 @@ All responses follow a consistent JSON structure:
 }
 ```
 
+A `403` from the permission gate adds `code`, `service`, `required` and `decisionId` (also in the `X-Decision-Id` header); OpenAI-compatible routes carry them as `error.code` and `error.decision_id`. See [Authorization](/guide/authorization#decision-ids).
+
 ## HTTP Status Codes
 
 | Code | Meaning |
@@ -146,13 +148,13 @@ All responses follow a consistent JSON structure:
 | 201 | Created |
 | 400 | Bad request (missing/invalid parameters) |
 | 401 | Invalid or missing API token |
-| 403 | Feature not available in license |
+| 403 | The token's owner, scope or project does not allow it (`code: "forbidden"`, with a `decisionId`), the route has no authorization declaration (`route_not_declared`), or the feature is not available in the license |
 | 404 | Resource not found |
 | 409 | Conflict (duplicate resource) |
 | 422 | Unprocessable (validation failure) |
 | 429 | Rate limit exceeded |
 | 500 | Internal server error |
-| 503 | Service unavailable (circuit breaker open or shutting down) |
+| 503 | Service unavailable (circuit breaker open or shutting down), or authorization could not be decided (`code: "authorization_unavailable"`, with `Retry-After`) |
 
 ## Rate Limiting
 

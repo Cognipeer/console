@@ -30,6 +30,7 @@ import { startRedTeamQueueConsumer } from '@/lib/services/redteam/campaignConsum
 import { startEvaluationRunQueueConsumer } from '@/lib/services/evaluation/evaluationRunConsumer';
 import { startAnalysisRunQueueConsumer } from '@/lib/services/analysis/analysisRunConsumer';
 import { startAgentQueueConsumer } from '@/lib/services/agents/agentConsumer';
+import { startWebhookQueueConsumer } from '@/lib/services/webhooks/webhookConsumer';
 import { startAgentScheduler } from '@/lib/services/agents/agentScheduler';
 import { reconcileOrphanedAgentRuns, startAgentRunReconciler } from '@/lib/services/agents/agentRunReconciler';
 import { startMcpQueueConsumer } from '@/lib/services/mcp/mcpConsumer';
@@ -82,6 +83,33 @@ const FATAL_EXIT_DELAY_MS = 1000;
 function scheduleFatalExit(message: string): void {
   logger.error(`FATAL: ${message}`);
   setTimeout(() => process.exit(1), FATAL_EXIT_DELAY_MS).unref();
+}
+
+/**
+ * The authorization engine decides every request of every workspace, so a
+ * process that cannot run it must not serve: load Cedar, compile the managed
+ * policy set and the schema, evaluate a few canned decisions (lib/iam/selfTest.ts,
+ * no database needed). A failure ends the process (see scheduleFatalExit: the
+ * rollout stalls on the previous, working ReplicaSet). Success registers the
+ * engine in the readiness report (`checks.authorization-engine`).
+ */
+async function verifyAuthorizationEngine(): Promise<void> {
+  try {
+    const { engineSelfTest, engineHealth } = await import('@/lib/iam/selfTest');
+    const result = engineSelfTest();
+    if (!result.ok) throw new Error(result.error);
+    registerHealthCheck('authorization-engine', async () => engineHealth());
+    logger.info('Authorization engine ready', {
+      cedar: result.cedar,
+      checks: result.checks,
+      durationMs: result.durationMs,
+    });
+  } catch (error) {
+    const message = `Authorization engine self-test failed: ${error instanceof Error ? error.message : String(error)}. `
+      + 'Refusing to start - every request is decided by the engine.';
+    scheduleFatalExit(message);
+    throw new Error(message);
+  }
 }
 
 /** One boot step that must never stop the rest of boot: a failure is logged and boot carries on. */
@@ -139,6 +167,8 @@ async function runBootstrap(): Promise<void> {
       `${errors.length} config validation error(s). Some features may not work.`,
     );
   }
+
+  await verifyAuthorizationEngine();
 
   initLifecycle();
 
@@ -297,6 +327,7 @@ async function runBootstrap(): Promise<void> {
   // The consumers are no-ops for memory queue + single-node deployments.
   await bestEffort(() => Promise.all([
     startAgentQueueConsumer(),
+    startWebhookQueueConsumer(),
     startMcpQueueConsumer(),
     startBrowserQueueConsumer(),
     startCrawlerQueueConsumer(),

@@ -21,6 +21,8 @@ import {
   IconPhoto,
   IconShieldCheck,
   IconScale,
+  IconRobot,
+  IconUsersGroup,
 } from '@tabler/icons-react';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
 import type { QuotaDomain, QuotaScope } from '@/lib/quota/types';
@@ -36,6 +38,7 @@ interface QuotaPolicyCardProps {
 
 const SCOPE_ICONS: Record<QuotaScope, React.ReactNode> = {
   tenant: <IconBuildingBank size={14} />,
+  group: <IconUsersGroup size={14} />,
   user: <IconUser size={14} />,
   token: <IconKey size={14} />,
   resource: <IconPackage size={14} />,
@@ -55,6 +58,7 @@ const DOMAIN_ICONS: Record<QuotaDomain, React.FC<{ size?: number }>> = {
   image: IconPhoto,
   moderation: IconShieldCheck,
   decision: IconScale,
+  agent: IconRobot,
 };
 
 export function QuotaPolicyCard({ policy, onEdit, onDelete, showDomain = true, compact = false }: QuotaPolicyCardProps) {
@@ -98,7 +102,7 @@ export function QuotaPolicyCard({ policy, onEdit, onDelete, showDomain = true, c
                   variant="filled" 
                   size="xs" 
                   leftSection={SCOPE_ICONS[scope]}
-                  color={scope === 'tenant' ? 'blue' : scope === 'user' ? 'green' : scope === 'token' ? 'orange' : 'gray'}
+                  color={scope === 'tenant' ? 'blue' : scope === 'group' ? 'violet' : scope === 'user' ? 'green' : scope === 'token' ? 'orange' : 'gray'}
                 >
                   {tScopes(scope)}
                 </Badge>

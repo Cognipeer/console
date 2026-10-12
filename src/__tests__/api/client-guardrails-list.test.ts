@@ -37,11 +37,15 @@ vi.mock('@/lib/services/apiTokenAuth', () => {
 
 // Sync factories only: an async `vi.mock` factory does not intercept in this
 // repo, and the module under test would silently bind the real service.
-vi.mock('@/lib/database', () => ({
-  getDatabase: vi.fn(),
-  getTenantDatabase: vi.fn(),
-  runWithTenantScope: vi.fn(),
-}));
+vi.mock('@/lib/database', () => {
+  const getDatabase = vi.fn();
+  return {
+    getDatabase,
+    getTenantDatabase: vi.fn(),
+    // The gate reads the caller (and the engine its policies) through the tenant scope.
+    runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await getDatabase()),
+  };
+});
 
 // The whole barrel, because the client plugin imports the dashboard plugin for
 // the shared half of this surface and that one reaches for far more of it.
@@ -75,6 +79,7 @@ import { requireApiTokenFromHeader, ApiTokenAuthError } from '@/lib/services/api
 import { getDatabase } from '@/lib/database';
 import { createGuardrail, evaluateGuardrail, listGuardrails } from '@/lib/services/guardrail';
 import { clientGuardrailsApiPlugin } from '@/server/api/plugins/client-guardrails';
+import { createMockDb } from '../helpers/db.mock';
 import { createFastifyApiTestApp, parseJsonBody } from '../helpers/fastify-api';
 
 function mockFn(fn: unknown): ReturnType<typeof vi.fn> {
@@ -219,9 +224,7 @@ describe('GET /api/client/v1/guardrails', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({
-      runWithTenant: <T,>(_tenantDbName: string, operation: () => T) => operation(),
-    });
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
     mockFn(listGuardrails).mockResolvedValue([
       AUTHORED_GUARDRAIL,
       WORKSPACE_LEGACY_GUARDRAIL,
@@ -432,9 +435,7 @@ describe('POST /api/client/v1/guardrails — regex rule diagnostics', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({
-      runWithTenant: <T,>(_tenantDbName: string, operation: () => T) => operation(),
-    });
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
     app = await createFastifyApiTestApp(clientGuardrailsApiPlugin);
   });
 
@@ -547,9 +548,7 @@ describe('retired /api/client/v1/aegis/* surface answers 410 Gone', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     mockFn(requireApiTokenFromHeader).mockResolvedValue(AUTH_CTX);
-    mockFn(getDatabase).mockResolvedValue({
-      runWithTenant: <T,>(_tenantDbName: string, operation: () => T) => operation(),
-    });
+    mockFn(getDatabase).mockResolvedValue(createMockDb());
     app = await createFastifyApiTestApp(clientGuardrailsApiPlugin);
   });
 

@@ -27,7 +27,11 @@ const hoisted = vi.hoisted(() => ({
   validateCallbackRequest: vi.fn(),
 }));
 
-vi.mock('@/lib/database', () => ({ getDatabase: hoisted.getDatabase }));
+// The permission gate reads the caller inside a tenant scope: serve it from the same stubbed database.
+vi.mock('@/lib/database', () => ({
+  getDatabase: hoisted.getDatabase,
+  runWithTenantScope: async (_tenantDbName: string, fn: (db: unknown) => unknown) => fn(await hoisted.getDatabase()),
+}));
 vi.mock('@/lib/core/lifecycle', () => ({ isShuttingDown: vi.fn().mockReturnValue(false) }));
 
 vi.mock('@/lib/services/apiTokenAuth', () => {

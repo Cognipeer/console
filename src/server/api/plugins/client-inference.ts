@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { LicenseType } from '@/lib/license/license-manager';
-import { AgentGuardrailBlockedError, type AgentChatResponse } from '@/lib/services/agents/agentService';
+import { AgentGuardrailBlockedError, getConversationById, type AgentChatResponse } from '@/lib/services/agents/agentService';
 import { createLogger } from '@/lib/core/logger';
 import {
   GuardrailBlockError,
@@ -12,11 +12,14 @@ import {
   handleImageRequest,
 } from '@/lib/services/models/inferenceService';
 import { normalizeInferenceError } from '@/lib/services/models/openaiErrors';
-import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
+import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { toClientErrorBody } from '@/lib/services/agents/clientWire';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
 import {
   resolveAgentModel,
   runAgentCompletion,
@@ -222,9 +225,8 @@ async function handleAgentChatCompletion(input: {
           },
         });
       }
-      logger.error('Agent chat completion failed', { error });
-      const classified = classifyAgentRunError(error);
-      return reply.code(classified.status).send({ error: classified.error });
+      const classified = logAgentRouteError(logger, 'Agent chat completion failed', error);
+      return reply.code(classified.status).send({ error: toClientErrorBody(classified.error) });
     }
     if ('error' in result) {
       return reply.code(result.status).send({
@@ -282,8 +284,8 @@ async function handleAgentChatCompletion(input: {
     }
     send(toChatChunk({ id, model, finish: true, stopReason }));
   } catch (error) {
-    logger.error('Agent chat completion stream failed', { error });
-    send({ error: classifyAgentRunError(error).error });
+    const classified = logAgentRouteError(logger, 'Agent chat completion stream failed', error);
+    send({ error: toClientErrorBody(classified.error) });
   } finally {
     if (!closed) {
       reply.raw.write('data: [DONE]\n\n');
@@ -340,6 +342,43 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         async (key) => Boolean(await getModelByKey(auth.tenantDbName, key, auth.projectId)),
       );
       if (agent) {
+        // Continuing a session that waits on a request, under `cancel_pending`, cancels that request: it takes
+        // the permission to answer it.
+        if (typeof body.conversation_id === 'string') {
+          const conversation = await getConversationById(auth.tenantDbName, body.conversation_id);
+          if (conversation && conversation.agentKey === agent.key && conversation.projectId === auth.projectId) {
+            // Continuing a session somebody else started is acting on it: its owner always may, anybody else needs
+            // `agent.session_manage_others` and `agent.session_view_others` - as for the Responses route, whichever
+            // service gate let the token in.
+            const access = await decideSessionAccess(request, conversation, {
+              need: 'continue',
+              agent,
+              actor: { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') },
+            });
+            if (!access.ok) return sendOpenAiSessionRefusal(reply, request, access);
+            const refusal = await refuseCancelPending(request, { tenantDbName: auth.tenantDbName, conversation, agent });
+            if (refusal?.unavailable) {
+              return reply.code(503).send({
+                error: {
+                  message: 'Authorization is temporarily unavailable',
+                  type: 'server_error',
+                  code: 'authorization_unavailable',
+                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+                },
+              });
+            }
+            if (refusal) {
+              return reply.code(403).send({
+                error: {
+                  message: CANCEL_PENDING_FORBIDDEN_MESSAGE,
+                  type: 'permission_error',
+                  code: 'action_forbidden',
+                  ...(refusal.decisionId ? { decision_id: refusal.decisionId } : {}),
+                },
+              });
+            }
+          }
+        }
         return handleAgentChatCompletion({
           agent,
           auth,

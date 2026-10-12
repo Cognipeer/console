@@ -6,6 +6,9 @@ import PropertiesPanel, { type PropertyRow } from '@/components/common/ui/Proper
 import MessageBlock from '@/components/common/ui/MessageBlock';
 import CollapsibleText from '@/components/common/ui/CollapsibleText';
 import JsonTreeViewer from '@/components/common/JsonTreeViewer';
+import { MessageAttachments } from '@/components/agents/session/SessionAttachments';
+import type { AttachmentView } from '@/components/agents/session/sessionFilesUi';
+import { contentWithoutDrawnParts, messageImageViews, type TraceSessionFiles } from './messageImages';
 
 /**
  * One ordered stream of "what happened in this request" — every surface
@@ -21,13 +24,22 @@ import JsonTreeViewer from '@/components/common/JsonTreeViewer';
  * grouping never reaches across an unrelated message.
  */
 export type LlmRequestItem =
-  | { itemType: 'message'; role: string; roleLabel?: ReactNode; content: unknown }
+  | { itemType: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[] }
   | { itemType: 'divider'; label: ReactNode }
   /** Escape hatch for content a surface already renders well (e.g. a tool-definitions
    *  or response-format section) — passed through as-is, in its position in the stream. */
   | { itemType: 'custom'; node: ReactNode }
   | { itemType: 'call'; turnId: string; name?: string; args: unknown }
   | { itemType: 'result'; turnId: string; name?: string; content: unknown };
+
+/**
+ * A file a message carried: `{ fileId, name, mimeType, size, url?, expired? }`.
+ * `url` shows or opens it (an image is drawn from it, a document is saved from
+ * it); a file that is gone is `expired` and shows muted. Pictures inside the
+ * message's own content parts (`image_url` / `input_image`) are drawn too,
+ * without being listed here.
+ */
+export type LlmRequestAttachment = AttachmentView;
 
 export interface LlmRequestDetailData {
   /** Status/latency/finish-reason/decision/etc chips, rendered above the tabs. */
@@ -78,6 +90,8 @@ export interface LlmRequestDetailModalProps {
   title: ReactNode;
   data: LlmRequestDetailData | null;
   labels?: Partial<LlmRequestDetailLabels>;
+  /** The agent session the request was recorded in, when it is one: its recorded pictures are then drawn as thumbnails. */
+  sessionFiles?: TraceSessionFiles | null;
 }
 
 /* ─── Grouping: the ordered item stream → messages / dividers / turn cards ─── */
@@ -89,7 +103,7 @@ interface TurnEntry {
 }
 
 type GroupedEntry =
-  | { kind: 'message'; role: string; roleLabel?: ReactNode; content: unknown }
+  | { kind: 'message'; role: string; roleLabel?: ReactNode; content: unknown; attachments?: LlmRequestAttachment[] }
   | { kind: 'divider'; label: ReactNode }
   | { kind: 'custom'; node: ReactNode }
   | { kind: 'turn'; turnId: string; name?: string; entries: TurnEntry[] };
@@ -117,7 +131,7 @@ function groupItems(items: LlmRequestItem[]): GroupedEntry[] {
       // grouping never reaches across an unrelated turn of the conversation.
       openTurns.clear();
       if (item.itemType === 'message') {
-        output.push({ kind: 'message', role: item.role, roleLabel: item.roleLabel, content: item.content });
+        output.push({ kind: 'message', role: item.role, roleLabel: item.roleLabel, content: item.content, attachments: item.attachments });
       } else if (item.itemType === 'divider') {
         output.push({ kind: 'divider', label: item.label });
       } else {
@@ -223,6 +237,12 @@ function TurnCard({
 export interface LlmRequestItemsViewProps {
   items: LlmRequestItem[];
   labels?: Partial<LlmRequestDetailLabels>;
+  /**
+   * The agent session these messages were recorded in. A picture the request names by reference
+   * (`session-file://<id>`) is drawn from that session's content route — and shown as its name
+   * when the viewer is refused or the file is gone. Without it a reference is only a named chip.
+   */
+  sessionFiles?: TraceSessionFiles | null;
 }
 
 /**
@@ -232,7 +252,7 @@ export interface LlmRequestItemsViewProps {
  * rendering inline (e.g. Agent Observability's own Sections tab) without the
  * full-screen modal chrome around it.
  */
-export function LlmRequestItemsView({ items, labels: labelsOverride }: LlmRequestItemsViewProps) {
+export function LlmRequestItemsView({ items, labels: labelsOverride, sessionFiles }: LlmRequestItemsViewProps) {
   const labels = { ...DEFAULT_LABELS, ...labelsOverride };
   const grouped = groupItems(items);
   let turnNumber = 0;
@@ -249,7 +269,18 @@ export function LlmRequestItemsView({ items, labels: labelsOverride }: LlmReques
     <Stack gap="lg">
       {grouped.map((g, i) => {
         if (g.kind === 'message') {
-          return <MessageBlock key={i} messageRole={g.role} roleLabel={g.roleLabel} content={g.content} />;
+          const drawnFromContent = messageImageViews(g.content, { sessionFiles });
+          const files = [...(g.attachments ?? []), ...drawnFromContent];
+          return (
+            <MessageBlock
+              key={i}
+              messageRole={g.role}
+              roleLabel={g.roleLabel}
+              content={drawnFromContent.length > 0 ? contentWithoutDrawnParts(g.content) : g.content}
+            >
+              {files.length > 0 ? <MessageAttachments attachments={files} /> : null}
+            </MessageBlock>
+          );
         }
         if (g.kind === 'divider') {
           return <Divider key={i} label={g.label} labelPosition="left" />;
@@ -295,6 +326,7 @@ export default function LlmRequestDetailModal({
   title,
   data,
   labels: labelsOverride,
+  sessionFiles,
 }: LlmRequestDetailModalProps) {
   const labels = { ...DEFAULT_LABELS, ...labelsOverride };
   const hasRaw = Boolean(data?.raw && (data.raw.request !== undefined || data.raw.response !== undefined));
@@ -325,7 +357,7 @@ export default function LlmRequestDetailModal({
               <Box style={{ display: 'flex', gap: 40, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                 <ScrollArea.Autosize mah="calc(100vh - 220px)" style={{ flex: '1 1 520px', minWidth: 0 }} type="auto">
                   <Box pr="sm" maw={760}>
-                    <LlmRequestItemsView items={data.items} labels={labels} />
+                    <LlmRequestItemsView items={data.items} labels={labels} sessionFiles={sessionFiles} />
                   </Box>
                 </ScrollArea.Autosize>
 

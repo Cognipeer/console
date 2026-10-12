@@ -2347,6 +2347,19 @@ export interface IAgentExecutionConfig {
   backgroundEnabled?: boolean;
   /** Longest a background run of this agent may take, minutes. */
   backgroundMaxDurationMinutes?: number;
+  /**
+   * Default spend budget of a session of this agent (copied to each session
+   * when it starts). Absent = sessions have no budget; the per-turn
+   * `runtime.limits.maxCostUsd` is separate and unchanged.
+   */
+  sessionBudget?: IAgentSessionBudget & {
+    /**
+     * May an API client remove this budget or raise it past `maxCostUsd`
+     * (session create / `PATCH`)? Default false: the budget the admin set binds
+     * the integration it is meant to constrain. Dashboard users are not affected.
+     */
+    allowClientOverride?: boolean;
+  };
   /** What an API call that does not say `background` gets. Default 'sync'. */
   defaultMode?: 'sync' | 'background';
   /** Callback for background runs started without their own `callback_url`. */
@@ -2355,6 +2368,54 @@ export interface IAgentExecutionConfig {
   callbackSecret?: string;
   /** Sealed `callbackSecret`; never returned by the API. */
   callbackSecretSealed?: string;
+}
+
+/**
+ * Files a user attaches to a session (the composer's paperclip, the client
+ * API's `input_file` / `input_image`). Every field is a stored setting; absent
+ * limits take the defaults in `SESSION_FILES_DEFAULTS` (sessionFilesConfig.ts).
+ *
+ * Off unless switched on, and on only with a bucket to keep the files in: the
+ * files are ordinary Document Store files in the bucket the agent names — there
+ * is no built-in fallback storage, and nothing is ever written to the server's
+ * own disk unless the operator chose a local-disk bucket on purpose.
+ */
+export interface IAgentAttachmentsConfig {
+  /** true = the agent takes attachments (needs `bucketKey`). Default false. */
+  enabled?: boolean;
+  /** Most files one session may hold. Default 10. */
+  maxFiles?: number;
+  /** Largest single file, MB. Default 20. */
+  maxFileSizeMb?: number;
+  /** MIME types accepted (`image/*` allowed); empty / absent = anything convertible. */
+  allowedMimeTypes?: string[];
+  /** A message's attachments are put in the user turn when their text is at most this many tokens (estimated chars/4); otherwise the agent reads them in pages. Default 30000. */
+  inlineMaxTokens?: number;
+  /** Characters per page of `session_files_read`. Default 20000. */
+  readPageChars?: number;
+  /** Days a file lives after upload before the cleanup removes it. Default 30. */
+  retentionDays?: number;
+  /** Bucket of the agent's project the files are stored in. Required when `enabled`. */
+  bucketKey?: string;
+  /** Root folder inside the bucket; a file lands in `<folder>/<agentKey>/<sessionId>/…`. Default `agent-sessions`. */
+  folder?: string;
+  /** Files uploaded to a session that no message has carried yet ride along with the next message. Default true. */
+  attachNewUploads?: boolean;
+  /**
+   * Most images ONE model request carries. Images travel as references and are
+   * read from the bucket at the model call; beyond this the oldest ones become a
+   * text placeholder naming the file (the agent can look again with
+   * `session_files_view_image`). Default 6.
+   */
+  maxImages?: number;
+  /** Most image bytes (before base64) one model request carries, oldest dropped first. Default 12000000. */
+  maxBytes?: number;
+  /**
+   * How many of the person's most recent image-bearing messages are shown again
+   * with a new message when the agent's own context window no longer holds them.
+   * 0 = never re-attach. Default 2.
+   */
+  carryRecentImages?: number;
 }
 
 export interface IAgentConfig {
@@ -2429,6 +2490,93 @@ export interface IAgentConfig {
    * value is min(env ceiling, tenant quota, this).
    */
   execution?: IAgentExecutionConfig;
+  /**
+   * Human in the loop: tool approvals and questions to the user. Absent (every
+   * agent created before this existed) = nothing ever pauses.
+   */
+  humanInTheLoop?: IAgentHumanInTheLoopConfig;
+  /** Files users may attach to a session. Absent = not accepted. */
+  attachments?: IAgentAttachmentsConfig;
+  /**
+   * What a chat surface (a portal, a widget) shows around this agent: the
+   * welcome text and the suggested first messages. Absent = nothing extra.
+   */
+  experience?: IAgentExperienceConfig;
+}
+
+/** A suggested first message shown on an empty conversation. */
+export interface IAgentStarter {
+  /** The message the starter puts in the composer (or sends). */
+  text: string;
+  /** Short chip label; defaults to the text. */
+  label?: string;
+  /** Send the message at once instead of only filling the composer. Default false. */
+  autoSend?: boolean;
+}
+
+/** `IAgentConfig.experience` — what a chat surface shows around the agent. */
+export interface IAgentExperienceConfig {
+  /** At most 6. */
+  starters?: IAgentStarter[];
+  /** Markdown welcome text; may use `{{user.name}}`, `{{user.firstName}}`, `{{agent.name}}` and `{{portal.name}}`. */
+  welcome?: string;
+  /**
+   * Tools the page that embeds a chat may hand this agent (a portal's embed
+   * settings declare them). The agent's author opts in here: absent, or
+   * `enabled` not true, = the agent never gets a tool from a page.
+   */
+  clientTools?: IAgentClientToolsConfig;
+}
+
+/**
+ * `IAgentExperienceConfig.clientTools`. What such a tool returns is typed by the
+ * end user's browser, so it reaches the model marked as untrusted and the agent's
+ * approval policy applies to the call unless the embedding's admin exempts the tool.
+ */
+export interface IAgentClientToolsConfig {
+  /** Accept tools from the embedding page. Default false. */
+  enabled?: boolean;
+}
+
+/** Whether a tool call waits for a person first. */
+export type AgentToolApprovalPolicy = 'always' | 'never';
+
+/**
+ * What an approval-gated tool call or an ask-user question does on a run that
+ * has no interactive user (a schedule, an evaluation or red-team case, an
+ * OpenAI-shaped or Assistants client):
+ *  - `deny` (default): the call returns an error result to the model and never
+ *    runs; the run continues. The ask-user tool is not offered.
+ *  - `pause`: behaves as an attended run — the turn stops and the request waits
+ *    for someone to answer it from Studio.
+ *  - `allow`: the call runs without approval. An explicit owner opt-in only.
+ */
+export type AgentHitlUnattendedPolicy = 'deny' | 'pause' | 'allow';
+
+/**
+ * Human-in-the-loop settings of an agent. Every behaviour choice is a stored
+ * setting (the Configure → "Approvals & questions" section), never a constant.
+ */
+export interface IAgentHumanInTheLoopConfig {
+  /** Let the model ask the user a structured question mid-run. */
+  askUser?: { enabled: boolean; /** Default true. */ allowFreeText?: boolean };
+  toolApproval?: {
+    enabled: boolean;
+    /** Policy for every tool not named in `tools` and not read-only. Default `always`. */
+    defaultPolicy?: AgentToolApprovalPolicy;
+    /** Per-tool override; the key is the tool name as the model sees it. */
+    tools?: Record<string, AgentToolApprovalPolicy>;
+  };
+  /** Minutes a request waits before `onTimeout` applies. Default 1440; 0 = never expires. */
+  timeoutMinutes?: number;
+  /** What a timeout does. `deny` (default) denies and lets the agent continue; `cancel` drops the request. */
+  onTimeout?: 'deny' | 'cancel';
+  /** Who may answer. Default `owner_or_admin`. */
+  approvers?: 'owner' | 'owner_or_admin' | 'project_members';
+  /** A new message while a request is open. `reject` (default) answers 409; `cancel_pending` cancels the request and proceeds. */
+  onUserMessageWhilePending?: 'reject' | 'cancel_pending';
+  /** Runs with nobody to answer (schedules, API bridges, evaluations). Default `deny`. */
+  unattended?: AgentHitlUnattendedPolicy;
 }
 
 /**
@@ -2611,6 +2759,12 @@ export interface IAgentConversationStep {
    * any tool that legitimately returns a field called `error`.
    */
   status?: 'success' | 'error' | 'rejected' | 'handoff';
+  /**
+   * A person (or the approval timeout) answered "deny" to this call: it is
+   * `rejected` and never ran, but it is a decision, not a failure — no `error`
+   * text, not counted as a failed call. A call a guardrail blocked is `error`.
+   */
+  deniedByUser?: boolean;
   /** Served from the response cache — no upstream call was made. */
   fromCache?: boolean;
   /** `output` is a compaction of the result; `originalTokenCount` is its pre-compaction size. */
@@ -2626,12 +2780,38 @@ export interface IAgentConversationStep {
   narration?: string;
 }
 
+/** A file attached to a user message — the file itself is a conversation file (`IFileRecord`). */
+export interface IAgentMessageAttachment {
+  fileId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+}
+
+/** An earlier answer to the same question, kept when an answer is regenerated (newest last, at most 5). */
+export interface IAgentMessageVersion {
+  content: string;
+  timestamp: Date;
+  stopReason?: 'limit' | 'cancelled' | 'paused';
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number };
+}
+
 export interface IAgentConversationMessage {
+  /**
+   * Stable id of the message, assigned the first time something has to point at
+   * it (feedback, a regenerate). Absent on messages nothing ever referred to;
+   * `#<index>` addresses those.
+   */
+  id?: string;
   role: string;
   content: string;
+  /** Files attached to this (user) message. Absent on every message without any. */
+  attachments?: IAgentMessageAttachment[];
   /** Reasoning / "thinking" trace for assistant messages from reasoning models. */
   reasoning?: string;
   timestamp: Date;
+  /** Answers this one replaced (a regenerate), oldest first. */
+  previousVersions?: IAgentMessageVersion[];
   /**
    * Debug detail for an assistant turn produced by a Session (not the live
    * `/v1/responses` path, which deliberately returns content only — see
@@ -2664,6 +2844,12 @@ export interface IAgentConversationMessage {
   stopReason?: 'limit' | 'cancelled' | 'paused';
   /** The runtime's wording, e.g. "maxWallClockMs (30000ms) exceeded". */
   stopDetail?: string;
+  /**
+   * Snapshot of the approvals / questions a paused turn is waiting on, kept on
+   * the message so history can render them. `status` / `resolution` are updated
+   * in place when the action is resolved — the live record is `IAgentPendingAction`.
+   */
+  pendingActions?: IAgentMessagePendingAction[];
   /** Context summarizations that ran during this turn — see `IAgentTurnCompaction`. */
   compactions?: IAgentTurnCompaction[];
   /** The tool results those summarizations replaced with a placeholder. */
@@ -2699,6 +2885,192 @@ export interface IAgentTurnCompaction {
   failed?: boolean;
 }
 
+/** Why a turn stopped, as the session API reports it (conversation + events). */
+export type AgentSessionStopReason = 'end_turn' | 'requires_action' | 'limit' | 'cancelled' | 'error' | 'budget_reached';
+
+/**
+ * What the conversation is doing right now. Absent = idle (every pre-existing row).
+ * `budget_paused`: the session's own spend budget was reached and the agent
+ * waits for the budget to be raised (or removed) before it goes on.
+ */
+export type AgentSessionRuntimeStatus = 'idle' | 'running' | 'requires_action' | 'budget_paused';
+
+/**
+ * A spend budget for one session (conversation): the sum of what its turns
+ * cost. `onReach: 'pause'` stops the turn and waits for a higher budget, after
+ * which the turn can be continued; `'stop'` stops it and refuses new messages
+ * until the budget is raised or removed.
+ */
+export interface IAgentSessionBudget {
+  maxCostUsd: number;
+  onReach: 'pause' | 'stop';
+}
+
+/**
+ * - `tool_approval`: a person decides whether a tool call runs.
+ * - `user_question`: the model asked the person something.
+ * - `client_tool`: the model called a tool that runs in the page that embeds the
+ *   chat (declared by the embedding's admin); the page answers with its result.
+ */
+export type AgentPendingActionKind = 'tool_approval' | 'user_question' | 'client_tool';
+export type AgentPendingActionStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
+
+/** One question of an `ask user` pause — mirrors the agent-sdk `UserQuestionItem`. */
+export interface IAgentUserQuestion {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  placeholder?: string;
+  required?: boolean;
+  options?: Array<{ label: string; value?: string; description?: string }>;
+}
+
+/** How a pending action was answered. */
+export interface IAgentPendingActionResolution {
+  decision?: 'allow' | 'deny';
+  comment?: string;
+  approvedArgs?: Record<string, unknown>;
+  answers?: Record<string, string | string[]>;
+  cancelled?: boolean;
+  rememberForSession?: boolean;
+  /** `client_tool`: the result the host page returned (JSON, at most 64 KB). */
+  output?: unknown;
+  /** `client_tool`: the host page could not do it, or did not answer in time. The model reads it as the tool's error. */
+  error?: string;
+  /** `client_tool`: the error is a timeout. */
+  timedOut?: boolean;
+  /** `client_tool`: how long the host page took, measured from the request. */
+  durationMs?: number;
+}
+
+/** The copy of a pending action carried on the assistant message — see `IAgentConversationMessage.pendingActions`. */
+export interface IAgentMessagePendingAction {
+  id: string;
+  kind: AgentPendingActionKind;
+  toolName?: string;
+  args?: unknown;
+  questions?: IAgentUserQuestion[];
+  allowFreeText?: boolean;
+  /** `client_tool`: how long the host page may take. */
+  timeoutSeconds?: number;
+  status: AgentPendingActionStatus;
+  resolution?: IAgentPendingActionResolution;
+}
+
+/**
+ * A tool approval or a question the agent paused on (`agent_pending_actions`).
+ * One row per pending SDK approval / question; resolved through
+ * `resolveAgentPendingAction`.
+ */
+export interface IAgentPendingAction {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  conversationId: string;
+  runId?: string;
+  kind: AgentPendingActionKind;
+  /** The SDK's own approval / question id. */
+  sdkId: string;
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  questions?: IAgentUserQuestion[];
+  allowFreeText?: boolean;
+  status: AgentPendingActionStatus;
+  requestedAt: Date;
+  expiresAt?: Date | null;
+  resolvedAt?: Date | null;
+  resolvedBy?: string;
+  resolution?: IAgentPendingActionResolution;
+  /** `client_tool`: how long the host page may take before the call is answered with an error. */
+  clientTool?: { timeoutSeconds: number };
+  /** The config the paused turn ran with, so the continuation rebuilds the same agent. */
+  agentVersion?: number | null;
+  usePublished?: boolean;
+  /** Who started the paused turn. */
+  createdBy?: string;
+}
+
+export type AgentFeedbackRating = 'up' | 'down';
+export type AgentFeedbackReason = 'inaccurate' | 'incomplete' | 'off_topic' | 'too_long' | 'unsafe' | 'other';
+
+/**
+ * One person's rating of one assistant message (`agent_message_feedback`).
+ * At most one per person per message (`conversationId + messageId + userId`);
+ * rating again replaces it and withdrawing deletes it.
+ */
+export interface IAgentMessageFeedback {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  /** The version the rated turn ran (null = the draft). */
+  agentVersion?: number | null;
+  conversationId: string;
+  /** The message's stable id (`IAgentConversationMessage.id`). */
+  messageId: string;
+  /** Where the message sat in the transcript when it was rated. */
+  messageIndex: number;
+  userId: string;
+  /** Where the rating came from: `portal`, `embed`, `dashboard`, `api`… */
+  channel: string;
+  portalId?: string;
+  rating: AgentFeedbackRating;
+  reasons: AgentFeedbackReason[];
+  comment?: string;
+  /** Set when the rated message was later removed (regenerated, edited away). The rating still counts. */
+  removedAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Filters of `listAgentMessageFeedback` / `aggregateAgentMessageFeedback`. */
+export interface AgentMessageFeedbackFilter {
+  projectId: string;
+  agentKey: string;
+  rating?: AgentFeedbackRating;
+  reason?: AgentFeedbackReason;
+  portalId?: string;
+  hasComment?: boolean;
+  from?: Date;
+  to?: Date;
+}
+
+/** Counts over a feedback filter. */
+export interface AgentMessageFeedbackTotals {
+  up: number;
+  down: number;
+  withComment: number;
+  /** How many ratings name each reason (a rating can name several). */
+  reasons: Partial<Record<AgentFeedbackReason, number>>;
+}
+
+/**
+ * One entry of the append-only session event log (`agent_session_events`).
+ * `seq` is dense and increasing per conversation; `(conversationId, seq)` is unique.
+ */
+export interface IAgentSessionEvent {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId: string;
+  agentKey: string;
+  conversationId: string;
+  seq: number;
+  type: string;
+  data: Record<string, unknown>;
+  runId?: string;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+/**
+ * An event as handed to `appendAgentSessionEvents`. A caller that sets `_id`
+ * keeps it stable across retries, which is how it recognises what an earlier,
+ * partly-failed attempt already stored (see `AgentSessionEventSeqConflictError`).
+ */
+export type NewAgentSessionEvent = Omit<IAgentSessionEvent, '_id'> & { _id?: string };
+
 export interface IAgentConversation {
   _id?: ObjectId | string;
   tenantId: string;
@@ -2706,6 +3078,28 @@ export interface IAgentConversation {
   agentKey: string;
   title?: string;
   messages: IAgentConversationMessage[];
+  /** What the conversation is doing now; absent = idle. */
+  runtimeStatus?: AgentSessionRuntimeStatus;
+  /** Why the last turn stopped. */
+  stopReason?: AgentSessionStopReason;
+  /** Ids (`act_…`) of the actions the conversation is waiting on while `requires_action`. */
+  pendingActionIds?: string[];
+  /** Highest `agent_session_events.seq` written for this conversation. */
+  lastEventSeq?: number;
+  /**
+   * This session's spend budget. Copied from the agent's `execution.sessionBudget`
+   * when the session is created; can be set, raised or removed (`null`) later.
+   */
+  budget?: IAgentSessionBudget | null;
+  /** Running total of the priced usage of every turn (USD); backfilled from the messages when absent. */
+  spentUsd?: number;
+  /**
+   * Which turn owns the runtime fields above right now (set when a turn starts).
+   * Internal: a turn that was cut off (deadline, cancel) and finishes late writes
+   * its end state only if it is still the owner, so it cannot overwrite the turn
+   * that started after it. Never part of an API response.
+   */
+  runtimeTurnId?: string;
   /**
    * `metadata.runtimeContext` holds the context entered once when the session
    * is started, merged UNDER every turn's own runtime context (so a
@@ -2716,6 +3110,9 @@ export interface IAgentConversation {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+/** A conversation as a list shows it: no transcript, just how many messages it holds. */
+export type IAgentConversationListItem = Omit<IAgentConversation, 'messages'> & { messageCount: number };
 
 /**
  * The agent runtime's own state for a conversation, carried between turns.
@@ -2739,6 +3136,13 @@ export interface IAgentConversationState {
   agentKey: string;
   /** `JSON.stringify` of the agent-sdk `AgentSnapshot`. */
   snapshot: string;
+  /**
+   * The FULL resumable SDK state at a pause (messages as the SDK left them,
+   * pending approvals / questions, resume ctx keys). Present only while the
+   * conversation `requires_action`; `snapshot` above is the normal repaired
+   * state used when the pending actions are cancelled.
+   */
+  pausedSnapshot?: string;
   /**
    * `conversation.messages.length` right after the turn that produced the
    * snapshot. A mismatch at load time means the transcript was written by
@@ -3663,6 +4067,12 @@ export type AgentRunMode = 'sync' | 'background';
 export type AgentRunStatus =
   | 'queued'
   | 'running'
+  /**
+   * Non-terminal: the turn paused for an approval or a question. Not an active
+   * status (it does not hold the conversation's run slot); a resolution moves
+   * it back to `queued`.
+   */
+  | 'requires_action'
   | 'succeeded'
   | 'failed'
   | 'canceled';
@@ -3688,6 +4098,62 @@ export type AgentRunErrorReason =
 /** Durable delivery state for the optional callback webhook (§12.6). */
 export type AgentRunCallbackStatus = 'pending' | 'delivered' | 'failed';
 
+// ── Webhook subscriptions ────────────────────────────────────────────────
+
+export type WebhookEndpointStatus = 'active' | 'disabled';
+
+/** Why an endpoint was switched off. `manual` = a person did it. */
+export type WebhookDisabledReason = 'manual' | 'redirect' | 'blocked_address' | 'sustained_failure';
+
+/**
+ * An outgoing webhook subscription (`webhook_endpoints`). `projectId` absent
+ * = every project of the tenant.
+ */
+export interface IWebhookEndpoint {
+  _id?: ObjectId | string;
+  tenantId: string;
+  projectId?: string | null;
+  url: string;
+  description?: string;
+  /** Event types and `prefix.*` patterns the endpoint subscribes to. */
+  events: string[];
+  /** Sealed (`encryptObject`) signing secret. Never returned by the API. */
+  secretSealed: string;
+  status: WebhookEndpointStatus;
+  disabledReason?: WebhookDisabledReason | null;
+  /** Start of the current unbroken run of failed deliveries; cleared by any 2xx. */
+  failingSince?: Date | null;
+  createdBy: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export type WebhookDeliveryStatus = 'pending' | 'delivered' | 'failed';
+
+/**
+ * One event owed to one endpoint (`webhook_deliveries`). `pending` with a
+ * `nextAttemptAt` is the retry queue: the reconciler re-enqueues what is due.
+ */
+export interface IWebhookDelivery {
+  _id?: ObjectId | string;
+  tenantId: string;
+  /** The project the event happened in. */
+  projectId?: string | null;
+  endpointId: string;
+  eventId: string;
+  eventType: string;
+  /** The thin body that is signed and sent: `{ id, type, createdAt, projectId, data }`. */
+  payload: Record<string, unknown>;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  nextAttemptAt?: Date | null;
+  lastStatusCode?: number | null;
+  lastError?: string | null;
+  lastDurationMs?: number | null;
+  createdAt: Date;
+  deliveredAt?: Date | null;
+}
+
 export interface IAgentRun extends IUsageAttributionFields {
   _id?: ObjectId | string;
   mode: AgentRunMode;
@@ -3703,6 +4169,8 @@ export interface IAgentRun extends IUsageAttributionFields {
    */
   conversationId: string;
   userMessage: string;
+  /** Ids of the conversation files this turn's message attaches (`IFileRecord`). */
+  attachments?: string[] | null;
   /**
    * Which agent config the worker re-runs the turn with. The queue message
    * carries only ids; the worker loads the rest from this row (§7 step 2).
@@ -3720,6 +4188,16 @@ export interface IAgentRun extends IUsageAttributionFields {
   idempotencyRequestHash?: string | null;
   status: AgentRunStatus;
   errorReason?: AgentRunErrorReason;
+  /**
+   * How the agent turn ended (a `succeeded` run can still be `limit`). Absent on
+   * rows from before this field and on non-terminal / failed runs.
+   */
+  stopReason?: AgentSessionStopReason | null;
+  /**
+   * Set while the run is queued to CONTINUE a paused turn (the pending actions
+   * it resolves) rather than to start from `userMessage`.
+   */
+  resumeActionIds?: string[] | null;
   /** The same response payload a synchronous call would have returned. */
   result?: Record<string, unknown> | null;
   errorMessage?: string | null;

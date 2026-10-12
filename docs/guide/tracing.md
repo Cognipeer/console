@@ -23,6 +23,10 @@ The left sidebar splits the surface into three operational views:
 
 Clicking a session opens its event timeline — LLM calls, tool calls, retrieval steps, and child-agent invocations are rendered as nested spans with token usage and latency on each row.
 
+### Who sees the threads of an agent
+
+The thread of an agent is its [agent session](/guide/agent-sessions): whoever started it sees it, and anybody else needs the Agents service at Read (`agent.session_view_others`) - holding Tracing alone does not show other people's agent threads, they are left out of the lists and refused with `403` by id. Threads that other producers send (an SDK, an OpenTelemetry exporter) are not agent sessions and follow the Tracing service only. A caller who is held to their own sessions gets the Threads and Sessions lists filled from further pages and a `hasMore` / `nextSkip` pair in place of `total`. See [Authorization](/guide/authorization#sessions-and-approvals).
+
 ## Concepts
 
 | Concept | Description |

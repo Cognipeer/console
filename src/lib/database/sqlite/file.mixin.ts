@@ -2,9 +2,10 @@
  * SQLite Provider – File record + bucket operations mixin
  */
 
-import type { IFileRecord, IFileBucketRecord } from '../provider.interface';
+import type { IFileRecord, IFileBucketRecord, IFileEntriesPage, FileListPurpose } from '../provider.interface';
 import type { Constructor, SqliteRow } from './types';
 import { SQLiteProviderBase, TABLES } from './base';
+import { keyPrefixUpperBound, walkFileEntries, type KeyRange } from '../fileEntryWalk';
 
 export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: TBase) {
   return class FileOps extends Base {
@@ -20,9 +21,11 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         INSERT INTO ${TABLES.files}
         (id, tenantId, projectId, providerKey, bucketKey, key, name, size, contentType, checksum, etag,
          metadata, markdownKey, markdownStatus, markdownError, markdownSize, markdownContentType,
+         purpose, conversationId, agentKey, expiresAt, uploadedBy,
          createdBy, updatedBy, createdAt, updatedAt)
         VALUES (@id, @tenantId, @projectId, @providerKey, @bucketKey, @key, @name, @size, @contentType, @checksum, @etag,
          @metadata, @markdownKey, @markdownStatus, @markdownError, @markdownSize, @markdownContentType,
+         @purpose, @conversationId, @agentKey, @expiresAt, @uploadedBy,
          @createdBy, @updatedBy, @createdAt, @updatedAt)
       `).run({
         id,
@@ -42,6 +45,11 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         markdownError: record.markdownError ?? null,
         markdownSize: record.markdownSize ?? null,
         markdownContentType: record.markdownContentType ?? null,
+        purpose: record.purpose ?? null,
+        conversationId: record.conversationId ?? null,
+        agentKey: record.agentKey ?? null,
+        expiresAt: record.expiresAt ? new Date(record.expiresAt).toISOString() : null,
+        uploadedBy: record.uploadedBy ?? null,
         createdBy: record.createdBy,
         updatedBy: record.updatedBy ?? null,
         createdAt: now,
@@ -71,6 +79,7 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       if (data.markdownError !== undefined) { sets.push('markdownError = @markdownError'); params.markdownError = data.markdownError; }
       if (data.markdownSize !== undefined) { sets.push('markdownSize = @markdownSize'); params.markdownSize = data.markdownSize; }
       if (data.markdownContentType !== undefined) { sets.push('markdownContentType = @markdownContentType'); params.markdownContentType = data.markdownContentType; }
+      if (data.expiresAt !== undefined) { sets.push('expiresAt = @expiresAt'); params.expiresAt = data.expiresAt ? new Date(data.expiresAt).toISOString() : null; }
       if (data.updatedBy !== undefined) { sets.push('updatedBy = @updatedBy'); params.updatedBy = data.updatedBy; }
 
       db.prepare(`UPDATE ${TABLES.files} SET ${sets.join(', ')} WHERE id = @id`).run(params);
@@ -97,15 +106,31 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       return row ? this.mapFileRow(row) : null;
     }
 
+    /** `purpose` as a SQL condition: session files, or everything that is not one. */
+    protected filePurposeClause(purpose: FileListPurpose | undefined): string | null {
+      if (purpose === 'conversation') return "purpose = 'conversation'";
+      if (purpose === 'other') return "(purpose IS NULL OR purpose <> 'conversation')";
+      return null;
+    }
+
     async listFileRecords(filters: {
       providerKey: string; bucketKey: string; projectId?: string;
-      search?: string; limit?: number; cursor?: string;
+      search?: string; prefix?: string; purpose?: FileListPurpose; limit?: number; cursor?: string;
     }): Promise<{ items: IFileRecord[]; nextCursor?: string }> {
       const db = this.getTenantDb();
       const clauses: string[] = ['providerKey = @providerKey', 'bucketKey = @bucketKey'];
       const params: Record<string, unknown> = { providerKey: filters.providerKey, bucketKey: filters.bucketKey };
 
       if (filters.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+      if (filters.prefix) {
+        // A key range, not LIKE: exact (LIKE ignores case) and served by the (providerKey, bucketKey, key) index.
+        clauses.push('key >= @prefix');
+        params.prefix = filters.prefix;
+        const upper = keyPrefixUpperBound(filters.prefix);
+        if (upper !== undefined) { clauses.push('key < @prefixUpper'); params.prefixUpper = upper; }
+      }
+      const purposeClause = this.filePurposeClause(filters.purpose);
+      if (purposeClause) clauses.push(purposeClause);
       if (filters.search) { clauses.push('name LIKE @search'); params.search = this.likePattern(filters.search.trim()); }
       if (filters.cursor) { clauses.push('id > @cursor'); params.cursor = filters.cursor; }
 
@@ -123,6 +148,48 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
       }
 
       return { items, nextCursor };
+    }
+
+    async listFileEntries(filters: {
+      providerKey: string; bucketKey: string; projectId?: string;
+      prefix: string; purpose?: FileListPurpose; limit?: number; cursor?: string;
+    }): Promise<IFileEntriesPage> {
+      const db = this.getTenantDb();
+      const purposeClause = this.filePurposeClause(filters.purpose);
+      const probe = async (range: KeyRange, limit: number): Promise<IFileRecord[]> => {
+        const clauses: string[] = ['providerKey = @providerKey', 'bucketKey = @bucketKey'];
+        const params: Record<string, unknown> = { providerKey: filters.providerKey, bucketKey: filters.bucketKey, limit };
+        if (filters.projectId) { clauses.push('projectId = @projectId'); params.projectId = filters.projectId; }
+        if (range.gte !== undefined) { clauses.push('key >= @gte'); params.gte = range.gte; }
+        if (range.gt !== undefined) { clauses.push('key > @gt'); params.gt = range.gt; }
+        if (range.lt !== undefined) { clauses.push('key < @lt'); params.lt = range.lt; }
+        if (purposeClause) clauses.push(purposeClause);
+        const rows = db.prepare(`SELECT * FROM ${TABLES.files} WHERE ${clauses.join(' AND ')} ORDER BY key ASC LIMIT @limit`)
+          .all(params) as SqliteRow[];
+        return rows.map((r) => this.mapFileRow(r));
+      };
+      return walkFileEntries(probe, {
+        prefix: filters.prefix,
+        limit: Math.min(Math.max(filters.limit ?? 50, 1), 200),
+        cursor: filters.cursor,
+      });
+    }
+
+    async listFileRecordsByConversation(conversationId: string): Promise<IFileRecord[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(`SELECT * FROM ${TABLES.files} WHERE conversationId = @conversationId ORDER BY createdAt ASC, rowid ASC`)
+        .all({ conversationId }) as SqliteRow[];
+      return rows.map((r) => this.mapFileRow(r));
+    }
+
+    async listExpiredConversationFiles(before: Date, limit: number): Promise<IFileRecord[]> {
+      const db = this.getTenantDb();
+      const rows = db.prepare(`
+        SELECT * FROM ${TABLES.files}
+        WHERE purpose = 'conversation' AND expiresAt IS NOT NULL AND expiresAt < @before
+        ORDER BY expiresAt ASC, createdAt ASC, rowid ASC LIMIT @limit
+      `).all({ before: before.toISOString(), limit }) as SqliteRow[];
+      return rows.map((r) => this.mapFileRow(r));
     }
 
     async countFileRecords(filters?: { projectId?: string }): Promise<number> {
@@ -263,6 +330,11 @@ export function FileMixin<TBase extends Constructor<SQLiteProviderBase>>(Base: T
         markdownError: r.markdownError as string | undefined,
         markdownSize: r.markdownSize as number | undefined,
         markdownContentType: r.markdownContentType as string | undefined,
+        ...(r.purpose ? { purpose: r.purpose as 'conversation' } : {}),
+        ...(r.conversationId ? { conversationId: r.conversationId as string } : {}),
+        ...(r.agentKey ? { agentKey: r.agentKey as string } : {}),
+        ...(r.expiresAt ? { expiresAt: this.toDate(r.expiresAt) } : {}),
+        ...(r.uploadedBy ? { uploadedBy: r.uploadedBy as string } : {}),
         createdBy: r.createdBy as string,
         updatedBy: r.updatedBy as string | undefined,
         createdAt: this.toDate(r.createdAt),

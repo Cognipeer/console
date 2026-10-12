@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
+import { authz } from '@/lib/iam/routeAuthz';
 import { getDashboardData } from '@/lib/services/dashboard/dashboardService';
 import {
   GuardrailBlockError,
@@ -32,13 +33,31 @@ import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { parseDashboardDateFilterFromSearchParams } from '@/lib/utils/dashboardDateFilter';
 import {
   applyStreamHeaders,
+  authorizeServiceForRequest,
   readJsonBody,
   requireProjectContextForRequest,
+  resolveSessionRbacContext,
   sendProjectContextError,
   withApiRequestContext,
+  type ApiSessionContext,
 } from '../fastify-utils';
 
 const logger = createLogger('api:dashboard');
+
+// The overview is a per-project summary for any member of the project (the
+// project context already limits what it shows). The handler drops the sections
+// whose service the caller cannot read (models, vector, tracing), so project
+// narrowing / custom policies / token scopes apply to the numbers too.
+const OVERVIEW_AUTHZ = authz.authenticated();
+// The playgrounds invoke a model of the tenant on the caller's behalf, i.e. the
+// same capability as the token API's chat / audio / images / embeddings / ocr
+// routes, which are gated by the `models` (and `ocr`) service. They were
+// unmapped, so a user whose `models` permission an admin had lowered to `none`
+// could still run any model from here. They require `read` (not the method's
+// `write`): a member who may see and test models keeps the playground, only a
+// member without the service loses it.
+const MODEL_PLAYGROUND_AUTHZ = authz.service('models', 'read');
+const OCR_PLAYGROUND_AUTHZ = authz.service('ocr', 'read');
 
 type MessageContentPart = string | { text?: string };
 type ChatMessage = {
@@ -65,8 +84,34 @@ function sanitize(value: unknown, max = 20000) {
   }
 }
 
+/**
+ * Blank the overview sections of services the caller cannot read (the policy
+ * engine decides, with project narrowing and the token cap). The caller's user
+ * row and groups are loaded once and handed to the three checks.
+ */
+export async function hideUnreadableOverviewSections(
+  request: FastifyRequest,
+  session: ApiSessionContext,
+  data: Awaited<ReturnType<typeof getDashboardData>>,
+): Promise<void> {
+  const rbac = await resolveSessionRbacContext(session);
+  const [models, vector, tracing] = await Promise.all(
+    (['models', 'vector', 'tracing'] as const).map((service) =>
+      authorizeServiceForRequest(request, service, { level: 'read', rbac })),
+  );
+  if (!models.allowed) data.stats.models = { total: 0, llm: 0, embedding: 0 };
+  if (!vector.allowed) data.stats.vectors = { providers: 0, indexes: 0 };
+  if (!tracing.allowed) {
+    data.stats.tracing = { totalSessions: 0, totalTokens: 0, activeSessions: 0 };
+    data.stats.apiCalls = { total: 0, trend: 0 };
+    data.recentActivity = [];
+    data.recentSessions = [];
+    data.daily = [];
+  }
+}
+
 export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
-  app.get('/dashboard', withApiRequestContext(async (request, reply) => {
+  app.get('/dashboard', { config: OVERVIEW_AUTHZ }, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const filter = parseDashboardDateFilterFromSearchParams(
@@ -82,6 +127,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
           to: filter.to,
         },
       );
+      await hideUnreadableOverviewSections(request, session, data);
 
       return reply.code(200).send({
         ...data,
@@ -99,7 +145,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/dashboard/playground/chat', withApiRequestContext(async (request, reply) => {
+  app.post('/dashboard/playground/chat', { config: MODEL_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
     const startedAt = Date.now();
     let body: PlaygroundChatRequest | undefined;
     let projectId: string;
@@ -190,7 +236,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ─── STT playground ─────────────────────────────────────────────────
-  app.post('/dashboard/playground/transcription', withApiRequestContext(async (request, reply) => {
+  app.post('/dashboard/playground/transcription', { config: MODEL_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const contentType = (Array.isArray(request.headers['content-type'])
@@ -280,7 +326,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ─── TTS playground ─────────────────────────────────────────────────
-  app.post('/dashboard/playground/speech', withApiRequestContext(async (request, reply) => {
+  app.post('/dashboard/playground/speech', { config: MODEL_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -326,7 +372,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ─── Image generation playground ────────────────────────────────────
-  app.post('/dashboard/playground/images', withApiRequestContext(async (request, reply) => {
+  app.post('/dashboard/playground/images', { config: MODEL_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -419,7 +465,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
   // Returns the vector's shape and a short preview rather than thousands of
   // floats, plus pairwise cosine similarity — which is the thing an operator is
   // actually trying to eyeball when they open this.
-  app.post('/dashboard/playground/embeddings', withApiRequestContext(async (request, reply) => {
+  app.post('/dashboard/playground/embeddings', { config: MODEL_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const body = readJsonBody<Record<string, unknown>>(request);
@@ -495,7 +541,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
   }));
 
   // ─── OCR playground ─────────────────────────────────────────────────
-  app.post('/dashboard/playground/ocr', withApiRequestContext(async (request, reply) => {
+  app.post('/dashboard/playground/ocr', { config: OCR_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const contentType = (Array.isArray(request.headers['content-type'])

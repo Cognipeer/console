@@ -25,6 +25,10 @@ import {
 } from './bindingResolution';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
+import { validateHitlConfig } from './agentHumanInTheLoop';
+import { validateExperienceConfig } from './agentExperience';
+import { normalizeAttachmentsFolder } from './sessionFilesConfig';
+import { inspectFileBucket } from './sessionFilesBucket';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -87,6 +91,8 @@ function checkEnum(issues: Issues, field: string, value: unknown, allowed: Set<s
  */
 export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValidation {
     const issues: Issues = { errors: [], warnings: [] };
+    // What a chat surface shows around the agent applies to a connected agent as well.
+    issues.errors.push(...validateExperienceConfig(config).errors);
     if (config.kind === 'external') return issues;
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });
@@ -178,6 +184,24 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         const backgroundMaxMinutes = Math.max(1, Math.floor(env.backgroundMaxDurationMs / 60_000));
         checkNumber(issues, 'execution.syncTimeoutSeconds', execution.syncTimeoutSeconds, { min: 5, max: syncMaxSeconds, integer: true });
         checkNumber(issues, 'execution.backgroundMaxDurationMinutes', execution.backgroundMaxDurationMinutes, { min: 1, max: backgroundMaxMinutes, integer: true });
+        const sessionBudget = execution.sessionBudget as { maxCostUsd?: unknown; onReach?: unknown; allowClientOverride?: unknown } | undefined;
+        if (sessionBudget !== undefined && sessionBudget !== null) {
+            if (typeof sessionBudget !== 'object' || Array.isArray(sessionBudget)) {
+                issues.errors.push({ field: 'execution.sessionBudget', message: 'must be an object: { maxCostUsd, onReach }' });
+            } else {
+                if (!isNumber(sessionBudget.maxCostUsd)) {
+                    issues.errors.push({ field: 'execution.sessionBudget.maxCostUsd', message: 'is required and must be a number' });
+                } else {
+                    checkNumber(issues, 'execution.sessionBudget.maxCostUsd', sessionBudget.maxCostUsd, { min: 0, exclusiveMin: true });
+                }
+                if (sessionBudget.onReach !== 'pause' && sessionBudget.onReach !== 'stop') {
+                    issues.errors.push({ field: 'execution.sessionBudget.onReach', message: 'must be one of: pause, stop' });
+                }
+                if (sessionBudget.allowClientOverride !== undefined && typeof sessionBudget.allowClientOverride !== 'boolean') {
+                    issues.errors.push({ field: 'execution.sessionBudget.allowClientOverride', message: 'must be a boolean' });
+                }
+            }
+        }
         if (execution.defaultMode !== undefined && execution.defaultMode !== 'sync' && execution.defaultMode !== 'background') {
             issues.errors.push({ field: 'execution.defaultMode', message: 'must be one of: sync, background' });
         }
@@ -198,6 +222,35 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
         if (execution.callbackSecret && !execution.callbackUrl) {
             issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
+        }
+    }
+
+    const attachments = config.attachments;
+    if (attachments) {
+        checkNumber(issues, 'attachments.maxFiles', attachments.maxFiles, { min: 1, max: 100, integer: true });
+        checkNumber(issues, 'attachments.maxFileSizeMb', attachments.maxFileSizeMb, { min: 0, exclusiveMin: true, max: getConfig().limits.fileUploadMaxMb });
+        checkNumber(issues, 'attachments.inlineMaxTokens', attachments.inlineMaxTokens, { min: 100, integer: true });
+        checkNumber(issues, 'attachments.readPageChars', attachments.readPageChars, { min: 500, max: 200_000, integer: true });
+        checkNumber(issues, 'attachments.retentionDays', attachments.retentionDays, { min: 1, max: 3650 });
+        checkNumber(issues, 'attachments.maxImages', attachments.maxImages, { min: 1, max: 50, integer: true });
+        checkNumber(issues, 'attachments.maxBytes', attachments.maxBytes, { min: 100_000, max: 200_000_000, integer: true });
+        checkNumber(issues, 'attachments.carryRecentImages', attachments.carryRecentImages, { min: 0, max: 20, integer: true });
+        if (attachments.allowedMimeTypes !== undefined
+            && (!Array.isArray(attachments.allowedMimeTypes) || attachments.allowedMimeTypes.some((entry) => typeof entry !== 'string'))) {
+            issues.errors.push({ field: 'attachments.allowedMimeTypes', message: 'must be a list of MIME types (image/* is allowed)' });
+        }
+        for (const flag of ['enabled', 'attachNewUploads'] as const) {
+            if (attachments[flag] !== undefined && typeof attachments[flag] !== 'boolean') {
+                issues.errors.push({ field: `attachments.${flag}`, message: 'must be true or false' });
+            }
+        }
+        const folder = normalizeAttachmentsFolder(attachments.folder);
+        if (folder.error) issues.errors.push({ field: 'attachments.folder', message: folder.error });
+        if (attachments.bucketKey !== undefined && typeof attachments.bucketKey !== 'string') {
+            issues.errors.push({ field: 'attachments.bucketKey', message: 'must be a bucket key' });
+        } else if (attachments.enabled === true && !attachments.bucketKey?.trim()) {
+            // Files are kept in a bucket of the project; there is no built-in storage to fall back to.
+            issues.errors.push({ field: 'attachments.bucketKey', message: 'Choose a bucket to keep the files in' });
         }
     }
 
@@ -242,6 +295,10 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
             issues.warnings.push({ field: 'sandbox.tools', message: 'Sandbox access is on but every sandbox tool is off' });
         }
     }
+
+    const hitl = validateHitlConfig(config);
+    issues.errors.push(...hitl.errors);
+    issues.warnings.push(...hitl.warnings);
 
     const memory = config.memory;
     if (memory?.enabled && !memory.memoryStoreKey) {
@@ -364,6 +421,21 @@ export async function validateAgentConfig(input: {
             if (templates && !templates.some((template) => template.key === config.sandbox!.templateKey)) {
                 issues.errors.push({ field: 'sandbox.templateKey', message: `Sandbox template "${config.sandbox.templateKey}" does not exist` });
             }
+        }
+    }
+
+    // Session files need a bucket that can take a file: it exists in this project, is
+    // active, and its provider exists, is assigned here and is active.
+    const filesBucketKey = config.attachments?.enabled === true && typeof config.attachments.bucketKey === 'string'
+        ? config.attachments.bucketKey.trim()
+        : '';
+    if (filesBucketKey && input.tenantId) {
+        const inspection = await inspectFileBucket(db, input.tenantId, projectId, filesBucketKey).catch(() => null);
+        if (inspection && !inspection.usable) {
+            issues.errors.push({
+                field: 'attachments.bucketKey',
+                message: `${inspection.message.charAt(0).toUpperCase()}${inspection.message.slice(1)}`,
+            });
         }
     }
 

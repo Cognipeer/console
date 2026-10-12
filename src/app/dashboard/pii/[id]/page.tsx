@@ -8,7 +8,6 @@ import {
   Code,
   Group,
   Loader,
-  Modal,
   Paper,
   Stack,
   Switch,
@@ -17,6 +16,7 @@ import {
   TextInput,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { ResourceUsageSection, useDeleteResource } from '@/components/common/confirm';
 import {
   IconPlayerPlay,
   IconShieldLock,
@@ -50,6 +50,8 @@ export default function PiiPolicyDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const t = useTranslations('pii');
+  const tSafe = useTranslations('common.confirm.dataSafety');
+  const deleteResource = useDeleteResource();
   const tAct = useTranslations('pii.actions');
   const tEngine = useTranslations('pii.engines');
   const locale = useLocale();
@@ -59,8 +61,6 @@ export default function PiiPolicyDetailPage() {
   const [defaultCategories, setDefaultCategories] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('config');
 
   // editable state
@@ -205,22 +205,18 @@ export default function PiiPolicyDetailPage() {
 
   const handleDelete = async () => {
     if (!policy) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/pii/policies/${policy.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed');
-      notifications.show({ title: t('notifications.deleted'), message: name, color: 'red' });
-      router.push('/dashboard/pii');
-    } catch (err) {
-      notifications.show({
-        title: t('notifications.saveError'),
-        message: err instanceof Error ? err.message : '',
-        color: 'red',
-      });
-    } finally {
-      setDeleting(false);
-      setDeleteOpen(false);
-    }
+    await deleteResource({
+      noun: tSafe('nouns.piiPolicy'),
+      name: policy.name,
+      type: 'pii-policy',
+      id: policy.id,
+      action: async () => {
+        const res = await fetch(`/api/pii/policies/${policy.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed');
+        notifications.show({ title: t('notifications.deleted'), message: name, color: 'red' });
+        router.push('/dashboard/pii');
+      },
+    });
   };
 
   const handleToggleEnabled = async () => {
@@ -266,7 +262,7 @@ export default function PiiPolicyDetailPage() {
         variant="light"
         size="sm"
         leftSection={<IconTrash size={14} stroke={1.7} />}
-        onClick={() => setDeleteOpen(true)}
+        onClick={() => void handleDelete()}
       >
         {t('detail.actions.delete')}
       </Button>
@@ -370,6 +366,10 @@ export default function PiiPolicyDetailPage() {
               {saving ? t('detail.actions.saving') : t('detail.actions.save')}
             </Button>
           </Group>
+
+          <Paper p="md" withBorder radius="sm">
+            <ResourceUsageSection type="pii-policy" id={policy.id} />
+          </Paper>
         </Stack>
       ) : null}
 
@@ -389,14 +389,6 @@ export default function PiiPolicyDetailPage() {
           defaultAction={defaultAction}
         />
       ) : null}
-
-      <Modal opened={deleteOpen} onClose={() => setDeleteOpen(false)} title={t('deleteModal.title')} centered size="sm">
-        <Text size="sm" mb="lg">{t('deleteModal.body', { name })}</Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteOpen(false)}>{t('deleteModal.cancel')}</Button>
-          <Button color="red" loading={deleting} onClick={handleDelete}>{t('deleteModal.confirm')}</Button>
-        </Group>
-      </Modal>
     </DetailShell>
   );
 }

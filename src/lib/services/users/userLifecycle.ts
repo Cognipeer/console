@@ -12,6 +12,7 @@ import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
 import type { IUser } from '@/lib/database';
+import { dropTokenDelegation } from '@/lib/iam/tokenDelegation';
 import type { PermissionService } from '@/lib/security/rbac';
 import { recordAuditLog } from '@/lib/services/audit/auditService';
 import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
@@ -95,10 +96,13 @@ export interface SetUserStatusInput {
   requestId?: string;
   ipAddress?: string;
   userAgent?: string;
+  /** Set when the change is one step of a bulk request: the audit row carries it so the steps can be found together. */
+  batchId?: string;
 }
 
 export type SetUserStatusResult =
-  | { ok: true; user: IUser }
+  /** `changed` is false when the account was already in the requested state (nothing was written). */
+  | { ok: true; user: IUser; changed: boolean }
   | { ok: false; httpStatus: 400 | 403 | 404; error: string };
 
 function normalizeReason(reason: string | undefined): string | undefined {
@@ -139,7 +143,7 @@ export async function setUserStatus(input: SetUserStatusInput): Promise<SetUserS
   // Idempotent: repeating the current state is a success with no write and no
   // audit row, so a retried request can't pad the audit trail.
   if ((status === 'disabled') === isUserDisabled(target)) {
-    return { ok: true, user: target };
+    return { ok: true, user: target, changed: false };
   }
 
   const reason = normalizeReason(input.reason);
@@ -176,7 +180,7 @@ export async function setUserStatus(input: SetUserStatusInput): Promise<SetUserS
       apiTokenId: actor.apiTokenId,
       event: status === 'disabled' ? 'user.disable' : 'user.enable',
       ipAddress: input.ipAddress,
-      metadata: { reason: reason ?? null },
+      metadata: { reason: reason ?? null, ...(input.batchId ? { batchId: input.batchId } : {}) },
       outcome: 'success',
       requestId: input.requestId,
       resourceId: targetUserId,
@@ -188,7 +192,7 @@ export async function setUserStatus(input: SetUserStatusInput): Promise<SetUserS
 
   notifyUserStatusChanged({ tenantDbName, tenantId, userId: targetUserId, status });
 
-  return { ok: true, user: updated };
+  return { ok: true, user: updated, changed: true };
 }
 
 /* ------------------------------------------------------------------ */
@@ -204,16 +208,22 @@ export async function setUserStatus(input: SetUserStatusInput): Promise<SetUserS
 export async function revokeUserApiTokens(
   tenantDbName: string,
   userId: string,
-): Promise<{ revoked: number; failed: number }> {
+): Promise<{ revoked: number; failed: number; revokedIds: string[] }> {
   const tokens = await runWithTenantScope(tenantDbName, (db) => db.listApiTokens(userId));
 
   let revoked = 0;
   let failed = 0;
+  const revokedIds: string[] = [];
   for (const token of tokens) {
     const tokenId = String(token._id);
     try {
       const deleted = await runWithTenantScope(tenantDbName, (db) => db.deleteApiToken(tokenId, userId));
-      if (deleted) revoked += 1;
+      if (deleted) {
+        revoked += 1;
+        revokedIds.push(tokenId);
+        // what the token was set up to act for goes with it (best effort: nothing reads it any more)
+        await dropTokenDelegation(tenantDbName, tokenId);
+      }
       // Legacy rows may carry only the plaintext token; hash it so the cache
       // entry the auth path would have written is still found.
       const tokenHash = token.tokenHash ?? (token.token ? hashApiToken(token.token) : undefined);
@@ -223,25 +233,70 @@ export async function revokeUserApiTokens(
       logger.error('Failed to revoke API token for user', { error, tokenId, userId });
     }
   }
-  return { revoked, failed };
+  return { revoked, failed, revokedIds };
+}
+
+/** What deleting a person took with it. */
+export interface DeletedUserCleanup {
+  revokedTokens: number;
+  failedTokens: number;
+  removedGroupMemberships: number;
+  removedProjectMemberships: number;
 }
 
 /**
  * The cleanup both DELETE /users/:id surfaces run after a successful
- * `db.deleteUser`: revoke the user's tokens and drop the cached auth state.
- * Passing `tenantId` also notifies status listeners. Never throws: the row is
- * already gone, so a cleanup failure is logged, not returned as a failed delete.
+ * `db.deleteUser`: revoke the user's tokens, drop their group and project
+ * memberships (rows that would otherwise stay behind and be counted as members),
+ * and drop the cached auth state. Passing `tenantId` also notifies status
+ * listeners. Never throws: the row is already gone, so a cleanup failure is
+ * logged, not returned as a failed delete. Returns what was removed, for the audit
+ * row.
  */
 export async function cleanupDeletedUser(
   tenantDbName: string,
   userId: string,
   tenantId?: string,
-): Promise<void> {
+): Promise<DeletedUserCleanup> {
+  const cleanup: DeletedUserCleanup = {
+    revokedTokens: 0,
+    failedTokens: 0,
+    removedGroupMemberships: 0,
+    removedProjectMemberships: 0,
+  };
+
   try {
-    await revokeUserApiTokens(tenantDbName, userId);
+    const result = await revokeUserApiTokens(tenantDbName, userId);
+    cleanup.revokedTokens = result.revoked;
+    cleanup.failedTokens = result.failed;
   } catch (error) {
     logger.error('Failed to revoke API tokens of deleted user', { error, userId });
   }
+
+  try {
+    const memberships = await runWithTenantScope(tenantDbName, (db) => db.listGroupMembersByUser(userId));
+    for (const membership of memberships) {
+      try {
+        const removed = await runWithTenantScope(tenantDbName, (db) => db.removeGroupMember(String(membership.groupId), userId));
+        if (removed) cleanup.removedGroupMemberships += 1;
+      } catch (error) {
+        logger.error('Failed to remove a group membership of a deleted user', { error, userId, groupId: String(membership.groupId) });
+      }
+    }
+  } catch (error) {
+    logger.error('Failed to list the group memberships of a deleted user', { error, userId });
+  }
+
+  try {
+    await runWithTenantScope(tenantDbName, async (db) => {
+      const rows = await db.listUserProjectsByUser(userId);
+      await db.deleteUserProjectsByUser(userId);
+      cleanup.removedProjectMemberships = rows.length;
+    });
+  } catch (error) {
+    logger.error('Failed to remove the project memberships of a deleted user', { error, userId });
+  }
+
   await invalidateUserAuthState(tenantDbName, userId);
   // A deleted account must lose its open terminals / realtime sockets just like
   // a disabled one, so listeners get the same event (status 'disabled').
@@ -249,4 +304,5 @@ export async function cleanupDeletedUser(
   if (tenantId) {
     notifyUserStatusChanged({ tenantDbName, tenantId, userId, status: 'disabled' });
   }
+  return cleanup;
 }

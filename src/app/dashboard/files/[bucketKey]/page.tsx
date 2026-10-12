@@ -40,6 +40,7 @@ import {
 } from '@tabler/icons-react';
 import FileObjectManager from '@/components/files/FileObjectManager';
 import type { FileBucketView } from '@/lib/services/files';
+import { ResourceUsageSection } from '@/components/common/confirm';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -156,6 +157,10 @@ function OverviewTab({ bucket }: { bucket: FileBucketView }) {
             </>
           ) : null}
         </Stack>
+      </Paper>
+
+      <Paper withBorder radius="lg" p="lg">
+        <ResourceUsageSection type="file-bucket" id={bucket.id} />
       </Paper>
     </Stack>
   );

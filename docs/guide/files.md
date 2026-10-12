@@ -84,6 +84,20 @@ GET /api/client/v1/files/buckets/:bucketKey/objects
 Authorization: Bearer <token>
 ```
 
+Without further parameters this is the flat list of every file in the bucket. Add `prefix` to list **one folder**, the way an object store does with a `/` delimiter:
+
+```
+GET /api/client/v1/files/buckets/:bucketKey/objects?prefix=agent-sessions/support-bot/
+```
+
+The answer then holds the files directly in that folder (`files`) and its sub-folders (`folders`, each a full path ending in `/`), found from the file keys; `prefix=` (empty) is the bucket root. Page with `nextCursor` (pass it as `cursor`). `purpose=conversation` keeps only [session files](/guide/session-files), `purpose=other` only the rest. With `search`, `prefix` just narrows the search to everything under it, however deep. The Document Store screens show buckets this way, with a breadcrumb.
+
+### Session files
+
+Who may see a session file is who may see its session: the person who started the session, or anybody the Agents service lets view other people's sessions (`agent.session_view_others` needs Agents at Read). A role with Files access and no Agents level sees ordinary files only; session files are left out of its listings and refused by key. The folder view follows the same rule: in the listing of `<folder>/<agentKey>/` the sub-folder of a session the caller may not view is left out of `folders` (the session's id is in its name), and so are the files in it. A listing for a caller held to their own sessions is filled from the following pages, folders and files counting as entries, so the page is not short while the bucket goes on (`nextCursor` continues it). The decision is taken once per request, however many folders the page holds. See [Authorization](/guide/authorization#sessions-and-approvals).
+
+Files attached to agent sessions are ordinary files in the bucket the agent names (**Configure → Files**), under `<folder>/<agentKey>/<sessionId>/`; they carry `purpose: "conversation"`, the session they belong to, when they expire and who uploaded them. A bucket an agent keeps session files in cannot be deleted or disabled until the agent uses another one (`409 bucket_in_use`, naming the agents — also an agent whose *published* version still uses it). A session file's row carries `agentId`, the `_id` of its agent, so a Session link can be built. Uploading from inside a folder: add `folder` (alias `prefix`) to the upload body — the file lands in it under a generated name, or under `keyHint` taken as its name in the folder; a `..` or `.` segment is refused.
+
 ## Markdown Conversion
 
 When a file is uploaded, the gateway can automatically convert it to Markdown using `@cognipeer/to-markdown`. This is used by the Knowledge Engine pipeline for document ingestion.

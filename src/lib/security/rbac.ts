@@ -49,7 +49,11 @@ export type PermissionService =
   | 'ai-app-gateway'
   | 'cluster'
   | 'sso'
-  | 'ldap';
+  | 'ldap'
+  | 'portals'
+  | 'resources'
+  | 'iam'
+  | 'webhooks';
 
 /**
  * Tenant-wide roles.
@@ -137,7 +141,27 @@ export const RBAC_SERVICE_DEFINITIONS: RbacServiceDefinition[] = [
   // department's gateway feed without holding tenant-admin.
   { id: 'ai-app-gateway', label: 'AI App Gateway', description: 'Coding-agent gateway instances: identity, observation, policy enforcement and session traces.', category: 'operate' },
   { id: 'sso', label: 'Single Sign-On', description: 'OIDC single sign-on connection, attribute mapping and JIT provisioning.', category: 'admin', adminService: true },
+  // adminService: a webhook is outbound network egress with a signing secret, so who manages
+  // them is a tenant-admin decision, delegated like any other administration service (a person's
+  // or a group's `webhooks` level in the Authorization center). The policy engine is the ONLY
+  // authority: reading needs `read`, changing needs `admin`; nothing inside the webhook code
+  // looks at a role.
+  { id: 'webhooks', label: 'Webhooks', description: 'Outgoing webhook subscriptions for session, run, approval, budget and schedule events.', category: 'admin', adminService: true },
   { id: 'ldap', label: 'LDAP Directory', description: 'LDAP/Active Directory connection, group→role mapping and JIT provisioning.', category: 'admin', adminService: true },
+  // Admin surface of the portal feature (create/edit portals, choose agents and
+  // who may use them). adminService: configuring what employees can reach is a
+  // tenant-admin decision. End-user portal ACCESS is not an RBAC service — see
+  // the note on ROUTE_PREFIXES below.
+  { id: 'portals', label: 'Portals', description: 'Chat portals that expose selected agents to chosen people, with their access lists and usage statistics.', category: 'admin', adminService: true },
+  // Read-only, tenant-wide inventory across ALL projects (and tenant-wide rows).
+  // adminService on purpose: it deliberately ignores the active project, so it
+  // must not default to anyone below owner/admin.
+  { id: 'resources', label: 'Resource Registry', description: 'Read-only inventory of every resource in the tenant across all projects. A grant is tenant-wide and cross-service: it lists every resource type and project regardless of the grantee\'s other permissions.', category: 'admin', adminService: true },
+  // Authorization engine administration: custom access policies, the access check,
+  // the audit of denials and policy changes, token rules and engine health.
+  // adminService: changing how access is decided is a tenant-admin decision, so
+  // it defaults to owner/admin only and every mutation needs admin.
+  { id: 'iam', label: 'Authorization Engine', description: 'Custom access policies, the access check, denial and change history, token rules and engine health.', category: 'admin', adminService: true },
 ];
 
 const SERVICE_IDS = new Set<PermissionService>(RBAC_SERVICE_DEFINITIONS.map((service) => service.id));
@@ -161,6 +185,11 @@ export function minPermission(
   return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
 }
 
+// NOTE (portals): only the ADMIN API '/api/portals' is mapped (service
+// 'portals', adminService). The END-USER runtime '/api/portal/:key/...' is
+// deliberately NOT mapped: portal users are ordinary tenant members without any
+// console service permission, so they are authorised by the session hook plus
+// the portal's own access list, which the handler enforces per request.
 const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/browser', service: 'browser' },
   { prefix: '/api/client/v1/crawler', service: 'crawler' },
@@ -186,6 +215,7 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/client/v1/pii', service: 'pii' },
   { prefix: '/api/client/v1/mcp', service: 'mcp' },
   { prefix: '/api/client/v1/sandbox', service: 'sandbox' },
+  { prefix: '/api/client/v1/webhooks', service: 'webhooks' },
   // Retired enforcement-plane paths, kept mapped so any client still calling
   // them is authorized (and audited) as the guardrail service rather than
   // falling through `getPermissionServiceForPath` to `null`, which means "not a
@@ -242,6 +272,11 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/audit', service: 'audit' },
   { prefix: '/api/users', service: 'members' },
   { prefix: '/api/groups', service: 'members' },
+  { prefix: '/api/resources', service: 'resources' },
+  // Default for the per-type resolver registered below: unknown or not yet
+  // resolvable -> admin-only. Without this entry the path would be unmapped,
+  // and an unmapped path is "not a gated surface".
+  { prefix: '/api/resource-usage', service: 'resources' },
   { prefix: '/api/license', service: 'license' },
   { prefix: '/api/providers', service: 'providers' },
   { prefix: '/api/config', service: 'config' },
@@ -250,6 +285,9 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/tokens', service: 'tokens' },
   { prefix: '/api/models', service: 'models' },
   { prefix: '/api/prompts', service: 'prompts' },
+  // Enterprise prompt optimizer: optimizes prompts against datasets; it was
+  // unmapped (no authorization at all).
+  { prefix: '/api/prompt-optimizer', service: 'prompts' },
   { prefix: '/api/vector', service: 'vector' },
   { prefix: '/api/memory', service: 'memory' },
   { prefix: '/api/files', service: 'files' },
@@ -257,6 +295,10 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   { prefix: '/api/reranker', service: 'reranker' },
   { prefix: '/api/realtime', service: 'realtime' },
   { prefix: '/api/agents', service: 'agents' },
+  // Agent skill library (`/api/skills`, `/api/skills/:id`): skills are agent
+  // building blocks, so they ride the agents service. Previously unmapped,
+  // which `enforceSessionRbac` treats as "not a gated surface".
+  { prefix: '/api/skills', service: 'agents' },
   { prefix: '/api/tracing', service: 'tracing' },
   { prefix: '/api/inference-monitoring', service: 'inference-monitoring' },
   { prefix: '/api/guardrails', service: 'guardrails' },
@@ -296,6 +338,9 @@ const ROUTE_PREFIXES: Array<{ prefix: string; service: PermissionService }> = [
   // audit_logs. The gateway writes its own request records instead.
   { prefix: '/api/ai-app-gateway', service: 'ai-app-gateway' },
   { prefix: '/api/cluster', service: 'cluster' },
+  { prefix: '/api/portals', service: 'portals' },
+  { prefix: '/api/iam', service: 'iam' },
+  { prefix: '/api/webhooks', service: 'webhooks' },
 ];
 
 export function isPermissionService(value: unknown): value is PermissionService {
@@ -325,10 +370,46 @@ export function getServiceDefinition(service: PermissionService): RbacServiceDef
     ?? RBAC_SERVICE_DEFINITIONS[0];
 }
 
+/**
+ * A prefix whose owning service depends on a path segment (e.g.
+ * `/api/resource-usage/:type/:id` is gated by the service that owns `:type`).
+ * The resolver lives with the module that knows the mapping, so rbac.ts never
+ * imports it (no cycles). Returning null falls through to ROUTE_PREFIXES.
+ */
+export type PathServiceResolver = (pathname: string) => PermissionService | null;
+
+const pathServiceResolvers = new Map<string, PathServiceResolver>();
+
+function normalizeResolverPrefix(prefix: string): string {
+  return prefix.length > 1 && prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+}
+
+/** Registers (or replaces) the resolver for a path prefix. Idempotent per prefix. */
+export function registerPathServiceResolver(prefix: string, resolver: PathServiceResolver): void {
+  pathServiceResolvers.set(normalizeResolverPrefix(prefix), resolver);
+}
+
+/** Test seam. */
+export function resetPathServiceResolversForTests(): void {
+  pathServiceResolvers.clear();
+}
+
 export function getPermissionServiceForPath(pathname: string): PermissionService | null {
   const normalized = pathname.endsWith('/') && pathname !== '/'
     ? pathname.slice(0, -1)
     : pathname;
+  for (const [prefix, resolver] of pathServiceResolvers) {
+    if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+      let resolved: PermissionService | null = null;
+      try {
+        resolved = resolver(normalized);
+      } catch {
+        // A throwing resolver must never open the gate: fall back to the static map.
+        resolved = null;
+      }
+      if (resolved) return resolved;
+    }
+  }
   const match = ROUTE_PREFIXES.find(({ prefix }) =>
     normalized === prefix || normalized.startsWith(`${prefix}/`),
   );
@@ -524,24 +605,30 @@ export function resolveCurrentServicePermission(
   return current;
 }
 
-export function authorizeServiceRequest(
+export type ServiceAuthorizationResult =
+  | { allowed: true; service: PermissionService; required: ServicePermissionLevel }
+  | {
+      allowed: false;
+      service: PermissionService;
+      required: ServicePermissionLevel;
+      current: ServicePermissionLevel;
+    };
+
+/**
+ * The service-level decision for an ALREADY RESOLVED service (the route's owner
+ * is known: from the path map or from an explicit route declaration). `level`
+ * overrides the method-derived required level (route declaration
+ * `{ kind: 'service', level }`).
+ */
+export function authorizeService(
   user: RbacUserLike,
   method: string,
-  pathname: string,
+  service: PermissionService,
   groupGrants: GroupTenantGrant[] = [],
   tokenScope?: UserServicePermissions | null,
-): { allowed: true; service: PermissionService | null; required?: ServicePermissionLevel } | {
-  allowed: false;
-  service: PermissionService;
-  required: ServicePermissionLevel;
-  current: ServicePermissionLevel;
-} {
-  const service = getPermissionServiceForPath(pathname);
-  if (!service) {
-    return { allowed: true, service: null };
-  }
-
-  const required = getRequiredPermissionLevel(method, service);
+  level?: ServicePermissionLevel,
+): ServiceAuthorizationResult {
+  const required = level ?? getRequiredPermissionLevel(method, service);
   let current = getEffectiveServicePermissionWithGroups(user, groupGrants, service);
   // Least-privilege API-token scope: when the token carries its own
   // servicePermissions allowlist, cap the effective level at that scope (a
@@ -561,4 +648,23 @@ export function authorizeServiceRequest(
     required,
     service,
   };
+}
+
+export function authorizeServiceRequest(
+  user: RbacUserLike,
+  method: string,
+  pathname: string,
+  groupGrants: GroupTenantGrant[] = [],
+  tokenScope?: UserServicePermissions | null,
+): { allowed: true; service: PermissionService | null; required?: ServicePermissionLevel } | {
+  allowed: false;
+  service: PermissionService;
+  required: ServicePermissionLevel;
+  current: ServicePermissionLevel;
+} {
+  const service = getPermissionServiceForPath(pathname);
+  if (!service) {
+    return { allowed: true, service: null };
+  }
+  return authorizeService(user, method, service, groupGrants, tokenScope);
 }

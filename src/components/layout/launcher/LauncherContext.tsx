@@ -2,6 +2,7 @@
 
 import { createContext, ReactNode, useContext, useMemo } from 'react';
 import type { DashboardServiceDefinition } from '@/lib/utils/dashboardServices';
+import type { PermissionService } from '@/lib/security/rbac';
 
 export interface LauncherContextValue {
   pinned: Set<string>;
@@ -15,6 +16,12 @@ export interface LauncherContextValue {
   openLauncher: () => void;
   /** False until pins/recents are restored from local storage (treat missing as true). */
   hydrated?: boolean;
+  /**
+   * Whether the person may use a permission service, judged like the offered services (the engine's
+   * answer for the active project, else the role's). Asked for pages that sit inside another
+   * service's menu (Webhooks, in Agents) and so are not in `services`.
+   */
+  canUseService?: (service: PermissionService) => boolean;
 }
 
 const LauncherContext = createContext<LauncherContextValue | null>(null);

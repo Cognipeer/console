@@ -27,6 +27,7 @@ import {
     TextInput,
 } from '@mantine/core';
 import { IconInfoCircle } from '@tabler/icons-react';
+import { useTranslations } from '@/lib/i18n';
 import type { IAgentExecutionConfig } from '@/lib/database/provider/types.domain';
 import { ConfigBlock } from './ConfigSection';
 import { SANDBOX_SECRET_MASK } from './AgentSandboxPanel';
@@ -50,6 +51,7 @@ function compact(next: IAgentExecutionConfig): IAgentExecutionConfig | undefined
 }
 
 export default function AgentExecutionPanel({ value, onChange }: AgentExecutionPanelProps) {
+    const tb = useTranslations('agents.budget');
     const [limits, setLimits] = useState<ExecutionLimits | null>(null);
 
     useEffect(() => {
@@ -88,6 +90,53 @@ export default function AgentExecutionPanel({ value, onChange }: AgentExecutionP
                     onChange={(v) => set({ syncTimeoutSeconds: typeof v === 'number' ? v : undefined })}
                     maw={320}
                 />
+            </ConfigBlock>
+
+            <ConfigBlock title={tb('cfgTitle')}>
+                <Stack gap="sm">
+                    <NumberInput
+                        label={tb('cfgAmountLabel')}
+                        description={tb('cfgAmountDescription')}
+                        placeholder={tb('cfgNoBudget')}
+                        min={0}
+                        decimalScale={4}
+                        value={current.sessionBudget?.maxCostUsd ?? ''}
+                        onChange={(v) => set({
+                            sessionBudget: typeof v === 'number' && v > 0
+                                ? { ...current.sessionBudget, maxCostUsd: v, onReach: current.sessionBudget?.onReach ?? 'pause' }
+                                : undefined,
+                        })}
+                        maw={420}
+                    />
+                    {current.sessionBudget ? (
+                        <Stack gap={4}>
+                            <Text size="sm" fw={500}>{tb('onReachLabel')}</Text>
+                            <SegmentedControl
+                                w="fit-content"
+                                value={current.sessionBudget.onReach}
+                                onChange={(onReach) => set({
+                                    sessionBudget: { ...current.sessionBudget!, onReach: onReach === 'stop' ? 'stop' : 'pause' },
+                                })}
+                                data={[
+                                    { value: 'pause', label: tb('cfgPause') },
+                                    { value: 'stop', label: tb('cfgStop') },
+                                ]}
+                            />
+                            <Text size="xs" c="dimmed">
+                                {current.sessionBudget.onReach === 'pause' ? tb('cfgPauseDescription') : tb('cfgStopDescription')}
+                                {' '}{tb('cfgPerTurnNote')}
+                            </Text>
+                            <Switch
+                                label={tb('cfgClientOverride')}
+                                description={tb('cfgClientOverrideDescription')}
+                                checked={current.sessionBudget.allowClientOverride === true}
+                                onChange={(event) => set({
+                                    sessionBudget: { ...current.sessionBudget!, allowClientOverride: event.currentTarget.checked },
+                                })}
+                            />
+                        </Stack>
+                    ) : null}
+                </Stack>
             </ConfigBlock>
 
             <ConfigBlock title="Background runs">

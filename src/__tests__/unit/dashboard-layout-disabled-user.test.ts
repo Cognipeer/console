@@ -1,6 +1,13 @@
 /**
- * SSR guard: a disabled account still holds a valid JWT, so the dashboard
- * layouts must bounce it to /login exactly like a deleted account.
+ * SSR guards of the dashboard layouts.
+ *
+ * A disabled account still holds a valid JWT, so the layouts must bounce it to
+ * /login exactly like a deleted account.
+ *
+ * A member's projects count however they were given - directly, in the legacy
+ * list, or through a group - exactly as the session endpoint and the project
+ * switcher count them. A guard that looked at direct memberships only would send
+ * a member whose only project comes from a group to "no project".
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,10 +17,13 @@ const h = vi.hoisted(() => ({
     switchToTenant: vi.fn(),
     findUserById: vi.fn(),
     listUserProjectsByUser: vi.fn(),
+    listGroupMembersByUser: vi.fn(),
+    listGroupProjectsByGroup: vi.fn(),
+    listGroupProjectsByProject: vi.fn(),
     findProjectById: vi.fn(),
     findUserProject: vi.fn(),
   },
-  getUserAuthState: vi.fn(),
+  getUserIdentity: vi.fn(),
 }));
 
 vi.mock('next/headers', () => ({
@@ -28,7 +38,7 @@ vi.mock('@/lib/database', () => ({ getDatabase: vi.fn(async () => h.db) }));
 vi.mock('@/lib/services/support/supportHandoff', () => ({ isSupportEntryPointEnabled: () => false }));
 vi.mock('@/lib/services/users/userAuthState', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/users/userAuthState')>()),
-  getUserAuthState: h.getUserAuthState,
+  getUserIdentity: h.getUserIdentity,
 }));
 
 // The vitest esbuild transform compiles JSX to React.createElement (the app
@@ -70,29 +80,119 @@ describe('dashboard layout', () => {
   });
 });
 
+describe('dashboard layout (which projects count)', () => {
+  const asMember = () => {
+    h.headerValues['x-user-role'] = 'user';
+    h.db.listUserProjectsByUser.mockResolvedValue([]);
+    h.db.listGroupMembersByUser.mockResolvedValue([]);
+    h.db.listGroupProjectsByGroup.mockResolvedValue([]);
+  };
+
+  it('sends a member with no project of any kind to /no-project', async () => {
+    asMember();
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', status: 'active', projectIds: [] });
+    await expect(DashboardRouteLayout({ children: null })).rejects.toThrow('REDIRECT:/no-project');
+  });
+
+  it('lets a member in through a direct membership, the legacy list, or a group', async () => {
+    asMember();
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', status: 'active', projectIds: [] });
+    h.db.listUserProjectsByUser.mockResolvedValue([{ projectId: 'p-direct' }]);
+    await expect(DashboardRouteLayout({ children: null })).resolves.toBeTruthy();
+
+    asMember();
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', status: 'active', projectIds: ['p-legacy'] });
+    await expect(DashboardRouteLayout({ children: null })).resolves.toBeTruthy();
+
+    asMember();
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', status: 'active', projectIds: [] });
+    h.db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g1' }]);
+    h.db.listGroupProjectsByGroup.mockResolvedValue([{ projectId: 'p-via-group', groupId: 'g1' }]);
+    await expect(DashboardRouteLayout({ children: null })).resolves.toBeTruthy();
+    expect(h.db.listGroupProjectsByGroup).toHaveBeenCalledWith('g1');
+  });
+
+  it('does not count a group that has no project', async () => {
+    asMember();
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', status: 'active', projectIds: [] });
+    h.db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g1' }]);
+    h.db.listGroupProjectsByGroup.mockResolvedValue([]);
+    await expect(DashboardRouteLayout({ children: null })).rejects.toThrow('REDIRECT:/no-project');
+  });
+
+  it('does not look at memberships for a workspace admin', async () => {
+    h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'admin', status: 'active' });
+    await expect(DashboardRouteLayout({ children: null })).resolves.toBeTruthy();
+    expect(h.db.listUserProjectsByUser).not.toHaveBeenCalled();
+    expect(h.db.listGroupMembersByUser).not.toHaveBeenCalled();
+  });
+});
+
 describe('project layout', () => {
   const render = () => ProjectLayout({ children: 'kids', params: Promise.resolve({ projectId: 'p1' }) });
+  // The role in the session header is deliberately a different one in every case below: the
+  // layout decides on the account record (getUserIdentity), never on the header.
+  const accountIs = (state: string, role: string | null) =>
+    h.getUserIdentity.mockResolvedValue({ state, role });
 
   it('redirects a disabled admin before the admin short-circuit', async () => {
-    h.getUserAuthState.mockResolvedValue('disabled');
+    accountIs('disabled', 'admin');
     await expect(render()).rejects.toThrow('REDIRECT:/login');
   });
 
   it('redirects a disabled project member even though a membership exists', async () => {
-    h.headerValues['x-user-role'] = 'user';
-    h.getUserAuthState.mockResolvedValue('disabled');
+    accountIs('disabled', 'user');
     h.db.findProjectById.mockResolvedValue({ _id: 'p1', tenantId: 't1' });
     h.db.findUserProject.mockResolvedValue({ projectId: 'p1' });
     await expect(render()).rejects.toThrow('REDIRECT:/login');
   });
 
   it('lets an active admin through', async () => {
-    h.getUserAuthState.mockResolvedValue('active');
+    accountIs('active', 'admin');
     await expect(render()).resolves.toBe('kids');
   });
 
-  it('does not turn a missing user row into a redirect (existing behaviour kept)', async () => {
-    h.getUserAuthState.mockResolvedValue('missing');
-    await expect(render()).resolves.toBe('kids');
+  it('sends a deleted account (or a session of another workspace) to sign in', async () => {
+    accountIs('missing', null);
+    await expect(render()).rejects.toThrow('REDIRECT:/login');
+  });
+
+  describe('a member who is not an admin', () => {
+    const asMember = () => {
+      accountIs('active', 'user');
+      h.db.findProjectById.mockResolvedValue({ _id: 'p1', tenantId: 't1' });
+      h.db.findUserProject.mockResolvedValue(null);
+      h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', projectIds: [] });
+      h.db.listGroupMembersByUser.mockResolvedValue([]);
+      h.db.listGroupProjectsByProject.mockResolvedValue([]);
+    };
+
+    it('may open a project through a group that is assigned to it', async () => {
+      asMember();
+      h.db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g1' }]);
+      h.db.listGroupProjectsByProject.mockResolvedValue([{ groupId: 'g1', projectId: 'p1', role: 'member', servicePermissions: {} }]);
+      await expect(render()).resolves.toBe('kids');
+    });
+
+    it('does not get a project through a group that is not theirs, or from a project nobody gave them', async () => {
+      asMember();
+      h.db.listGroupMembersByUser.mockResolvedValue([{ groupId: 'g-other' }]);
+      h.db.listGroupProjectsByProject.mockResolvedValue([{ groupId: 'g1', projectId: 'p1', role: 'member', servicePermissions: {} }]);
+      await expect(render()).rejects.toThrow('NOT_FOUND');
+
+      asMember();
+      await expect(render()).rejects.toThrow('NOT_FOUND');
+    });
+
+    it('still lets in a direct member and a legacy member without asking about groups', async () => {
+      asMember();
+      h.db.findUserProject.mockResolvedValue({ projectId: 'p1' });
+      await expect(render()).resolves.toBe('kids');
+
+      asMember();
+      h.db.findUserById.mockResolvedValue({ _id: 'u1', role: 'user', projectIds: ['p1'] });
+      await expect(render()).resolves.toBe('kids');
+      expect(h.db.listGroupMembersByUser).not.toHaveBeenCalled();
+    });
   });
 });

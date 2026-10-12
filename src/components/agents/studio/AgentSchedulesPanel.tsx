@@ -29,6 +29,8 @@ import {
     Tooltip,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useTranslations } from '@/lib/i18n';
+import { useDeleteResource } from '@/components/common/confirm';
 import {
     IconAlertTriangle,
     IconCalendarTime,
@@ -82,6 +84,8 @@ function formatWhen(value: string | null | undefined): string {
 }
 
 export default function AgentSchedulesPanel({ agentId, publishedVersion }: AgentSchedulesPanelProps) {
+    const tConfirm = useTranslations('common.confirm');
+    const deleteResource = useDeleteResource();
     const [schedules, setSchedules] = useState<Schedule[]>([]);
     const [nextRuns, setNextRuns] = useState<Record<string, string | null>>({});
     const [loading, setLoading] = useState(true);
@@ -136,9 +140,20 @@ export default function AgentSchedulesPanel({ agentId, publishedVersion }: Agent
         }
     };
 
-    const remove = async (id: string) => {
-        const res = await fetch(`/api/agents/${agentId}/schedules/${id}`, { method: 'DELETE' });
-        if (res.ok) await load();
+    const remove = async (schedule: Schedule) => {
+        const deleted = await deleteResource({
+            noun: tConfirm('nouns.agentSchedule'),
+            name: schedule.name,
+            extraWarning: tConfirm('extras.agentScheduleStops'),
+            action: async () => {
+                const res = await fetch(`/api/agents/${agentId}/schedules/${schedule.id}`, { method: 'DELETE' });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => null);
+                    throw new Error(body?.error || 'Failed to delete schedule');
+                }
+            },
+        });
+        if (deleted) await load();
     };
 
     const toggle = async (schedule: Schedule) => {
@@ -279,7 +294,7 @@ export default function AgentSchedulesPanel({ agentId, publishedVersion }: Agent
                                 <ActionIcon variant="subtle" size="sm" onClick={() => setDraft({ ...schedule })}>
                                     <IconPencil size={14} />
                                 </ActionIcon>
-                                <ActionIcon variant="subtle" size="sm" color="red" onClick={() => void remove(schedule.id)}>
+                                <ActionIcon variant="subtle" size="sm" color="red" onClick={() => void remove(schedule)}>
                                     <IconTrash size={14} />
                                 </ActionIcon>
                             </Group>

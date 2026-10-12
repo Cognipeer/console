@@ -28,6 +28,8 @@ import {
 import { notifications } from '@mantine/notifications';
 import { IconAlertTriangle, IconExternalLink, IconPlus, IconX } from '@tabler/icons-react';
 import { ToggleList, ToggleRow } from '@/components/common/ui/FormShell';
+import { useConfirm } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import type { McpSourceType } from '@/lib/database';
 
 interface McpMemberSummary {
@@ -62,6 +64,8 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 export default function McpMembersPanel({ serverId, members, onServerUpdated }: McpMembersPanelProps) {
+  const { confirmAction } = useConfirm();
+  const tq = useTranslations('common.confirm.qos');
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -127,20 +131,26 @@ export default function McpMembersPanel({ serverId, members, onServerUpdated }: 
     }
   };
 
+  // Removing a member republishes the composite without that server's tools,
+  // which changes what its consumers can call: ask first.
   const handleRemove = async (memberId: string) => {
-    setRemoving(memberId);
-    try {
-      await patchMembers([...memberIds].filter((id) => id !== memberId));
-      notifications.show({ title: 'Member removed', message: 'Tools were rebuilt without it', color: 'teal' });
-    } catch (err) {
-      notifications.show({
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to remove member',
-        color: 'red',
-      });
-    } finally {
-      setRemoving(null);
-    }
+    const member = members.find((m) => m.serverId === memberId);
+    const removed = await confirmAction({
+      title: tq('removeTitle', { noun: tq('nouns.compositeMember') }),
+      message: tq('removeCompositeMember', { name: member?.name ?? memberId }),
+      tone: 'warning',
+      confirmLabel: tq('remove'),
+      action: async () => {
+        setRemoving(memberId);
+        try {
+          await patchMembers([...memberIds].filter((id) => id !== memberId));
+        } finally {
+          setRemoving(null);
+        }
+      },
+    });
+    if (!removed) return;
+    notifications.show({ title: 'Member removed', message: 'Tools were rebuilt without it', color: 'teal' });
   };
 
   const availableOptions = options.filter((o) => !memberIds.has(o.id));

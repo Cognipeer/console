@@ -16,7 +16,6 @@ import {
   Group,
   Loader,
   Menu,
-  Modal,
   Paper,
   SegmentedControl,
   Select,
@@ -32,6 +31,8 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { ResourceUsageSection, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconAlertTriangle,
   IconBolt,
@@ -189,6 +190,8 @@ interface GuardrailFormValues {
 }
 
 export default function GuardrailDetailPage() {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -232,11 +235,9 @@ export default function GuardrailDetailPage() {
    * persisted, and a rename orphans every one of them.
    */
   const [savedAt, setSavedAt] = useState(0);
-  const [deleteOpen, setDeleteOpen] = useState(false);
   /** The Basic-settings disclosure. Closed on arrival: nothing behind it is a
    *  question a guardrail has to answer to work. */
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(initialTab);
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
 
@@ -739,27 +740,23 @@ export default function GuardrailDetailPage() {
     }
   };
 
-  const handleDelete = async () => {
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/guardrails/${params.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({
-        title: 'Deleted',
-        message: `"${guardrail?.name}" was deleted`,
-        color: 'red',
-      });
-      router.push('/dashboard/guardrails');
-    } catch (err) {
-      notifications.show({
-        title: 'Error',
-        message: err instanceof Error ? err.message : 'Failed to delete',
-        color: 'red',
-      });
-      setDeleting(false);
-      setDeleteOpen(false);
-    }
-  };
+  const handleDelete = () =>
+    deleteResource({
+      noun: tSafe('nouns.guardrail'),
+      name: guardrail?.name,
+      type: 'guardrail',
+      id: guardrail?.id,
+      action: async () => {
+        const res = await fetch(`/api/guardrails/${params.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete');
+        notifications.show({
+          title: 'Deleted',
+          message: `"${guardrail?.name}" was deleted`,
+          color: 'red',
+        });
+        router.push('/dashboard/guardrails');
+      },
+    });
 
   if (loading) {
     return (
@@ -785,7 +782,7 @@ export default function GuardrailDetailPage() {
         <Menu.Item
           color="red"
           leftSection={<IconTrash size={14} />}
-          onClick={() => setDeleteOpen(true)}
+          onClick={() => void handleDelete()}
         >
           Delete guardrail
         </Menu.Item>
@@ -985,6 +982,10 @@ export default function GuardrailDetailPage() {
               mode="overview"
               dateFilter={dateFilter}
             />
+
+            <Paper withBorder radius="md" p="md">
+              <ResourceUsageSection type="guardrail" id={guardrail.id} />
+            </Paper>
           </Stack>
         </Tabs.Panel>
 
@@ -1481,22 +1482,6 @@ export default function GuardrailDetailPage() {
         />
       )}
 
-      {/* Delete confirmation */}
-      <Modal
-        opened={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
-        title="Delete guardrail"
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          Are you sure you want to delete <strong>{guardrail.name}</strong>? This cannot be undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteOpen(false)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={handleDelete}>Delete</Button>
-        </Group>
-      </Modal>
     </>
   );
 }

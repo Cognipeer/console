@@ -1,6 +1,6 @@
 'use client';
 
-import { ReactNode, useMemo, type MouseEvent } from 'react';
+import { Fragment, ReactNode, useMemo, type MouseEvent } from 'react';
 import {
   ActionIcon,
   Button,
@@ -186,6 +186,7 @@ export default function DataGrid<T>({
   const isRefreshing = !showSkeleton && Boolean(loading || refreshing);
 
   const tFeedback = useTranslations('navigationFeedback');
+  const tGrid = useTranslations('dataGrid');
   const { push: navigate } = useNavigationFeedback();
   const pendingKey = usePendingNavigationKey(Boolean(rowHref));
   const { getIntentProps } = useIntentPrefetch({
@@ -305,7 +306,7 @@ export default function DataGrid<T>({
                   className="ds-muted"
                   style={{ fontSize: 13 }}
                 >
-                  {selected.size} selected
+                  {tGrid('selected', { count: selected.size })}
                 </span>
                 {bulkActions.map((a, i) => (
                   <Button
@@ -332,14 +333,14 @@ export default function DataGrid<T>({
             {toolbarRight}
 
             {onRefresh ? (
-              <Tooltip label="Refresh" withArrow>
+              <Tooltip label={tGrid('refresh')} withArrow>
                 <ActionIcon
                   variant="subtle"
                   color="gray"
                   radius="md"
                   onClick={onRefresh}
                   loading={refreshing}
-                  aria-label="Refresh"
+                  aria-label={tGrid('refresh')}
                 >
                   <IconRefresh size={14} stroke={1.7} />
                 </ActionIcon>
@@ -367,7 +368,7 @@ export default function DataGrid<T>({
                             el.indeterminate = someSelected && !allSelected;
                         }}
                         onChange={toggleAll}
-                        aria-label="Select all rows"
+                        aria-label={tGrid('selectAll')}
                       />
                     </th>
                   ) : null}
@@ -385,7 +386,7 @@ export default function DataGrid<T>({
                   {rowActions ? (
                     <th
                       style={{ width: 60, textAlign: 'right' }}
-                      aria-label="Actions"
+                      aria-label={tGrid('actions')}
                     />
                   ) : null}
                 </tr>
@@ -429,7 +430,7 @@ export default function DataGrid<T>({
                             className="ds-checkbox"
                             checked={isSel}
                             onChange={() => {}}
-                            aria-label="Select row"
+                            aria-label={tGrid('selectRow')}
                           />
                         </td>
                       ) : null}
@@ -477,12 +478,12 @@ export default function DataGrid<T>({
                     <select
                       className="ds-select"
                       value={pagination.pageSize}
-                      aria-label="Rows per page"
+                      aria-label={tGrid('rowsPerPage')}
                       style={{ fontSize: 12, padding: '2px 6px' }}
                       onChange={(e) => pagination.onPageSizeChange?.(Number(e.target.value))}
                     >
                       {pagination.pageSizeOptions.map((n) => (
-                        <option key={n} value={n}>{n} / page</option>
+                        <option key={n} value={n}>{tGrid('perPage', { count: n })}</option>
                       ))}
                     </select>
                   ) : null}
@@ -495,7 +496,7 @@ export default function DataGrid<T>({
                       pagination.onPageChange(Math.max(1, pagination.page - 1))
                     }
                   >
-                    Prev
+                    {tGrid('previous')}
                   </Button>
                   <span className="ds-mono" style={{ fontSize: 12 }}>
                     {pagination.page}
@@ -507,7 +508,7 @@ export default function DataGrid<T>({
                     rightSection={<IconChevronRight size={12} />}
                     onClick={() => pagination.onPageChange(pagination.page + 1)}
                   >
-                    Next
+                    {tGrid('next')}
                   </Button>
                 </>
               ) : null}
@@ -561,6 +562,46 @@ function EmptyView({ empty }: { empty?: DataGridEmpty }) {
   );
 }
 
+/** The actions of a row that are not hidden for it. */
+function visibleRowActions<T>(actions: DataGridRowAction<T>[], row: T): DataGridRowAction<T>[] {
+  return actions.filter((a) => {
+    if (!a.hidden) return true;
+    return typeof a.hidden === 'function' ? !a.hidden(row) : !a.hidden;
+  });
+}
+
+/**
+ * The items of a row's actions menu. A bare `{ divider: true }` is a divider; an
+ * action that has a label (or a handler) as well is a divider followed by the
+ * item, so `{ id: 'delete', label, divider: true }` keeps its Delete entry.
+ */
+export function RowActionItems<T>({ actions, row }: { actions: DataGridRowAction<T>[]; row: T }) {
+  return (
+    <>
+      {visibleRowActions(actions, row).map((a, idx) => {
+        const hasItem = a.label !== undefined || a.onClick !== undefined;
+        const disabled =
+          typeof a.disabled === 'function' ? a.disabled(row) : !!a.disabled;
+        return (
+          <Fragment key={a.id ?? `${idx}`}>
+            {a.divider ? <Menu.Divider /> : null}
+            {hasItem ? (
+              <Menu.Item
+                color={a.color}
+                leftSection={a.icon}
+                disabled={disabled}
+                onClick={() => a.onClick?.(row)}
+              >
+                {a.label}
+              </Menu.Item>
+            ) : null}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}
+
 function RowActionsMenu<T>({
   actions,
   row,
@@ -568,35 +609,17 @@ function RowActionsMenu<T>({
   actions: DataGridRowAction<T>[];
   row: T;
 }) {
-  const visible = actions.filter((a) => {
-    if (!a.hidden) return true;
-    return typeof a.hidden === 'function' ? !a.hidden(row) : !a.hidden;
-  });
-  if (visible.length === 0) return null;
+  const tGrid = useTranslations('dataGrid');
+  if (visibleRowActions(actions, row).length === 0) return null;
   return (
     <Menu withinPortal position="bottom-end" withArrow>
       <Menu.Target>
-        <ActionIcon variant="subtle" color="gray" size="md" radius="md">
+        <ActionIcon variant="subtle" color="gray" size="md" radius="md" aria-label={tGrid('actions')}>
           <IconDots size={16} stroke={1.7} />
         </ActionIcon>
       </Menu.Target>
       <Menu.Dropdown>
-        {visible.map((a, idx) => {
-          if (a.divider) return <Menu.Divider key={`d-${idx}`} />;
-          const disabled =
-            typeof a.disabled === 'function' ? a.disabled(row) : !!a.disabled;
-          return (
-            <Menu.Item
-              key={a.id ?? `${idx}`}
-              color={a.color}
-              leftSection={a.icon}
-              disabled={disabled}
-              onClick={() => a.onClick?.(row)}
-            >
-              {a.label}
-            </Menu.Item>
-          );
-        })}
+        <RowActionItems actions={actions} row={row} />
       </Menu.Dropdown>
     </Menu>
   );

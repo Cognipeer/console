@@ -1,8 +1,8 @@
 'use client';
 
-import { NumberInput, Select, Switch, TextInput, Textarea } from '@mantine/core';
+import { NumberInput, Select, Switch, Text, TextInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { IconBolt, IconGauge } from '@tabler/icons-react';
 import FormShell, {
   Checklist,
@@ -16,9 +16,19 @@ import FormShell, {
   ToggleRow,
 } from '@/components/common/ui/FormShell';
 import type { IQuotaPolicy } from '@/lib/database/provider.interface';
-import type { QuotaDomain, QuotaScope, QuotaLimits, QuotaRateLimit } from '@/lib/quota/types';
-import { useTranslations } from '@/lib/i18n';
+import {
+  isTenantWideKind,
+  type QuotaDomain,
+  type QuotaGroupMode,
+  type QuotaScope,
+  type QuotaLimits,
+  type QuotaRateLimit,
+} from '@/lib/quota/types';
+import { isSameTargetKind, quotaTargetSource } from '@/lib/quota/targets';
+import { tryTranslate } from '@/components/resources/i18nLookup';
+import { useLocale, useTranslations } from '@/lib/i18n';
 import { ScopeIdSelector } from './ScopeIdSelector';
+import { SearchableSelect } from './SearchableSelect';
 
 interface QuotaPolicyModalProps {
   opened: boolean;
@@ -30,18 +40,36 @@ interface QuotaPolicyModalProps {
   allowedDomains?: QuotaDomain[];
   allowedScopes?: QuotaScope[];
   resourceOptions?: { value: string; label: string }[];
+  /**
+   * The projects a limit can live in. When given, the editor shows a project
+   * field (required for the kinds of limit that only apply inside a project,
+   * optional — "all projects" — for group and agent-run limits).
+   */
+  projects?: { value: string; label: string }[];
+  /** Starting values for a NEW policy (a duplicate, a deep link). Ignored when editing. */
+  seed?: Partial<QuotaPolicyFormData> | null;
+  /** Replaces the header when the editor is not tied to one domain. */
+  title?: string;
+  subtitle?: string;
 }
 
 export interface QuotaPolicyFormData {
   scope: QuotaScope;
   scopeId?: string;
+  /** Group scope only: count each member separately (default) or the group as one. */
+  groupMode?: QuotaGroupMode;
   domain: QuotaDomain;
   priority: number;
   enabled: boolean;
   label?: string;
   description?: string;
   limits: QuotaLimits;
+  /** Where the limit lives. On an update, '' moves it to "all projects". */
+  projectId?: string;
 }
+
+/** The select cannot hold an empty value, so "all projects" is this sentinel. */
+const ALL_PROJECTS = '__all__';
 
 const toFormValue = (value?: number | string | null): number | '' => {
   if (value === undefined || value === null || value === '') return '';
@@ -56,6 +84,14 @@ const fromFormValue = (
   const numeric = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
 };
+
+/** The name the Limits table resolved for a saved policy's target, if it came with one. */
+const targetLabelOf = (policy: IQuotaPolicy): string | undefined =>
+  (policy as { target?: { label?: string } }).target?.label;
+
+/** The Limits table found the saved person / group / token / agent gone. */
+const targetMissingOf = (policy: IQuotaPolicy): boolean =>
+  (policy as { target?: { missing?: boolean } }).target?.missing === true;
 
 const hasAnyValue = (obj?: object | null) =>
   !!obj &&
@@ -77,11 +113,22 @@ export function QuotaPolicyModal({
   allowedDomains,
   allowedScopes,
   resourceOptions = [],
+  projects,
+  seed = null,
+  title,
+  subtitle,
 }: QuotaPolicyModalProps) {
   const isEditing = !!policy;
+  // The name behind the chosen target, for the summary (the form itself keeps the id).
+  const [targetName, setTargetName] = useState<string | undefined>(undefined);
+  // The project was set by picking a model / index / bucket / provider that lives in exactly one.
+  const [projectFromPick, setProjectFromPick] = useState(false);
   const t = useTranslations('settings.quotaSection.form');
   const tScopes = useTranslations('settings.quotaSection.scopes');
   const tDomains = useTranslations('settings.quotaSection.domains');
+  const tl = useTranslations('iamLimits.form');
+  const te = useTranslations('iamLimits.form.editor');
+  const locale = useLocale();
 
   const emptyLimits: QuotaLimits = {
     rateLimit: { requests: {}, tokens: {} },
@@ -94,6 +141,8 @@ export function QuotaPolicyModal({
     initialValues: {
       scope: 'tenant',
       scopeId: '',
+      groupMode: 'perMember',
+      projectId: '',
       domain: defaultDomain,
       priority: 0,
       enabled: true,
@@ -104,6 +153,7 @@ export function QuotaPolicyModal({
   });
 
   useEffect(() => {
+    setProjectFromPick(false);
     if (policy) {
       const rl = policy.limits?.rateLimit;
       const normalizedLimits: QuotaLimits = {
@@ -117,6 +167,8 @@ export function QuotaPolicyModal({
       form.setValues({
         scope: policy.scope,
         scopeId: policy.scopeId || '',
+        groupMode: policy.groupMode ?? 'perMember',
+        projectId: policy.projectId ? String(policy.projectId) : '',
         domain: policy.domain,
         priority: policy.priority || 0,
         enabled: policy.enabled !== false,
@@ -128,9 +180,17 @@ export function QuotaPolicyModal({
       form.reset();
       form.setFieldValue('domain', defaultDomain);
       form.setFieldValue('limits', emptyLimits);
+      if (seed) {
+        form.setValues({
+          ...seed,
+          scopeId: seed.scopeId ?? '',
+          projectId: seed.projectId ?? '',
+          limits: seed.limits ? { ...emptyLimits, ...structuredClone(seed.limits) } : emptyLimits,
+        });
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [policy, opened, defaultDomain]);
+  }, [policy, opened, defaultDomain, seed]);
 
   const handleSubmit = async () => {
     const values = form.getValues();
@@ -147,21 +207,26 @@ export function QuotaPolicyModal({
       ...(anyDefined(budget) ? { budget } : {}),
     };
 
+    const { projectId, groupMode, ...rest } = values;
     await onSubmit({
-      ...values,
-      scopeId: values.scopeId || undefined,
+      ...rest,
+      scopeId: values.scope === 'tenant' ? undefined : values.scopeId || undefined,
       limits: cleanLimits,
+      ...(values.scope === 'group' ? { groupMode: groupMode ?? 'perMember' } : {}),
+      // A new limit with no project is tenant-wide, which the server takes as
+      // "no projectId"; an edit must say '' to move one out of its project.
+      ...(projects ? (isEditing ? { projectId: projectId || '' } : projectId ? { projectId } : {}) : {}),
     });
   };
 
   const scopeOptions = (allowedScopes ||
-    (['tenant', 'user', 'token', 'resource', 'provider'] as QuotaScope[])).map((s) => ({
+    (['tenant', 'group', 'user', 'token', 'resource', 'provider'] as QuotaScope[])).map((s) => ({
     value: s,
     label: tScopes(s),
   }));
 
   const domainOptions = (allowedDomains ||
-    (['global', 'llm', 'embedding', 'vector', 'file', 'tracing'] as QuotaDomain[])).map((d) => ({
+    (['global', 'llm', 'embedding', 'vector', 'file', 'tracing', 'agent'] as QuotaDomain[])).map((d) => ({
     value: d,
     label: tDomains(d),
   }));
@@ -172,16 +237,40 @@ export function QuotaPolicyModal({
   const values = form.values;
   const limits = values.limits;
 
+  // Agent runs are limited by requests and tokens per person (optionally per
+  // agent): none of the model, vector, file, tracing, budget or resource-cap
+  // fields apply to them.
+  const isAgentDomain = currentDomain === 'agent';
   const showTokens =
     currentDomain === 'global' || currentDomain === 'llm' || currentDomain === 'embedding';
+  const showTokenWindows = showTokens || isAgentDomain;
   const showVectors = currentDomain === 'global' || currentDomain === 'vector';
   // Storage limits belong to the file domain, so showFiles also gates them.
   const showFiles = currentDomain === 'global' || currentDomain === 'file';
   const showTracing = currentDomain === 'global' || currentDomain === 'tracing';
   const showCreationQuotas = currentScope === 'tenant' || currentScope === 'user';
 
+  // Where the limit lives. Group and agent-run limits may be tenant-wide; every
+  // other kind only exists inside a project (see isTenantWideKind).
+  const showProjectField = Boolean(projects);
+  const tenantWideKind = isTenantWideKind({ scope: currentScope, domain: currentDomain });
+  const projectRequired = showProjectField && !tenantWideKind;
+  // An agent-narrowed limit lives in the project of the agent it names.
+  const projectFromAgent = isAgentDomain && currentScope === 'resource';
+  // The target an existing limit was saved with is gone (and still the one in the field).
+  const savedTargetGone = policy ? targetMissingOf(policy) && values.scopeId === (policy.scopeId ?? '') : false;
+  // What the target is called depends on what it is: a group, a person, an agent, a model, a vector index...
+  const targetSource = quotaTargetSource(currentDomain, currentScope);
+  const targetKind = projectFromAgent ? 'agent' : currentScope === 'resource' && targetSource ? targetSource.noun : currentScope;
+  const targetLabel = tryTranslate(tl, `targetLabel.${targetKind}`, 'iamLimits.form') ?? t('scopeId');
+  const targetHint = tryTranslate(tl, `targetHint.${targetKind}`, 'iamLimits.form') ?? t('scopeIdDescription');
+  const projectLabel = values.projectId
+    ? projects?.find((p) => p.value === values.projectId)?.label ?? values.projectId
+    : undefined;
+
   // Validation/checklist signals
   const identityDone = !!values.label && !!values.domain;
+  const projectDone = !projectRequired || !!values.projectId;
   const scopeDone =
     !!values.scope && (currentScope === 'tenant' || !!values.scopeId);
   const limitsDone = [
@@ -193,13 +282,15 @@ export function QuotaPolicyModal({
 
   const checklist = useMemo(
     () => [
-      { id: 1, label: 'Label set', done: !!values.label },
-      { id: 2, label: 'Domain chosen', done: !!values.domain },
-      { id: 3, label: 'Scope target valid', done: scopeDone },
-      { id: 4, label: 'At least one limit configured', done: limitsDone },
-      { id: 5, label: 'Active', done: values.enabled },
+      { id: 1, label: te('checklist.label'), done: !!values.label },
+      { id: 2, label: te('checklist.domain'), done: !!values.domain },
+      { id: 3, label: te('checklist.target'), done: scopeDone },
+      ...(projectRequired ? [{ id: 6, label: tl('checklistProject'), done: projectDone }] : []),
+      { id: 4, label: te('checklist.limits'), done: limitsDone },
+      { id: 5, label: te('checklist.active'), done: values.enabled },
     ],
-    [values.label, values.domain, scopeDone, limitsDone, values.enabled],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [values.label, values.domain, scopeDone, limitsDone, values.enabled, projectRequired, projectDone, locale],
   );
 
   const headerTitle = isEditing
@@ -255,58 +346,76 @@ export function QuotaPolicyModal({
 
   const planLimit = { placeholder: t('planLimit') };
 
+  // `lang`: the page's own is "en", and the upper-cased labels would lose their Turkish dots ("ÖNCELIK", not "ÖNCELİK").
+  // `display: contents` keeps the wrapper out of the layout.
+  const langScope = { lang: locale, style: { display: 'contents' } as const };
+
   const summary = (
-    <>
-      <SummaryGroup title="Identity">
+    <div {...langScope}>
+      <SummaryGroup title={te('summary.identity')}>
         <SummaryKV
-          label="Label"
+          label={te('summary.label')}
           value={values.label || <span className="ds-faint">—</span>}
         />
         <SummaryKV
-          label="Description"
+          label={te('summary.description')}
           value={values.description || <span className="ds-faint">—</span>}
         />
-        <SummaryKV label="Priority" value={values.priority ?? 0} mono />
-        <SummaryKV label="Status" value={values.enabled ? 'enabled' : 'disabled'} />
+        <SummaryKV label={te('summary.priority')} value={values.priority ?? 0} mono />
+        <SummaryKV label={te('summary.status')} value={values.enabled ? te('summary.enabled') : te('summary.disabled')} />
       </SummaryGroup>
 
-      <SummaryGroup title="Scope">
-        <SummaryKV label="Domain" value={tDomains(values.domain)} />
-        <SummaryKV label="Scope" value={tScopes(values.scope)} />
+      <SummaryGroup title={te('summary.scopeGroup')}>
+        <SummaryKV label={te('summary.domain')} value={tDomains(values.domain)} />
+        <SummaryKV label={te('summary.scope')} value={tScopes(values.scope)} />
         {showScopeId ? (
           <SummaryKV
-            label="Target"
-            value={values.scopeId || <span className="ds-faint">—</span>}
-            mono
+            label={te('summary.target')}
+            value={values.scopeId ? targetName || values.scopeId : <span className="ds-faint">—</span>}
+            mono={!targetName}
+          />
+        ) : null}
+        {currentScope === 'group' ? (
+          <SummaryKV
+            label={tl('summaryCounting')}
+            value={values.groupMode === 'shared' ? tl('shared') : tl('perMember')}
+          />
+        ) : null}
+        {showProjectField ? (
+          <SummaryKV
+            label={tl('project')}
+            value={projectLabel ?? tl('projectAll')}
           />
         ) : null}
       </SummaryGroup>
 
-      <SummaryGroup title="Limits">
+      <SummaryGroup title={te('summary.limits')}>
         <SummaryKV
-          label="Request RPM"
+          label={te('summary.requestsPerMinute')}
           value={toFormValue(limits.rateLimit?.requests?.perMinute) || '—'}
           mono
         />
         <SummaryKV
-          label="Request RPH"
+          label={te('summary.requestsPerHour')}
           value={toFormValue(limits.rateLimit?.requests?.perHour) || '—'}
           mono
         />
+        {showTokenWindows ? (
+          <SummaryKV
+            label={te('summary.tokensPerMinute')}
+            value={toFormValue(limits.rateLimit?.tokens?.perMinute) || '—'}
+            mono
+          />
+        ) : null}
         {showTokens ? (
           <>
             <SummaryKV
-              label="Token TPM"
-              value={toFormValue(limits.rateLimit?.tokens?.perMinute) || '—'}
-              mono
-            />
-            <SummaryKV
-              label="Max input"
+              label={te('summary.maxInput')}
               value={toFormValue(limits.perRequest?.maxInputTokens) || '—'}
               mono
             />
             <SummaryKV
-              label="Max output"
+              label={te('summary.maxOutput')}
               value={toFormValue(limits.perRequest?.maxOutputTokens) || '—'}
               mono
             />
@@ -314,7 +423,7 @@ export function QuotaPolicyModal({
         ) : null}
         {showFiles ? (
           <SummaryKV
-            label="Max file size (MB)"
+            label={te('summary.maxFileSize')}
             value={
               limits.perRequest?.maxFileSize
                 ? Math.round(limits.perRequest.maxFileSize / 1024 / 1024)
@@ -323,40 +432,48 @@ export function QuotaPolicyModal({
             mono
           />
         ) : null}
-        <SummaryKV
-          label="Daily $"
-          value={toFormValue(limits.budget?.dailySpendLimit) || '—'}
-          mono
-        />
-        <SummaryKV
-          label="Monthly $"
-          value={toFormValue(limits.budget?.monthlySpendLimit) || '—'}
-          mono
-        />
+        {isAgentDomain ? null : (
+          <>
+            <SummaryKV
+              label={te('summary.dailySpend')}
+              value={toFormValue(limits.budget?.dailySpendLimit) || '—'}
+              mono
+            />
+            <SummaryKV
+              label={te('summary.monthlySpend')}
+              value={toFormValue(limits.budget?.monthlySpendLimit) || '—'}
+              mono
+            />
+          </>
+        )}
       </SummaryGroup>
 
-      <SummaryGroup title="Pre-flight">
+      <SummaryGroup title={te('summary.preflight')}>
         <Checklist items={checklist} />
       </SummaryGroup>
-    </>
+    </div>
   );
 
   const readyCount = checklist.filter((c) => c.done).length;
+
+  // Sections come and go with the domain, so they are numbered as they render.
+  let sectionNumber = 0;
+  const section = () => (sectionNumber += 1);
 
   return (
     <FormShell
       open={opened}
       onClose={onClose}
       icon={<IconGauge size={16} />}
-      title={headerTitle}
-      subtitle="Configure rate limits, resource quotas, and budgets for this scope."
+      title={title ?? headerTitle}
+      subtitle={subtitle ?? te('subtitle')}
       summary={summary}
-      footerStatus={`${readyCount} of ${checklist.length} ready`}
+      footerStatus={te('ready', { done: readyCount, total: checklist.length })}
       primaryAction={{
         label: isEditing ? t('actions.update') : t('actions.create'),
         icon: <IconBolt size={13} />,
         loading,
-        disabled: !values.label || !values.domain || !scopeDone,
+        disabled: !values.label || !values.domain || !scopeDone || !projectDone,
         onClick: handleSubmit,
       }}
       secondaryAction={{
@@ -364,358 +481,450 @@ export function QuotaPolicyModal({
         onClick: onClose,
       }}
     >
-      <FormSection
-        number={1}
-        title="Identity"
-        description="How this policy is identified across the console."
-        done={identityDone}
-      >
-        <FormRow cols={1}>
-          <FormField label={t('label')} required>
-            <TextInput
-              placeholder={t('labelPlaceholder')}
-              {...form.getInputProps('label')}
-            />
-          </FormField>
-        </FormRow>
-        <FormRow cols={1}>
-          <FormField label={t('description')} optional>
-            <Textarea
-              placeholder={t('descriptionPlaceholder')}
-              autosize
-              minRows={2}
-              {...form.getInputProps('description')}
-            />
-          </FormField>
-        </FormRow>
-        <FormRow cols={2}>
-          <FormField
-            label={t('priority')}
-            hint={t('priorityDescription')}
-          >
-            <NumberInput min={0} max={100} {...form.getInputProps('priority')} />
-          </FormField>
-          <FormField label={t('enabled')} hint={t('enabledDescription')}>
-            <Switch
-              checked={values.enabled}
-              onChange={(e) => form.setFieldValue('enabled', e.currentTarget.checked)}
-            />
-          </FormField>
-        </FormRow>
-      </FormSection>
-
-      <FormSection
-        number={2}
-        title="Scope"
-        description="Choose which domain this policy targets and to whom it applies."
-        done={scopeDone}
-      >
-        <FormRow cols={1}>
-          <FormField label={t('domain')} required>
-            <Select
-              data={domainOptions}
-              value={values.domain}
-              onChange={(v) => form.setFieldValue('domain', (v as QuotaDomain) || defaultDomain)}
-              disabled={allowedDomains?.length === 1}
-              allowDeselect={false}
-            />
-          </FormField>
-        </FormRow>
-        <FormRow cols={1}>
-          <FormField label={t('scope')} required>
-            <ChipPicker<QuotaScope>
-              options={scopeOptions}
-              value={values.scope}
-              onChange={(v) => form.setFieldValue('scope', v as QuotaScope)}
-            />
-          </FormField>
-        </FormRow>
-        {showScopeId ? (
+      <div {...langScope}>
+        <FormSection
+          number={section()}
+          title={te('sections.identityTitle')}
+          description={te('sections.identityDescription')}
+          done={identityDone}
+        >
           <FormRow cols={1}>
-            <FormField label={t('scopeId')} required hint={t('scopeIdDescription')}>
-              <ScopeIdSelector
-                scope={values.scope}
-                value={values.scopeId}
-                onChange={(v) => form.setFieldValue('scopeId', v || '')}
-                resourceOptions={resourceOptions}
+            <FormField label={t('label')} required>
+              <TextInput
+                placeholder={t('labelPlaceholder')}
+                {...form.getInputProps('label')}
               />
             </FormField>
           </FormRow>
-        ) : null}
-      </FormSection>
-
-      <FormSection
-        number={3}
-        title="Request rate limits"
-        description="Cap how many requests can be made within rolling windows."
-      >
-        {rateWindowRows('requests')}
-        <FormRow cols={1}>
-          {limitField(
-            t('perRequest.maxConcurrentRequests'),
-            'limits.perRequest.maxConcurrentRequests',
-            limits.perRequest?.maxConcurrentRequests,
-          )}
-        </FormRow>
-      </FormSection>
-
-      {showTokens ? (
-        <FormSection
-          number={4}
-          title={t('rateLimits.tokens')}
-          description="Throttle token throughput for LLM and embedding workloads."
-        >
-          {rateWindowRows('tokens')}
+          <FormRow cols={1}>
+            <FormField label={t('description')} optional>
+              <Textarea
+                placeholder={t('descriptionPlaceholder')}
+                autosize
+                minRows={2}
+                {...form.getInputProps('description')}
+              />
+            </FormField>
+          </FormRow>
           <FormRow cols={2}>
-            {limitField(
-              t('perRequest.maxInputTokens'),
-              'limits.perRequest.maxInputTokens',
-              limits.perRequest?.maxInputTokens,
-            )}
-            {limitField(
-              t('perRequest.maxOutputTokens'),
-              'limits.perRequest.maxOutputTokens',
-              limits.perRequest?.maxOutputTokens,
-            )}
+            <FormField
+              label={t('priority')}
+              hint={t('priorityDescription')}
+            >
+              <NumberInput min={0} max={100} {...form.getInputProps('priority')} />
+            </FormField>
+            <FormField label={t('enabled')} hint={t('enabledDescription')}>
+              <Switch
+                checked={values.enabled}
+                onChange={(e) => form.setFieldValue('enabled', e.currentTarget.checked)}
+              />
+            </FormField>
+          </FormRow>
+        </FormSection>
+
+        <FormSection
+          number={section()}
+          title={te('sections.scopeTitle')}
+          description={te('sections.scopeDescription')}
+          done={scopeDone}
+        >
+          <FormRow cols={1}>
+            <FormField
+              label={t('domain')}
+              required
+              hint={values.domain === 'global' ? tl('globalAgentNote') : undefined}
+            >
+              <Select
+                data={domainOptions}
+                value={values.domain}
+                onChange={(v) => {
+                  const next = (v as QuotaDomain) || defaultDomain;
+                  // A resource limit points at an agent in the agent domain, at a model in the model
+                  // domains, at an index for vector...: a target chosen for another kind of value does
+                  // not carry over (a model key is not an index key, an embedding model is not a chat one).
+                  if (!isSameTargetKind(values.scope, values.domain, next)) {
+                    form.setFieldValue('scopeId', '');
+                    setProjectFromPick(false);
+                  }
+                  form.setFieldValue('domain', next);
+                }}
+                disabled={allowedDomains?.length === 1}
+                allowDeselect={false}
+              />
+            </FormField>
           </FormRow>
           <FormRow cols={1}>
-            {limitField(
-              t('perRequest.maxTotalTokens'),
-              'limits.perRequest.maxTotalTokens',
-              limits.perRequest?.maxTotalTokens,
-            )}
+            <FormField label={t('scope')} required>
+              <ChipPicker<QuotaScope>
+                options={scopeOptions}
+                value={values.scope}
+                onChange={(v) => {
+                  if (v === values.scope) return;
+                  // A user id is not a token id: a different kind of target starts empty.
+                  form.setValues({ scope: v as QuotaScope, scopeId: '', groupMode: 'perMember' });
+                  setProjectFromPick(false);
+                }}
+              />
+            </FormField>
           </FormRow>
+          {showScopeId ? (
+            <FormRow cols={1}>
+              <FormField label={targetLabel} required hint={targetHint}>
+                <ScopeIdSelector
+                  scope={values.scope}
+                  domain={values.domain}
+                  value={values.scopeId}
+                  valueLabel={policy ? targetLabelOf(policy) : undefined}
+                  valueMissing={savedTargetGone}
+                  projectId={values.projectId || undefined}
+                  onLabelChange={setTargetName}
+                  onChange={(v, option) => {
+                    form.setFieldValue('scopeId', v || '');
+                    // An agent, a model, an index or a bucket lives in one project (a provider in one or
+                    // several); a limit on it only ever applies there, so the limit follows it.
+                    const follows = Boolean(option?.projectId)
+                      && (projectFromAgent || currentScope === 'resource' || currentScope === 'provider');
+                    if (follows && option?.projectId) form.setFieldValue('projectId', option.projectId);
+                    setProjectFromPick(follows && !projectFromAgent);
+                  }}
+                  resourceOptions={resourceOptions}
+                />
+              </FormField>
+            </FormRow>
+          ) : null}
+          {currentScope === 'group' ? (
+            <FormRow cols={1}>
+              <FormField label={tl('groupMode')} required hint={values.groupMode === 'shared' ? tl('sharedHint') : tl('perMemberHint')}>
+                <ChipPicker<QuotaGroupMode>
+                  options={[
+                    { value: 'perMember', label: tl('perMember') },
+                    { value: 'shared', label: tl('shared') },
+                  ]}
+                  value={values.groupMode ?? 'perMember'}
+                  onChange={(v) => form.setFieldValue('groupMode', v as QuotaGroupMode)}
+                />
+              </FormField>
+            </FormRow>
+          ) : null}
+          {showProjectField ? (
+            <FormRow cols={1}>
+              <FormField
+                label={tl('project')}
+                required={projectRequired}
+                optional={!projectRequired}
+                hint={
+                  projectFromAgent
+                    ? tl('projectFromAgent')
+                    : projectFromPick
+                      ? tl('projectFromTarget')
+                      : projectRequired
+                        ? tl('projectRequiredHint')
+                        : tl('projectOptionalHint')
+                }
+              >
+                <SearchableSelect
+                  data={[
+                    ...(projectRequired || projectFromAgent ? [] : [{ value: ALL_PROJECTS, label: tl('projectAll') }]),
+                    ...(projects ?? []),
+                  ]}
+                  value={values.projectId || (projectRequired || projectFromAgent ? null : ALL_PROJECTS)}
+                  onChange={(v) => form.setFieldValue('projectId', !v || v === ALL_PROJECTS ? '' : v)}
+                  placeholder={tl('projectPlaceholder')}
+                  disabled={projectFromAgent || projectFromPick}
+                />
+              </FormField>
+            </FormRow>
+          ) : null}
+          {currentScope === 'group' || currentScope === 'tenant' ? (
+            <Text size="xs" c="dimmed">
+              {currentScope === 'group' ? tl('ceilingHint') : tl('tenantCeilingNote')}
+            </Text>
+          ) : null}
         </FormSection>
-      ) : null}
 
-      {showVectors ? (
         <FormSection
-          number={5}
-          title={t('rateLimits.vectors')}
-          description="Upsert and query throughput for vector indexes."
+          number={section()}
+          title={te('sections.requestsTitle')}
+          description={isAgentDomain ? tl('agentRequestsDescription') : te('sections.requestsDescription')}
         >
-          {rateWindowRows('vectors')}
-          <FormRow cols={2}>
-            {limitField(
-              t('perRequest.maxVectorsPerUpsert'),
-              'limits.perRequest.maxVectorsPerUpsert',
-              limits.perRequest?.maxVectorsPerUpsert,
-            )}
-            {limitField(
-              t('perRequest.maxQueryResults'),
-              'limits.perRequest.maxQueryResults',
-              limits.perRequest?.maxQueryResults,
-            )}
-          </FormRow>
-        </FormSection>
-      ) : null}
-
-      {showFiles ? (
-        <FormSection
-          number={6}
-          title={t('rateLimits.files')}
-          description="Per-request and rate limits for file operations."
-        >
-          {rateWindowRows('files')}
-          <FormRow cols={2}>
-            {limitField(
-              t('perRequest.maxFileSizeMB'),
-              'limits.perRequest.maxFileSize',
-              limits.perRequest?.maxFileSize,
-              { scale: 1024 * 1024 },
-            )}
-            {limitField(
-              t('perRequest.maxFilesPerRequest'),
-              'limits.perRequest.maxFilesPerRequest',
-              limits.perRequest?.maxFilesPerRequest,
-            )}
-          </FormRow>
-        </FormSection>
-      ) : null}
-
-      {showFiles ? (
-        <FormSection
-          number={7}
-          title={t('rateLimits.storage')}
-          description="Throttle storage I/O measured in bytes."
-        >
-          {rateWindowRows('storage')}
-        </FormSection>
-      ) : null}
-
-      {showTracing ? (
-        <FormSection
-          number={8}
-          title={t('perRequest.tracing')}
-          description="Limits for observability session size and duration."
-        >
-          <FormRow cols={2}>
-            {limitField(
-              t('perRequest.maxEventsPerSession'),
-              'limits.perRequest.maxEventsPerSession',
-              limits.perRequest?.maxEventsPerSession,
-            )}
-            {limitField(
-              t('perRequest.maxSessionDurationSec'),
-              'limits.perRequest.maxSessionDurationMs',
-              limits.perRequest?.maxSessionDurationMs,
-              { scale: 1000 },
-            )}
-          </FormRow>
-        </FormSection>
-      ) : null}
-
-      <FormSection
-        number={9}
-        title="Resource quotas"
-        description={t('quotas.description')}
-      >
-        {showCreationQuotas ? (
-          <>
-            <FormRow cols={2}>
-              {showTokens ? (
-                limitField(
-                  t('quotas.maxModels'),
-                  'limits.quotas.maxModels',
-                  limits.quotas?.maxModels,
-                  planLimit,
-                )
-              ) : (
-                <div />
-              )}
-              {showVectors ? (
-                limitField(
-                  t('quotas.maxVectorIndexes'),
-                  'limits.quotas.maxVectorIndexes',
-                  limits.quotas?.maxVectorIndexes,
-                  planLimit,
-                )
-              ) : (
-                <div />
+          {rateWindowRows('requests')}
+          {isAgentDomain ? null : (
+            <FormRow cols={1}>
+              {limitField(
+                t('perRequest.maxConcurrentRequests'),
+                'limits.perRequest.maxConcurrentRequests',
+                limits.perRequest?.maxConcurrentRequests,
               )}
             </FormRow>
-            <FormRow cols={2}>
-              {showFiles ? (
-                limitField(
-                  t('quotas.maxFileBuckets'),
-                  'limits.quotas.maxFileBuckets',
-                  limits.quotas?.maxFileBuckets,
-                  planLimit,
-                )
-              ) : (
-                <div />
-              )}
-              {showTracing ? (
-                limitField(
-                  t('quotas.maxTracingSessions'),
-                  'limits.quotas.maxTracingSessions',
-                  limits.quotas?.maxTracingSessions,
-                  planLimit,
-                )
-              ) : (
-                <div />
-              )}
-            </FormRow>
-            {currentDomain === 'global' && currentScope === 'tenant' ? (
-              <FormRow cols={2}>
-                {limitField(
-                  t('quotas.maxApiTokens'),
-                  'limits.quotas.maxApiTokens',
-                  limits.quotas?.maxApiTokens,
-                  planLimit,
-                )}
-                {limitField(
-                  t('quotas.maxUsers'),
-                  'limits.quotas.maxUsers',
-                  limits.quotas?.maxUsers,
-                  planLimit,
-                )}
-              </FormRow>
+          )}
+        </FormSection>
+
+        {showTokenWindows ? (
+          <FormSection
+            number={section()}
+            title={t('rateLimits.tokens')}
+            description={isAgentDomain ? tl('agentTokensDescription') : te('sections.tokensDescription')}
+          >
+            {rateWindowRows('tokens')}
+            {showTokens ? (
+              <>
+                <FormRow cols={2}>
+                  {limitField(
+                    t('perRequest.maxInputTokens'),
+                    'limits.perRequest.maxInputTokens',
+                    limits.perRequest?.maxInputTokens,
+                  )}
+                  {limitField(
+                    t('perRequest.maxOutputTokens'),
+                    'limits.perRequest.maxOutputTokens',
+                    limits.perRequest?.maxOutputTokens,
+                  )}
+                </FormRow>
+                <FormRow cols={1}>
+                  {limitField(
+                    t('perRequest.maxTotalTokens'),
+                    'limits.perRequest.maxTotalTokens',
+                    limits.perRequest?.maxTotalTokens,
+                  )}
+                </FormRow>
+              </>
             ) : null}
-            {currentDomain === 'global' ? (
-              <FormRow cols={3}>
-                {limitField(
-                  t('quotas.maxAgentSyncTimeoutSeconds'),
-                  'limits.quotas.maxAgentSyncTimeoutSeconds',
-                  limits.quotas?.maxAgentSyncTimeoutSeconds,
-                  { ...planLimit, min: 5 },
-                )}
-                {limitField(
-                  t('quotas.maxAgentBackgroundDurationMinutes'),
-                  'limits.quotas.maxAgentBackgroundDurationMinutes',
-                  limits.quotas?.maxAgentBackgroundDurationMinutes,
-                  { ...planLimit, min: 1 },
-                )}
-                {limitField(
-                  t('quotas.maxConcurrentAgentRuns'),
-                  'limits.quotas.maxConcurrentAgentRuns',
-                  limits.quotas?.maxConcurrentAgentRuns,
-                  planLimit,
-                )}
-              </FormRow>
-            ) : null}
-          </>
+          </FormSection>
         ) : null}
 
-        <FormRow cols={2}>
-          {showVectors ? (
-            limitField(
-              t('quotas.maxVectorsTotal'),
-              'limits.quotas.maxVectorsTotal',
-              limits.quotas?.maxVectorsTotal,
-            )
-          ) : (
-            <div />
-          )}
-          {showFiles ? (
-            limitField(
-              t('quotas.maxStorageMB'),
-              'limits.quotas.maxStorageBytes',
-              limits.quotas?.maxStorageBytes,
-              { scale: 1024 * 1024 },
-            )
-          ) : (
-            <div />
-          )}
-        </FormRow>
-      </FormSection>
+        {showVectors ? (
+          <FormSection
+            number={section()}
+            title={t('rateLimits.vectors')}
+            description={te('sections.vectorsDescription')}
+          >
+            {rateWindowRows('vectors')}
+            <FormRow cols={2}>
+              {limitField(
+                t('perRequest.maxVectorsPerUpsert'),
+                'limits.perRequest.maxVectorsPerUpsert',
+                limits.perRequest?.maxVectorsPerUpsert,
+              )}
+              {limitField(
+                t('perRequest.maxQueryResults'),
+                'limits.perRequest.maxQueryResults',
+                limits.perRequest?.maxQueryResults,
+              )}
+            </FormRow>
+          </FormSection>
+        ) : null}
 
-      <FormSection
-        number={10}
-        title={t('tabs.budget')}
-        description={t('budget.description')}
-      >
-        <FormRow cols={2}>
-          {limitField(
-            t('budget.dailyLimit'),
-            'limits.budget.dailySpendLimit',
-            limits.budget?.dailySpendLimit,
-            { decimalScale: 2 },
-          )}
-          {limitField(
-            t('budget.monthlyLimit'),
-            'limits.budget.monthlySpendLimit',
-            limits.budget?.monthlySpendLimit,
-            { decimalScale: 2 },
-          )}
-        </FormRow>
-      </FormSection>
+        {showFiles ? (
+          <FormSection
+            number={section()}
+            title={t('rateLimits.files')}
+            description={te('sections.filesDescription')}
+          >
+            {rateWindowRows('files')}
+            <FormRow cols={2}>
+              {limitField(
+                t('perRequest.maxFileSizeMB'),
+                'limits.perRequest.maxFileSize',
+                limits.perRequest?.maxFileSize,
+                { scale: 1024 * 1024 },
+              )}
+              {limitField(
+                t('perRequest.maxFilesPerRequest'),
+                'limits.perRequest.maxFilesPerRequest',
+                limits.perRequest?.maxFilesPerRequest,
+              )}
+            </FormRow>
+          </FormSection>
+        ) : null}
 
-      <FormSection
-        number={11}
-        title="Activation"
-        description="Make the policy active or staged for later enablement."
-        done={values.enabled}
-      >
-        <ToggleList>
-          <ToggleRow
-            label={t('enabled')}
-            description={t('enabledDescription')}
-            checked={values.enabled}
-            onChange={(v) => form.setFieldValue('enabled', v)}
-          />
-        </ToggleList>
-      </FormSection>
+        {showFiles ? (
+          <FormSection
+            number={section()}
+            title={t('rateLimits.storage')}
+            description={te('sections.storageDescription')}
+          >
+            {rateWindowRows('storage')}
+          </FormSection>
+        ) : null}
+
+        {showTracing ? (
+          <FormSection
+            number={section()}
+            title={t('perRequest.tracing')}
+            description={te('sections.tracingDescription')}
+          >
+            <FormRow cols={2}>
+              {limitField(
+                t('perRequest.maxEventsPerSession'),
+                'limits.perRequest.maxEventsPerSession',
+                limits.perRequest?.maxEventsPerSession,
+              )}
+              {limitField(
+                t('perRequest.maxSessionDurationSec'),
+                'limits.perRequest.maxSessionDurationMs',
+                limits.perRequest?.maxSessionDurationMs,
+                { scale: 1000 },
+              )}
+            </FormRow>
+          </FormSection>
+        ) : null}
+
+        {isAgentDomain ? null : (
+          <FormSection
+            number={section()}
+            title={te('sections.quotasTitle')}
+            description={t('quotas.description')}
+          >
+            {showCreationQuotas ? (
+              <>
+                <FormRow cols={2}>
+                  {showTokens ? (
+                    limitField(
+                      t('quotas.maxModels'),
+                      'limits.quotas.maxModels',
+                      limits.quotas?.maxModels,
+                      planLimit,
+                    )
+                  ) : (
+                    <div />
+                  )}
+                  {showVectors ? (
+                    limitField(
+                      t('quotas.maxVectorIndexes'),
+                      'limits.quotas.maxVectorIndexes',
+                      limits.quotas?.maxVectorIndexes,
+                      planLimit,
+                    )
+                  ) : (
+                    <div />
+                  )}
+                </FormRow>
+                <FormRow cols={2}>
+                  {showFiles ? (
+                    limitField(
+                      t('quotas.maxFileBuckets'),
+                      'limits.quotas.maxFileBuckets',
+                      limits.quotas?.maxFileBuckets,
+                      planLimit,
+                    )
+                  ) : (
+                    <div />
+                  )}
+                  {showTracing ? (
+                    limitField(
+                      t('quotas.maxTracingSessions'),
+                      'limits.quotas.maxTracingSessions',
+                      limits.quotas?.maxTracingSessions,
+                      planLimit,
+                    )
+                  ) : (
+                    <div />
+                  )}
+                </FormRow>
+                {currentDomain === 'global' && currentScope === 'tenant' ? (
+                  <FormRow cols={2}>
+                    {limitField(
+                      t('quotas.maxApiTokens'),
+                      'limits.quotas.maxApiTokens',
+                      limits.quotas?.maxApiTokens,
+                      planLimit,
+                    )}
+                    {limitField(
+                      t('quotas.maxUsers'),
+                      'limits.quotas.maxUsers',
+                      limits.quotas?.maxUsers,
+                      planLimit,
+                    )}
+                  </FormRow>
+                ) : null}
+                {currentDomain === 'global' ? (
+                  <FormRow cols={3}>
+                    {limitField(
+                      t('quotas.maxAgentSyncTimeoutSeconds'),
+                      'limits.quotas.maxAgentSyncTimeoutSeconds',
+                      limits.quotas?.maxAgentSyncTimeoutSeconds,
+                      { ...planLimit, min: 5 },
+                    )}
+                    {limitField(
+                      t('quotas.maxAgentBackgroundDurationMinutes'),
+                      'limits.quotas.maxAgentBackgroundDurationMinutes',
+                      limits.quotas?.maxAgentBackgroundDurationMinutes,
+                      { ...planLimit, min: 1 },
+                    )}
+                    {limitField(
+                      t('quotas.maxConcurrentAgentRuns'),
+                      'limits.quotas.maxConcurrentAgentRuns',
+                      limits.quotas?.maxConcurrentAgentRuns,
+                      planLimit,
+                    )}
+                  </FormRow>
+                ) : null}
+              </>
+            ) : null}
+
+            <FormRow cols={2}>
+              {showVectors ? (
+                limitField(
+                  t('quotas.maxVectorsTotal'),
+                  'limits.quotas.maxVectorsTotal',
+                  limits.quotas?.maxVectorsTotal,
+                )
+              ) : (
+                <div />
+              )}
+              {showFiles ? (
+                limitField(
+                  t('quotas.maxStorageMB'),
+                  'limits.quotas.maxStorageBytes',
+                  limits.quotas?.maxStorageBytes,
+                  { scale: 1024 * 1024 },
+                )
+              ) : (
+                <div />
+              )}
+            </FormRow>
+          </FormSection>
+        )}
+
+        {isAgentDomain ? null : (
+          <FormSection
+            number={section()}
+            title={t('tabs.budget')}
+            description={t('budget.description')}
+          >
+            <FormRow cols={2}>
+              {limitField(
+                t('budget.dailyLimit'),
+                'limits.budget.dailySpendLimit',
+                limits.budget?.dailySpendLimit,
+                { decimalScale: 2 },
+              )}
+              {limitField(
+                t('budget.monthlyLimit'),
+                'limits.budget.monthlySpendLimit',
+                limits.budget?.monthlySpendLimit,
+                { decimalScale: 2 },
+              )}
+            </FormRow>
+          </FormSection>
+        )}
+
+        <FormSection
+          number={section()}
+          title={te('sections.activationTitle')}
+          description={te('sections.activationDescription')}
+          done={values.enabled}
+        >
+          <ToggleList>
+            <ToggleRow
+              label={t('enabled')}
+              description={t('enabledDescription')}
+              checked={values.enabled}
+              onChange={(v) => form.setFieldValue('enabled', v)}
+            />
+          </ToggleList>
+        </FormSection>
+      </div>
     </FormShell>
   );
 }

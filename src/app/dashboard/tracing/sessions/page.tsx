@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ActionIcon, Button, Group, Text, TextInput, Tooltip } from '@mantine/core';
 import {
@@ -20,6 +20,7 @@ import {
   formatRelativeTime,
 } from '@/lib/utils/tracingUtils';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
+import { SkipTrail, type OffsetPageInfo } from '@/lib/shared/offsetPaging';
 
 interface SessionRecord {
   sessionId: string;
@@ -33,9 +34,9 @@ interface SessionRecord {
   totalTokens?: number;
 }
 
-interface SessionsResponse {
+// A caller who may not view every session gets `hasMore` / `nextSkip` instead of a `total` (see offsetPaging.ts).
+interface SessionsResponse extends OffsetPageInfo {
   sessions: SessionRecord[];
-  total: number;
 }
 
 dayjs.extend(relativeTime);
@@ -48,6 +49,9 @@ export default function TracingSessionsPage() {
   const { openDocs } = useDocsDrawer();
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [totalSessions, setTotalSessions] = useState(0);
+  // Where each page starts, and whether a list without a total has a next page (null: it has a total).
+  const skipTrail = useRef(new SkipTrail());
+  const [moreAfter, setMoreAfter] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
@@ -67,7 +71,7 @@ export default function TracingSessionsPage() {
   const buildQueryParams = useCallback(() => {
     const params = new URLSearchParams();
     params.set('limit', pageSize.toString());
-    params.set('skip', ((page - 1) * pageSize).toString());
+    params.set('skip', skipTrail.current.skipFor(page, pageSize).toString());
     if (query) params.set('query', query.trim());
     if (statusFilter !== 'all') params.set('status', statusFilter);
     if (agentFilter) params.set('agent', agentFilter.trim());
@@ -95,12 +99,15 @@ export default function TracingSessionsPage() {
         }
         const data: SessionsResponse = await response.json();
         setSessions(data.sessions || []);
-        setTotalSessions(data.total || 0);
+        skipTrail.current.remember(page, data);
+        setTotalSessions(data.total ?? 0);
+        setMoreAfter(typeof data.total === 'number' ? null : data.hasMore === true);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') return;
         console.error('Failed to load sessions:', error);
         setSessions([]);
         setTotalSessions(0);
+        setMoreAfter(null);
       } finally {
         if (!signal?.aborted) {
           setLoading(false);
@@ -108,7 +115,7 @@ export default function TracingSessionsPage() {
         }
       }
     },
-    [buildQueryParams],
+    [buildQueryParams, page],
   );
 
   useEffect(() => {
@@ -119,6 +126,11 @@ export default function TracingSessionsPage() {
     const metadataValueParam = searchParams.get('metadataValue')?.trim() || '';
     setMetadataValue((current) => (current === metadataValueParam ? current : metadataValueParam));
   }, [searchParams]);
+
+  // Another search is another list: the pages of the last one no longer say where this one's start.
+  useEffect(() => {
+    skipTrail.current.reset();
+  }, [query, statusFilter, agentFilter, metadataKey, metadataValue]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -365,15 +377,15 @@ export default function TracingSessionsPage() {
         }}
         footerLeft={
           <Text size="xs" c="dimmed">
-            {formatNumber(totalSessions)} total · Page {page} of {totalPages}
+            {moreAfter === null ? `${formatNumber(totalSessions)} total · Page ${page} of ${totalPages}` : `Page ${page}`}
           </Text>
         }
         pagination={{
           page,
           onPageChange: setPage,
           pageSize,
-          total: totalSessions,
-          hasMore: page < totalPages,
+          ...(moreAfter === null ? { total: totalSessions } : {}),
+          hasMore: moreAfter === null ? page < totalPages : moreAfter,
         }}
         rowActions={(s) => [
           {

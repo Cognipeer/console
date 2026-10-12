@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button, Group, Modal, Text } from '@mantine/core';
+import { Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconChartDots3,
   IconDatabase,
@@ -56,6 +58,8 @@ function formatDate(value?: string | Date) {
 }
 
 export default function VectorIndexPage() {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const router = useRouter();
   const [providers, setProviders] = useState<VectorProviderView[]>([]);
   const [indexesByProvider, setIndexesByProvider] = useState<
@@ -68,8 +72,6 @@ export default function VectorIndexPage() {
     null,
   );
   const [dateFilter, setDateFilter] = useDashboardDateFilterState();
-  const [deleteTarget, setDeleteTarget] = useState<VectorIndexRow | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [query, setQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState('all');
 
@@ -156,35 +158,30 @@ export default function VectorIndexPage() {
     });
   }, [rows, query, providerFilter]);
 
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    try {
-      const response = await fetch(
-        `/api/vector/indexes/${encodeURIComponent(deleteTarget.index.key)}?providerKey=${encodeURIComponent(deleteTarget.provider.key)}`,
-        { method: 'DELETE' },
-      );
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error ?? 'Failed to delete index');
-      }
-      notifications.show({
-        color: 'green',
-        title: 'Vector index deleted',
-        message: `${deleteTarget.index.name} has been removed.`,
-      });
-      setDeleteTarget(null);
-      await loadProvidersAndIndexes();
-    } catch (error) {
-      notifications.show({
-        color: 'red',
-        title: 'Unable to delete index',
-        message: error instanceof Error ? error.message : 'Unexpected error',
-      });
-    } finally {
-      setDeleting(false);
-    }
-  };
+  const confirmDelete = (target: VectorIndexRow) =>
+    deleteResource({
+      noun: tSafe('nouns.vectorIndex'),
+      name: target.index.name,
+      type: 'vector-index',
+      id: target.index._id ? String(target.index._id) : undefined,
+      extraWarning: tSafe('vectorIndexExtra'),
+      action: async () => {
+        const response = await fetch(
+          `/api/vector/indexes/${encodeURIComponent(target.index.key)}?providerKey=${encodeURIComponent(target.provider.key)}`,
+          { method: 'DELETE' },
+        );
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error ?? 'Failed to delete index');
+        }
+        notifications.show({
+          color: 'green',
+          title: 'Vector index deleted',
+          message: `${target.index.name} has been removed.`,
+        });
+        await loadProvidersAndIndexes();
+      },
+    });
 
   const handleIndexCreated = ({
     index,
@@ -373,31 +370,10 @@ export default function VectorIndexPage() {
             label: 'Delete index',
             icon: <IconTrash size={14} />,
             color: 'red',
-            onClick: () => setDeleteTarget(r),
+            onClick: () => void confirmDelete(r),
           },
         ]}
       />
-
-      <Modal
-        opened={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        title="Delete vector index"
-        centered
-        size="sm"
-      >
-        <Text size="sm" mb="lg">
-          Delete index <strong>{deleteTarget?.index.name}</strong>? This cannot be
-          undone.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteTarget(null)}>
-            Cancel
-          </Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>
-            Delete
-          </Button>
-        </Group>
-      </Modal>
 
       <CreateVectorIndexModal
         opened={createModalOpen}

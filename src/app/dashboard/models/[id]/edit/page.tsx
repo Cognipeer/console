@@ -36,6 +36,7 @@ import {
   IconShield,
 } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
 import { useDocsDrawer } from '@/components/docs/DocsDrawerContext';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 import {
@@ -48,9 +49,17 @@ import {
   validateRequestDefaults,
 } from '@/components/models/requestParams';
 import {
-  getDefaultModelInputModalities,
   getDefaultModelOutputModalities,
+  type ModelInputModality,
 } from '@/lib/services/models/modelCapabilities';
+import ModelInputModalitiesField from '@/components/models/ModelInputModalitiesField';
+import {
+  inferredInputModalities,
+  inputModalitiesPayload,
+  isMultimodalFor,
+  shownInputModalities,
+  storedInputModalities,
+} from '@/components/models/inputModalities';
 import CatalogPriceFill from '@/components/models/CatalogPriceFill';
 import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
 import type { GuardrailBindingRow } from '@/components/guardrails/GuardrailBindingList';
@@ -180,6 +189,8 @@ export default function EditModelPage() {
   const { openDocs } = useDocsDrawer();
   const t = useTranslations('modelEdit');
   const tWizard = useTranslations('modelWizard');
+  const tNouns = useTranslations('common.confirm.nouns');
+  const confirmKeyChange = useConfirmKeyChange();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -192,6 +203,8 @@ export default function EditModelPage() {
   const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
   // Held as text so a half-typed JSON object doesn't get thrown away on rerender.
   const [requestDefaultsText, setRequestDefaultsText] = useState('');
+  // What the model can be sent, when someone set it; null = detected from the model id.
+  const [inputModalities, setInputModalities] = useState<ModelInputModality[] | null>(null);
 
   const form = useForm<FormValues>({
     initialValues: {
@@ -230,6 +243,12 @@ export default function EditModelPage() {
     () =>
       modelProviders.find((candidate) => candidate.key === form.values.providerKey) ?? null,
     [form.values.providerKey, modelProviders],
+  );
+
+  // What the model id is known to accept — the boxes start from it until someone ticks one.
+  const inferredModalities = useMemo(
+    () => inferredInputModalities(model?.category ?? 'llm', form.values.modelId, Boolean(model?.isMultimodal)),
+    [model?.category, model?.isMultimodal, form.values.modelId],
   );
 
   /**
@@ -322,6 +341,7 @@ export default function EditModelPage() {
 
       const settings = { ...nextModel.settings };
       setRequestDefaultsText(formatRequestDefaults(settings.requestDefaults));
+      setInputModalities(storedInputModalities(nextModel.metadata, nextModel));
 
       const cache = nextModel.semanticCache;
 
@@ -440,7 +460,7 @@ export default function EditModelPage() {
   }, [params?.id]);
 
   const handleSubmit = async (values: FormValues) => {
-    if (!model) return;
+    if (!model || saving) return;
 
     const validation = form.validate();
     if (validation.hasErrors) {
@@ -473,7 +493,24 @@ export default function EditModelPage() {
       return;
     }
 
+    // Agents, replica pools and routing bind models by key: warn before a rename breaks them.
+    // Busy from the usage lookup on: the button shows progress and a second
+    // click cannot queue a second rename dialog.
     setSaving(true);
+    let proceed = false;
+    try {
+      proceed = await confirmKeyChange({
+        type: 'model',
+        id: String(model._id),
+        noun: tNouns('model'),
+        originalKey: model.key,
+        nextKey: values.key,
+      });
+    } finally {
+      if (!proceed) setSaving(false);
+    }
+    if (!proceed) return;
+
     try {
       const response = await fetch(`/api/models/${model._id}`, {
         method: 'PUT',
@@ -499,7 +536,7 @@ export default function EditModelPage() {
               ? toStringArray(values.settings.unsupportedParams)
               : null,
           },
-          isMultimodal: values.isMultimodal,
+          isMultimodal: isMultimodalFor(shownInputModalities(inputModalities, inferredModalities)),
           supportsToolCalls: values.supportsToolCalls,
           capabilities: {
             ...(values.contextWindow !== ''
@@ -508,10 +545,10 @@ export default function EditModelPage() {
             ...(values.maxOutputTokens !== ''
               ? { maxOutputTokens: values.maxOutputTokens }
               : {}),
-            inputModalities: getDefaultModelInputModalities(
-              model.category,
-              values.isMultimodal,
-            ),
+            // Only an explicit choice is stored. Writing the category default
+            // back here pinned every edited model to "text only" whether or not
+            // it ever took images.
+            ...inputModalitiesPayload(inputModalities),
             outputModalities: getDefaultModelOutputModalities(model.category),
             supportsReasoning: values.supportsReasoning,
             supportsStructuredOutputs: values.supportsStructuredOutputs,
@@ -767,12 +804,13 @@ export default function EditModelPage() {
               </Grid.Col>
             </Grid>
 
+            <ModelInputModalitiesField
+              value={inputModalities}
+              inferred={inferredModalities}
+              onChange={setInputModalities}
+            />
+
             <Group align="flex-start">
-              <Checkbox
-                label={tWizard('fields.isMultimodal.label')}
-                description={tWizard('fields.isMultimodal.description')}
-                {...form.getInputProps('isMultimodal', { type: 'checkbox' })}
-              />
               <Checkbox
                 label={tWizard('fields.supportsToolCalls.label')}
                 description={tWizard('fields.supportsToolCalls.description')}

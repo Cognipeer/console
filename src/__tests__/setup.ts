@@ -4,6 +4,7 @@
  */
 
 import { beforeEach } from 'vitest';
+import { invalidateTenantPrincipals } from '@/lib/iam/events';
 import { resetRateLimitStore } from '@/lib/services/auth/rateLimiter';
 
 // Database provider — default to mongodb for existing tests
@@ -23,4 +24,11 @@ if (!process.env.DEBUG) {
 
 beforeEach(() => {
   resetRateLimitStore();
+  // Every request is decided by the authorization engine, which keeps each
+  // caller's groups and project assignments for a few seconds. Suites reuse the
+  // same tenant and user ids with different fixtures from one test to the next,
+  // so each test starts with an empty principal cache. (events.ts has no imports
+  // on purpose: pulling it in here does not load the database layer before a
+  // suite's own vi.mock calls are registered.)
+  invalidateTenantPrincipals(null);
 });

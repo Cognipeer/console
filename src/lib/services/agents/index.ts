@@ -39,3 +39,47 @@ export {
 } from './agentRunService';
 
 export { normalizeA2aMetadataUpdate } from './a2aExposure';
+
+// What a chat surface (a portal, an embedded widget) builds on.
+export {
+  agentAcceptsClientTools,
+  resolveAgentExperience,
+  renderWelcomeTemplate,
+  escapeForMarkdown,
+  AGENT_STARTERS_MAX,
+} from './agentExperience';
+export type { ResolvedAgentExperience, WelcomeVariables } from './agentExperience';
+
+export {
+  checkEmbeddedClientTools,
+  CLIENT_TOOL_OUTPUT_MAX_BYTES,
+  CLIENT_TOOL_UNANSWERED_MESSAGE,
+} from './agentClientTools';
+export type { EmbeddedClientTool, EmbeddedRunContext } from './agentClientTools';
+
+export {
+  truncateSessionAfterMessage,
+  rerunSessionTurn,
+  planRerun,
+  SessionEditError,
+} from './sessionTruncate';
+export type { PreparedRerun, RerunTarget } from './sessionTruncate';
+
+export {
+  generateConversationTitle,
+  generateAndStoreConversationTitle,
+  resolveTitleModelKey,
+} from './conversationTitle';
+export type { TitleSetting } from './conversationTitle';
+
+export {
+  recordMessageFeedback,
+  listSessionFeedback,
+  listAgentFeedback,
+  summarizeAgentFeedback,
+  messageIdOf,
+  FeedbackError,
+  FEEDBACK_REASONS,
+  FEEDBACK_COMMENT_MAX,
+} from './agentFeedback';
+export type { RecordFeedbackInput, RecordFeedbackResult } from './agentFeedback';

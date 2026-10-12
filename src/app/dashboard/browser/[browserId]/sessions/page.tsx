@@ -27,6 +27,8 @@ import {
 import { useDisclosure } from '@mantine/hooks';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { useConfirm, useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import {
   IconCamera,
   IconFileTypePdf,
@@ -68,6 +70,9 @@ function statusColor(status: string): string {
 }
 
 export default function BrowserSessionsPage() {
+  const deleteResource = useDeleteResource();
+  const { confirmAction } = useConfirm();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const params = useParams<{ browserId: string }>();
   const browserId = params?.browserId ?? '';
   const [sessions, setSessions] = useState<BrowserSessionView[]>([]);
@@ -153,13 +158,29 @@ export default function BrowserSessionsPage() {
   };
 
   const handleClose = async (session: BrowserSessionView) => {
-    await fetch(`/api/browser/sessions/${session.sessionKey}`, { method: 'DELETE' });
-    await loadSessions();
+    await confirmAction({
+      title: tSafe('closeSession.title'),
+      message: tSafe('closeSession.message'),
+      confirmLabel: tSafe('closeSession.confirm'),
+      tone: 'warning',
+      action: async () => {
+        const res = await fetch(`/api/browser/sessions/${session.sessionKey}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error((await res.text()) || 'Failed to close session');
+        await loadSessions();
+      },
+    });
   };
 
   const handleDelete = async (session: BrowserSessionView) => {
-    await fetch(`/api/browser/sessions/by-id/${session.id}`, { method: 'DELETE' });
-    await loadSessions();
+    await deleteResource({
+      noun: tSafe('nouns.browserSession'),
+      name: session.name || session.sessionKey,
+      action: async () => {
+        const res = await fetch(`/api/browser/sessions/by-id/${session.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error((await res.text()) || 'Failed to delete session');
+        await loadSessions();
+      },
+    });
   };
 
   return (

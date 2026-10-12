@@ -14,7 +14,10 @@ import {
   PASSWORD_RESET_RATE_LIMIT,
   REGISTER_RATE_LIMIT,
   SESSION_ISSUANCE_RATE_LIMIT,
+  type RateLimitConfig,
 } from '@/lib/services/auth/rateLimiter';
+import { DIRECTORY_READ_ONLY_FIELDS, isDirectoryManaged, providerOf } from '@/lib/iam/identity';
+import { recordPeopleAudit } from '@/lib/services/users/peopleAudit';
 import {
   BCRYPT_ROUNDS,
   validatePassword,
@@ -24,10 +27,14 @@ import {
   ensureDefaultProject,
 } from '@/lib/services/projects/projectService';
 import { normalizeServicePermissions } from '@/lib/security/rbac';
+import { authz } from '@/lib/iam/routeAuthz';
+import { computeSessionEffectivePermissions } from '@/lib/iam/effective';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
 import { tryExternalAuthenticate } from '@/enterprise/external-auth';
 import { isUserDisabled, isUserLoginBlocked } from '@/lib/services/users/userAuthState';
 import {
   clearSessionCookies,
+  getAuthzClientIp,
   getClientIp,
   getSessionContext,
   readJsonBody,
@@ -37,6 +44,28 @@ import {
 
 const logger = createLogger('api:auth');
 const RESET_TOKEN_EXPIRY_SECONDS = 3600;
+/** Password-change attempts per person: a signed-in session guessing the current password is still a guess. */
+const PASSWORD_CHANGE_RATE_LIMIT: RateLimitConfig = { maxAttempts: 10, windowSeconds: 15 * 60 };
+/** Edits of one's own profile per person and minute. */
+const PROFILE_EDIT_RATE_LIMIT: RateLimitConfig = { maxAttempts: 30, windowSeconds: 60 };
+const MIN_PROFILE_NAME_LENGTH = 2;
+const MAX_PROFILE_NAME_LENGTH = 120;
+
+/** What `GET /auth/me` answers (and `PATCH /auth/profile` repeats): the person and what of it they can change themselves. */
+function describeAccount(user: IUser, userId: string) {
+  // An account of a directory keeps its name, email and password there.
+  const managed = isDirectoryManaged(user);
+  return {
+    userId,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    authProvider: providerOf(user),
+    canLogin: user.canLogin !== false,
+    canChangePassword: !managed,
+    managedFields: managed ? [...DIRECTORY_READ_ONLY_FIELDS] : [],
+  };
+}
 
 type LoginBody = {
   email?: string;
@@ -51,23 +80,6 @@ type RegisterBody = {
   name?: string;
   password?: string;
 };
-
-async function collectAccessibleProjectIds(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  userId: string,
-  legacyProjectIds?: string[],
-): Promise<string[]> {
-  const projectIds = new Set((legacyProjectIds ?? []).map(String).filter(Boolean));
-  const memberships = await db.listUserProjectsByUser(userId);
-
-  for (const membership of memberships) {
-    if (membership.projectId) {
-      projectIds.add(String(membership.projectId));
-    }
-  }
-
-  return Array.from(projectIds);
-}
 
 function sendRateLimitHeaders(
   headers: Record<string, string | undefined>,
@@ -138,7 +150,8 @@ export async function issueSessionForAuthenticatedUser(
   // Last line of defense for every authenticator (local, LDAP, SSO): a
   // disabled account never gets a session, whatever vouched for it. Same
   // generic failure as a wrong password — no account enumeration.
-  if (isUserDisabled(authenticatedUser)) {
+  // An external account (a person of a host application) never gets a dashboard session either.
+  if (isUserDisabled(authenticatedUser) || authenticatedUser.kind === 'external') {
     return reply.code(401).send({ error: 'Invalid email or password' });
   }
 
@@ -239,7 +252,7 @@ export async function issueSessionForAuthenticatedUser(
 }
 
 export const authApiPlugin: FastifyPluginAsync = async (app) => {
-  app.post('/auth/login', async (request, reply) => {
+  app.post('/auth/login', { config: authz.public() }, async (request, reply) => {
     try {
       const clientIp = getClientIp(request);
       const rl = checkRateLimit(`login:${clientIp}`, LOGIN_RATE_LIMIT);
@@ -479,11 +492,11 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
   // Public: tells the signup UI which registration mode is active so it can
   // show the access-code field (beta) or a "registration disabled" notice.
-  app.get('/auth/register/options', async (_request, reply) => {
+  app.get('/auth/register/options', { config: authz.public() }, async (_request, reply) => {
     return reply.send({ mode: getConfig().registration.mode });
   });
 
-  app.post('/auth/register', async (request, reply) => {
+  app.post('/auth/register', { config: authz.public() }, async (request, reply) => {
     // Set once a beta access code is claimed, so a failure later in the
     // handler can put the code back instead of burning it.
     let claimedAccessCode: string | null = null;
@@ -666,12 +679,13 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.post('/auth/logout', async (_request, reply) => {
+  // Any signed-in session may end it (the global hook already requires a valid cookie).
+  app.post('/auth/logout', { config: authz.authenticated() }, async (_request, reply) => {
     clearSessionCookies(reply);
     return reply.code(200).send({ message: 'Logged out successfully' });
   });
 
-  app.get('/auth/session', withApiRequestContext(async (request, reply) => {
+  app.get('/auth/session', { config: authz.authenticated() }, withApiRequestContext(async (request, reply) => {
     try {
       const session = getSessionContext(request);
       if (!session) {
@@ -693,6 +707,28 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         user.projectIds,
       );
 
+      // What the engine allows this user in the active project, for navigation.
+      // Computed from the cached principal; if the engine cannot answer, the
+      // fields are null and the client falls back to the role-based view (this
+      // is a hint for the menu - the gates decide every request on their own).
+      let effectivePermissions: Record<string, string> | null = null;
+      let effectiveProjectId: string | null = null;
+      try {
+        const effective = await computeSessionEffectivePermissions({
+          tenantDbName: session.tenantDbName,
+          tenantId: session.tenantId,
+          user,
+          activeProjectId: request.cookies.active_project_id,
+          ip: getAuthzClientIp(request),
+        });
+        effectivePermissions = effective.levels;
+        effectiveProjectId = effective.projectId;
+      } catch (error) {
+        logger.warn('Could not compute the effective permissions of the session', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
       return reply.code(200).send({
         authenticated: true,
         mustChangePassword: Boolean(user.mustChangePassword),
@@ -700,6 +736,8 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         userId: session.userId,
         role: user.role,
         servicePermissions: normalizeServicePermissions(user.servicePermissions),
+        effectivePermissions,
+        effectiveProjectId,
       });
     } catch (error) {
       logger.error('Session endpoint error', { error });
@@ -707,11 +745,29 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  app.post('/auth/change-password', withApiRequestContext(async (request, reply) => {
+  // Own password only; the handler re-checks the current password. An account whose password lives in a
+  // directory (LDAP, SSO) has nothing to change here, and the attempts are rate limited per person.
+  const changeOwnPassword = withApiRequestContext(async (request, reply) => {
     try {
       const session = getSessionContext(request);
       if (!session) {
         return reply.code(401).send({ error: 'Unauthorized' });
+      }
+
+      const limit = checkRateLimit(`password-change:${session.userId}`, PASSWORD_CHANGE_RATE_LIMIT);
+      if (!limit.allowed) {
+        sendRateLimitHeaders(
+          {
+            'Retry-After': String(limit.retryAfterSeconds),
+            'X-RateLimit-Remaining': '0',
+            'X-RateLimit-Reset': limit.resetAt.toISOString(),
+          },
+          reply,
+        );
+        return reply.code(429).send({
+          error: 'Too many password change attempts. Please try again later.',
+          code: 'rate_limited',
+        });
       }
 
       const body = readJsonBody<{
@@ -722,6 +778,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       if (!body.currentPassword || !body.newPassword) {
         return reply.code(400).send({
           error: 'currentPassword and newPassword are required',
+          code: 'invalid_body',
         });
       }
 
@@ -729,6 +786,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       if (!pwResult.valid) {
         return reply.code(400).send({
           error: pwResult.errors.join('. '),
+          code: 'invalid_password',
         });
       }
 
@@ -740,12 +798,19 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(401).send({ error: 'Unauthorized' });
       }
 
+      if (isDirectoryManaged(user)) {
+        return reply.code(409).send({
+          error: 'The password of this account is managed by your organization\'s directory',
+          code: 'password_managed_externally',
+        });
+      }
+
       const isValid = await bcrypt.compare(
         body.currentPassword,
         user.password,
       );
       if (!isValid) {
-        return reply.code(401).send({ error: 'Invalid current password' });
+        return reply.code(401).send({ error: 'Invalid current password', code: 'invalid_current_password' });
       }
 
       const hashed = await bcrypt.hash(body.newPassword, BCRYPT_ROUNDS);
@@ -765,9 +830,117 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
       logger.error('Change password error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
+  });
+  app.post('/auth/change-password', { config: authz.authenticated() }, changeOwnPassword);
+  // The same operation under the account's own path, next to GET /auth/me (the Account page uses this pair).
+  app.post('/auth/me/password', { config: authz.authenticated() }, changeOwnPassword);
+
+  // Who the signed-in person is and what of it they can change themselves. Read from the account, so the role is
+  // the one the account has now; GET /auth/session is the navigation payload and is not touched by this.
+  app.get('/auth/me', { config: authz.authenticated() }, withApiRequestContext(async (request, reply) => {
+    try {
+      const session = getSessionContext(request);
+      if (!session) {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+
+      const db = await getDatabase();
+      const user = await db.findUserById(session.userId);
+      if (!user || String(user.tenantId) !== String(session.tenantId)) {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+
+      return reply.code(200).send(describeAccount(user, session.userId));
+    } catch (error) {
+      logger.error('Account endpoint error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
   }));
 
-  app.post('/auth/forgot-password', async (request, reply) => {
+  // The one thing a person edits about themselves: their display name (an email is the administrators' to change).
+  // An account of a directory keeps its name there. Audited as what it is, so the generic request row is skipped.
+  app.patch('/auth/profile', { config: { ...authz.authenticated(), skipAuditOnSuccess: true } }, withApiRequestContext(async (request, reply) => {
+    try {
+      const session = getSessionContext(request);
+      if (!session) {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+
+      let body: unknown;
+      try {
+        body = readJsonBody<unknown>(request);
+      } catch {
+        return reply.code(400).send({ error: 'The request body must be a JSON object', code: 'invalid_body' });
+      }
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        return reply.code(400).send({ error: 'The request body must be a JSON object', code: 'invalid_body' });
+      }
+      const input = body as Record<string, unknown>;
+      const extraKeys = Object.keys(input).filter((key) => key !== 'name');
+      if (extraKeys.length > 0 || input.name === undefined) {
+        return reply.code(400).send({
+          error: 'Only the name can be changed',
+          code: 'invalid_body',
+          details: extraKeys.map((field) => ({ field, message: 'Unknown field' })),
+        });
+      }
+      const name = typeof input.name === 'string' ? input.name.trim() : '';
+      if (name.length < MIN_PROFILE_NAME_LENGTH || name.length > MAX_PROFILE_NAME_LENGTH) {
+        return reply.code(400).send({
+          error: `name must be between ${MIN_PROFILE_NAME_LENGTH} and ${MAX_PROFILE_NAME_LENGTH} characters`,
+          code: 'invalid_body',
+          details: [{ field: 'name', message: `Between ${MIN_PROFILE_NAME_LENGTH} and ${MAX_PROFILE_NAME_LENGTH} characters` }],
+        });
+      }
+
+      const limit = checkRateLimit(`profile-edit:${session.userId}`, PROFILE_EDIT_RATE_LIMIT);
+      if (!limit.allowed) {
+        sendRateLimitHeaders({ 'Retry-After': String(limit.retryAfterSeconds) }, reply);
+        return reply.code(429).send({ error: 'Too many requests. Please try again shortly.', code: 'rate_limited' });
+      }
+
+      const db = await getDatabase();
+      const user = await db.findUserById(session.userId);
+      if (!user || String(user.tenantId) !== String(session.tenantId)) {
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+      if (isDirectoryManaged(user)) {
+        return reply.code(409).send({
+          error: 'The name of this account is managed by your organization\'s directory',
+          code: 'directory_managed',
+        });
+      }
+      if (name === user.name) {
+        return reply.code(200).send({ ...describeAccount(user, session.userId), changed: [] });
+      }
+
+      const updated = await db.updateUser(session.userId, { name });
+      if (!updated) {
+        return reply.code(500).send({ error: 'Failed to update the profile' });
+      }
+      recordPeopleAudit(
+        { tenantDbName: session.tenantDbName, tenantId: session.tenantId },
+        {
+          type: 'user',
+          userId: session.userId,
+          email: session.userEmail,
+          role: session.userRole,
+          requestId: session.requestId,
+          ipAddress: getClientIp(request),
+          userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : undefined,
+          method: request.method.toUpperCase(),
+          path: (request.raw.url ?? '').split('?')[0],
+        },
+        { event: 'user.profile.update', resourceType: 'user', resourceId: session.userId, metadata: { changedFields: ['name'], self: true } },
+      );
+      return reply.code(200).send({ ...describeAccount(updated, session.userId), changed: ['name'] });
+    } catch (error) {
+      logger.error('Update profile error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  app.post('/auth/forgot-password', { config: authz.public() }, async (request, reply) => {
     // Constant-time response: always wait at least this long before responding,
     // regardless of whether the email/tenant exists. Mitigates user enumeration via timing.
     const MIN_RESPONSE_MS = 250;
@@ -817,11 +990,13 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
 
       return await withTenantScope(db, tenant.dbName, async () => {
         const user = await db.findUserByEmail(email);
-        // A login-disabled ("Programmatic User") account has no password to
-        // reset: treat it exactly like an unknown email — same generic 200, no
-        // token minted, no mail sent — so the flow neither burns a reset token
-        // nor lets a user-chosen password be planted on a no-login record.
-        if (!user || isUserLoginBlocked(user)) {
+        // A login-disabled (service) account has no password to reset: treat it
+        // exactly like an unknown email — same generic 200, no token minted, no
+        // mail sent — so the flow neither burns a reset token nor lets a
+        // user-chosen password be planted on a no-login record. The same goes for
+        // an account its directory (LDAP, SSO) manages: its password is the
+        // directory's, and a local one planted here would open a second door.
+        if (!user || isUserLoginBlocked(user) || isDirectoryManaged(user)) {
           return finishWithSuccess();
         }
 
@@ -871,7 +1046,7 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.post('/auth/reset-password', async (request, reply) => {
+  app.post('/auth/reset-password', { config: authz.public() }, async (request, reply) => {
     try {
       const clientIp = getClientIp(request);
       const rl = checkRateLimit(
@@ -942,10 +1117,12 @@ export const authApiPlugin: FastifyPluginAsync = async (app) => {
         // Same generic answer as an invalid token for a login-disabled account:
         // a token minted before `canLogin` was turned off must not be able to
         // set a password on a record that is never supposed to log in. A
-        // disabled account is rejected the same way.
+        // disabled account is rejected the same way, and so is an account its
+        // directory manages (a token minted before it was linked to SSO or LDAP).
         if (
           !user
           || isUserLoginBlocked(user)
+          || isDirectoryManaged(user)
           || (isInvitation && (
             !user.invitedBy
             || user.inviteAcceptedAt

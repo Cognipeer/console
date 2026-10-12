@@ -4,10 +4,34 @@
  * Includes agent CRUD and conversation management.
  */
 
-import { ObjectId } from 'mongodb';
-import type { IAgent, AgentStatus, IAgentConversation, IAgentConversationState, IAgentVersion } from '../provider.interface';
+import { randomUUID } from 'node:crypto';
+import { ObjectId, type Db } from 'mongodb';
+import type {
+  IAgent,
+  AgentStatus,
+  AgentSessionRuntimeStatus,
+  IAgentConversation,
+  IAgentConversationListItem,
+  IAgentConversationState,
+  IAgentPendingAction,
+  IAgentMessageFeedback,
+  AgentMessageFeedbackFilter,
+  AgentMessageFeedbackTotals,
+  AgentFeedbackReason,
+  IAgentSessionEvent,
+  IAgentVersion,
+  NewAgentSessionEvent,
+} from '../provider.interface';
+import { AgentSessionEventSeqConflictError } from '../provider/errors';
 import type { Constructor } from './types';
 import { MongoDBProviderBase, COLLECTIONS } from './base';
+
+/** A conversation as the rest of the app sees it: without the internal turn-owner marker. */
+function withoutTurnOwner<T extends object>(conversation: T): Omit<T, 'runtimeTurnId'> {
+  const { runtimeTurnId: _owner, ...rest } = conversation as T & { runtimeTurnId?: unknown };
+  void _owner;
+  return rest;
+}
 
 export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base: TBase) {
   return class AgentOps extends Base {
@@ -169,10 +193,33 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
 
     // ── Agent Conversation operations ────────────────────────────
 
+    /** Per-process memo: the session-list indexes are ensured on the first conversation written per tenant DB. */
+    private conversationListIndexesReady = new Set<string>();
+
+    /**
+     * The client API's session list (a project's sessions newest first, optionally
+     * one agent's or one status). Ensured on the write path as well as in the boot
+     * manifest, for a tenant whose first conversation is created after it was bound.
+     * Names/keys are IDENTICAL to the manifest's.
+     */
+    private async ensureConversationListIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.conversationListIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.agentConversations);
+      await Promise.all([
+        coll.createIndex({ agentKey: 1, createdBy: 1, updatedAt: -1 }, { name: 'idx_agent_creator_updatedAt' }),
+        coll.createIndex({ projectId: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_createdAt' }),
+        coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_agent_createdAt' }),
+        coll.createIndex({ projectId: 1, runtimeStatus: 1, createdAt: -1, _id: -1 }, { name: 'idx_project_status_createdAt' }),
+      ]);
+      this.conversationListIndexesReady.add(dbName);
+    }
+
     async createAgentConversation(
       conversation: Omit<IAgentConversation, '_id' | 'createdAt' | 'updatedAt'>,
     ): Promise<IAgentConversation> {
       const db = this.getTenantDb();
+      await this.ensureConversationListIndexes(db).catch(() => undefined);
       const now = new Date();
       const doc = { ...conversation, createdAt: now, updatedAt: now };
       const result = await db
@@ -196,12 +243,58 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
           { returnDocument: 'after' },
         );
       if (!result) return null;
-      return { ...result, _id: result._id?.toString() } as IAgentConversation;
+      return withoutTurnOwner({ ...result, _id: result._id?.toString() }) as IAgentConversation;
+    }
+
+    async updateAgentConversationRuntime(
+      id: string,
+      patch: Partial<Pick<IAgentConversation, 'runtimeStatus' | 'stopReason' | 'pendingActionIds' | 'lastEventSeq' | 'budget' | 'spentUsd' | 'runtimeTurnId'>>,
+      options?: { onlyIfTurn?: string },
+    ): Promise<boolean> {
+      const set: Record<string, unknown> = {};
+      for (const key of ['runtimeStatus', 'stopReason', 'pendingActionIds', 'lastEventSeq', 'budget', 'spentUsd', 'runtimeTurnId'] as const) {
+        if (patch[key] !== undefined) set[key] = patch[key];
+      }
+      if (Object.keys(set).length === 0) return true;
+      // The condition is part of the filter, so "is it still my turn?" and the write are one atomic step.
+      const filter: Record<string, unknown> = { _id: new ObjectId(id) };
+      if (options?.onlyIfTurn !== undefined) {
+        filter.$or = [{ runtimeTurnId: options.onlyIfTurn }, { runtimeTurnId: null }];
+      }
+      const result = await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .updateOne(filter, { $set: set });
+      return result.matchedCount > 0;
+    }
+
+    async addAgentConversationSpend(id: string, change: { addUsd?: number; atLeastUsd?: number }): Promise<void> {
+      const addUsd = typeof change.addUsd === 'number' && Number.isFinite(change.addUsd) ? Math.max(0, change.addUsd) : 0;
+      const atLeastUsd = typeof change.atLeastUsd === 'number' && Number.isFinite(change.atLeastUsd) ? Math.max(0, change.atLeastUsd) : 0;
+      if (addUsd === 0 && atLeastUsd === 0) return;
+      // An aggregation-pipeline update, so the server does the arithmetic in one
+      // atomic step. Plain `$inc` would reject a total that is not a number, and
+      // could not raise to a floor and add in the same write.
+      await this.getTenantDb()
+        .collection(COLLECTIONS.agentConversations)
+        .updateOne({ _id: new ObjectId(id) }, [{
+          $set: {
+            spentUsd: {
+              $add: [
+                { $max: [{ $convert: { input: '$spentUsd', to: 'double', onError: 0, onNull: 0 } }, atLeastUsd] },
+                addUsd,
+              ],
+            },
+          },
+        }]);
     }
 
     async deleteAgentConversation(id: string): Promise<boolean> {
       const db = this.getTenantDb();
       await db.collection(COLLECTIONS.agentConversationStates).deleteOne({ conversationId: id });
+      // The session's event log and pending approvals die with it.
+      await db.collection(COLLECTIONS.agentSessionEvents).deleteMany({ conversationId: id });
+      await db.collection(COLLECTIONS.agentPendingActions).deleteMany({ conversationId: id });
+      await db.collection(COLLECTIONS.agentMessageFeedback).deleteMany({ conversationId: id });
       const result = await db
         .collection(COLLECTIONS.agentConversations)
         .deleteOne({ _id: new ObjectId(id) });
@@ -222,9 +315,15 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     ): Promise<void> {
       const db = this.getTenantDb();
       const now = new Date();
+      // A save without `pausedSnapshot` clears one left by an earlier pause.
+      const { pausedSnapshot, ...rest } = state;
       await db.collection(COLLECTIONS.agentConversationStates).updateOne(
         { conversationId: state.conversationId },
-        { $set: { ...state, updatedAt: now }, $setOnInsert: { createdAt: now } },
+        {
+          $set: { ...rest, ...(pausedSnapshot !== undefined ? { pausedSnapshot } : {}), updatedAt: now },
+          ...(pausedSnapshot === undefined ? { $unset: { pausedSnapshot: '' } } : {}),
+          $setOnInsert: { createdAt: now },
+        },
         { upsert: true },
       );
     }
@@ -238,21 +337,25 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
     }
 
     async findAgentConversationById(id: string): Promise<IAgentConversation | null> {
+      // An id that cannot be one of ours (another producer's thread id, a typo) names no conversation: not found,
+      // not an error - so a caller can tell "no such session" from a store that failed.
+      if (typeof id !== 'string' || !/^[0-9a-fA-F]{24}$/.test(id)) return null;
       const db = this.getTenantDb();
       const doc = await db
         .collection(COLLECTIONS.agentConversations)
         .findOne({ _id: new ObjectId(id) });
       if (!doc) return null;
-      return { ...doc, _id: doc._id?.toString() } as unknown as IAgentConversation;
+      return withoutTurnOwner({ ...doc, _id: doc._id?.toString() }) as unknown as IAgentConversation;
     }
 
     async listAgentConversations(
       agentKey: string,
-      filters?: { projectId?: string; limit?: number; skip?: number },
+      filters?: { projectId?: string; limit?: number; skip?: number; createdBy?: string },
     ): Promise<IAgentConversation[]> {
       const db = this.getTenantDb();
       const filter: Record<string, unknown> = { agentKey };
       if (filters?.projectId !== undefined) filter.projectId = filters.projectId;
+      if (filters?.createdBy !== undefined) filter.createdBy = filters.createdBy;
       let cursor = db
         .collection(COLLECTIONS.agentConversations)
         .find(filter)
@@ -260,7 +363,380 @@ export function AgentMixin<TBase extends Constructor<MongoDBProviderBase>>(Base:
       if (filters?.skip) cursor = cursor.skip(filters.skip);
       if (filters?.limit) cursor = cursor.limit(filters.limit);
       const docs = await cursor.toArray();
-      return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as IAgentConversation[];
+      return docs.map((d) => withoutTurnOwner({ ...d, _id: d._id?.toString() })) as unknown as IAgentConversation[];
+    }
+
+    async listAgentConversationPage(filters: {
+      projectId: string;
+      agentKey?: string;
+      runtimeStatus?: AgentSessionRuntimeStatus;
+      limit: number;
+      after?: { createdAt: Date; id: string };
+      ownOnly?: { userId: string; viewableAgentKeys?: string[] };
+    }): Promise<IAgentConversationListItem[]> {
+      const db = this.getTenantDb();
+      const match: Record<string, unknown> = { projectId: filters.projectId };
+      if (filters.agentKey) match.agentKey = filters.agentKey;
+      if (filters.ownOnly) {
+        // The caller's own sessions, and every session of the agents they may view; nothing else - an agent that
+        // is not named (including one that no longer exists) shows only what the caller started.
+        const keys = filters.ownOnly.viewableAgentKeys ?? [];
+        if (keys.length === 0) match.createdBy = filters.ownOnly.userId;
+        else match.$and = [{ $or: [{ createdBy: filters.ownOnly.userId }, { agentKey: { $in: keys } }] }];
+      }
+      // A conversation that never ran has no status: "idle" covers it.
+      if (filters.runtimeStatus === 'idle') match.runtimeStatus = { $in: [null, 'idle'] };
+      else if (filters.runtimeStatus) match.runtimeStatus = filters.runtimeStatus;
+      if (filters.after) {
+        // Keyset on (createdAt, _id), newest first.
+        match.$or = ObjectId.isValid(filters.after.id)
+          ? [
+            { createdAt: { $lt: filters.after.createdAt } },
+            { createdAt: filters.after.createdAt, _id: { $lt: new ObjectId(filters.after.id) } },
+          ]
+          : [{ createdAt: { $lt: filters.after.createdAt } }];
+      }
+      // Sorted and limited BEFORE the transcript is touched; it is only counted, never returned.
+      const docs = await db
+        .collection(COLLECTIONS.agentConversations)
+        .aggregate([
+          { $match: match },
+          { $sort: { createdAt: -1, _id: -1 } },
+          { $limit: filters.limit },
+          { $addFields: { messageCount: { $cond: [{ $isArray: '$messages' }, { $size: '$messages' }, 0] } } },
+          { $project: { messages: 0, runtimeTurnId: 0 } },
+        ])
+        .toArray();
+      return docs.map((doc) => ({ ...doc, _id: doc._id?.toString() })) as unknown as IAgentConversationListItem[];
+    }
+
+    // ── Agent session event log ──────────────────────────────────
+
+    /** Per-process memo: the unique/TTL indexes are ensured on the first write per tenant DB. */
+    private sessionEventIndexesReady = new Set<string>();
+    private sessionEventIndexInit = new Map<string, Promise<void>>();
+
+    /**
+     * Ensured on the WRITE path as well as in the boot manifest: the manifest is
+     * existence-guarded, so a collection created after the tenant's first bind
+     * would stay without its unique (conversationId, seq) guard until a restart.
+     */
+    private async ensureSessionEventIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.sessionEventIndexesReady.has(dbName)) return;
+      const existing = this.sessionEventIndexInit.get(dbName);
+      if (existing) {
+        await existing;
+        return;
+      }
+      const coll = db.collection(COLLECTIONS.agentSessionEvents);
+      const setup = Promise.all([
+        coll.createIndex({ conversationId: 1, seq: 1 }, { name: 'uniq_conversation_seq', unique: true }),
+        coll.createIndex({ expiresAt: 1 }, { name: 'ttl_expiresAt', expireAfterSeconds: 0 }),
+      ])
+        .then(() => {
+          this.sessionEventIndexesReady.add(dbName);
+        })
+        .finally(() => {
+          this.sessionEventIndexInit.delete(dbName);
+        });
+      this.sessionEventIndexInit.set(dbName, setup);
+      await setup;
+    }
+
+    async appendAgentSessionEvents(events: NewAgentSessionEvent[]): Promise<void> {
+      if (events.length === 0) return;
+      const db = this.getTenantDb();
+      await this.ensureSessionEventIndexes(db);
+      const docs = events.map((event) => ({ ...event, _id: event._id ?? `sevt_${randomUUID().replace(/-/g, '').slice(0, 24)}` }));
+      const collection = db.collection(COLLECTIONS.agentSessionEvents);
+      try {
+        await collection.insertMany(docs as never[], { ordered: true });
+      } catch (error) {
+        if ((error as { code?: number } | null)?.code === 11000) {
+          // An ordered insert keeps the documents before the one that failed.
+          // Say which, by what is actually stored (a primary-key lookup) rather
+          // than by what the driver reports, which differs between backends:
+          // the caller must not store them a second time under new seq numbers.
+          const ids = docs.map((doc) => doc._id);
+          const stored = await collection
+            .find({ _id: { $in: ids } } as never)
+            .project({ _id: 1 })
+            .toArray()
+            .catch(() => []);
+          const storedIds = new Set(stored.map((doc) => String(doc._id)));
+          throw new AgentSessionEventSeqConflictError(
+            events[0].conversationId,
+            ids.filter((id) => storedIds.has(id)),
+          );
+        }
+        throw error;
+      }
+    }
+
+    async listAgentSessionEvents(
+      conversationId: string,
+      options?: { afterSeq?: number; types?: string[]; limit?: number },
+    ): Promise<IAgentSessionEvent[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { conversationId };
+      if (options?.afterSeq !== undefined && options.afterSeq > 0) filter.seq = { $gt: options.afterSeq };
+      if (options?.types && options.types.length > 0) filter.type = { $in: options.types };
+      let cursor = db.collection(COLLECTIONS.agentSessionEvents).find(filter).sort({ seq: 1 });
+      if (options?.limit) cursor = cursor.limit(options.limit);
+      const docs = await cursor.toArray();
+      return docs.map((d) => ({ ...d, _id: d._id?.toString() })) as unknown as IAgentSessionEvent[];
+    }
+
+    async getAgentSessionMaxSeq(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const doc = await db
+        .collection(COLLECTIONS.agentSessionEvents)
+        .find({ conversationId })
+        .sort({ seq: -1 })
+        .limit(1)
+        .project({ seq: 1 })
+        .next();
+      return typeof doc?.seq === 'number' ? doc.seq : 0;
+    }
+
+    async deleteAgentSessionEvents(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db.collection(COLLECTIONS.agentSessionEvents).deleteMany({ conversationId });
+      return result.deletedCount ?? 0;
+    }
+
+    async cleanupAgentSessionEventRetention(options: { olderThan: Date; batchSize?: number }): Promise<{ deletedCount: number }> {
+      // The TTL index normally does this; the sweep covers a deployment whose
+      // TTL monitor is off (some Cosmos tiers) and costs one indexed delete.
+      const db = this.getTenantDb();
+      const result = await db
+        .collection(COLLECTIONS.agentSessionEvents)
+        .deleteMany({ expiresAt: { $lt: options.olderThan } });
+      return { deletedCount: result.deletedCount ?? 0 };
+    }
+
+    // ── Agent pending actions ────────────────────────────────────
+
+    /** Per-process memo: the pending-action indexes are ensured on the first write per tenant DB. */
+    private pendingActionIndexesReady = new Set<string>();
+
+    /**
+     * Ensured on the write path as well as in the boot manifest, for the same
+     * reason as the event indexes: the manifest only covers collections that
+     * exist when a tenant DB is first bound. Names/keys are IDENTICAL to it.
+     */
+    private async ensurePendingActionIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.pendingActionIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.agentPendingActions);
+      await Promise.all([
+        coll.createIndex({ conversationId: 1, status: 1 }, { name: 'idx_conversation_status' }),
+        coll.createIndex({ status: 1, expiresAt: 1 }, { name: 'idx_status_expiresAt' }),
+        coll.createIndex({ tenantId: 1, projectId: 1, status: 1 }, { name: 'idx_tenant_project_status' }),
+      ]);
+      this.pendingActionIndexesReady.add(dbName);
+    }
+
+    async createAgentPendingActions(
+      actions: Array<Omit<IAgentPendingAction, '_id'>>,
+    ): Promise<IAgentPendingAction[]> {
+      if (actions.length === 0) return [];
+      const db = this.getTenantDb();
+      await this.ensurePendingActionIndexes(db).catch(() => undefined);
+      const docs = actions.map((action) => ({ ...action, _id: `act_${randomUUID().replace(/-/g, '').slice(0, 24)}` }));
+      await db.collection(COLLECTIONS.agentPendingActions).insertMany(docs as never[]);
+      return docs as unknown as IAgentPendingAction[];
+    }
+
+    async findAgentPendingActionById(id: string): Promise<IAgentPendingAction | null> {
+      const db = this.getTenantDb();
+      const doc = await db.collection(COLLECTIONS.agentPendingActions).findOne({ _id: id as never });
+      return doc ? ({ ...doc, _id: String(doc._id) } as unknown as IAgentPendingAction) : null;
+    }
+
+    async listAgentPendingActions(
+      conversationId: string,
+      options?: { status?: IAgentPendingAction['status'] },
+    ): Promise<IAgentPendingAction[]> {
+      const db = this.getTenantDb();
+      const filter: Record<string, unknown> = { conversationId };
+      if (options?.status) filter.status = options.status;
+      const docs = await db.collection(COLLECTIONS.agentPendingActions).find(filter).sort({ requestedAt: 1 }).toArray();
+      return docs.map((d) => ({ ...d, _id: String(d._id) })) as unknown as IAgentPendingAction[];
+    }
+
+    async updateAgentPendingAction(
+      id: string,
+      data: Partial<Omit<IAgentPendingAction, '_id' | 'tenantId' | 'projectId' | 'conversationId'>>,
+      options?: { onlyIfStatus?: IAgentPendingAction['status'] },
+    ): Promise<IAgentPendingAction | null> {
+      const db = this.getTenantDb();
+      const set: Record<string, unknown> = { ...data };
+      delete set._id;
+      const doc = await db.collection(COLLECTIONS.agentPendingActions).findOneAndUpdate(
+        { _id: id as never, status: options?.onlyIfStatus ?? 'pending' },
+        { $set: set },
+        { returnDocument: 'after' },
+      );
+      return doc ? ({ ...doc, _id: String(doc._id) } as unknown as IAgentPendingAction) : null;
+    }
+
+    async listExpiredAgentPendingActions(now: Date, limit = 100): Promise<IAgentPendingAction[]> {
+      const db = this.getTenantDb();
+      const docs = await db
+        .collection(COLLECTIONS.agentPendingActions)
+        .find({ status: 'pending', expiresAt: { $lt: now } })
+        .sort({ expiresAt: 1 })
+        .limit(limit)
+        .toArray();
+      return docs.map((d) => ({ ...d, _id: String(d._id) })) as unknown as IAgentPendingAction[];
+    }
+
+    async deleteAgentPendingActions(conversationId: string): Promise<number> {
+      const db = this.getTenantDb();
+      const result = await db.collection(COLLECTIONS.agentPendingActions).deleteMany({ conversationId });
+      return result.deletedCount ?? 0;
+    }
+
+    // ── Message feedback ─────────────────────────────────────────
+
+    private feedbackIndexesReady = new Set<string>();
+
+    /** Same indexes as the boot manifest (which skips collections that do not exist yet); the unique one makes the upsert race-free. */
+    private async ensureFeedbackIndexes(db: Db): Promise<void> {
+      const dbName = db.databaseName;
+      if (this.feedbackIndexesReady.has(dbName)) return;
+      const coll = db.collection(COLLECTIONS.agentMessageFeedback);
+      await Promise.all([
+        coll.createIndex({ conversationId: 1, messageId: 1, userId: 1 }, { name: 'idx_message_user', unique: true }),
+        coll.createIndex({ projectId: 1, agentKey: 1, createdAt: -1 }, { name: 'idx_agent_createdAt' }),
+        coll.createIndex({ portalId: 1, createdAt: -1 }, { name: 'idx_portal_createdAt' }),
+      ]);
+      this.feedbackIndexesReady.add(dbName);
+    }
+
+    private toFeedback(doc: Record<string, unknown>): IAgentMessageFeedback {
+      return { ...doc, _id: String(doc._id) } as unknown as IAgentMessageFeedback;
+    }
+
+    private feedbackFilter(filter: AgentMessageFeedbackFilter): Record<string, unknown> {
+      const query: Record<string, unknown> = { projectId: filter.projectId, agentKey: filter.agentKey };
+      if (filter.rating) query.rating = filter.rating;
+      if (filter.portalId) query.portalId = filter.portalId;
+      if (filter.reason) query.reasons = filter.reason;
+      if (filter.hasComment) query.comment = { $exists: true, $nin: [null, ''] };
+      if (filter.from || filter.to) {
+        query.createdAt = { ...(filter.from ? { $gte: filter.from } : {}), ...(filter.to ? { $lte: filter.to } : {}) };
+      }
+      return query;
+    }
+
+    async upsertAgentMessageFeedback(
+      feedback: Omit<IAgentMessageFeedback, '_id' | 'createdAt' | 'updatedAt' | 'removedAt'>,
+    ): Promise<{ feedback: IAgentMessageFeedback; created: boolean }> {
+      const db = this.getTenantDb();
+      await this.ensureFeedbackIndexes(db).catch(() => undefined);
+      const now = new Date();
+      const { conversationId, messageId, userId } = feedback;
+      const set: Record<string, unknown> = {
+        tenantId: feedback.tenantId,
+        projectId: feedback.projectId,
+        agentKey: feedback.agentKey,
+        agentVersion: feedback.agentVersion ?? null,
+        messageIndex: feedback.messageIndex,
+        channel: feedback.channel,
+        rating: feedback.rating,
+        reasons: feedback.reasons ?? [],
+        updatedAt: now,
+        removedAt: null,
+      };
+      const unset: Record<string, ''> = {};
+      if (feedback.portalId) set.portalId = feedback.portalId; else unset.portalId = '';
+      if (feedback.comment) set.comment = feedback.comment; else unset.comment = '';
+      const coll = db.collection(COLLECTIONS.agentMessageFeedback);
+      const doc = await coll.findOneAndUpdate(
+        { conversationId, messageId, userId },
+        {
+          $set: set,
+          ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}),
+          $setOnInsert: { _id: `fb_${randomUUID().replace(/-/g, '').slice(0, 24)}` as never, createdAt: now },
+        },
+        { upsert: true, returnDocument: 'after', includeResultMetadata: true },
+      );
+      const stored = doc.value as Record<string, unknown>;
+      return { feedback: this.toFeedback(stored), created: doc.lastErrorObject?.updatedExisting !== true };
+    }
+
+    async findAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<IAgentMessageFeedback | null> {
+      const doc = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).findOne({ conversationId, messageId, userId });
+      return doc ? this.toFeedback(doc) : null;
+    }
+
+    async deleteAgentMessageFeedback(conversationId: string, messageId: string, userId: string): Promise<boolean> {
+      const result = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).deleteOne({ conversationId, messageId, userId });
+      return (result.deletedCount ?? 0) > 0;
+    }
+
+    async listAgentMessageFeedbackByConversation(conversationId: string, options?: { userId?: string }): Promise<IAgentMessageFeedback[]> {
+      const docs = await this.getTenantDb()
+        .collection(COLLECTIONS.agentMessageFeedback)
+        .find({ conversationId, ...(options?.userId ? { userId: options.userId } : {}) })
+        .sort({ messageIndex: 1, createdAt: 1 })
+        .toArray();
+      return docs.map((doc) => this.toFeedback(doc));
+    }
+
+    async listAgentMessageFeedback(
+      filter: AgentMessageFeedbackFilter,
+      options?: { limit?: number; skip?: number },
+    ): Promise<{ items: IAgentMessageFeedback[]; total: number }> {
+      const coll = this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback);
+      const query = this.feedbackFilter(filter);
+      const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
+      const skip = Math.max(0, options?.skip ?? 0);
+      const [total, docs] = await Promise.all([
+        coll.countDocuments(query),
+        coll.find(query).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).toArray(),
+      ]);
+      return { items: docs.map((doc) => this.toFeedback(doc)), total };
+    }
+
+    async aggregateAgentMessageFeedback(filter: AgentMessageFeedbackFilter): Promise<AgentMessageFeedbackTotals> {
+      const coll = this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback);
+      const query = this.feedbackFilter(filter);
+      const [counts] = await coll.aggregate<{ up: number; down: number; withComment: number }>([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            up: { $sum: { $cond: [{ $eq: ['$rating', 'up'] }, 1, 0] } },
+            down: { $sum: { $cond: [{ $eq: ['$rating', 'down'] }, 1, 0] } },
+            withComment: { $sum: { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$comment', ''] } }, 0] }, 1, 0] } },
+          },
+        },
+      ]).toArray();
+      const reasonRows = await coll.aggregate<{ _id: string; cnt: number }>([
+        { $match: query },
+        { $unwind: '$reasons' },
+        { $group: { _id: '$reasons', cnt: { $sum: 1 } } },
+      ]).toArray();
+      const reasons: Partial<Record<AgentFeedbackReason, number>> = {};
+      for (const row of reasonRows) reasons[row._id as AgentFeedbackReason] = row.cnt;
+      return { up: counts?.up ?? 0, down: counts?.down ?? 0, withComment: counts?.withComment ?? 0, reasons };
+    }
+
+    async markAgentMessageFeedbackRemoved(conversationId: string, fromIndex: number, at: Date = new Date()): Promise<number> {
+      const result = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).updateMany(
+        { conversationId, messageIndex: { $gte: fromIndex }, $or: [{ removedAt: null }, { removedAt: { $exists: false } }] },
+        { $set: { removedAt: at } },
+      );
+      return result.modifiedCount;
+    }
+
+    async deleteAgentMessageFeedbackByConversation(conversationId: string): Promise<number> {
+      const result = await this.getTenantDb().collection(COLLECTIONS.agentMessageFeedback).deleteMany({ conversationId });
+      return result.deletedCount ?? 0;
     }
   };
 }

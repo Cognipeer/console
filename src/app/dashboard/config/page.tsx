@@ -19,6 +19,7 @@ import {
 import { useRouter } from 'next/navigation';
 import PageContainer, { PageHeader } from '@/components/common/ui/PageContainer';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
 import {
   IconChevronRight,
   IconFolder,
@@ -59,6 +60,8 @@ interface ConfigGroup {
 
 export default function ConfigPage() {
   const t = useTranslations('config');
+  const tSafe = useTranslations('common.confirm.dataSafety');
+  const deleteResource = useDeleteResource();
   const router = useRouter();
   const [groups, setGroups] = useState<ConfigGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -114,31 +117,34 @@ export default function ConfigPage() {
   };
 
   const handleDeleteGroup = async (groupId: string) => {
-    if (!confirm(t('confirmDeleteGroup'))) return;
-    setDeletingId(groupId);
-    try {
-      const res = await fetch(`/api/config/groups/${groupId}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || t('deleteError'));
-      }
-      notifications.show({
-        title: t('groupDeleted'),
-        message: t('groupDeletedMessage'),
-        color: 'teal',
-      });
-      handleRefresh();
-    } catch (err) {
-      notifications.show({
-        title: t('error'),
-        message: err instanceof Error ? err.message : t('deleteError'),
-        color: 'red',
-      });
-    } finally {
-      setDeletingId(null);
-    }
+    const target = groups.find((g) => g._id === groupId);
+    await deleteResource({
+      noun: tSafe('nouns.configGroup'),
+      name: target?.name,
+      type: 'config-group',
+      id: groupId,
+      extraWarning: tSafe('configGroupExtra'),
+      action: async () => {
+        setDeletingId(groupId);
+        try {
+          const res = await fetch(`/api/config/groups/${groupId}`, {
+            method: 'DELETE',
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || t('deleteError'));
+          }
+          notifications.show({
+            title: t('groupDeleted'),
+            message: t('groupDeletedMessage'),
+            color: 'teal',
+          });
+          handleRefresh();
+        } finally {
+          setDeletingId(null);
+        }
+      },
+    });
   };
 
   const totalItems = groups.reduce((sum, g) => sum + g.items.length, 0);

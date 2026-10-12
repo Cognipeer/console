@@ -31,8 +31,9 @@ function buildContextHeaders(request: FastifyRequest) {
 
 export async function createFastifyApiTestApp(
   plugin: FastifyPluginAsync,
+  options: { trustProxy?: boolean | string[] } = {},
 ) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, ...(options.trustProxy !== undefined ? { trustProxy: options.trustProxy } : {}) });
   await app.register(cookie);
 
   app.addHook('onRequest', async (request) => {

@@ -221,6 +221,36 @@
       "popular": true
     },
     {
+      "id": "portals",
+      "href": "/dashboard/portals",
+      "icon": "IconMessageChatbot",
+      "category": "build",
+      "navLabelKey": "portals",
+      "navDescriptionKey": "portalsDescription",
+      "tags": [
+        "portal",
+        "chat",
+        "employees",
+        "agents",
+        "access"
+      ],
+      "searchKeywords": [
+        "portal",
+        "portals",
+        "portallar",
+        "chat page",
+        "employee assistant",
+        "agent portal",
+        "self service",
+        "share agents",
+        "\u00e7al\u0131\u015fan asistan\u0131"
+      ],
+      "tenantAdminOnly": true,
+      "badge": "new",
+      "requiresEnterprise": true,
+      "enterpriseModule": "portals"
+    },
+    {
       "id": "config",
       "href": "/dashboard/config",
       "icon": "IconLock",
@@ -746,23 +776,22 @@
       "enterpriseModule": "prompt-optimizer"
     },
     {
-      "id": "members",
-      "href": "/dashboard/members",
-      "icon": "IconUsers",
+      "id": "resources",
+      "href": "/dashboard/resources",
+      "icon": "IconCube",
       "category": "admin",
-      "navLabelKey": "members",
-      "navDescriptionKey": "membersDescription",
+      "navLabelKey": "resources",
+      "navDescriptionKey": "resourcesDescription",
       "tags": [
-        "users",
-        "invite",
-        "roles"
+        "inventory",
+        "assets",
+        "crn"
       ],
       "searchKeywords": [
-        "members",
-        "users",
-        "invite",
-        "tenant",
-        "\u00fcyeler"
+        "resources",
+        "inventory",
+        "crn",
+        "kaynaklar"
       ],
       "tenantAdminOnly": true,
       "settings": true
@@ -842,6 +871,18 @@
         "rbac",
         "yetki"
       ],
+      "tenantAdminOnly": true,
+      "settings": true
+    },
+    {
+      "id": "iam",
+      "href": "/dashboard/iam",
+      "icon": "IconShield",
+      "category": "admin",
+      "navLabelKey": "iam",
+      "navDescriptionKey": "iamDescription",
+      "tags": ["iam", "authorization", "policy", "security", "members", "users", "invite", "roles", "groups"],
+      "searchKeywords": ["iam", "authorization", "policy", "cedar", "access", "permissions", "yetki", "yetki motoru", "politika", "members", "users", "invite", "roles", "tenant", "people", "groups", "service account", "\u00fcyeler", "ki\u015filer", "gruplar", "servis hesab\u0131"],
       "tenantAdminOnly": true,
       "settings": true
     },

@@ -2,9 +2,20 @@ import type { FastifyPluginAsync } from 'fastify';
 import { getConfig } from '@/lib/core/config';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
+import { getProjectLevelsSince, ignoredProjectLevels } from '@/lib/iam/projectLevels';
+import { dropTokenDelegation } from '@/lib/iam/tokenDelegation';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { checkResourceQuota } from '@/lib/quota/quotaGuard';
+import { invalidateApiTokenAuthCache } from '@/lib/services/apiTokenAuth';
 import { createApiTokenSecret, getApiTokenPrefix, hashApiToken } from '@/lib/services/apiTokens/tokenHashing';
+import { filterManageableTokens, resolveManageableProjectToken } from '@/lib/services/apiTokens/tokenGovernance';
+import {
+  loadTokenPolicyForDisplay,
+  prepareTokenCreate,
+  presentAllowedIpRanges,
+  presentApiToken,
+  tokenExceedsPolicy,
+} from '@/lib/services/apiTokens/tokenPolicy';
 import { isUserDisabled } from '@/lib/services/users/userAuthState';
 import {
   DEFAULT_PROJECT_KEY,
@@ -15,11 +26,14 @@ import {
 import type { ProjectRole } from '@/lib/database/provider/types.base';
 import type { UserServicePermissions } from '@/lib/security/rbac';
 import { mergeServicePermissions } from '@/lib/security/rbac';
+import { collectAccessibleProjectIds } from '@/lib/services/projects/accessibleProjects';
+import { foldSearchText } from '@/lib/shared/searchFold';
 import {
   readJsonBody,
   requireSessionContext,
   withApiRequestContext,
 } from '../fastify-utils';
+import { auditTokenRestrictionChange, editApiTokenForSession, readBodyObject } from './tokens';
 
 const logger = createLogger('api:projects');
 
@@ -29,34 +43,6 @@ function canManageProjects(userRole: string): boolean {
 
 function getLegacyProjectIds(projectIds?: string[]): string[] {
   return (projectIds ?? []).map(String).filter(Boolean);
-}
-
-async function collectAccessibleProjectIds(
-  db: Awaited<ReturnType<typeof getDatabase>>,
-  userId: string,
-  legacyProjectIds?: string[],
-): Promise<string[]> {
-  const projectIds = new Set(getLegacyProjectIds(legacyProjectIds));
-  const memberships = await db.listUserProjectsByUser(userId);
-
-  for (const membership of memberships) {
-    if (membership.projectId) {
-      projectIds.add(String(membership.projectId));
-    }
-  }
-
-  // Projects inherited through group membership.
-  const groupMemberships = await db.listGroupMembersByUser(userId);
-  for (const groupMembership of groupMemberships) {
-    const groupProjects = await db.listGroupProjectsByGroup(String(groupMembership.groupId));
-    for (const groupProject of groupProjects) {
-      if (groupProject.projectId) {
-        projectIds.add(String(groupProject.projectId));
-      }
-    }
-  }
-
-  return Array.from(projectIds);
 }
 
 /**
@@ -429,11 +415,16 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           role: u.role as string,
           projectRole: null as ProjectRole | null,
           servicePermissions: null,
+          ignoredServices: [] as string[],
           implicit: true,
         }));
 
-      // Explicit members via UserProject records
+      // Explicit members via UserProject records. The engine reads a stored "no access" of a row that
+      // predates the workspace's activation instant as not set (projectLevels.ts): the row names those
+      // services so the screens do not show them as live limits (and a save does not turn them into
+      // fresh ones).
       const memberships = await access.db.listUserProjectsByProject(projectId);
+      const since = await getProjectLevelsSince(session.tenantDbName);
       const explicit = memberships
         .map((m) => {
           const user = userById.get(m.userId);
@@ -445,6 +436,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
             role: user.role as string,
             projectRole: m.role,
             servicePermissions: m.servicePermissions ?? null,
+            ignoredServices: ignoredProjectLevels(m, since),
             implicit: false,
           };
         })
@@ -452,6 +444,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           userId: string;
           email: string;
           implicit: boolean;
+          ignoredServices: string[];
           name: string;
           projectRole: ProjectRole;
           role: string;
@@ -471,6 +464,7 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           projectRole: user.role === 'project_admin' ? 'project_admin' : 'member',
           role: user.role as string,
           servicePermissions: null,
+          ignoredServices: [] as string[],
         }));
 
       // Deduplicate: privileged users already covered above
@@ -529,6 +523,11 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(400).send({
           error: 'Owners and admins are implicitly assigned to all projects',
         });
+      }
+
+      // A host application's person belongs to no project.
+      if (target.kind === 'external') {
+        return reply.code(400).send({ error: 'External users cannot be project members', code: 'external_user' });
       }
 
       const role: ProjectRole = (body.role === 'project_admin') ? 'project_admin' : 'member';
@@ -730,7 +729,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       const query = (request.query ?? {}) as { q?: string };
-      const search = query.q?.trim().toLowerCase() ?? '';
+      // Folded like every other picker search: "ismail" finds "İsmail", "ısparta" finds "ISPARTA".
+      const search = foldSearchText(query.q?.trim() ?? '');
       if (search.length < 2) {
         return reply.code(200).send({ users: [] });
       }
@@ -748,8 +748,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
           return !getLegacyProjectIds(user.projectIds).includes(String(projectId));
         })
         .filter((user) => {
-          const email = (user.email ?? '').toLowerCase();
-          const name = (user.name ?? '').toLowerCase();
+          const email = foldSearchText(user.email ?? '');
+          const name = foldSearchText(user.name ?? '');
           return email.includes(search) || name.includes(search);
         })
         .slice(0, 10)
@@ -781,36 +781,18 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(access.status).send({ error: access.error });
       }
 
+      // Listing is not minting: the token quota is checked when a token is created, never here.
       const db = await getDatabase();
       const existingTokens = await db.listProjectApiTokens(session.tenantId, projectId);
-      const quotaCheck = await checkResourceQuota(
-        {
-          domain: 'global',
-          licenseType: session.licenseType as LicenseType,
-          projectId,
-          tenantDbName: session.tenantDbName,
-          tenantId: session.tenantId,
-          userId: session.userId,
-        },
-        'apiTokens',
-        existingTokens.length,
-      );
 
-      if (!quotaCheck.allowed) {
-        return reply.code(429).send({
-          error: quotaCheck.reason || 'API token quota exceeded',
-        });
-      }
-
-      const tokens = existingTokens.map((token) => ({
-        _id: token._id,
-        canDelete: true,
-        createdAt: token.createdAt,
-        label: token.label,
-        lastUsed: token.lastUsed,
-        tokenPrefix: token.tokenPrefix,
-        userId: token.userId,
-      }));
+      const policy = await loadTokenPolicyForDisplay(session.tenantDbName);
+      const now = new Date();
+      // What is listed is what the caller may manage - the owner sees every token of the
+      // project, an admin never the owner's (nor those of an account it cannot act on), the
+      // same rule as GET /api/tokens?scope=project - so edit and delete hold for every row.
+      const visibleTokens = await filterManageableTokens(db, session, existingTokens);
+      const tokens = visibleTokens.map((token) =>
+        presentApiToken(token, { policy, now, canDelete: true, canEdit: true }));
 
       return reply.code(200).send({ tokens });
     } catch (error) {
@@ -858,6 +840,12 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // Same expiry / IP allowlist preparation as every other mint endpoint.
+      const prepared = await prepareTokenCreate({ body, tenantDbName: session.tenantDbName });
+      if (!prepared.ok) {
+        return reply.code(prepared.status).send(prepared.body);
+      }
+
       const token = createApiTokenSecret();
       const apiToken = await db.createApiToken({
         label: body.label.trim(),
@@ -866,6 +854,8 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         tokenHash: hashApiToken(token),
         tokenPrefix: getApiTokenPrefix(token),
         userId: session.userId,
+        ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
+        ...(prepared.allowedIpRanges ? { allowedIpRanges: prepared.allowedIpRanges } : {}),
       });
 
       return reply.code(201).send({
@@ -873,9 +863,43 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         label: apiToken.label,
         message: 'API token created successfully',
         token,
+        expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
+        allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        lastUsedAt: null,
+        exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),
       });
     } catch (error) {
       logger.error('Create project token error', { error });
+      return reply.code(500).send({ error: 'Internal server error' });
+    }
+  }));
+
+  // Edit label / expiry / IP allowlist of a project token. Same rules and the
+  // same implementation as PUT /tokens/:id.
+  app.put('/projects/:projectId/tokens/:id', withApiRequestContext(async (request, reply) => {
+    try {
+      const session = requireSessionContext(request);
+      if (!canManageProjects(session.userRole)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      const { id, projectId } = request.params as { id: string; projectId: string };
+      const access = await assertProjectAccess({ projectId, session });
+      if (!access.ok) {
+        return reply.code(access.status).send({ error: access.error });
+      }
+
+      const body = readBodyObject(request);
+      if (!body) {
+        return reply.code(400).send({ error: 'The request body must be a JSON object', code: 'invalid_body' });
+      }
+
+      const db = await getDatabase();
+      const result = await editApiTokenForSession({ db, session, projectId, tokenId: id, body });
+      auditTokenRestrictionChange(request, session, result.change);
+      return reply.code(result.status).send(result.body);
+    } catch (error) {
+      logger.error('Update project token error', { error });
       return reply.code(500).send({ error: 'Internal server error' });
     }
   }));
@@ -893,11 +917,25 @@ export const projectsApiPlugin: FastifyPluginAsync = async (app) => {
         return reply.code(access.status).send({ error: access.error });
       }
 
+      // The same rule as DELETE /api/tokens/:id: the owner role may delete any token of the
+      // project, an admin any but the owner's (or an account it cannot act on), and a token
+      // that is not this project's is not found.
       const db = await getDatabase();
-      const deleted = await db.deleteProjectApiToken(id, session.tenantId, projectId);
+      const target = await resolveManageableProjectToken(db, session, projectId, id);
+      if (!target.ok) {
+        return target.reason === 'forbidden'
+          ? reply.code(403).send({ error: 'Forbidden' })
+          : reply.code(404).send({ error: 'Token not found' });
+      }
+
+      // Per owner, not per workspace: deleting one token does not flush every principal's cache.
+      const deleted = await db.deleteApiToken(id, String(target.token.userId));
       if (!deleted) {
         return reply.code(404).send({ error: 'Token not found' });
       }
+      await invalidateApiTokenAuthCache(target.token.tokenHash);
+      // what the token was set up to act for goes with it (nothing reads it any more; this only tidies, and keeps the sealed secrets from outliving it)
+      await dropTokenDelegation(session.tenantDbName, id);
 
       return reply.code(200).send({ message: 'API token deleted successfully' });
     } catch (error) {

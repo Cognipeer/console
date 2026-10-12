@@ -1,4 +1,5 @@
 import type { IModel, ModelCategory } from '@/lib/database';
+import { inferModelAcceptsImages } from '@/lib/providers/contracts/modelCapabilityInference';
 
 export const MODEL_CAPABILITY_SCHEMA_VERSION = '1.0' as const;
 
@@ -9,6 +10,12 @@ export type ModelCapabilityOverrides = {
   contextWindow?: number;
   maxOutputTokens?: number;
   inputModalities?: ModelInputModality[];
+  /**
+   * Set whenever `inputModalities` is written (every write goes through
+   * `parseModelCapabilityOverrides`): the stored list is somebody's choice. A
+   * list stored WITHOUT it predates the flag — see `isLegacyTextOnlyDefault`.
+   */
+  inputModalitiesExplicit?: boolean;
   outputModalities?: ModelOutputModality[];
   supportsReasoning?: boolean;
   supportsStructuredOutputs?: boolean;
@@ -48,15 +55,25 @@ const OUTPUT_MODALITIES = new Set<ModelOutputModality>([
   'embeddings',
 ]);
 
+/**
+ * What a model accepts when nothing explicit is stored for it. A chat model is
+ * `text`, plus `image` when the model is flagged multimodal OR — with `modelId`
+ * given — belongs to a known vision family (`modelCapabilityInference.ts`). The
+ * model forms prefill their input-modality boxes from this, and store an
+ * override only when the person changes it.
+ */
 export function getDefaultModelInputModalities(
   category: ModelCategory,
   isMultimodal = false,
+  modelId?: string,
 ): ModelInputModality[] {
   switch (category) {
     case 'stt':
       return ['audio'];
     case 'ocr':
       return ['image', 'file'];
+    case 'llm':
+      return isMultimodal || inferModelAcceptsImages(modelId) ? ['text', 'image'] : ['text'];
     default:
       return isMultimodal ? ['text', 'image'] : ['text'];
   }
@@ -75,6 +92,32 @@ export function getDefaultModelOutputModalities(
     default:
       return ['text'];
   }
+}
+
+/**
+ * Whether a stored `inputModalities` is the value the model forms of earlier
+ * releases wrote back on EVERY save, not a choice: exactly `['text']` on a chat
+ * model not flagged multimodal, with nothing marking it as chosen
+ * (`inputModalitiesExplicit`). Nearly every model created or edited in the
+ * dashboard carries one, and read as a choice it beat the vision-family table
+ * for models that read images perfectly well. Treated as "nothing stored".
+ *
+ * The cost: a "text only" choice made BEFORE the flag existed, on a model whose
+ * id is a known vision family, reads as unset until it is chosen again in the
+ * model's page (a choice made now is flagged and always wins).
+ */
+export function isLegacyTextOnlyDefault(
+  category: ModelCategory,
+  isMultimodal: boolean | undefined,
+  stored: readonly string[] | undefined,
+  explicit?: unknown,
+): boolean {
+  return category === 'llm'
+    && isMultimodal !== true
+    && explicit !== true
+    && stored !== undefined
+    && stored.length === 1
+    && stored[0] === 'text';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -171,14 +214,18 @@ export function parseModelCapabilityOverrides(
     );
   }
 
+  const inputModalities = parseModalities(
+    value.inputModalities,
+    'capabilities.inputModalities',
+    INPUT_MODALITIES,
+  );
+
   return {
     contextWindow,
     maxOutputTokens,
-    inputModalities: parseModalities(
-      value.inputModalities,
-      'capabilities.inputModalities',
-      INPUT_MODALITIES,
-    ),
+    inputModalities,
+    // Whoever writes the list is choosing it (the forms store one only when the person picks).
+    ...(inputModalities ? { inputModalitiesExplicit: true } : {}),
     outputModalities: parseModalities(
       value.outputModalities,
       'capabilities.outputModalities',
@@ -219,8 +266,12 @@ export function resolveModelCapabilities(model: IModel): ResolvedModelCapabiliti
   const settings = model.settings ?? {};
   const overrides = readOverrides(model);
 
-  const inputModalities = readModalities(overrides.inputModalities, INPUT_MODALITIES)
-    ?? getDefaultModelInputModalities(model.category, model.isMultimodal);
+  const stored = readModalities(overrides.inputModalities, INPUT_MODALITIES);
+  const chosen = isLegacyTextOnlyDefault(model.category, model.isMultimodal, stored, overrides.inputModalitiesExplicit)
+    ? undefined
+    : stored;
+  const inputModalities = chosen
+    ?? getDefaultModelInputModalities(model.category, model.isMultimodal, model.modelId);
   const outputModalities = readModalities(overrides.outputModalities, OUTPUT_MODALITIES)
     ?? getDefaultModelOutputModalities(model.category);
 

@@ -18,6 +18,8 @@ import {
 } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import { IconTrash, IconRefresh } from '@tabler/icons-react';
 import EmptyState from '@/components/common/EmptyState';
 import LoadingState from '@/components/common/LoadingState';
@@ -77,6 +79,8 @@ function resolveAllowedMetrics(provider?: VectorProviderView | null): string[] |
 }
 
 export default function VectorIndexManager({ provider }: VectorIndexManagerProps) {
+  const deleteResource = useDeleteResource();
+  const tSafe = useTranslations('common.confirm.dataSafety');
   const [indexes, setIndexes] = useState<VectorIndexRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -205,34 +209,29 @@ export default function VectorIndexManager({ provider }: VectorIndexManagerProps
 
   const handleDeleteIndex = async (index: VectorIndexRecord) => {
     if (!providerKey) return;
-    const confirmed = window.confirm(
-      `Delete index "${index.name}"? This cannot be undone.`,
-    );
-    if (!confirmed) return;
-
-    const response = await fetch(
-  `/api/vector/indexes/${encodeURIComponent(index.key)}?providerKey=${encodeURIComponent(providerKey)}`,
-      {
-        method: 'DELETE',
+    await deleteResource({
+      noun: tSafe('nouns.vectorIndex'),
+      name: index.name,
+      type: 'vector-index',
+      id: index._id ? String(index._id) : undefined,
+      extraWarning: tSafe('vectorIndexExtra'),
+      action: async () => {
+        const response = await fetch(
+          `/api/vector/indexes/${encodeURIComponent(index.key)}?providerKey=${encodeURIComponent(providerKey)}`,
+          { method: 'DELETE' },
+        );
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(error.error ?? 'Unexpected error');
+        }
+        notifications.show({
+          color: 'green',
+          title: 'Vector index deleted',
+          message: `${index.name} has been removed.`,
+        });
+        await loadIndexes();
       },
-    );
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-      notifications.show({
-        color: 'red',
-        title: 'Failed to delete index',
-        message: error.error ?? 'Unexpected error',
-      });
-      return;
-    }
-
-    notifications.show({
-      color: 'green',
-      title: 'Vector index deleted',
-      message: `${index.name} has been removed.`,
     });
-    await loadIndexes();
   };
 
   const navigateToIndex = (index: VectorIndexRecord) => {

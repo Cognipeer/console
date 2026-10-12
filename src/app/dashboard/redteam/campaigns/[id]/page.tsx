@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Button, Group, Loader, Menu, Modal, Text } from '@mantine/core';
+import { Button, Group, Loader, Menu, Text } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { useDeleteResource, ResourceUsageSection } from '@/components/common/confirm';
+import { useTranslations } from '@/lib/i18n';
 import { IconDots, IconPencil, IconPlayerPlay, IconShield, IconTrash } from '@tabler/icons-react';
 import DetailShell from '@/components/common/ui/DetailShell';
 import DataGrid, { type DataGridColumn } from '@/components/common/ui/DataGrid';
@@ -32,6 +34,8 @@ function pct(value?: number): string {
 
 export default function RedTeamCampaignDetailPage() {
   const router = useRouter();
+  const deleteResource = useDeleteResource();
+  const tq = useTranslations('common.confirm.qos');
   const params = useParams<{ id: string }>();
   const id = params?.id;
 
@@ -44,8 +48,6 @@ export default function RedTeamCampaignDetailPage() {
   const [notFound, setNotFound] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -82,19 +84,21 @@ export default function RedTeamCampaignDetailPage() {
     })();
   }, []);
 
-  const confirmDelete = async () => {
+  const onDelete = async () => {
     if (!campaign) return;
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/redteam/campaigns/${campaign.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      notifications.show({ title: 'Deleted', message: campaign.name, color: 'red' });
-      router.push('/dashboard/redteam');
-    } catch (err) {
-      notifications.show({ title: 'Error', message: err instanceof Error ? err.message : 'Failed to delete', color: 'red' });
-    } finally {
-      setDeleting(false);
-    }
+    const done = await deleteResource({
+      noun: tq('nouns.redteamCampaign'),
+      name: campaign.name,
+      type: 'redteam-campaign',
+      id: campaign.id,
+      action: async () => {
+        const res = await fetch(`/api/redteam/campaigns/${campaign.id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(tq('deleteFailed'));
+      },
+    });
+    if (!done) return;
+    notifications.show({ title: 'Deleted', message: campaign.name, color: 'red' });
+    router.push('/dashboard/redteam');
   };
 
   const runColumns: DataGridColumn<RedTeamRunView>[] = [
@@ -141,7 +145,7 @@ export default function RedTeamCampaignDetailPage() {
             <Menu.Dropdown>
               <Menu.Item leftSection={<IconPencil size={14} />} onClick={() => setEditing(true)}>Edit</Menu.Item>
               <Menu.Divider />
-              <Menu.Item color="red" leftSection={<IconTrash size={14} />} onClick={() => setDeleteOpen(true)}>Delete</Menu.Item>
+              <Menu.Item color="red" leftSection={<IconTrash size={14} />} onClick={() => void onDelete()}>Delete</Menu.Item>
             </Menu.Dropdown>
           </Menu>
         </>
@@ -171,14 +175,6 @@ export default function RedTeamCampaignDetailPage() {
         }}
       />
 
-      <Modal opened={deleteOpen} onClose={() => setDeleteOpen(false)} title="Delete campaign" centered size="sm">
-        <Text size="sm" mb="lg">Delete <strong>{campaign.name}</strong>? This cannot be undone.</Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={() => setDeleteOpen(false)}>Cancel</Button>
-          <Button color="red" loading={deleting} onClick={confirmDelete}>Delete</Button>
-        </Group>
-      </Modal>
-
       <CreateCampaignModal
         opened={editing}
         editing={campaign}
@@ -197,6 +193,10 @@ export default function RedTeamCampaignDetailPage() {
         onClose={() => setScanOpen(false)}
         onStarted={(runId) => router.push(`/dashboard/redteam/runs/${runId}`)}
       />
+
+      <div style={{ marginTop: 16 }}>
+        <ResourceUsageSection type="redteam-campaign" id={campaign.id} />
+      </div>
     </DetailShell>
   );
 }
