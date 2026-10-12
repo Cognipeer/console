@@ -483,6 +483,11 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         stream: Boolean(body.stream),
         tenantDbName: auth.tenantDbName,
         tenantId: auth.tenantId,
+        callerContext: {
+          channel: 'api',
+          apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+          projectId: auth.projectId,
+        },
         // Settling here (rather than after the call returns, as before) is
         // what makes this work for BOTH stream and non-stream: a streamed
         // response's real usage isn't known until long after this function
@@ -663,6 +668,11 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         stream: Boolean(body.stream),
         tenantDbName: auth.tenantDbName,
         tenantId: auth.tenantId,
+        callerContext: {
+          channel: 'api',
+          apiTokenId: auth.tokenRecord._id ? String(auth.tokenRecord._id) : undefined,
+          projectId: auth.projectId,
+        },
       });
       requestId = result.requestId;
 

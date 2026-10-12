@@ -11,7 +11,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconArrowsSplit, IconPlus, IconRoute, IconTrash } from '@tabler/icons-react';
-import FormShell, {
+import {
   Checklist,
   ChipPicker,
   FormField,
@@ -20,6 +20,8 @@ import FormShell, {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
+import ModelFormLayout, { ModelFormPanel, type ModelFormSection } from './ModelFormLayout';
+import RoutingAnalyticsPanel from './RoutingAnalyticsPanel';
 import type {
   DynamicPoolPolicy,
   DynamicRoutingOperator,
@@ -29,6 +31,12 @@ import type {
   IDynamicRoutingGuards,
   IDynamicRoutingTarget,
 } from '@/lib/database';
+import {
+  CallerValueField,
+  describeCallerCondition,
+  useIdentityOptions,
+  type IdentityOptions,
+} from './DynamicCallerConditions';
 
 /** A model that can be picked as a routing target / default / fallback / decider. */
 export interface CandidateModel {
@@ -129,9 +137,9 @@ export interface DynamicModelInit {
   dynamic: IDynamicRoutingConfig;
 }
 
-type SignalKind = 'number' | 'boolean' | 'text';
+type SignalKind = 'number' | 'boolean' | 'text' | 'list';
 
-const SIGNALS: ReadonlyArray<{ value: DynamicRoutingSignal; label: string; kind: SignalKind }> = [
+const SIGNALS: ReadonlyArray<{ value: DynamicRoutingSignal; label: string; kind: SignalKind; group?: 'Caller' }> = [
   { value: 'inputTokensEst', label: 'Estimated input tokens', kind: 'number' },
   { value: 'messageCount', label: 'Message count', kind: 'number' },
   { value: 'lastUserLength', label: 'Last user message length', kind: 'number' },
@@ -144,6 +152,19 @@ const SIGNALS: ReadonlyArray<{ value: DynamicRoutingSignal; label: string; kind:
   { value: 'hasResponseFormat', label: 'Structured output requested', kind: 'boolean' },
   { value: 'hasImages', label: 'Request has images', kind: 'boolean' },
   { value: 'keyword', label: 'Keyword in last user message', kind: 'text' },
+  { value: 'channel', label: 'Channel', kind: 'list', group: 'Caller' },
+  { value: 'userId', label: 'User', kind: 'list', group: 'Caller' },
+  { value: 'groupIds', label: 'Group (any of the caller’s groups)', kind: 'list', group: 'Caller' },
+  { value: 'agentKey', label: 'Agent', kind: 'list', group: 'Caller' },
+  { value: 'portalKey', label: 'Portal', kind: 'list', group: 'Caller' },
+  { value: 'apiTokenId', label: 'API token', kind: 'list', group: 'Caller' },
+  { value: 'projectId', label: 'Project', kind: 'list', group: 'Caller' },
+];
+
+/** Picker data: request-content signals and caller-context signals in separate groups. */
+const SIGNAL_SELECT_DATA = [
+  { group: 'Request', items: SIGNALS.filter((s) => !s.group).map((s) => ({ value: s.value, label: s.label })) },
+  { group: 'Caller', items: SIGNALS.filter((s) => s.group).map((s) => ({ value: s.value, label: s.label })) },
 ];
 
 const OPERATORS: Record<SignalKind, Array<{ value: DynamicRoutingOperator; label: string }>> = {
@@ -162,6 +183,10 @@ const OPERATORS: Record<SignalKind, Array<{ value: DynamicRoutingOperator; label
   text: [
     { value: 'contains', label: 'contains' },
     { value: 'matches', label: 'matches (regex)' },
+  ],
+  list: [
+    { value: 'in', label: 'is one of' },
+    { value: 'not_in', label: 'is not one of' },
   ],
 };
 
@@ -239,6 +264,7 @@ export default function CreateDynamicModelModal({
   const [canaryPercent, setCanaryPercent] = useState<number | ''>(100);
 
   const isEdit = Boolean(editModel);
+  const identityOptions = useIdentityOptions(opened && strategy === 'rule-based');
   // Bumped on every hydration so collapsible sections re-read `defaultOpen`
   // from the loaded config instead of the pre-hydration blank form.
   const [hydration, setHydration] = useState(0);
@@ -549,10 +575,33 @@ export default function CreateDynamicModelModal({
 
   const noCandidates = candidates.length === 0;
 
+  const sections: ModelFormSection[] = [
+    { id: 'general', label: 'General', done: validIdentity },
+    strategy === 'rule-based'
+      ? { id: 'rules', label: 'Rules', done: validStrategy }
+      : { id: 'decider', label: 'Decider', done: validStrategy },
+    { id: 'pools', label: 'Pools & defaults', done: validDefault && validDefaultPool },
+    { id: 'limits', label: 'Limits' },
+    { id: 'analytics', label: 'Analytics', hidden: !isEdit },
+  ];
+
+  // Dirty = differs from the state right after the form was hydrated.
+  const snapshot = JSON.stringify([name, key, description, buildConfig()]);
+  const [baseline, setBaseline] = useState<string | null>(null);
+  useEffect(() => {
+    if (opened) setBaseline(snapshot);
+    // Only the post-hydration state is the baseline, never later edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydration]);
+  const dirty = opened && baseline !== null && baseline !== snapshot;
+
   return (
-    <FormShell
+    <ModelFormLayout
       open={opened}
       onClose={onClose}
+      sections={sections}
+      dirty={dirty}
+      resetKey={hydration}
       icon={<IconArrowsSplit size={16} />}
       title={isEdit ? 'Edit Dynamic LLM' : 'Create Dynamic LLM'}
       subtitle="Route each request to a different model by rules or by a decider model."
@@ -562,7 +611,7 @@ export default function CreateDynamicModelModal({
         label: isEdit ? 'Save changes' : 'Create Dynamic LLM',
         icon: <IconRoute size={13} />,
         loading: submitting,
-        disabled: !canSubmit,
+        disabled: !canSubmit || (isEdit && !dirty),
         onClick: submit,
       }}
     >
@@ -575,7 +624,8 @@ export default function CreateDynamicModelModal({
         </div>
       ) : null}
 
-      <FormSection number={1} title="Identity" description="How this router is identified." done={validIdentity}>
+      <ModelFormPanel id="general">
+      <FormSection title="Identity" description="How this router is identified." done={validIdentity}>
         <FormRow cols={2}>
           <FormField label="Display name" required>
             <TextInput
@@ -606,7 +656,7 @@ export default function CreateDynamicModelModal({
         </FormRow>
       </FormSection>
 
-      <FormSection number={2} title="Strategy" description="How the target model is chosen for each request." done>
+      <FormSection title="Strategy" description="How the target model is chosen for each request." done>
         <ChipPicker<DynamicRoutingStrategy>
           options={[
             { value: 'rule-based', label: 'Rule-based' },
@@ -622,8 +672,10 @@ export default function CreateDynamicModelModal({
         </div>
       </FormSection>
 
+      </ModelFormPanel>
+
+      <ModelFormPanel id="pools">
       <FormSection
-        number={3}
         title="Default & fallback"
         description="Default runs when nothing matches; fallback runs when the chosen model errors."
         done={validDefault}
@@ -663,8 +715,11 @@ export default function CreateDynamicModelModal({
         ) : null}
       </FormSection>
 
+      </ModelFormPanel>
+
       {strategy === 'rule-based' ? (
-        <FormSection number={4} title="Rules" description="First matching rule decides the target model." done={validStrategy}>
+        <ModelFormPanel id="rules">
+        <FormSection title="Rules" description="First matching rule decides the target model." done={validStrategy}>
           <div className="ds-col ds-gap-md">
             {rules.map((rule, ri) => (
               <div
@@ -721,7 +776,7 @@ export default function CreateDynamicModelModal({
                         <div style={{ flex: 2 }}>
                           <Select
                             size="xs"
-                            data={SIGNALS.map((s) => ({ value: s.value, label: s.label }))}
+                            data={SIGNAL_SELECT_DATA}
                             value={cond.signal}
                             onChange={(v) => {
                               const nextSignal = (v ?? 'inputTokensEst') as DynamicRoutingSignal;
@@ -745,7 +800,14 @@ export default function CreateDynamicModelModal({
                           />
                         </div>
                         <div style={{ flex: 1.4 }}>
-                          {kind === 'number' ? (
+                          {kind === 'list' ? (
+                            <CallerValueField
+                              signal={cond.signal}
+                              value={cond.value}
+                              onChange={(value) => updateCondition(ri, ci, { value })}
+                              options={identityOptions}
+                            />
+                          ) : kind === 'number' ? (
                             <NumberInput
                               size="xs"
                               min={0}
@@ -779,6 +841,9 @@ export default function CreateDynamicModelModal({
                       </div>
                     );
                   })}
+                  <div className="ds-faint" style={{ fontSize: 12 }}>
+                    {describeRule(rule, identityOptions, modelOptions)}
+                  </div>
                   <Button
                     variant="subtle"
                     size="xs"
@@ -835,9 +900,10 @@ export default function CreateDynamicModelModal({
             ) : null}
           </div>
         </FormSection>
+        </ModelFormPanel>
       ) : (
+        <ModelFormPanel id="decider">
         <FormSection
-          number={4}
           title="Decider"
           description="A model classifies each request into one label; the label decides the target."
           done={validStrategy}
@@ -941,11 +1007,12 @@ export default function CreateDynamicModelModal({
             </Button>
           </div>
         </FormSection>
+        </ModelFormPanel>
       )}
 
+      <ModelFormPanel id="limits">
       <FormSection
         key={`guards-${hydration}`}
-        number={5}
         title="Cost guards"
         description="Router-wide limits applied after a route is chosen. A guard only ever moves a request to a cheaper model."
         done
@@ -1000,7 +1067,6 @@ export default function CreateDynamicModelModal({
 
       <FormSection
         key={`rollout-${hydration}`}
-        number={6}
         title="Measurement & rollout"
         description="Savings are measured against a baseline model. Shadow mode logs what pools and guards would do without changing traffic."
         done
@@ -1037,7 +1103,14 @@ export default function CreateDynamicModelModal({
           </FormField>
         </FormRow>
       </FormSection>
-    </FormShell>
+      </ModelFormPanel>
+
+      {isEdit && editModel ? (
+        <ModelFormPanel id="analytics" lazy>
+          <RoutingAnalyticsPanel modelId={editModel._id} />
+        </ModelFormPanel>
+      ) : null}
+    </ModelFormLayout>
   );
 }
 
@@ -1148,6 +1221,7 @@ function TargetEditor({
 function isConditionValid(c: ConditionDraft): boolean {
   const kind = signalKind(c.signal);
   if (kind === 'boolean') return c.operator === 'isTrue' || c.operator === 'isFalse';
+  if (kind === 'list') return (c.operator === 'in' || c.operator === 'not_in') && c.value.trim() !== '';
   return c.value !== '' && c.value !== undefined && c.value !== null;
 }
 
@@ -1156,4 +1230,24 @@ function coerceValue(c: ConditionDraft): string | number | boolean | undefined {
   if (kind === 'number') return Number(c.value);
   if (kind === 'boolean') return undefined;
   return c.value;
+}
+
+/** One-line readable rule: "channel in portal AND group in Pro → gpt-5". */
+function describeRule(
+  rule: RuleDraft,
+  identity: IdentityOptions,
+  modelOptions: Array<{ value: string; label: string }>,
+): string {
+  const parts = rule.conditions.filter(isConditionValid).map((c) => {
+    const def = SIGNALS.find((x) => x.value === c.signal);
+    if (def?.kind === 'list') return describeCallerCondition(c.signal, c.operator, c.value, identity);
+    const op = OPERATORS[def?.kind ?? 'number'].find((o) => o.value === c.operator)?.label ?? c.operator;
+    return `${def?.label ?? c.signal} ${op}${def?.kind === 'boolean' ? '' : ` ${c.value}`}`;
+  });
+  const joiner = rule.matchType === 'any' ? ' OR ' : ' AND ';
+  const targetLabel =
+    rule.target.kind === 'model'
+      ? modelOptions.find((m) => m.value === rule.target.modelKey)?.label ?? (rule.target.modelKey || '…')
+      : describeDraft(rule.target);
+  return `${parts.length ? parts.join(joiner) : 'no conditions yet'} → ${targetLabel}`;
 }

@@ -5,7 +5,9 @@ import { fireAndForget } from '@/lib/core/asyncTask';
 import { AIMessageChunk, type AIMessage } from '@langchain/core/messages';
 
 const logger = createLogger('inference');
-import { IModel } from '@/lib/database';
+import { IModel, runWithTenantScope } from '@/lib/database';
+import { listUserGroupIds } from '@/lib/iam/groupGrants';
+import { mergeRoutingCaller, type RoutingCallerContext } from './routingCallerContext';
 import type {
   SttRuntime,
   SttResult,
@@ -1362,15 +1364,17 @@ async function resolveDynamicCompletion(args: {
   config: IDynamicRoutingConfig;
   depth: number;
   onUsageSettled?: (cost: UsageCostResult) => void;
+  callerContext?: RoutingCallerContext;
 }): Promise<ChatCompletionOutcome> {
   const { tenantDbName, tenantId, projectId, body, stream, router, config, depth, onUsageSettled } = args;
+  const callerContext = mergeRoutingCaller(args.callerContext);
   const start = Date.now();
   const routerRequestId =
     typeof body.request_id === 'string' && body.request_id.length > 0
       ? body.request_id
       : crypto.randomUUID();
 
-  const signals = extractRoutingSignals(body);
+  const signals = extractRoutingSignals(body, callerContext && { ...callerContext, projectId: callerContext.projectId ?? projectId });
   const conversationId = deriveConversationId(body as { messages?: unknown; metadata?: unknown; user?: unknown });
   const guards = config.guards;
   const defaultOutputTokens = config.defaultOutputTokens ?? DEFAULT_ROUTER_OUTPUT_TOKENS;
@@ -1410,6 +1414,22 @@ async function resolveDynamicCompletion(args: {
   // Lazy rule signals — computed only when a rule references them.
   if (config.strategy === 'rule-based') {
     const rules = config.rules ?? [];
+    // Group membership is only looked up when a rule asks for it.
+    if (
+      rulesReferenceSignal(rules, 'groupIds') &&
+      signals.caller?.userId &&
+      signals.caller.groupIds === undefined
+    ) {
+      try {
+        const userId = signals.caller.userId;
+        const groupIds = await runWithTenantScope(tenantDbName, (db) => listUserGroupIds(db, userId));
+        signals.caller = { ...signals.caller, groupIds };
+      } catch (error) {
+        logger.warn('Dynamic routing: group lookup failed; groupIds conditions will not match', {
+          error: error instanceof Error ? error.message : error,
+        });
+      }
+    }
     if (rulesReferenceSignal(rules, 'complexityScore') && config.complexity) {
       const scoringStart = Date.now();
       try {
@@ -1793,6 +1813,7 @@ async function resolveDynamicCompletion(args: {
       stream,
       _routingDepth: depth + 1,
       onUsageSettled,
+      callerContext,
       _routedBy: { routing, baselinePricing },
     });
 
@@ -1905,6 +1926,8 @@ export async function handleChatCompletion(params: {
   _routingDepth?: number;
   /** Internal: the Dynamic LLM decision this call serves, recorded on its usage rows. */
   _routedBy?: RoutedBy;
+  /** Who is asking and through which door — feeds Dynamic LLM caller conditions. Merged over the ambient `runWithRoutingCaller` scope. */
+  callerContext?: RoutingCallerContext;
   /**
    * Called with the REALIZED cost of this call, once usage is known — for a
    * streaming response that is long after this function has already returned
@@ -1962,6 +1985,7 @@ export async function handleChatCompletion(params: {
       config: dynamicConfig,
       depth,
       onUsageSettled,
+      callerContext: params.callerContext,
     });
   }
 

@@ -462,7 +462,7 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
       matcher: (p, s) =>
         p.startsWith('/dashboard/models') &&
         !MODEL_TYPE_KEYS.includes(s.get('type') ?? '') &&
-        s.get('create') !== 'dynamic',
+        s.get('type') !== 'dynamic',
     },
     {
       id: 'llm',
@@ -474,10 +474,10 @@ export const SUBNAV_CONFIG: Record<string, SubNavItem[]> = {
     {
       id: 'dynamic-llm',
       label: 'Dynamic LLM',
-      href: '/dashboard/models?create=dynamic',
+      href: '/dashboard/models?type=dynamic',
       icon: IconArrowsSplit,
       matcher: (p, s) =>
-        p === '/dashboard/models' && s.get('create') === 'dynamic',
+        p === '/dashboard/models' && s.get('type') === 'dynamic',
     },
     {
       id: 'embedding',
