@@ -6,7 +6,7 @@
  * caller answers each call, and the run goes on with that answer.
  */
 
-import { useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     ActionIcon,
     Alert,
@@ -45,14 +45,19 @@ export interface AgentClientToolsPanelProps {
 }
 
 interface ToolCardProps {
+    id: string;
     tool: IAgentClientToolConfig;
-    errors: ClientToolFieldError[];
-    onPatch: (patch: Partial<IAgentClientToolConfig>) => void;
-    onRemove: () => void;
+    /** The card's field errors, joined by a comma (a string, so an unchanged card compares equal and is not re-rendered). */
+    errorsText: string;
+    onPatch: (id: string, patch: Partial<IAgentClientToolConfig>) => void;
+    onRemove: (id: string) => void;
 }
 
-function ToolCard({ tool, errors, onPatch, onRemove }: ToolCardProps) {
+const ToolCard = memo(function ToolCard({ id, tool, errorsText, onPatch: patchById, onRemove: removeById }: ToolCardProps) {
     const t = useTranslations('agents.clientTools');
+    const errors = (errorsText ? errorsText.split(',') : []) as ClientToolFieldError[];
+    const onPatch = (patch: Partial<IAgentClientToolConfig>) => patchById(id, patch);
+    const onRemove = () => removeById(id);
     const [schemaText, setSchemaText] = useState(() => schemaToText(tool.inputSchema));
     const [schemaError, setSchemaError] = useState<string | null>(null);
 
@@ -135,16 +140,73 @@ function ToolCard({ tool, errors, onPatch, onRemove }: ToolCardProps) {
             </Stack>
         </Paper>
     );
-}
+});
+
+let keyCounter = 0;
+const newKey = () => `ct-${++keyCounter}`;
+
+/** Typing is kept in local state and handed to the page after a short pause: the page behind this panel is large, and re-rendering it on every keystroke made typing lag. */
+const COMMIT_DELAY_MS = 300;
 
 export default function AgentClientToolsPanel({ value, onChange }: AgentClientToolsPanelProps) {
     const t = useTranslations('agents.clientTools');
-    const tools = value ?? [];
-    const errors = clientToolErrors(tools);
-    const emit = (next: IAgentClientToolConfig[]) => onChange(normalizeClientTools(next));
+    const [draft, setDraft] = useState<IAgentClientToolConfig[]>(value ?? []);
+    const keys = useRef<string[]>((value ?? []).map(newKey));
+    const draftRef = useRef(draft);
+    draftRef.current = draft;
+    const lastEmitted = useRef(value);
+    const pending = useRef(false);
+    const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
+
+    const flush = useCallback(() => {
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = undefined;
+        if (!pending.current) return;
+        pending.current = false;
+        const next = normalizeClientTools(draftRef.current);
+        lastEmitted.current = next;
+        onChangeRef.current(next);
+    }, []);
+
+    // A change that did not come from here (the agent was reloaded, a version restored) replaces the draft.
+    useEffect(() => {
+        if (value === lastEmitted.current) return;
+        lastEmitted.current = value;
+        pending.current = false;
+        if (timer.current) clearTimeout(timer.current);
+        keys.current = (value ?? []).map(newKey);
+        setDraft(value ?? []);
+    }, [value]);
+
+    useEffect(() => flush, [flush]);
+
+    const commit = useCallback((next: IAgentClientToolConfig[]) => {
+        draftRef.current = next;
+        setDraft(next);
+        pending.current = true;
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(flush, COMMIT_DELAY_MS);
+    }, [flush]);
+
+    const patchById = useCallback((id: string, patch: Partial<IAgentClientToolConfig>) => {
+        const index = keys.current.indexOf(id);
+        if (index >= 0) commit(updateTool(draftRef.current, index, patch));
+    }, [commit]);
+    const removeById = useCallback((id: string) => {
+        const index = keys.current.indexOf(id);
+        if (index < 0) return;
+        keys.current = keys.current.filter((key) => key !== id);
+        commit(removeTool(draftRef.current, index));
+        flush();
+    }, [commit, flush]);
+
+    const tools = draft;
+    const errors = useMemo(() => clientToolErrors(draft), [draft]);
 
     return (
-        <Stack gap="lg">
+        <Stack gap="lg" onBlur={flush}>
             <Alert icon={<IconInfoCircle size={16} />} color="blue" variant="light">
                 <Stack gap={2}>
                     <Text size="sm">{t('infoRuns')}</Text>
@@ -160,11 +222,12 @@ export default function AgentClientToolsPanel({ value, onChange }: AgentClientTo
                     ) : (
                         tools.map((tool, index) => (
                             <ToolCard
-                                key={index}
+                                key={keys.current[index]}
+                                id={keys.current[index]}
                                 tool={tool}
-                                errors={errors[index] ?? []}
-                                onPatch={(patch) => emit(updateTool(tools, index, patch))}
-                                onRemove={() => emit(removeTool(tools, index))}
+                                errorsText={(errors[index] ?? []).join(',')}
+                                onPatch={patchById}
+                                onRemove={removeById}
                             />
                         ))
                     )}
@@ -174,7 +237,7 @@ export default function AgentClientToolsPanel({ value, onChange }: AgentClientTo
                             size="xs"
                             leftSection={<IconPlus size={14} />}
                             disabled={tools.length >= CLIENT_TOOLS_MAX_COUNT}
-                            onClick={() => emit(addTool(tools))}
+                            onClick={() => { keys.current = [...keys.current, newKey()]; commit(addTool(tools)); flush(); }}
                         >
                             {t('add')}
                         </Button>
