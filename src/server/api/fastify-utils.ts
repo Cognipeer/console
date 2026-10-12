@@ -551,6 +551,8 @@ export async function serviceActionAllowedForRequest(
 }
 
 export interface ResourceRequestAuthzInput {
+  /** The service whose principal the decision is made with. Default `agents` (the session verbs); a portal's verbs pass `portals`. */
+  service?: PermissionService;
   /** A session action of an agent (`agent.approve`, `agent.session_view_others`, `agent.session_manage_others`). */
   action: ResourceAuthzAction;
   /** The agent together with the session it is asked about (agentSessionResource). */
@@ -584,16 +586,17 @@ export async function authorizeResourceForRequest(
   input: ResourceRequestAuthzInput,
 ): Promise<ResourceAuthzResult> {
   const required = auditLevelOf(input.action);
+  const service: PermissionService = input.service ?? 'agents';
   const requestId = request.apiRequestId ?? 'unknown';
   const route = routeLabel(request, getRequestPathname(request));
-  const principal = await requestPrincipal(request, 'agents', { rbac: input.rbac, required, projectId: input.projectId });
+  const principal = await requestPrincipal(request, service, { rbac: input.rbac, required, projectId: input.projectId });
   if (!principal) return { allowed: false, source: 'engine', reasons: [], policyIds: [] };
 
   let engine;
   try {
-    engine = await buildServicePrincipal(principal, { service: 'agents', requestId, route, method: 'POST' });
+    engine = await buildServicePrincipal(principal, { service, requestId, route, method: 'POST' });
   } catch (error) {
-    throw authorizationUnavailable(request, principal.tenantDbName, 'principal_unavailable', error, { service: 'agents', required });
+    throw authorizationUnavailable(request, principal.tenantDbName, 'principal_unavailable', error, { service, required });
   }
   const userAgent = request.headers['user-agent'];
   const result = await authorizeResourceForPrincipal({
@@ -618,7 +621,7 @@ export async function authorizeResourceForRequest(
   });
   if (!result.allowed && result.decisionId) {
     if (result.unavailable) {
-      throw unavailableError(request, { decisionId: result.decisionId, service: 'agents', required, action: input.action, projectId: engine.contextProjectId });
+      throw unavailableError(request, { decisionId: result.decisionId, service, required, action: input.action, projectId: engine.contextProjectId });
     }
     request.iamDecisionId = result.decisionId;
   }
