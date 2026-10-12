@@ -18,13 +18,15 @@ import { getModelByKey } from '@/lib/services/models/modelService';
 import type { IAgent } from '@/lib/database';
 import type { ApiTokenContext } from '@/lib/services/apiTokenAuth';
 import { buildRuntimeContextFromRequest } from '@/lib/services/runtimeContext';
-import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { CANCEL_PENDING_FORBIDDEN_MESSAGE, approvalAuthorizerFor, refuseCancelPending } from './agent-approval-authz';
 import { decideSessionAccess, sendOpenAiSessionRefusal } from './agent-session-access';
 import {
   resolveAgentModel,
   runAgentCompletion,
   toChatChunk,
   toChatCompletion,
+  toChatToolCallsChunk,
+  extractToolAnswers,
   type OpenAiMessage,
 } from './agent-openai-bridge';
 import {
@@ -176,6 +178,7 @@ function invalidJson(reply: FastifyReply) {
  * invocation in the tenant's bill.
  */
 async function handleAgentChatCompletion(input: {
+  request: FastifyRequest;
   agent: IAgent;
   auth: ApiTokenContext;
   body: Record<string, unknown>;
@@ -183,7 +186,7 @@ async function handleAgentChatCompletion(input: {
   model: string;
   reply: FastifyReply;
 }) {
-  const { agent, auth, body, model, reply } = input;
+  const { request, agent, auth, body, model, reply } = input;
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const streaming = body.stream === true;
 
@@ -205,6 +208,21 @@ async function handleAgentChatCompletion(input: {
       tenantId: auth.tenantId,
       projectId: auth.projectId,
       userId: auth.tokenRecord.userId,
+    },
+    // Answering a client tool call (a `tool` message) is the same act as POST .../actions/{id}: same token, same engine decision.
+    answer: {
+      authorize: approvalAuthorizerFor(request, auth.tenantDbName),
+      actor: {
+        userId: String(auth.tokenRecord.userId ?? ''),
+        channel: 'api' as const,
+        ...(auth.user?.email ? { email: auth.user.email } : {}),
+        ...(auth.user?.role ? { role: auth.user.role } : {}),
+        ...(auth.tokenRecord._id ? { apiTokenId: String(auth.tokenRecord._id) } : {}),
+      },
+      audit: {
+        ipAddress: request.ip,
+        ...(typeof request.headers['user-agent'] === 'string' ? { userAgent: request.headers['user-agent'] } : {}),
+      },
     },
   };
 
@@ -251,6 +269,7 @@ async function handleAgentChatCompletion(input: {
   };
 
   let streamed = '';
+  let toolCallsSent = false;
   let stopReason: AgentChatResponse['stop_reason'];
   try {
     const result = await runAgentCompletion({
@@ -281,8 +300,13 @@ async function handleAgentChatCompletion(input: {
         }
       }
       stopReason = result.stopReason;
+      if (result.toolCalls?.length) {
+        // Ends the stream the way OpenAI does when the model calls tools: the calls, then finish_reason "tool_calls".
+        send({ ...toChatToolCallsChunk({ id, model, toolCalls: result.toolCalls }), conversation_id: result.conversationId });
+        toolCallsSent = true;
+      }
     }
-    send(toChatChunk({ id, model, finish: true, stopReason }));
+    if (!toolCallsSent) send(toChatChunk({ id, model, finish: true, stopReason }));
   } catch (error) {
     const classified = logAgentRouteError(logger, 'Agent chat completion stream failed', error);
     send({ error: toClientErrorBody(classified.error) });
@@ -356,7 +380,9 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
               actor: { tenantDbName: auth.tenantDbName, projectId: auth.projectId, userId: String(auth.tokenRecord.userId ?? '') },
             });
             if (!access.ok) return sendOpenAiSessionRefusal(reply, request, access);
-            const refusal = await refuseCancelPending(request, { tenantDbName: auth.tenantDbName, conversation, agent });
+            // A `tool` message answers an open call (authorized when it is resolved); only a new message cancels one.
+            const answeringToolCalls = extractToolAnswers(body.messages as OpenAiMessage[] | undefined).length > 0;
+            const refusal = answeringToolCalls ? null : await refuseCancelPending(request, { tenantDbName: auth.tenantDbName, conversation, agent });
             if (refusal?.unavailable) {
               return reply.code(503).send({
                 error: {
@@ -380,6 +406,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
           }
         }
         return handleAgentChatCompletion({
+          request,
           agent,
           auth,
           body: body as Record<string, unknown>,

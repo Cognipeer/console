@@ -423,6 +423,7 @@ export type {
   IAgentExecutionConfig,
   IAgentAttachmentsConfig,
   IAgentClientToolConfig,
+  IAgentClientToolSurfaces,
   IAgentMessageAttachment,
   IAgentHumanInTheLoopConfig,
   AgentToolApprovalPolicy,

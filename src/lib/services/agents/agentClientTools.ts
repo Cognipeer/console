@@ -492,3 +492,26 @@ function openToolCallCount(messages: ReadonlyArray<Record<string, unknown>>): nu
     }
     return 0;
 }
+
+// ── Where the agent's own client tools are offered ──────────────────────
+
+export type ClientToolSurface = 'api' | 'playground' | 'portal';
+
+/**
+ * The surface a run belongs to, from who is driving it - or null for a run no
+ * surface can answer (A2A, MCP, realtime, schedules, evaluations, a portal chat
+ * that is not embedded in a page). `embedded` wins: a portal passes it only for
+ * a page that can run tools.
+ */
+export function clientToolSurfaceOf(run: { source?: string; embedded?: unknown }): ClientToolSurface | null {
+    if (run.embedded) return 'portal';
+    if (run.source === 'api') return 'api';
+    if (run.source === 'playground') return 'playground';
+    return null;
+}
+
+/** Whether the author left the tools on for a surface (every surface defaults to on). */
+export function clientToolsOnSurface(surfaces: { api?: boolean; playground?: boolean; portal?: boolean } | undefined, surface: ClientToolSurface | null): boolean {
+    if (!surface) return false;
+    return surfaces?.[surface] !== false;
+}

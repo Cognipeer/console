@@ -2504,6 +2504,23 @@ export interface IAgentConfig {
    * `client_tool` pending action. Absent = none.
    */
   clientTools?: IAgentClientToolConfig[];
+  /**
+   * Where the client tools are offered. Each surface defaults to ON (absent = on);
+   * `false` keeps the tools away from that surface. Nothing else ever gets them:
+   * not A2A, MCP, realtime, schedules, evaluations, a non-embedded portal chat,
+   * or a call with no session to pause.
+   */
+  clientToolSurfaces?: IAgentClientToolSurfaces;
+}
+
+/** The surfaces an agent's client tools can be offered on (`IAgentConfig.clientToolSurfaces`). */
+export interface IAgentClientToolSurfaces {
+  /** The client API: sessions, `/agents/responses`, background runs, chat completions. Their callers answer on the actions endpoint (or reply with `tool` messages). */
+  api?: boolean;
+  /** The dashboard playground: the person testing answers on the call's card, or an external system answers through the API. */
+  playground?: boolean;
+  /** A portal embedded in a host page: the page runs the tool. */
+  portal?: boolean;
 }
 
 /** One tool the agent's caller runs (see `IAgentConfig.clientTools`). */

@@ -36,6 +36,7 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock('@/server/api/plugins/agent-approval-authz', () => ({
   refuseCancelPending: hoisted.cancelPending,
+  approvalAuthorizerFor: () => async () => ({ allowed: true }),
   CANCEL_PENDING_FORBIDDEN_MESSAGE: 'sending a message would cancel the open request',
 }));
 vi.mock('@/lib/services/agents/agentService', async (importOriginal) => {

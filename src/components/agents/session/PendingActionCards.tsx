@@ -340,9 +340,11 @@ export function QuestionCard({
 }
 
 /**
- * A tool the page embedding the chat is running: nothing for the viewer to
- * decide. It waits for the page's answer (or its timeout); the one thing Studio
- * offers is to give up on it, which the model reads as the tool failing.
+ * A client tool the agent's caller runs. In the playground nobody is running it,
+ * so the person testing can type the result themself ("Send result"), give up on
+ * the call (the model reads that as the tool failing), or leave it open for an
+ * external system - a webhook receiver, an API client - to answer on the actions
+ * endpoint.
  */
 function ClientToolCard({
     action,
@@ -351,6 +353,7 @@ function ClientToolCard({
     onResolve,
 }: CardProps & { onResolve: (body: ClientToolResolveBody) => void }) {
     const t = useTranslations('agents.hitl');
+    const [resultText, setResultText] = useState('');
     return (
         <Paper withBorder radius="md" p="sm" className={classes.card}>
             <Stack gap="xs">
@@ -368,7 +371,19 @@ function ClientToolCard({
                     </Box>
                 ) : null}
                 <Text size="xs" c="dimmed">{t('clientToolHint')}</Text>
-                <Group justify="flex-end">
+                <Textarea
+                    size="xs"
+                    autosize
+                    minRows={2}
+                    maxRows={8}
+                    label={t('clientToolResult')}
+                    placeholder={t('clientToolResultPlaceholder')}
+                    value={resultText}
+                    onChange={(event) => setResultText(event.currentTarget.value)}
+                    disabled={busy}
+                    styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
+                />
+                <Group justify="flex-end" gap="xs">
                     <Button
                         size="xs"
                         variant="default"
@@ -379,10 +394,28 @@ function ClientToolCard({
                     >
                         {t('clientToolGiveUp')}
                     </Button>
+                    <Button
+                        size="xs"
+                        disabled={busy || resultText.trim() === ''}
+                        loading={resolving && busy}
+                        onClick={() => onResolve({ output: parseClientToolResult(resultText) })}
+                    >
+                        {t('clientToolSend')}
+                    </Button>
                 </Group>
             </Stack>
         </Paper>
     );
+}
+
+/** What the person typed as the tool's result: JSON when it is JSON, otherwise the text itself. */
+export function parseClientToolResult(text: string): unknown {
+    const trimmed = text.trim();
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        return trimmed;
+    }
 }
 
 /** One line for an action that is no longer open. */

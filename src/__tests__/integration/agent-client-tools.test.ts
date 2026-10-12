@@ -626,11 +626,42 @@ describe('tools the agent declares itself (config.clientTools)', () => {
     expect(model.offered.flat()).not.toContain('lookup_order');
   });
 
-  it('are not offered to the dashboard playground or a non-embedded portal chat (nobody there can run them)', async () => {
+  it('are offered to the dashboard playground (the person testing answers on the call\'s card, or an API client does)', async () => {
     await createAgent(DECLARED);
     const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
     await chat(String((await newConversation())._id), 'hi');
+    expect(model.offered.flat()).toContain('lookup_order');
+  });
+
+  it.each([
+    ['api', 'api' as const],
+    ['playground', 'playground' as const],
+  ])('the author can switch the %s surface off, and only that one', async (_label, off) => {
+    await createAgent({ ...DECLARED, clientToolSurfaces: { [off]: false } });
+    const offered = async (source: 'api' | 'playground') => {
+      const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+      await chat(String((await newConversation())._id), 'hi', { runtimeContext: { userId: OWNER, source } });
+      return model.offered.flat().includes('lookup_order');
+    };
+    expect(await offered('api')).toBe(off !== 'api');
+    expect(await offered('playground')).toBe(off !== 'playground');
+  });
+
+  it('are never offered to A2A, MCP, realtime or a portal chat that is not embedded', async () => {
+    await createAgent(DECLARED);
+    for (const source of ['a2a', 'mcp', 'realtime', 'portal'] as const) {
+      const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+      await chat(String((await newConversation())._id), 'hi', { runtimeContext: { userId: OWNER, source } });
+      expect(model.offered.flat(), source).not.toContain('lookup_order');
+    }
+  });
+
+  it('a portal surface switched off keeps the agent\'s tools from an embedded page, but not the portal\'s own', async () => {
+    await createAgent({ ...DECLARED, clientToolSurfaces: { portal: false } });
+    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+    await chat(String((await newConversation())._id), 'hi', { embedded: EMBEDDED });
     expect(model.offered.flat()).not.toContain('lookup_order');
+    expect(model.offered.flat()).toContain('get_selection');
   });
 
   it('are not offered to a stateless call (nothing to park the pause on)', async () => {
@@ -705,5 +736,101 @@ describe('tools the agent declares itself (config.clientTools)', () => {
     scriptModel(orderScript());
     const first = await chat(String((await newConversation())._id), 'go', API);
     expect(first.pendingActions?.[0]).toMatchObject({ kind: 'tool_approval', toolName: 'lookup_order' });
+  });
+});
+
+describe('the OpenAI chat completions bridge runs the agent\'s client tools', () => {
+  const DECLARED = {
+    clientTools: [{
+      name: 'lookup_order',
+      description: 'Look an order up in the customer\'s own system.',
+      inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      timeoutSeconds: 20,
+    }],
+  };
+  const orderScript = () => (call: number, messages: Array<{ role: string; content: unknown }>): Reply => {
+    if (call === 0) return { role: 'assistant', content: '', tool_calls: [toolCall('c1', 'lookup_order', { id: 'A-1' })] };
+    const toolMessage = [...messages].reverse().find((m) => m.role === 'tool');
+    return { role: 'assistant', content: `order: ${String(toolMessage?.content ?? '')}` };
+  };
+  const answer = {
+    authorize: allowAll,
+    actor: { userId: OWNER, channel: 'api' as const, apiTokenId: 'tok-1' },
+  };
+
+  async function bridge(extra: Record<string, unknown>) {
+    const { runAgentCompletion } = await import('@/server/api/plugins/agent-openai-bridge');
+    const { getAgentByKey } = await import('@/lib/services/agents/agentService');
+    const agent = (await getAgentByKey(DB_NAME, AGENT_KEY, PROJECT_ID))!;
+    return runAgentCompletion({
+      agent, model: `agent:${AGENT_KEY}`,
+      ctx: { tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, userId: OWNER },
+      runtimeContext: { userId: OWNER, source: 'api' },
+      answer,
+      ...extra,
+    } as never);
+  }
+
+  it('replies with tool_calls, takes the answer as a tool message, and the same turn goes on', async () => {
+    await createAgent({ ...DECLARED, humanInTheLoop: undefined });
+    const model = scriptModel(orderScript());
+
+    const first = await bridge({ messages: [{ role: 'user', content: 'where is order A-1?' }] });
+    expect('error' in first).toBe(false);
+    if ('error' in first) return;
+    expect(first.toolCalls).toHaveLength(1);
+    expect(first.toolCalls![0]).toMatchObject({ type: 'function', function: { name: 'lookup_order', arguments: '{"id":"A-1"}' } });
+    const callId = first.toolCalls![0].id;
+
+    const second = await bridge({
+      conversationId: first.conversationId,
+      messages: [
+        { role: 'user', content: 'where is order A-1?' },
+        { role: 'assistant', content: null, tool_calls: first.toolCalls },
+        { role: 'tool', tool_call_id: callId, content: '{"status":"shipped"}' },
+      ],
+    });
+    expect('error' in second).toBe(false);
+    if ('error' in second) return;
+    expect(second.toolCalls).toBeUndefined();
+    expect(second.content).toBe(`order: ${untrusted('{"status":"shipped"}')}`);
+    expect(String(model.seen.at(-1)!.find((m) => m.role === 'tool')?.content)).toBe(untrusted('{"status":"shipped"}'));
+  });
+
+  it('a tool message with is_error tells the model the tool failed', async () => {
+    await createAgent(DECLARED);
+    const model = scriptModel(orderScript());
+    const first = await bridge({ messages: [{ role: 'user', content: 'go' }] });
+    if ('error' in first) throw new Error(first.error);
+    const second = await bridge({
+      conversationId: first.conversationId,
+      messages: [{ role: 'tool', tool_call_id: first.toolCalls![0].id, content: 'order service is down', is_error: true }],
+    });
+    expect('error' in second).toBe(false);
+    expect(String(model.seen.at(-1)!.find((m) => m.role === 'tool')?.content)).toContain('order service is down');
+  });
+
+  it('refuses a tool message for a call that is not open, and one without a conversation_id', async () => {
+    await createAgent(DECLARED);
+    scriptModel(orderScript());
+    const first = await bridge({ messages: [{ role: 'user', content: 'go' }] });
+    if ('error' in first) throw new Error(first.error);
+    expect(await bridge({ messages: [{ role: 'tool', tool_call_id: first.toolCalls![0].id, content: 'x' }] })).toMatchObject({ status: 400 });
+    expect(await bridge({ conversationId: first.conversationId, messages: [{ role: 'tool', tool_call_id: 'act_000000000000000000000000', content: 'x' }] })).toMatchObject({ status: 404 });
+  });
+
+  it('does not offer a tool the approval policy would ask about: nobody on this wire can answer an approval', async () => {
+    await createAgent({ ...DECLARED, humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always' } } });
+    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+    await bridge({ messages: [{ role: 'user', content: 'hi' }] });
+    expect(model.offered.flat()).not.toContain('lookup_order');
+  });
+
+  it('offers it, without asking, where the agent lets unattended runs go ahead', async () => {
+    await createAgent({ ...DECLARED, humanInTheLoop: { unattended: 'allow', toolApproval: { enabled: true, defaultPolicy: 'always' } } });
+    scriptModel(orderScript());
+    const first = await bridge({ messages: [{ role: 'user', content: 'go' }] });
+    if ('error' in first) throw new Error(first.error);
+    expect(first.toolCalls?.[0].function.name).toBe('lookup_order');
   });
 });

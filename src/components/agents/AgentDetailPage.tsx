@@ -76,6 +76,7 @@ import { SESSION_FILES_DEFAULTS } from '@/lib/services/agents/sessionFilesConfig
 import AgentClientToolsPanel from './studio/AgentClientToolsPanel';
 import { normalizeClientTools } from './studio/clientToolsSettings';
 import AgentHumanInTheLoopPanel from './studio/AgentHumanInTheLoopPanel';
+import ClientToolsSurfaces from './studio/ClientToolsSurfaces';
 import AgentFeedbackPanel from './studio/AgentFeedbackPanel';
 import AgentRunsTable from './studio/AgentRunsTable';
 import { CONFIG_SECTION_KEYS, changedConfigSections, configSectionTitle } from './studio/configSections';
@@ -92,6 +93,7 @@ import type {
   IAgentMemoryConfig,
   IAgentSandboxConfig,
   IAgentExecutionConfig,
+  IAgentClientToolSurfaces,
   IAgentHumanInTheLoopConfig,
   IAgentClientToolConfig,
   IAgentRuntimeConfig,
@@ -280,6 +282,7 @@ export default function AgentDetailPage() {
   const [executionConfig, setExecutionConfig] = useState<IAgentExecutionConfig | undefined>(undefined);
   const [hitlConfig, setHitlConfig] = useState<IAgentHumanInTheLoopConfig | undefined>(undefined);
   const [clientToolsConfig, setClientToolsConfig] = useState<IAgentClientToolConfig[] | undefined>(undefined);
+  const [clientToolSurfaces, setClientToolSurfaces] = useState<IAgentClientToolSurfaces | undefined>(undefined);
   const [attachmentsConfig, setAttachmentsConfig] = useState<AttachmentsSettings | undefined>(undefined);
   // A save was refused because Files is on without a bucket: the field shows its error from then on.
   const [filesSaveRefused, setFilesSaveRefused] = useState(false);
@@ -380,6 +383,7 @@ export default function AgentDetailPage() {
         setExecutionConfig(cfg.execution);
         setHitlConfig(cfg.humanInTheLoop);
         setClientToolsConfig(cfg.clientTools);
+        setClientToolSurfaces(cfg.clientToolSurfaces);
         setAttachmentsConfig(cfg.attachments);
         setFilesSaveRefused(false);
 
@@ -625,6 +629,7 @@ export default function AgentDetailPage() {
     // (every agent from before it existed) must keep never pausing.
     nextConfig.humanInTheLoop = hitlConfig && Object.keys(hitlConfig).length > 0 ? hitlConfig : undefined;
     nextConfig.clientTools = normalizeClientTools(clientToolsConfig);
+    nextConfig.clientToolSurfaces = clientToolSurfaces && Object.keys(clientToolSurfaces).length > 0 ? clientToolSurfaces : undefined;
     // Absent = files off.
     nextConfig.attachments = attachmentsConfig && Object.keys(attachmentsConfig).length > 0 ? attachmentsConfig : undefined;
 
@@ -1283,7 +1288,10 @@ export default function AgentDetailPage() {
             {buildSection(
               'clienttools',
               t('clientTools.sectionDescription'),
-              <AgentClientToolsPanel value={clientToolsConfig} onChange={setClientToolsConfig} />,
+              <Stack gap="lg">
+                <AgentClientToolsPanel value={clientToolsConfig} onChange={setClientToolsConfig} />
+                <ClientToolsSurfaces value={clientToolSurfaces} onChange={setClientToolSurfaces} />
+              </Stack>,
               clientToolsConfig && clientToolsConfig.length > 0 ? (
                 <Badge size="xs" color="grape" variant="light" w="fit-content">
                   {t('clientTools.badgeCount', { count: clientToolsConfig.length })}

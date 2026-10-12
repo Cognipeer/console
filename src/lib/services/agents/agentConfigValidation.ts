@@ -230,6 +230,18 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
     }
 
+    if (config.clientToolSurfaces !== undefined) {
+        const surfaces = config.clientToolSurfaces as unknown;
+        if (!surfaces || typeof surfaces !== 'object' || Array.isArray(surfaces)) {
+            issues.errors.push({ field: 'clientToolSurfaces', message: 'must be an object' });
+        } else {
+            for (const [key, value] of Object.entries(surfaces)) {
+                if (!['api', 'playground', 'portal'].includes(key)) issues.errors.push({ field: `clientToolSurfaces.${key}`, message: 'unknown surface (api, playground, portal)' });
+                else if (typeof value !== 'boolean') issues.errors.push({ field: `clientToolSurfaces.${key}`, message: 'must be true or false' });
+            }
+        }
+    }
+
     const attachments = config.attachments;
     if (attachments) {
         checkNumber(issues, 'attachments.maxFiles', attachments.maxFiles, { min: 1, max: 100, integer: true });

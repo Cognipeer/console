@@ -147,13 +147,16 @@ Over A2A, a paused task reports the state `input-required` with the requests in 
 
 A client tool is a tool the agent calls but **its caller runs** — read what is selected on a page, look an order up in the customer's own system, open a record — without any server-side connector. The author declares them on the agent: *Build → Configure → Client tools* (`config.clientTools`), each with a name, a description, an input schema and a timeout. Whether a call waits for a person is **not** set there: the tools appear in this section's per-tool table (as `client`) and follow *Ask before tools run* and the per-tool setting like any other tool. A tool can be switched off without deleting it.
 
-Who runs a call depends on how the agent is being used:
+Where the tools are offered is explicit. *Configure → Client tools → Where these tools are offered* has one switch per surface, all on by default:
 
-| Caller | How it learns about a call | How it answers |
-| --- | --- | --- |
-| **API client** (a session, `session_id`, or a background run) | The response is `requires_action` with the call in `required_action`; a streaming client gets an `action` event; a background run fires its `requires_action` callback and the `action.required` webhook | `POST /api/client/v1/agents/sessions/{id}/actions/{actionId}` with `{ "output": … }` or `{ "error": "…" }` — from the same program, or from whatever receives the callback or webhook, under its own API token |
-| **Portal page** (an embedded portal) | The frame posts `cp:tool_call` to the host page | The host answers with `cp:tool_result`; the frame posts the answer to the same endpoint |
-| Dashboard playground, a portal chat that is not embedded, schedules, evaluations, the OpenAI-shaped and Assistants endpoints | — | Not offered: nobody there can run a tool. A stateless call (no session) has nowhere to park the pause either; the response carries a warning saying so |
+| Surface (switch) | Who runs the call | How the caller learns about it | How it answers |
+| --- | --- | --- | --- |
+| **API and webhooks** (`api`): sessions, `/agents/responses`, background runs | An API client, or whatever receives the callback or webhook | `requires_action` response with the call in `required_action`; the session event stream (`action.required`); for a background run the `requires_action` callback and the `action.required` webhook | `POST /api/client/v1/agents/sessions/{id}/actions/{actionId}` with `{ "output": … }` or `{ "error": "…" }`, under its own API token |
+| **API: OpenAI chat completions** (`api`, `model: "agent:<key>"`) | The OpenAI-style client | The reply is an assistant message with `tool_calls` (`finish_reason: "tool_calls"`, `id` = the call's id, plus `conversation_id`) | Send the next request with `conversation_id` and a `tool` message: `{ "role": "tool", "tool_call_id": "<id>", "content": "<result>" }` (`"is_error": true` reports the tool failing). Same authorization as the actions endpoint |
+| **Dashboard playground** (`playground`) | The person testing | The call waits on its card | Type the result on the card, give up, or let an external system answer through the API |
+| **Portal embedded in a page** (`portal`) | The page that embeds the portal | The frame posts `cp:tool_call` | The host answers with `cp:tool_result` |
+
+**Never offered anywhere else**: A2A, MCP, realtime, schedules, evaluations and red-team cases, the Assistants API, a portal chat that is not embedded in a page, and a call without a session to pause (the response carries a warning). On the chat completions wire nobody can answer an approval, so a client tool that the approval policy would ask about is only offered when *When nobody can answer* is *Run without approval* — and then it runs without asking.
 
 An embedded portal can also declare tools of its own for its page. Where both name the same tool, the agent's declaration wins.
 

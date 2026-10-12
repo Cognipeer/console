@@ -140,6 +140,9 @@ export interface ResolveAgentActionInput {
      * Only a host that knows the embedding sets this — never a client request.
      */
     embedded?: EmbeddedRunContext;
+    /** The caller cannot answer approvals but runs the agent's client tools (the chat completions bridge). */
+    unattended?: boolean;
+    answersClientTools?: boolean;
     /** Live callbacks for `?stream=1`. */
     stream?: {
         onToolEvent?: (event: AgentToolCallEvent) => void;
@@ -669,6 +672,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     trigger: 'resume',
                     runtimeContext: input.runtimeContext,
                     ...(input.embedded ? { embedded: input.embedded } : {}),
+                    ...(input.unattended ? { unattended: true } : {}),
+                    ...(input.answersClientTools ? { answersClientTools: true } : {}),
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),

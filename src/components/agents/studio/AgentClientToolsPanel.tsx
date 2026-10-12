@@ -14,6 +14,8 @@ import {
     Group,
     NumberInput,
     Paper,
+    Select,
+    SegmentedControl,
     Stack,
     Switch,
     Text,
@@ -38,6 +40,21 @@ import {
     updateTool,
     type ClientToolFieldError,
 } from './clientToolsSettings';
+import {
+    SCHEMA_FIELD_TYPES,
+    SCHEMA_ITEMS_TYPES,
+    addField,
+    fieldErrors,
+    fieldsToSchema,
+    removeField,
+    schemaToFields,
+    updateField,
+    type SchemaField,
+    type SchemaFieldError,
+    type SchemaFieldType,
+    type SchemaItemsType,
+    type SchemaMeta,
+} from './schemaFields';
 
 export interface AgentClientToolsPanelProps {
     value: IAgentClientToolConfig[] | undefined;
@@ -53,26 +70,237 @@ interface ToolCardProps {
     onRemove: (id: string) => void;
 }
 
-const ToolCard = memo(function ToolCard({ id, tool, errorsText, onPatch: patchById, onRemove: removeById }: ToolCardProps) {
-    const t = useTranslations('agents.clientTools');
-    const errors = (errorsText ? errorsText.split(',') : []) as ClientToolFieldError[];
-    const onPatch = (patch: Partial<IAgentClientToolConfig>) => patchById(id, patch);
-    const onRemove = () => removeById(id);
-    const [schemaText, setSchemaText] = useState(() => schemaToText(tool.inputSchema));
-    const [schemaError, setSchemaError] = useState<string | null>(null);
+const MONO = { fontFamily: 'var(--mantine-font-family-monospace)' } as const;
 
-    const has = (e: ClientToolFieldError) => errors.includes(e);
+interface FieldRowProps {
+    field: SchemaField;
+    errorsText: string;
+    onUpdate: (id: string, patch: Partial<Omit<SchemaField, 'id'>>) => void;
+    onRemove: (id: string) => void;
+}
+
+const FieldRow = memo(function FieldRow({ field, errorsText, onUpdate, onRemove }: FieldRowProps) {
+    const t = useTranslations('agents.clientTools');
+    const errors = (errorsText ? errorsText.split(',') : []) as SchemaFieldError[];
+    const [enumText, setEnumText] = useState(() => (field.enumValues ?? []).join(', '));
+    const typeData = SCHEMA_FIELD_TYPES.map((value) => ({ value, label: t(`type_${value}`) }));
+    const itemsData = SCHEMA_ITEMS_TYPES.map((value) => ({ value, label: t(`type_${value}`) }));
+
+    return (
+        <Paper withBorder p="xs" radius="sm">
+            <Stack gap="xs">
+                <Group gap="xs" align="flex-start" wrap="nowrap">
+                    <TextInput
+                        aria-label={t('argName')}
+                        placeholder={t('argName')}
+                        size="xs"
+                        value={field.name}
+                        onChange={(event) => onUpdate(field.id, { name: event.currentTarget.value })}
+                        error={errors.includes('nameDuplicate') ? t('errorArgDuplicate') : errors.includes('name') ? t('errorArgName') : undefined}
+                        styles={{ input: MONO }}
+                        style={{ flex: 1 }}
+                    />
+                    <Select
+                        aria-label={t('argType')}
+                        size="xs"
+                        w={120}
+                        allowDeselect={false}
+                        data={typeData}
+                        value={field.type}
+                        onChange={(next) => next && onUpdate(field.id, { type: next as SchemaFieldType })}
+                    />
+                    <Switch
+                        size="xs"
+                        mt={6}
+                        label={t('argRequired')}
+                        checked={field.required}
+                        onChange={(event) => onUpdate(field.id, { required: event.currentTarget.checked })}
+                    />
+                    <ActionIcon variant="subtle" color="red" onClick={() => onRemove(field.id)} aria-label={t('argRemove')}>
+                        <IconTrash size={14} />
+                    </ActionIcon>
+                </Group>
+                <TextInput
+                    aria-label={t('argDescription')}
+                    placeholder={t('argDescription')}
+                    size="xs"
+                    value={field.description}
+                    onChange={(event) => onUpdate(field.id, { description: event.currentTarget.value })}
+                />
+                {field.type === 'string' && (
+                    <TextInput
+                        aria-label={t('argEnum')}
+                        placeholder={t('argEnum')}
+                        description={t('argEnumHint')}
+                        size="xs"
+                        value={enumText}
+                        onChange={(event) => {
+                            const text = event.currentTarget.value;
+                            setEnumText(text);
+                            const values = text.split(',').map((part) => part.trim()).filter(Boolean);
+                            onUpdate(field.id, { enumValues: values.length > 0 ? values : undefined });
+                        }}
+                        error={errors.includes('enum') ? t('errorArgEnum') : undefined}
+                        styles={{ input: MONO }}
+                    />
+                )}
+                {field.type === 'array' && (
+                    <Select
+                        aria-label={t('argItemsType')}
+                        label={t('argItemsType')}
+                        size="xs"
+                        w={160}
+                        clearable
+                        data={itemsData}
+                        value={field.itemsType ?? null}
+                        onChange={(next) => onUpdate(field.id, { itemsType: (next as SchemaItemsType | null) ?? undefined })}
+                    />
+                )}
+                {field.type === 'object' && <Text size="xs" c="dimmed">{t('argObjectNote')}</Text>}
+            </Stack>
+        </Paper>
+    );
+});
+
+interface SchemaEditorProps {
+    schema: Record<string, unknown> | undefined;
+    onSchema: (schema: Record<string, unknown> | undefined) => void;
+}
+
+/** The input schema of one tool, edited as a list of arguments (Form) or as raw JSON. Both edit the same schema. */
+function SchemaEditor({ schema, onSchema }: SchemaEditorProps) {
+    const t = useTranslations('agents.clientTools');
+    const [initial] = useState(() => schemaToFields(schema));
+    const [mode, setMode] = useState<'form' | 'json'>(initial.ok ? 'form' : 'json');
+    const [fields, setFields] = useState<SchemaField[]>(initial.ok ? initial.fields : []);
+    const fieldsRef = useRef(fields);
+    const metaRef = useRef<SchemaMeta>(initial.ok ? initial.meta : {});
+    const [schemaText, setSchemaText] = useState(() => schemaToText(schema));
+    const [schemaError, setSchemaError] = useState<string | null>(null);
+    const [formNote, setFormNote] = useState<string | null>(initial.ok ? null : initial.reason);
+    const onSchemaRef = useRef(onSchema);
+    onSchemaRef.current = onSchema;
+
+    const applyFields = useCallback((next: SchemaField[]) => {
+        fieldsRef.current = next;
+        setFields(next);
+        if (Object.keys(fieldErrors(next)).length === 0) onSchemaRef.current(fieldsToSchema(next, metaRef.current));
+    }, []);
+    const handleUpdate = useCallback((id: string, patch: Partial<Omit<SchemaField, 'id'>>) => {
+        applyFields(updateField(fieldsRef.current, id, patch));
+    }, [applyFields]);
+    const handleRemove = useCallback((id: string) => {
+        applyFields(removeField(fieldsRef.current, id));
+    }, [applyFields]);
 
     const handleSchema = (text: string) => {
         setSchemaText(text);
         const parsed = parseSchemaText(text);
         if (parsed.ok) {
             setSchemaError(null);
-            onPatch({ inputSchema: parsed.schema });
+            onSchema(parsed.schema);
         } else {
             setSchemaError(parsed.message);
         }
     };
+
+    const switchMode = (next: string) => {
+        if (next === mode) return;
+        if (next === 'json') {
+            const current = Object.keys(fieldErrors(fieldsRef.current)).length === 0
+                ? fieldsToSchema(fieldsRef.current, metaRef.current)
+                : undefined;
+            setSchemaText(schemaToText(current));
+            setSchemaError(null);
+            setMode('json');
+            return;
+        }
+        const parsed = parseSchemaText(schemaText);
+        if (!parsed.ok) {
+            setSchemaError(parsed.message);
+            return;
+        }
+        const derived = schemaToFields(parsed.schema);
+        if (!derived.ok) {
+            setFormNote(derived.reason);
+            setSchemaError(null);
+            return;
+        }
+        metaRef.current = derived.meta;
+        fieldsRef.current = derived.fields;
+        setFields(derived.fields);
+        setFormNote(null);
+        setSchemaError(null);
+        setMode('form');
+    };
+
+    const errors = fieldErrors(fields);
+
+    return (
+        <Stack gap={6}>
+            <Group justify="space-between" align="flex-end">
+                <div>
+                    <Text size="sm" fw={500}>{t('schema')}</Text>
+                    <Text size="xs" c="dimmed">{t('schemaHint')}</Text>
+                </div>
+                <SegmentedControl
+                    size="xs"
+                    value={mode}
+                    onChange={switchMode}
+                    data={[{ value: 'form', label: t('tabForm') }, { value: 'json', label: t('tabJson') }]}
+                />
+            </Group>
+            {mode === 'form' ? (
+                <Stack gap="xs">
+                    {fields.length === 0 && <Text size="xs" c="dimmed" fs="italic">{t('argsEmpty')}</Text>}
+                    {fields.map((field) => (
+                        <FieldRow
+                            key={field.id}
+                            field={field}
+                            errorsText={(errors[field.id] ?? []).join(',')}
+                            onUpdate={handleUpdate}
+                            onRemove={handleRemove}
+                        />
+                    ))}
+                    <Group>
+                        <Button
+                            variant="light"
+                            size="xs"
+                            leftSection={<IconPlus size={14} />}
+                            onClick={() => applyFields(addField(fieldsRef.current))}
+                        >
+                            {t('argAdd')}
+                        </Button>
+                    </Group>
+                </Stack>
+            ) : (
+                <>
+                    {formNote && <Text size="xs" c="dimmed">{t('formUnavailable', { reason: formNote })}</Text>}
+                    <Textarea
+                        aria-label={t('schema')}
+                        placeholder={'{\n  "type": "object",\n  "properties": {}\n}'}
+                        autosize
+                        minRows={4}
+                        maxRows={14}
+                        value={schemaText}
+                        onChange={(event) => handleSchema(event.currentTarget.value)}
+                        error={schemaError ? t('errorSchema', { message: schemaError }) : undefined}
+                        spellCheck={false}
+                        styles={{ input: { ...MONO, fontSize: 12 } }}
+                    />
+                </>
+            )}
+        </Stack>
+    );
+}
+
+const ToolCard = memo(function ToolCard({ id, tool, errorsText, onPatch: patchById, onRemove: removeById }: ToolCardProps) {
+    const t = useTranslations('agents.clientTools');
+    const errors = (errorsText ? errorsText.split(',') : []) as ClientToolFieldError[];
+    const onPatch = (patch: Partial<IAgentClientToolConfig>) => patchById(id, patch);
+    const onRemove = () => removeById(id);
+
+    const has = (e: ClientToolFieldError) => errors.includes(e);
 
     return (
         <Paper withBorder p="sm" radius="md">
@@ -124,19 +352,7 @@ const ToolCard = memo(function ToolCard({ id, tool, errorsText, onPatch: patchBy
                         w={200}
                     />
                 </Group>
-                <Textarea
-                    label={t('schema')}
-                    description={t('schemaHint')}
-                    placeholder={'{\n  "type": "object",\n  "properties": {}\n}'}
-                    autosize
-                    minRows={4}
-                    maxRows={14}
-                    value={schemaText}
-                    onChange={(event) => handleSchema(event.currentTarget.value)}
-                    error={schemaError ? t('errorSchema', { message: schemaError }) : undefined}
-                    spellCheck={false}
-                    styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)', fontSize: 12 } }}
-                />
+                <SchemaEditor schema={tool.inputSchema} onSchema={(inputSchema) => onPatch({ inputSchema })} />
             </Stack>
         </Paper>
     );
