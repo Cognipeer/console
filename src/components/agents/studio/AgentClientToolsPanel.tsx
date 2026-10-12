@@ -14,7 +14,6 @@ import {
     Group,
     NumberInput,
     Paper,
-    Select,
     Stack,
     Switch,
     Text,
@@ -31,15 +30,12 @@ import {
     CLIENT_TOOL_TIMEOUT_MAX,
     CLIENT_TOOLS_MAX_COUNT,
     addTool,
-    approvalChoice,
-    approvalFromChoice,
     clientToolErrors,
     normalizeClientTools,
     parseSchemaText,
     removeTool,
     schemaToText,
     updateTool,
-    type ApprovalChoice,
     type ClientToolFieldError,
 } from './clientToolsSettings';
 
@@ -60,11 +56,6 @@ function ToolCard({ tool, errors, onPatch, onRemove }: ToolCardProps) {
     const [schemaText, setSchemaText] = useState(() => schemaToText(tool.inputSchema));
     const [schemaError, setSchemaError] = useState<string | null>(null);
 
-    const approvalOptions = [
-        { value: 'inherit', label: t('approvalInherit'), description: t('approvalInheritDescription') },
-        { value: 'always', label: t('approvalAlways'), description: t('approvalAlwaysDescription') },
-        { value: 'never', label: t('approvalNever'), description: t('approvalNeverDescription') },
-    ];
     const has = (e: ClientToolFieldError) => errors.includes(e);
 
     const handleSchema = (text: string) => {
@@ -126,17 +117,6 @@ function ToolCard({ tool, errors, onPatch, onRemove }: ToolCardProps) {
                         onChange={(next) => onPatch({ timeoutSeconds: typeof next === 'number' ? next : undefined })}
                         error={has('timeout') ? t('errorTimeout', { max: CLIENT_TOOL_TIMEOUT_MAX }) : undefined}
                         w={200}
-                    />
-                    <Select
-                        label={t('approval')}
-                        description={t('approvalHint')}
-                        data={approvalOptions}
-                        renderOption={describedSelectOption(approvalOptions)}
-                        value={approvalChoice(tool)}
-                        onChange={(next) => onPatch({ needsApproval: approvalFromChoice((next ?? 'inherit') as ApprovalChoice) })}
-                        allowDeselect={false}
-                        maw={360}
-                        style={{ flex: 1 }}
                     />
                 </Group>
                 <Textarea
@@ -201,6 +181,7 @@ export default function AgentClientToolsPanel({ value, onChange }: AgentClientTo
                         <Text size="xs" c="dimmed">{t('count', { count: tools.length, max: CLIENT_TOOLS_MAX_COUNT })}</Text>
                     </Group>
                     <Text size="xs" c="dimmed">{t('callbackHint')}</Text>
+                    <Text size="xs" c="dimmed">{t('approvalsNote')}</Text>
                 </Stack>
             </ConfigBlock>
         </Stack>

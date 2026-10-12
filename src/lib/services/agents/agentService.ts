@@ -3469,7 +3469,7 @@ async function buildLocalAgentRun(input: {
     // which have nobody to run the tool.
     const callerCanAnswer = input.runtimeContext?.source === 'api' || Boolean(input.embedded);
     const ownClientTools = callerCanAnswer
-        ? (config.clientTools ?? []).filter((tool) => tool.enabled !== false).map(({ enabled: _enabled, ...tool }) => tool)
+        ? (config.clientTools ?? []).filter((tool) => tool.enabled !== false).map(({ enabled: _enabled, ...tool }) => tool as Omit<typeof tool, 'needsApproval'>)
         : [];
     const declaredClientTools = [...ownClientTools, ...(input.embedded?.clientTools ?? [])];
     if (declaredClientTools.length > 0) {

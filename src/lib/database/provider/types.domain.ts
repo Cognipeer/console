@@ -2515,9 +2515,7 @@ export interface IAgentClientToolConfig {
   inputSchema?: Record<string, unknown>;
   /** How long the caller may take. Default 60, at most 600. */
   timeoutSeconds?: number;
-  /** Absent = the agent's approval policy decides; `true` = always ask; `false` = exempt. */
-  needsApproval?: boolean;
-  /** false = declared but switched off. Default true. */
+  /** false = declared but switched off. Default true. Approval is managed under Approvals & questions (`humanInTheLoop.toolApproval.tools`). */
   enabled?: boolean;
 }
 

@@ -690,4 +690,20 @@ describe('tools the agent declares itself (config.clientTools)', () => {
     const issues = validateAgentConfigShape({ modelKey: 'gpt-4o', clientTools: [{ name: 'bad name', description: '' }] } as IAgentConfig);
     expect(JSON.stringify(issues)).toContain('clientTools.0');
   });
+
+  it('approval is managed under Approvals & questions: the per-tool setting decides for a declared tool', async () => {
+    const asking = { humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always' as const, tools: { lookup_order: 'never' as const } } } };
+    await createAgent({ ...DECLARED, ...asking });
+    scriptModel(orderScript());
+    const first = await chat(String((await newConversation())._id), 'go', API);
+    // Exempted there: straight to the caller, no tool_approval first.
+    expect(first.pendingActions?.[0]).toMatchObject({ kind: 'client_tool', toolName: 'lookup_order' });
+  });
+
+  it('and asks a person first when the agent\'s default is to ask', async () => {
+    await createAgent({ ...DECLARED, humanInTheLoop: { toolApproval: { enabled: true, defaultPolicy: 'always' } } });
+    scriptModel(orderScript());
+    const first = await chat(String((await newConversation())._id), 'go', API);
+    expect(first.pendingActions?.[0]).toMatchObject({ kind: 'tool_approval', toolName: 'lookup_order' });
+  });
 });

@@ -14,7 +14,6 @@ export const CLIENT_TOOL_TIMEOUT_DEFAULT = 60;
 const SCHEMA_MAX_BYTES = 16 * 1024;
 const TOOL_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
 
-export type ApprovalChoice = 'inherit' | 'always' | 'never';
 
 export function addTool(list: IAgentClientToolConfig[] | undefined): IAgentClientToolConfig[] {
     const current = list ?? [];
@@ -47,13 +46,6 @@ export function normalizeClientTools(list: IAgentClientToolConfig[] | undefined)
     return list && list.length > 0 ? list : undefined;
 }
 
-export function approvalChoice(tool: Pick<IAgentClientToolConfig, 'needsApproval'>): ApprovalChoice {
-    return tool.needsApproval === true ? 'always' : tool.needsApproval === false ? 'never' : 'inherit';
-}
-
-export function approvalFromChoice(choice: ApprovalChoice): boolean | undefined {
-    return choice === 'always' ? true : choice === 'never' ? false : undefined;
-}
 
 export type ParsedSchema =
     | { ok: true; schema: Record<string, unknown> | undefined }

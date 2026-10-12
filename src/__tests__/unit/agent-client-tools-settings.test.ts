@@ -6,8 +6,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   addTool,
-  approvalChoice,
-  approvalFromChoice,
   clientToolErrors,
   normalizeClientTools,
   parseSchemaText,
@@ -43,16 +41,6 @@ describe('list edits', () => {
   });
 });
 
-describe('approval choice', () => {
-  it('maps absent / true / false', () => {
-    expect(approvalChoice({})).toBe('inherit');
-    expect(approvalChoice({ needsApproval: true })).toBe('always');
-    expect(approvalChoice({ needsApproval: false })).toBe('never');
-    expect(approvalFromChoice('inherit')).toBeUndefined();
-    expect(approvalFromChoice('always')).toBe(true);
-    expect(approvalFromChoice('never')).toBe(false);
-  });
-});
 
 describe('parseSchemaText', () => {
   it('treats empty text as no schema', () => {
@@ -92,5 +80,15 @@ describe('section registration', () => {
       key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], (messages as unknown as { agents: unknown }).agents) as string;
     expect(configSectionTitle('clienttools', translate(en))).toBe('Client tools');
     expect(configSectionTitle('clienttools', translate(tr))).toBe('İstemci araçları');
+  });
+});
+
+import { hitlToolRows } from '@/components/agents/studio/hitlSettings';
+
+describe('client tools in the Approvals & questions table', () => {
+  it('lists each client tool as a row with its stored choice and the effective policy', () => {
+    const rows = hitlToolRows(undefined, { toolApproval: { enabled: true, defaultPolicy: 'always', tools: { lookup_order: 'never' } } }, [{ name: 'lookup_order' }, { name: 'open_ticket' }]);
+    expect(rows.find((r) => r.name === 'lookup_order')).toMatchObject({ origin: 'client', choice: 'never', effective: 'never', readOnly: false });
+    expect(rows.find((r) => r.name === 'open_ticket')).toMatchObject({ origin: 'client', choice: 'default', effective: 'always' });
   });
 });

@@ -1281,11 +1281,22 @@ export default function AgentDetailPage() {
               ),
             )}
             {buildSection(
+              'clienttools',
+              t('clientTools.sectionDescription'),
+              <AgentClientToolsPanel value={clientToolsConfig} onChange={setClientToolsConfig} />,
+              clientToolsConfig && clientToolsConfig.length > 0 ? (
+                <Badge size="xs" color="grape" variant="light" w="fit-content">
+                  {t('clientTools.badgeCount', { count: clientToolsConfig.length })}
+                </Badge>
+              ) : null,
+            )}
+            {buildSection(
               'hitl',
               t('hitl.sectionDescription'),
               <AgentHumanInTheLoopPanel
                 value={hitlConfig}
                 onChange={setHitlConfig}
+                clientTools={clientToolsConfig}
                 toolConfig={{
                   toolBindings,
                   knowledgeEngineKey: configForm.values.knowledgeEngineKey || undefined,
@@ -1299,16 +1310,6 @@ export default function AgentDetailPage() {
                 <Badge size="xs" color="orange" variant="light" w="fit-content">
                   {[hitlConfig?.toolApproval?.enabled ? t('hitl.badgeApprovals') : null, hitlConfig?.askUser?.enabled ? t('hitl.badgeQuestions') : null]
                     .filter(Boolean).join(' + ')}
-                </Badge>
-              ) : null,
-            )}
-            {buildSection(
-              'clienttools',
-              t('clientTools.sectionDescription'),
-              <AgentClientToolsPanel value={clientToolsConfig} onChange={setClientToolsConfig} />,
-              clientToolsConfig && clientToolsConfig.length > 0 ? (
-                <Badge size="xs" color="grape" variant="light" w="fit-content">
-                  {t('clientTools.badgeCount', { count: clientToolsConfig.length })}
                 </Badge>
               ) : null,
             )}
