@@ -3,7 +3,7 @@
 /**
  * "Additional models" of an agent: further models a caller may pick for a run, next to the
  * main one. The list bounds the choice (an administrator narrows it per person with the
- * `agent.use_model` action); each row carries the label and description a picker shows.
+ * list); each row carries the label and description a picker shows.
  */
 
 import { useMemo } from 'react';

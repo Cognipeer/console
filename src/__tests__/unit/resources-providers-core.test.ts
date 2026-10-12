@@ -162,6 +162,7 @@ describe('agent edge extraction', () => {
           { source: 'system', sourceKey: 'web_search', toolNames: [], config: { providerKey: 'tavily' } },
           { source: 'system', sourceKey: 'web_search', toolNames: [], config: {} },
         ],
+        additionalModels: [{ modelKey: 'fast' }, { modelKey: '' }, { modelKey: 'smart', label: 'S' }],
         memory: { enabled: true, memoryStoreKey: 'mem' },
         skills: ['s1', '', 's2'],
         subagents: [
@@ -176,6 +177,8 @@ describe('agent edge extraction', () => {
     });
     expect(pick(edges)).toEqual([
       'agent.model=gpt@config.modelKey',
+      'agent.additionalModel=fast@config.additionalModels[0].modelKey',
+      'agent.additionalModel=smart@config.additionalModels[2].modelKey',
       'agent.prompt=sys@config.promptKey',
       'agent.knowledge=kb@config.knowledgeEngineKey',
       'agent.guardrail=g1@config.guardrails[0].key',

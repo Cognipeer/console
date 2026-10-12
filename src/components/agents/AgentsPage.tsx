@@ -27,6 +27,11 @@ import CreateAgentModal from './CreateAgentModal';
 import ConnectAgentModal from './ConnectAgentModal';
 import ImportAgentShell from './ImportAgentShell';
 
+/** The main model and the additional ones an agent offers. */
+function agentModelKeys(config: { modelKey?: string; additionalModels?: Array<{ modelKey: string }> }): string[] {
+  return [config.modelKey, ...(config.additionalModels ?? []).map((m) => m.modelKey)].filter((k): k is string => Boolean(k));
+}
+
 interface Agent {
   _id: string;
   key: string;
@@ -34,6 +39,7 @@ interface Agent {
   description?: string;
   config: {
     modelKey?: string;
+    additionalModels?: Array<{ modelKey: string }>;
     kind?: 'native' | 'external';
     connection?: { protocol?: string };
     toolBindings?: Array<{ toolNames?: string[] }>;
@@ -179,7 +185,10 @@ export default function AgentsPage() {
   // offers a model no agent uses (an empty result that looks like a bug).
   const modelOptions = useMemo(() => {
     const keys = new Set<string>();
-    for (const a of agents) if (a.config.kind !== 'external' && a.config.modelKey) keys.add(a.config.modelKey);
+    for (const a of agents) {
+      if (a.config.kind === 'external') continue;
+      for (const key of agentModelKeys(a.config)) keys.add(key);
+    }
     return [...keys].sort();
   }, [agents]);
 
@@ -192,7 +201,7 @@ export default function AgentsPage() {
         a.name.toLowerCase().includes(q) ||
         a.key.toLowerCase().includes(q) ||
         (a.description ?? '').toLowerCase().includes(q) ||
-        (a.config.modelKey ?? '').toLowerCase().includes(q) ||
+        agentModelKeys(a.config).some((key) => key.toLowerCase().includes(q)) ||
         (a.config.connection?.protocol ?? '').toLowerCase().includes(q);
       if (!hit) return false;
     }
@@ -203,7 +212,7 @@ export default function AgentsPage() {
     // set of agents no external caller can actually reach yet.
     if (publishFilter === 'published' && !a.publishedVersion) return false;
     if (publishFilter === 'unpublished' && a.publishedVersion) return false;
-    if (modelFilter !== 'all' && a.config.modelKey !== modelFilter) return false;
+    if (modelFilter !== 'all' && !agentModelKeys(a.config).includes(modelFilter)) return false;
     return true;
   }), [agents, query, statusFilter, kindFilter, publishFilter, modelFilter]);
 
@@ -255,6 +264,11 @@ export default function AgentsPage() {
           {agent.config.kind === 'external'
             ? (agent.config.connection?.protocol ?? 'external')
             : (agent.config.modelKey ?? '—')}
+          {agent.config.kind !== 'external' && agent.config.additionalModels?.length ? (
+            <span className="ds-muted" title={agent.config.additionalModels.map((m) => m.modelKey).join(', ')}>
+              {' '}+{agent.config.additionalModels.length}
+            </span>
+          ) : null}
         </span>
       ),
     },

@@ -802,7 +802,16 @@ async function applyManifestDocument(
         }
 
         const remapped = remapSpecResourceKeys(manifest.spec, remap);
-        const spec = input.modelKey ? { ...remapped, modelKey: input.modelKey } : remapped;
+        // The chosen main model replaces the manifest's; it must not also sit on the list of additional ones.
+        const spec = input.modelKey
+            ? {
+                ...remapped,
+                modelKey: input.modelKey,
+                ...(remapped.additionalModels
+                    ? { additionalModels: remapped.additionalModels.filter((entry) => entry.modelKey !== input.modelKey) }
+                    : {}),
+            }
+            : remapped;
         const result = await applyAgentManifest(ctx.tenantDbName, ctx.tenantId, ctx.projectId, ctx.userId, { ...manifest, resources: undefined, spec }, {
             mode: input.overwrite ? 'upsert' : 'create',
             key,

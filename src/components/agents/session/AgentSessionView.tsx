@@ -222,6 +222,9 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     const [agent, setAgent] = useState<AgentSummary | null>(null);
     const [session, setSession] = useState<SessionRecord | null>(null);
     const [versions, setVersions] = useState<VersionOption[]>([]);
+    // The agent's models a turn can run on (main + additional); `''` = the agent's default / the session's last pick.
+    const [agentModels, setAgentModels] = useState<Array<{ key: string; label: string; default: boolean }>>([]);
+    const [pickedModel, setPickedModel] = useState('');
     const [loading, setLoading] = useState(true);
     // Why the page could not be shown: the session is not there, or the person may not open it.
     const [loadFailure, setLoadFailure] = useState<SessionLoadFailure | null>(null);
@@ -459,6 +462,10 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             const agentData = await agentRes.json();
             const sessionData = await sessionRes.json();
             setAgent(agentData.agent);
+            setAgentModels(Array.isArray(agentData.models) ? agentData.models : []);
+            // The session remembers the model its last turn ran on: the picker starts there.
+            const rememberedModel = sessionData.session?.metadata?.activeModel?.modelKey;
+            setPickedModel(typeof rememberedModel === 'string' ? rememberedModel : '');
             setSession(sessionData.session);
             setServerActions(Array.isArray(sessionData.pendingActions) ? sessionData.pendingActions : []);
             // A resumed turn's version badge, tokens and cost should read "what
@@ -636,6 +643,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             ...(sentFiles.length > 0 ? { attachments: attachmentIds(sentFiles) } : {}),
             runtime_context: parseRuntimeContextJson(runtimeContextJson),
             ...(pinnedVersion ? { version: Number(pinnedVersion) } : {}),
+            ...(pickedModel ? { model: pickedModel } : {}),
         });
 
         const applyResult = (data: Record<string, unknown>) => {
@@ -1035,6 +1043,17 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             }
             actions={
                 <>
+                    {!isConnected && agentModels.length > 1 ? (
+                        <Select
+                            size="xs"
+                            w={180}
+                            data={agentModels.map((m) => ({ value: m.key, label: m.default ? `${m.label} *` : m.label }))}
+                            value={pickedModel || agentModels.find((m) => m.default)?.key || null}
+                            onChange={(next) => setPickedModel(next ?? '')}
+                            allowDeselect={false}
+                            disabled={liveActive}
+                        />
+                    ) : null}
                     {!isConnected ? (
                         <Select
                             size="xs"

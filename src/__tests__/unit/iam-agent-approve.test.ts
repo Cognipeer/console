@@ -122,8 +122,8 @@ describe('the managed approval rule', () => {
     expect((await decide(strangersToken, session('owner'))).allowed).toBe(false);
   });
 
-  it('the managed set has no boundary on the action: the agent rules: two approval permits and the model permit', () => {
-    expect(Object.keys(AGENT_POLICIES)).toEqual(['managed:agent:approve', 'managed:agent:approve-token', 'managed:agent:use-model']);
+  it('the managed set has no boundary on the action: three agent rules less one, two permits', () => {
+    expect(Object.keys(AGENT_POLICIES)).toEqual(['managed:agent:approve', 'managed:agent:approve-token']);
     expect(MANAGED_POLICIES['managed:rbac:user-write']).toContain('action != Action::"agent.approve"');
     expect(MANAGED_POLICIES['managed:rbac:token-write']).toContain('action != Action::"agent.approve"');
   });

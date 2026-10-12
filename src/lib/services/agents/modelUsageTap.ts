@@ -20,6 +20,7 @@ import { createLogger } from '@/lib/core/logger';
 import type { IModel } from '@/lib/database';
 import { calculateCost, logModelUsage, type TokenUsage } from '@/lib/services/models/usageLogger';
 import { addRunUsage } from './runUsage';
+import { isDynamicModel } from './dynamicChatModel';
 
 const logger = createLogger('agent-model-usage');
 
@@ -45,6 +46,8 @@ export interface ModelUsageTapContext {
      * limit is debited (see agentSpendLimits.ts). Never allowed to fail a request.
      */
     onCost?: (cost: { currency: string; totalCost: number }) => void;
+    /** A Dynamic LLM call reports the concrete model it was routed to. */
+    onRouted?: (modelKey: string) => void;
 }
 
 /**
@@ -106,19 +109,32 @@ function record(
     outcome: { status: 'success' | 'error' | 'cancelled'; message?: unknown; error?: unknown; startedAt: number; streamed: boolean },
 ) {
     const usage = extractTokenUsage(outcome.message) ?? {};
+    // A Dynamic LLM call went through the gateway, which already logged it (router + child rows)
+    // and knows the child's price: the router's own pricing is zero.
+    const dynamic = isDynamicModel(ctx.model);
+    const routedCost = dynamic
+        ? ((outcome.message as { response_metadata?: { routedCost?: { currency: string; totalCost: number } } } | undefined)
+            ?.response_metadata?.routedCost)
+        : undefined;
     // The run in progress (if any) is charged for what this call spent, however the run ends.
     addRunUsage(usage.totalTokens);
     const toolCalls = countToolCalls(outcome.message);
     const finishReason = finishReasonOf(outcome.message);
     if (ctx.onCost && (usage.inputTokens || usage.outputTokens)) {
         try {
-            ctx.onCost(calculateCost(ctx.model.pricing, usage));
+            if (!dynamic) ctx.onCost(calculateCost(ctx.model.pricing, usage));
+            else if (routedCost) ctx.onCost(routedCost);
         } catch (error) {
             logger.warn('Agent spend could not be settled', {
                 model: ctx.model.key,
                 error: error instanceof Error ? error.message : String(error),
             });
         }
+    }
+    if (dynamic) {
+        const routed = (outcome.message as { response_metadata?: { routedModel?: unknown } } | undefined)?.response_metadata?.routedModel;
+        if (typeof routed === 'string') ctx.onRouted?.(routed);
+        return;
     }
     void logModelUsage(ctx.tenantDbName, ctx.model, {
         requestId: `agent-${ctx.agentKey ?? 'run'}-${outcome.startedAt}-${Math.random().toString(36).slice(2, 8)}`,

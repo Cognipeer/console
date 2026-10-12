@@ -106,6 +106,7 @@ import { withAssembledStream } from './assembledStream';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import { withModelUsageLogging } from './modelUsageTap';
+import { createDynamicChatModel, isDynamicModel } from './dynamicChatModel';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { toClientPendingAction, type ClientPendingAction } from './clientWire';
@@ -1647,14 +1648,19 @@ async function buildSubagentModel(
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') return undefined;
-        const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
-        if (!runtime.createChatModel) return undefined;
-        const lcModel = await runtime.createChatModel({
-            modelId: model.modelId,
-            category: 'llm',
-            modelSettings: resolveModelInvocationConfig(model, {}),
-            options: agentChatModelOptions(model),
-        });
+        let lcModel: unknown;
+        if (isDynamicModel(model)) {
+            lcModel = createDynamicChatModel({ tenantDbName, tenantId, projectId, modelKey: model.key });
+        } else {
+            const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
+            if (!runtime.createChatModel) return undefined;
+            lcModel = await runtime.createChatModel({
+                modelId: model.modelId,
+                category: 'llm',
+                modelSettings: resolveModelInvocationConfig(model, {}),
+                options: agentChatModelOptions(model),
+            });
+        }
         const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
         const tapped = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
             tenantDbName,
@@ -2540,6 +2546,17 @@ export async function buildAgentChatModel(
     const model = await getModelByKey(tenantDbName, modelKey, projectId);
     if (!model) throw new Error(`Model "${modelKey}" not found`);
     if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
+    if (isDynamicModel(model)) {
+        // No provider of its own: every call goes through the routing engine (dynamicChatModel.ts).
+        const passthrough: Record<string, unknown> = {};
+        for (const key of ['temperature', 'top_p', 'max_tokens'] as const) {
+            if (overrides[key] !== undefined) passthrough[key] = overrides[key];
+        }
+        return {
+            model,
+            lcModel: createDynamicChatModel({ tenantDbName, tenantId, projectId, modelKey: model.key, overrides: passthrough }) as unknown,
+        };
+    }
     const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
     if (!runtime.createChatModel) throw new Error('Provider runtime does not support chat model creation');
 
@@ -2880,6 +2897,10 @@ export interface AgentPlaygroundChatRequest {
     projectId: string;
     agentKey: string;
     userMessage: string;
+    /** The model the route resolved for this turn - see `AgentChatRequest.modelKey`. */
+    modelKey?: string;
+    /** Who is asking and through which door - see `AgentChatRequest.callerContext`. Overrides what is derived from the runtime context. */
+    callerContext?: RoutingCallerContext;
     /** Ids of the session's files this message attaches (a Session only; uploaded to it first). */
     attachments?: string[];
     /**
@@ -3300,6 +3321,8 @@ async function buildLocalAgentRun(input: {
     // read by the caller to keep the session budget true even when the turn is
     // never persisted.
     let tappedUsd = 0;
+    // The concrete model a Dynamic LLM routed this run's latest call to.
+    let routedModelKey: string | undefined;
     const spend: AgentSpendScope | undefined = input.spend
         ? { ...input.spend, observe: (cost) => { if (Number.isFinite(cost.totalCost) && cost.totalCost > 0) tappedUsd += cost.totalCost; } }
         : undefined;
@@ -3561,6 +3584,7 @@ async function buildLocalAgentRun(input: {
         model,
         route: input.route,
         agentKey,
+        onRouted: (key) => { routedModelKey = key; },
         ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
     });
     // Outermost: whatever the SDK sends the model passes through the image resolver first
@@ -3645,7 +3669,14 @@ async function buildLocalAgentRun(input: {
     return {
         sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, tools: [...gatedTools, ...clientTools], costEstimator, toolGuard,
         tappedUsd: () => tappedUsd,
+        routedModel: () => routedModelKey,
     };
+}
+
+/** `metadata` of a stored assistant message: the model that answered (see IAgentConversationMessage.metadata). */
+function answeredWithMetadata(modelKey: string, offered: boolean, routedModel: string | undefined) {
+    if (!offered && !routedModel) return {};
+    return { metadata: { model: modelKey, ...(routedModel ? { routedModel } : {}) } };
 }
 
 /**
@@ -4124,7 +4155,7 @@ async function runAgentChatTurn(
     }
 
     // 3. Model, prompt, guardrails and tools — see `buildLocalAgentRun`.
-    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
+    const { sdkAgent, model, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -4328,6 +4359,7 @@ async function runAgentChatTurn(
                 ...(usage ? { usage } : {}),
                 ...(outputParsed !== undefined ? { output: outputParsed } : {}),
                 ...(outputError ? { outputError } : {}),
+                ...answeredWithMetadata(model.key, Boolean(modelChoice), routedModel()),
                 timestamp: new Date(),
             },
         ];
@@ -4645,7 +4677,16 @@ export async function executePlaygroundChatLocal(
 ): Promise<AgentPlaygroundChatResult> {
     const scope: { events?: SessionTurnEvents } = {};
     try {
-        return await runPlaygroundChatTurn(request, scope);
+        const runtime = request.runtimeContext;
+        const caller: RoutingCallerContext = {
+            channel: channelFromSource(runtime?.source) ?? 'playground',
+            agentKey: request.agentKey,
+            projectId: request.projectId,
+            ...(runtime?.userId ? { userId: runtime.userId } : {}),
+            ...(runtime?.tokenId ? { apiTokenId: runtime.tokenId } : {}),
+            ...Object.fromEntries(Object.entries(request.callerContext ?? {}).filter(([, v]) => v !== undefined)),
+        };
+        return await runWithRoutingCaller(caller, () => runPlaygroundChatTurn(request, scope));
     } catch (error) {
         await scope.events?.fail(error).catch(() => undefined);
         throw error;
@@ -4686,6 +4727,11 @@ async function runPlaygroundChatTurn(
         config = snapshot.snapshot.config;
         ranVersion = request.version;
     }
+    const offersModels = config.kind !== 'external' && additionalModelKeys(config).length > 0;
+    const modelChoice: AgentModelChoice | undefined = offersModels
+        ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: sessionConversation?.metadata })
+        : undefined;
+    if (modelChoice && modelChoice.modelKey !== config.modelKey) config = { ...config, modelKey: modelChoice.modelKey };
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -4734,6 +4780,7 @@ async function runPlaygroundChatTurn(
             conversationId: String(sessionConversation._id),
             userMessage,
             trigger: 'message',
+            ...(modelChoice ? { model: modelChoice } : {}),
         })
         : undefined;
     scope.events = turnEvents;
@@ -4800,7 +4847,7 @@ async function runPlaygroundChatTurn(
         return externalResult;
     }
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, tappedUsd, routedModel } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -4826,6 +4873,7 @@ async function runPlaygroundChatTurn(
         canPause: Boolean(sessionConversation),
         ...(request.embedded ? { embedded: request.embedded } : {}),
         ...(spend ? { spend } : {}),
+        ...(modelChoice ? { modelChoice } : {}),
     });
 
     const attached = await assembleMessageAttachments({
@@ -4960,6 +5008,7 @@ async function runPlaygroundChatTurn(
             latencyMs: Date.now() - invokeStartedAt,
             steps: extractPlaygroundSteps(result, priorExecutionIds),
             version: ranVersion,
+            ...answeredWithMetadata(model.key, Boolean(modelChoice), routedModel()),
             ...(outcome.stopReason !== 'completed'
                 ? { stopReason: outcome.stopReason, ...(outcome.stopDetail ? { stopDetail: outcome.stopDetail } : {}) }
                 : {}),
@@ -5078,6 +5127,7 @@ async function persistSessionTurn(
                 ...(result.outputError ? { outputError: result.outputError } : {}),
                 ...(result.usage ? { usage: result.usage } : {}),
                 ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}),
+                ...(result.metadata ? { metadata: result.metadata } : {}),
                 ...(result.stopReason ? { stopReason: result.stopReason } : {}),
                 ...(result.stopDetail ? { stopDetail: result.stopDetail } : {}),
                 ...(result.compactions?.length ? { compactions: result.compactions } : {}),
@@ -5414,7 +5464,7 @@ async function runAgentResumeTurn(
     // Same merge as a playground turn: the session's context under the caller's.
     const runtimeContext = mergeSessionRuntimeContext(conversation, request.runtimeContext);
 
-    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd } = await buildLocalAgentRun({
+    const { sdkAgent, model, systemPrompt, cleanupTasks, warnings, hitl, costEstimator, toolGuard, tappedUsd, routedModel } = await buildLocalAgentRun({
         db,
         tenantDbName,
         tenantId,
@@ -5627,6 +5677,7 @@ async function runAgentResumeTurn(
             role: 'assistant',
             content: outcome.content,
             timestamp: new Date(),
+            ...answeredWithMetadata(model.key, additionalModelKeys(config).length > 0, routedModel()),
             ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
             ...(steps.length > 0 ? { steps } : {}),
             ...(outcome.stopReason !== 'completed'

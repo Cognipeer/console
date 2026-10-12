@@ -513,8 +513,16 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
         projectId: ctx.projectId,
       });
 
+      // Only agents that list additional models are asked about them (one policy check per extra model).
+      const modelsByAgent = new Map<string, Awaited<ReturnType<typeof advertisedModelsForRequest>>>();
+      await Promise.all(agents.filter((agent) => agent.config.additionalModels?.length).map(async (agent) => {
+        const models = await advertisedModelsForRequest(request, { agent, tenantDbName: ctx.tenantDbName, projectId: ctx.projectId }).catch(() => undefined);
+        if (models) modelsByAgent.set(agent.key, models);
+      }));
+
       return reply.code(200).send({
         agents: agents.map((agent) => ({
+          ...(modelsByAgent.has(agent.key) ? { models: modelsByAgent.get(agent.key) } : {}),
           config: {
             maxTokens: agent.config.maxTokens,
             modelKey: agent.config.modelKey,
@@ -545,7 +553,7 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
       }
 
       // The models a caller may pick, when the agent offers more than its main one (those they may not use are left out).
-      const models = await advertisedModelsForRequest(request, {
+      const models = !agent.config.additionalModels?.length ? undefined : await advertisedModelsForRequest(request, {
         agent: { ...agent, config: (await resolveAgentConfig(ctx.tenantDbName, agent.key, ctx.projectId).catch(() => null))?.config ?? agent.config },
         tenantDbName: ctx.tenantDbName,
         projectId: ctx.projectId,

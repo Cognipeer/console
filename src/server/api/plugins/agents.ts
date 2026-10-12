@@ -103,6 +103,14 @@ import {
   type AnswerAbility,
 } from './agent-approval-authz';
 import {
+  AgentModelError,
+  advertisedModelsForRequest,
+  rememberSessionModel,
+  resolveAgentConfigForModels,
+  resolveRunModelForRequest,
+} from './agent-model-authz';
+import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
+import {
   decideSessionAccess,
   loadSessionForPrincipal,
   sendAuthorizationUnavailable,
@@ -483,6 +491,31 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       return null;
     }
   }
+  // Which of the agent's models this turn runs on: `model` in the body (the playground's picker), else the
+  // session's last choice. The draft config unless a version is asked for - the playground runs the draft.
+  let modelChoice: AgentModelChoice | undefined;
+  const askedModel = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
+  const sessionConversation = typeof body.conversationId === 'string'
+    ? await getConversationById(session.tenantDbName, body.conversationId)
+    : null;
+  if (askedModel || agent.config.additionalModels?.length || sessionConversation?.metadata?.activeModel) {
+    const runConfig = typeof body.version === 'number'
+      ? await resolveAgentConfigForModels(session.tenantDbName, agent, projectId, body.version)
+      : agent.config;
+    if (askedModel || runConfig.additionalModels?.length) {
+      try {
+        modelChoice = await resolveRunModelForRequest(request, {
+          agent, config: runConfig, projectId, requested: askedModel, conversation: sessionConversation,
+        });
+      } catch (error) {
+        if (!(error instanceof AgentModelError)) throw error;
+        void reply.code(error.status).send({ error: error.message, code: error.code });
+        return null;
+      }
+    }
+  }
+  if (modelChoice && sessionConversation) await rememberSessionModel(session.tenantDbName, sessionConversation, modelChoice);
+
   const reservation = await reserveDashboardSession({
     session, projectId, agentKey: agent.key, conversationId: body.conversationId, userMessage: body.message,
   });
@@ -509,6 +542,7 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(typeof body.version === 'number' ? { version: body.version } : {}),
       ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+      ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
     },
   };
 }
@@ -712,7 +746,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
     try {
       const scoped = await requireScopedAgent(request, reply);
       if (!scoped) return reply;
-      return reply.code(200).send({ agent: redactAgent(scoped.agent) });
+      // The models the playground may pick among (main + additional the caller may use).
+      const models = await advertisedModelsForRequest(request, {
+        agent: scoped.agent, tenantDbName: scoped.session.tenantDbName, projectId: scoped.projectId,
+      }).catch(() => undefined);
+      return reply.code(200).send({ agent: redactAgent(scoped.agent), ...(models ? { models } : {}) });
     } catch (error) {
       return sendRouteError(reply, error, 'Get agent error', 'Failed to get agent');
     }

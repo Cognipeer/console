@@ -13543,7 +13543,7 @@ components:
         additionalModels:
           type: array
           maxItems: 10
-          description: "Further models a caller may pick for a run (`agent_model`). Unique, never the main `modelKey`, each a model of the agent's project (a Dynamic LLM is allowed). Who may use each is decided by the `agent.use_model` policy action; by default everyone who can run the agent."
+          description: "Further models a caller may pick for a run (`agent_model`). Unique, never the main `modelKey`, each a model of the agent's project (a Dynamic LLM is allowed). Anyone who can run the agent may pick any of them."
           items:
             type: object
             required: [modelKey]
@@ -14358,7 +14358,7 @@ components:
           description: Agent key identifying the agent to run.
         agent_model:
           type: string
-          description: "Which of the agent's models answers this turn: its main model or one listed in `models` on the agent. Omit to use the session's last choice, else the main model. Not listed: `400` `model_not_allowed`. Listed but not permitted to the caller by the `agent.use_model` policy action: `403` `model_forbidden` (with `decision_id`). The main model is never checked. The `X-Cognipeer-Agent-Model` header does the same; the body wins."
+          description: "Which of the agent's models answers this turn: its main model or one listed in `models` on the agent. Omit to use the session's last choice, else the main model. Not listed: `400` `model_not_allowed`. The `X-Cognipeer-Agent-Model` header does the same; the body wins."
         input:
           description: "User message: a plain string, or an array of message items. The text and files (`input_file`, `input_image`) of the most recent `user` item are used."
           oneOf:
@@ -14554,7 +14554,7 @@ components:
           $ref: "#/components/schemas/AgentConfig"
         models:
           type: array
-          description: "Only on the single-agent lookup, and only when the agent offers additional models. The main model first (`default: true`); models the caller may not use (`agent.use_model`) are left out; absent when fewer than two remain. Pick one with `agent_model` on a run."
+          description: "Only on the single-agent lookup, and only when the agent offers additional models. The main model first (`default: true`); absent when fewer than two remain. Pick one with `agent_model` on a run."
           items:
             type: object
             required: [key, label, default]
@@ -16408,7 +16408,7 @@ components:
           example: gpt-4
         agent_model:
           type: string
-          description: "When `model` names an agent that offers several models: which one answers (OpenAI SDKs: `extra_body`). The `X-Cognipeer-Agent-Model` header does the same; the body wins. Errors: `400` `model_not_allowed` (not offered by the agent), `403` `model_forbidden` (the `agent.use_model` policy action refuses it, with `decision_id`). The response `model` stays the agent; the answering model is `cognipeer.agent_model`."
+          description: "When `model` names an agent that offers several models: which one answers (OpenAI SDKs: `extra_body`). The `X-Cognipeer-Agent-Model` header does the same; the body wins. Errors: `400` `model_not_allowed` (not offered by the agent). The response `model` stays the agent; the answering model is `cognipeer.agent_model`."
         messages:
           type: array
           description: Ordered list of messages that make up the conversation.

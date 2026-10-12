@@ -32,8 +32,6 @@ export type BuiltInKind =
   | 'portalTest'
   /** `managed:agent:approve*`: the session's owner, or whoever the agent accepts, may approve its tool calls. */
   | 'approvalRule'
-  /** `managed:agent:use-model`: the agent's additional models are open to whoever reaches the run until a rule narrows them. */
-  | 'modelRule'
   | 'other';
 
 export interface BuiltInReason {
@@ -55,7 +53,6 @@ export function parseBuiltInReason(cedarId: string): BuiltInReason {
   if (PORTAL_TEST_MANAGED.test(cedarId)) return { kind: 'portalTest', level: null };
   const agent = AGENT_MANAGED.exec(cedarId);
   if (agent) return { kind: 'approvalRule', level: null };
-  if (cedarId === 'managed:agent:use-model') return { kind: 'modelRule', level: null };
   const match = MANAGED.exec(cedarId);
   if (!match) return { kind: 'other', level: null };
   const [, group, who, level] = match;

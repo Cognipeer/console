@@ -131,6 +131,8 @@ function kind(
 // fall back only to the tenant-wide row (bindingResolution.ts). Models, prompts,
 // memory stores and skills have no tenant-wide fallback at all.
 kind('agent.model', 'agent', 'model', 'strict-project', 'error');
+// A model the agent offers next to its main one (config.additionalModels): a run asked to use it fails without it.
+kind('agent.additionalModel', 'agent', 'model', 'strict-project', 'error');
 kind('agent.prompt', 'agent', 'prompt', 'strict-project', 'error');
 // A guardrail that cannot be compiled either denies the run (fail-closed) or is
 // silently skipped (fail-open): a lost safety control either way, and a disabled

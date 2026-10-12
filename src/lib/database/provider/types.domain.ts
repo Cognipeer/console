@@ -2432,7 +2432,7 @@ export interface IAgentConfig {
   /**
    * Further models a caller may pick for a run (`model` on the client API, `agent_model` on the
    * OpenAI-compatible surfaces). Max 10, unique, never the main `modelKey`. The main model is
-   * always usable; these are checked by `agent.use_model` (see `resolveAgentRunModel`).
+   * always usable; a caller may pick any of them (see `resolveAgentRunModel`).
    */
   additionalModels?: IAgentAdditionalModel[];
   systemPrompt?: string;
@@ -2846,6 +2846,11 @@ export interface IAgentConversationMessage {
   };
   /** Which agent config produced this turn: a version number, or null for the draft. */
   version?: number | null;
+  /**
+   * The model that answered, for an agent that offers several: `model` is the key the run used
+   * (the Dynamic LLM's key when it is one), `routedModel` the concrete model it routed to.
+   */
+  metadata?: { model?: string; routedModel?: string };
   /** Wall-clock time the turn took, measured server-side. */
   latencyMs?: number;
   /**

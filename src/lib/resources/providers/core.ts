@@ -76,6 +76,7 @@ export function extractAgentEdges(a: Doc): ResourceEdgeInput[] | undefined {
   const edges = createEdgeCollector('agent');
 
   edges.add('agent.model', config.modelKey, 'config.modelKey');
+  asArray(config.additionalModels).forEach((entry, i) => edges.add('agent.additionalModel', entry.modelKey, `config.additionalModels[${i}].modelKey`));
   // agentService only looks the prompt up when there is no inline system prompt.
   if (!config.systemPrompt) edges.add('agent.prompt', config.promptKey, 'config.promptKey');
   edges.add('agent.knowledge', config.knowledgeEngineKey, 'config.knowledgeEngineKey');

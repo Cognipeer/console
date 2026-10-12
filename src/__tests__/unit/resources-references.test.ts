@@ -57,7 +57,7 @@ describe('edge kind registry', () => {
 
   it('defines every kind of the spec with the agreed severity', () => {
     const errors = [
-      'agent.model', 'agent.prompt', 'agent.guardrail', 'model.provider', 'model.guardrail', 'model.dynamicModel',
+      'agent.model', 'agent.additionalModel', 'agent.prompt', 'agent.guardrail', 'model.provider', 'model.guardrail', 'model.dynamicModel',
       'rag.embeddingModel', 'rag.vectorIndex', 'memory.embeddingModel', 'memory.vectorIndex', 'mcp.guardrail',
       'guardrail.model', 'guardrail.wordList',
       // degraded policy + failMode 'open' = unscanned traffic (safety control lost)

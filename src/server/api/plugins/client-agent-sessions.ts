@@ -17,6 +17,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { AgentSessionRuntimeStatus, IAgentConversation, IAgentConversationListItem, IAgentSessionBudget } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
 import { createConversation, deleteConversation, getAgentByKey, getConversationById } from '@/lib/services/agents';
+import { sessionModelChoice } from '@/lib/services/agents/agentModelSelection';
 import {
   apiErrorBody,
   backgroundDisabledErrorBody,
@@ -164,6 +165,7 @@ function serializeSession(conversation: IAgentConversation, runtime: Awaited<Ret
     stop_reason: runtime.stopReason,
     pending_actions: runtime.pendingActions.map(toClientPendingAction),
     last_event_seq: runtime.lastEventSeq,
+    ...(sessionModelChoice(conversation.metadata) ? { model: sessionModelChoice(conversation.metadata)!.modelKey } : {}),
     budget: publicSessionBudget(conversation),
     spent_usd: sessionSpentUsd(conversation),
   };

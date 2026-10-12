@@ -1197,7 +1197,6 @@ export const en = {
         infer: 'Run a {type}',
         use: 'Use a {type}',
         approve: 'Approve the tool calls of a {type}',
-        use_model: 'Run a {type} on one of its additional models',
         session_view_others: 'View sessions of a {type} that others started',
         conversations_view: 'View the conversations of a {type}',
         session_manage_others: 'Act on sessions of a {type} that others started',
@@ -1287,10 +1286,6 @@ export const en = {
       'agent-approve': {
         name: 'People who may approve an agent\'s tool calls',
         description: 'A person may approve a tool call of an agent session (allow, deny, edit the arguments, remember it for the session) when they started that session, or when the agent accepts them: workspace owners and admins and the admins of the agent\'s project (the default), or every member of the project. The agent\'s "who can approve" setting is the input of this rule. Having Write access to Agents is not enough on its own; your own allow rules can appoint more approvers, such as a compliance group.',
-      },
-      'agent-use-model': {
-        name: 'Everyone who can run an agent may pick its additional models',
-        description: 'An agent can offer additional models next to its main one. By default the people and API tokens that reach the agent may choose any model on its list; the list on the agent is the limit. Write a deny rule on the action agent.use_model (with a condition on context.model) to keep a model for some people only. The main model is never asked about.',
       },
       'agent-approve-token': {
         name: 'API tokens approve on behalf of their owner',
@@ -2436,7 +2431,6 @@ export const en = {
       infer: 'Infer',
       use: 'Use',
       approve: 'Approve tool calls',
-      use_model: 'Use additional models',
       session_view_others: 'View others\' sessions',
       session_manage_others: 'Act on others\' sessions',
     },
@@ -4268,7 +4262,7 @@ export const en = {
       knowledgeEnginePlaceholder: 'Select a knowledge engine',
       knowledgeEngineDescription: 'Attach a Knowledge Engine module as a retrieval tool for the agent.',
       additionalModels: 'Additional models',
-      additionalModelsDescription: 'Models a caller may pick instead of the main one (up to 10). An access rule on agent.use_model can limit who may use each.',
+      additionalModelsDescription: 'Models a caller may pick instead of the main one (up to 10).',
       additionalModelsPlaceholder: 'Add models',
       additionalModelLabel: 'Label',
       additionalModelLabelPlaceholder: 'Name shown in the picker',
@@ -6302,6 +6296,7 @@ export const en = {
       'agent.mcp': 'MCP binding',
       'agent.knowledge': 'Knowledge module',
       'agent.subagent': 'Sub-agent',
+      'agent.additionalModel': 'Additional model',
       'agent.subagentModel': 'Sub-agent model',
       'agent.subagentKnowledge': 'Sub-agent knowledge module',
       'agent.subagentTool': 'Sub-agent tool binding',

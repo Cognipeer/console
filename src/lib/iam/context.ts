@@ -19,7 +19,6 @@
  *              identity the host application vouched for (a signed token the
  *              portal verified). Only the portal runtime can know this; it is
  *              never taken from a request header
- *   model      the additional model an agent run was asked to use (`agent.use_model` only)
  *   test       true for a TEST SESSION of a portal: a workspace owner or admin
  *              trying the portal out. The managed rules honour it for those two
  *              roles only (managedPolicies.ts), so a caller cannot claim it
@@ -50,7 +49,6 @@ export interface IamRequestContext {
   path?: string | null;
   embedded?: boolean | null;
   test?: boolean | null;
-  model?: string | null;
 }
 
 /** The context of a Cedar request: plain strings, booleans and extension values. */
@@ -165,7 +163,6 @@ export function buildCedarContext(context: IamRequestContext | undefined | null,
   if (typeof c.channel === 'string' && c.channel) out.channel = clip(c.channel);
   if (typeof c.method === 'string' && c.method) out.method = clip(c.method.toUpperCase());
   if (typeof c.path === 'string' && c.path) out.path = clip(c.path);
-  if (typeof c.model === 'string' && c.model) out.model = clip(c.model);
   // Flags are only ever set when TRUE: an absent flag is "not claimed", which is what every rule tests.
   if (c.embedded === true) out.embedded = true;
   if (c.test === true) out.test = true;

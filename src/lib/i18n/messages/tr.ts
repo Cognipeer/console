@@ -1006,7 +1006,6 @@ export const tr: typeof en = {
         infer: 'Çıkarım yap: {type}',
         use: 'Kullan: {type}',
         approve: '{type} araç çağrılarını onayla',
-        use_model: '{type} için ek modellerden birini kullan',
         session_view_others: 'Başkalarının başlattığı {type} oturumlarını görüntüle',
         conversations_view: '{type} konuşmalarını görüntüle',
         session_manage_others: 'Başkalarının başlattığı {type} oturumlarında işlem yap',
@@ -1096,10 +1095,6 @@ export const tr: typeof en = {
       'agent-approve': {
         name: 'Bir ajanın araç çağrılarını onaylayabilecek kişiler',
         description: 'Bir kişi, bir ajan oturumundaki araç çağrısını onaylayabilir (izin ver, reddet, argümanları düzenle, oturum için hatırla): oturumu kendisi başlattıysa ya da ajan onu kabul ediyorsa; yani çalışma alanı sahipleri ve yöneticileri ile ajanın projesinin yöneticileri (varsayılan) ya da projenin tüm üyeleri. Ajanın "kimler onaylayabilir" ayarı bu kuralın girdisidir. Ajanlarda Yazma erişimi tek başına yetmez; kendi izin kurallarınız bir uyum grubu gibi daha fazla onaylayıcı atayabilir.',
-      },
-      'agent-use-model': {
-        name: 'Ajana erişen herkes ek modellerini seçebilir',
-        description: 'Bir ajan ana modelinin yanında ek modeller sunabilir. Varsayılan olarak ajana erişen kişiler ve API token\'ları listedeki herhangi bir modeli seçebilir; sınır ajandaki listedir. Bir modeli yalnızca bazı kişilere ayırmak için agent.use_model eylemine (context.model koşuluyla) bir yasaklama kuralı yazın. Ana model hakkında hiç soru sorulmaz.',
       },
       'agent-approve-token': {
         name: 'API token\'ları sahipleri adına onaylar',
@@ -1618,7 +1613,6 @@ export const tr: typeof en = {
       infer: 'Çıkarım yap',
       use: 'Kullan',
       approve: 'Araç çağrılarını onayla',
-      use_model: 'Ek modelleri kullan',
       session_view_others: 'Başkalarının oturumlarını görüntüle',
       session_manage_others: 'Başkalarının oturumlarında işlem yap',
     },
@@ -2729,7 +2723,7 @@ export const tr: typeof en = {
       knowledgeEnginePlaceholder: 'Bir bilgi motoru seçin',
       knowledgeEngineDescription: 'Agent için bir Bilgi Motoru modülünü getirim aracı olarak ekleyin.',
       additionalModels: 'Ek modeller',
-      additionalModelsDescription: 'Çağıranın ana model yerine seçebileceği modeller (en fazla 10). agent.use_model üzerindeki bir erişim kuralı kimin hangisini kullanabileceğini sınırlayabilir.',
+      additionalModelsDescription: 'Çağıranın ana model yerine seçebileceği modeller (en fazla 10).',
       additionalModelsPlaceholder: 'Model ekleyin',
       additionalModelLabel: 'Etiket',
       additionalModelLabelPlaceholder: 'Seçicide görünen ad',
@@ -4547,6 +4541,7 @@ export const tr: typeof en = {
       'agent.mcp': 'MCP bağlantısı',
       'agent.knowledge': 'Bilgi modülü',
       'agent.subagent': 'Alt ajan',
+      'agent.additionalModel': 'Ek model',
       'agent.subagentModel': 'Alt ajan modeli',
       'agent.subagentKnowledge': 'Alt ajan bilgi modülü',
       'agent.subagentTool': 'Alt ajan tool bağlantısı',

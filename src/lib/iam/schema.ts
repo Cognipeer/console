@@ -74,7 +74,7 @@ const record = (attributes: Record<string, TypeJson>): TypeJson => ({
  * a call supplies only what it knows (`context has channel` guards the rest).
  * `ip` is a Cedar `ipaddr` and `now` a Cedar `datetime` (context.ts builds them).
  */
-export const IAM_CONTEXT_ATTRS = ['projectId', 'channel', 'ip', 'now', 'method', 'path', 'embedded', 'test', 'model'] as const;
+export const IAM_CONTEXT_ATTRS = ['projectId', 'channel', 'ip', 'now', 'method', 'path', 'embedded', 'test'] as const;
 
 const IAM_CONTEXT_EXTENSION_TYPES: Readonly<Record<string, string>> = { ip: 'ipaddr', now: 'datetime' };
 /** Context attributes that are flags (Cedar Boolean). */
@@ -101,7 +101,7 @@ const contextType = (): TypeJson =>
  * Bumped whenever the generated schema changes in a way the NAMES of its types and
  * actions do not show (the signature below, and so the preparsed copy, follows).
  */
-const SCHEMA_REVISION = 5;
+const SCHEMA_REVISION = 4;
 
 type EntityTypeJson = { memberOfTypes?: string[]; shape: { attributes: Record<string, TypeJson> } };
 

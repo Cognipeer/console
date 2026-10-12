@@ -2,17 +2,15 @@
  * Which model an agent run uses when the agent offers ADDITIONAL models (`config.additionalModels`).
  *
  *   1. The caller asked for a model (`requested`): it must be the main model or on the list
- *      (400 `model_not_allowed` otherwise). Anything but the main model also needs the policy
- *      engine's `agent.use_model` (403 `model_forbidden`, with the decision id; an engine that
- *      cannot decide is a 503 and never a "no"). The main model is never asked about.
+ *      (400 `model_not_allowed` otherwise). There is no separate permission: whoever may run the
+ *      agent may use any model on its list.
  *   2. Nothing asked: the model the session last used (sticky). It is checked again against the
- *      list and the engine; if it no longer passes the run quietly goes back to the main model.
+ *      list; if it is no longer on it the run quietly goes back to the main model.
  *   3. The agent's main model.
  *
  * `resolveAgentRunModel` is the one function the routes call; it knows nothing about HTTP or
- * the engine (the route hands it `authorize`). The service layer then only APPLIES a choice
- * (`applyAgentModelChoice`): the choice is checked against the list once more, but the policy
- * decision was the route's.
+ * the model records. The service layer then only APPLIES a choice (`applyAgentModelChoice`),
+ * checking it against the list once more.
  *
  * The choice rides on the session (`conversation.metadata.activeModel`, server-owned) so a queued
  * (background) run executes with what its request was authorized for, and on the run's session
@@ -28,30 +26,18 @@ export interface AgentModelChoice {
     reason: AgentModelReason;
 }
 
-export type AgentModelErrorCode = 'model_not_allowed' | 'model_forbidden' | 'authorization_unavailable';
+export type AgentModelErrorCode = 'model_not_allowed';
 
 export class AgentModelError extends Error {
-    readonly status: 400 | 403 | 503;
+    readonly status = 400 as const;
     constructor(
         readonly code: AgentModelErrorCode,
         message: string,
-        readonly decisionId?: string,
     ) {
         super(message);
         this.name = 'AgentModelError';
-        this.status = code === 'model_not_allowed' ? 400 : code === 'model_forbidden' ? 403 : 503;
     }
 }
-
-/** The engine's answer to "may this caller run the agent on that additional model?". */
-export interface AgentModelVerdict {
-    allowed: boolean;
-    decisionId?: string;
-    /** The engine could not decide: never read as a "no". */
-    unavailable?: boolean;
-}
-
-export type AgentModelAuthorizer = (modelKey: string, options: { quiet: boolean }) => Promise<AgentModelVerdict>;
 
 type ModelConfig = Pick<IAgentConfig, 'modelKey' | 'additionalModels'>;
 
@@ -74,13 +60,6 @@ export function sessionModelChoice(metadata: Record<string, unknown> | undefined
     return { modelKey: raw.modelKey, reason };
 }
 
-function refuse(verdict: AgentModelVerdict, modelKey: string): never {
-    if (verdict.unavailable) {
-        throw new AgentModelError('authorization_unavailable', 'Authorization is temporarily unavailable', verdict.decisionId);
-    }
-    throw new AgentModelError('model_forbidden', `You are not allowed to use the model "${modelKey}" with this agent`, verdict.decisionId);
-}
-
 /** See the module comment. Throws `AgentModelError`; otherwise says which model the run uses and why. */
 export async function resolveAgentRunModel(input: {
     config: ModelConfig;
@@ -88,7 +67,6 @@ export async function resolveAgentRunModel(input: {
     requested?: string | null;
     /** The session's stored metadata (`conversation.metadata`), when the run continues one. */
     sessionMetadata?: Record<string, unknown> | null;
-    authorize: AgentModelAuthorizer;
 }): Promise<AgentModelChoice> {
     const main = input.config.modelKey ?? '';
     const listed = additionalModelKeys(input.config);
@@ -99,18 +77,11 @@ export async function resolveAgentRunModel(input: {
         if (!listed.includes(requested)) {
             throw new AgentModelError('model_not_allowed', `The model "${requested}" is not offered by this agent`);
         }
-        const verdict = await input.authorize(requested, { quiet: false });
-        if (!verdict.allowed) refuse(verdict, requested);
         return { modelKey: requested, reason: 'requested' };
     }
 
     const sticky = sessionModelChoice(input.sessionMetadata)?.modelKey;
-    if (sticky && sticky !== main && listed.includes(sticky)) {
-        const verdict = await input.authorize(sticky, { quiet: true });
-        // An outage must not silently change the model of a running session either way: it is the caller's 503.
-        if (verdict.unavailable) refuse(verdict, sticky);
-        if (verdict.allowed) return { modelKey: sticky, reason: 'session' };
-    }
+    if (sticky && sticky !== main && listed.includes(sticky)) return { modelKey: sticky, reason: 'session' };
     return { modelKey: main, reason: 'default' };
 }
 
@@ -141,12 +112,11 @@ export interface AdvertisedAgentModel {
 
 /**
  * The `models` field of an agent's info: only when the agent lists additional models; the main model first
- * (`default: true`), entries the caller is denied left out, and nothing at all when fewer than two remain.
+ * (`default: true`), and nothing at all when fewer than two remain.
  * `nameOf` gives a model's display name (its label when the agent does not set one).
  */
 export async function advertisedAgentModels(input: {
     config: ModelConfig;
-    authorize: AgentModelAuthorizer;
     nameOf: (modelKey: string) => Promise<string | undefined>;
 }): Promise<AdvertisedAgentModel[] | undefined> {
     const { config } = input;
@@ -156,8 +126,6 @@ export async function advertisedAgentModels(input: {
         const key = typeof entry?.modelKey === 'string' ? entry.modelKey.trim() : '';
         if (!key || key === config.modelKey || out.some((m) => m.key === key)) continue;
         if (out.length >= 11) break;
-        const verdict = await input.authorize(key, { quiet: true });
-        if (!verdict.allowed) continue;
         const label = entry.label?.trim() || (await input.nameOf(key)) || key;
         const description = entry.description?.trim();
         out.push({ key, label, ...(description ? { description } : {}), default: false });

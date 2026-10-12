@@ -45,7 +45,7 @@ describe.each(Object.entries(locales))('iamApi labels [%s]', (_name, messages) =
 
   it('resolves the name and description of every managed policy', () => {
     const views = listManagedPolicyViews();
-    expect(views).toHaveLength(23);
+    expect(views).toHaveLength(22);
     for (const v of views) {
       expect(typeof resolve(messages, v.nameKey), v.nameKey).toBe('string');
       expect(typeof resolve(messages, v.descriptionKey), v.descriptionKey).toBe('string');
