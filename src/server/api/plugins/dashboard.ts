@@ -416,7 +416,7 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
   // quota lifecycle: the dashboard session authenticates, and the call still goes
   // through handleDecisionRequest (guardrails, usage log, cost).
   // @test-skip: a thin adapter over handleDecisionRequest, which client-decisions-fastify.test.ts covers; there is no dashboard-session API harness yet.
-  app.post('/dashboard/playground/decisions', withApiRequestContext(async (request, reply) => {
+  app.post('/dashboard/playground/decisions', { config: MODEL_PLAYGROUND_AUTHZ }, withApiRequestContext(async (request, reply) => {
     try {
       const { projectId, session } = await requireProjectContextForRequest(request);
       const parsed = parseDecisionRequest(readJsonBody<unknown>(request));
