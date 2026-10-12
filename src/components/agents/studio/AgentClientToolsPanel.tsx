@@ -24,7 +24,7 @@ import {
 import { IconInfoCircle, IconPlus, IconTrash } from '@tabler/icons-react';
 import type { IAgentClientToolConfig } from '@/lib/database/provider/types.domain';
 import { useTranslations } from '@/lib/i18n';
-import { ConfigBlock, describedSelectOption } from './ConfigSection';
+import { ConfigBlock } from './ConfigSection';
 import {
     CLIENT_TOOL_TIMEOUT_DEFAULT,
     CLIENT_TOOL_TIMEOUT_MAX,
