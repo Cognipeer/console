@@ -20,7 +20,7 @@ import {
   SummaryGroup,
   SummaryKV,
 } from '@/components/common/ui/FormShell';
-import ModelFormLayout, { ModelFormPanel, type ModelFormSection } from './ModelFormLayout';
+import ModelFormLayout from './ModelFormLayout';
 import RoutingAnalyticsPanel from './RoutingAnalyticsPanel';
 import type {
   DynamicPoolPolicy,
@@ -535,6 +535,10 @@ export default function CreateDynamicModelModal({
   const updateLabel = (index: number, patch: Partial<LabelDraft>) =>
     setLabels((ls) => ls.map((l, i) => (i === index ? { ...l, ...patch } : l)));
 
+  const callerSignalsInUse = SIGNALS.filter(
+    (sig) => sig.kind === 'list' && rules.some((r) => r.conditions.some((c) => c.signal === sig.value && isConditionValid(c))),
+  ).map((sig) => sig.label.replace(/ \(.*\)$/, ''));
+
   const summary = (
     <>
       <SummaryGroup title="Dynamic LLM">
@@ -557,6 +561,14 @@ export default function CreateDynamicModelModal({
         />
         <SummaryKV label="Cost guards" value={buildGuards() ? 'on' : <span className="ds-faint">none</span>} />
       </SummaryGroup>
+      {strategy === 'rule-based' ? (
+        <SummaryGroup title="Caller conditions">
+          <SummaryKV
+            label="In use"
+            value={callerSignalsInUse.length ? callerSignalsInUse.join(', ') : <span className="ds-faint">none</span>}
+          />
+        </SummaryGroup>
+      ) : null}
       <SummaryGroup title={strategy === 'rule-based' ? 'Rules' : 'Decider'}>
         {strategy === 'rule-based' ? (
           <SummaryKV label="Rule count" value={String(rules.length)} />
@@ -575,16 +587,6 @@ export default function CreateDynamicModelModal({
 
   const noCandidates = candidates.length === 0;
 
-  const sections: ModelFormSection[] = [
-    { id: 'general', label: 'General', done: validIdentity },
-    strategy === 'rule-based'
-      ? { id: 'rules', label: 'Rules', done: validStrategy }
-      : { id: 'decider', label: 'Decider', done: validStrategy },
-    { id: 'pools', label: 'Pools & defaults', done: validDefault && validDefaultPool },
-    { id: 'limits', label: 'Limits' },
-    { id: 'analytics', label: 'Analytics', hidden: !isEdit },
-  ];
-
   // Dirty = differs from the state right after the form was hydrated.
   const snapshot = JSON.stringify([name, key, description, buildConfig()]);
   const [baseline, setBaseline] = useState<string | null>(null);
@@ -599,9 +601,7 @@ export default function CreateDynamicModelModal({
     <ModelFormLayout
       open={opened}
       onClose={onClose}
-      sections={sections}
       dirty={dirty}
-      resetKey={hydration}
       icon={<IconArrowsSplit size={16} />}
       title={isEdit ? 'Edit Dynamic LLM' : 'Create Dynamic LLM'}
       subtitle="Route each request to a different model by rules or by a decider model."
@@ -624,8 +624,7 @@ export default function CreateDynamicModelModal({
         </div>
       ) : null}
 
-      <ModelFormPanel id="general">
-      <FormSection title="Identity" description="How this router is identified." done={validIdentity}>
+      <FormSection number={1} title="General" description="How this router is identified across the console and SDK." done={validIdentity}>
         <FormRow cols={2}>
           <FormField label="Display name" required>
             <TextInput
@@ -656,70 +655,24 @@ export default function CreateDynamicModelModal({
         </FormRow>
       </FormSection>
 
-      <FormSection title="Strategy" description="How the target model is chosen for each request." done>
-        <ChipPicker<DynamicRoutingStrategy>
-          options={[
-            { value: 'rule-based', label: 'Rule-based' },
-            { value: 'model-based', label: 'Model-based (decider)' },
-          ]}
-          value={strategy}
-          onChange={(v) => setStrategy(v as DynamicRoutingStrategy)}
-        />
-        <div className="ds-muted" style={{ fontSize: 12, marginTop: 8 }}>
-          {strategy === 'rule-based'
-            ? 'Evaluate ordered rules against request signals (token size, tools, keywords…). First match wins.'
-            : 'A decider model classifies each request into one of your labels, then routes to that label’s model.'}
-        </div>
-      </FormSection>
-
-      </ModelFormPanel>
-
-      <ModelFormPanel id="pools">
-      <FormSection
-        title="Default & fallback"
-        description="Default runs when nothing matches; fallback runs when the chosen model errors."
-        done={validDefault}
-      >
-        <FormRow cols={2}>
-          <FormField label="Default model" required>
-            <Select
-              placeholder="Select default model"
-              data={modelOptions}
-              value={defaultModelKey || null}
-              onChange={(v) => setDefaultModelKey(v ?? '')}
-              searchable
-            />
-          </FormField>
-          <FormField label="Fallback model" optional>
-            <Select
-              placeholder="None"
-              data={modelOptions}
-              value={fallbackModelKey}
-              onChange={setFallbackModelKey}
-              clearable
-              searchable
-            />
-          </FormField>
-        </FormRow>
-        <Switch
-          size="xs"
-          label="When nothing matches, pick from a pool instead of the default model"
-          checked={useDefaultPool}
-          onChange={(e) => setUseDefaultPool(e.currentTarget.checked)}
-          style={{ marginTop: 8 }}
-        />
-        {useDefaultPool ? (
-          <div style={{ marginTop: 8 }}>
-            <TargetEditor value={defaultPool} onChange={setDefaultPool} modelOptions={modelOptions} poolOnly />
-          </div>
-        ) : null}
-      </FormSection>
-
-      </ModelFormPanel>
 
       {strategy === 'rule-based' ? (
-        <ModelFormPanel id="rules">
-        <FormSection title="Rules" description="First matching rule decides the target model." done={validStrategy}>
+        <FormSection number={2} title="Strategy & rules" description="Ordered rules pick the target model; the first matching rule wins." done={validStrategy}>
+        <FormField label="Strategy">
+          <ChipPicker<DynamicRoutingStrategy>
+            options={[
+              { value: 'rule-based', label: 'Rule-based' },
+              { value: 'model-based', label: 'Model-based (decider)' },
+            ]}
+            value={strategy}
+            onChange={(v) => setStrategy(v as DynamicRoutingStrategy)}
+          />
+        </FormField>
+        <div className="ds-muted" style={{ fontSize: 12 }}>
+          {strategy === 'rule-based'
+            ? 'Evaluate ordered rules against request signals (token size, tools, keywords, caller). First match wins.'
+            : 'A decider model classifies each request into one of your labels, then routes to that label’s model.'}
+        </div>
           <div className="ds-col ds-gap-md">
             {rules.map((rule, ri) => (
               <div
@@ -772,10 +725,9 @@ export default function CreateDynamicModelModal({
                   {rule.conditions.map((cond, ci) => {
                     const kind = signalKind(cond.signal);
                     return (
-                      <div key={ci} className="ds-row ds-gap-xs" style={{ alignItems: 'flex-end' }}>
-                        <div style={{ flex: 2 }}>
+                      <FormRow key={ci} cols={3}>
+                        <FormField label="Signal">
                           <Select
-                            size="xs"
                             data={SIGNAL_SELECT_DATA}
                             value={cond.signal}
                             onChange={(v) => {
@@ -788,18 +740,33 @@ export default function CreateDynamicModelModal({
                               });
                             }}
                           />
-                        </div>
-                        <div style={{ flex: 1.4 }}>
+                        </FormField>
+                        <FormField label="Operator">
                           <Select
-                            size="xs"
                             data={OPERATORS[kind]}
                             value={cond.operator}
                             onChange={(v) =>
                               updateCondition(ri, ci, { operator: (v ?? OPERATORS[kind][0].value) as DynamicRoutingOperator })
                             }
                           />
-                        </div>
-                        <div style={{ flex: 1.4 }}>
+                        </FormField>
+                        <FormField
+                          label="Value"
+                          action={
+                            <ActionIcon
+                              variant="subtle"
+                              color="red"
+                              size="sm"
+                              disabled={rule.conditions.length <= 1}
+                              onClick={() =>
+                                updateRule(ri, { conditions: rule.conditions.filter((_, j) => j !== ci) })
+                              }
+                              aria-label="Remove condition"
+                            >
+                              <IconTrash size={13} />
+                            </ActionIcon>
+                          }
+                        >
                           {kind === 'list' ? (
                             <CallerValueField
                               signal={cond.signal}
@@ -809,7 +776,6 @@ export default function CreateDynamicModelModal({
                             />
                           ) : kind === 'number' ? (
                             <NumberInput
-                              size="xs"
                               min={0}
                               placeholder="value"
                               value={cond.value === '' ? '' : Number(cond.value)}
@@ -817,28 +783,15 @@ export default function CreateDynamicModelModal({
                             />
                           ) : kind === 'text' ? (
                             <TextInput
-                              size="xs"
                               placeholder="keyword / regex"
                               value={cond.value}
                               onChange={(e) => updateCondition(ri, ci, { value: e.currentTarget.value })}
                             />
                           ) : (
-                            <TextInput size="xs" value="—" disabled />
+                            <TextInput value="—" disabled />
                           )}
-                        </div>
-                        <ActionIcon
-                          variant="subtle"
-                          color="red"
-                          size="sm"
-                          disabled={rule.conditions.length <= 1}
-                          onClick={() =>
-                            updateRule(ri, { conditions: rule.conditions.filter((_, j) => j !== ci) })
-                          }
-                          aria-label="Remove condition"
-                        >
-                          <IconTrash size={13} />
-                        </ActionIcon>
-                      </div>
+                        </FormField>
+                      </FormRow>
                     );
                   })}
                   <div className="ds-faint" style={{ fontSize: 12 }}>
@@ -900,14 +853,26 @@ export default function CreateDynamicModelModal({
             ) : null}
           </div>
         </FormSection>
-        </ModelFormPanel>
       ) : (
-        <ModelFormPanel id="decider">
         <FormSection
+          number={2}
           title="Decider"
           description="A model classifies each request into one label; the label decides the target."
           done={validStrategy}
         >
+          <FormField label="Strategy">
+            <ChipPicker<DynamicRoutingStrategy>
+              options={[
+                { value: 'rule-based', label: 'Rule-based' },
+                { value: 'model-based', label: 'Model-based (decider)' },
+              ]}
+              value={strategy}
+              onChange={(v) => setStrategy(v as DynamicRoutingStrategy)}
+            />
+          </FormField>
+          <div className="ds-muted" style={{ fontSize: 12 }}>
+            A decider model classifies each request into one of your labels, then routes to that label’s model.
+          </div>
           <FormRow cols={1}>
             <FormField
               label="Decider model"
@@ -1007,17 +972,54 @@ export default function CreateDynamicModelModal({
             </Button>
           </div>
         </FormSection>
-        </ModelFormPanel>
       )}
 
-      <ModelFormPanel id="limits">
       <FormSection
-        key={`guards-${hydration}`}
-        title="Cost guards"
-        description="Router-wide limits applied after a route is chosen. A guard only ever moves a request to a cheaper model."
+        number={3}
+        title="Pools & default"
+        description="The default model runs when nothing matches; the fallback runs when the chosen model errors."
+        done={validDefault}
+      >
+        <FormRow cols={2}>
+          <FormField label="Default model" required>
+            <Select
+              placeholder="Select default model"
+              data={modelOptions}
+              value={defaultModelKey || null}
+              onChange={(v) => setDefaultModelKey(v ?? '')}
+              searchable
+            />
+          </FormField>
+          <FormField label="Fallback model" optional>
+            <Select
+              placeholder="None"
+              data={modelOptions}
+              value={fallbackModelKey}
+              onChange={setFallbackModelKey}
+              clearable
+              searchable
+            />
+          </FormField>
+        </FormRow>
+        <Switch
+          size="xs"
+          label="When nothing matches, pick from a pool instead of the default model"
+          checked={useDefaultPool}
+          onChange={(e) => setUseDefaultPool(e.currentTarget.checked)}
+          style={{ marginTop: 8 }}
+        />
+        {useDefaultPool ? (
+          <div style={{ marginTop: 8 }}>
+            <TargetEditor value={defaultPool} onChange={setDefaultPool} modelOptions={modelOptions} poolOnly />
+          </div>
+        ) : null}
+      </FormSection>
+
+      <FormSection
+        number={4}
+        title="Limits"
+        description="Router-wide cost guards, measurement and rollout. A guard only ever moves a request to a cheaper model."
         done
-        collapsible
-        defaultOpen={Boolean(buildGuards())}
       >
         <FormRow cols={2}>
           <FormField label="Max cost per request (USD)" optional hint="Pools pick the best model under it; fixed targets downgrade to the economy model above it.">
@@ -1063,21 +1065,10 @@ export default function CreateDynamicModelModal({
             <NumberInput min={0} max={100} value={switchMargin} onChange={(v) => setSwitchMargin(v === '' ? '' : Number(v))} disabled={!sticky} />
           </FormField>
         </FormRow>
-      </FormSection>
-
-      <FormSection
-        key={`rollout-${hydration}`}
-        title="Measurement & rollout"
-        description="Savings are measured against a baseline model. Shadow mode logs what pools and guards would do without changing traffic."
-        done
-        collapsible
-        defaultOpen={
-          mode === 'shadow' ||
-          Boolean(baselineModelKey) ||
-          (canaryPercent !== '' && Number(canaryPercent) < 100) ||
-          defaultOutputTokens !== ''
-        }
-      >
+        <div className="ds-eyebrow">Measurement &amp; rollout</div>
+        <div className="ds-muted" style={{ fontSize: 12 }}>
+          Savings are measured against a baseline model. Shadow mode logs what pools and guards would do without changing traffic.
+        </div>
         <FormRow cols={2}>
           <FormField label="Baseline model" optional hint="What savings are measured against. Defaults to the default model.">
             <Select placeholder={defaultModelKey || 'Default model'} data={modelOptions} value={baselineModelKey} onChange={setBaselineModelKey} clearable searchable />
@@ -1103,12 +1094,11 @@ export default function CreateDynamicModelModal({
           </FormField>
         </FormRow>
       </FormSection>
-      </ModelFormPanel>
 
       {isEdit && editModel ? (
-        <ModelFormPanel id="analytics" lazy>
+        <FormSection number={5} title="Analytics" description="How requests were routed, what they cost and what the router saved.">
           <RoutingAnalyticsPanel modelId={editModel._id} />
-        </ModelFormPanel>
+        </FormSection>
       ) : null}
     </ModelFormLayout>
   );

@@ -51,6 +51,7 @@ import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import CreateModelModal from '@/components/models/CreateModelModal';
+import EditModelModal from '@/components/models/EditModelModal';
 import ModelProviderModal from '@/components/models/ModelProviderModal';
 import { modelTakesImages } from '@/components/models/inputModalities';
 import CreateDynamicModelModal, {
@@ -193,6 +194,7 @@ export default function ModelsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [dynamicModalOpen, setDynamicModalOpen] = useState(false);
+  const [editModelId, setEditModelId] = useState<string | null>(null);
   const [dynamicEdit, setDynamicEdit] = useState<DynamicModelInit | null>(null);
   const [guardrailModel, setGuardrailModel] = useState<ModelDto | null>(null);
   const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
@@ -657,7 +659,7 @@ export default function ModelsPage() {
               onClick: () =>
                 dynamicConfigOf(m)
                   ? openDynamicEdit(m)
-                  : navigate(`${modelDetailHref(m)}/edit`),
+                  : setEditModelId(m._id),
             },
             { divider: true },
             {
@@ -937,6 +939,16 @@ export default function ModelsPage() {
         defaultCategory={activeType === 'all' ? undefined : activeType}
         onCreated={handleModelCreated}
         onAddProvider={() => setProviderModalOpen(true)}
+      />
+
+      <EditModelModal
+        modelId={editModelId}
+        opened={editModelId !== null}
+        onClose={() => setEditModelId(null)}
+        onSaved={() => {
+          void loadModels();
+          void loadDashboard();
+        }}
       />
 
       <CreateDynamicModelModal

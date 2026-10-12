@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
   Button,
@@ -81,6 +81,8 @@ import {
 import { calcCacheHitRate, formatPercent } from '@/lib/utils/tracingUtils';
 import { isAbnormalFinishReason } from '@/lib/shared/finishReason';
 import ModelGuardrailModal from '@/components/models/ModelGuardrailModal';
+import EditModelModal from '@/components/models/EditModelModal';
+import CreateDynamicModelModal, { type CandidateModel } from '@/components/models/CreateDynamicModelModal';
 import {
   bindingRowsFromStored,
   effectiveHooks,
@@ -472,6 +474,13 @@ export default function ModelDetailPage() {
   const deleteResource = useDeleteResource();
 
   const [model, setModel] = useState<ModelDetailDto | null>(null);
+  // The editor opens in place (an overlay); `?edit=1` is how old /edit links arrive.
+  const searchParams = useSearchParams();
+  const [editOpen, setEditOpen] = useState(searchParams.get('edit') === '1');
+  const [routerCandidates, setRouterCandidates] = useState<{ llm: CandidateModel[]; decision: CandidateModel[] }>({
+    llm: [],
+    decision: [],
+  });
   const [usage, setUsage] = useState<UsageAggregateDto | null>(null);
   const [logs, setLogs] = useState<UsageLogDto[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -758,6 +767,27 @@ export default function ModelDetailPage() {
   const dynamic = dynamicConfigOf(model);
   const isDynamic = Boolean(dynamic);
 
+  // A router's editor needs the models it can route to.
+  useEffect(() => {
+    if (!editOpen || !dynamic) return;
+    let cancelled = false;
+    void fetch('/api/models', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const all = (data.models ?? []) as Array<{ key: string; name: string; category: string; settings?: Record<string, unknown> }>;
+        setRouterCandidates({
+          llm: all.filter((m) => m.category === 'llm' && !dynamicConfigOf(m)).map((m) => ({ key: m.key, name: m.name })),
+          decision: all.filter((m) => m.category === 'decision').map((m) => ({ key: m.key, name: m.name })),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per open
+  }, [editOpen, Boolean(dynamic)]);
+
   // A Dynamic LLM has no real provider runtime, so its playground would error.
   const playgroundCategories = ['llm', 'stt', 'tts', 'ocr', 'image', 'embedding', 'decision'] as const;
   const hasPlayground =
@@ -783,6 +813,23 @@ export default function ModelDetailPage() {
 
   return (
     <PageContainer>
+      {dynamic ? (
+        <CreateDynamicModelModal
+          opened={editOpen}
+          onClose={() => setEditOpen(false)}
+          candidates={routerCandidates.llm}
+          decisionCandidates={routerCandidates.decision}
+          editModel={{ _id: model._id, name: model.name, description: model.description, key: model.key, dynamic }}
+          onSaved={() => void fetchDetail()}
+        />
+      ) : (
+        <EditModelModal
+          modelId={model._id}
+          opened={editOpen}
+          onClose={() => setEditOpen(false)}
+          onSaved={() => void fetchDetail()}
+        />
+      )}
       {/* Header */}
       <header className="ds-page-header" style={{ alignItems: 'center' }}>
         <div className="ds-row ds-gap-md" style={{ flex: 1, minWidth: 0 }}>
@@ -921,12 +968,7 @@ export default function ModelDetailPage() {
             </Menu.Target>
             <Menu.Dropdown>
               <Menu.Item
-                component={Link}
-                href={
-                  dynamic
-                    ? `/dashboard/models?editDynamic=${model._id}`
-                    : `/dashboard/models/${model._id}/edit`
-                }
+                onClick={() => setEditOpen(true)}
                 leftSection={<IconSettings size={14} />}
               >
                 {t('actions.edit')}
@@ -1054,6 +1096,7 @@ export default function ModelDetailPage() {
           modelId={String(model._id)}
           config={dynamic}
           logs={logs}
+          onEdit={() => setEditOpen(true)}
           onOpenLog={(l) => {
             setSelectedLog(l);
             openLogModal();
@@ -1068,6 +1111,7 @@ export default function ModelDetailPage() {
           onDelete={handleDelete}
           deleting={deleting}
           onGuardrailsSaved={() => void fetchDetail()}
+          onEdit={() => setEditOpen(true)}
         />
       ) : null}
 
@@ -1911,12 +1955,14 @@ function ConfigureTab({
   onDelete,
   deleting,
   onGuardrailsSaved,
+  onEdit,
 }: {
   model: ModelDetailDto;
   guardrails: GuardrailLite[];
   onDelete: () => void;
   deleting: boolean;
   onGuardrailsSaved: () => void;
+  onEdit: () => void;
 }) {
   const [guardrailModalOpen, setGuardrailModalOpen] = useState(false);
 
@@ -2220,11 +2266,10 @@ function ConfigureTab({
             style={{ fontSize: 12.5, marginBottom: 12 }}
           >
             Configuration is read-only here — apart from the guardrail bindings above,
-            which their own overlay saves. Use the edit page for everything else.
+            which their own overlay saves. Use the editor for everything else.
           </p>
           <Button
-            component={Link}
-            href={`/dashboard/models/${model._id}/edit`}
+            onClick={onEdit}
             color="teal"
             fullWidth
             leftSection={<IconSettings size={13} stroke={1.7} />}
@@ -2294,10 +2339,12 @@ function RoutingTab({
   config,
   logs,
   onOpenLog,
+  onEdit,
 }: {
   modelId: string;
   config: IDynamicRoutingConfig;
   logs: UsageLogDto[];
+  onEdit: () => void;
   onOpenLog: (l: UsageLogDto) => void;
 }) {
   const decisions = logs.filter((l) => l.routing);
@@ -2420,9 +2467,9 @@ function RoutingTab({
         <div className="ds-card ds-card-pad-lg">
           <div className="ds-row-between" style={{ marginBottom: 12 }}>
             <div className="ds-h4">Configuration</div>
-            <Link href={`/dashboard/models?editDynamic=${modelId}`} style={{ fontSize: 12.5 }}>
+            <Button variant="subtle" size="compact-xs" onClick={onEdit}>
               Edit routing
-            </Link>
+            </Button>
           </div>
           <Stack gap="xs">
             <div className="ds-row-between" style={{ fontSize: 12.5 }}>
