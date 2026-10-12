@@ -3191,7 +3191,7 @@ export const tr: typeof en = {
       clientToolTimeout: '{seconds} sn sonra zaman aşımına uğrar',
       clientToolHint: 'Çağıran (bir API istemcisi, webhook alıcısı ya da portalı gömen sayfa) aracı çalıştırıp sonucunu geri gönderir. Playground’da sonucu kendiniz yazabilirsiniz. Kimse cevap vermezse agent’a cevap gelmediği söylenir.',
       clientToolResult: 'Sonuç (JSON ya da metin)',
-      clientToolResultPlaceholder: '{"status": "shipped"}',
+      clientToolResultPlaceholder: '{"durum": "gönderildi"}',
       clientToolSend: 'Sonucu gönder',
       clientToolGiveUp: 'Vazgeç',
       clientToolGivenUp: 'Çağrıdan Studio’da vazgeçildi.',

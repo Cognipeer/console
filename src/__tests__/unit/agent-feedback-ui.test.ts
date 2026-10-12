@@ -120,12 +120,12 @@ describe('a tool the host page runs, in a session', () => {
 
   it('shows what is being asked of the page, not an approval', () => {
     const html = render(h(PendingActionList, { actions: [waiting], busy: false, onResolve: noop }));
-    expect(html).toContain('Waiting for the page');
+    expect(html).toContain('Waiting for the caller');
     expect(html).toContain('get_selection');
     expect(html).toContain('times out after 30 s');
     expect(html).toContain('Give up on it');
     expect(html).not.toContain('Approve');
-    expect(render(h(PendingActionList, { actions: [waiting], busy: false, onResolve: noop }), 'tr')).toContain('Sayfa bekleniyor');
+    expect(render(h(PendingActionList, { actions: [waiting], busy: false, onResolve: noop }), 'tr')).toContain('Çağıran bekleniyor');
   });
 
   it('giving up is an error answer, shown at once as the tool failing', () => {
