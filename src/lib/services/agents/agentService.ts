@@ -173,6 +173,9 @@ import {
     checkEmbeddedClientTools,
     clientToolErrorText,
     clientToolMeta,
+    clientToolNeedsApproval,
+    clientToolSurfaceOf,
+    clientToolsOnSurface,
     clientToolOutputText,
     clientToolPolicyName,
     resolveClientToolState,
@@ -2790,6 +2793,14 @@ export interface AgentChatRequest {
      * than parking on a prompt no one will see.
      */
     unattended?: boolean;
+    /**
+     * The caller can run the agent's client tools even though it cannot answer an
+     * approval (the OpenAI-shaped chat completions bridge: a `tool_calls` reply
+     * and a `tool` message are its way of asking and answering). Only meaningful
+     * with `unattended`; a client tool that would need approval is then not offered
+     * unless `humanInTheLoop.unattended` is `allow`.
+     */
+    answersClientTools?: boolean;
     /** Request a specific published version (API/SDK) */
     version?: number;
     /** When true, use the published version (default for API/SDK calls) */
@@ -3247,6 +3258,8 @@ async function buildLocalAgentRun(input: {
      * tool call or a question does: deny it, pause for Studio, or run it.
      */
     unattended?: boolean;
+    /** See `AgentChatRequest.answersClientTools`. */
+    answersClientTools?: boolean;
     /**
      * False when there is no conversation to park a paused turn on (a stateless
      * playground call). `pause` cannot be honoured there, so it behaves as
@@ -3453,17 +3466,34 @@ async function buildLocalAgentRun(input: {
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
 
-    // Tools that run in the page embedding the chat. Offered only to a run that says it is
-    // embedded AND can be paused (a Session) AND has a person on the other end. The caller
-    // (a portal) passes the declared tools only for an agent its admin allowed: what such a
-    // tool returns is typed in the end user's browser. They are kept out of the approval pass below, which only
-    // knows the tools built above; their own approval follows the agent's policy (see
-    // `clientToolNeedsApproval`), unless the embedding's admin exempted the tool.
+    // Tools the CALLER runs. Two sources: the ones the agent declares itself
+    // (`config.clientTools` — any channel: a portal page, an API client answering on the
+    // actions endpoint, or a backend answering the agent's callback) and the ones a portal
+    // passes for the embedding page (`input.embedded`). Offered only to a run that can be
+    // paused (a Session) and has someone to answer. What such a tool returns is typed in
+    // the caller's environment, so it reaches the model as untrusted input. They are kept
+    // out of the approval pass below, which only knows the tools built above; their own
+    // approval follows the agent's policy (see `clientToolNeedsApproval`), unless the tool
+    // is exempted by its declaration.
     const allowedTools = sessionAllowedTools(input.conversation?.metadata);
     let clientTools: AgentSdkToolInterface[] = [];
-    if (input.embedded && input.embedded.clientTools.length > 0) {
-        if (input.canPause === false || input.unattended || !input.conversation) {
+    // The agent's own declaration is offered on three surfaces, each switchable by the author
+    // (`clientToolSurfaces`, all on by default): the client API (its caller answers on the actions
+    // endpoint, from the agent's callback, or with a `tool` message), the dashboard playground, and
+    // a portal embedded in a host page. Never on A2A, MCP, realtime, schedules, evaluations or a
+    // non-embedded portal chat: nobody there can run a tool.
+    const callerCanAnswer = clientToolsOnSurface(config.clientToolSurfaces, clientToolSurfaceOf({ source: input.runtimeContext?.source, embedded: input.embedded }));
+    const ownClientTools = callerCanAnswer
+        ? (config.clientTools ?? []).filter((tool) => tool.enabled !== false).map(({ enabled: _enabled, ...tool }) => tool as Omit<typeof tool, 'needsApproval'>)
+        : [];
+    const declaredClientTools = [...ownClientTools, ...(input.embedded?.clientTools ?? [])];
+    if (declaredClientTools.length > 0) {
+        if (input.canPause === false || (input.unattended && !input.answersClientTools) || !input.conversation) {
             logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
+            // Only the agent's own declaration warns: a portal's tools are simply not for this run.
+            if (ownClientTools.length > 0) {
+                warnings.add('Client tools were not offered: this call has no session to pause (use a session) or nobody to answer.');
+            }
         } else {
             const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');
             const taken = new Set<string>([
@@ -3472,18 +3502,32 @@ async function buildLocalAgentRun(input: {
                 ...(DELEGATION_TOOL_NAMES as readonly string[]),
                 ASK_USER_TOOL_NAME,
             ]);
-            const offered = input.embedded.clientTools.filter((tool) => !taken.has(tool.name));
+            // The agent's own declaration wins over a portal's tool of the same name.
+            const seen = new Set<string>();
+            // An unattended caller that runs client tools (the chat completions bridge) cannot answer
+            // an approval: a tool the policy would ask about is only offered where the agent says
+            // unattended runs may go ahead (`allow`), and then without asking.
+            const offered = declaredClientTools.filter((tool) => {
+                if (taken.has(tool.name) || seen.has(tool.name)) return false;
+                if (input.unattended && clientToolNeedsApproval(tool, hitl) && hitl.unattended !== 'allow') {
+                    warnings.add(`Client tool "${tool.name}" was not offered: it needs approval and this caller cannot answer one.`);
+                    return false;
+                }
+                seen.add(tool.name);
+                return true;
+            });
             const checked = checkEmbeddedClientTools(offered);
             if (!checked.ok) {
                 logger.warn('Client tools not offered: the declared list is invalid', { agentKey, problem: checked.errors[0] });
-                warnings.add(`Host page tools were not offered: ${checked.errors[0].field} ${checked.errors[0].message}`);
+                warnings.add(`Client tools were not offered: ${checked.errors[0].field} ${checked.errors[0].message}`);
             } else {
                 const built = buildClientTools({
                     declared: checked.tools,
                     createToolFn: createTool,
                     guard: toolGuard,
                     allowedTools,
-                    approvalPolicy: hitl,
+                    // Nobody can be asked on an unattended run: what got this far was allowed to go ahead.
+                    approvalPolicy: input.unattended ? { ...hitl, toolApprovalEnabled: false } : hitl,
                 });
                 clientTools = built.tools;
                 toolDefinitions.push(...built.definitions);
@@ -4057,6 +4101,7 @@ async function runAgentChatTurn(
         threadId: conversationId,
         onMessageRewrite: (rewrite) => rewriteLedger.record(rewrite),
         unattended: request.unattended,
+        ...(request.answersClientTools ? { answersClientTools: true } : {}),
         ...(spend ? { spend } : {}),
     });
 
@@ -5040,6 +5085,9 @@ export interface AgentResumeRequest {
     onInvokeStart?: () => void;
     /** The host page this continuation answers for, when the chat is embedded — see `AgentPlaygroundChatRequest.embedded`. */
     embedded?: EmbeddedRunContext;
+    /** The continuation of an unattended caller (see `AgentChatRequest.unattended` / `answersClientTools`). */
+    unattended?: boolean;
+    answersClientTools?: boolean;
     /**
      * Set to continue a session that stopped on its spend budget rather than on
      * a pause: there are no answers to apply and no new user message — the loop
@@ -5329,6 +5377,8 @@ async function runAgentResumeTurn(
         config,
         runtimeContext,
         ...(request.embedded ? { embedded: request.embedded } : {}),
+        ...(request.unattended ? { unattended: true } : {}),
+        ...(request.answersClientTools ? { answersClientTools: true } : {}),
         actorId: source === 'agent' ? request.userId : `agent:${agentKey}`,
         source,
         route: source === 'agent' ? 'agent.chat' : 'agent.playground',

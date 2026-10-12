@@ -25,7 +25,8 @@ export function sessionWebhookEvents(
   events: readonly LoggedEvent[],
   scope: Pick<SessionWebhookScope, 'agentKey' | 'conversationId'>,
 ): Array<{ type: string; data: Record<string, unknown> }> {
-  const base = { conversationId: scope.conversationId, agentKey: scope.agentKey };
+  // `sessionId` is the id a client continues the session by (`session_id`); `conversationId` is the same id under its older name.
+  const base = { sessionId: scope.conversationId, conversationId: scope.conversationId, agentKey: scope.agentKey };
   const out: Array<{ type: string; data: Record<string, unknown> }> = [];
   for (const event of events) {
     switch (event.type) {

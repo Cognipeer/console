@@ -26,6 +26,7 @@ import {
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
+import { checkEmbeddedClientTools } from './agentClientTools';
 import { normalizeAttachmentsFolder } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 
@@ -219,6 +220,25 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
         if (execution.callbackSecret && !execution.callbackUrl) {
             issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
+        }
+    }
+
+    if (config.clientTools !== undefined) {
+        const checked = checkEmbeddedClientTools(config.clientTools);
+        if (!checked.ok) {
+            for (const problem of checked.errors) issues.errors.push({ field: problem.field, message: problem.message });
+        }
+    }
+
+    if (config.clientToolSurfaces !== undefined) {
+        const surfaces = config.clientToolSurfaces as unknown;
+        if (!surfaces || typeof surfaces !== 'object' || Array.isArray(surfaces)) {
+            issues.errors.push({ field: 'clientToolSurfaces', message: 'must be an object' });
+        } else {
+            for (const [key, value] of Object.entries(surfaces)) {
+                if (!['api', 'playground', 'portal'].includes(key)) issues.errors.push({ field: `clientToolSurfaces.${key}`, message: 'unknown surface (api, playground, portal)' });
+                else if (typeof value !== 'boolean') issues.errors.push({ field: `clientToolSurfaces.${key}`, message: 'must be true or false' });
+            }
         }
     }
 

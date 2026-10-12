@@ -1354,7 +1354,12 @@ export async function fireAgentRunCallback(
     tenantId: run.tenantId,
     projectId: run.projectId,
     type: `agent_run.${event}`,
-    data: { runId: publicAgentRunId(run), conversationId: run.conversationId, agentKey: run.agentKey },
+    data: {
+      runId: publicAgentRunId(run),
+      sessionId: run.conversationId,
+      conversationId: run.conversationId,
+      agentKey: run.agentKey,
+    },
   });
   if (!run.callbackUrl) return;
   // A new event starts a new count: a run that was `requires_action` (callback
@@ -1440,6 +1445,7 @@ export async function deliverAgentRunCallbackJob(
       event: eventName,
       createdAt: new Date().toISOString(),
       runId: publicRunId,
+      sessionId: payload.conversationId,
       conversationId: payload.conversationId,
       data: payload.data,
     });

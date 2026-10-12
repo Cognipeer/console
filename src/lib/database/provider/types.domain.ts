@@ -2497,6 +2497,43 @@ export interface IAgentConfig {
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
   /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
+  /**
+   * Tools the agent calls but the CALLER runs: a portal's host page, or the
+   * integrating backend (answers on the actions endpoint or from the agent's
+   * callback). The model sees them like any tool; a call pauses the turn as a
+   * `client_tool` pending action. Absent = none.
+   */
+  clientTools?: IAgentClientToolConfig[];
+  /**
+   * Where the client tools are offered. Each surface defaults to ON (absent = on);
+   * `false` keeps the tools away from that surface. Nothing else ever gets them:
+   * not A2A, MCP, realtime, schedules, evaluations, a non-embedded portal chat,
+   * or a call with no session to pause.
+   */
+  clientToolSurfaces?: IAgentClientToolSurfaces;
+}
+
+/** The surfaces an agent's client tools can be offered on (`IAgentConfig.clientToolSurfaces`). */
+export interface IAgentClientToolSurfaces {
+  /** The client API: sessions, `/agents/responses`, background runs, chat completions. Their callers answer on the actions endpoint (or reply with `tool` messages). */
+  api?: boolean;
+  /** The dashboard playground: the person testing answers on the call's card, or an external system answers through the API. */
+  playground?: boolean;
+  /** A portal embedded in a host page: the page runs the tool. */
+  portal?: boolean;
+}
+
+/** One tool the agent's caller runs (see `IAgentConfig.clientTools`). */
+export interface IAgentClientToolConfig {
+  /** The name the model calls; letters, digits and `_`, at most 64. */
+  name: string;
+  description: string;
+  /** JSON Schema of the arguments (an object schema). Absent = an object with any properties. */
+  inputSchema?: Record<string, unknown>;
+  /** How long the caller may take. Default 60, at most 600. */
+  timeoutSeconds?: number;
+  /** false = declared but switched off. Default true. Approval is managed under Approvals & questions (`humanInTheLoop.toolApproval.tools`). */
+  enabled?: boolean;
 }
 
 /** Whether a tool call waits for a person first. */

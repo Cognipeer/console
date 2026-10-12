@@ -16,7 +16,7 @@ export type ToolPolicyChoice = 'default' | AgentToolApprovalPolicy;
 
 export interface HitlToolRow {
     name: string;
-    origin: ToolOrigin | 'unknown';
+    origin: ToolOrigin | 'client' | 'unknown';
     sourceKey?: string;
     /** Read-only built-in: not asked about unless a per-tool setting says so. */
     readOnly: boolean;
@@ -36,6 +36,7 @@ export interface HitlToolRow {
 export function hitlToolRows(
     toolConfig: AgentToolConfig | undefined,
     hitl: IAgentHumanInTheLoopConfig | undefined,
+    clientTools?: ReadonlyArray<{ name: string }>,
 ): HitlToolRow[] {
     const resolved = resolveHitlConfig(hitl);
     const stored = hitl?.toolApproval?.tools ?? {};
@@ -53,6 +54,21 @@ export function hitlToolRows(
             readOnly: isReadOnlyTool(tool.name),
             choice: entry === 'always' || entry === 'never' ? entry : 'default',
             effective: toolApprovalPolicy(resolved, tool.name),
+        });
+    }
+
+    // Tools the caller runs (Configure → Client tools): approval is decided here, with the rest.
+    for (const tool of clientTools ?? []) {
+        const name = tool.name.trim();
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        const entry = stored[name];
+        rows.push({
+            name,
+            origin: 'client',
+            readOnly: false,
+            choice: entry === 'always' || entry === 'never' ? entry : 'default',
+            effective: toolApprovalPolicy(resolved, name),
         });
     }
 

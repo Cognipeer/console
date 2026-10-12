@@ -27,7 +27,7 @@ import {
     Tooltip,
 } from '@mantine/core';
 import { IconAlertTriangle, IconInfoCircle } from '@tabler/icons-react';
-import type { IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
+import type { IAgentClientToolConfig, IAgentHumanInTheLoopConfig } from '@/lib/database/provider/types.domain';
 import { HITL_DEFAULTS, resolveHitlConfig } from '@/lib/services/agents/agentHumanInTheLoop';
 import { useTranslations } from '@/lib/i18n';
 import { ConfigBlock, describedSelectOption } from './ConfigSection';
@@ -39,12 +39,14 @@ export interface AgentHumanInTheLoopPanelProps {
     onChange: (next: IAgentHumanInTheLoopConfig | undefined) => void;
     /** The agent's tools as currently edited (unsaved bindings included) — the per-tool table lists these. */
     toolConfig: AgentToolConfig;
+    /** The agent's client tools (Configure → Client tools): listed in the per-tool table too. */
+    clientTools?: IAgentClientToolConfig[];
 }
 
-export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig }: AgentHumanInTheLoopPanelProps) {
+export default function AgentHumanInTheLoopPanel({ value, onChange, toolConfig, clientTools }: AgentHumanInTheLoopPanelProps) {
     const t = useTranslations('agents.hitl');
     const resolved = resolveHitlConfig(value);
-    const rows = hitlToolRows(toolConfig, value);
+    const rows = hitlToolRows(toolConfig, value, clientTools);
     const set = (patch: Partial<IAgentHumanInTheLoopConfig>) => onChange(patchHitl(value, patch));
     const canPause = resolved.toolApprovalEnabled || resolved.askUserEnabled;
 

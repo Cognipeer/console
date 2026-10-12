@@ -171,6 +171,17 @@ describe('parameters (env)', () => {
 describe('session log events that are webhook events', () => {
   const scope = { agentKey: 'support', conversationId: 'conv-1' };
 
+  it('an action.required webhook never carries the request: no arguments, no tool name', () => {
+    const [call] = sessionWebhookEvents([
+      { type: 'action.required', data: { actionId: 'act_9', kind: 'client_tool', toolName: 'lookup_order', args: { id: 'A-1' }, timeoutSeconds: 20 } },
+      { type: 'action.required', data: { actionId: 'act_11', kind: 'tool_approval', toolName: 'sandbox_exec', args: { cmd: 'rm -rf' } } },
+    ], scope);
+    expect(call.data).toEqual({ sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', actionId: 'act_9', kind: 'client_tool' });
+    expect(JSON.stringify(sessionWebhookEvents([
+      { type: 'action.required', data: { actionId: 'act_11', kind: 'tool_approval', toolName: 'sandbox_exec', args: { cmd: 'rm -rf' } } },
+    ], scope))).not.toContain('rm -rf');
+  });
+
   it('maps idle, work_done, action.required and budget.reached to thin event data', () => {
     const events = sessionWebhookEvents([
       { type: 'agent.message', data: { content: 'secret text that must not leave' } },
@@ -182,10 +193,10 @@ describe('session log events that are webhook events', () => {
     ], scope);
 
     expect(events).toEqual([
-      { type: 'action.required', data: { conversationId: 'conv-1', agentKey: 'support', actionId: 'act_1', kind: 'tool_approval' } },
-      { type: 'budget.reached', data: { conversationId: 'conv-1', agentKey: 'support', spentUsd: 1.5, maxCostUsd: 1 } },
-      { type: 'session.idled', data: { conversationId: 'conv-1', agentKey: 'support', stopReason: 'end_turn' } },
-      { type: 'session.work_done', data: { conversationId: 'conv-1', agentKey: 'support' } },
+      { type: 'action.required', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', actionId: 'act_1', kind: 'tool_approval' } },
+      { type: 'budget.reached', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', spentUsd: 1.5, maxCostUsd: 1 } },
+      { type: 'session.idled', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support', stopReason: 'end_turn' } },
+      { type: 'session.work_done', data: { sessionId: 'conv-1', conversationId: 'conv-1', agentKey: 'support' } },
     ]);
   });
 

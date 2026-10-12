@@ -140,6 +140,9 @@ export interface ResolveAgentActionInput {
      * Only a host that knows the embedding sets this — never a client request.
      */
     embedded?: EmbeddedRunContext;
+    /** The caller cannot answer approvals but runs the agent's client tools (the chat completions bridge). */
+    unattended?: boolean;
+    answersClientTools?: boolean;
     /** Live callbacks for `?stream=1`. */
     stream?: {
         onToolEvent?: (event: AgentToolCallEvent) => void;
@@ -171,7 +174,7 @@ export type ResolveOutcome =
 /**
  * A page's result goes into the model's context as a tool result, so it is the
  * word of whoever answers. Only the person the chat belongs to — the page they
- * are looking at — may supply it; an administrator or another project member
+ * are looking at — or an API token that passed the approval policy may supply it; an administrator or another project member
  * (whom `approvers` lets approve a tool) may only give the call up, with an
  * error. Without this, anyone allowed to approve could put words in the model's
  * mouth in somebody else's session.
@@ -181,12 +184,17 @@ export type ResolveOutcome =
  * as untrusted user input (`markClientToolContent`).
  */
 export function mayAnswerClientTool(
-    actor: Pick<ResolveActor, 'userId'>,
+    actor: Pick<ResolveActor, 'userId'> & Partial<Pick<ResolveActor, 'channel' | 'apiTokenId'>>,
     conversation: Pick<IAgentConversation, 'createdBy'>,
     action: Pick<IAgentPendingAction, 'createdBy'>,
     resolution: IAgentPendingActionResolution,
 ): boolean {
     if (resolution.error !== undefined) return true;
+    // An API client answers for a tool the agent declared: the integrating backend (or the
+    // agent's callback receiver) runs it under its own token, which need not be the
+    // token that started the session. The token already passed the approval policy
+    // (`agent.approve`) before this check, and the result is still marked untrusted.
+    if (actor.channel === 'api' && actor.apiTokenId) return true;
     return Boolean(actor.userId)
         && (actor.userId === String(conversation.createdBy) || actor.userId === action.createdBy);
 }
@@ -664,6 +672,8 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     trigger: 'resume',
                     runtimeContext: input.runtimeContext,
                     ...(input.embedded ? { embedded: input.embedded } : {}),
+                    ...(input.unattended ? { unattended: true } : {}),
+                    ...(input.answersClientTools ? { answersClientTools: true } : {}),
                     ...(input.cancellationCell ? { cancellationCell: input.cancellationCell } : {}),
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),

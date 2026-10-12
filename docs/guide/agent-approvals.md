@@ -143,15 +143,25 @@ A background run that pauses has the non-terminal status `requires_action`; its 
 
 Over A2A, a paused task reports the state `input-required` with the requests in `metadata.pendingActions`. Unless the agent cancels the pending request on a new message, a `message/send` to a conversation that is still waiting is refused, with the ids to answer in the error's `data.pending_action_ids`. `tasks/cancel` is not supported (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that waits on a person is ended by answering its requests through the actions endpoint above (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids. A caller who may not answer those requests gets the JSON-RPC error `-32010` (with a `decision_id`) from `tasks/cancel` on such a task, and from a `message/send` that would cancel the request.
 
-## Tools the page runs (`client_tool`)
+## Client tools (`client_tool`)
 
-A chat that is embedded in a host page (a portal's widget) can let the agent use tools **that run in the page** — read what is selected, open a record — without any server-side connector. Two settings of the embedding have to agree before an agent gets one:
+A client tool is a tool the agent calls but **its caller runs** — read what is selected on a page, look an order up in the customer's own system, open a record — without any server-side connector. The author declares them on the agent: *Build → Configure → Client tools* (`config.clientTools`), each with a name, a description, an input schema and a timeout. Whether a call waits for a person is **not** set there: the tools appear in this section's per-tool table (as `client`) and follow *Ask before tools run* and the per-tool setting like any other tool. A tool can be switched off without deleting it.
 
-- **The embedding's admin lists the agents.** A portal passes the declared tools only to the agents its admin allowed for the page's tools (off by default, per agent). An agent that is not on that list never receives a tool from a page, whatever the embedding declares.
-- **The embedding's admin declares the tools** (name, description, input schema, timeout, and what to do about approval, below). Only those are offered, and only on a run that says it is embedded. Nothing declares them from a client request: they are never offered over the plain API.
+Where the tools are offered is explicit. *Configure → Client tools → Where these tools are offered* has one switch per surface, all on by default:
 
-::: warning What a page returns is user input
-The person controls their browser, so a tool's result is whatever they (or a script in their page) send. A tool such as `get_user_role` or `get_order_total` lets the person steer an agent that believes the value. **Do not let a client tool's result carry an authorization decision**: take identity, roles and permissions from the signed identity of the session and from server-side tools, never from the page.
+| Surface (switch) | Who runs the call | How the caller learns about it | How it answers |
+| --- | --- | --- | --- |
+| **API and webhooks** (`api`): sessions, `/agents/responses`, background runs | An API client, or whatever receives the callback or webhook | `requires_action` response with the call in `required_action`; the session event stream (`action.required`); for a background run the `requires_action` callback and the `action.required` webhook | `POST /api/client/v1/agents/sessions/{id}/actions/{actionId}` with `{ "output": … }` or `{ "error": "…" }`, under its own API token |
+| **API: OpenAI chat completions** (`api`, `model: "agent:<key>"`) | The OpenAI-style client | The reply is an assistant message with `tool_calls` (`finish_reason: "tool_calls"`, `id` = the call's id, plus `conversation_id`) | Send the next request with `conversation_id` and a `tool` message: `{ "role": "tool", "tool_call_id": "<id>", "content": "<result>" }` (`"is_error": true` reports the tool failing). Same authorization as the actions endpoint |
+| **Dashboard playground** (`playground`) | The person testing | The call waits on its card | Type the result on the card, give up, or let an external system answer through the API |
+| **Portal embedded in a page** (`portal`) | The page that embeds the portal | The frame posts `cp:tool_call` | The host answers with `cp:tool_result` |
+
+**Never offered anywhere else**: A2A, MCP, realtime, schedules, evaluations and red-team cases, the Assistants API, a portal chat that is not embedded in a page, and a call without a session to pause (the response carries a warning). On the chat completions wire nobody can answer an approval, so a client tool that the approval policy would ask about is only offered when *When nobody can answer* is *Run without approval* — and then it runs without asking.
+
+An embedded portal can also declare tools of its own for its page. Where both name the same tool, the agent's declaration wins.
+
+::: warning What a caller returns is user input
+Whoever answers decides the result: a person's browser, or a backend that forwards what it was given. A tool such as `get_user_role` or `get_order_total` lets that party steer an agent that believes the value. **Do not let a client tool's result carry an authorization decision**: take identity, roles and permissions from the signed identity of the session and from server-side tools, never from a client tool.
 
 The console helps, but it cannot make the value true: the description the model sees says the result is untrusted, every result reaches the model behind a one-line notice saying so, the arguments are checked against the declared schema and the result against the 64 KB limit, and the agent's guardrails screen it like any tool result.
 :::
@@ -170,13 +180,39 @@ A call pauses the turn like an approval, as a pending action of kind `client_too
 }
 ```
 
-The page runs the tool and answers with `output` or `error` (table above). The turn then continues; the model reads `output` as the tool's result (after the agent's `tool.post` guardrails) and `error` as the tool failing.
+### From an API client
 
-- A page that does not answer within the tool's timeout — plus a few seconds for the round trip — is answered by the console with the error *The host page did not answer.*, whatever the agent's *On timeout* setting says, and the turn goes on as a background job.
-- **Approval follows the agent's policy.** Unless the admin decided for the tool, a call is treated like a call to any other tool of the agent: with *Approvals & questions* on and the default *ask*, a person approves it first (an ordinary `tool_approval`), and only then the page is asked; the *read-only* exemption of the agent's own lookup tools does not apply. The admin can decide per tool: `needsApproval: true` always asks, `needsApproval: false` exempts the tool from the agent's policy (for a harmless one, such as reading the page title), and leaving it out follows the agent.
+```js
+// The agent declares `lookup_order`. Start (or continue) a session, then answer the call.
+const base = 'https://console.example.com/api/client/v1';
+const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+let res = await (await fetch(`${base}/agents/responses`, {
+  method: 'POST', headers,
+  body: JSON.stringify({ agent: 'support', session_id: sessionId, input: 'Where is order A-1?' }),
+})).json();
+
+while (res.status === 'requires_action') {
+  for (const action of res.required_action.actions.filter((a) => a.kind === 'client_tool')) {
+    let answer;
+    try { answer = { output: await tools[action.tool_name](action.args) }; }
+    catch (e) { answer = { error: String(e.message) }; }
+    res = await (await fetch(`${base}/agents/sessions/${conversationId}/actions/${action.id}`, {
+      method: 'POST', headers, body: JSON.stringify(answer),
+    })).json();   // the turn continues; a further call comes back as requires_action again
+  }
+}
+```
+
+With `"background": true` (or the agent's default callback under *Execution*) nothing waits on the connection: the `requires_action` callback and the `action.required` webhook carry the same `required_action`, and the receiver answers on the same endpoint. A background run stays `requires_action` until every call is answered or times out.
+
+The caller runs the tool and answers with `output` or `error` (table above). The turn then continues; the model reads `output` as the tool's result (after the agent's `tool.post` guardrails) and `error` as the tool failing.
+
+- A caller that does not answer within the tool's timeout — plus a few seconds for the round trip — is answered by the console with the error *The host page did not answer.*, whatever the agent's *On timeout* setting says, and the turn goes on as a background job.
+- **Approval follows the agent's policy.** A call is treated like a call to any other tool of the agent: with *Approvals & questions* on and the default *ask*, a person approves it first (an ordinary `tool_approval`), and only then the page is asked; the *read-only* exemption of the agent's own lookup tools does not apply. Set a single tool to *always* or *never* in the per-tool table (`never` suits a harmless one, such as reading the page title).
 - `tool.pre` guardrails see the arguments before the page does. The audit trail (`agent.client_tool.resolve`) records the call and its result as digests and sizes, never as content; the session log has `action.required` / `action.resolved` and an `agent.tool_result` with `source: client`.
-- Only the person the chat belongs to can supply the page's `output` (it goes into the model's context as a tool result); an administrator or another project member — whom *Who can answer* lets approve a tool — can only give the call up with an `error`. Tool-access guardrails see the tool as `agent.client.<name>`.
-- Studio shows the open call as *Waiting for the page*, with a **Give up on it** button that answers with an error.
+- Only the person the chat belongs to, or an API token that is allowed to answer under *Who can answer*, can supply the `output` (it goes into the model's context as a tool result); an administrator or another project member answering from the dashboard can only give the call up with an `error`. Tool-access guardrails see the tool as `agent.client.<name>`.
+- The dashboard shows the open call as *Waiting for the page*, with a **Give up on it** button that answers with an error.
 
 ## Unattended runs
 
