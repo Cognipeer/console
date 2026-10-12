@@ -422,6 +422,7 @@ export type {
   IAgentSandboxConfig,
   IAgentExecutionConfig,
   IAgentAttachmentsConfig,
+  IAgentClientToolConfig,
   IAgentMessageAttachment,
   IAgentHumanInTheLoopConfig,
   AgentToolApprovalPolicy,

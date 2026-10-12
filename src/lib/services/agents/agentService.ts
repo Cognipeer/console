@@ -3452,17 +3452,33 @@ async function buildLocalAgentRun(input: {
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
 
-    // Tools that run in the page embedding the chat. Offered only to a run that says it is
-    // embedded AND can be paused (a Session) AND has a person on the other end. The caller
-    // (a portal) passes the declared tools only for an agent its admin allowed: what such a
-    // tool returns is typed in the end user's browser. They are kept out of the approval pass below, which only
-    // knows the tools built above; their own approval follows the agent's policy (see
-    // `clientToolNeedsApproval`), unless the embedding's admin exempted the tool.
+    // Tools the CALLER runs. Two sources: the ones the agent declares itself
+    // (`config.clientTools` — any channel: a portal page, an API client answering on the
+    // actions endpoint, or a backend answering the agent's callback) and the ones a portal
+    // passes for the embedding page (`input.embedded`). Offered only to a run that can be
+    // paused (a Session) and has someone to answer. What such a tool returns is typed in
+    // the caller's environment, so it reaches the model as untrusted input. They are kept
+    // out of the approval pass below, which only knows the tools built above; their own
+    // approval follows the agent's policy (see `clientToolNeedsApproval`), unless the tool
+    // is exempted by its declaration.
     const allowedTools = sessionAllowedTools(input.conversation?.metadata);
     let clientTools: AgentSdkToolInterface[] = [];
-    if (input.embedded && input.embedded.clientTools.length > 0) {
+    // The agent's own declaration is offered where the caller can answer: an API client (sessions,
+    // background runs — it answers on the actions endpoint or from the agent's callback) or a
+    // portal's embedding page. Not to the dashboard playground or a non-embedded portal chat,
+    // which have nobody to run the tool.
+    const callerCanAnswer = input.runtimeContext?.source === 'api' || Boolean(input.embedded);
+    const ownClientTools = callerCanAnswer
+        ? (config.clientTools ?? []).filter((tool) => tool.enabled !== false).map(({ enabled: _enabled, ...tool }) => tool)
+        : [];
+    const declaredClientTools = [...ownClientTools, ...(input.embedded?.clientTools ?? [])];
+    if (declaredClientTools.length > 0) {
         if (input.canPause === false || input.unattended || !input.conversation) {
             logger.debug('Client tools not offered: the run has no session to pause or no person to answer', { agentKey });
+            // Only the agent's own declaration warns: a portal's tools are simply not for this run.
+            if (ownClientTools.length > 0) {
+                warnings.add('Client tools were not offered: this call has no session to pause (use a session) or nobody to answer.');
+            }
         } else {
             const { ASK_USER_TOOL_NAME, CONTROL_PLANE_TOOL_NAMES, DELEGATION_TOOL_NAMES } = await import('@cognipeer/agent-sdk');
             const taken = new Set<string>([
@@ -3471,11 +3487,17 @@ async function buildLocalAgentRun(input: {
                 ...(DELEGATION_TOOL_NAMES as readonly string[]),
                 ASK_USER_TOOL_NAME,
             ]);
-            const offered = input.embedded.clientTools.filter((tool) => !taken.has(tool.name));
+            // The agent's own declaration wins over a portal's tool of the same name.
+            const seen = new Set<string>();
+            const offered = declaredClientTools.filter((tool) => {
+                if (taken.has(tool.name) || seen.has(tool.name)) return false;
+                seen.add(tool.name);
+                return true;
+            });
             const checked = checkEmbeddedClientTools(offered);
             if (!checked.ok) {
                 logger.warn('Client tools not offered: the declared list is invalid', { agentKey, problem: checked.errors[0] });
-                warnings.add(`Host page tools were not offered: ${checked.errors[0].field} ${checked.errors[0].message}`);
+                warnings.add(`Client tools were not offered: ${checked.errors[0].field} ${checked.errors[0].message}`);
             } else {
                 const built = buildClientTools({
                     declared: checked.tools,

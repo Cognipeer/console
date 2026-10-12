@@ -593,3 +593,101 @@ describe('who may answer for the page', () => {
     expect(await check(ownerActor, {})).toMatchObject({ kind: 'invalid' });
   });
 });
+
+describe('tools the agent declares itself (config.clientTools)', () => {
+  const DECLARED = {
+    clientTools: [{
+      name: 'lookup_order',
+      description: 'Look an order up in the customer\'s own system.',
+      inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      timeoutSeconds: 20,
+    }],
+  };
+  const orderScript = () => (call: number, messages: Array<{ role: string; content: unknown }>): Reply => {
+    if (call === 0) return { role: 'assistant', content: '', tool_calls: [toolCall('c1', 'lookup_order', { id: 'A-1' })] };
+    const toolMessage = [...messages].reverse().find((m) => m.role === 'tool');
+    return { role: 'assistant', content: `order: ${String(toolMessage?.content ?? '')}` };
+  };
+  const API = { runtimeContext: { userId: OWNER, source: 'api' as const } };
+  const apiActor: ResolveActor = { userId: 'service-user', channel: 'api', apiTokenId: 'tok-1' };
+
+  it('are offered to a session run with no embedding page at all (an API client)', async () => {
+    await createAgent(DECLARED);
+    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+    await chat(String((await newConversation())._id), 'hi', API);
+    expect(model.offered.flat()).toContain('lookup_order');
+    expect(model.described.get('lookup_order')).toContain(CLIENT_TOOL_DESCRIPTION_NOTE);
+  });
+
+  it('a tool switched off is not offered', async () => {
+    await createAgent({ clientTools: [{ ...DECLARED.clientTools[0], enabled: false }] });
+    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+    await chat(String((await newConversation())._id), 'hi', API);
+    expect(model.offered.flat()).not.toContain('lookup_order');
+  });
+
+  it('are not offered to the dashboard playground or a non-embedded portal chat (nobody there can run them)', async () => {
+    await createAgent(DECLARED);
+    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+    await chat(String((await newConversation())._id), 'hi');
+    expect(model.offered.flat()).not.toContain('lookup_order');
+  });
+
+  it('are not offered to a stateless call (nothing to park the pause on)', async () => {
+    await createAgent(DECLARED);
+    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+    const result = await executePlaygroundChatLocal({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, agentKey: AGENT_KEY, userMessage: 'hi', runtimeContext: API.runtimeContext,
+    });
+    expect(model.offered.flat()).not.toContain('lookup_order');
+    expect(result.warnings?.join(' ')).toContain('no session to pause');
+  });
+
+  it('the agent\'s declaration wins over a portal\'s tool of the same name; both sources are offered together', async () => {
+    await createAgent(DECLARED);
+    const model = scriptModel(() => ({ role: 'assistant', content: 'hello' }));
+    await chat(String((await newConversation())._id), 'hi', {
+      embedded: { clientTools: [{ name: 'lookup_order', description: 'portal copy' }, ...EMBEDDED.clientTools] },
+    });
+    expect(model.offered.flat()).toEqual(expect.arrayContaining(['lookup_order', 'get_selection']));
+    expect(model.described.get('lookup_order')).toContain('Look an order up');
+    expect(model.described.get('lookup_order')).not.toContain('portal copy');
+  });
+
+  it('an API client pauses the turn, answers under a DIFFERENT token, and the same turn goes on — without the host passing the tools again', async () => {
+    await createAgent(DECLARED);
+    const model = scriptModel(orderScript());
+    const id = String((await newConversation())._id);
+    const paused = await chat(id, 'where is order A-1?', API);
+    expect(paused.stopReason).toBe('paused');
+    expect(paused.pendingActions?.[0]).toMatchObject({ kind: 'client_tool', toolName: 'lookup_order', args: { id: 'A-1' }, timeoutSeconds: 20 });
+
+    const outcome = await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId: paused.pendingActions![0].id,
+      body: { output: { status: 'shipped' } }, actor: apiActor, authorize: allowAll, mode: 'sync',
+    });
+    expect(outcome.kind).toBe('resumed');
+    if (outcome.kind !== 'resumed') return;
+    expect(String(model.seen.at(-1)!.find((m) => m.role === 'tool')?.content)).toBe(untrusted('{"status":"shipped"}'));
+    const resolved = (await db.listAgentSessionEvents(id)).find((e) => e.type === 'action.resolved')!.data as Record<string, unknown>;
+    expect(resolved).toMatchObject({ kind: 'client_tool', toolName: 'lookup_order', ok: true, channel: 'api' });
+  });
+
+  it('a signed-in member without an API token still cannot put a result into someone else\'s session', async () => {
+    await createAgent(DECLARED);
+    scriptModel(orderScript());
+    const id = String((await newConversation())._id);
+    const paused = await chat(id, 'go', API);
+    const refused = await resolveAgentPendingAction({
+      tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, conversationId: id, actionId: paused.pendingActions![0].id,
+      body: { output: 'x' }, actor: { userId: 'member-2', channel: 'dashboard' }, authorize: allowAll, mode: 'sync',
+    });
+    expect(refused).toMatchObject({ kind: 'forbidden' });
+  });
+
+  it('the agent\'s config is refused at save time when a declared tool is malformed', async () => {
+    const { validateAgentConfigShape } = await import('@/lib/services/agents/agentConfigValidation');
+    const issues = validateAgentConfigShape({ modelKey: 'gpt-4o', clientTools: [{ name: 'bad name', description: '' }] } as IAgentConfig);
+    expect(JSON.stringify(issues)).toContain('clientTools.0');
+  });
+});

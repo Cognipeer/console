@@ -26,6 +26,7 @@ import {
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
+import { checkEmbeddedClientTools } from './agentClientTools';
 import { normalizeAttachmentsFolder } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
 
@@ -219,6 +220,13 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         }
         if (execution.callbackSecret && !execution.callbackUrl) {
             issues.errors.push({ field: 'execution.callbackSecret', message: 'needs a callback URL' });
+        }
+    }
+
+    if (config.clientTools !== undefined) {
+        const checked = checkEmbeddedClientTools(config.clientTools);
+        if (!checked.ok) {
+            for (const problem of checked.errors) issues.errors.push({ field: problem.field, message: problem.message });
         }
     }
 

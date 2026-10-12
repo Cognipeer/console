@@ -13513,10 +13513,10 @@ components:
           type: boolean
           description: "User question. Skip the question; the model is told it was not answered."
         output:
-          description: "Client tool. The page's result: any JSON value, at most 64 KB (`400` over that, and the request stays open). The model reads it as the tool's result, after the agent's `tool.post` guardrails, marked as untrusted user input (it must never carry an authorization decision)."
+          description: "Client tool. The caller's result: any JSON value, at most 64 KB (`400` over that, and the request stays open). The model reads it as the tool's result, after the agent's `tool.post` guardrails, marked as untrusted user input (it must never carry an authorization decision)."
         error:
           type: string
-          description: "Client tool. The page could not run the tool. At most 1000 characters; the model reads it as the tool failing."
+          description: "Client tool. The caller could not run the tool. At most 1000 characters; the model reads it as the tool failing."
         background:
           type: boolean
           description: Continue the turn as a background run (`202`). Same as the `X-Cognipeer-Background` header.
@@ -13544,7 +13544,7 @@ components:
           description: "`tool_approval` and `client_tool`: the arguments the model proposed."
         timeout_seconds:
           type: integer
-          description: "`client_tool`: how long the page may take; after that (plus a few seconds) the call is answered with an error and the turn goes on."
+          description: "`client_tool`: how long the caller may take; after that (plus a few seconds) the call is answered with an error and the turn goes on."
         questions:
           type: array
           description: "`user_question`: the questions to answer."

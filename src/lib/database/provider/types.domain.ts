@@ -2497,6 +2497,28 @@ export interface IAgentConfig {
   humanInTheLoop?: IAgentHumanInTheLoopConfig;
   /** Files users may attach to a session. Absent = not accepted. */
   attachments?: IAgentAttachmentsConfig;
+  /**
+   * Tools the agent calls but the CALLER runs: a portal's host page, or the
+   * integrating backend (answers on the actions endpoint or from the agent's
+   * callback). The model sees them like any tool; a call pauses the turn as a
+   * `client_tool` pending action. Absent = none.
+   */
+  clientTools?: IAgentClientToolConfig[];
+}
+
+/** One tool the agent's caller runs (see `IAgentConfig.clientTools`). */
+export interface IAgentClientToolConfig {
+  /** The name the model calls; letters, digits and `_`, at most 64. */
+  name: string;
+  description: string;
+  /** JSON Schema of the arguments (an object schema). Absent = an object with any properties. */
+  inputSchema?: Record<string, unknown>;
+  /** How long the caller may take. Default 60, at most 600. */
+  timeoutSeconds?: number;
+  /** Absent = the agent's approval policy decides; `true` = always ask; `false` = exempt. */
+  needsApproval?: boolean;
+  /** false = declared but switched off. Default true. */
+  enabled?: boolean;
 }
 
 /** Whether a tool call waits for a person first. */
