@@ -178,6 +178,7 @@ import {
     resolveClientToolState,
     type EmbeddedRunContext,
 } from './agentClientTools';
+import { messageIdOf } from './messageIds';
 import {
     applyToolApprovals,
     denyUnattendedTools,
@@ -3797,7 +3798,11 @@ function toAgentChatResponse(input: {
     const { reasoning, outcome, usage } = input;
     const requiresAction = (input.pendingActions?.length ?? 0) > 0;
     const responseId = `resp_${input.conversationId}`;
-    const msgId = `msg_${Date.now().toString(36)}`;
+    // The id of the answer is the id a client rates it by (`PUT .../messages/{id}/feedback`): the stored message's own.
+    const answerIndex = input.messages.map((message) => message.role).lastIndexOf('assistant');
+    const msgId = answerIndex >= 0
+        ? messageIdOf(input.conversationId, answerIndex, input.messages[answerIndex])
+        : `msg_${Date.now().toString(36)}`;
     const reasoningId = `rs_${Date.now().toString(36)}`;
     const stopped = outcome && outcome.stopReason !== 'completed' ? outcome : undefined;
 

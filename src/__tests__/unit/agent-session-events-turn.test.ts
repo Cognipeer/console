@@ -107,6 +107,7 @@ vi.mock('@cognipeer/agent-sdk', () => {
 import { getDatabase } from '@/lib/database';
 import { createMockDb } from '../helpers/db.mock';
 import { executeAgentChatLocal } from '@/lib/services/agents/agentService';
+import { messageIdOf } from '@/lib/services/agents/messageIds';
 
 const TENANT_DB = 'tenant_acme';
 const TENANT_ID = 'tenant-acme';
@@ -192,6 +193,15 @@ describe('executeAgentChatLocal — session events and steps', () => {
     expect(assistant.steps).toEqual([
       expect.objectContaining({ id: 'e1', name: 'lookup', args: { q: 'x' }, output: { hit: 1 }, status: 'success' }),
     ]);
+  });
+
+  it('names the answer in the response by the id a client rates it with (the stored message\'s own)', async () => {
+    const response = await run();
+    const update = db.updateAgentConversation.mock.calls[0][1] as unknown as { messages: Array<{ role: string; id?: string; timestamp: Date }> };
+    const index = update.messages.map((message) => message.role).lastIndexOf('assistant');
+    const item = response.output.find((entry) => entry.type === 'message');
+    expect(item?.id).toBe(messageIdOf(CONVERSATION_ID, index, update.messages[index]));
+    expect(item?.id).toMatch(/^msg_[0-9a-f]{20}$/);
   });
 
   it('logs the turn: user message, running, tool use/result, answer, idle(end_turn), work_done', async () => {

@@ -16,7 +16,7 @@
  * never disturbed — or by its index.
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { createLogger } from '@/lib/core/logger';
 import { runWithTenantScope } from '@/lib/database';
@@ -33,6 +33,9 @@ import type { IAgentConversationMessage } from '@/lib/database/provider/types.do
 import { recordAuditLog } from '@/lib/services/audit/auditService';
 import { publishWebhookEvent } from '@/lib/services/webhooks/webhookService';
 import { runWithTenantDb } from './agentRunService';
+import { messageIdOf } from './messageIds';
+
+export { messageIdOf };
 
 const logger = createLogger('agents:feedback');
 
@@ -61,19 +64,6 @@ export class FeedbackError extends Error {
         this.status = status;
         this.code = code;
     }
-}
-
-/**
- * The stable id of the message at `index`. An explicit `id` on the message wins;
- * otherwise it is derived from where and when the message was written — the same
- * for every reader, and different for a message that replaces it after a
- * regenerate (new timestamp).
- */
-export function messageIdOf(conversationId: string, index: number, message: Pick<IAgentConversationMessage, 'id' | 'timestamp'> | undefined): string {
-    if (message?.id) return message.id;
-    const ms = message?.timestamp ? new Date(message.timestamp as unknown as string | Date).getTime() : 0;
-    const digest = createHash('sha256').update(`${conversationId}|${index}|${Number.isFinite(ms) ? ms : 0}`).digest('hex').slice(0, 20);
-    return `msg_${digest}`;
 }
 
 export type MessageRef = { id?: string; index?: number };

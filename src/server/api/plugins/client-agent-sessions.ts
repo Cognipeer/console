@@ -32,6 +32,7 @@ import {
   type ResolveOutcome,
 } from '@/lib/services/agents/agentActionResolution';
 import { logAgentRouteError } from '@/lib/services/agents/agentErrorLogging';
+import { FeedbackError, recordMessageFeedback } from '@/lib/services/agents/agentFeedback';
 import { normalizeClientResolveBody, toClientErrorBody, toClientPendingAction } from '@/lib/services/agents/clientWire';
 import { activeSessionBudget, clientBudgetViolation, parseSessionBudget, roundUsd, sessionSpentUsd } from '@/lib/services/agents/sessionBudget';
 import {
@@ -506,6 +507,72 @@ export const clientAgentSessionsApiPlugin: FastifyPluginAsync = async (app) => {
   // `requires_action` again if it paused again) or, with `background: true`,
   // as a run (202). Nothing is returned for a request someone else answered
   // first (409), that ran out of time (410), or that this caller may not answer (403).
+  // ── Rating an answer ──
+  //
+  // `PUT .../messages/{message_id}/feedback` with `{ rating: "up" | "down", reasons?, comment? }` stores the person's
+  // rating of one answer (one per person per answer; rating again replaces it) and `DELETE` withdraws it. The
+  // message id is the `id` of the message item the response returned. Only the person the session belongs to may
+  // rate its answers: the token's owner, or the end user a delegating token acts for. It is the same record, trace
+  // event, audit entry and `feedback.recorded` webhook as a portal's thumbs, with `channel: "api"`.
+  const rateAnswer = (withdraw: boolean) => withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const conversation = await requireSession(request, reply, ctx, 'view');
+      if (!conversation) return reply;
+      const userId = String(ctx.tokenRecord.userId ?? '');
+      if (!userId || conversation.createdBy !== userId) {
+        return reply.code(403).send(apiErrorBody(
+          'permission_error', 'Only the person who started a session can rate its answers.', 'not_session_owner',
+        ));
+      }
+      const { messageId } = request.params as { messageId: string };
+      const body = withdraw ? {} : readJsonBody<Record<string, unknown>>(request);
+      if (!withdraw && body.rating !== 'up' && body.rating !== 'down') {
+        return reply.code(400).send(apiErrorBody('invalid_request_error', '`rating` must be "up" or "down"', 'invalid_rating'));
+      }
+      const userAgent = request.headers['user-agent'];
+      const result = await recordMessageFeedback({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        conversationId: String(conversation._id),
+        message: { id: messageId },
+        userId,
+        ...(ctx.user?.email ? { email: ctx.user.email } : {}),
+        channel: 'api',
+        rating: withdraw ? null : (body.rating as 'up' | 'down'),
+        ...(withdraw ? {} : { reasons: body.reasons, comment: body.comment }),
+        audit: {
+          ipAddress: request.ip,
+          ...(typeof userAgent === 'string' ? { userAgent } : {}),
+          ...(request.apiRequestId ? { requestId: request.apiRequestId } : {}),
+        },
+      });
+      const base = {
+        object: 'agent.message.feedback',
+        session_id: String(conversation._id),
+        message_id: result.messageId,
+      };
+      if (withdraw) return reply.code(200).send({ ...base, deleted: true });
+      const stored = result.feedback!;
+      return reply.code(result.created ? 201 : 200).send({
+        ...base,
+        rating: stored.rating,
+        reasons: stored.reasons,
+        comment: stored.comment ?? null,
+        created_at: isoOrNull(stored.createdAt),
+        updated_at: isoOrNull(stored.updatedAt),
+      });
+    } catch (error) {
+      if (error instanceof FeedbackError) {
+        return reply.code(error.status).send(apiErrorBody(error.status === 404 ? 'not_found_error' : 'invalid_request_error', error.message, error.code));
+      }
+      logger.error('Client agent message feedback error', { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  });
+  app.put('/client/v1/agents/sessions/:conversationId/messages/:messageId/feedback', rateAnswer(false));
+  app.delete('/client/v1/agents/sessions/:conversationId/messages/:messageId/feedback', rateAnswer(true));
+
   app.post('/client/v1/agents/sessions/:conversationId/actions/:actionId', withClientApiRequestContext(async (request, reply, ctx) => {
     try {
       const conversation = await requireSession(request, reply, ctx, 'none');

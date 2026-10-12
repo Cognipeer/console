@@ -847,6 +847,114 @@ paths:
           $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
+  /agents/sessions/{conversationId}/messages/{messageId}/feedback:
+    put:
+      tags:
+        - Agent Sessions
+      summary: Rate an answer
+      description: "Stores the rating of one answer: helpful (`up`) or not helpful (`down`, optionally with reasons). One rating per person per answer; rating again replaces it. `messageId` is the `id` of the message item the response returned. Only the person the session belongs to can rate its answers: the token's owner, or the end user a delegating token acts for. The rating is the same record the portal's thumbs write (`channel: api`): it shows in the agent's Feedback tab, adds a trace event and an audit entry, and sends the `feedback.recorded` webhook event (the comment itself is never sent)."
+      operationId: rateAgentSessionMessage
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: messageId
+          in: path
+          required: true
+          description: The id of the assistant message (`output[].id` of the response).
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentMessageFeedbackRequest"
+      responses:
+        "200":
+          description: The earlier rating of this answer by this person was replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentMessageFeedback"
+        "201":
+          description: The answer was rated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentMessageFeedback"
+        "400":
+          description: "`invalid_rating`, `invalid_reasons`, `invalid_comment`, `comment_too_long` or `not_an_answer` (only an assistant message can be rated)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The session belongs to somebody else (`not_session_owner`), or the caller may not look at it."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "The session (`session_not_found`) or the message (`message_not_found`) was not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags:
+        - Agent Sessions
+      summary: Withdraw a rating
+      description: Deletes this person's rating of the answer. Withdrawing a rating that does not exist is not an error.
+      operationId: withdrawAgentSessionMessageRating
+      parameters:
+        - $ref: "#/components/parameters/AgentSessionId"
+        - name: messageId
+          in: path
+          required: true
+          description: The id of the assistant message.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The rating was withdrawn.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    enum:
+                      - agent.message.feedback
+                  session_id:
+                    type: string
+                  message_id:
+                    type: string
+                  deleted:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The session belongs to somebody else (`not_session_owner`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "The session or the message was not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /agents/sessions/{conversationId}/files:
     get:
       tags:
@@ -1068,7 +1176,7 @@ paths:
                 type: string
                 format: binary
         "416":
-          description: The range starts past the end of the file (`Content-Range: bytes */<size>`).
+          description: "The range starts past the end of the file (`Content-Range: bytes */<size>`)."
         "200":
           description: The file's bytes.
           headers:
@@ -13480,6 +13588,54 @@ components:
       properties:
         agent:
           $ref: "#/components/schemas/AgentSummary"
+    AgentMessageFeedbackRequest:
+      type: object
+      required:
+        - rating
+      properties:
+        rating:
+          type: string
+          enum:
+            - up
+            - down
+        reasons:
+          type: array
+          description: "Why an answer was not helpful, any of `inaccurate`, `incomplete`, `off_topic`, `too_long`, `unsafe`, `other`. Only kept with `down`."
+          items:
+            type: string
+        comment:
+          type: string
+          maxLength: 1000
+          description: Free text, up to 1000 characters.
+    AgentMessageFeedback:
+      type: object
+      properties:
+        object:
+          type: string
+          enum:
+            - agent.message.feedback
+        session_id:
+          type: string
+        message_id:
+          type: string
+        rating:
+          type: string
+          enum:
+            - up
+            - down
+        reasons:
+          type: array
+          items:
+            type: string
+        comment:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     AgentActionResolution:
       type: object
       description: "The answer to a pending action. For a `tool_approval` send `decision` (and optionally the rest); for a `user_question` send `answers`, or `cancelled: true` to skip it; for a `client_tool` send `output`, or `error` when the page could not do it. `approvedArgs` / `rememberForSession` are accepted as aliases of `approved_args` / `remember_for_session`."
@@ -14105,6 +14261,7 @@ components:
       properties:
         id:
           type: string
+          description: "The id of the stored answer (`msg_` and 20 hex characters). Rate it with `PUT /agents/sessions/{conversationId}/messages/{messageId}/feedback`."
         type:
           type: string
           enum:

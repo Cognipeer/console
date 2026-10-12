@@ -22,6 +22,28 @@ A person can rate an answer **helpful** or **not helpful**. A thumbs down can ca
 
 Surfaces call `recordMessageFeedback` from `@/lib/services/agents`; it takes the session, the message, the person, the channel (`portal`, `embed`, …) and whether comments are allowed on that surface.
 
+
+### From your own client (API)
+
+A client that calls the agent through the API can send the same rating. The `id` of the message item in a response is the id to rate:
+
+```http
+PUT /api/client/v1/agents/sessions/{session_id}/messages/{message_id}/feedback
+Content-Type: application/json
+
+{ "rating": "down", "reasons": ["inaccurate"], "comment": "The date is wrong." }
+```
+
+| | |
+| --- | --- |
+| `rating` | `up` or `down` (required). |
+| `reasons` | Any of `inaccurate`, `incomplete`, `off_topic`, `too_long`, `unsafe`, `other`. Kept with `down`. |
+| `comment` | Free text, up to 1000 characters. The API always accepts comments; a portal can turn them off for itself. |
+
+Answers `201` for a new rating and `200` when it replaced the person's earlier one. `DELETE` on the same path withdraws it.
+
+Only the person the session belongs to can rate its answers: the token's owner, or the end user a delegating token acts for. Anyone else gets `403 not_session_owner`. The rating is the same record the portal writes (marked `channel: api`), so it shows in the agent's Feedback tab, adds the trace event and audit entry, and sends the `feedback.recorded` webhook event.
+
 ## Titles
 
 `generateConversationTitle` asks a model for a title of at most six words, in the language the conversation is in. The call is recorded like any other model call (a usage row tagged `purpose: title`, route `agent.title`), attributed to the person, and counted against the tenant's spend limits. `generateAndStoreConversationTitle` names a conversation once, after its first exchange, and leaves a title a person chose (`metadata.titleSource: user`). A model that is gone, a spend limit or a timeout means "no generated title": the conversation keeps the one it has. Which model writes titles (`off`, the agent's own, or a model key) is the surface's setting.
