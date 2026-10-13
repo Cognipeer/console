@@ -32,6 +32,18 @@ function asRecord(value: unknown): ErrorRecord | null {
   return value !== null && typeof value === 'object' ? value as ErrorRecord : null;
 }
 
+/** A provider error body kept as text (`{"error":{"code":...}}`) is read as the object it is. */
+function parseJsonBody(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{')) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+}
+
 function collectErrorRecords(error: unknown): ErrorRecord[] {
   const records: ErrorRecord[] = [];
   const queue: unknown[] = [error];
@@ -50,6 +62,8 @@ function collectErrorRecords(error: unknown): ErrorRecord[] {
       record.error,
       record.errors,
       record.response,
+      // The agent-sdk providers' ProviderError keeps the upstream's error body here.
+      parseJsonBody(record.responseBody),
       record.body,
       record.data,
       record.details,

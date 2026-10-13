@@ -1,0 +1,571 @@
+/**
+ * Request-side rules of the gateway that are independent of any chat library:
+ * which body fields are known, what may pass through to an upstream, how a
+ * request's parameters and the model record combine, and how a request is
+ * described for the logs.
+ */
+
+import { AGENT_REASONING_OVERRIDE, normalizeReasoning, resolveGatewayReasoning } from '@/lib/services/models/reasoning';
+import { createLogger } from '@/lib/core/logger';
+import type { IModel } from '@/lib/database';
+import { resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
+
+const logger = createLogger('inference');
+
+/**
+ * The parts of a model request that decide the SHAPE of the answer, recorded
+ * in one canonical form for every call site and every surface (gateway logs,
+ * tracing, evaluation runs).
+ *
+ * Messages alone cannot explain a malformed or prose-instead-of-JSON reply:
+ * whether the provider was asked for a JSON schema, which tools were on the
+ * table, and where the output ceiling sat are what actually determine it.
+ * Logging those was the missing half — without them a structured-output
+ * failure is indistinguishable from a model that simply chose to write prose.
+ *
+ * Tool SCHEMAS get their own byte budget (like `responseFormat.schema` below)
+ * rather than being logged unconditionally: the full definitions routinely
+ * dwarf the rest of the payload and would be truncated away by
+ * `sanitizeForLogging`'s whole-payload cap, taking the response with them.
+ * `names`/`count` are always logged regardless, so a caller that only needs
+ * "which tools were offered" never depends on the budget.
+ */
+export interface LoggedRequestContract {
+  responseFormat?: {
+    type: string;
+    schemaName?: string;
+    strict?: boolean;
+    /** The JSON Schema as sent, when it fits RESPONSE_SCHEMA_LOG_MAX_BYTES. */
+    schema?: Record<string, unknown>;
+    /** Set when the schema was dropped by that budget. */
+    schemaTruncated?: true;
+  };
+  tools?: {
+    count: number;
+    names: string[];
+    /** The full tool/function definitions as sent, when they fit TOOLS_SCHEMA_LOG_MAX_BYTES. */
+    schemas?: unknown[];
+    /** Set when the schemas were dropped by that budget — names/count still logged. */
+    schemasTruncated?: true;
+  };
+  toolChoice?: unknown;
+  maxTokens?: number;
+  temperature?: number;
+  topP?: number;
+}
+
+/**
+ * Per-field budget for the logged response schema. Deliberately far below
+ * `sanitizeForLogging`'s whole-payload cap: that cap replaces the ENTIRE
+ * providerRequest with a preview once exceeded, so an unbounded schema would
+ * take the messages down with it. Beyond this budget the contract's identity
+ * (type / name / strict) survives and only the schema body is dropped.
+ */
+const RESPONSE_SCHEMA_LOG_MAX_BYTES = 8 * 1024;
+
+/** Same rationale as RESPONSE_SCHEMA_LOG_MAX_BYTES, sized for a typical tool
+ *  menu (several tool definitions) rather than a single schema. */
+const TOOLS_SCHEMA_LOG_MAX_BYTES = 16 * 1024;
+
+export function describeRequestContract(body: Record<string, unknown> | undefined): LoggedRequestContract {
+  const out: LoggedRequestContract = {};
+  if (!body) return out;
+
+  const rf = body.response_format ?? body.responseFormat;
+  if (rf && typeof rf === 'object') {
+    const r = rf as Record<string, unknown>;
+    const schema = (r.json_schema ?? r.jsonSchema) as Record<string, unknown> | undefined;
+    // The schema itself is what a REPLAY needs (evaluation suite, prompt
+    // optimizer, traffic snapshot): a summary says a contract existed, only
+    // the schema lets the same contract be sent again.
+    const body_ = schema?.schema;
+    let schemaBody: Record<string, unknown> | undefined;
+    let schemaTruncated = false;
+    if (body_ && typeof body_ === 'object' && !Array.isArray(body_)) {
+      try {
+        if (Buffer.byteLength(JSON.stringify(body_), 'utf8') <= RESPONSE_SCHEMA_LOG_MAX_BYTES) {
+          schemaBody = body_ as Record<string, unknown>;
+        } else {
+          schemaTruncated = true;
+        }
+      } catch {
+        schemaTruncated = true;
+      }
+    }
+    out.responseFormat = {
+      type: typeof r.type === 'string' ? r.type : 'unknown',
+      ...(schema && typeof schema.name === 'string' ? { schemaName: schema.name } : {}),
+      ...(schema && typeof schema.strict === 'boolean' ? { strict: schema.strict } : {}),
+      ...(schemaBody ? { schema: schemaBody } : {}),
+      ...(schemaTruncated ? { schemaTruncated: true as const } : {}),
+    };
+  }
+
+  const tools = body.tools;
+  if (Array.isArray(tools)) {
+    out.tools = {
+      count: tools.length,
+      names: tools
+        .map((t) => {
+          const entry = t as Record<string, unknown> | null;
+          const fn = entry?.function as Record<string, unknown> | undefined;
+          const name = fn?.name ?? entry?.name;
+          return typeof name === 'string' ? name : null;
+        })
+        .filter((n): n is string => Boolean(n)),
+    };
+    // Full definitions are what a REPLAY needs (evaluation suite, prompt
+    // optimizer, traffic snapshot) — same reasoning as the response schema
+    // above, on its own budget so an oversized tool menu can't take the
+    // messages down with it.
+    try {
+      if (Buffer.byteLength(JSON.stringify(tools), 'utf8') <= TOOLS_SCHEMA_LOG_MAX_BYTES) {
+        out.tools.schemas = tools;
+      } else {
+        out.tools.schemasTruncated = true;
+      }
+    } catch {
+      out.tools.schemasTruncated = true;
+    }
+  }
+  if (body.tool_choice !== undefined) out.toolChoice = body.tool_choice;
+
+  const maxTokens = body.max_tokens ?? body.max_completion_tokens ?? body.maxTokens;
+  if (typeof maxTokens === 'number') out.maxTokens = maxTokens;
+  if (typeof body.temperature === 'number') out.temperature = body.temperature;
+  if (typeof body.top_p === 'number') out.topP = body.top_p;
+
+  return out;
+}
+
+export function sanitizeForLogging(payload: unknown, maxLength = 20000) {
+  if (payload === null || payload === undefined) {
+    return payload;
+  }
+
+  try {
+    const json = JSON.stringify(payload);
+    if (json.length <= maxLength) {
+      return payload;
+    }
+    return {
+      truncated: true,
+      preview: json.slice(0, maxLength),
+    };
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+/**
+ * Body fields the gateway understands natively. Everything else is a candidate
+ * for passthrough (see `buildPassthroughBody`) rather than being dropped.
+ */
+export const KNOWN_REQUEST_FIELDS = new Set([
+  // Unwrapped below rather than forwarded as-is; forwarding the literal key too
+  // makes OpenAI and Azure answer 400 "Unrecognized request argument".
+  'extra_body',
+  'frequency_penalty',
+  'max_completion_tokens',
+  'max_output_tokens',
+  'max_tokens',
+  'messages',
+  'modality',
+  'model',
+  'presence_penalty',
+  'include_reasoning',
+  'reasoning',
+  'reasoning_effort',
+  'request_id',
+  'response_format',
+  'seed',
+  'stop',
+  'stream',
+  'temperature',
+  'tool_choice',
+  'tools',
+  'top_p',
+]);
+
+/**
+ * Fields a caller must never be able to inject into the upstream body — they
+ * either address our own routing or would let a request rewrite the transport.
+ */
+export const PASSTHROUGH_DENYLIST = new Set([
+  'api_key',
+  'apikey',
+  'authorization',
+  'base_url',
+  'messages',
+  'model',
+  'stream',
+]);
+
+export function buildOverrides(body: Record<string, unknown>) {
+  const overrides: Record<string, unknown> = {};
+  const fields = [
+    'temperature',
+    'top_p',
+    'max_tokens',
+    'presence_penalty',
+    'frequency_penalty',
+    'seed',
+  ];
+
+  fields.forEach((field) => {
+    if (body[field] !== undefined) {
+      overrides[field] = body[field];
+    }
+  });
+
+  if (body.stop !== undefined) overrides.stop = body.stop;
+  if (body.tools !== undefined) overrides.tools = body.tools;
+  if (body.tool_choice !== undefined) overrides.tool_choice = body.tool_choice;
+  if (body.parallel_tool_calls !== undefined) {
+    overrides.parallel_tool_calls = body.parallel_tool_calls;
+  }
+  if (body.strict !== undefined) overrides.strict = body.strict;
+  if (body.stream_options !== undefined) {
+    overrides.stream_options = body.stream_options;
+  }
+  if (body.response_format !== undefined)
+    overrides.response_format = body.response_format;
+  if (body.modality !== undefined) overrides.modality = body.modality;
+  if (body.max_output_tokens !== undefined)
+    overrides.max_output_tokens = body.max_output_tokens;
+
+  // Reasoning model support (o1, o3, o4-mini, etc.)
+  // max_completion_tokens is required for reasoning models instead of max_tokens
+  if (body.max_completion_tokens !== undefined)
+    overrides.max_completion_tokens = body.max_completion_tokens;
+
+  // reasoning parameter: { effort: "low" | "medium" | "high", summary?: "auto" | "concise" }
+  if (body.reasoning !== undefined) overrides.reasoning = body.reasoning;
+
+  // Legacy reasoning_effort parameter (deprecated but still supported)
+  // Will be mapped to reasoning.effort by LangChain
+  if (body.reasoning_effort !== undefined)
+    overrides.reasoning_effort = body.reasoning_effort;
+
+  return overrides;
+}
+
+export function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return { ...(value as Record<string, unknown>) };
+}
+
+function buildChatModelSettings(
+  modelSettings: unknown,
+  overrides: Record<string, unknown>,
+  agentReasoning?: unknown,
+) {
+  const settings = asRecord(modelSettings);
+
+  if (overrides.temperature !== undefined) {
+    settings.temperature = overrides.temperature;
+  }
+
+  // top_p / presence_penalty / frequency_penalty were collected from the request
+  // and then read by nobody, so the API accepted them and silently sampled at
+  // the provider's defaults.
+  if (overrides.top_p !== undefined) {
+    settings.topP = overrides.top_p;
+  }
+
+  if (overrides.presence_penalty !== undefined) {
+    settings.presencePenalty = overrides.presence_penalty;
+  }
+
+  if (overrides.frequency_penalty !== undefined) {
+    settings.frequencyPenalty = overrides.frequency_penalty;
+  }
+
+  if (overrides.max_tokens !== undefined) {
+    settings.maxTokens = overrides.max_tokens;
+  }
+
+  if (overrides.max_completion_tokens !== undefined) {
+    settings.maxCompletionTokens = overrides.max_completion_tokens;
+  }
+
+  // Model Hub default > request value > nothing. The request only fills the
+  // gap when the operator left the model's reasoning unset; it never overrides
+  // what the UI pinned (see `resolveGatewayReasoning`).
+  // (An agent's own pick, carried through a Dynamic LLM, is the one thing above the Model Hub default.)
+  const picked = normalizeReasoning(agentReasoning);
+  const resolved = picked
+    ? { reasoning: picked, source: 'agent' as const }
+    : resolveGatewayReasoning(settings, {
+        reasoning: overrides.reasoning,
+        reasoning_effort: overrides.reasoning_effort,
+      });
+  if (resolved.reasoning) {
+    settings.reasoning = resolved.reasoning;
+  } else {
+    delete settings.reasoning;
+  }
+
+  return settings;
+}
+
+function normalizeStrictJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalizeStrictJsonSchema);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const schema = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
+      key,
+      normalizeStrictJsonSchema(nestedValue),
+    ]),
+  );
+
+  if (schema.type === 'object' || schema.properties) {
+    schema.additionalProperties = false;
+  }
+
+  return schema;
+}
+
+function normalizeTools(tools: unknown, strictOverride: unknown): unknown {
+  if (!Array.isArray(tools)) {
+    return tools;
+  }
+
+  return tools.map((tool) => {
+    if (!tool || typeof tool !== 'object') {
+      return tool;
+    }
+
+    const normalizedTool = { ...(tool as Record<string, unknown>) };
+    if (!normalizedTool.function || typeof normalizedTool.function !== 'object') {
+      return normalizedTool;
+    }
+
+    const fn = { ...(normalizedTool.function as Record<string, unknown>) };
+    const strict = typeof strictOverride === 'boolean' ? strictOverride : fn.strict;
+    if (strict === true) {
+      fn.strict = true;
+      if (fn.parameters !== undefined) {
+        fn.parameters = normalizeStrictJsonSchema(fn.parameters);
+      }
+    }
+
+    normalizedTool.function = fn;
+    return normalizedTool;
+  });
+}
+
+function buildChatCallOptions(overrides: Record<string, unknown>) {
+  const options: Record<string, unknown> = {};
+
+  if (overrides.stop !== undefined) options.stop = overrides.stop;
+  if (overrides.tools !== undefined) {
+    options.tools = normalizeTools(overrides.tools, overrides.strict);
+  }
+  if (overrides.tool_choice !== undefined) options.tool_choice = overrides.tool_choice;
+  if (overrides.parallel_tool_calls !== undefined) {
+    options.parallel_tool_calls = overrides.parallel_tool_calls;
+  }
+  if (overrides.strict !== undefined) options.strict = overrides.strict;
+  if (overrides.stream_options !== undefined) {
+    options.stream_options = overrides.stream_options;
+  }
+  if (overrides.response_format !== undefined) {
+    options.response_format = overrides.response_format;
+  }
+  if (overrides.seed !== undefined) options.seed = overrides.seed;
+  if (overrides.modality !== undefined) {
+    options.modalities = Array.isArray(overrides.modality)
+      ? overrides.modality
+      : [overrides.modality];
+  }
+  if (overrides.max_output_tokens !== undefined) {
+    options.max_output_tokens = overrides.max_output_tokens;
+  }
+
+  return options;
+}
+
+export function resolveOutputTokenLimit(
+  overrides: Record<string, unknown>,
+  modelSettings: Record<string, unknown>,
+): number | undefined {
+  const candidates = [
+    overrides.max_completion_tokens,
+    overrides.max_tokens,
+    modelSettings.maxCompletionTokens,
+    modelSettings.maxTokens,
+  ];
+
+  return candidates.find(
+    (value): value is number => typeof value === 'number' && Number.isFinite(value),
+  );
+}
+
+/**
+ * Extra request-body fields destined for the upstream verbatim: the model's own
+ * `settings.requestDefaults` merged under anything the caller sent that our
+ * schema does not know (`chat_template_kwargs`, `top_k`, `repetition_penalty`,
+ * `min_p`, …). Caller passthrough is opt-in per model, because forwarding
+ * arbitrary fields to a provider is a decision the operator should make.
+ *
+ * Precedence is model defaults < caller body, and plain objects merge one level
+ * deep so a caller's `chat_template_kwargs: { enable_thinking: true }` does not
+ * erase a sibling key the operator set on the model.
+ */
+export function buildPassthroughBody(
+  modelSettings: unknown,
+  body: Record<string, unknown>,
+  blockedNames: Set<string>,
+): Record<string, unknown> | undefined {
+  const settings = asRecord(modelSettings);
+  const defaults = asRecord(settings.requestDefaults);
+  const explicit = asRecord(settings.extraBody);
+  const merged: Record<string, unknown> = { ...defaults, ...explicit };
+
+  // Operator-authored defaults are not exempt from the reserved-key rule: these
+  // address our own routing, and the UI validator that rejects them only guards
+  // one of the two surfaces that can write them.
+  for (const key of Object.keys(merged)) {
+    if (PASSTHROUGH_DENYLIST.has(key.toLowerCase())) delete merged[key];
+  }
+
+  if (settings.allowUnknownPassthrough === true) {
+    // A parameter the operator declared unsupported must not come back through
+    // the passthrough channel; and a parameter the gateway already resolves has
+    // its own precedence rules, so it must not be duplicated here either —
+    // extra-body fields are spread *after* them in the provider SDK and would
+    // win.
+    const accept = (key: string) =>
+      !KNOWN_REQUEST_FIELDS.has(key)
+      && !PASSTHROUGH_DENYLIST.has(key.toLowerCase())
+      && !blockedNames.has(key.toLowerCase());
+
+    const mergeField = (key: string, value: unknown) => {
+      const existing = merged[key];
+      merged[key] = isPlainObject(existing) && isPlainObject(value)
+        ? { ...existing, ...value }
+        : value;
+    };
+
+    for (const [key, value] of Object.entries(body)) {
+      if (value === undefined || !accept(key)) continue;
+      mergeField(key, value);
+    }
+
+    // `extra_body` is how OpenAI SDK users carry non-schema fields; unwrap it so
+    // those land as real top-level body fields rather than a nested object the
+    // upstream would reject. `extra_body` itself is a known field, so the loop
+    // above already skipped the literal key.
+    for (const [key, value] of Object.entries(asRecord(body.extra_body))) {
+      if (!accept(key)) continue;
+      mergeField(key, value);
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * The one place a chat runnable's parameters are decided. Every caller that
+ * builds a chat model — the gateway, agents, guardrail judges — goes through
+ * here so a model's `unsupportedParams` and `requestDefaults` apply everywhere,
+ * not only on the routes that happen to remember to read them.
+ *
+ * `unsupportedParams` is stripped at the contract layer (`resolveOverrides`),
+ * which is the last point before the provider SDK; passing it through the
+ * settings object keeps that single strip point authoritative.
+ */
+export function resolveModelInvocationConfig(
+  model: Pick<IModel, 'settings'> & Partial<Pick<IModel, 'modelId' | 'providerDriver'>>,
+  body: Record<string, unknown>,
+): {
+  modelSettings: Record<string, unknown>;
+  callOptions: Record<string, unknown>;
+  overrides: Record<string, unknown>;
+  extraBody?: Record<string, unknown>;
+  unsupportedParams: string[];
+} {
+  const settings = asRecord(model.settings);
+  const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+
+  // Resolved here as well as in the contract layer, because the passthrough body
+  // is assembled here and must not smuggle back a parameter the provider is
+  // known to reject.
+  const { params: unsupportedParams, detected } = resolveUnsupportedParamNames({
+    driver: model.providerDriver,
+    modelId: model.modelId,
+    manual: settings.unsupportedParams,
+    autoDetect: settings.autoDropUnsupportedParams,
+    hasTools,
+  });
+  const blockedLower = new Set(unsupportedParams.map((name) => name.toLowerCase()));
+
+  const overrides = buildOverrides(body);
+  const modelSettings = buildChatModelSettings(
+    model.settings,
+    overrides,
+    (body as { [AGENT_REASONING_OVERRIDE]?: unknown })[AGENT_REASONING_OVERRIDE],
+  );
+  const extraBody = buildPassthroughBody(model.settings, body, blockedLower);
+
+  if (extraBody) {
+    modelSettings.extraBody = extraBody;
+  }
+
+  // `reasoning`/`reasoning_effort` is a call-level field the constructor
+  // wiring (openAiChatOverrides) always forwards, so — unlike the other
+  // unsupported params, which get filtered in the contract layer — it has to
+  // be dropped here, before it ever lands in modelSettings.
+  if (blockedLower.has('reasoning') || blockedLower.has('reasoning_effort')) {
+    delete modelSettings.reasoning;
+  }
+
+  // A rule can also REQUIRE a value, not just forbid one — see
+  // `forcedParamsWithTools`. It goes on the passthrough body under its WIRE
+  // name rather than through a typed setting: LangChain only forwards
+  // `reasoning` for a model its own `isReasoningModel()` recognises, and that
+  // check is prefix-anchored, so a gateway-namespaced id
+  // (`global.openai.gpt-5.6-terra`) silently loses the parameter on the way out.
+  // Merged last, after `buildPassthroughBody` has filtered the caller's fields,
+  // so the forced value always wins.
+  if (detected.forced) {
+    modelSettings.extraBody = { ...asRecord(modelSettings.extraBody), ...detected.forced };
+  }
+
+  // Stripping silently changes sampling behaviour, so leave a trace of which
+  // rule did it and what the caller had asked for.
+  if (detected.params.length > 0) {
+    const overridden = detected.params.filter((name) => body[name] !== undefined);
+    if (overridden.length > 0) {
+      logger.debug('Dropping parameters this model does not accept', {
+        driver: model.providerDriver,
+        dropped: overridden,
+        modelId: model.modelId,
+        rule: detected.ruleId,
+      });
+    }
+  }
+
+  return {
+    modelSettings,
+    callOptions: buildChatCallOptions(overrides),
+    overrides,
+    extraBody,
+    unsupportedParams,
+  };
+}

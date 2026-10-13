@@ -13,12 +13,14 @@
  * cache added (it is read for the variant key).
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GuardrailBlockError,
   clientSafeFindings,
   handleChatCompletion,
 } from '@/lib/services/models/inferenceService';
+import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
+import { completion, json, openAiRuntime, stubUpstream } from '../helpers/nativeGateway';
 
 const hoisted = vi.hoisted(() => ({
   getCachedGuardrail: vi.fn(),
@@ -52,20 +54,10 @@ vi.mock('@/lib/services/guardrail/hooks/recordCache', () => ({
   getCachedGuardrail: hoisted.getCachedGuardrail,
 }));
 
-vi.mock('@/lib/services/models/openaiAdapter', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@/lib/services/models/openaiAdapter')>();
-  return {
-    ...original,
-    toOpenAIChatResponse: vi.fn(),
-    summarizeUsage: vi.fn().mockReturnValue({ inputTokens: 10, outputTokens: 20, totalTokens: 30 }),
-  };
-});
-
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { buildCacheVariantKey, storeInCache } from '@/lib/services/models/semanticCacheService';
 import { evaluateGuardrail } from '@/lib/services/guardrail';
-import { toOpenAIChatResponse } from '@/lib/services/models/openaiAdapter';
 
 const SECRET = 'sk-live-0123456789abcdef';
 const RAW_ANSWER = `Your key is ${SECRET}.`;
@@ -109,23 +101,22 @@ const scriptGuardrails = (byKey: Scripted) => {
   );
 };
 
+let runtime: ModelProviderRuntime;
+beforeAll(async () => {
+  runtime = await openAiRuntime();
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
-  (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
-    runtime: {
-      createChatModel: vi.fn().mockResolvedValue({
-        invoke: vi.fn().mockResolvedValue({ content: RAW_ANSWER, tool_calls: [] }),
-      }),
-    },
-  });
-  (toOpenAIChatResponse as ReturnType<typeof vi.fn>).mockReturnValue({
-    id: 'chatcmpl-1',
-    choices: [{ index: 0, message: { role: 'assistant', content: RAW_ANSWER }, finish_reason: 'stop' }],
-  });
+  vi.unstubAllGlobals();
+  (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime });
+  stubUpstream(() => json(completion({ content: RAW_ANSWER })));
   (buildCacheVariantKey as ReturnType<typeof vi.fn>).mockReturnValue('variant-key');
   hoisted.getCachedGuardrail.mockResolvedValue(null);
   scriptGuardrails({});
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('#5 the semantic cache and the output guardrail', () => {
   it('stores the REDACTED answer, not the raw provider message', async () => {
@@ -174,6 +165,25 @@ describe('#5 the semantic cache and the output guardrail', () => {
     await handleChatCompletion({ ...PARAMS, body: { messages: [{ role: 'user', content: 'hi' }] } });
     const variant = (buildCacheVariantKey as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>;
     expect(variant.__outputGuardrails).toEqual([]);
+  });
+
+  it('keys the cache on the reasoning the call RESOLVES to, not only on what the request carried', async () => {
+    // The Model Hub default (or an agent's pick) changes what the model produces
+    // from the same prompt; two callers with different resolved reasoning must not
+    // share a cached answer.
+    const keyOf = async (settings: Record<string, unknown>, body: Record<string, unknown> = {}) => {
+      (buildCacheVariantKey as ReturnType<typeof vi.fn>).mockClear();
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(model({ settings }));
+      await handleChatCompletion({ ...PARAMS, body: { messages: [{ role: 'user', content: 'hi' }], ...body } });
+      return (buildCacheVariantKey as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>;
+    };
+
+    expect((await keyOf({ reasoning: { effort: 'high' } })).__reasoning).toEqual({ effort: 'high' });
+    expect((await keyOf({ reasoning: { effort: 'low' } })).__reasoning).toEqual({ effort: 'low' });
+    // Model default wins over the request, so the request value is not what is keyed.
+    expect((await keyOf({ reasoning: { effort: 'high' } }, { reasoning_effort: 'low' })).__reasoning).toEqual({ effort: 'high' });
+    // Nothing resolved: the key carries no reasoning at all (unchanged for the common case).
+    expect(await keyOf({})).not.toHaveProperty('__reasoning');
   });
 
   it('falls back to the bare key when the record cache cannot answer', async () => {

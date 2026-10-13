@@ -1,5 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import {
   normalizeReasoning,
   readRequestReasoning,
@@ -20,14 +19,26 @@ import {
   BedrockModelProviderContract,
   VertexModelProviderContract,
 } from '@/lib/providers/contracts/modelContracts';
-import { toOpenAIChatResponse, toOpenAIStreamChunk } from '@/lib/services/models/openaiAdapter';
+import { OpenAiStreamFramer, toOpenAIChatResponse } from '@/lib/services/models/openaiAdapter';
 import {
   anthropicRequestToOpenAi,
   openAiResponseToAnthropic,
   openAiStreamToAnthropic,
 } from '@/lib/services/models/anthropicWire';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
-import { handleChatCompletion } from '@/lib/services/models/inferenceService';
+import { executeModelCall, handleChatCompletion } from '@/lib/services/models/inferenceService';
+import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
+import {
+  anthropicRuntime,
+  chunk,
+  completion,
+  flush,
+  json,
+  openAiRuntime,
+  readSse,
+  sse,
+  stubUpstream,
+} from '../helpers/nativeGateway';
 
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: vi.fn() }));
 vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: vi.fn() }));
@@ -277,82 +288,128 @@ describe('reasoning: provider wire bodies (real LangChain clients)', () => {
 });
 
 describe('reasoning: hiding on the chat-completions adapter', () => {
-  const message = () => new AIMessage({
+  const reply = {
     content: 'The answer is 4.',
-    additional_kwargs: { reasoning_content: 'two plus two' },
-  });
+    toolCalls: [],
+    reasoning: { summary: 'two plus two' },
+  };
+  const options = { model: 'm', usage: {}, wireFinishReason: 'stop' };
 
   it('non-stream: shown by default, removed with includeReasoning:false', () => {
-    const shown = toOpenAIChatResponse(message(), { model: 'm' }) as any;
+    const shown = toOpenAIChatResponse(reply, options) as any;
     expect(shown.choices[0].message.reasoning_content).toBe('two plus two');
-    const hidden = toOpenAIChatResponse(message(), { model: 'm', includeReasoning: false }) as any;
+    const hidden = toOpenAIChatResponse(reply, { ...options, includeReasoning: false }) as any;
     expect(hidden.choices[0].message).not.toHaveProperty('reasoning_content');
     expect(hidden.choices[0].message).not.toHaveProperty('reasoning');
     expect(hidden.choices[0].message.content).toBe('The answer is 4.');
   });
 
-  it('non-stream: leaked inline <reasoning> is stripped from content and hidden too', () => {
-    const leaky = new AIMessage({ content: '<reasoning>secret plan</reasoning>done' });
-    const hidden = toOpenAIChatResponse(leaky, { model: 'm', includeReasoning: false }) as any;
-    expect(hidden.choices[0].message.content).toBe('done');
-    expect(JSON.stringify(hidden)).not.toContain('secret plan');
-  });
-
   it('stream: reasoning deltas disappear, content stays', () => {
-    const chunk = new AIMessageChunk({ content: 'Hi', additional_kwargs: { reasoning_content: 'thinking...' } });
-    const shown = toOpenAIStreamChunk(chunk, { model: 'm', stream: true }) as any;
+    const step = { type: 'delta' as const, content: 'Hi', reasoning: 'thinking...' };
+    const shown = new OpenAiStreamFramer({ model: 'm' }).delta(step) as any;
     expect(shown.choices[0].delta.reasoning_content).toBe('thinking...');
-    const hidden = toOpenAIStreamChunk(chunk, { model: 'm', stream: true, includeReasoning: false }) as any;
+    const hidden = new OpenAiStreamFramer({ model: 'm', includeReasoning: false }).delta(step) as any;
     expect(hidden.choices[0].delta).toEqual({ content: 'Hi' });
   });
 });
 
 describe('reasoning: hiding and precedence through handleChatCompletion', () => {
   const BASE = { tenantDbName: 'tenant_acme', tenantId: 'tenant-1', modelKey: 'm', projectId: 'proj-1' };
-  const makeModel = (settings: Record<string, unknown>) => ({
+  const makeModel = (settings: Record<string, unknown>, driver = 'openai', modelId = 'gpt-4o') => ({
     _id: 'id', tenantId: 'tenant-1', projectId: 'proj-1', name: 'M', key: 'm',
-    providerKey: 'p', providerDriver: 'openai', category: 'llm' as const, modelId: 'gpt-4o',
+    providerKey: 'p', providerDriver: driver, category: 'llm' as const, modelId,
     settings, pricing: { inputPer1k: 0, outputPer1k: 0 },
   });
-  const useRuntime = (chat: Record<string, unknown>) => {
-    const createChatModel = vi.fn().mockResolvedValue(chat);
-    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: { createChatModel } });
-    return createChatModel;
-  };
-  const replyMessage = () => new AIMessage({
-    content: 'Answer',
-    additional_kwargs: { reasoning_content: 'chain of thought' },
-    usage_metadata: { input_tokens: 3, output_tokens: 9, total_tokens: 12 },
+  let runtime: ModelProviderRuntime;
+  let claude: ModelProviderRuntime;
+  beforeAll(async () => {
+    runtime = await openAiRuntime();
+    claude = await anthropicRuntime();
   });
-  const sse = async (stream: ReadableStream) => {
-    const text = await new Response(stream).text();
-    return text.split('\n').filter((l) => l.startsWith('data:') && !l.includes('[DONE]'))
-      .map((l) => JSON.parse(l.slice(5)));
-  };
+  const useOpenAi = () => (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime });
+  const reply = () => json(completion({
+    content: 'Answer',
+    reasoning: 'chain of thought',
+    usage: { prompt_tokens: 3, completion_tokens: 9, total_tokens: 12 },
+  }));
+  const frames = async (stream: ReadableStream) => (await readSse(stream)).frames.filter((f) => f !== '[DONE]') as any[];
 
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    useOpenAi();
+  });
+  afterEach(() => vi.unstubAllGlobals());
 
-  it('model default reaches the client constructor ahead of the request value', async () => {
+  it('model default reaches the wire ahead of the request value', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({ reasoning: { effort: 'high' } }));
-    const create = useRuntime({ invoke: vi.fn().mockResolvedValue(replyMessage()) });
+    const upstream = stubUpstream(reply);
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], reasoning_effort: 'low' } });
-    expect(create.mock.calls[0][0].modelSettings.reasoning).toEqual({ effort: 'high' });
+    expect(upstream.calls[0].body.reasoning_effort).toBe('high');
   });
 
   it('request value is used when the model has none; nothing is sent when neither', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({}));
-    const create = useRuntime({ invoke: vi.fn().mockResolvedValue(replyMessage()) });
+    const upstream = stubUpstream(reply);
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], reasoning_effort: 'low' } });
-    expect(create.mock.calls[0][0].modelSettings.reasoning).toEqual({ effort: 'low' });
+    expect(upstream.calls[0].body.reasoning_effort).toBe('low');
 
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }] } });
-    expect(create.mock.calls[1][0].modelSettings.reasoning).toBeUndefined();
+    expect(upstream.calls[1].body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('an agent\'s own pick outranks the Model Hub default, which outranks the request', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({ reasoning: { effort: 'high' } }));
+    const upstream = stubUpstream(reply);
+    const call = (context: object, settings: Record<string, unknown>, body: Record<string, unknown> = {}) => {
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel(settings));
+      return executeModelCall({
+        ...BASE,
+        request: { messages: [{ role: 'user', content: 'x' }] },
+        wire: { messages: [{ role: 'user', content: 'x' }], ...body },
+        context,
+      });
+    };
+    await call({ reasoningOverride: { effort: 'minimal' } }, { reasoning: { effort: 'high' } }, { reasoning_effort: 'low' });
+    await call({}, { reasoning: { effort: 'high' } }, { reasoning_effort: 'low' });
+    await call({}, {}, { reasoning_effort: 'low' });
+    await call({ reasoningOverride: { effort: 'medium' } }, {}, {});
+    await call({}, {}, {});
+    expect(upstream.calls.map((c) => c.body.reasoning_effort)).toEqual(['minimal', 'high', 'low', 'medium', undefined]);
+  });
+
+  it('a request cannot claim the agent rung: the override is not read from a JSON field', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({ reasoning: { effort: 'high' } }));
+    const upstream = stubUpstream(reply);
+    await handleChatCompletion({
+      ...BASE,
+      body: { messages: [{ role: 'user', content: 'x' }], reasoningOverride: { effort: 'none' }, agentReasoning: { effort: 'none' } },
+    });
+    expect(upstream.calls[0].body.reasoning_effort).toBe('high');
+  });
+
+  it('Anthropic: the resolved reasoning becomes a thinking budget on the Messages request', async () => {
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: claude });
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({ reasoning: { effort: 'medium' }, maxTokens: 20000 }, 'anthropic', 'claude-sonnet-4-5'));
+    const upstream = stubUpstream(() => json({
+      id: 'msg_1', model: 'claude', type: 'message', role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'hmm', signature: 'sig' },
+        { type: 'text', text: 'Answer' },
+      ],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 3, output_tokens: 9 },
+    }));
+    const res: any = await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }] } });
+    expect(upstream.calls[0].body.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 });
+    expect(upstream.calls[0].body.temperature).toBeUndefined();
+    expect(res.response.choices[0].message).toMatchObject({ content: 'Answer', reasoning_content: 'hmm' });
   });
 
   it('non-stream: returned by default, hidden by the model switch, hidden by include_reasoning:false', async () => {
     const body = { messages: [{ role: 'user', content: 'x' }] };
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({}));
-    useRuntime({ invoke: vi.fn().mockResolvedValue(replyMessage()) });
+    stubUpstream(reply);
     let res: any = await handleChatCompletion({ ...BASE, body });
     expect(res.response.choices[0].message.reasoning_content).toBe('chain of thought');
 
@@ -369,28 +426,45 @@ describe('reasoning: hiding and precedence through handleChatCompletion', () => 
     expect(res.response.usage.completion_tokens).toBe(9);
   });
 
-  const streamChunks = () => (async function* () {
-    yield new AIMessageChunk({ content: '', additional_kwargs: { reasoning_content: 'chain of thought' } });
-    yield new AIMessageChunk({ content: 'Answer' });
-  })();
+  it('non-stream: a leaked inline <reasoning> block is cut out of the answer, and hidden with the rest', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({}));
+    stubUpstream(() => json(completion({ content: '<reasoning>secret plan</reasoning>done' })));
+    const body = { messages: [{ role: 'user', content: 'x' }] };
+    let res: any = await handleChatCompletion({ ...BASE, body });
+    expect(res.response.choices[0].message).toMatchObject({ content: 'done', reasoning_content: 'secret plan' });
+
+    res = await handleChatCompletion({ ...BASE, body: { ...body, include_reasoning: false } });
+    expect(res.response.choices[0].message.content).toBe('done');
+    expect(JSON.stringify(res.response)).not.toContain('secret plan');
+  });
+
+  it('the core never hides: a native caller still gets the reasoning the wire edge would hide', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({ returnReasoning: false }));
+    stubUpstream(reply);
+    const outcome = await executeModelCall({ ...BASE, request: { messages: [{ role: 'user', content: 'x' }] } });
+    expect(outcome.result?.response.reasoning?.summary).toBe('chain of thought');
+    expect(outcome.includeReasoning).toBe(false);
+    expect(JSON.stringify(outcome.wire)).not.toContain('chain of thought');
+  });
 
   it('stream: reasoning frames appear by default and are absent when hidden', async () => {
     const body = { messages: [{ role: 'user', content: 'x' }] };
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({}));
-    useRuntime({ invoke: vi.fn(), stream: vi.fn().mockImplementation(async () => streamChunks()) });
+    stubUpstream(() => sse([chunk.reasoning('chain of thought'), chunk.text('Answer')]));
     let res: any = await handleChatCompletion({ ...BASE, body, stream: true });
-    let frames = await sse(res.stream);
-    expect(frames.some((f) => f.choices?.[0]?.delta?.reasoning_content === 'chain of thought')).toBe(true);
+    let out = await frames(res.stream);
+    expect(out.some((f) => f.choices?.[0]?.delta?.reasoning_content === 'chain of thought')).toBe(true);
 
     res = await handleChatCompletion({ ...BASE, body: { ...body, include_reasoning: false }, stream: true });
-    frames = await sse(res.stream);
-    expect(JSON.stringify(frames)).not.toContain('chain of thought');
-    expect(frames.map((f) => f.choices?.[0]?.delta?.content).join('')).toContain('Answer');
+    out = await frames(res.stream);
+    expect(JSON.stringify(out)).not.toContain('chain of thought');
+    expect(out.map((f) => f.choices?.[0]?.delta?.content).join('')).toContain('Answer');
 
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({ returnReasoning: false }));
     res = await handleChatCompletion({ ...BASE, body, stream: true });
-    frames = await sse(res.stream);
-    expect(JSON.stringify(frames)).not.toContain('chain of thought');
+    out = await frames(res.stream);
+    expect(JSON.stringify(out)).not.toContain('chain of thought');
+    await flush();
   });
 });
 

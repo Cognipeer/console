@@ -88,9 +88,10 @@ function isRetryable(error: unknown): boolean {
     if (statusMatch && NON_RETRYABLE_STATUSES.has(parseInt(statusMatch[1], 10))) {
       return false;
     }
-    // Check for status property
-    if ('status' in error && typeof (error as { status: unknown }).status === 'number') {
-      if (NON_RETRYABLE_STATUSES.has((error as { status: number }).status)) {
+    // Check for status property (`statusCode` is what the agent-sdk providers' ProviderError carries)
+    for (const key of ['status', 'statusCode'] as const) {
+      const value = (error as unknown as Record<string, unknown>)[key];
+      if (typeof value === 'number' && NON_RETRYABLE_STATUSES.has(value)) {
         return false;
       }
     }

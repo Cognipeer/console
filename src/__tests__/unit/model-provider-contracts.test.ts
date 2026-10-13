@@ -88,7 +88,7 @@ import {
   AzureModelProviderContract,
 } from '@/lib/providers/contracts/modelContracts';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
-import { toLangChainMessages } from '@/lib/services/models/openaiAdapter';
+import { openAiMessagesToNative } from '@/lib/services/models/openaiAdapter';
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
@@ -267,12 +267,12 @@ describe('openai-compatible provider', () => {
         });
       }),
     );
-    const model = runtime.createChatModel!({
+    const client = await runtime.createNativeChatClient!({
       modelId: 'vision-model',
       category: 'llm',
-    }) as { invoke: (messages: unknown[]) => Promise<unknown> };
+    });
     const imageUrl = 'data:image/png;base64,iVBORw0KGgo=';
-    const messages = toLangChainMessages([{
+    const messages = openAiMessagesToNative([{
       role: 'user',
       content: [
         { type: 'text', text: 'Describe this image' },
@@ -280,7 +280,7 @@ describe('openai-compatible provider', () => {
       ],
     }]);
 
-    await model.invoke(messages);
+    await client.complete({ messages });
 
     expect(capturedBody).toMatchObject({
       model: 'vision-model',

@@ -4,7 +4,8 @@
  * answer, tool calls and usage come back in the shape the agent loop reads.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
+import { chunk as sseChunk, completion, controlledStream, json, openAiRuntime, sse, stubUpstream, type Upstream } from '../helpers/nativeGateway';
+import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: vi.fn() }));
 vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: vi.fn() }));
@@ -55,21 +56,29 @@ const router = llm('router', {
 const models: Record<string, unknown> = { router, big: llm('big'), small: llm('small') };
 const deps = { tenantDbName: 'tenant_x', tenantId: 't', projectId: 'p', modelKey: 'router' };
 
+const runtimes = new Map<string, ModelProviderRuntime>();
+/** The provider key is the API key, so the upstream knows which model it is serving. */
+const useRuntimes = () => (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(
+  async (_db: string, _t: string, providerKey: string) => {
+    if (!runtimes.has(providerKey)) runtimes.set(providerKey, await openAiRuntime({}, providerKey));
+    return { runtime: runtimes.get(providerKey) };
+  },
+);
+const servedBy = (call: { headers: Record<string, string> }) => call.headers.authorization.replace('Bearer ', '');
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   (getModelByKey as ReturnType<typeof vi.fn>).mockImplementation(async (_db: string, key: string) => models[key] ?? null);
-  (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async (_db: string, _t: string, providerKey: string) => ({
-    runtime: {
-      createChatModel: vi.fn().mockResolvedValue({
-        invoke: vi.fn().mockResolvedValue(new AIMessage({
-          content: `answered by ${providerKey}`,
-          tool_calls: [{ id: 'c1', name: 'lookup', args: { q: 'x' }, type: 'tool_call' }],
-          usage_metadata: { input_tokens: 1000, output_tokens: 500, total_tokens: 1500 },
-        })),
-      }),
-    },
-  }));
+  useRuntimes();
+  stubUpstream((call) => json(completion({
+    content: `answered by ${servedBy(call)}`,
+    toolCalls: [{ id: 'c1', name: 'lookup', arguments: '{"q":"x"}' }],
+    usage: { prompt_tokens: 1000, completion_tokens: 500, total_tokens: 1500 },
+  })));
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('agent run on a Dynamic LLM', () => {
   it('a rule on the caller channel picks the target per call; the answer and tool calls come back', async () => {
@@ -102,39 +111,22 @@ describe('agent run on a Dynamic LLM', () => {
 });
 
 describe('Dynamic LLM model as a native agent model', () => {
-  const chatConfigs: Array<Record<string, unknown>> = [];
-  const invokeArgs: unknown[][] = [];
+  let upstream: Upstream;
 
   beforeEach(() => {
-    chatConfigs.length = 0;
-    invokeArgs.length = 0;
-    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async (_db: string, _t: string, providerKey: string) => ({
-      runtime: {
-        createChatModel: vi.fn().mockImplementation(async (config: Record<string, unknown>) => {
-          chatConfigs.push(config);
-          return {
-            bindTools() { return this; },
-            invoke: vi.fn().mockImplementation(async (...args: unknown[]) => {
-              invokeArgs.push(args);
-              return new AIMessage({ content: `answered by ${providerKey}`, usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } });
-            }),
-            async *stream() {
-              yield new AIMessageChunk({ content: 'Hel' });
-              yield new AIMessageChunk({ content: 'lo' });
-              yield new AIMessageChunk({
-                content: '',
-                tool_call_chunks: [{ index: 0, id: 'call_1', name: 'lookup', args: '{"q":', type: 'tool_call_chunk' }],
-              });
-              yield new AIMessageChunk({
-                content: '',
-                tool_call_chunks: [{ index: 0, args: '"x"}', type: 'tool_call_chunk' }],
-                usage_metadata: { input_tokens: 1000, output_tokens: 500, total_tokens: 1500 },
-              });
-            },
-          };
-        }),
-      },
-    }));
+    upstream = stubUpstream((call) => {
+      if (call.body.stream) {
+        return sse([
+          sseChunk.text('Hel'),
+          sseChunk.text('lo'),
+          sseChunk.tool(0, { id: 'call_1', name: 'lookup', arguments: '{"q":' }),
+          sseChunk.tool(0, { arguments: '"x"}' }),
+          sseChunk.finish('tool_calls'),
+          sseChunk.usage({ prompt_tokens: 1000, completion_tokens: 500, total_tokens: 1500 }),
+        ]);
+      }
+      return json(completion({ content: `answered by ${servedBy(call)}`, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }));
+    });
   });
 
   it('streams: text deltas, then ONE assembled message with the tool call, usage and routing', async () => {
@@ -163,16 +155,15 @@ describe('Dynamic LLM model as a native agent model', () => {
     const bound = createDynamicChatModel(deps).bindTools([lookup]);
     await runWithRoutingCaller({ channel: 'api' }, () => bound.invoke([{ role: 'user', content: 'hi' }]));
     // The routed child received the tool through the gateway's own request handling.
-    const child = chatConfigs[0];
-    expect(child).toBeDefined();
-    const callOptions = invokeArgs[0]?.[1] as { tools?: Array<{ function?: { name?: string } }> } | undefined;
-    expect(JSON.stringify(callOptions?.tools ?? invokeArgs[0])).toContain('lookup');
+    expect(upstream.calls[0].body.tools).toEqual([
+      expect.objectContaining({ type: 'function', function: expect.objectContaining({ name: 'lookup', description: 'Find a thing' }) }),
+    ]);
   });
 
   it('carries the agent reasoning to the routed model', async () => {
     const model = createDynamicChatModel({ ...deps, reasoning: { effort: 'high' } });
     await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
-    expect(chatConfigs[0]).toMatchObject({ modelSettings: { reasoning: { effort: 'high' } } });
+    expect(upstream.calls[0].body.reasoning_effort).toBe('high');
   });
 
   describe('against a routed model that has its own Model Hub default', () => {
@@ -186,13 +177,13 @@ describe('Dynamic LLM model as a native agent model', () => {
     it("the AGENT's pick outranks the routed model's Model Hub default (agent > Model Hub)", async () => {
       const model = createDynamicChatModel({ ...deps, reasoning: { effort: 'low' }, reasoningFromAgent: true });
       await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
-      expect(chatConfigs[0]).toMatchObject({ modelSettings: { reasoning: { effort: 'low' } } });
+      expect(upstream.calls[0].body.reasoning_effort).toBe('low');
     });
 
     it("an API request's value stays below the routed model's Model Hub default (Model Hub > request)", async () => {
       const model = createDynamicChatModel({ ...deps, reasoning: { effort: 'low' } });
       await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
-      expect(chatConfigs[0]).toMatchObject({ modelSettings: { reasoning: { effort: 'medium' } } });
+      expect(upstream.calls[0].body.reasoning_effort).toBe('medium');
     });
 
     it('a caller cannot claim the agent rung from the wire: only an in-process key counts', async () => {
@@ -209,7 +200,7 @@ describe('Dynamic LLM model as a native agent model', () => {
   it('applies the agent sampling overrides to the routed call', async () => {
     const model = createDynamicChatModel({ ...deps, overrides: { temperature: 0.3, max_tokens: 77 } });
     await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
-    expect(chatConfigs[0]).toMatchObject({ modelSettings: { temperature: 0.3, maxTokens: 77 } });
+    expect(upstream.calls[0].body).toMatchObject({ temperature: 0.3, max_tokens: 77 });
   });
 
   it('a call made while another is in flight keeps its own routing facts', async () => {
@@ -222,16 +213,12 @@ describe('Dynamic LLM model as a native agent model', () => {
   });
 
   it('a stream that fails midway rejects the call instead of ending quietly', async () => {
-    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
-      runtime: {
-        createChatModel: vi.fn().mockResolvedValue({
-          async *stream() {
-            yield new AIMessageChunk({ content: 'par' });
-            throw new Error('upstream exploded');
-          },
-        }),
-      },
-    }));
+    stubUpstream((call) => {
+      const live = controlledStream(call.signal);
+      live.send(sseChunk.text('par'));
+      setTimeout(() => live.fail(new Error('upstream exploded')), 5);
+      return live.response;
+    });
     const model = createDynamicChatModel(deps);
     const run = async () => {
       for await (const chunk of model.stream([{ role: 'user', content: 'hi' }])) void chunk;
