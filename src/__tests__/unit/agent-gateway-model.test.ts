@@ -265,7 +265,7 @@ describe('agent stream edge cases', () => {
   it('a consumer that stops reading without a signal still aborts the upstream, books a cancelled row and settles usage', async () => {
     let upstreamSignal: AbortSignal | undefined;
     upstream = stubUpstream((call) => {
-      upstreamSignal = call.signal;
+      upstreamSignal = call.signal ?? undefined;
       const live = controlledStream(call.signal);
       live.send(chunk.text('a partial answer'));
       return live.response;

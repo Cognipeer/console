@@ -179,9 +179,9 @@ export interface ThinkingTranslation {
 
 /**
  * Claude 5.x and fable models take `thinking: {type:'adaptive'}` + `output_config.effort`;
- * older ones take `enabled` + `budget_tokens`. Mirrors the SDK's per-model choice
- * (its `supportsAdaptiveThinking` is not exported from the package root, so the rule
- * lives here too: keep the two in step when the SDK moves).
+ * older ones take `enabled` + `budget_tokens`. Mirrors the SDK's `supportsAdaptiveThinking`:
+ * this module is bundled into the Model Hub form, so it cannot import the SDK.
+ * reasoning-adaptive-parity.test.ts keeps the two in step.
  */
 export function supportsAdaptiveThinking(modelId: string | undefined): boolean {
   if (typeof modelId !== 'string') return false;
