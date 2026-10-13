@@ -113,9 +113,9 @@ const makeEmbeddingModel = (overrides = {}) => ({
   ...overrides,
 });
 
-const makeEmbeddingRuntime = (embedResult?: number[][]) => ({
-  createEmbeddingModel: vi.fn().mockResolvedValue({
-    embedDocuments: vi.fn().mockResolvedValue(embedResult ?? [[0.1, 0.2, 0.3]]),
+const makeEmbeddingRuntime = (embedResult?: number[][], usage = { inputTokens: 0, totalTokens: 0 }) => ({
+  createNativeEmbedder: vi.fn().mockResolvedValue({
+    embed: vi.fn().mockResolvedValue({ model: 'm', vectors: embedResult ?? [[0.1, 0.2, 0.3]], usage, raw: [] }),
   }),
 });
 
@@ -2276,7 +2276,7 @@ describe('handleEmbeddingRequest', () => {
     ).rejects.toThrow('Model is not configured for embeddings');
   });
 
-  it('throws when runtime has no createEmbeddingModel', async () => {
+  it('throws when runtime has no createNativeEmbedder', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmbeddingModel());
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
       runtime: {},
@@ -2296,7 +2296,7 @@ describe('handleEmbeddingRequest', () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmbeddingModel());
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({
       runtime: {
-        createEmbeddingModel: vi.fn().mockResolvedValue(null),
+        createNativeEmbedder: vi.fn().mockResolvedValue(null),
       },
     });
 
@@ -2393,6 +2393,39 @@ describe('handleEmbeddingRequest', () => {
         status: 'success',
       }),
     );
+  });
+
+  it('uses the provider usage when the caller gave no count, and forwards dimensions', async () => {
+    const model = makeEmbeddingModel();
+    const runtime = makeEmbeddingRuntime([[0.1]], { inputTokens: 11, totalTokens: 11 });
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(model);
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime });
+
+    const result = await handleEmbeddingRequest({
+      tenantDbName: 'tenant_acme',
+      modelKey: 'emb-model',
+      projectId: 'proj-1',
+      body: { input: 'hello', dimensions: 256 },
+    });
+
+    expect(result.response.usage).toEqual({ prompt_tokens: 11, total_tokens: 11 });
+    const embedder = await runtime.createNativeEmbedder.mock.results[0].value;
+    expect(embedder.embed).toHaveBeenCalledWith(['hello'], expect.objectContaining({ dimensions: 256 }));
+    expect(runtime.createNativeEmbedder).toHaveBeenCalledWith(expect.objectContaining({ options: { maxRetries: 0 } }));
+  });
+
+  it('estimates tokens when the provider reports none (Bedrock / Vertex)', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeEmbeddingModel());
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: makeEmbeddingRuntime() });
+
+    const result = await handleEmbeddingRequest({
+      tenantDbName: 'tenant_acme',
+      modelKey: 'emb-model',
+      projectId: 'proj-1',
+      body: { input: 'abcdefgh' },
+    });
+
+    expect(result.response.usage.prompt_tokens).toBe(2);
   });
 
   it('uses provided request_id', async () => {

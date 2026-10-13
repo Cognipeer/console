@@ -1,11 +1,12 @@
-import { HumanMessage } from '@langchain/core/messages';
 import type {
   OcrRuntime,
   OcrExtractInput,
   OcrResult,
   OcrPageResult,
 } from '../domains/ocr';
-import type { ModelProviderRuntime, ModelRuntimeConfig } from '../domains/model';
+import type { ModelProviderRuntime, ModelRuntimeConfig, NativeChatClient } from '../domains/model';
+import type { ChatCompletionResponse } from '@cognipeer/agent-sdk';
+import { imageUrlToPart } from './nativeParts';
 import { looksLikePdf, renderPdfToPngDataUrls } from './pdfRender';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { stripInlineReasoning } from '@/lib/shared/inlineReasoning';
@@ -28,36 +29,6 @@ Rules:
 - If the document is empty, return {"text": ""}.
 
 Respond with JSON only.`;
-
-interface ChatRunnable {
-  invoke(input: unknown, options?: Record<string, unknown>): Promise<unknown>;
-}
-
-function isChatRunnable(value: unknown): value is ChatRunnable {
-  return Boolean(
-    value &&
-      typeof value === 'object' &&
-      typeof (value as { invoke?: unknown }).invoke === 'function',
-  );
-}
-
-function extractText(message: unknown): string {
-  if (!message || typeof message !== 'object') return '';
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
-        if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
-          return (part as { text: string }).text;
-        }
-        return '';
-      })
-      .join('');
-  }
-  return '';
-}
 
 function stripJsonFence(text: string): string {
   let trimmed = stripInlineReasoning(text).trim();
@@ -107,7 +78,7 @@ interface UsageMeta {
 
 /** Run the VLM on a single image data URL and parse its JSON response. */
 async function ocrSingleImage(
-  chatModel: ChatRunnable,
+  client: NativeChatClient,
   prompt: string,
   imageDataUrl: string,
 ): Promise<{
@@ -115,17 +86,19 @@ async function ocrSingleImage(
   usage: UsageMeta;
   raw: unknown;
 }> {
-  const userMessage = new HumanMessage({
-    content: [
-      { type: 'text', text: prompt },
-      { type: 'image_url', image_url: { url: imageDataUrl } },
-    ],
+  const response: ChatCompletionResponse = await client.complete({
+    messages: [{
+      role: 'user',
+      content: [{ type: 'text', text: prompt }, imageUrlToPart(imageDataUrl)],
+    }],
   });
-  const response = await chatModel.invoke([userMessage]);
-  const raw = extractText(response);
-  const parsed = tryParseJson(raw);
-  const usage = (response as { usage_metadata?: UsageMeta }).usage_metadata ?? {};
-  return { parsed, usage, raw: response };
+  const parsed = tryParseJson(response.content ?? '');
+  const usage: UsageMeta = {
+    input_tokens: response.usage?.inputTokens,
+    output_tokens: response.usage?.outputTokens,
+    total_tokens: response.usage?.totalTokens,
+  };
+  return { parsed, usage, raw: response.raw ?? response };
 }
 
 /** Detect whether the OCR document is a PDF (content type, URL, or magic bytes). */
@@ -150,21 +123,21 @@ export function createVlmOcrRuntime(
   config: ModelRuntimeConfig,
   defaultPrompt?: string,
 ): OcrRuntime {
-  if (!providerRuntime.createChatModel) {
+  if (!providerRuntime.createNativeChatClient) {
     throw new Error(
-      'VLM-mode OCR requires a chat-capable model provider with createChatModel.',
+      'VLM-mode OCR requires a chat-capable model provider with createNativeChatClient.',
     );
   }
 
   return {
     async extract(input: OcrExtractInput): Promise<OcrResult> {
-      const chatModel = await providerRuntime.createChatModel!({
+      const chatModel = await providerRuntime.createNativeChatClient!({
         ...config,
         category: 'llm',
-        options: { ...(config.options ?? {}), streaming: false },
+        options: { ...(config.options ?? {}) },
       });
 
-      if (!isChatRunnable(chatModel)) {
+      if (!chatModel || typeof chatModel.complete !== 'function') {
         throw new Error('Model provider returned a non-invocable chat runtime for VLM-OCR.');
       }
 

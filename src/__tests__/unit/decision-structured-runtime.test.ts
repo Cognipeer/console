@@ -22,9 +22,26 @@ const request: DecisionRequest = {
 };
 
 function fakeRuntime(message: Record<string, unknown>) {
-  const invoke = vi.fn().mockResolvedValue(message);
-  const createChatModel = vi.fn().mockReturnValue({ invoke });
-  const runtime: ModelProviderRuntime = { createChatModel };
+  const { content, usage_metadata: meta, additional_kwargs: kwargs, ...rest } = message as {
+    content?: string; usage_metadata?: { input_tokens: number; output_tokens: number }; additional_kwargs?: { refusal?: string };
+  };
+  const invoke = vi.fn().mockResolvedValue({
+    id: 'r1',
+    model: 'gpt-4o',
+    content: content ?? null,
+    toolCalls: [],
+    usage: {
+      inputTokens: meta?.input_tokens ?? 0, outputTokens: meta?.output_tokens ?? 0,
+      totalTokens: (meta?.input_tokens ?? 0) + (meta?.output_tokens ?? 0),
+      cachedInputTokens: 0, cachedWriteTokens: 0, cachedOutputTokens: 0, reasoningTokens: 0,
+    },
+    finishReason: 'stop',
+    ...(kwargs?.refusal ? { providerFields: { refusal: kwargs.refusal } } : {}),
+    ...rest,
+    raw: {},
+  });
+  const createChatModel = vi.fn().mockResolvedValue({ complete: invoke });
+  const runtime: ModelProviderRuntime = { createNativeChatClient: createChatModel };
   return { runtime, invoke, createChatModel };
 }
 
@@ -41,10 +58,10 @@ describe('createStructuredDecisionRuntime', () => {
 
     expect(createChatModel).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledTimes(1);
-    const [messages, callOptions] = invoke.mock.calls[0];
-    expect(callOptions.response_format.type).toBe('json_schema');
-    expect(callOptions.response_format.json_schema.strict).toBe(true);
-    expect(Object.keys(callOptions.response_format.json_schema.schema.properties.answers.properties)).toEqual(['sentiment', 'urgent']);
+    const [{ messages, responseFormat }] = invoke.mock.calls[0];
+    expect(responseFormat.type).toBe('json_schema');
+    expect(Object.keys(responseFormat.schema.properties.answers.properties)).toEqual(['sentiment', 'urgent']);
+    expect(messages.map((m: { role: string }) => m.role)).toEqual(['system', 'user']);
     expect(JSON.stringify(messages)).toContain('Great service, thanks!');
 
     expect(result.answers.sentiment).toMatchObject({ type: 'choice', choice: 'pos', confidence_source: 'self_reported' });
@@ -67,13 +84,14 @@ describe('createStructuredDecisionRuntime', () => {
     expect(detectUnsupportedParams('openai', 'gpt-5.6-terra').params).toContain('temperature');
   });
 
-  it('sends image parts as image_url content', async () => {
+  it('sends image parts as native image content', async () => {
     const { runtime, invoke } = fakeRuntime({ content: '{"answers":{}}' });
     await createStructuredDecisionRuntime(runtime, config, 'openai').decide({
       ...request,
       input: [{ type: 'text', text: 'look' }, { type: 'image', data_url: 'data:image/png;base64,AAAA' }],
     });
-    expect(JSON.stringify(invoke.mock.calls[0][0])).toContain('image_url');
+    const user = invoke.mock.calls[0][0].messages[1].content as Array<Record<string, unknown>>;
+    expect(user).toContainEqual({ type: 'image', source: { type: 'base64', mediaType: 'image/png', data: 'AAAA' } });
   });
 
   it('tolerates a fenced / prefixed JSON answer', async () => {
@@ -126,8 +144,11 @@ describe('createStructuredDecisionRuntime', () => {
 describe('driver wiring', () => {
   it('temperature 0 reaches a normal model but is stripped for the gpt-5 family (real driver)', async () => {
     const openai = await OpenAiModelProviderContract.createRuntime({ credentials: { apiKey: 'sk-test' }, settings: {} } as never);
-    const plain = await openai.createChatModel!({ modelId: 'gpt-4o', category: 'llm', modelSettings: { temperature: 0 } }) as { temperature?: number };
-    const reasoning = await openai.createChatModel!({ modelId: 'gpt-5.6-terra', category: 'llm', modelSettings: { temperature: 0 } }) as { temperature?: number };
+    const plainClient = await openai.createNativeChatClient!({ modelId: 'gpt-4o', category: 'llm', modelSettings: { temperature: 0 } });
+    const reasoningClient = await openai.createNativeChatClient!({ modelId: 'gpt-5.6-terra', category: 'llm', modelSettings: { temperature: 0 } });
+    const messages = [{ role: 'user' as const, content: 'hi' }];
+    const plain = await plainClient.prepare({ messages });
+    const reasoning = await reasoningClient.prepare({ messages });
     expect(plain.temperature).toBe(0);
     expect(reasoning.temperature).toBeUndefined();
   });

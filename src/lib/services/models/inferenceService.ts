@@ -61,52 +61,18 @@ export { describeRequestContract, resolveModelInvocationConfig } from './gateway
 export type { LoggedRequestContract } from './gatewayRequest';
 export { executeModelCall } from './gatewayCore';
 
+import type { NativeEmbedOptions } from '@/lib/providers/domains/model';
+
 const encoder = new TextEncoder();
-
-type EmbeddingVector = number[] | Float32Array | { values: number[] };
-
-interface EmbeddingRunnable {
-  embedDocuments(inputs: string[]): Promise<EmbeddingVector[]>;
-}
-
-function ensureEmbeddingRunnable(value: unknown): EmbeddingRunnable {
-  if (!value || typeof value !== 'object') {
-    throw new Error('Model provider returned an invalid embedding runtime.');
-  }
-
-  const candidate = value as Partial<EmbeddingRunnable>;
-  if (typeof candidate.embedDocuments !== 'function') {
-    throw new Error('Model provider returned an invalid embedding runtime.');
-  }
-
-  return candidate as EmbeddingRunnable;
-}
-
-function normalizeEmbeddingVector(vector: EmbeddingVector): number[] {
-  if (Array.isArray(vector)) {
-    return vector;
-  }
-
-  if (vector instanceof Float32Array) {
-    return Array.from(vector);
-  }
-
-  if (
-    vector &&
-    typeof vector === 'object' &&
-    Array.isArray((vector as { values?: unknown }).values)
-  ) {
-    return (vector as { values: number[] }).values;
-  }
-
-  return [];
-}
 
 interface EmbeddingRequestBody extends Record<string, unknown> {
   input?: string | string[];
   request_id?: string;
   input_tokens?: number;
   inputTokenCount?: number;
+  dimensions?: number;
+  encoding_format?: string;
+  input_type?: string;
 }
 
 function ensureModerationModel(model: IModel) {
@@ -394,15 +360,20 @@ export async function handleEmbeddingRequest(params: {
     projectId,
   );
 
-  if (!runtime.createEmbeddingModel) {
+  if (!runtime.createNativeEmbedder) {
     throw new Error('Model provider does not support embeddings');
   }
 
-  const embedder = ensureEmbeddingRunnable(await runtime.createEmbeddingModel({
+  const embedder = await runtime.createNativeEmbedder({
     modelId: model.modelId,
     category: model.category,
     modelSettings: model.settings,
-  }));
+    // `withResilience` owns retry and circuit-breaking here.
+    options: { maxRetries: 0 },
+  });
+  if (!embedder || typeof embedder.embed !== 'function') {
+    throw new Error('Model provider returned an invalid embedding runtime.');
+  }
   const rawInput = body.input;
   const inputsArray = Array.isArray(rawInput) ? rawInput : [rawInput];
   const inputs = inputsArray.map((value) => {
@@ -412,24 +383,31 @@ export async function handleEmbeddingRequest(params: {
     return value;
   });
 
-  const embeddings = await withResilience(
-    () => embedder.embedDocuments(inputs),
+  const embedOptions: NativeEmbedOptions = {};
+  if (typeof body.dimensions === 'number' && body.dimensions > 0) embedOptions.dimensions = body.dimensions;
+  if (body.encoding_format === 'float' || body.encoding_format === 'base64') embedOptions.encodingFormat = body.encoding_format;
+  if (typeof body.input_type === 'string' && body.input_type) embedOptions.inputType = body.input_type;
+
+  const embedded = await withResilience(
+    () => embedder.embed(inputs, embedOptions),
     { key: `embedding:${model.providerKey}` },
   );
+  const embeddings = embedded.vectors;
   const latencyMs = Date.now() - start;
 
-  // Embedding APIs reached through LangChain's `embedDocuments` return only
-  // vectors — no usage. The caller-supplied count wins when there is one;
-  // otherwise the input is estimated at ~4 chars/token (the same rule the
-  // chat gateway uses for its pre-flight estimate). Falling back to 0, as
-  // this did, recorded every embedding at 0 tokens and $0 — which is why
-  // Model Hub showed embedding calls with no usage at all.
+  // Token count: the caller-supplied count wins; then the provider's own
+  // usage; otherwise (Bedrock/Vertex report none) the input is estimated at
+  // ~4 chars/token, the rule the chat gateway uses for its pre-flight
+  // estimate. Never 0, which showed embedding calls with no usage in Model Hub.
+  const providerTokens = embedded.usage?.inputTokens || embedded.usage?.totalTokens || 0;
   const tokenEstimate =
     typeof body.input_tokens === 'number'
       ? body.input_tokens
       : typeof body.inputTokenCount === 'number'
         ? body.inputTokenCount
-        : inputs.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0);
+        : providerTokens > 0
+          ? providerTokens
+          : inputs.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0);
 
   const usage: TokenUsage = {
     inputTokens: tokenEstimate,
@@ -460,7 +438,7 @@ export async function handleEmbeddingRequest(params: {
       data: embeddings.map((vector, index) => ({
         object: 'embedding',
         index,
-        embedding: normalizeEmbeddingVector(vector),
+        embedding: vector,
       })),
       model: model.modelId,
       usage: {
