@@ -61,7 +61,7 @@ export interface AgentCodegenResult {
 }
 
 const SDK_VERSIONS = {
-    agentSdk: '^0.11.0',
+    agentSdk: '^0.12.0',
     consoleSdk: '^1.7.1',
     zod: '^3.25.0',
     dotenv: '^16.4.5',

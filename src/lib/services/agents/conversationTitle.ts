@@ -17,10 +17,9 @@ import { runWithRequestContext } from '@/lib/core/requestContext';
 import type { IAgentConfig } from '@/lib/database';
 import { buildAgentChatModel } from './agentService';
 import { titleReasoningForModel } from './agentReasoning';
-import { isDynamicModel } from './dynamicChatModel';
+import { isDynamicModel } from './gatewayChatModel';
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { assertAgentSpendAllowed, agentSpendSettler, resolveAgentSpendScope } from './agentSpendLimits';
-import { withModelUsageLogging } from './modelUsageTap';
 import { runWithTenantDb } from './agentRunService';
 
 const logger = createLogger('agents:title');
@@ -111,23 +110,27 @@ export async function generateConversationTitle(input: GenerateTitleInput): Prom
                 // that reasons is told not to (forced above every other rung); one that does not is left alone.
                 const record = await getModelByKey(input.tenantDbName, input.modelKey, input.projectId);
                 const titleThinking = record ? titleReasoningForModel(record, { dynamic: isDynamicModel(record) }) : undefined;
-                const { model, chatModel } = await buildAgentChatModel(input.tenantDbName, input.tenantId, input.projectId, input.modelKey, {
+                const { chatModel } = await buildAgentChatModel(input.tenantDbName, input.tenantId, input.projectId, input.modelKey, {
                     // A title is a few words: no room for a long answer, and nothing creative about it.
                     max_tokens: 40,
                     temperature: 0.2,
-                }, titleThinking);
-                const tapped = withModelUsageLogging(chatModel, {
-                    tenantDbName: input.tenantDbName,
-                    model,
+                }, titleThinking, undefined, {
                     route: 'agent.title',
                     purpose: 'title',
                     ...(input.agentKey ? { agentKey: input.agentKey } : {}),
-                    onCost: agentSpendSettler(spend, model.key),
-                }) as { invoke: (messages: unknown) => Promise<unknown> };
+                    ...(input.userId ? { userId: input.userId } : {}),
+                    onCost: agentSpendSettler(spend, input.modelKey),
+                });
+                const tapped = chatModel as { invoke: (messages: unknown, options?: { signal?: AbortSignal }) => Promise<unknown> };
+                // A title that is late is dropped, and its request with it.
+                const abort = new AbortController();
 
                 let timer: ReturnType<typeof setTimeout> | undefined;
                 const timeout = new Promise<never>((_, reject) => {
-                    timer = setTimeout(() => reject(new Error('title generation timed out')), input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+                    timer = setTimeout(() => {
+                        abort.abort();
+                        reject(new Error('title generation timed out'));
+                    }, input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
                     timer.unref?.();
                 });
                 try {
@@ -135,7 +138,7 @@ export async function generateConversationTitle(input: GenerateTitleInput): Prom
                         tapped.invoke([
                             { role: 'system', content: SYSTEM_PROMPT(maxWords) },
                             { role: 'user', content: `User: ${userText}\n\nAssistant: ${assistantText}` },
-                        ]),
+                        ], { signal: abort.signal }),
                         timeout,
                     ]);
                     return cleanGeneratedTitle(replyText(reply), maxWords);

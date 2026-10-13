@@ -65,7 +65,7 @@ export interface GatewayCallContext {
    * the call returned. Fires for success and for a cancelled stream with partial
    * usage, never for a call that produced no usage.
    */
-  onUsageSettled?: (cost: UsageCostResult) => void;
+  onUsageSettled?: (cost: UsageCostResult, usage?: TokenUsage) => void;
   /** Aborts the upstream request; a streamed call that is aborted is logged `cancelled` with estimated output tokens. */
   signal?: AbortSignal;
   /** Usage row route. Default `chat.completions`. */
@@ -74,6 +74,21 @@ export interface GatewayCallContext {
   attribution?: Partial<UsageAttribution>;
   /** An agent's own reasoning pick: outranks the Model Hub default. In-process only. */
   reasoningOverride?: unknown;
+  /** Extra facts about the caller (agent key, session, purpose ...): merged into the `providerRequest` of every usage row of this call. */
+  requestTags?: Record<string, unknown>;
+  /**
+   * False keeps the prompt out of the usage rows (only its size is recorded). An
+   * agent's context is the whole conversation plus tool results at every step and
+   * the trace already holds it: copying it into each row multiplies storage.
+   */
+  logPrompt?: boolean;
+  /**
+   * A non-streamed call (or a stream that fails to open) that fails writes an
+   * `error` usage row. Off by default: an HTTP caller gets the error itself. An
+   * in-process caller that has no other record of the failure turns it on.
+   * A call whose `signal` aborts is always logged `cancelled`.
+   */
+  logFailures?: boolean;
   /**
    * Input guardrails evaluate the latest user message once per turn: a caller that
    * calls the model repeatedly inside one turn (an agent's tool loop) names the turn,
@@ -149,6 +164,8 @@ export interface ModelStreamDone {
   type: 'done';
   response: ChatCompletionResponse;
   usage: TokenUsage;
+  /** The provider's usage exactly as the native client reported it (the shape agent-sdk consumers read); absent when the stream carried none. */
+  nativeUsage?: ChatCompletionResponse['usage'];
   wireFinishReason: string;
   /** The model hit its output limit without producing an answer. */
   outputLimitReached: boolean;

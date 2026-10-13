@@ -1,8 +1,7 @@
 /**
  * Native (agent-sdk) clients of the model provider contracts.
  *
- * `createNativeChatClient` / `createNativeEmbedder` sit next to the LangChain
- * `createChatModel` / `createEmbeddingModel` of every contract. They reuse the
+ * `createNativeChatClient` / `createNativeEmbedder` of every contract. They reuse the
  * credential / endpoint resolution of the contract (its `createNativeProviderSpec`
  * closure - no secret is read here) and the per-model request rules that already
  * apply to a gateway call:
@@ -30,7 +29,7 @@ import type {
   NativeModelOptions,
 } from '@cognipeer/agent-sdk';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
-import { hasExplicitThinking } from '@/lib/services/models/reasoning';
+import { hasExplicitThinking, translateAnthropicThinking } from '@/lib/services/models/reasoning';
 import { withInlineReasoningNormalization } from './wireNormalization';
 import type {
   ModelRuntimeConfig,
@@ -174,12 +173,20 @@ export function buildNativeOptions(input: {
 
   // An operator-supplied `thinking` block in the extra body is the whole
   // instruction: a second, translated one would conflict with it.
-  const reasoning = input.reasoning;
+  // Extended thinking on Bedrock is a Claude feature; the other Converse families have
+  // their own reasoning envelope and are left alone.
+  const reasoning = driver === 'bedrock' && !/anthropic|claude/i.test(input.modelId) ? undefined : input.reasoning;
   if (reasoning && !((driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody))) {
     if (openAiSchema) {
       if (reasoning.effort) extra = { ...(extra ?? {}), reasoning_effort: reasoning.effort };
     } else {
       options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
+      // Thinking tokens come out of `max_tokens`: leave the answer the room the console's
+      // rule promises (the SDK's own floor is thinner), and keep a roomy cap as it is.
+      if (driver === 'anthropic' || driver === 'bedrock') {
+        const thinking = translateAnthropicThinking(reasoning, maxTokens);
+        if (thinking?.thinking.type === 'enabled' && thinking.maxTokens !== undefined) options.maxTokens = thinking.maxTokens;
+      }
     }
   }
   if (extra) options.extra = extra;

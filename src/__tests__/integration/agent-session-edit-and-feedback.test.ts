@@ -8,6 +8,7 @@
  * and webhook publishing, so what the services TELL those can be asserted.
  */
 
+import { settlingModel } from '../helpers/fakeGatewayModel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getModelByKey: vi.fn(),
-  buildNativeAgentModel: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
@@ -30,7 +31,7 @@ vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: hoi
 vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.recordAuditLog }));
 vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/services/agents/nativeAgentModel', () => ({ buildNativeAgentModel: hoisted.buildNativeAgentModel }));
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({ buildGatewayChatModel: hoisted.buildGatewayChatModel, isDynamicModel: () => false, }));
 vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/models/usageLogger')>();
   return { ...actual, logModelUsage: hoisted.logModelUsage };
@@ -103,7 +104,7 @@ let tenantId: string;
 
 function scriptModel(script: ConstructorParameters<typeof ScriptedModel>[0]): ScriptedModel {
   const model = new ScriptedModel(script);
-  hoisted.buildNativeAgentModel.mockResolvedValue(model);
+  hoisted.buildGatewayChatModel.mockImplementation(async (input: Parameters<typeof settlingModel>[0]) => settlingModel(input, model));
   return model;
 }
 
@@ -372,7 +373,7 @@ describe('rerunSessionTurn', () => {
 
   it('puts the transcript back when the new turn cannot run, and does not mark any rating', async () => {
     await createAgent();
-    hoisted.buildNativeAgentModel.mockRejectedValue(new Error('provider is down'));
+    hoisted.buildGatewayChatModel.mockRejectedValue(new Error('provider is down'));
     const id = await conversationWith(THREE_TURNS());
     await recordMessageFeedback({ ...scope(id), message: { index: 5 }, userId: 'u9', channel: 'portal', rating: 'up' });
 
@@ -606,19 +607,20 @@ describe('titles', () => {
     expect(String(sent[1].content)).toContain('Faturamı nasıl iade ederim?');
     expect(String(sent[1].content)).toContain('Önce iade formunu');
 
-    await vi.waitFor(() => expect(hoisted.logModelUsage).toHaveBeenCalled());
-    const [, usedModel, payload] = hoisted.logModelUsage.mock.calls[0];
-    expect(usedModel.key).toBe('gpt-4o');
-    expect(payload).toMatchObject({ route: 'agent.title', providerRequest: { purpose: 'title', agentKey: AGENT_KEY } });
+    // The usage row is the gateway's (gateway-agent-model.test.ts): the title only says whose call it is.
+    expect(hoisted.buildGatewayChatModel.mock.calls[0][0]).toMatchObject({
+      route: 'agent.title', purpose: 'title', agentKey: AGENT_KEY, userId: OWNER, model: { key: 'gpt-4o' },
+    });
   });
 
   it('is "no title" — never an error — when the model is gone, fails or says nothing', async () => {
     const input = {
       tenantDbName: DB_NAME, tenantId, projectId: PROJECT_ID, modelKey: 'gpt-4o', exchange: { user: 'hi', assistant: 'hello' },
     };
-    hoisted.getModelByKey.mockResolvedValueOnce(null);
+    // Looked up twice: for the title's reasoning, and again to build the model.
+    hoisted.getModelByKey.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     expect(await generateConversationTitle(input)).toBeNull();
-    hoisted.buildNativeAgentModel.mockRejectedValueOnce(new Error('down'));
+    hoisted.buildGatewayChatModel.mockRejectedValueOnce(new Error('down'));
     expect(await generateConversationTitle(input)).toBeNull();
     scriptModel(() => ({ role: 'assistant', content: '   ' }));
     expect(await generateConversationTitle(input)).toBeNull();

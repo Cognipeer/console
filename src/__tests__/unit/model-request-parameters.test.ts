@@ -9,66 +9,16 @@
  *    OpenAI reasoning family 400'd on any request the gateway built;
  *  - non-OpenAI-schema parameters (vLLM's `chat_template_kwargs`, `top_k`) could
  *    not be sent at all;
- *  - LangChain's own retries nested inside `withResilience`.
+ *  - the provider's own retries nested inside `withResilience`.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { bedrockRuntime, chunk, completion, json, sse, stubUpstream } from '../helpers/nativeGateway';
 
-const constructed: Array<Record<string, unknown>> = [];
+afterEach(() => vi.unstubAllGlobals());
 
-vi.mock('@langchain/openai', () => {
-  class FakeChatOpenAI {
-    constructor(fields: Record<string, unknown>) {
-      constructed.push(fields);
-    }
-    invoke = vi.fn();
-    stream = vi.fn();
-  }
-  class FakeOpenAIEmbeddings {
-    embedDocuments = vi.fn();
-  }
-  return {
-    ChatOpenAI: FakeChatOpenAI,
-    AzureChatOpenAI: FakeChatOpenAI,
-    OpenAIEmbeddings: FakeOpenAIEmbeddings,
-    AzureOpenAIEmbeddings: FakeOpenAIEmbeddings,
-  };
-});
-
-vi.mock('@langchain/community/chat_models/togetherai', () => ({
-  ChatTogetherAI: class {
-    constructor(fields: Record<string, unknown>) {
-      constructed.push(fields);
-    }
-    invoke = vi.fn();
-  },
-}));
-vi.mock('@langchain/community/embeddings/togetherai', () => ({
-  TogetherAIEmbeddings: class {},
-}));
-vi.mock('@langchain/aws', () => ({
-  ChatBedrockConverse: class {
-    constructor(fields: Record<string, unknown>) {
-      constructed.push(fields);
-    }
-    invoke = vi.fn();
-  },
-  BedrockEmbeddings: class {},
-}));
-vi.mock('@langchain/google-vertexai', () => ({
-  ChatVertexAI: class {
-    constructor(fields: Record<string, unknown>) {
-      constructed.push(fields);
-    }
-    invoke = vi.fn();
-  },
-  VertexAIEmbeddings: class {},
-}));
-
-import {
-  OpenAiCompatibleModelProviderContract,
-  BedrockModelProviderContract,
-} from '@/lib/providers/contracts/modelContracts';
+import { OpenAiCompatibleModelProviderContract } from '@/lib/providers/contracts/modelContracts';
+import { buildTransformRequest } from '@/lib/providers/contracts/nativeClients';
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 import { normalizeModelSettings } from '@/lib/services/models/modelSettings';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
@@ -78,29 +28,30 @@ import {
 } from '@/lib/providers/unsupportedParams';
 import { buildCacheVariantKey } from '@/lib/services/models/semanticCacheService';
 
-function buildOpenAiCompatibleChat(modelSettings: Record<string, unknown>, modelId = 'qwen3-32b') {
-  constructed.length = 0;
-  const runtime = OpenAiCompatibleModelProviderContract.createRuntime({
+const ASK = [{ role: 'user' as const, content: 'hi' }];
+
+async function compatibleRuntime(baseUrl = 'https://vllm.internal/v1') {
+  return OpenAiCompatibleModelProviderContract.createRuntime({
     tenantId: 't1',
     providerKey: 'p1',
     credentials: { apiKey: 'sk-test' },
-    settings: { baseUrl: 'https://vllm.internal/v1' },
+    settings: { baseUrl },
     metadata: {},
     logger: console,
   } as never) as ModelProviderRuntime;
-
-  runtime.createChatModel!({
-    modelId,
-    category: 'llm',
-    modelSettings,
-    options: { maxRetries: 0 },
-  });
-  return constructed[0];
 }
 
-describe('resolveOverrides — sampling parameters reach the provider', () => {
-  it('forwards top_p and the penalties, which used to be collected and discarded', () => {
-    const fields = buildOpenAiCompatibleChat({
+/** The request body an OpenAI-compatible native client puts on the wire for these model settings. */
+async function sentBody(modelSettings: Record<string, unknown>, modelId = 'qwen3-32b', options: { maxRetries?: number } = { maxRetries: 0 }) {
+  const upstream = stubUpstream(() => json(completion()));
+  const client = await (await compatibleRuntime()).createNativeChatClient!({ modelId, category: 'llm', modelSettings, options });
+  await client.complete({ messages: ASK });
+  return upstream.calls[0].body;
+}
+
+describe('resolveOverrides - sampling parameters reach the provider', () => {
+  it('forwards top_p and the penalties, which used to be collected and discarded', async () => {
+    const body = await sentBody({
       temperature: 0.4,
       topP: 0.8,
       presencePenalty: 0.5,
@@ -108,160 +59,116 @@ describe('resolveOverrides — sampling parameters reach the provider', () => {
       maxTokens: 512,
     });
 
-    expect(fields.temperature).toBe(0.4);
-    expect(fields.topP).toBe(0.8);
-    expect(fields.presencePenalty).toBe(0.5);
-    expect(fields.frequencyPenalty).toBe(0.25);
-    expect(fields.maxTokens).toBe(512);
+    expect(body.temperature).toBe(0.4);
+    expect(body.top_p).toBe(0.8);
+    expect(body.presence_penalty).toBe(0.5);
+    expect(body.frequency_penalty).toBe(0.25);
+    expect(body.max_tokens).toBe(512);
   });
 
-  it('leaves LangChain no retry budget when the caller owns retry', () => {
-    // AsyncCaller defaults to 6 retries; nested in withResilience's 3 attempts
-    // that is up to 21 upstream calls, 18 invisible to the circuit breaker.
-    expect(buildOpenAiCompatibleChat({}).maxRetries).toBe(0);
+  it('leaves the provider no retry budget when the caller owns retry', async () => {
+    // Nested in withResilience's 3 attempts, the provider's own retries would
+    // be up to 9 upstream calls, 6 of them invisible to the circuit breaker.
+    const upstream = stubUpstream(() => new Response('{"error":{"message":"boom"}}', { status: 500, headers: { 'retry-after': '0' } }));
+    const client = await (await compatibleRuntime()).createNativeChatClient!({ modelId: 'qwen3-32b', category: 'llm', options: { maxRetries: 0 } });
+    await expect(client.complete({ messages: ASK })).rejects.toBeDefined();
+    expect(upstream.calls).toHaveLength(1);
   });
 
-  it('keeps a small retry budget for callers outside withResilience (agents)', () => {
-    constructed.length = 0;
-    const runtime = OpenAiCompatibleModelProviderContract.createRuntime({
-      tenantId: 't1',
-      providerKey: 'p1',
-      credentials: { apiKey: 'sk-test' },
-      settings: { baseUrl: 'https://vllm.internal/v1' },
-      metadata: {},
-      logger: console,
-    } as never) as ModelProviderRuntime;
-
-    runtime.createChatModel!({ modelId: 'qwen3-32b', category: 'llm', modelSettings: {} });
-
-    expect(constructed[0].maxRetries).toBe(2);
+  it('keeps a small retry budget for callers outside withResilience', async () => {
+    const upstream = stubUpstream(() => new Response('{"error":{"message":"boom"}}', { status: 500, headers: { 'retry-after': '0' } }));
+    const client = await (await compatibleRuntime()).createNativeChatClient!({ modelId: 'qwen3-32b', category: 'llm' });
+    await expect(client.complete({ messages: ASK })).rejects.toBeDefined();
+    expect(upstream.calls).toHaveLength(3);
   });
 });
 
-describe('unsupportedParams — models that reject a parameter outright', () => {
-  it('drops temperature so it never reaches the wire', () => {
-    const fields = buildOpenAiCompatibleChat({
-      temperature: 0.2,
-      unsupportedParams: ['temperature'],
-    });
-
-    // undefined, not 0 or 1 — JSON.stringify omits it, which is the whole point.
-    expect(fields.temperature).toBeUndefined();
+describe('unsupportedParams - models that reject a parameter outright', () => {
+  it('drops temperature so it never reaches the wire', async () => {
+    const body = await sentBody({ temperature: 0.2, unsupportedParams: ['temperature'] });
+    expect(body).not.toHaveProperty('temperature');
   });
 
-  it('accepts the provider wire name in any case, and camelCase too', () => {
-    const fields = buildOpenAiCompatibleChat({
-      temperature: 0.2,
-      topP: 0.9,
-      unsupportedParams: ['TEMPERATURE', 'top_p'],
-    });
-
-    expect(fields.temperature).toBeUndefined();
-    expect(fields.topP).toBeUndefined();
+  it('accepts the provider wire name in any case, and camelCase too', async () => {
+    const body = await sentBody({ temperature: 0.2, topP: 0.9, unsupportedParams: ['TEMPERATURE', 'top_p'] });
+    expect(body).not.toHaveProperty('temperature');
+    expect(body).not.toHaveProperty('top_p');
   });
 
-  it('sends max_completion_tokens for a model id LangChain would not rename', () => {
-    // LangChain collapses maxCompletionTokens/maxTokens into one property and
-    // then picks the wire key from the model id alone (/^o\d/ or a gpt-5
-    // prefix). For an Azure deployment or a vanity id the constructor field
-    // cannot express the rename, so it has to ride in the request body — and
-    // LangChain's own emission has to be silenced with its -1 sentinel.
-    const fields = buildOpenAiCompatibleChat({
-      maxTokens: 4096,
-      unsupportedParams: ['max_tokens'],
-    }, 'luna-prod');
+  it('sends max_completion_tokens for a model id no name rule would rename', async () => {
+    const body = await sentBody({ maxTokens: 4096, unsupportedParams: ['max_tokens'] }, 'luna-prod');
 
-    expect(fields.maxTokens).toBe(-1);
-    expect(fields.maxCompletionTokens).toBe(-1);
-    expect(fields.modelKwargs).toMatchObject({ max_completion_tokens: 4096 });
+    expect(body.max_completion_tokens).toBe(4096);
+    expect(body).not.toHaveProperty('max_tokens');
   });
 
-  it('uses the constructor field when the model id already triggers the rename', () => {
-    const fields = buildOpenAiCompatibleChat({
-      maxTokens: 4096,
-      unsupportedParams: ['max_tokens'],
-    }, 'gpt-5.6-luna');
+  it('sends max_completion_tokens when the model id already triggers the rename', async () => {
+    const body = await sentBody({ maxTokens: 4096, unsupportedParams: ['max_tokens'] }, 'gpt-5.6-luna');
 
-    expect(fields.maxCompletionTokens).toBe(4096);
-    expect(fields.modelKwargs).toBeUndefined();
+    expect(body.max_completion_tokens).toBe(4096);
+    expect(body).not.toHaveProperty('max_tokens');
   });
 
-  it('still gives Bedrock a token cap when max_tokens is declared unsupported', () => {
-    constructed.length = 0;
-    const runtime = BedrockModelProviderContract.createRuntime({
-      tenantId: 't1',
-      providerKey: 'p1',
-      credentials: { accessKeyId: 'a', secretAccessKey: 'b' },
-      settings: { region: 'us-east-1' },
-      metadata: {},
-      logger: console,
-    } as never) as ModelProviderRuntime;
-
-    runtime.createChatModel!({
+  it('still gives Bedrock a token cap when max_tokens is declared unsupported', async () => {
+    const upstream = stubUpstream(() => json({
+      output: { message: { role: 'assistant', content: [{ text: 'ok' }] } }, stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 },
+    }));
+    const client = await (await bedrockRuntime()).createNativeChatClient!({
       modelId: 'anthropic.claude-3',
       category: 'llm',
       modelSettings: { maxTokens: 2048, unsupportedParams: ['max_tokens'] },
+      options: { maxRetries: 0 },
     });
+    await client.complete({ messages: ASK });
 
-    expect(constructed[0].maxTokens).toBe(2048);
+    expect(upstream.calls[0].body.inferenceConfig.maxTokens).toBe(2048);
   });
 
-  it('turns off stream usage when the upstream rejects stream_options', () => {
-    expect(
-      buildOpenAiCompatibleChat({ unsupportedParams: ['stream_options'] }).streamUsage,
-    ).toBe(false);
-    expect(buildOpenAiCompatibleChat({}).streamUsage).toBeUndefined();
+  it('turns off stream usage when the upstream rejects stream_options', async () => {
+    const streamed = async (modelSettings: Record<string, unknown>) => {
+      const upstream = stubUpstream(() => sse([chunk.text('hi'), chunk.finish('stop')]));
+      const client = await (await compatibleRuntime()).createNativeChatClient!({ modelId: 'qwen3-32b', category: 'llm', modelSettings, options: { maxRetries: 0 } });
+      for await (const part of client.stream({ messages: ASK })) void part;
+      return upstream.calls[0].body;
+    };
+    expect(await streamed({ unsupportedParams: ['stream_options'] })).not.toHaveProperty('stream_options');
+    expect((await streamed({})).stream_options).toEqual({ include_usage: true });
   });
 
-  it('ignores names it does not recognise instead of throwing', () => {
-    const fields = buildOpenAiCompatibleChat({
-      temperature: 0.3,
-      unsupportedParams: ['not_a_real_param', 42 as unknown as string],
-    });
-
-    expect(fields.temperature).toBe(0.3);
+  it('ignores names it does not recognise instead of throwing', async () => {
+    const body = await sentBody({ temperature: 0.3, unsupportedParams: ['not_a_real_param', 42 as unknown as string] });
+    expect(body.temperature).toBe(0.3);
   });
 });
 
-describe('extra request body — parameters outside the OpenAI schema', () => {
-  it('passes the resolved extraBody to the provider as modelKwargs', () => {
-    const fields = buildOpenAiCompatibleChat({
-      extraBody: { chat_template_kwargs: { enable_thinking: false }, top_k: 20 },
-    });
+describe('extra request body - parameters outside the OpenAI schema', () => {
+  it('merges the resolved extraBody into the upstream body', async () => {
+    const body = await sentBody({ extraBody: { chat_template_kwargs: { enable_thinking: false }, top_k: 20 } });
 
-    expect(fields.modelKwargs).toEqual({
-      chat_template_kwargs: { enable_thinking: false },
-      top_k: 20,
-    });
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(body.top_k).toBe(20);
   });
 
-  it('falls back to the model-level requestDefaults for callers that build a runtime directly', () => {
+  it('falls back to the model-level requestDefaults for callers that build a runtime directly', async () => {
     // Agents, OCR and evaluations pass `model.settings` straight through.
-    const fields = buildOpenAiCompatibleChat({
-      requestDefaults: { top_k: 40 },
-    });
+    const body = await sentBody({ requestDefaults: { top_k: 40 } });
 
-    expect(fields.modelKwargs).toEqual({ top_k: 40 });
+    expect(body.top_k).toBe(40);
   });
 
-  it('routes Bedrock through additionalModelRequestFields, not modelKwargs', () => {
-    constructed.length = 0;
-    const runtime = BedrockModelProviderContract.createRuntime({
-      tenantId: 't1',
-      providerKey: 'p1',
-      credentials: { accessKeyId: 'a', secretAccessKey: 'b' },
-      settings: { region: 'us-east-1' },
-      metadata: {},
-      logger: console,
-    } as never) as ModelProviderRuntime;
-
-    runtime.createChatModel!({
+  it('routes Bedrock through additionalModelRequestFields', async () => {
+    const upstream = stubUpstream(() => json({
+      output: { message: { role: 'assistant', content: [{ text: 'ok' }] } }, stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 },
+    }));
+    const client = await (await bedrockRuntime()).createNativeChatClient!({
       modelId: 'anthropic.claude-3',
       category: 'llm',
       modelSettings: { extraBody: { anthropic_beta: ['x'] } },
+      options: { maxRetries: 0 },
     });
+    await client.complete({ messages: ASK });
 
-    expect(constructed[0].additionalModelRequestFields).toEqual({ anthropic_beta: ['x'] });
+    expect(upstream.calls[0].body.additionalModelRequestFields).toEqual({ anthropic_beta: ['x'] });
   });
 });
 
@@ -283,9 +190,9 @@ describe('automatic detection — the drop_params equivalent', () => {
     expect(detectUnsupportedParams(undefined, undefined).params).toEqual([]);
   });
 
-  it('drops a detected parameter with no operator configuration at all', () => {
-    const fields = buildOpenAiCompatibleChat({ temperature: 0.2 }, 'gpt-5.6-luna');
-    expect(fields.temperature).toBeUndefined();
+  it('drops a detected parameter with no operator configuration at all', async () => {
+    const body = await sentBody({ temperature: 0.2 }, 'gpt-5.6-luna');
+    expect(body).not.toHaveProperty('temperature');
   });
 
   it('unions detection with the operator list rather than replacing it', () => {
@@ -313,12 +220,12 @@ describe('automatic detection — the drop_params equivalent', () => {
     expect(params).toEqual(['frequency_penalty']);
   });
 
-  it('honours the per-model opt-out all the way to the provider', () => {
-    const fields = buildOpenAiCompatibleChat(
-      { temperature: 0.2, autoDropUnsupportedParams: false },
-      'gpt-5.6-luna',
-    );
-    expect(fields.temperature).toBe(0.2);
+  it('honours the per-model opt-out in the request hook, so the gateway adds no stripping of its own', () => {
+    const request = () => ({ model: 'gpt-5.6-luna', messages: [], temperature: 0.2 });
+    const strip = (settings: Record<string, unknown>) =>
+      buildTransformRequest({ driver: 'openai-compatible', modelId: 'gpt-5.6-luna', settings })(request() as never) as { temperature?: number };
+    expect(strip({ autoDropUnsupportedParams: false }).temperature).toBe(0.2);
+    expect(strip({}).temperature).toBeUndefined();
   });
 });
 
@@ -364,17 +271,7 @@ describe('reasoning_effort + function tools — upstream 400s the combination', 
     expect(config.modelSettings.reasoning).toEqual({ effort: 'high' });
   });
 
-  it('reaches the provider as reasoning_effort "none" once bound to a real gpt-5 model id', () => {
-    constructed.length = 0;
-    const runtime = OpenAiCompatibleModelProviderContract.createRuntime({
-      tenantId: 't1',
-      providerKey: 'p1',
-      credentials: { apiKey: 'sk-test' },
-      settings: { baseUrl: 'https://api.openai.com/v1' },
-      metadata: {},
-      logger: console,
-    } as never) as ModelProviderRuntime;
-
+  it('reaches the provider as reasoning_effort "none" once bound to a real gpt-5 model id', async () => {
     const { modelSettings } = resolveModelInvocationConfig(
       { settings: {}, modelId: 'gpt-5.6-luna', providerDriver: 'openai-compatible' },
       {
@@ -384,10 +281,9 @@ describe('reasoning_effort + function tools — upstream 400s the combination', 
       },
     );
 
-    runtime.createChatModel!({ modelId: 'gpt-5.6-luna', category: 'llm', modelSettings });
+    const body = await sentBody(modelSettings as Record<string, unknown>, 'gpt-5.6-luna');
 
-    expect(constructed[0].reasoning).toBeUndefined();
-    expect(constructed[0].modelKwargs).toMatchObject({ reasoning_effort: 'none' });
+    expect(body.reasoning_effort).toBe('none');
   });
 });
 

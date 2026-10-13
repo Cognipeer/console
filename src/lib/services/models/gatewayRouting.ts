@@ -587,7 +587,10 @@ export async function resolveDynamicCompletion(args: {
         status,
         providerRequest: sanitizeForLogging({
           model: router.key,
-          messages: wire.messages,
+          messages: input.context?.logPrompt === false
+            ? { count: Array.isArray(wire.messages) ? wire.messages.length : 0 }
+            : wire.messages,
+          ...input.context?.requestTags,
           signals: routing.signals,
           ...describeRequestContract(wire),
         }),

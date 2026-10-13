@@ -54,6 +54,7 @@ import {
   sanitizeForLogging,
 } from './gatewayRequest';
 import {
+  GuardrailBlockError,
   annotateResponseWithGuardrails,
   enforceModelGuardrailChain,
   foldGuardrailAnnotation,
@@ -369,12 +370,21 @@ interface CallState {
   outputGuardrailKeys: string[];
   guardrailAnnotations: Record<string, GuardrailAnnotation>;
   includeReasoning: boolean;
+  /** What a usage row records of the prompt: the messages, or just their count when the caller opted out (`logPrompt: false`). */
+  loggedMessages: unknown;
+}
+
+/** The caller's tags ride along on every usage row's request. */
+function loggedRequest(state: CallState, request: unknown): unknown {
+  const { requestTags } = state.context;
+  return requestTags ? { ...asRecord(request), ...requestTags } : request;
 }
 
 function usageRow(state: CallState, label: string, payload: Parameters<typeof logModelUsage>[2]) {
   fireAndForget(label, () =>
     logModelUsage(state.tenantDbName, state.model, {
       ...payload,
+      providerRequest: loggedRequest(state, payload.providerRequest),
       ...state.routedByLog,
       ...(state.attribution ? { attribution: state.attribution } : {}),
     } as Parameters<typeof logModelUsage>[2]),
@@ -576,6 +586,9 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
     outputGuardrailKeys,
     guardrailAnnotations,
     includeReasoning: shouldReturnReasoning(model.settings, wire),
+    loggedMessages: context.logPrompt === false
+      ? { count: Array.isArray(wire.messages) ? wire.messages.length : 0 }
+      : wire.messages,
   };
 
   // Semantic cache: check for cached response before calling the model
@@ -599,7 +612,7 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
           status: 'success',
           providerRequest: sanitizeForLogging({
             model: modelKey,
-            messages: wire.messages,
+            messages: state.loggedMessages,
             stream: false,
             ...describeRequestContract(wire),
           }),
@@ -630,7 +643,35 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
     }
   }
 
-  return stream ? openStream(state) : completeOnce(state);
+  try {
+    return await (stream ? openStream(state) : completeOnce(state));
+  } catch (error) {
+    logFailedCall(state, error);
+    throw error;
+  }
+}
+
+/**
+ * A call that ends in an exception before any usage was written. A caller that walked
+ * away (its `signal` aborted) is `cancelled`, never a fault; any other failure is an
+ * `error` row only for a caller that asked for it (`logFailures`). A guardrail block
+ * has its own record already.
+ */
+function logFailedCall(state: CallState, error: unknown): void {
+  if (error instanceof GuardrailBlockError) return;
+  const cancelled = Boolean(state.context.signal?.aborted);
+  if (!cancelled && !state.context.logFailures) return;
+  const message = error instanceof Error ? error.message : String(error);
+  usageRow(state, cancelled ? 'log-call-cancelled' : 'log-call-error', {
+    requestId: state.requestId,
+    route: state.route,
+    status: cancelled ? 'cancelled' : 'error',
+    providerRequest: sanitizeForLogging({ model: state.modelKey, messages: state.loggedMessages, stream: Boolean(state.input.stream) }),
+    providerResponse: sanitizeForLogging(cancelled ? { cancelled: 'client_disconnected' } : { error: message }),
+    ...(cancelled ? {} : { errorMessage: message }),
+    latencyMs: Date.now() - state.start,
+    usage: {},
+  });
 }
 
 // ── Non-streamed call ─────────────────────────────────────────────────────
@@ -713,7 +754,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     includeReasoning: state.includeReasoning,
   });
 
-  context.onUsageSettled?.(calculateCost(model.pricing, usage));
+  context.onUsageSettled?.(calculateCost(model.pricing, usage), usage);
 
   usageRow(state, 'log-chat-usage', {
     requestId,
@@ -721,7 +762,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     status: 'success',
     providerRequest: sanitizeForLogging({
       model: modelKey,
-      messages: wire.messages,
+      messages: state.loggedMessages,
       overrides,
       stream: false,
       ...describeRequestContract(wire),
@@ -1031,7 +1072,7 @@ async function* streamEvents(args: {
 
   const requestLog = (extra: AnyRecord = {}) => sanitizeForLogging({
     model: modelKey,
-    messages: wire.messages,
+    messages: state.loggedMessages,
     overrides,
     stream: true,
     ...extra,
@@ -1136,7 +1177,7 @@ async function* streamEvents(args: {
       ? { ...toGatewayUsage(driver, assembler.usage), toolCalls: toolCallCount() }
       : { toolCalls: toolCallCount() };
 
-    context.onUsageSettled?.(calculateCost(model.pricing, usage));
+    context.onUsageSettled?.(calculateCost(model.pricing, usage), usage);
 
     usageRow(state, 'log-stream-usage', {
       requestId,
@@ -1307,6 +1348,7 @@ async function* streamEvents(args: {
       type: 'done',
       response,
       usage,
+      ...(assembler.usage ? { nativeUsage: assembler.usage } : {}),
       wireFinishReason: finishForSettle,
       outputLimitReached: Boolean(outputLimitError),
     };
@@ -1326,14 +1368,14 @@ async function* streamEvents(args: {
     // provider had already generated (and bills us for) were written as zero.
     if (external?.aborted) {
       const cancelledUsage = partialUsage();
-      context.onUsageSettled?.(calculateCost(model.pricing, cancelledUsage));
+      context.onUsageSettled?.(calculateCost(model.pricing, cancelledUsage), cancelledUsage);
       usageRow(state, 'log-stream-cancelled', {
         requestId,
         route: state.route,
         status: 'cancelled',
         providerRequest: sanitizeForLogging({
           model: modelKey,
-          messages: wire.messages,
+          messages: state.loggedMessages,
           overrides,
           stream: true,
         }),

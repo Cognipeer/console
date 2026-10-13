@@ -34,7 +34,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildNativeAgentModel: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   invokeExternalAgent: vi.fn(),
   evaluateGuardrail: vi.fn(),
   routeInstanceCall: vi.fn(),
@@ -52,8 +52,9 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/agents/nativeAgentModel', () => ({
-  buildNativeAgentModel: hoisted.buildNativeAgentModel,
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({
+  buildGatewayChatModel: hoisted.buildGatewayChatModel,
+  isDynamicModel: () => false,
 }));
 
 vi.mock('@/lib/services/agents/externalAgent', () => ({
@@ -274,7 +275,7 @@ beforeEach(() => {
     projectId: PROJECT_ID,
     settings: {},
   });
-  hoisted.buildNativeAgentModel.mockResolvedValue({});
+  hoisted.buildGatewayChatModel.mockResolvedValue({});
   hoisted.evaluateGuardrail.mockImplementation(async (params: { guardrailKey: string }) => allow(params.guardrailKey));
   hoisted.routeInstanceCall.mockImplementation(async (_ctx: unknown, _payload: unknown, local: () => Promise<unknown>) => local());
 });
@@ -653,85 +654,5 @@ describe('resolveAgentVoiceVersion', () => {
   it('unknown agent → undefined (the run that follows reports "not found")', async () => {
     db.findAgentByKey.mockResolvedValue(null);
     await expect(resolveAgentVoiceVersion({ ...params, prefer: 'published' })).resolves.toBeUndefined();
-  });
-});
-
-/* ── 6. The chat model is built with the model's streaming option ────────── */
-
-describe('agent chat model — provider streaming option', () => {
-  const modelRecord = (key: string, settings: Record<string, unknown> = {}) => ({
-    key,
-    name: key,
-    category: 'llm',
-    providerKey: 'openai',
-    providerDriver: 'openai',
-    modelId: key,
-    tenantId: TENANT_ID,
-    projectId: PROJECT_ID,
-    settings,
-  });
-
-  /** The native model builder (nativeAgentModel.ts), as a spy that records what each model was built with. */
-  function installChatModelSpy() {
-    hoisted.buildNativeAgentModel.mockReset();
-    hoisted.buildNativeAgentModel.mockResolvedValue({});
-    return hoisted.buildNativeAgentModel;
-  }
-
-  it('a model flagged disableStreamingWithTools (an upstream that cannot stream tool calls) is built non-streaming', async () => {
-    // Agents stream through `.stream()`. The gateway answers a streamed,
-    // tool-carrying request for such a model with one `invoke()`; an agent has
-    // to do the same or it sends the very request the flag exists to avoid.
-    hoisted.getModelByKey.mockResolvedValue(modelRecord('gpt-4o', { disableStreamingWithTools: true }));
-    const createChatModel = installChatModelSpy();
-
-    await executePlaygroundChatLocal(playground({ onTextChunk: vi.fn() }));
-
-    expect(createChatModel.mock.calls).toHaveLength(1);
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ model: { modelId: 'gpt-4o' }, disableStreaming: true });
-  });
-
-  it('an ordinary model keeps streaming', async () => {
-    const createChatModel = installChatModelSpy();
-    await executePlaygroundChatLocal(playground({ onTextChunk: vi.fn() }));
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ disableStreaming: false });
-  });
-
-  it('only the exact flag counts', async () => {
-    hoisted.getModelByKey.mockResolvedValue(modelRecord('gpt-4o', { disableStreamingWithTools: 'true' }));
-    const createChatModel = installChatModelSpy();
-    await executePlaygroundChatLocal(playground());
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ disableStreaming: false });
-  });
-
-  it('the chat entry point builds the model the same way', async () => {
-    hoisted.getModelByKey.mockResolvedValue(modelRecord('gpt-4o', { disableStreamingWithTools: true }));
-    const createChatModel = installChatModelSpy();
-    await executeAgentChatLocal(chat({ onTextChunk: vi.fn() }));
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ disableStreaming: true });
-  });
-
-  it('a sub-agent with a model of its own gets the same treatment, independently of the parent', async () => {
-    db.findAgentByKey.mockResolvedValue({
-      ...nativeAgent(),
-      config: {
-        ...nativeAgent().config,
-        subagents: [{ kind: 'inline', name: 'researcher', header: 'Researcher', modelKey: 'fast-model' }],
-      },
-    } as IAgent);
-    hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) =>
-      modelRecord(key, key === 'fast-model' ? { disableStreamingWithTools: true } : {}),
-    );
-    const createChatModel = installChatModelSpy();
-
-    await executePlaygroundChatLocal(playground());
-
-    const optionsByModel = Object.fromEntries(
-      createChatModel.mock.calls.map(([input]) => [(input.model as { modelId: string }).modelId, { disableStreaming: input.disableStreaming }]),
-    );
-    expect(optionsByModel).toEqual({
-      'gpt-4o': { disableStreaming: false },
-      'fast-model': { disableStreaming: true },
-    });
   });
 });

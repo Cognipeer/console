@@ -11,7 +11,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildNativeAgentModel: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   scripted: { content: 'plain answer' } as { content: string; ctx?: Record<string, unknown> },
 }));
 
@@ -21,8 +21,9 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/agents/nativeAgentModel', () => ({
-  buildNativeAgentModel: hoisted.buildNativeAgentModel,
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({
+  buildGatewayChatModel: hoisted.buildGatewayChatModel,
+  isDynamicModel: () => false,
 }));
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
@@ -159,7 +160,7 @@ beforeEach(() => {
     projectId: PROJECT_ID,
     settings: {},
   });
-  hoisted.buildNativeAgentModel.mockResolvedValue({});
+  hoisted.buildGatewayChatModel.mockResolvedValue({});
 });
 
 function run(extra: Record<string, unknown> = {}) {
@@ -242,7 +243,7 @@ describe('executeAgentChatLocal — session events and steps', () => {
   });
 
   it('a thrown turn is logged as session.error + idle(error) and still throws', async () => {
-    hoisted.buildNativeAgentModel.mockRejectedValue(new Error('provider exploded'));
+    hoisted.buildGatewayChatModel.mockRejectedValue(new Error('provider exploded'));
     await expect(run()).rejects.toThrow('provider exploded');
     const types = loggedEvents().map((e) => e.type);
     expect(types).toContain('session.error');

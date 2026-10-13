@@ -30,7 +30,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildNativeAgentModel: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   /** Every wire transcript the fake provider was handed, per invoke. */
   providerCalls: [] as Array<Array<{ role: string; content: unknown }>>,
 }));
@@ -41,8 +41,9 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/agents/nativeAgentModel', () => ({
-  buildNativeAgentModel: hoisted.buildNativeAgentModel,
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({
+  buildGatewayChatModel: hoisted.buildGatewayChatModel,
+  isDynamicModel: () => false,
 }));
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
@@ -234,7 +235,7 @@ beforeEach(() => {
     projectId: PROJECT_ID,
     settings: {},
   });
-  hoisted.buildNativeAgentModel.mockResolvedValue({});
+  hoisted.buildGatewayChatModel.mockResolvedValue({});
   hoisted.resolveGuardrail.mockResolvedValue({ key: KEY, name: 'PII redact', mode: 'enforce', enabled: true });
   hoisted.runHook.mockImplementation(redactingRunHook);
 });

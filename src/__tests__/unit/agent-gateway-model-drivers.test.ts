@@ -1,13 +1,13 @@
 /**
- * An agent's model is an agent-sdk NATIVE model built from the Model Hub record
- * (nativeAgentModel.ts). Every driver is exercised through the real provider
- * contract and the real SDK with an injected `fetch`: what is asserted is the
- * wire request an agent turn sends (model id, tools, token-limit field, extra
- * fields, credentials) and what the turn parses back (text, tool calls, usage,
- * reasoning, streaming).
+ * An agent's model is a call into the gateway core (gatewayChatModel.ts). Every
+ * driver is exercised through the real provider contract, the real gateway core
+ * and the real agent-sdk with a scripted `fetch`: what is asserted is the wire
+ * request an agent turn sends (model id, tools, token-limit field, extra fields,
+ * credentials) and what the turn parses back (text, tool calls, usage, reasoning,
+ * streaming).
  */
 import { generateKeyPairSync } from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AnthropicModelProviderContract,
   AzureModelProviderContract,
@@ -20,6 +20,23 @@ import {
 
 const hoisted = vi.hoisted(() => ({
   providers: {} as Record<string, { driver: string; credentials: Record<string, unknown>; settings: Record<string, unknown> }>,
+  model: null as unknown,
+}));
+
+vi.mock('@/lib/core/config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/core/config')>();
+  return {
+    ...actual,
+    getConfig: () => {
+      const config = actual.getConfig();
+      return { ...config, gateway: { ...config.gateway, retryEnabled: true, retryMaxAttempts: 3, retryInitialDelayMs: 1, circuitBreakerEnabled: false } };
+    },
+  };
+});
+vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: async () => hoisted.model }));
+vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/services/models/usageLogger')>()),
+  logModelUsage: vi.fn().mockResolvedValue(undefined),
 }));
 
 const CONTRACTS = {
@@ -49,7 +66,7 @@ vi.mock('@/lib/services/models/runtimeService', () => ({
   },
 }));
 
-import { buildNativeAgentModel, normalizeNativeReasoning, type NativeAgentModelInput } from '@/lib/services/agents/nativeAgentModel';
+import { buildGatewayChatModel, normalizeNativeReasoning, type GatewayChatModelInput } from '@/lib/services/agents/gatewayChatModel';
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
@@ -91,12 +108,12 @@ function useProvider(driver: string, credentials: Record<string, unknown>, setti
   hoisted.providers.prov = { driver, credentials, settings };
 }
 
-async function build(over: Record<string, unknown>, extra: Partial<NativeAgentModelInput> & { fetch: typeof fetch }) {
-  return buildNativeAgentModel({
-    tenantDbName: 'tenant_x', tenantId: 't', projectId: 'p',
-    model: modelRecord({ providerDriver: hoisted.providers.prov.driver, ...over }) as never,
-    ...extra,
-  });
+async function build(over: Record<string, unknown>, extra: Partial<Pick<GatewayChatModelInput, 'overrides' | 'reasoning' | 'requestReasoning'>> & { fetch: typeof fetch }) {
+  const { fetch: scripted, ...rest } = extra;
+  vi.stubGlobal('fetch', scripted);
+  const model = modelRecord({ providerDriver: hoisted.providers.prov.driver, ...over });
+  hoisted.model = model;
+  return buildGatewayChatModel({ tenantDbName: 'tenant_x', tenantId: 't', projectId: 'p', model: model as never, ...rest });
 }
 
 async function lookupTool() {
@@ -114,6 +131,7 @@ const chatCompletion = (message: Record<string, unknown>, extra: Record<string, 
 });
 
 beforeEach(() => { hoisted.providers = {}; });
+afterEach(() => vi.unstubAllGlobals());
 
 /* ── OpenAI ──────────────────────────────────────────────────────────────── */
 
@@ -236,15 +254,19 @@ describe('openai', () => {
     });
   });
 
-  it('disableStreaming: .stream() is ONE non-streaming request, and a model bound later keeps that', async () => {
+  it('disableStreamingWithTools: a streamed, tool-carrying turn is ONE non-streaming request (the gateway decides, per request)', async () => {
     const { calls, fetch } = recorder(() => json(chatCompletion({ content: 'whole answer' })));
-    const model = await build({}, { fetch, disableStreaming: true });
+    const model = await build({ settings: { disableStreamingWithTools: true } }, { fetch });
     const parts: any[] = [];
     for await (const part of model.bindTools!([await lookupTool()]).stream!(USER)) parts.push(part);
     expect(calls).toHaveLength(1);
-    expect(calls[0].body.stream).toBe(false);
-    expect(parts).toHaveLength(1);
-    expect(parts[0]).toMatchObject({ role: 'assistant', content: 'whole answer' });
+    expect(calls[0].body.stream).toBeFalsy();
+    expect(parts.at(-1)).toMatchObject({ role: 'assistant', content: 'whole answer' });
+    // Without tools the same model streams.
+    const plain = recorder(() => sse([{ id: 's', object: 'chat.completion.chunk', model: 'gpt-4o', choices: [{ index: 0, delta: { content: 'hi' }, finish_reason: 'stop' }] }]));
+    const streaming = await build({ settings: { disableStreamingWithTools: true } }, { fetch: plain.fetch });
+    for await (const part of streaming.stream!(USER)) void part;
+    expect(plain.calls[0].body.stream).toBe(true);
   });
 
   it('a provider error carries its status', async () => {
@@ -685,15 +707,16 @@ describe('normalizeNativeReasoning', () => {
 /* ── guards ──────────────────────────────────────────────────────────────── */
 
 describe('provider support', () => {
-  it('a driver without a chat model cannot serve an agent', async () => {
+  it('a driver without a chat client cannot serve an agent turn', async () => {
     hoisted.providers.prov = { driver: 'openai', credentials: { apiKey: 'k' }, settings: {} };
     const original = OpenAiModelProviderContract.createRuntime as unknown as (c: unknown) => Record<string, unknown>;
     vi.spyOn(OpenAiModelProviderContract, 'createRuntime').mockImplementation(((ctx: unknown) => {
       const runtime = original(ctx);
-      delete runtime.createNativeProviderSpec;
+      delete runtime.createNativeChatClient;
       return runtime;
     }) as never);
-    await expect(build({}, { fetch: recorder(() => json({})).fetch })).rejects.toThrow(/cannot serve an agent/);
+    const model = await build({}, { fetch: recorder(() => json({})).fetch });
+    await expect(model.invoke(USER)).rejects.toThrow(/does not support chat completions/);
     vi.restoreAllMocks();
   });
 });

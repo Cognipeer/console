@@ -1,22 +1,21 @@
 /**
- * Review fixes on the native agent model path:
+ * Review fixes on the agent model path (an agent calls the gateway core in process):
  *  - a title only asks for reasoning where the model takes it (a chat model answers 400 to
  *    `reasoning_effort`, and the failure used to cost the agent its generated titles);
  *  - `unsupportedParams: ['reasoning']` keeps the agent's pick off the wire too;
  *  - Model Hub "Return reasoning to callers" off hides the thinking text from agent outputs.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenAiModelProviderContract } from '@/lib/providers/contracts/modelContracts';
+import { stubUpstream, type Upstream } from '../helpers/nativeGateway';
 
 const hoisted = vi.hoisted(() => ({
   getModelByKey: vi.fn(),
-  safeFetch: vi.fn(),
   logModelUsage: vi.fn(),
 }));
 
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: hoisted.safeFetch }));
 vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/models/usageLogger')>()),
   logModelUsage: hoisted.logModelUsage,
@@ -56,21 +55,23 @@ const sse = (deltas: Array<Record<string, unknown>>) => new Response(
   { status: 200, headers: { 'content-type': 'text/event-stream' } },
 );
 
-const bodyOf = (call: unknown[]) => JSON.parse(String((call[1] as RequestInit).body));
+let upstream: Upstream;
+const serve = (respond: () => Response) => { upstream = stubUpstream(respond); };
 
 beforeEach(() => {
   vi.clearAllMocks();
   hoisted.logModelUsage.mockResolvedValue(undefined);
-  hoisted.safeFetch.mockImplementation(async () => completion({}));
+  serve(() => completion({}));
 });
+afterEach(() => vi.unstubAllGlobals());
 
 describe('a title asks for reasoning only where the model takes it', () => {
   const input = { tenantDbName: 'tenant_x', tenantId: 't', projectId: 'p', modelKey: 'gpt-4o', agentKey: 'a1', exchange: { user: 'plan my trip', assistant: 'sure, where to?' } };
   const titleBody = async (modelId: string, extra: Record<string, unknown> = {}) => {
-    hoisted.safeFetch.mockClear();
+    upstream.calls.length = 0;
     hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key, extra));
     expect(await generateConversationTitle({ ...input, modelKey: modelId })).toBe('Trip planning help');
-    return bodyOf(hoisted.safeFetch.mock.calls[0]);
+    return upstream.calls[0].body;
   };
 
   it('a chat model gets no reasoning_effort at all', async () => {
@@ -102,14 +103,14 @@ describe('unsupportedParams on the agent path', () => {
     hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key, { settings: { unsupportedParams: [name] } }));
     const { chatModel } = await buildAgentChatModel('tenant_x', 't', 'p', 'gpt-4o', {}, { effort: 'low' }, { effort: 'high' });
     await chatModel.invoke([{ role: 'user', content: 'hi' }]);
-    expect(bodyOf(hoisted.safeFetch.mock.calls[0])).not.toHaveProperty('reasoning_effort');
+    expect(upstream.calls[0].body).not.toHaveProperty('reasoning_effort');
   });
 
   it('without it the pick is sent', async () => {
     hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key));
     const { chatModel } = await buildAgentChatModel('tenant_x', 't', 'p', 'gpt-4o', {}, { effort: 'low' });
     await chatModel.invoke([{ role: 'user', content: 'hi' }]);
-    expect(bodyOf(hoisted.safeFetch.mock.calls[0]).reasoning_effort).toBe('low');
+    expect(upstream.calls[0].body.reasoning_effort).toBe('low');
   });
 });
 
@@ -126,13 +127,13 @@ describe('Model Hub "Return reasoning to callers" on the agent path', () => {
   };
 
   it('on (default): the message carries the thinking text', async () => {
-    hoisted.safeFetch.mockImplementation(async () => completion(thinking));
+    serve(() => completion(thinking));
     const reply = await (await build({})).invoke([{ role: 'user', content: 'hi' }]);
     expect((reply as { reasoning?: { summary?: string } }).reasoning?.summary).toBe('let me think');
   });
 
   it('off: invoke() returns no thinking text, but the tokens are still on the message', async () => {
-    hoisted.safeFetch.mockImplementation(async () => completion(thinking));
+    serve(() => completion(thinking));
     const reply = await (await build({ returnReasoning: false })).invoke([{ role: 'user', content: 'hi' }]) as Record<string, unknown>;
     expect(reply.reasoning).toBeUndefined();
     expect(reply.content).toBe('Trip planning help');
@@ -141,20 +142,20 @@ describe('Model Hub "Return reasoning to callers" on the agent path', () => {
 
   it('off: a stream carries no reasoning part and the assembled message no summary; on: both are there', async () => {
     const frames = () => sse([{ role: 'assistant', reasoning_content: 'let me ' }, { reasoning_content: 'think' }, { content: 'Hi' }]);
-    hoisted.safeFetch.mockImplementation(async () => frames());
+    serve(() => frames());
     const hidden = await collect(await build({ returnReasoning: false }) as never);
     expect(hidden.some((c) => (c as { type?: string })?.type === 'reasoning')).toBe(false);
     expect(JSON.stringify(hidden)).not.toContain('think');
     expect(hidden.some((c) => (c as { content?: string })?.content === 'Hi')).toBe(true);
 
-    hoisted.safeFetch.mockImplementation(async () => frames());
+    serve(() => frames());
     const shown = await collect(await build({}) as never);
     expect(shown.some((c) => (c as { type?: string })?.type === 'reasoning')).toBe(true);
     expect((shown.at(-1) as { reasoning?: { summary?: string } }).reasoning?.summary).toBe('let me think');
   });
 
   it('survives tools being bound afterwards', async () => {
-    hoisted.safeFetch.mockImplementation(async () => completion(thinking));
+    serve(() => completion(thinking));
     const chatModel = await build({ returnReasoning: false }) as { bindTools: (t: unknown[]) => { invoke: (m: unknown) => Promise<Record<string, unknown>> } };
     const reply = await chatModel.bindTools([]).invoke([{ role: 'user', content: 'hi' }]);
     expect(reply.reasoning).toBeUndefined();

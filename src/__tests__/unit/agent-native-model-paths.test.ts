@@ -1,21 +1,31 @@
 /**
  * The agent entry points that build a chat model - conversation titles, the
  * Configure page's model check, sub-agent overrides and the Dynamic LLM branch
- * of `buildAgentChatModel` - all run on a native (agent-sdk) model, and every
- * request leaves through the SSRF-guarded transport (`safeFetch`).
+ * of `buildAgentChatModel` - all call the gateway core in process: the request
+ * leaves through the gateway's native provider client, and the core writes the
+ * usage row.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OpenAiModelProviderContract } from '@/lib/providers/contracts/modelContracts';
+import { completion as completionBody, json, stubUpstream, flush, type Upstream } from '../helpers/nativeGateway';
 
 const hoisted = vi.hoisted(() => ({
   getModelByKey: vi.fn(),
-  safeFetch: vi.fn(),
   logModelUsage: vi.fn(),
 }));
 
+vi.mock('@/lib/core/config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/core/config')>();
+  return {
+    ...actual,
+    getConfig: () => {
+      const config = actual.getConfig();
+      return { ...config, gateway: { ...config.gateway, retryEnabled: true, retryMaxAttempts: 2, retryInitialDelayMs: 1, circuitBreakerEnabled: false } };
+    },
+  };
+});
 vi.mock('@/lib/database', () => ({ getDatabase: vi.fn() }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/security/outboundFetch', () => ({ safeFetch: hoisted.safeFetch }));
 vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/services/models/usageLogger')>()),
   logModelUsage: hoisted.logModelUsage,
@@ -43,52 +53,48 @@ const model = (modelId: string, extra: Record<string, unknown> = {}) => ({
   category: 'llm', modelId, settings: {}, pricing: { inputTokenPer1M: 1, outputTokenPer1M: 2 }, ...extra,
 });
 
-const completion = (content: string) => new Response(JSON.stringify({
-  id: 'c', object: 'chat.completion', created: 1, model: 'm',
-  choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
-  usage: { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24 },
-}), { status: 200, headers: { 'content-type': 'application/json' } });
+const answer = (content: string) => json(completionBody({ content, usage: { prompt_tokens: 20, completion_tokens: 4, total_tokens: 24 } }));
 
-const bodyOf = (call: unknown[]) => JSON.parse(String((call[1] as RequestInit).body));
-
+let upstream: Upstream;
 beforeEach(() => {
   vi.clearAllMocks();
   hoisted.logModelUsage.mockResolvedValue(undefined);
-  hoisted.safeFetch.mockImplementation(async () => completion('Trip planning help'));
+  upstream = stubUpstream(() => answer('Trip planning help'));
   hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => (key === 'missing' ? null : model(key)));
 });
+afterEach(() => vi.unstubAllGlobals());
 
 describe('conversation titles', () => {
   const input = { tenantDbName: 'tenant_x', tenantId: 't', projectId: 'p', modelKey: 'gpt-4o', agentKey: 'a1', exchange: { user: 'plan my trip', assistant: 'sure, where to?' } };
 
-  it('asks the model through the guarded transport with a tight budget, and records a title usage row', async () => {
+  it('asks the model through the gateway with a tight budget, and the gateway records ONE title usage row', async () => {
     const title = await generateConversationTitle(input);
     expect(title).toBe('Trip planning help');
 
-    expect(hoisted.safeFetch).toHaveBeenCalledTimes(1);
-    const call = hoisted.safeFetch.mock.calls[0];
-    expect(call[0]).toBe('https://api.openai.com/v1/chat/completions');
-    expect(call[2]).toMatchObject({ timeoutMs: expect.any(Number) });
-    expect(bodyOf(call)).toMatchObject({ model: 'gpt-4o', max_tokens: 40, temperature: 0.2 });
+    expect(upstream.calls).toHaveLength(1);
+    expect(upstream.calls[0].url).toBe('https://api.openai.com/v1/chat/completions');
+    expect(upstream.calls[0].body).toMatchObject({ model: 'gpt-4o', max_tokens: 40, temperature: 0.2 });
 
     await vi.waitFor(() => expect(hoisted.logModelUsage).toHaveBeenCalled());
+    await flush();
+    expect(hoisted.logModelUsage).toHaveBeenCalledTimes(1);
     expect(hoisted.logModelUsage.mock.calls[0][2]).toMatchObject({
       route: 'agent.title', status: 'success', usage: { inputTokens: 20, outputTokens: 4 },
-      providerRequest: { purpose: 'title' },
+      providerRequest: { purpose: 'title', agentKey: 'a1' },
     });
   });
 
   it('a reasoning model gets max_completion_tokens and no temperature', async () => {
     hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key));
     await generateConversationTitle({ ...input, modelKey: 'gpt-5.2' });
-    const body = bodyOf(hoisted.safeFetch.mock.calls[0]);
+    const body = upstream.calls[0].body;
     expect(body.max_completion_tokens).toBe(40);
     expect(body.max_tokens).toBeUndefined();
     expect(body.temperature).toBeUndefined();
   });
 
   it('is null (never a thrown error) when the provider fails', async () => {
-    hoisted.safeFetch.mockImplementation(async () => new Response('nope', { status: 500 }));
+    upstream = stubUpstream(() => new Response('nope', { status: 500 }));
     expect(await generateConversationTitle(input)).toBeNull();
   });
 });
@@ -97,11 +103,11 @@ describe('model check', () => {
   it('passes when the model answers', async () => {
     const result = await checkAgentModel('tenant_x', 't', 'p', 'gpt-4o');
     expect(result.ok).toBe(true);
-    expect(bodyOf(hoisted.safeFetch.mock.calls[0]).messages).toEqual([{ role: 'user', content: 'Reply with the single word OK.' }]);
+    expect(upstream.calls[0].body.messages).toEqual([{ role: 'user', content: 'Reply with the single word OK.' }]);
   });
 
   it('reports a rejected key with its type, not a stack', async () => {
-    hoisted.safeFetch.mockImplementation(async () => new Response('{"error":{"message":"Incorrect API key"}}', { status: 401 }));
+    upstream = stubUpstream(() => new Response('{"error":{"message":"Incorrect API key"}}', { status: 401 }));
     const result = await checkAgentModel('tenant_x', 't', 'p', 'gpt-4o');
     expect(result.ok).toBe(false);
     expect(result.error?.message).toBeTruthy();
@@ -114,21 +120,21 @@ describe('model check', () => {
 });
 
 describe('buildAgentChatModel', () => {
-  it('builds a native model for a provider-backed model', async () => {
+  it('builds a gateway model for a provider-backed model, whose settings reach the upstream', async () => {
     const { model: record, chatModel } = await buildAgentChatModel('tenant_x', 't', 'p', 'gpt-4o', { temperature: 0.7 });
     expect(record.key).toBe('gpt-4o');
     await chatModel.invoke([{ role: 'user', content: 'hi' }]);
-    expect(bodyOf(hoisted.safeFetch.mock.calls[0])).toMatchObject({ model: 'gpt-4o', temperature: 0.7 });
+    expect(upstream.calls[0].body).toMatchObject({ model: 'gpt-4o', temperature: 0.7 });
   });
 
-  it('builds the routing model for a Dynamic LLM', async () => {
+  it('builds the same gateway model for a Dynamic LLM: nothing leaves until a call is routed', async () => {
     hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key, {
       providerKey: 'dynamic', providerDriver: 'dynamic',
       settings: { dynamic: { strategy: 'rule-based', defaultModelKey: 'small', rules: [] } },
     }));
     const { chatModel } = await buildAgentChatModel('tenant_x', 't', 'p', 'router', {}, { effort: 'low' });
-    expect((chatModel as unknown as Record<string, unknown>).__dynamicRouted).toBe(true);
-    expect(hoisted.safeFetch).not.toHaveBeenCalled();
+    expect((chatModel as unknown as Record<string, unknown>).__gatewayModel).toBe(true);
+    expect(upstream.fetch).not.toHaveBeenCalled();
   });
 
   it('refuses a model that is not a chat model', async () => {

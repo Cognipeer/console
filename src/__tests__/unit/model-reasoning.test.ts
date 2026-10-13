@@ -8,17 +8,13 @@ import {
   translateVertexThinking,
   reasoningControlForDriver,
   describeEffectiveReasoning,
+  THINKING_ANSWER_HEADROOM,
 } from '@/lib/services/models/reasoning';
 import {
   reasoningFormFromSettings,
   reasoningSettingsPatch,
   EMPTY_REASONING_FORM,
 } from '@/components/models/reasoningForm';
-import {
-  AnthropicModelProviderContract,
-  BedrockModelProviderContract,
-  VertexModelProviderContract,
-} from '@/lib/providers/contracts/modelContracts';
 import { OpenAiStreamFramer, toOpenAIChatResponse } from '@/lib/services/models/openaiAdapter';
 import {
   anthropicRequestToOpenAi,
@@ -30,6 +26,7 @@ import { executeModelCall, handleChatCompletion } from '@/lib/services/models/in
 import type { ModelProviderRuntime } from '@/lib/providers/domains/model';
 import {
   anthropicRuntime,
+  bedrockRuntime,
   chunk,
   completion,
   flush,
@@ -193,97 +190,72 @@ describe('reasoning: form <-> settings', () => {
   });
 });
 
-describe('reasoning: provider wire bodies (real LangChain clients)', () => {
-  const anthropic = (modelSettings: Record<string, unknown>, modelId = 'claude-sonnet-4-5') => {
-    const runtime: any = AnthropicModelProviderContract.createRuntime({ credentials: { apiKey: 'k' }, settings: {} } as any);
-    return runtime.createChatModel({ modelId, modelSettings });
+describe('reasoning: provider wire bodies (real native clients)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const messageBody = json({
+    id: 'msg', model: 'claude', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }],
+    stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
+  });
+  const converseBody = json({
+    output: { message: { role: 'assistant', content: [{ text: 'ok' }] } }, stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 },
+  });
+  const ASK = [{ role: 'user' as const, content: 'hi' }];
+
+  /** The body the native client puts on the wire for these model settings. */
+  const sent = async (runtime: ModelProviderRuntime, body: Response, modelId: string, modelSettings: Record<string, unknown>) => {
+    const upstream = stubUpstream(() => body.clone());
+    const client = await runtime.createNativeChatClient!({ modelId, category: 'llm', modelSettings, options: { maxRetries: 0 } });
+    await client.complete({ messages: ASK });
+    return upstream.calls[0].body;
   };
+  const anthropic = (modelSettings: Record<string, unknown>, modelId = 'claude-sonnet-4-5') =>
+    anthropicRuntime().then((runtime) => sent(runtime, messageBody, modelId, modelSettings));
+  const bedrock = (modelId: string, modelSettings: Record<string, unknown>) =>
+    bedrockRuntime().then((runtime) => sent(runtime, converseBody, modelId, modelSettings));
 
   it('anthropic: thinking enabled, max_tokens above the budget, temperature and top_p dropped', async () => {
-    const model: any = await anthropic({ temperature: 0.5, topP: 0.9, maxTokens: 2000, reasoning: { effort: 'high' } });
-    const body = model.invocationParams({});
+    const body = await anthropic({ temperature: 0.5, topP: 0.9, maxTokens: 2000, reasoning: { effort: 'high' } });
     expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 16384 });
-    expect(body.max_tokens).toBe(16384 + 4096);
+    expect(body.max_tokens).toBe(16384 + THINKING_ANSWER_HEADROOM);
     expect(body.temperature).toBeUndefined();
     expect(body.top_p).toBeUndefined();
   });
 
   it('anthropic: an exact budget beats the level; a roomy cap is kept', async () => {
-    const model: any = await anthropic({ maxTokens: 30000, reasoning: { effort: 'low', budgetTokens: 6000 } });
-    const body = model.invocationParams({});
+    const body = await anthropic({ maxTokens: 30000, reasoning: { effort: 'low', budgetTokens: 6000 } });
     expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 6000 });
     expect(body.max_tokens).toBe(30000);
   });
 
-  it('anthropic: none disables thinking and keeps sampling; unset sends nothing', async () => {
-    const off: any = (await anthropic({ temperature: 0.3, reasoning: { effort: 'none' } })).invocationParams({});
-    expect(off.thinking).toEqual({ type: 'disabled' });
+  it('anthropic: none turns thinking off (no block at all) and keeps sampling; unset sends nothing', async () => {
+    const off = await anthropic({ temperature: 0.3, reasoning: { effort: 'none' } });
+    expect(off.thinking?.type).not.toBe('enabled');
     expect(off.temperature).toBe(0.3);
-    const unset: any = (await anthropic({ temperature: 0.3 })).invocationParams({});
-    // Nothing of ours: whatever ChatAnthropic does by default, never an enabled budget.
+    const unset = await anthropic({ temperature: 0.3 });
     expect(unset.thinking?.type).not.toBe('enabled');
     expect(unset.temperature).toBe(0.3);
   });
 
   it('anthropic: an explicit thinking in the operator extra body wins', async () => {
-    const body = (await anthropic({
+    const body = await anthropic({
       reasoning: { effort: 'high' },
       requestDefaults: { thinking: { type: 'enabled', budget_tokens: 1500 } },
-    })).invocationParams({});
+    });
     expect(body.thinking).toEqual({ type: 'enabled', budget_tokens: 1500 });
   });
 
   it('bedrock (Claude): thinking rides additionalModelRequestFields, cap raised, sampling dropped', async () => {
-    const runtime: any = BedrockModelProviderContract.createRuntime({
-      credentials: { accessKeyId: 'a', secretAccessKey: 's' },
-      settings: { region: 'us-east-1' },
-    } as any);
-    const model: any = await runtime.createChatModel({
-      modelId: 'eu.anthropic.claude-sonnet-4-5',
-      modelSettings: { temperature: 0.7, topP: 0.8, reasoning: { effort: 'medium' } },
-    });
-    const body = model.invocationParams({});
+    const body = await bedrock('eu.anthropic.claude-sonnet-4-5', { temperature: 0.7, topP: 0.8, reasoning: { effort: 'medium' } });
     expect(body.additionalModelRequestFields).toEqual({ thinking: { type: 'enabled', budget_tokens: 8192 } });
-    expect(body.inferenceConfig.maxTokens).toBe(8192 + 4096);
+    expect(body.inferenceConfig.maxTokens).toBe(8192 + THINKING_ANSWER_HEADROOM);
     expect(body.inferenceConfig.temperature).toBeUndefined();
     expect(body.inferenceConfig.topP).toBeUndefined();
   });
 
   it('bedrock (non-Claude): nothing is injected', async () => {
-    const runtime: any = BedrockModelProviderContract.createRuntime({
-      credentials: { accessKeyId: 'a', secretAccessKey: 's' },
-      settings: { region: 'us-east-1' },
-    } as any);
-    const model: any = await runtime.createChatModel({
-      modelId: 'amazon.nova-pro-v1:0',
-      modelSettings: { reasoning: { effort: 'high' } },
-    });
-    expect(model.invocationParams({}).additionalModelRequestFields).toBeUndefined();
-  });
-
-  it('vertex: the thinking budget reaches the client (thinkingConfig is built from it)', async () => {
-    const runtime: any = VertexModelProviderContract.createRuntime({
-      credentials: { serviceAccountKey: JSON.stringify({ client_email: 'a@b.c', private_key: 'k' }) },
-      settings: { projectId: 'p', location: 'us-central1' },
-    } as any);
-    const model: any = await runtime.createChatModel({ modelId: 'gemini-2.5-pro', modelSettings: { reasoning: { effort: 'low' } } });
-    expect(model.invocationParams({}).maxReasoningTokens).toBe(2048);
-    const off: any = await runtime.createChatModel({ modelId: 'gemini-2.5-pro', modelSettings: { reasoning: { effort: 'none' } } });
-    expect(off.invocationParams({}).maxReasoningTokens).toBe(0);
-    const unset: any = await runtime.createChatModel({ modelId: 'gemini-2.5-pro', modelSettings: {} });
-    expect(unset.invocationParams({}).maxReasoningTokens).toBeUndefined();
-  });
-
-  it('vertex: a cap at or under the budget is raised so the client does not throw', async () => {
-    const runtime: any = VertexModelProviderContract.createRuntime({
-      credentials: { serviceAccountKey: JSON.stringify({ client_email: 'a@b.c', private_key: 'k' }) },
-      settings: { projectId: 'p', location: 'us-central1' },
-    } as any);
-    const model: any = await runtime.createChatModel({
-      modelId: 'gemini-2.5-pro',
-      modelSettings: { maxTokens: 1000, reasoning: { effort: 'high' } },
-    });
-    expect(model.maxOutputTokens).toBeGreaterThan(16384);
+    const body = await bedrock('amazon.nova-pro-v1:0', { reasoning: { effort: 'high' } });
+    expect(body.additionalModelRequestFields).toBeUndefined();
   });
 });
 

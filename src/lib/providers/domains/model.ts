@@ -45,7 +45,7 @@ export interface ModelRuntimeConfig {
 /**
  * What an agent-sdk native provider needs to talk to the same upstream this
  * runtime talks to: credentials and endpoint, read from the SAME decrypted
- * provider record the LangChain-backed methods use. The caller adds the
+ * provider record every runtime method uses. The caller adds the
  * transport (`fetch`, `timeoutMs`) and the per-model request settings.
  */
 export interface NativeProviderSpec {
@@ -111,14 +111,12 @@ export interface NativeEmbedder {
 }
 
 export interface ModelProviderRuntime {
-  /** Native (agent-sdk) chat client; the LangChain-free counterpart of `createChatModel`. */
+  /** Native (agent-sdk) chat client: the gateway core's way to call the model. */
   createNativeChatClient?(config: ModelRuntimeConfig, transport?: NativeTransport): Promise<NativeChatClient>;
-  /** Native (agent-sdk) embedder; the LangChain-free counterpart of `createEmbeddingModel`. */
+  /** Native (agent-sdk) embedder. */
   createNativeEmbedder?(config: ModelRuntimeConfig, transport?: NativeTransport): Promise<NativeEmbedder>;
-  /** Native (agent-sdk) provider for an agent's chat model. See `NativeProviderSpec`. */
+  /** The provider an agent-sdk native client is built from. See `NativeProviderSpec`. */
   createNativeProviderSpec?(config: ModelRuntimeConfig): NativeProviderSpec;
-  createChatModel?(config: ModelRuntimeConfig): Promise<unknown> | unknown;
-  createEmbeddingModel?(config: ModelRuntimeConfig): Promise<unknown> | unknown;
   createSttRuntime?(config: ModelRuntimeConfig): Promise<SttRuntime> | SttRuntime;
   createTtsRuntime?(config: ModelRuntimeConfig): Promise<TtsRuntime> | TtsRuntime;
   createOcrRuntime?(config: ModelRuntimeConfig): Promise<OcrRuntime> | OcrRuntime;

@@ -305,6 +305,7 @@ describe('handleChatCompletion', () => {
 
     expect(onUsageSettled).toHaveBeenCalledWith(
       expect.objectContaining({ currency: 'USD', totalCost: 0.007 }),
+      expect.objectContaining({ inputTokens: expect.any(Number) }),
     );
   });
 
@@ -546,6 +547,7 @@ describe('handleChatCompletion', () => {
     // 100 input tokens @ $10/1M + 200 output tokens @ $30/1M = $0.001 + $0.006
     expect(onUsageSettled).toHaveBeenCalledWith(
       expect.objectContaining({ currency: 'USD', totalCost: 0.007 }),
+      expect.objectContaining({ inputTokens: expect.any(Number) }),
     );
   });
 

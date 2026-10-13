@@ -8,6 +8,7 @@
  * for "a tool Console builds"), the queue and the audit write.
  */
 
+import { settlingModel } from '../helpers/fakeGatewayModel';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,7 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getModelByKey: vi.fn(),
-  buildNativeAgentModel: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
@@ -31,7 +32,7 @@ vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.re
 // What the session log tells webhook subscribers (the subscriptions themselves are covered elsewhere).
 vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/services/agents/nativeAgentModel', () => ({ buildNativeAgentModel: hoisted.buildNativeAgentModel }));
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({ buildGatewayChatModel: hoisted.buildGatewayChatModel, isDynamicModel: () => false, }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
   buildAgentSandboxTools: vi.fn(async () => ({ tools: hoisted.sandboxTools, definitions: [], cleanup: async () => undefined })),
   destroyConversationSandbox: vi.fn(),
@@ -113,7 +114,7 @@ let executed: string[];
 
 function scriptModel(script: (call: number) => Reply): ScriptedModel {
   const model = new ScriptedModel(script);
-  hoisted.buildNativeAgentModel.mockResolvedValue(model);
+  hoisted.buildGatewayChatModel.mockImplementation(async (input: Parameters<typeof settlingModel>[0]) => settlingModel(input, model));
   return model;
 }
 

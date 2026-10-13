@@ -3,8 +3,8 @@
  *
  * Verifies that every model provider contract:
  *  1. createRuntime() returns an object with the expected runtime methods
- *  2. createChatModel() produces a LangChain-compatible object (has .invoke)
- *  3. createEmbeddingModel() produces a LangChain-compatible object (has .embedDocuments)
+ *  2. createNativeChatClient() produces an agent-sdk native chat client (complete / stream)
+ *  3. createNativeEmbedder() produces a native embedder (has .embed)
  *  4. Required credential / setting validation throws with a descriptive message
  *
  * AWS Bedrock and Google Vertex use SDK clients that perform auth at
@@ -43,35 +43,6 @@ vi.mock('@aws-sdk/client-bedrock-runtime', () => ({
   ConverseStreamCommand: vi.fn(),
 }));
 
-// ── Google Auth mock (Vertex) ────────────────────────────────────────────────
-vi.mock('@langchain/google-vertexai', () => {
-  const mockInvoke = vi.fn().mockResolvedValue({
-    content: 'Hello from mock Vertex!',
-    lc_namespace: ['langchain', 'schema'],
-  });
-  const mockEmbedDocuments = vi.fn().mockResolvedValue([[0.1, 0.2, 0.3]]);
-
-  // The contract builds `ChatVertexAI`; `VertexAI` is the text-completion LLM
-  // and is no longer used for chat. Both are exported so a regression back to
-  // the wrong class fails loudly rather than silently resolving a mock.
-  class FakeChatVertexAI {
-    invoke = mockInvoke;
-    stream = vi.fn();
-    bindTools = vi.fn().mockReturnThis();
-    withStructuredOutput = vi.fn().mockReturnThis();
-  }
-
-  class FakeVertexAIEmbeddings {
-    embedDocuments = mockEmbedDocuments;
-    embedQuery = vi.fn().mockResolvedValue([0.1, 0.2, 0.3]);
-  }
-
-  return {
-    ChatVertexAI: FakeChatVertexAI,
-    VertexAIEmbeddings: FakeVertexAIEmbeddings,
-  };
-});
-
 // ── Config mock (system providers read from getConfig()) ─────────────────────
 // ── MSW lifecycle ────────────────────────────────────────────────────────────────────────────
 beforeAll(() => mswServer.listen({ onUnhandledRequest: 'warn' }));
@@ -101,14 +72,15 @@ function makeCtx(credentials: Record<string, unknown>, settings: Record<string, 
   };
 }
 
-function assertChatModel(model: unknown) {
-  expect(model).toBeDefined();
-  expect(typeof (model as Record<string, unknown>).invoke).toBe('function');
+function assertChatModel(client: unknown) {
+  expect(client).toBeDefined();
+  expect(typeof (client as Record<string, unknown>).complete).toBe('function');
+  expect(typeof (client as Record<string, unknown>).stream).toBe('function');
 }
 
-function assertEmbeddingModel(model: unknown) {
-  expect(model).toBeDefined();
-  expect(typeof (model as Record<string, unknown>).embedDocuments).toBe('function');
+function assertEmbeddingModel(embedder: unknown) {
+  expect(embedder).toBeDefined();
+  expect(typeof (embedder as Record<string, unknown>).embed).toBe('function');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -122,19 +94,19 @@ describe('openai provider', () => {
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
-    expect(typeof runtime.createChatModel).toBe('function');
-    expect(typeof runtime.createEmbeddingModel).toBe('function');
+    expect(typeof runtime.createNativeChatClient).toBe('function');
+    expect(typeof runtime.createNativeEmbedder).toBe('function');
   });
 
-  it('createChatModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createChatModel!({ modelId: 'gpt-4o', category: 'llm' });
+  it('createNativeChatClient returns a native chat client', async () => {
+    const model = await runtime
+      .createNativeChatClient!({ modelId: 'gpt-4o', category: 'llm' });
     assertChatModel(model);
   });
 
-  it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createEmbeddingModel!({ modelId: 'text-embedding-3-small', category: 'embedding' });
+  it('createNativeEmbedder returns a native embedder', async () => {
+    const model = await runtime
+      .createNativeEmbedder!({ modelId: 'text-embedding-3-small', category: 'embedding' });
     assertEmbeddingModel(model);
   });
 
@@ -158,94 +130,10 @@ describe('openai-compatible provider', () => {
     expect(runtime).toBeDefined();
   });
 
-  it('createChatModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createChatModel!({ modelId: 'mistral-large', category: 'llm' });
+  it('createNativeChatClient returns a native chat client', async () => {
+    const model = await runtime
+      .createNativeChatClient!({ modelId: 'mistral-large', category: 'llm' });
     assertChatModel(model);
-  });
-
-  it('streams through .stream() when built without options, while invoke() stays non-streaming', async () => {
-    // @langchain/openai turns an explicit `streaming: false` into
-    // `disableStreaming: true`, which made `.stream()` ONE non-streaming call:
-    // native agents (agent-sdk `stream: true` → `.stream()`) answered in one
-    // piece and the realtime voice engine waited for the whole reply.
-    const bodies: Array<Record<string, unknown>> = [];
-    mswServer.use(
-      http.post('https://api.custom.com/v1/chat/completions', async ({ request }) => {
-        const body = await request.json() as Record<string, unknown>;
-        bodies.push(body);
-        if (!body.stream) {
-          return HttpResponse.json({
-            id: 'chatcmpl-plain',
-            object: 'chat.completion',
-            created: 1,
-            model: 'mistral-large',
-            choices: [{ index: 0, message: { role: 'assistant', content: 'Hello' }, finish_reason: 'stop' }],
-          });
-        }
-        const frames = ['Hel', 'lo'].map((content, i) => `data: ${JSON.stringify({
-          id: 'chatcmpl-stream',
-          object: 'chat.completion.chunk',
-          created: 1,
-          model: 'mistral-large',
-          choices: [{ index: 0, delta: i === 0 ? { role: 'assistant', content } : { content }, finish_reason: null }],
-        })}\n\n`);
-        frames.push('data: [DONE]\n\n');
-        return new HttpResponse(frames.join(''), { headers: { 'content-type': 'text/event-stream' } });
-      }),
-    );
-    const model = runtime.createChatModel!({ modelId: 'mistral-large', category: 'llm' }) as unknown as {
-      disableStreaming?: boolean;
-      stream: (input: unknown) => Promise<AsyncIterable<{ content?: unknown }>>;
-      invoke: (input: unknown) => Promise<{ content?: unknown }>;
-    };
-    expect(model.disableStreaming).toBe(false);
-
-    const chunks: string[] = [];
-    for await (const chunk of await model.stream([{ role: 'user', content: 'hi' }])) {
-      if (typeof chunk.content === 'string' && chunk.content) chunks.push(chunk.content);
-    }
-    expect(bodies[0]?.stream).toBe(true);
-    expect(chunks).toEqual(['Hel', 'lo']);
-
-    const reply = await model.invoke([{ role: 'user', content: 'hi' }]);
-    expect(bodies[1]?.stream).toBeFalsy();
-    expect(reply.content).toBe('Hello');
-  });
-
-  it('options.disableStreaming (an upstream that cannot stream tool calls) keeps .stream() one non-streaming request', async () => {
-    const bodies: Array<Record<string, unknown>> = [];
-    mswServer.use(
-      http.post('https://api.custom.com/v1/chat/completions', async ({ request }) => {
-        const body = await request.json() as Record<string, unknown>;
-        bodies.push(body);
-        return HttpResponse.json({
-          id: 'chatcmpl-plain',
-          object: 'chat.completion',
-          created: 1,
-          model: 'mistral-large',
-          choices: [{ index: 0, message: { role: 'assistant', content: 'Hello' }, finish_reason: 'stop' }],
-        });
-      }),
-    );
-    const model = runtime.createChatModel!({
-      modelId: 'mistral-large',
-      category: 'llm',
-      options: { disableStreaming: true },
-    }) as unknown as {
-      disableStreaming?: boolean;
-      stream: (input: unknown) => Promise<AsyncIterable<{ content?: unknown }>>;
-    };
-    expect(model.disableStreaming).toBe(true);
-
-    const chunks: string[] = [];
-    for await (const chunk of await model.stream([{ role: 'user', content: 'hi' }])) {
-      if (typeof chunk.content === 'string' && chunk.content) chunks.push(chunk.content);
-    }
-    expect(bodies).toHaveLength(1);
-    expect(bodies[0].stream).toBeFalsy();
-    expect(bodies[0].stream_options).toBeUndefined();
-    expect(chunks).toEqual(['Hello']);
   });
 
   it('preserves canonical vision content in the provider HTTP payload', async () => {
@@ -294,9 +182,9 @@ describe('openai-compatible provider', () => {
     });
   });
 
-  it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createEmbeddingModel!({ modelId: 'text-embedding', category: 'embedding' });
+  it('createNativeEmbedder returns a native embedder', async () => {
+    const model = await runtime
+      .createNativeEmbedder!({ modelId: 'text-embedding', category: 'embedding' });
     assertEmbeddingModel(model);
   });
 
@@ -387,15 +275,15 @@ describe('together provider', () => {
     expect(runtime).toBeDefined();
   });
 
-  it('createChatModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createChatModel!({ modelId: 'meta-llama/Llama-3.1-70B-Instruct-Turbo', category: 'llm' });
+  it('createNativeChatClient returns a native chat client', async () => {
+    const model = await runtime
+      .createNativeChatClient!({ modelId: 'meta-llama/Llama-3.1-70B-Instruct-Turbo', category: 'llm' });
     assertChatModel(model);
   });
 
-  it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createEmbeddingModel!({ modelId: 'togethercomputer/m2-bert-80M', category: 'embedding' });
+  it('createNativeEmbedder returns a native embedder', async () => {
+    const model = await runtime
+      .createNativeEmbedder!({ modelId: 'togethercomputer/m2-bert-80M', category: 'embedding' });
     assertEmbeddingModel(model);
   });
 
@@ -420,19 +308,19 @@ describe('bedrock provider', () => {
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
-    expect(typeof runtime.createChatModel).toBe('function');
-    expect(typeof runtime.createEmbeddingModel).toBe('function');
+    expect(typeof runtime.createNativeChatClient).toBe('function');
+    expect(typeof runtime.createNativeEmbedder).toBe('function');
   });
 
-  it('createChatModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createChatModel!({ modelId: 'anthropic.claude-3-7-sonnet-v1:0', category: 'llm' });
+  it('createNativeChatClient returns a native chat client', async () => {
+    const model = await runtime
+      .createNativeChatClient!({ modelId: 'anthropic.claude-3-7-sonnet-v1:0', category: 'llm' });
     assertChatModel(model);
   });
 
-  it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createEmbeddingModel!({ modelId: 'amazon.titan-embed-text-v1', category: 'embedding' });
+  it('createNativeEmbedder returns a native embedder', async () => {
+    const model = await runtime
+      .createNativeEmbedder!({ modelId: 'amazon.titan-embed-text-v1', category: 'embedding' });
     assertEmbeddingModel(model);
   });
 
@@ -477,19 +365,19 @@ describe('vertex provider', () => {
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
-    expect(typeof runtime.createChatModel).toBe('function');
-    expect(typeof runtime.createEmbeddingModel).toBe('function');
+    expect(typeof runtime.createNativeChatClient).toBe('function');
+    expect(typeof runtime.createNativeEmbedder).toBe('function');
   });
 
-  it('createChatModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createChatModel!({ modelId: 'gemini-2.5-flash', category: 'llm' });
+  it('createNativeChatClient returns a native chat client', async () => {
+    const model = await runtime
+      .createNativeChatClient!({ modelId: 'gemini-2.5-flash', category: 'llm' });
     assertChatModel(model);
   });
 
-  it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createEmbeddingModel!({ modelId: 'text-embedding-004', category: 'embedding' });
+  it('createNativeEmbedder returns a native embedder', async () => {
+    const model = await runtime
+      .createNativeEmbedder!({ modelId: 'text-embedding-004', category: 'embedding' });
     assertEmbeddingModel(model);
   });
 
@@ -532,31 +420,19 @@ describe('azure provider', () => {
 
   it('createRuntime returns runtime object', () => {
     expect(runtime).toBeDefined();
-    expect(typeof runtime.createChatModel).toBe('function');
-    expect(typeof runtime.createEmbeddingModel).toBe('function');
+    expect(typeof runtime.createNativeChatClient).toBe('function');
+    expect(typeof runtime.createNativeEmbedder).toBe('function');
   });
 
-  it('createChatModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createChatModel!({ modelId: 'gpt-4o', category: 'llm' });
+  it('createNativeChatClient returns a native chat client', async () => {
+    const model = await runtime
+      .createNativeChatClient!({ modelId: 'gpt-4o', category: 'llm' });
     assertChatModel(model);
   });
 
-  it('forwards provider streaming controls for eager tool calls', () => {
-    const model = runtime.createChatModel!({
-      modelId: 'o3-mini',
-      category: 'llm',
-      modelSettings: { maxCompletionTokens: 1024 },
-      options: { streaming: true, disableStreaming: true },
-    }) as unknown as Record<string, unknown>;
-
-    expect(model.disableStreaming).toBe(true);
-    expect(model.streaming).toBe(false);
-  });
-
-  it('createEmbeddingModel returns LangChain-compatible object', () => {
-    const model = runtime
-      .createEmbeddingModel!({ modelId: 'text-embedding-ada-002', category: 'embedding' });
+  it('createNativeEmbedder returns a native embedder', async () => {
+    const model = await runtime
+      .createNativeEmbedder!({ modelId: 'text-embedding-ada-002', category: 'embedding' });
     assertEmbeddingModel(model);
   });
 
@@ -610,48 +486,24 @@ describe('azure provider', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('Model settings overrides propagation', () => {
-  it('openai — createChatModel accepts temperature override', () => {
+  it('openai - a native client accepts a temperature override', async () => {
     const runtime = OpenAiModelProviderContract.createRuntime(
       makeCtx({ apiKey: 'sk-test' }) as never,
     ) as unknown as ModelProviderRuntime;
-    expect(() =>
-      runtime
-        .createChatModel!({
-          modelId: 'gpt-4o',
-          category: 'llm',
-          modelSettings: { temperature: 0.7 },
-        }),
-    ).not.toThrow();
+    await expect(runtime.createNativeChatClient!({ modelId: 'gpt-4o', category: 'llm', modelSettings: { temperature: 0.7 } })).resolves.toBeDefined();
   });
 
-  it('openai — createChatModel accepts reasoning effort override', () => {
+  it('openai - a native client accepts a reasoning effort override', async () => {
     const runtime = OpenAiModelProviderContract.createRuntime(
       makeCtx({ apiKey: 'sk-test' }) as never,
     ) as unknown as ModelProviderRuntime;
-    expect(() =>
-      runtime
-        .createChatModel!({
-          modelId: 'o3',
-          category: 'llm',
-          modelSettings: { reasoning: { effort: 'high' } },
-        }),
-    ).not.toThrow();
+    await expect(runtime.createNativeChatClient!({ modelId: 'o3', category: 'llm', modelSettings: { reasoning: { effort: 'high' } } })).resolves.toBeDefined();
   });
 
-  it('bedrock — createChatModel accepts maxTokens override', () => {
+  it('bedrock - a native client accepts a maxTokens override', async () => {
     const runtime = BedrockModelProviderContract.createRuntime(
-      makeCtx(
-        { accessKeyId: 'AKIA', secretAccessKey: 'secret' },
-        { region: 'us-east-1' },
-      ) as never,
+      makeCtx({ accessKeyId: 'AKIA', secretAccessKey: 'secret' }, { region: 'us-east-1' }) as never,
     ) as unknown as ModelProviderRuntime;
-    expect(() =>
-      runtime
-        .createChatModel!({
-          modelId: 'anthropic.claude-3-7-sonnet-v1:0',
-          category: 'llm',
-          modelSettings: { maxTokens: 2048 },
-        }),
-    ).not.toThrow();
+    await expect(runtime.createNativeChatClient!({ modelId: 'anthropic.claude-3-7-sonnet-v1:0', category: 'llm', modelSettings: { maxTokens: 2048 } })).resolves.toBeDefined();
   });
 });

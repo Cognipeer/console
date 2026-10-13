@@ -27,7 +27,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildNativeAgentModel: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   /** Every `InvokeConfig` the fake SDK was called with, one per invoke. */
   invokeConfigs: [] as Array<Record<string, unknown>>,
 }));
@@ -38,8 +38,9 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/agents/nativeAgentModel', () => ({
-  buildNativeAgentModel: hoisted.buildNativeAgentModel,
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({
+  buildGatewayChatModel: hoisted.buildGatewayChatModel,
+  isDynamicModel: () => false,
 }));
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
@@ -164,7 +165,7 @@ beforeEach(() => {
     projectId: PROJECT_ID,
     settings: {},
   });
-  hoisted.buildNativeAgentModel.mockResolvedValue({});
+  hoisted.buildGatewayChatModel.mockResolvedValue({});
 });
 
 function request(cancellationCell?: { deadlineAt?: number; cancelled: boolean }) {

@@ -16,7 +16,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildNativeAgentModel: vi.fn(),
+  buildGatewayChatModel: vi.fn(),
   scripted: { content: 'plain answer', reasoning: 'secret thoughts' } as { content: string; reasoning?: string },
 }));
 
@@ -26,8 +26,9 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/agents/nativeAgentModel', () => ({
-  buildNativeAgentModel: hoisted.buildNativeAgentModel,
+vi.mock('@/lib/services/agents/gatewayChatModel', () => ({
+  buildGatewayChatModel: hoisted.buildGatewayChatModel,
+  isDynamicModel: () => false,
 }));
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
@@ -148,7 +149,7 @@ beforeEach(() => {
   (getDatabase as ReturnType<typeof vi.fn>).mockResolvedValue(db);
   db.findAgentConversationById.mockResolvedValue(conversation());
   hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => modelRecord(key));
-  hoisted.buildNativeAgentModel.mockResolvedValue({});
+  hoisted.buildGatewayChatModel.mockResolvedValue({});
 });
 
 const base = {
@@ -163,7 +164,7 @@ const base = {
 
 /** The reasoning inputs the run handed the native model of the MAIN call. */
 function mainModelCall() {
-  return hoisted.buildNativeAgentModel.mock.calls[0][0] as { model: { key: string }; reasoning?: unknown; requestReasoning?: unknown };
+  return hoisted.buildGatewayChatModel.mock.calls[0][0] as { model: { key: string }; reasoning?: unknown; requestReasoning?: unknown };
 }
 
 function persistedAssistantTurn() {
@@ -221,14 +222,14 @@ describe('what a run hands the native model', () => {
 
 describe('sub-agents', () => {
   const sub = (modelKey: string) => ({ kind: 'inline', name: 'helper', modelKey, systemPrompt: 'help', enabled: true });
-  const callFor = (key: string) => (hoisted.buildNativeAgentModel.mock.calls
+  const callFor = (key: string) => (hoisted.buildGatewayChatModel.mock.calls
     .map((call) => call[0] as { model: { key: string }; reasoning?: unknown; requestReasoning?: unknown })
     .find((input) => input.model.key === key))!;
 
   it('a sub-agent on a model the agent picked for gets that pick, plus the request value as the fallback', async () => {
     db.findAgentByKey.mockResolvedValue(agentWith({ reasoningEffort: 'high', subagents: [sub('main')] }));
     await executeAgentChatLocal({ ...base, requestReasoning: { effort: 'low' } });
-    const calls = hoisted.buildNativeAgentModel.mock.calls.map((call) => call[0] as { reasoning?: unknown });
+    const calls = hoisted.buildGatewayChatModel.mock.calls.map((call) => call[0] as { reasoning?: unknown });
     expect(calls).toHaveLength(2);
     for (const call of calls) expect(call.reasoning).toEqual({ effort: 'high' });
   });

@@ -22,6 +22,7 @@
  * calls share one set of counters.
  */
 
+import { isSyntheticActor } from './syntheticActor';
 import { getDatabase, type IAgentConfig } from '@/lib/database';
 import type { LicenseType } from '@/lib/license/license-manager';
 import { AgentSpendLimitError } from './agentErrors';
@@ -44,10 +45,6 @@ export interface AgentSpendScope {
   observe?: (cost: { currency: string; totalCost: number }) => void;
 }
 
-/** Actors that are not user rows: their spend counts against the tenant's own counter. */
-function isSyntheticActor(userId: string): boolean {
-  return userId.startsWith('system:') || userId.startsWith('agent:') || userId === 'a2a-public';
-}
 
 export async function resolveAgentSpendScope(input: {
   tenantDbName: string;

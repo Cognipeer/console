@@ -100,11 +100,9 @@ import {
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
-import { buildNativeAgentModel, type NativeAgentReasoning } from './nativeAgentModel';
+import { buildGatewayChatModel, isDynamicModel, type NativeAgentReasoning } from './gatewayChatModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
-import { withModelUsageLogging } from './modelUsageTap';
-import { createDynamicChatModel, isDynamicModel } from './dynamicChatModel';
 import { buildMemoryTools, memoryToolDefinitions } from './agentMemoryTools';
 import { AgentAttachmentError, annotateAgentRunError, classifyAgentRunError } from './agentErrors';
 import { toClientPendingAction, type ClientPendingAction } from './clientWire';
@@ -1486,6 +1484,14 @@ function reportPromptVariables(
 
 // ── Sub-agent registry ──────────────────────────────────────────────
 
+/** Who a model call is made for: rides on its usage row and its Dynamic LLM caller conditions. */
+export interface AgentModelCaller {
+    agentKey?: string;
+    /** The Session / API conversation. */
+    sessionId?: string;
+    userId?: string;
+}
+
 type BuildSubagentsInput = {
     tenantDbName: string;
     tenantId: string;
@@ -1499,6 +1505,8 @@ type BuildSubagentsInput = {
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
     images?: SessionImagesOptions;
+    /** Whose run this is, for the usage rows of a sub-agent's model calls. */
+    caller?: AgentModelCaller;
     /**
      * Reasoning of a sub-agent's model: the parent's selection for the same
      * model (when it is one the parent picked), then Model Hub, then the request.
@@ -1604,7 +1612,7 @@ async function buildAgentSubagents(
 
         let childModel: unknown;
         if (modelKey) {
-            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning);
+            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning, input.caller);
         }
 
         subagents.push({
@@ -1627,29 +1635,13 @@ async function buildAgentSubagents(
 }
 
 /**
- * Provider options for the chat model of an agent run and of its sub-agents.
- *
- * Agents stream: the SDK calls `.stream()` for any turn with an `onTextChunk`
- * (the dashboard Session view, a streamed chat completion, the realtime voice
- * engine). A model flagged `disableStreamingWithTools` sits behind an upstream
- * that cannot stream tool calls. The gateway honours that per request — only
- * when the request carries tools (`prepareCall` in inferenceService) — but an
- * agent builds ONE model for the whole run and binds tools on nearly every call,
- * so the flag turns streaming off for the model: `.stream()` then answers with
- * a single `invoke()`, exactly as every agent model did before the provider
- * contracts stopped forcing that.
- */
-function agentChatModelOptions(model: { settings?: unknown }): { disableStreaming: boolean } {
-    const settings = model.settings && typeof model.settings === 'object'
-        ? model.settings as Record<string, unknown>
-        : {};
-    return { disableStreaming: settings.disableStreamingWithTools === true };
-}
-
-/**
- * Builds the native model for a sub-agent's model override. Returns
+ * Builds the gateway chat model for a sub-agent's model override. Returns
  * undefined when the key no longer resolves, which makes the child fall back to
  * the parent's model rather than failing the whole run.
+ *
+ * Like every agent model it is a call into the gateway (gatewayChatModel.ts), so the
+ * model's own guardrails, cache, pool and routing apply to the child too, and its
+ * usage row (`agent.subagent`) lands on ITS model.
  */
 async function buildSubagentModel(
     tenantDbName: string,
@@ -1659,37 +1651,27 @@ async function buildSubagentModel(
     spend?: AgentSpendScope,
     images?: SessionImagesOptions,
     reasoning?: BuildSubagentsInput['reasoning'],
+    caller?: AgentModelCaller,
 ): Promise<unknown> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') return undefined;
         const agentPick = agentReasoningForModel(reasoning?.config, modelKey);
-        const chatModel = isDynamicModel(model)
-            ? createDynamicChatModel({
-                tenantDbName,
-                tenantId,
-                projectId,
-                modelKey: model.key,
-                ...(agentPick || reasoning?.request ? { reasoning: { ...(agentPick ?? reasoning?.request) } } : {}),
-                ...(agentPick ? { reasoningFromAgent: true } : {}),
-            })
-            : await buildNativeAgentModel({
-                tenantDbName,
-                tenantId,
-                projectId,
-                model,
-                disableStreaming: agentChatModelOptions(model).disableStreaming,
-                ...(agentPick ? { reasoning: agentPick } : {}),
-                ...(reasoning?.request ? { requestReasoning: reasoning.request } : {}),
-            });
-        const tapped = withModelUsageLogging(chatModel, {
+        const chatModel = await buildGatewayChatModel({
             tenantDbName,
+            tenantId,
+            projectId,
             model,
             route: 'agent.subagent',
+            ...(caller?.agentKey ? { agentKey: caller.agentKey } : {}),
+            ...(caller?.sessionId ? { sessionId: caller.sessionId } : {}),
+            ...(caller?.userId ? { userId: caller.userId } : {}),
+            ...(agentPick ? { reasoning: agentPick } : {}),
+            ...(reasoning?.request ? { requestReasoning: reasoning.request } : {}),
             ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
         });
         // A sub-agent can be handed the parent's context, image references included.
-        return images ? withSessionImages(tapped, images) : tapped;
+        return images ? withSessionImages(chatModel, images) : chatModel;
     } catch (error) {
         logger.warn('Sub-agent model override could not be built; falling back to parent model', {
             modelKey,
@@ -2562,8 +2544,9 @@ export interface AgentModelCheckResult {
 
 /**
  * The chat model an agent run (or the model check, or a title) talks to: an
- * agent-sdk native model built from the Model Hub record (nativeAgentModel.ts),
- * or the routing model of a Dynamic LLM.
+ * agent-sdk chat model whose every call is a call into the gateway
+ * (gatewayChatModel.ts) - so whatever is configured on the Model Hub record applies
+ * to the agent too. A Dynamic LLM is no different: the gateway routes it per call.
  */
 export async function buildAgentChatModel(
     tenantDbName: string,
@@ -2575,47 +2558,34 @@ export async function buildAgentChatModel(
     reasoning?: NativeAgentReasoning,
     /** What the API request asked for (lowest rung; see agentReasoning.ts). */
     requestReasoning?: NativeAgentReasoning,
+    /** What this call is for and who it is made for: the usage row's route and attribution, spend, routing. */
+    call: AgentModelCall = {},
 ) {
     const model = await getModelByKey(tenantDbName, modelKey, projectId);
     if (!model) throw new Error(`Model "${modelKey}" not found`);
     if (model.category !== 'llm') throw new Error('Configured model is not compatible with chat');
-    if (isDynamicModel(model)) {
-        // No provider of its own: every call goes through the routing engine (dynamicChatModel.ts).
-        const passthrough: Record<string, unknown> = {};
-        for (const key of ['temperature', 'top_p', 'max_tokens'] as const) {
-            if (overrides[key] !== undefined) passthrough[key] = overrides[key];
-        }
-        return {
-            model,
-            chatModel: createDynamicChatModel({
-                tenantDbName,
-                tenantId,
-                projectId,
-                modelKey: model.key,
-                overrides: passthrough,
-                // A Dynamic LLM has no reasoning config of its own: the agent's pick (or
-                // else the caller's) rides to whichever model the call is routed to.
-                ...((reasoning ?? requestReasoning) ? { reasoning: (reasoning ?? requestReasoning)! } : {}),
-                ...(reasoning ? { reasoningFromAgent: true } : {}),
-            }) as unknown as BaseChatModel,
-        };
-    }
 
-    // Resolved through the gateway's helper (inside buildNativeAgentModel) so an
-    // agent obeys the same model record everything else does: Top P, Max Tokens,
-    // `unsupportedParams` and `requestDefaults` all take effect.
-    const chatModel = await buildNativeAgentModel({
+    // Top P, Max Tokens, `unsupportedParams` and `requestDefaults` take effect inside
+    // the gateway, exactly as for any other caller of the model.
+    const passthrough: Record<string, unknown> = {};
+    for (const key of ['temperature', 'top_p', 'max_tokens'] as const) {
+        if (overrides[key] !== undefined) passthrough[key] = overrides[key];
+    }
+    const chatModel = await buildGatewayChatModel({
         tenantDbName,
         tenantId,
         projectId,
         model,
-        overrides,
-        disableStreaming: agentChatModelOptions(model).disableStreaming,
+        overrides: passthrough,
         ...(reasoning ? { reasoning } : {}),
         ...(requestReasoning ? { requestReasoning } : {}),
+        ...call,
     });
     return { model, chatModel };
 }
+
+/** The usage-row side of `buildAgentChatModel`. */
+export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'onCost' | 'onRouted'>;
 
 /**
  * One tiny completion through exactly the path an agent run uses (the model's
@@ -2631,7 +2601,10 @@ export async function checkAgentModel(
 ): Promise<AgentModelCheckResult> {
     const startedAt = Date.now();
     try {
-        const { model, chatModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, modelKey);
+        const { model, chatModel } = await buildAgentChatModel(
+            tenantDbName, tenantId, projectId, modelKey, {}, undefined, undefined,
+            { route: 'agent.check', purpose: 'model-check' },
+        );
         await chatModel
             .invoke([{ role: 'user', content: 'Reply with the single word OK.' }])
             .catch((error: unknown) => {
@@ -3385,7 +3358,14 @@ async function buildLocalAgentRun(input: {
         ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
         ...(config.topP !== undefined ? { top_p: config.topP } : {}),
         ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
-    }, agentReasoningForModel(config, config.modelKey), input.requestReasoning);
+    }, agentReasoningForModel(config, config.modelKey), input.requestReasoning, {
+        route: input.route,
+        agentKey,
+        ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
+        ...(input.userId ? { userId: input.userId } : {}),
+        onRouted: (key) => { routedModelKey = key; },
+        ...(spend ? { onCost: agentSpendSettler(spend, config.modelKey) } : {}),
+    });
 
     // System prompt
     let systemPrompt = config.systemPrompt;
@@ -3628,19 +3608,11 @@ async function buildLocalAgentRun(input: {
         }
     }
 
-    // Usage-tapped: agent calls bypass the gateway, so without this they
-    // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const tappedModel = withModelUsageLogging(chatModel, {
-        tenantDbName,
-        model,
-        route: input.route,
-        agentKey,
-        onRouted: (key) => { routedModelKey = key; },
-        ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
-    });
     // Outermost: whatever the SDK sends the model passes through the image resolver first
     // (sessionImages.ts), so the SDK, the saved state and the traces only ever see references.
-    const sdkModel = sessionImages ? withSessionImages(tappedModel, sessionImages) : tappedModel;
+    // The model itself is a gateway call (gatewayChatModel.ts): usage, cost and the model's
+    // own rules are the gateway's business, not this layer's.
+    const sdkModel = sessionImages ? withSessionImages(chatModel, sessionImages) : chatModel;
     const tracingSink = await createInternalTracingSink(tenantDbName, tenantId, projectId, toolDefinitions);
 
     const { subagents, cleanupTasks: subagentCleanupTasks } = await buildAgentSubagents({
@@ -3654,6 +3626,11 @@ async function buildLocalAgentRun(input: {
         runtimeContext,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
+        caller: {
+            agentKey,
+            ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
+            ...(input.userId ? { userId: input.userId } : {}),
+        },
         reasoning: { config, ...(input.requestReasoning ? { request: input.requestReasoning } : {}) },
     });
     cleanupTasks.push(...subagentCleanupTasks);

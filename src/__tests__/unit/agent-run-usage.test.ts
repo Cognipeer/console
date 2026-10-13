@@ -1,25 +1,21 @@
 /**
- * What a run has spent so far (runUsage.ts), fed by the model usage tap and
- * settled by agentQuota.settleAgentRun: a run that fails or is cancelled late is
+ * What a run has spent so far (runUsage.ts), fed by the gateway model's usage
+ * settlement (agent-gateway-model.test.ts) and settled by agentQuota.settleAgentRun: a run that fails or is cancelled late is
  * still charged for the tokens its model calls used.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const hoisted = vi.hoisted(() => ({ checkRateLimit: vi.fn(), logModelUsage: vi.fn() }));
+const hoisted = vi.hoisted(() => ({ checkRateLimit: vi.fn() }));
 vi.mock('@/lib/quota/quotaGuard', () => ({ checkRateLimit: hoisted.checkRateLimit }));
-vi.mock('@/lib/services/models/usageLogger', () => ({ logModelUsage: hoisted.logModelUsage }));
 
 import { settleAgentRun } from '@/lib/services/agents/agentQuota';
-import { withModelUsageLogging } from '@/lib/services/agents/modelUsageTap';
 import { addRunUsage, createRunUsageSink, runWithUsageSink } from '@/lib/services/agents/runUsage';
 
 const caller = { tenantDbName: 'tenant_a', tenantId: 't1', projectId: 'p1', agentKey: 'bot', userId: 'u1' };
-const model = { key: 'm1' } as never;
 
 beforeEach(() => {
   vi.clearAllMocks();
   hoisted.checkRateLimit.mockResolvedValue({ allowed: true, effectiveLimits: {} });
-  hoisted.logModelUsage.mockResolvedValue(undefined);
 });
 
 describe('the run usage sink', () => {
@@ -56,52 +52,6 @@ describe('the run usage sink', () => {
       addRunUsage(1);
     });
     expect([outer.totalTokens, inner.totalTokens]).toEqual([2, 10]);
-  });
-});
-
-describe('the model usage tap feeds the run', () => {
-  it('a completed call adds its tokens', async () => {
-    const tapped = withModelUsageLogging({
-      invoke: async () => ({ usage_metadata: { input_tokens: 40, output_tokens: 10, total_tokens: 50 } }),
-    }, { tenantDbName: 'tenant_a', model, route: 'agent', agentKey: 'bot' });
-    const sink = createRunUsageSink();
-    await runWithUsageSink(sink, () => tapped.invoke!());
-    expect(sink.totalTokens).toBe(50);
-  });
-
-  it('a call that fails adds nothing (the provider spent nothing)', async () => {
-    const tapped = withModelUsageLogging({
-      invoke: async () => { throw new Error('429 from the provider'); },
-    }, { tenantDbName: 'tenant_a', model, route: 'agent', agentKey: 'bot' });
-    const sink = createRunUsageSink();
-    await expect(runWithUsageSink(sink, () => tapped.invoke!())).rejects.toThrow('429');
-    expect(sink.totalTokens).toBe(0);
-  });
-
-  it('a stream that is abandoned before its end still counts what it had generated', async () => {
-    const tapped = withModelUsageLogging({
-      stream: async function* () {
-        yield { content: 'a', usage_metadata: { input_tokens: 30, output_tokens: 20, total_tokens: 50 } };
-        yield { content: 'b' };
-        yield { content: 'never read' };
-      },
-    }, { tenantDbName: 'tenant_a', model, route: 'agent', agentKey: 'bot' });
-    const sink = createRunUsageSink();
-    await runWithUsageSink(sink, async () => {
-      for await (const chunk of tapped.stream!() as AsyncIterable<{ content: string }>) {
-        if (chunk.content === 'b') break; // the client hung up
-      }
-    });
-    expect(sink.totalTokens).toBe(50);
-  });
-
-  it('many calls of one run add up', async () => {
-    const tapped = withModelUsageLogging({
-      invoke: async () => ({ usage_metadata: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }),
-    }, { tenantDbName: 'tenant_a', model, route: 'agent', agentKey: 'bot' });
-    const sink = createRunUsageSink();
-    await runWithUsageSink(sink, async () => { for (let i = 0; i < 5; i++) await tapped.invoke!(); });
-    expect(sink.totalTokens).toBe(10);
   });
 });
 

@@ -310,9 +310,9 @@ describe('agent code export', () => {
         expect(model).toContain('/api/client/v1');
         expect(model).not.toMatch(/langchain|fromLangchainModel|ChatOpenAI/i);
         const pkg = JSON.parse(files['package.json']);
-        expect(pkg.dependencies['@cognipeer/agent-sdk']).toBe('^0.11.0');
+        expect(pkg.dependencies['@cognipeer/agent-sdk']).toBe('^0.12.0');
         expect(Object.keys(pkg.dependencies).some((name) => name.includes('langchain'))).toBe(false);
-        for (const file of Object.values(files)) expect(file).not.toMatch(/@langchain|fromLangchainModel/);
+        for (const file of Object.values(files)) expect(file).not.toMatch(/langchain/i);
     });
 
     it('declares tools even when only sub-agents need them', () => {
