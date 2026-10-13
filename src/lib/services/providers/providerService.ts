@@ -5,6 +5,7 @@ import {
 } from '@/lib/database';
 import { decryptObject, encryptObject } from '@/lib/utils/crypto';
 import { createLogger } from '@/lib/core/logger';
+import { assertProviderEndpointsAllowed } from './providerEndpointGuard';
 
 const logger = createLogger('provider-service');
 
@@ -117,6 +118,7 @@ export async function createProviderConfig(
   tenantId: string,
   payload: CreateProviderConfigInput,
 ): Promise<ProviderConfigView> {
+  await assertProviderEndpointsAllowed(payload.type, payload.credentials, payload.settings);
   const settings = payload.type === 'websearch'
     ? await validateWebSearchSettings(tenantDbName, tenantId, payload.projectId, payload.settings)
     : payload.settings;
@@ -167,6 +169,11 @@ export async function updateProviderConfig(
 ): Promise<ProviderConfigView | null> {
   const db = await withTenantDb(tenantDbName);
   const updates: Partial<IProviderRecord> = {};
+
+  if (payload.settings !== undefined || payload.credentials !== undefined) {
+    const target = await db.findProviderById(providerId);
+    await assertProviderEndpointsAllowed(target?.type, payload.credentials, payload.settings);
+  }
 
   if (payload.projectIds !== undefined) {
     updates.projectIds = payload.projectIds;

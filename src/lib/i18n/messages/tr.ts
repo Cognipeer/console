@@ -987,6 +987,9 @@ export const tr: typeof en = {
       workspaceSlug: 'Çalışma alanı slug\'ı',
     },
   },
+  providerEndpoint: {
+    notAllowed: 'Bu uç nokta izinli değil. Herkese açık bir http(s) adresi kullanın veya yöneticinizden özel ağ model uç noktalarına izin vermesini isteyin.',
+  },
   iamApi: {
     services: {
       models: 'Model Hub',

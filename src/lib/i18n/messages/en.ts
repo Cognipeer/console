@@ -1126,6 +1126,9 @@ export const en = {
       },
     },
   },
+  providerEndpoint: {
+    notAllowed: 'This endpoint is not allowed. Use a public http(s) address, or ask your administrator to allow private-network model endpoints.',
+  },
   iamApi: {
     services: {
       models: 'Model Hub',
