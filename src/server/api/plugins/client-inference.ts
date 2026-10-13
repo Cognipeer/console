@@ -47,6 +47,7 @@ import {
   anthropicRequestToOpenAi,
   AnthropicRequestError,
   openAiResponseToAnthropic,
+  isThinkingRequested,
   openAiStreamToAnthropic,
   type AnthropicMessagesRequest,
 } from '@/lib/services/models/anthropicWire';
@@ -741,6 +742,7 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
         const translated = openAiStreamToAnthropic(
           result.stream as ReadableStream<Uint8Array>,
           modelKey,
+          { emitThinking: isThinkingRequested(anthropicBody) },
         );
         return reply.send(
           Readable.fromWeb(translated as unknown as NodeReadableStream<Uint8Array>),
@@ -752,7 +754,9 @@ export const clientInferenceApiPlugin: FastifyPluginAsync = async (app) => {
       // surface on their error/response objects.
       reply.header('request-id', result.requestId);
       return reply.code(200).send({
-        ...openAiResponseToAnthropic(result.response ?? {}, modelKey),
+        ...openAiResponseToAnthropic(result.response ?? {}, modelKey, {
+          emitThinking: isThinkingRequested(anthropicBody),
+        }),
         request_id: result.requestId,
       });
     } catch (error) {

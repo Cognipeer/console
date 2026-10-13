@@ -321,7 +321,8 @@ describe('reasoning: hiding and precedence through handleChatCompletion', () => 
   });
 
   it('request value is used when the model has none; nothing is sent when neither', async () => {
-    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({}));
+    // A model that reasons: the caller's effort is sent.
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({}, 'openai', 'o3'));
     const upstream = stubUpstream(reply);
     await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], reasoning_effort: 'low' } });
     expect(upstream.calls[0].body.reasoning_effort).toBe('low');
@@ -330,11 +331,18 @@ describe('reasoning: hiding and precedence through handleChatCompletion', () => 
     expect(upstream.calls[1].body).not.toHaveProperty('reasoning_effort');
   });
 
+  it('a request\'s effort is not sent to a model that does not reason (OpenAI answers it with a 400)', async () => {
+    (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({}, 'openai', 'gpt-4o'));
+    const upstream = stubUpstream(reply);
+    await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'x' }], reasoning_effort: 'low' } });
+    expect(upstream.calls[0].body).not.toHaveProperty('reasoning_effort');
+  });
+
   it('an agent\'s own pick outranks the Model Hub default, which outranks the request', async () => {
     (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel({ reasoning: { effort: 'high' } }));
     const upstream = stubUpstream(reply);
     const call = (context: object, settings: Record<string, unknown>, body: Record<string, unknown> = {}) => {
-      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel(settings));
+      (getModelByKey as ReturnType<typeof vi.fn>).mockResolvedValue(makeModel(settings, 'openai', 'o3'));
       return executeModelCall({
         ...BASE,
         request: { messages: [{ role: 'user', content: 'x' }] },

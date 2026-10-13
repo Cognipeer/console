@@ -54,6 +54,7 @@ import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { runWithRoutingCaller } from '@/lib/services/models/routingCallerContext';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { createStreamGate, evaluateGuardrail } from '@/lib/services/guardrail';
+import { isSemanticCacheEnabled, lookupCache, storeInCache } from '@/lib/services/models/semanticCacheService';
 import { buildGatewayChatModel, type GatewayChatModelInput } from '@/lib/services/agents/gatewayChatModel';
 import { createRunUsageSink, runWithUsageSink } from '@/lib/services/agents/runUsage';
 
@@ -243,6 +244,34 @@ describe('abort', () => {
     await flush();
     expect(rows()).toHaveLength(1);
     expect(rows()[0]).toMatchObject({ status: 'cancelled', route: 'agent.chat' });
+  });
+});
+
+describe('a model with a semantic cache, called by an agent', () => {
+  it('is not served from the cache: the tool loop makes its upstream calls and runs its tool once', async () => {
+    // A cache that would answer step 2 with step 1's stored tool call (same last user text).
+    useModels(llm('m', { semanticCache: { indexKey: 'i', threshold: 0.9 } }));
+    (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (lookupCache as ReturnType<typeof vi.fn>).mockResolvedValue({
+      hit: true,
+      response: completion({ content: null, toolCalls: [{ id: 'stale', name: 'lookup', arguments: '{"q":"apples"}' }] }),
+    });
+    const ran: string[] = [];
+    const { createSmartAgent } = await import('@cognipeer/agent-sdk');
+    const agent = createSmartAgent({
+      model: await build('m', { route: 'agent.chat', agentKey: 'a1' }),
+      tools: [await lookupTool((args) => { ran.push(args.q); return `found ${args.q}`; })],
+      systemPrompt: 'Be brief.',
+    } as never);
+    const result = await agent.invoke({ messages: [{ role: 'user', content: 'find apples' }] } as never) as { content?: string };
+
+    expect(result.content).toBe('answered by prov-m');
+    expect(upstream.calls).toHaveLength(2);
+    expect(ran).toEqual(['apples']);
+    expect(lookupCache).not.toHaveBeenCalled();
+    expect(storeInCache).not.toHaveBeenCalled();
+    (isSemanticCacheEnabled as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    (lookupCache as ReturnType<typeof vi.fn>).mockResolvedValue({ hit: false, response: null });
   });
 });
 

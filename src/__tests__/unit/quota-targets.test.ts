@@ -276,7 +276,7 @@ describe('the routes agree with the table', () => {
     // A chat route refuses a model that is not `llm`, the decision route one that is not `decision`...:
     // the category IS the service, which is why the picker filters on it.
     const enforced = new Set(
-      ['lib/services/models/inferenceService.ts', 'lib/services/models/decisionService.ts'].flatMap((file) =>
+      ['lib/services/models/inferenceService.ts', 'lib/services/models/gatewayCore.ts', 'lib/services/models/decisionService.ts'].flatMap((file) =>
         [...read(file).matchAll(/model\.category !== '(\w+)'/g)].map((m) => m[1]),
       ),
     );

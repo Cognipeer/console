@@ -196,7 +196,14 @@ describe('openAiMessagesToNative', () => {
     expect(message.content).toEqual([
       { type: 'audio', source: { type: 'base64', mediaType: 'audio/wav', data: 'UklGRg==' } },
       { type: 'file', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' }, fileName: 'a.pdf' },
-      { type: 'text', text: '[file: file-abc]' },
+      // A reference to a file the upstream holds is not degraded to a text note: it is kept (under a private
+      // type the SDK passes through) and leaves the process, and the wire view, as the caller wrote it.
+      { type: 'gateway_file_ref', file: { file_id: 'file-abc' } },
+    ]);
+    expect(nativeMessagesToOpenAi([message])[0].content).toEqual([
+      expect.objectContaining({ type: 'input_audio' }),
+      expect.objectContaining({ type: 'file' }),
+      { type: 'file', file: { file_id: 'file-abc' } },
     ]);
   });
 

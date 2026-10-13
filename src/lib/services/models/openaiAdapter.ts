@@ -23,6 +23,7 @@
 import crypto from 'crypto';
 import type { ChatCompletionResponse, FinishReason, UnifiedMessage } from '@cognipeer/agent-sdk';
 import { normalizeFinishReason } from '@/lib/shared/finishReason';
+import { FILE_REFERENCE_PART_TYPE } from '@/lib/providers/contracts/wireNormalization';
 import type {
   ContentPart,
   GatewayChatRequest,
@@ -170,7 +171,10 @@ function contentPartsToNative(content: unknown[], messageIndex: number): Content
           ...(fileName ? { fileName } : {}),
         });
       } else if (nonEmptyString(item.file.file_id)) {
-        parts.push({ type: 'text', text: `[file: ${item.file.file_id}]` });
+        // A reference to a file the upstream already holds: kept as the caller
+        // wrote it (an OpenAI-schema upstream receives it; the core drops it for a
+        // provider that could not read it) rather than degraded to a text note.
+        parts.push({ type: FILE_REFERENCE_PART_TYPE, file: item.file } as unknown as ContentPart);
       }
       return;
     }
@@ -386,6 +390,9 @@ function contentPartToWire(part: ContentPart): AnyRecord {
     return source.type === 'base64'
       ? { type: 'file', file: { filename: part.fileName ?? 'file', file_data: `data:${source.mediaType};base64,${source.data}` } }
       : { type: 'text', text: `[file: ${source.url}]` };
+  }
+  if ((part as { type: string }).type === FILE_REFERENCE_PART_TYPE) {
+    return { type: 'file', file: (part as unknown as { file: unknown }).file };
   }
   if (part.type !== 'audio') return part as unknown as AnyRecord;
   const source = part.source;
@@ -690,6 +697,8 @@ export type OpenAIStreamFrame = ReturnType<typeof openAIStreamDeltaChunk>;
  */
 export class OpenAiStreamFramer {
   private readonly opened = new Map<number, string>();
+  /** Calls whose `name` has been put on the wire. */
+  private readonly named = new Set<number>();
   private readonly byId = new Map<string, number>();
   private lastIndex = -1;
 
@@ -714,12 +723,21 @@ export class OpenAiStreamFramer {
         id = partial.id && partial.id.length > 0 ? partial.id : `call_${index}_${crypto.randomUUID()}`;
         this.opened.set(index, id);
         this.byId.set(id, index);
+        if (partial.name) this.named.add(index);
         out.push({
           index,
           id,
           type: 'function',
           function: { name: partial.name ?? '', arguments: args },
         });
+        return;
+      }
+      // An upstream that sends a call's id in one delta and its name in a later
+      // one opened the call with an empty name: the name still has to reach the
+      // client, which merges fragments by index.
+      if (partial.name && !this.named.has(index)) {
+        this.named.add(index);
+        out.push({ index, function: { name: partial.name, arguments: args } });
         return;
       }
       out.push({ index, function: { arguments: args } });

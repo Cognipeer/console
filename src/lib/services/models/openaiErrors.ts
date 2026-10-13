@@ -127,6 +127,24 @@ function normalized(
   };
 }
 
+/**
+ * The upstream's OWN message out of a provider error body. agent-sdk's
+ * ProviderError words its `message` as `<Provider> API error <status>: <raw
+ * response text>`; a client wants the sentence the upstream wrote, not the wrapper
+ * and a JSON blob around it. Anthropic / OpenAI / Gemini nest it under
+ * `error.message`, Bedrock and some compatible servers put `message` at the top.
+ */
+function upstreamMessage(error: unknown): string | undefined {
+  const body = parseJsonBody(asRecord(error)?.responseBody);
+  const record = asRecord(body);
+  if (!record) return undefined;
+  const nested = asRecord(record.error);
+  for (const candidate of [nested?.message, typeof record.error === 'string' ? record.error : undefined, record.message]) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+  }
+  return undefined;
+}
+
 export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
   if (error instanceof OutputTokenLimitError) {
     return normalized(
@@ -139,9 +157,10 @@ export function normalizeInferenceError(error: unknown): NormalizedOpenAIError {
   }
 
   const records = collectErrorRecords(error);
-  const rawMessage = error instanceof Error
-    ? error.message
-    : firstString(records, ['message']) || 'Inference request failed';
+  const rawMessage = upstreamMessage(error)
+    ?? (error instanceof Error
+      ? error.message
+      : firstString(records, ['message']) || 'Inference request failed');
   const message = safeMessage(rawMessage);
   const status = firstStatus(records);
   const providerCode = firstString(records, ['code']);

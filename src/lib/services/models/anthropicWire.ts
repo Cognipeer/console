@@ -418,10 +418,28 @@ function anthropicUsage(usage: Record<string, unknown> | undefined) {
   };
 }
 
+/**
+ * Whether `thinking` content blocks may appear in a Messages answer. They carry
+ * no signature here, so a caller that never asked for extended thinking (no
+ * `thinking: { type: 'enabled' }` on the request) gets none: a strict Anthropic
+ * SDK consumer, or a client that echoes the content back, must not receive
+ * unsolicited unsigned blocks. Default: emitted (the translator on its own is
+ * pure); the route passes `isThinkingRequested(body)`.
+ */
+export interface ThinkingEmission {
+  emitThinking?: boolean;
+}
+
+/** True when the Messages request turned extended thinking on. */
+export function isThinkingRequested(body: { thinking?: { type?: string } | null }): boolean {
+  return body?.thinking?.type === 'enabled';
+}
+
 /** Buffered OpenAI chat completion → Messages response. */
 export function openAiResponseToAnthropic(
   response: Record<string, unknown>,
   requestedModel: string,
+  options: ThinkingEmission = {},
 ): Record<string, unknown> {
   const choices = Array.isArray(response.choices) ? response.choices : [];
   const choice = (choices[0] ?? {}) as Record<string, unknown>;
@@ -430,7 +448,7 @@ export function openAiResponseToAnthropic(
   const content: Array<Record<string, unknown>> = [];
   // Present only when the gateway let the reasoning through (Model Hub
   // "return reasoning" on, no `include_reasoning: false`).
-  if (typeof message.reasoning_content === 'string' && message.reasoning_content) {
+  if (options.emitThinking !== false && typeof message.reasoning_content === 'string' && message.reasoning_content) {
     content.push({ type: 'thinking', thinking: message.reasoning_content, signature: '' });
   }
   if (typeof message.content === 'string' && message.content) {
@@ -496,7 +514,9 @@ function frame(event: string, data: unknown): Uint8Array {
 export function openAiStreamToAnthropic(
   source: ReadableStream<Uint8Array>,
   requestedModel: string,
+  options: ThinkingEmission = {},
 ): ReadableStream<Uint8Array> {
+  const emitThinking = options.emitThinking !== false;
   const decoder = new TextDecoder();
   // Acquired here, not inside `start()`, so `cancel()` can reach it. The
   // translated stream owns the source for its whole life either way.
@@ -593,7 +613,7 @@ export function openAiStreamToAnthropic(
 
         openMessage();
 
-        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+        if (emitThinking && typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
           if (thinkingIndex === null) {
             closeOpenBlocks();
             thinkingIndex = nextIndex++;

@@ -23,7 +23,7 @@
  */
 
 import crypto from 'crypto';
-import type { ChatCompletionChunk, ChatCompletionResponse, UnifiedMessage } from '@cognipeer/agent-sdk';
+import type { ChatCompletionChunk, ChatCompletionResponse, ProviderResponseFields, UnifiedMessage } from '@cognipeer/agent-sdk';
 import { AGENT_REASONING_OVERRIDE, shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
@@ -76,7 +76,7 @@ import {
   openAiResponseToNative,
   toOpenAIChatResponse,
 } from './openaiAdapter';
-import { StreamAssembler, frameHasContent, fromGateFrame, toGateFrame, wireFinishReason } from './gatewayStream';
+import { StreamAssembler, finishWithToolCalls, frameHasContent, fromGateFrame, toGateFrame, wireFinishReason } from './gatewayStream';
 import { estimateTokensFromText, toGatewayUsage, toWireUsage } from './gatewayUsage';
 import type {
   GatewayChatRequest,
@@ -445,6 +445,33 @@ async function prepareCall(state: CallState, activeModel: IModel) {
 
 type Prepared = Awaited<ReturnType<typeof prepareCall>>;
 
+/**
+ * The semantic cache keys an entry on the LAST USER message (plus the variant
+ * key); the system prompt, the tool list and everything after that message are
+ * not part of it. That is right for a plain question and wrong the moment the
+ * answer depends on more than the question: step 2 of a tool loop shares step
+ * 1's last user text, so a hit would replay step 1's tool call forever, and two
+ * agents with different system prompts would trade answers. Such calls bypass the
+ * cache: anything that offers tools, replays tool turns, or comes from an agent.
+ */
+function isCacheableConversation(request: ModelCallInput['request'], wire: AnyRecord, route: string): boolean {
+  if (route.startsWith('agent.')) return false;
+  if ((request.tools?.length ?? 0) > 0) return false;
+  if (Array.isArray(wire.tools) && wire.tools.length > 0) return false;
+  if (Array.isArray(wire.functions) && wire.functions.length > 0) return false;
+  const turns = [
+    ...(request.messages as unknown as Array<{ role?: string; toolCalls?: unknown[] }>),
+    ...(Array.isArray(wire.messages) ? (wire.messages as Array<{ role?: string; tool_calls?: unknown[] }>) : []),
+  ] as Array<{ role?: string; toolCalls?: unknown[]; tool_calls?: unknown[] }>;
+  return !turns.some(
+    (turn) =>
+      turn?.role === 'tool'
+      || turn?.role === 'function'
+      || (turn?.toolCalls?.length ?? 0) > 0
+      || (turn?.tool_calls?.length ?? 0) > 0,
+  );
+}
+
 export async function executeModelCall(input: ModelCallInput): Promise<ModelCallOutcome> {
   const { tenantDbName, tenantId, modelKey, projectId, stream } = input;
   const context = input.context ?? {};
@@ -553,13 +580,20 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
   // available, so an edit to a policy also retires the entries produced under
   // the old one.
   const outputGuardrailKeys = resolveBindings(model, 'output.pre');
-  const cacheEnabled = Boolean(!stream && tenantId && isSemanticCacheEnabled(model));
+  const includeReasoning = shouldReturnReasoning(model.settings, wire);
+  const cacheEnabled = Boolean(
+    !stream && tenantId && isSemanticCacheEnabled(model) && isCacheableConversation(request, wire, route),
+  );
   const cacheVariantKey = buildCacheVariantKey({
     ...invocation.overrides,
     ...(invocation.extraBody ?? {}),
     // The reasoning the call really runs with: the agent's pick or the Model Hub
     // default can differ from what the request carries, and so can the answer.
     ...(resolvedReasoning ? { __reasoning: resolvedReasoning } : {}),
+    // The cached wire response is stored AS RENDERED, so whether it carries
+    // `reasoning_content` is part of what an entry is: a hit must never show
+    // text the operator (or this caller) hid, nor hide what a caller asked for.
+    __returnReasoning: includeReasoning,
     ...(cacheEnabled
       ? { __outputGuardrails: await outputGuardrailPolicyVersions(tenantDbName, projectId, outputGuardrailKeys) }
       : {}),
@@ -585,7 +619,7 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
     cacheVariantKey,
     outputGuardrailKeys,
     guardrailAnnotations,
-    includeReasoning: shouldReturnReasoning(model.settings, wire),
+    includeReasoning,
     loggedMessages: context.logPrompt === false
       ? { count: Array.isArray(wire.messages) ? wire.messages.length : 0 }
       : wire.messages,
@@ -743,7 +777,11 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
 
   const usage = toGatewayUsage(client.driver, native.usage);
   if (native.toolCalls.length > 0) usage.toolCalls = native.toolCalls.length;
-  const wireFinish = wireFinishReason(client.driver, native.rawFinishReason, native.finishReason);
+  const wireFinish = finishWithToolCalls(
+    client.driver,
+    wireFinishReason(client.driver, native.rawFinishReason, native.finishReason),
+    native.toolCalls.length > 0,
+  );
 
   const wireResponse = toOpenAIChatResponse(finalResponse, {
     // The MODEL's id, never the replica's: the caller asked for this model and
@@ -1081,16 +1119,46 @@ async function* streamEvents(args: {
   // The gate hands back the frames that are safe NOW: whatever it has cleared,
   // plus this step's non-content residual (tool-call deltas, finish_reason) in
   // order. It never throws.
+  // The gate adjudicates OpenAI-shaped text frames, and that shape has no room for
+  // what only a native consumer (the agent loop) needs: a Gemini tool call's
+  // `thoughtSignature`, the provider's response fields. A frame it releases is
+  // converted back to a native step, and those are put back from what the assembler
+  // saw - a signature on the first released fragment of its call, the response
+  // fields on the first released step - so a gated stream replays like an ungated one.
+  const signatureSent = new Set<number>();
+  let heldProviderFields: ProviderResponseFields | undefined;
+  const restoreNativeExtras = (event: ModelStreamDelta): ModelStreamDelta => {
+    let restored = event;
+    if (event.toolCalls?.length) {
+      restored = {
+        ...restored,
+        toolCalls: event.toolCalls.map((call) => {
+          if (call.index === undefined || signatureSent.has(call.index)) return call;
+          const thoughtSignature = assembler.thoughtSignatureAt(call.index);
+          if (!thoughtSignature) return call;
+          signatureSent.add(call.index);
+          return { ...call, thoughtSignature };
+        }),
+      };
+    }
+    if (heldProviderFields) {
+      restored = { ...restored, providerFields: heldProviderFields };
+      heldProviderFields = undefined;
+    }
+    return restored;
+  };
+
   const emit = async (
     step: ModelStreamDelta,
   ): Promise<{ events: ModelStreamEvent[]; blocked?: StreamGateEmission['verdict'] | null }> => {
     if (!gate || !gateFramer) return { events: [step] };
+    if (step.providerFields) heldProviderFields = { ...(heldProviderFields ?? {}), ...step.providerFields };
     const frame = toGateFrame(step, gateFramer);
     if (!frame) return { events: [] };
     const gated = await gate.push(frame);
     const events = gated.emit.map((released) => {
       if (frameHasContent(released)) releasedGatedText = true;
-      return fromGateFrame(released);
+      return restoreNativeExtras(fromGateFrame(released));
     });
     return gated.blocked ? { events, blocked: gated.verdict ?? null } : { events };
   };
@@ -1286,6 +1354,7 @@ async function* streamEvents(args: {
 
     // The terminal frame the provider sent.
     if (!outputLimitError && pendingFinish !== undefined) {
+      pendingFinish = finishWithToolCalls(driver, pendingFinish, assembler.toolCallCount > 0);
       const out = await emit({ type: 'delta', finishReason: pendingFinish });
       for (const event of out.events) yield event;
       if (out.blocked !== undefined) {
@@ -1302,7 +1371,7 @@ async function* streamEvents(args: {
       const end = await gate.end();
       for (const released of end.emit) {
         if (frameHasContent(released)) releasedGatedText = true;
-        const event = fromGateFrame(released);
+        const event = restoreNativeExtras(fromGateFrame(released));
         if (event.content) emittedContent += event.content;
         yield event;
       }

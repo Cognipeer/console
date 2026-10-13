@@ -30,7 +30,7 @@ import type {
 } from '@cognipeer/agent-sdk';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { hasExplicitThinking, translateAnthropicThinking } from '@/lib/services/models/reasoning';
-import { withInlineReasoningNormalization } from './wireNormalization';
+import { withFileReferenceRestore, withInlineReasoningNormalization } from './wireNormalization';
 import type {
   ModelRuntimeConfig,
   NativeChatClient,
@@ -139,6 +139,28 @@ export function buildTransformRequest(input: {
   };
 }
 
+/**
+ * Extended thinking and a tool loop only mix when the loop replays the model's
+ * SIGNED thinking blocks: Anthropic answers a replayed `tool_use` turn that does
+ * not start with its thinking block with a 400. True when the request ends in a
+ * tool turn (an assistant message with tool calls after the last real user
+ * message) that cannot be replayed that way, because the caller never kept the
+ * blocks - a plain /messages or /chat/completions client, whose history is
+ * rebuilt from OpenAI-shaped messages.
+ */
+export function hasUnreplayableToolTurn(messages: ChatCompletionRequest['messages']): boolean {
+  let lastUser = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      lastUser = i;
+      break;
+    }
+  }
+  return messages.slice(lastUser + 1).some(
+    (message) => message.role === 'assistant' && (message.toolCalls?.length ?? 0) > 0 && !message.reasoning?.blocks?.length,
+  );
+}
+
 /** Sampling and token settings of the model record, as the request defaults. */
 export function buildNativeOptions(input: {
   driver: string;
@@ -202,8 +224,11 @@ export function buildProviderConfig(
   maxRetries?: number,
 ): NativeProviderSpec['provider'] {
   const baseFetch = transport?.fetch;
-  const fetchImpl = spec.normalizeInlineReasoning ? withInlineReasoningNormalization(baseFetch) : baseFetch;
   const kind = spec.provider.provider;
+  const normalizingFetch = spec.normalizeInlineReasoning ? withInlineReasoningNormalization(baseFetch) : baseFetch;
+  const fetchImpl = kind === 'openai' || kind === 'azure' || kind === 'openai-compatible'
+    ? withFileReferenceRestore(normalizingFetch)
+    : normalizingFetch;
   return {
     ...spec.provider,
     ...(fetchImpl ? { fetch: fetchImpl } : {}),
@@ -261,7 +286,10 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
       if (merged[key] === undefined) delete merged[key];
     }
     const reasoning = request.reasoning ?? defaultReasoning;
-    if (reasoning) merged.reasoning = reasoning;
+    // Thinking cannot continue a tool loop whose signed blocks were lost on the
+    // way in: that call runs without it (the first turn of the loop kept it).
+    const mustDropThinking = (driver === 'anthropic' || driver === 'bedrock') && hasUnreplayableToolTurn(merged.messages);
+    if (reasoning && !mustDropThinking) merged.reasoning = reasoning;
     if (defaultExtra || request.extra) merged.extra = { ...(defaultExtra ?? {}), ...(request.extra ?? {}) };
     if (stream && overrides.streamUsage === false && merged.streamUsage === undefined) merged.streamUsage = false;
     const out = await transformRequest!(merged);

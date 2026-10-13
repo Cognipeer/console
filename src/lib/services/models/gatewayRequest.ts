@@ -8,7 +8,7 @@
 import { AGENT_REASONING_OVERRIDE, normalizeReasoning, resolveGatewayReasoning } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
 import type { IModel } from '@/lib/database';
-import { resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
+import { requestReasoningEffortAccepted, resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
 
 const logger = createLogger('inference');
 
@@ -262,6 +262,7 @@ function buildChatModelSettings(
   modelSettings: unknown,
   overrides: Record<string, unknown>,
   agentReasoning?: unknown,
+  target?: { driver?: string; modelId?: string },
 ) {
   const settings = asRecord(modelSettings);
 
@@ -303,7 +304,13 @@ function buildChatModelSettings(
         reasoning: overrides.reasoning,
         reasoning_effort: overrides.reasoning_effort,
       });
-  if (resolved.reasoning) {
+  // A caller's own effort only reaches a model that takes one; the agent's pick
+  // and the operator's pin are deliberate and always go through.
+  const droppedRequestEffort =
+    resolved.source === 'request'
+    && target !== undefined
+    && !requestReasoningEffortAccepted(target.driver, target.modelId, resolved.reasoning?.effort);
+  if (resolved.reasoning && !droppedRequestEffort) {
     settings.reasoning = resolved.reasoning;
   } else {
     delete settings.reasoning;
@@ -520,6 +527,7 @@ export function resolveModelInvocationConfig(
     model.settings,
     overrides,
     (body as { [AGENT_REASONING_OVERRIDE]?: unknown })[AGENT_REASONING_OVERRIDE],
+    { driver: model.providerDriver, modelId: model.modelId },
   );
   const extraBody = buildPassthroughBody(model.settings, body, blockedLower);
 

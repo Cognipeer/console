@@ -53,6 +53,17 @@ export function wireFinishReason(
   return normalized;
 }
 
+/**
+ * A completion that ended in tool calls says `tool_calls`. Gemini finishes such a
+ * turn with STOP (the SDK maps that to `stop`), and a client that dispatches on
+ * `finish_reason` would read the turn as a finished answer. An OpenAI-schema
+ * upstream is left exactly as it said; `length` and `content_filter` stay.
+ */
+export function finishWithToolCalls(driver: string | undefined, finish: string, hasToolCalls: boolean): string {
+  if (!hasToolCalls || finish !== 'stop') return finish;
+  return driver && OPENAI_SCHEMA_DRIVERS.has(driver) ? finish : 'tool_calls';
+}
+
 const PROVIDER_FINISH_REASONS: Readonly<Record<string, string>> = {
   end_turn: 'stop',
   stop_sequence: 'stop',
@@ -136,6 +147,11 @@ export class StreamAssembler {
       if (partial.arguments) call.args += partial.arguments;
       if (partial.thoughtSignature) call.thoughtSignature = partial.thoughtSignature;
     }
+  }
+
+  /** The signature (Gemini `thoughtSignature`) a call carries so far, once the provider has sent it. */
+  thoughtSignatureAt(index: number): string | undefined {
+    return this.calls.get(index)?.thoughtSignature;
   }
 
   get toolCallCount(): number {

@@ -145,7 +145,7 @@ const EMPTY: DetectedUnsupportedParams = { params: [] };
  * `eu.anthropic.claude-...`, so anchored matching silently detected nothing and
  * the request went out with the parameters the upstream rejects.
  */
-function candidateModelIds(modelId: string): string[] {
+export function candidateModelIds(modelId: string): string[] {
   const candidates = [modelId];
   let rest = modelId;
   // Only leading `vendor.`/`region.` style segments are peeled: a dot inside the
@@ -214,4 +214,34 @@ export function resolveUnsupportedParamNames(input: {
     detected,
     params: [...new Set([...detected.params, ...manual].map((name) => name.trim()).filter(Boolean))],
   };
+}
+
+/** OpenAI-schema drivers, `together` included: it is a record driver of its own that speaks the same wire. */
+const REASONING_EFFORT_DRIVERS: ReadonlySet<string> = new Set([...OPENAI_SCHEMA_DRIVERS, 'together']);
+
+/** Model families that take `reasoning_effort` on an OpenAI-schema endpoint. */
+const REASONING_EFFORT_MODELS = /^(o\d|gpt-5(?!-chat)|gpt-oss|deepseek-(r\d|reasoner|v3\.[1-9]|v4)|qwq|qwen3)/i;
+/** `none` is a value only the GPT-5.1+ line accepts. */
+const REASONING_EFFORT_NONE_MODELS = /^gpt-5\.\d/i;
+
+/**
+ * Whether a reasoning effort that arrived on the REQUEST may be sent to this
+ * model. OpenAI and Azure answer `reasoning_effort` on a model that does not
+ * reason (gpt-4o, a vLLM Llama) with a 400, and `none` is not a value o3, gpt-4.1
+ * or GPT-5 accept; a caller's effort there is dropped, as the LangChain-based
+ * gateway always did. An operator's Model Hub pin never goes through this check:
+ * what the operator wrote is what is sent. Providers with their own reasoning
+ * envelope (Anthropic, Bedrock, Vertex) are not OpenAI-schema and always pass.
+ */
+export function requestReasoningEffortAccepted(
+  driver: string | undefined,
+  modelId: string | undefined,
+  effort: string | undefined,
+): boolean {
+  if (!driver || !REASONING_EFFORT_DRIVERS.has(driver)) return true;
+  if (!effort) return true;
+  const candidates = candidateModelIds(modelId ?? '');
+  if (!candidates.some((id) => REASONING_EFFORT_MODELS.test(id))) return false;
+  if (effort === 'none') return candidates.some((id) => REASONING_EFFORT_NONE_MODELS.test(id));
+  return true;
 }

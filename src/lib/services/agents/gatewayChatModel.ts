@@ -304,6 +304,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
             id,
             model: modelName,
             delta: blocks?.length ? { reasoning: { blocks } } : {},
+            ...(event.response.providerFields ? { providerFields: event.response.providerFields } : {}),
             ...(event.nativeUsage ? { usage: event.nativeUsage } : {}),
             finishReason: event.response.finishReason,
             ...(event.response.rawFinishReason ? { rawFinishReason: event.response.rawFinishReason } : {}),

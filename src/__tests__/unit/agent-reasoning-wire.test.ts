@@ -46,8 +46,9 @@ vi.mock('@/lib/services/models/runtimeService', () => ({
 import { buildAgentChatModel } from '@/lib/services/agents/agentService';
 import { generateConversationTitle } from '@/lib/services/agents/conversationTitle';
 
-const model = (modelId: string, settings: Record<string, unknown> = {}) => ({
-  _id: modelId, tenantId: 't', projectId: 'p', name: modelId, key: modelId, providerKey: 'prov', providerDriver: 'openai',
+// `modelId` is the upstream id, `key` the console's: a caller's own effort only reaches a model that reasons.
+const model = (key: string, settings: Record<string, unknown> = {}, modelId = 'o3') => ({
+  _id: key, tenantId: 't', projectId: 'p', name: key, key, providerKey: 'prov', providerDriver: 'openai',
   category: 'llm', modelId, settings, pricing: { inputTokenPer1M: 1, outputTokenPer1M: 2 },
 });
 
@@ -96,7 +97,7 @@ describe('reasoning_effort on the wire', () => {
 
 describe('title generation', () => {
   it('forces reasoning off above the agent pick, the Model Hub default and the request', async () => {
-    hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key, { reasoning: { effort: 'high' } }));
+    hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) => model(key, { reasoning: { effort: 'high' } }, 'gpt-5.2'));
     await generateConversationTitle({
       tenantDbName: 'tenant_x', tenantId: 't', projectId: 'p', modelKey: 'gpt-4o', agentKey: 'a1',
       exchange: { user: 'plan my trip', assistant: 'sure' },
@@ -113,14 +114,14 @@ describe('Dynamic LLM', () => {
   /** The agent / request reasoning goes to whichever model the call is routed to, and is read there. */
   async function routedEffort(input: { hub?: string; agent?: string; request?: string }) {
     hoisted.getModelByKey.mockImplementation(async (_db: string, key: string) =>
-      key === 'router' ? router(key) : model(key, input.hub ? { reasoning: { effort: input.hub } } : {}));
+      key === 'router' ? router(key) : model(key, input.hub ? { reasoning: { effort: input.hub } } : {}, 'o3-mini'));
     const { chatModel } = await buildAgentChatModel(
       'tenant_x', 't', 'p', 'router', {},
       input.agent ? { effort: input.agent as 'low' } : undefined,
       input.request ? { effort: input.request as 'low' } : undefined,
     );
     await chatModel.invoke([{ role: 'user', content: 'hi' }]);
-    expect(upstream.calls.at(-1)!.body.model).toBe('small');
+    expect(upstream.calls.at(-1)!.body.model).toBe('o3-mini');
     return lastBody().reasoning_effort as string | undefined;
   }
 
