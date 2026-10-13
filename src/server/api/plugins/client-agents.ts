@@ -1,4 +1,5 @@
 import { agentShowsReasoning, parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
+import { shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentSessionBudget } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -494,7 +495,7 @@ function createResponsesHandler(usePublished: boolean) {
       void _conversation_messages;
       // The agent's `showReasoning` already left the reasoning item out; `include_reasoning: false` lets
       // a request narrow it further for itself (it can never bring back what the agent hid).
-      const responseBody = body.include_reasoning === false
+      const responseBody = !shouldReturnReasoning(undefined, body)
         ? { ...fullBody, output: (fullBody.output ?? []).filter((item) => item.type !== 'reasoning') }
         : fullBody;
       return reply.code(200).send(modelChoice ? { ...responseBody, cognipeer: { agent_model: modelChoice.modelKey } } : responseBody);

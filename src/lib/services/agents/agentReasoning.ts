@@ -204,5 +204,35 @@ export function titleReasoning(driver?: string): NormalizedReasoning {
   return { effort: 'minimal' };
 }
 
+const OPENAI_FAMILY_DRIVERS: ReadonlySet<string> = new Set(['openai', 'azure', 'openai-compatible', 'together']);
+
+/**
+ * What a title call sends for reasoning, for THIS model - or nothing.
+ *
+ * Forcing `none` on every model is wrong: `reasoning_effort` is a 400 on a chat
+ * model (gpt-4o, gpt-4.1, anything on a compatible endpoint), and the title is
+ * best-effort, so the failure was swallowed and the agent simply never got a
+ * generated title. The value is sent only where the model reasons by default or
+ * the operator gave it a reasoning control, and it is the lowest value that
+ * model family accepts (the o-series has no `minimal`/`none`, the first GPT-5 has
+ * no `none`). A Dynamic LLM is routed to models this cannot know: nothing.
+ */
+export function titleReasoningForModel(
+  model: { modelId?: string; providerDriver?: string; settings?: unknown },
+  options: { dynamic?: boolean } = {},
+): NormalizedReasoning | undefined {
+  if (options.dynamic) return undefined;
+  const driver = model.providerDriver;
+  const id = (model.modelId ?? '').toLowerCase();
+  if (driver && OPENAI_FAMILY_DRIVERS.has(driver)) {
+    if (/^o\d/.test(id)) return { effort: 'low' };
+    if (/^gpt-5(?!-chat)(?:$|-)/.test(id)) return { effort: 'minimal' };
+    if (/^gpt-5\.(?!\d*-chat)/.test(id)) return { effort: 'none' };
+  }
+  const configured = readModelReasoning(model.settings);
+  if (configured?.effort || configured?.budgetTokens) return titleReasoning(driver);
+  return undefined;
+}
+
 /** Re-exported so callers need one import. */
 export { normalizeReasoning };

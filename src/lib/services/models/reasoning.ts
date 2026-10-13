@@ -29,6 +29,15 @@ export interface NormalizedReasoning {
 
 export type ReasoningSource = 'model' | 'request' | 'none';
 
+/**
+ * In-process only: an AGENT's own reasoning pick, riding on the body of a call a
+ * Dynamic LLM routes to a concrete model. The gateway's rule is Model Hub default
+ * > request, but an agent's selection outranks the routed model's Model Hub
+ * default too (agent > Model Hub > request). A symbol key cannot arrive over HTTP
+ * (JSON has none), so a caller cannot claim the top rung; `{...body}` copies it.
+ */
+export const AGENT_REASONING_OVERRIDE: unique symbol = Symbol.for('cognipeer.agentReasoningOverride') as never;
+
 const EFFORT_SET: ReadonlySet<string> = new Set(REASONING_EFFORTS);
 
 function isRecord(value: unknown): value is Record<string, unknown> {

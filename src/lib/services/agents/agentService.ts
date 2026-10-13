@@ -1671,6 +1671,7 @@ async function buildSubagentModel(
                 projectId,
                 modelKey: model.key,
                 ...(agentPick || reasoning?.request ? { reasoning: { ...(agentPick ?? reasoning?.request) } } : {}),
+                ...(agentPick ? { reasoningFromAgent: true } : {}),
             })
             : await buildNativeAgentModel({
                 tenantDbName,
@@ -2595,6 +2596,7 @@ export async function buildAgentChatModel(
                 // A Dynamic LLM has no reasoning config of its own: the agent's pick (or
                 // else the caller's) rides to whichever model the call is routed to.
                 ...((reasoning ?? requestReasoning) ? { reasoning: (reasoning ?? requestReasoning)! } : {}),
+                ...(reasoning ? { reasoningFromAgent: true } : {}),
             }) as unknown as BaseChatModel,
         };
     }

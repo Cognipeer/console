@@ -3,7 +3,7 @@
  * (dynamicChatModel.ts): the rules - caller conditions included - decide per call, the child's
  * answer, tool calls and usage come back in the shape the agent loop reads.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
 
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: vi.fn() }));
@@ -173,6 +173,37 @@ describe('Dynamic LLM model as a native agent model', () => {
     const model = createDynamicChatModel({ ...deps, reasoning: { effort: 'high' } });
     await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
     expect(chatConfigs[0]).toMatchObject({ modelSettings: { reasoning: { effort: 'high' } } });
+  });
+
+  describe('against a routed model that has its own Model Hub default', () => {
+    beforeEach(() => {
+      models.small = llm('small', { settings: { reasoning: { effort: 'medium' } } });
+    });
+    afterEach(() => {
+      models.small = llm('small');
+    });
+
+    it("the AGENT's pick outranks the routed model's Model Hub default (agent > Model Hub)", async () => {
+      const model = createDynamicChatModel({ ...deps, reasoning: { effort: 'low' }, reasoningFromAgent: true });
+      await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
+      expect(chatConfigs[0]).toMatchObject({ modelSettings: { reasoning: { effort: 'low' } } });
+    });
+
+    it("an API request's value stays below the routed model's Model Hub default (Model Hub > request)", async () => {
+      const model = createDynamicChatModel({ ...deps, reasoning: { effort: 'low' } });
+      await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
+      expect(chatConfigs[0]).toMatchObject({ modelSettings: { reasoning: { effort: 'medium' } } });
+    });
+
+    it('a caller cannot claim the agent rung from the wire: only an in-process key counts', async () => {
+      const { resolveModelInvocationConfig } = await import('@/lib/services/models/inferenceService');
+      const { AGENT_REASONING_OVERRIDE } = await import('@/lib/services/models/reasoning');
+      const settings = { reasoning: { effort: 'medium' } };
+      const wire = JSON.parse(JSON.stringify({ messages: [], reasoning_effort: 'low', AGENT_REASONING_OVERRIDE: { effort: 'low' } }));
+      expect(resolveModelInvocationConfig({ settings }, wire).modelSettings.reasoning).toMatchObject({ effort: 'medium' });
+      expect(resolveModelInvocationConfig({ settings }, { messages: [], [AGENT_REASONING_OVERRIDE]: { effort: 'low' } } as never).modelSettings.reasoning)
+        .toMatchObject({ effort: 'low' });
+    });
   });
 
   it('applies the agent sampling overrides to the routed call', async () => {

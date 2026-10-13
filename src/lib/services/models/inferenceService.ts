@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { resolveGatewayReasoning, shouldReturnReasoning } from '@/lib/services/models/reasoning';
+import { AGENT_REASONING_OVERRIDE, normalizeReasoning, resolveGatewayReasoning, shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
 import { abortErrorFrom, withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
@@ -865,6 +865,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 function buildChatModelSettings(
   modelSettings: unknown,
   overrides: Record<string, unknown>,
+  agentReasoning?: unknown,
 ) {
   const settings = asRecord(modelSettings);
 
@@ -898,10 +899,14 @@ function buildChatModelSettings(
   // Model Hub default > request value > nothing. The request only fills the
   // gap when the operator left the model's reasoning unset; it never overrides
   // what the UI pinned (see `resolveGatewayReasoning`).
-  const resolved = resolveGatewayReasoning(settings, {
-    reasoning: overrides.reasoning,
-    reasoning_effort: overrides.reasoning_effort,
-  });
+  // (An agent's own pick, carried through a Dynamic LLM, is the one thing above the Model Hub default.)
+  const picked = normalizeReasoning(agentReasoning);
+  const resolved = picked
+    ? { reasoning: picked, source: 'agent' as const }
+    : resolveGatewayReasoning(settings, {
+        reasoning: overrides.reasoning,
+        reasoning_effort: overrides.reasoning_effort,
+      });
   if (resolved.reasoning) {
     settings.reasoning = resolved.reasoning;
   } else {
@@ -1115,7 +1120,11 @@ export function resolveModelInvocationConfig(
   const blockedLower = new Set(unsupportedParams.map((name) => name.toLowerCase()));
 
   const overrides = buildOverrides(body);
-  const modelSettings = buildChatModelSettings(model.settings, overrides);
+  const modelSettings = buildChatModelSettings(
+    model.settings,
+    overrides,
+    (body as { [AGENT_REASONING_OVERRIDE]?: unknown })[AGENT_REASONING_OVERRIDE],
+  );
   const extraBody = buildPassthroughBody(model.settings, body, blockedLower);
 
   if (extraBody) {

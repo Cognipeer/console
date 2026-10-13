@@ -33,10 +33,13 @@ import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 
 /**
  * Time to the response HEADERS, per request. An open stream is never cut by it
- * (the SDK clears its timer once headers arrive; `safeFetch` does too). Long
- * enough for a reasoning model that thinks before it says anything.
+ * (the SDK clears its timer once headers arrive; `safeFetch` does too). A
+ * NON-streamed call only gets its headers when the whole answer is done, so this
+ * must outlast the slowest reasoning completion: it is the 10 minutes the
+ * OpenAI and Anthropic clients this path replaced allowed, not a tighter cap
+ * (120 s cut long high-effort or large-output `invoke()` calls with a 408).
  */
-export const AGENT_MODEL_REQUEST_TIMEOUT_MS = 120_000;
+export const AGENT_MODEL_REQUEST_TIMEOUT_MS = 600_000;
 
 /** `safeFetch` gets a little more, so the SDK's own timeout (a clean 408) fires first. */
 const GUARD_TIMEOUT_MARGIN_MS = 5_000;
@@ -95,7 +98,9 @@ export function normalizeNativeReasoning(value: unknown): NativeAgentReasoning |
 export function guardedModelFetch(timeoutMs: number): typeof fetch {
     return (input, init) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        return safeFetch(url, init, { timeoutMs: timeoutMs + GUARD_TIMEOUT_MARGIN_MS });
+        // `keepAbortLinked`: the SDK ends a streamed answer by aborting this call's signal, which must
+        // reach the open response too, not only the wait for its headers.
+        return safeFetch(url, init, { timeoutMs: timeoutMs + GUARD_TIMEOUT_MARGIN_MS, keepAbortLinked: true });
     };
 }
 
@@ -108,6 +113,8 @@ const STRIPPABLE_FIELDS: Readonly<Record<string, keyof ChatCompletionRequest>> =
     reasoning: 'reasoning',
     reasoning_effort: 'reasoning',
 };
+
+const REASONING_WIRE_NAMES = ['reasoning', 'reasoning_effort'];
 
 /**
  * The adapter's last-mile hook: the finished request (tools bound, reasoning
@@ -151,8 +158,11 @@ function buildTransformRequest(input: {
             const lower = name.toLowerCase();
             const field = STRIPPABLE_FIELDS[lower];
             if (field) delete request[field];
-            if (extra && lower in extra) delete extra[lower];
-            if (extra && name in extra) delete extra[name];
+            // `reasoning` and `reasoning_effort` are one setting to the gateway (resolveModelInvocationConfig
+            // drops both for either name), and here an OpenAI-schema effort already sits in `extra` under
+            // its wire name: listing only `reasoning` must still keep it off the wire.
+            const names = lower === 'reasoning' || lower === 'reasoning_effort' ? REASONING_WIRE_NAMES : [lower, name];
+            if (extra) for (const key of names) delete extra[key];
         }
 
         // A rule can REQUIRE a value, not only forbid one (GPT-5 + tools:
@@ -286,6 +296,47 @@ function splitInlineReasoningStream(model: BaseChatModel): BaseChatModel {
     return wrapped;
 }
 
+/** The reasoning TEXT of a message, gone. Provider blocks stay: they are what the next request replays (Anthropic signatures). */
+function withoutReasoningText<M>(message: M): M {
+    const reasoning = (message as AnyRecord | null)?.reasoning as AnyRecord | undefined;
+    if (!reasoning || typeof reasoning !== 'object' || reasoning.summary === undefined) return message;
+    const { summary: _summary, ...rest } = reasoning;
+    void _summary;
+    const next = { ...(message as AnyRecord) };
+    if (Object.keys(rest).length > 0) next.reasoning = rest;
+    else delete next.reasoning;
+    return next as M;
+}
+
+/**
+ * Model Hub "Return reasoning to callers" off: the model's thinking text never
+ * leaves the model, so no agent output (API response, session message, portal,
+ * Studio) can show it. The gateway enforces the same switch on a direct call; an
+ * agent calls the provider itself, so it is enforced here. Token accounting is
+ * untouched: usage rides on the message, not on this text.
+ */
+function hideReasoningText(model: BaseChatModel): BaseChatModel {
+    const wrapped: BaseChatModel = { ...model };
+    if (typeof model.invoke === 'function') {
+        const invoke = model.invoke.bind(model);
+        wrapped.invoke = async (messages, options) => withoutReasoningText(await invoke(messages, options));
+    }
+    if (typeof model.stream === 'function') {
+        const stream = model.stream.bind(model);
+        wrapped.stream = async function* hidden(messages, options) {
+            for await (const chunk of stream(messages, options)) {
+                if (chunk && typeof chunk === 'object' && (chunk as AnyRecord).type === 'reasoning') continue;
+                yield withoutReasoningText(chunk);
+            }
+        };
+    }
+    if (typeof model.bindTools === 'function') {
+        const bindTools = model.bindTools.bind(model);
+        wrapped.bindTools = (tools, bindOptions) => hideReasoningText(bindTools(tools, bindOptions));
+    }
+    return wrapped;
+}
+
 export async function buildNativeAgentModel(input: NativeAgentModelInput): Promise<BaseChatModel> {
     const { model } = input;
     const { runtime, record } = await buildModelRuntime(input.tenantDbName, input.tenantId, model.providerKey, input.projectId);
@@ -329,5 +380,6 @@ export async function buildNativeAgentModel(input: NativeAgentModelInput): Promi
         }),
     );
     const streaming = spec.normalizeInlineReasoning ? splitInlineReasoningStream(native) : native;
-    return input.disableStreaming ? collapseStreaming(streaming) : streaming;
+    const visible = (modelSettings as AnyRecord).returnReasoning === false ? hideReasoningText(streaming) : streaming;
+    return input.disableStreaming ? collapseStreaming(visible) : visible;
 }

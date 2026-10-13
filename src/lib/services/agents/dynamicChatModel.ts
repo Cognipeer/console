@@ -24,6 +24,7 @@ import type { BaseChatMessage, BaseChatModel, NativeModelOptions } from '@cognip
 import type { IModel } from '@/lib/database';
 import { getDynamicRoutingConfig } from '@/lib/services/models/dynamicRouting';
 import { getModelByKey } from '@/lib/services/models/modelService';
+import { AGENT_REASONING_OVERRIDE } from '@/lib/services/models/reasoning';
 import { calculateCost, type TokenUsage } from '@/lib/services/models/usageLogger';
 import type { NativeAgentReasoning } from './nativeAgentModel';
 
@@ -43,6 +44,11 @@ export interface DynamicChatModelDeps {
     overrides?: Record<string, unknown>;
     /** The agent's / caller's reasoning, carried to whichever model the call is routed to. */
     reasoning?: NativeAgentReasoning;
+    /**
+     * `reasoning` is the AGENT's own pick (not just an API request's value): it then outranks the routed
+     * model's Model Hub default, as it does on a model the agent calls directly.
+     */
+    reasoningFromAgent?: boolean;
 }
 
 type AnyRecord = Record<string, unknown>;
@@ -112,7 +118,12 @@ function loadProviderClass() {
                     tenantId: this.deps.tenantId,
                     modelKey: this.deps.modelKey,
                     projectId: this.deps.projectId,
-                    body: { ...(this.deps.overrides ?? {}), ...rest, messages: rest.messages as unknown[] },
+                    body: {
+                        ...(this.deps.overrides ?? {}),
+                        ...rest,
+                        messages: rest.messages as unknown[],
+                        ...(this.deps.reasoningFromAgent && this.deps.reasoning ? { [AGENT_REASONING_OVERRIDE]: this.deps.reasoning } : {}),
+                    },
                     stream,
                 });
                 this.facts.routedKey = outcome.routing?.chosenModelKey;

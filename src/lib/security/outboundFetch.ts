@@ -362,6 +362,14 @@ export interface SafeFetchOptions extends OutboundGuardOptions {
    * (default `true`). For callers that treat "the target moved" as an answer.
    */
   followRedirects?: boolean;
+  /**
+   * Keep forwarding the caller's `init.signal` to the response BODY after the
+   * headers arrive (default: detached, so a long-lived signal does not collect a
+   * listener per call). Streaming callers need it: the timeout only bounds the
+   * time to headers, and a pending `reader.read()` on a silent upstream is ended
+   * by the fetch signal alone.
+   */
+  keepAbortLinked?: boolean;
 }
 
 /**
@@ -414,6 +422,8 @@ export async function safeFetch(
   // Every other one (each redirect hop, and any hop that threw) is finished
   // the moment we stop using it, and is destroyed below.
   let liveDispatcher: Agent | undefined;
+  // A response is on its way to the caller (not a failure, not a redirect hop).
+  let delivered = false;
 
   try {
     let currentUrl = rawUrl;
@@ -450,6 +460,7 @@ export async function safeFetch(
           // Returned to the caller as-is: its body is theirs to read, so the
           // dispatcher stays alive with it.
           liveDispatcher = undefined;
+          delivered = true;
           return response;
         }
         if (hop === MAX_REDIRECTS) {
@@ -471,12 +482,15 @@ export async function safeFetch(
       }
 
       liveDispatcher = undefined; // handed to the caller together with the body
+      delivered = true;
       return response;
     }
     throw new OutboundNetworkError(`Too many redirects fetching ${rawUrl}`);
   } finally {
     clearTimeout(timer);
-    externalSignal?.removeEventListener('abort', onExternalAbort);
+    if (!(delivered && options?.keepAbortLinked)) {
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+    }
     // Anything still held here belongs to a hop nobody will read (the redirect
     // cap threw, or the loop fell through) -- releasing it is what keeps a
     // redirect chain from leaking one socket per hop.
