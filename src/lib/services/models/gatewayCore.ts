@@ -434,6 +434,9 @@ async function prepareCall(state: CallState, activeModel: IModel) {
     supportsUpstreamApiChoice(activeModel.providerDriver) ? resolveUpstreamApi(activeModel.settings) : undefined,
   );
   if (visibleReasoning) modelSettings.reasoning = visibleReasoning;
+  // The resolved invocation settings are a fresh object (sampling, limits, reasoning):
+  // the model's Upstream API choice has to be carried over for the provider spec.
+  if (supportsUpstreamApiChoice(activeModel.providerDriver)) modelSettings.upstreamApi = resolveUpstreamApi(activeModel.settings);
   const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
 
   const client = await runtime.createNativeChatClient({
