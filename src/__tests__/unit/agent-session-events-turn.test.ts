@@ -11,7 +11,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildNativeAgentModel: vi.fn(),
   scripted: { content: 'plain answer' } as { content: string; ctx?: Record<string, unknown> },
 }));
 
@@ -21,8 +21,8 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/models/runtimeService', () => ({
-  buildModelRuntime: hoisted.buildModelRuntime,
+vi.mock('@/lib/services/agents/nativeAgentModel', () => ({
+  buildNativeAgentModel: hoisted.buildNativeAgentModel,
 }));
 
 vi.mock('@/lib/services/guardrail/hooks/engine', () => ({
@@ -98,7 +98,6 @@ vi.mock('@cognipeer/agent-sdk', () => {
     CONSOLE_HOOK_MAP,
     GuardrailPhase: { Request: 'request', Response: 'response' },
     createSmartAgent,
-    fromLangchainModel: (model: unknown) => model,
     createTool: (spec: unknown) => spec,
     customSink: (config: unknown) => config,
   };
@@ -160,7 +159,7 @@ beforeEach(() => {
     projectId: PROJECT_ID,
     settings: {},
   });
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => ({}) } });
+  hoisted.buildNativeAgentModel.mockResolvedValue({});
 });
 
 function run(extra: Record<string, unknown> = {}) {
@@ -243,7 +242,7 @@ describe('executeAgentChatLocal — session events and steps', () => {
   });
 
   it('a thrown turn is logged as session.error + idle(error) and still throws', async () => {
-    hoisted.buildModelRuntime.mockRejectedValue(new Error('provider exploded'));
+    hoisted.buildNativeAgentModel.mockRejectedValue(new Error('provider exploded'));
     await expect(run()).rejects.toThrow('provider exploded');
     const types = loggedEvents().map((e) => e.type);
     expect(types).toContain('session.error');

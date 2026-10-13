@@ -4,7 +4,7 @@
  * answer, tool calls and usage come back in the shape the agent loop reads.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AIMessage } from '@langchain/core/messages';
+import { AIMessage, AIMessageChunk } from '@langchain/core/messages';
 
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: vi.fn() }));
 vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: vi.fn() }));
@@ -34,7 +34,7 @@ vi.mock('@/lib/services/guardrail', () => ({
 import { getModelByKey } from '@/lib/services/models/modelService';
 import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import { runWithRoutingCaller } from '@/lib/services/models/routingCallerContext';
-import { createDynamicChatModel, toOpenAiMessages } from '@/lib/services/agents/dynamicChatModel';
+import { createDynamicChatModel } from '@/lib/services/agents/dynamicChatModel';
 import { withModelUsageLogging } from '@/lib/services/agents/modelUsageTap';
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 
@@ -76,7 +76,8 @@ describe('agent run on a Dynamic LLM', () => {
     const model = createDynamicChatModel(deps);
     const portal = await runWithRoutingCaller({ channel: 'portal' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
     expect(portal.content).toBe('answered by prov-big');
-    expect(portal.tool_calls?.[0]).toMatchObject({ name: 'lookup', args: { q: 'x' } });
+    expect(portal.tool_calls?.[0]).toMatchObject({ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } });
+    expect(portal.usage).toMatchObject({ prompt_tokens: 1000, completion_tokens: 500, total_tokens: 1500 });
     expect(portal.response_metadata).toMatchObject({ routedModel: 'big', routedBy: 'router' });
 
     const api = await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
@@ -98,16 +99,118 @@ describe('agent run on a Dynamic LLM', () => {
     expect(routes).not.toContain('agent.chat');
     expect(routes).toContain('chat.completions.router');
   });
+});
 
-  it('converts LangChain and SDK-shaped messages to OpenAI messages', () => {
-    expect(toOpenAiMessages([
-      { role: 'system', content: 's' },
-      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 'lookup', args: { q: 1 } }] },
-      { role: 'tool', content: 'r', tool_call_id: 'c1' },
-    ])).toEqual([
-      { role: 'system', content: 's' },
-      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{"q":1}' } }] },
-      { role: 'tool', content: 'r', tool_call_id: 'c1' },
-    ]);
+describe('Dynamic LLM model as a native agent model', () => {
+  const chatConfigs: Array<Record<string, unknown>> = [];
+  const invokeArgs: unknown[][] = [];
+
+  beforeEach(() => {
+    chatConfigs.length = 0;
+    invokeArgs.length = 0;
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async (_db: string, _t: string, providerKey: string) => ({
+      runtime: {
+        createChatModel: vi.fn().mockImplementation(async (config: Record<string, unknown>) => {
+          chatConfigs.push(config);
+          return {
+            bindTools() { return this; },
+            invoke: vi.fn().mockImplementation(async (...args: unknown[]) => {
+              invokeArgs.push(args);
+              return new AIMessage({ content: `answered by ${providerKey}`, usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } });
+            }),
+            async *stream() {
+              yield new AIMessageChunk({ content: 'Hel' });
+              yield new AIMessageChunk({ content: 'lo' });
+              yield new AIMessageChunk({
+                content: '',
+                tool_call_chunks: [{ index: 0, id: 'call_1', name: 'lookup', args: '{"q":', type: 'tool_call_chunk' }],
+              });
+              yield new AIMessageChunk({
+                content: '',
+                tool_call_chunks: [{ index: 0, args: '"x"}', type: 'tool_call_chunk' }],
+                usage_metadata: { input_tokens: 1000, output_tokens: 500, total_tokens: 1500 },
+              });
+            },
+          };
+        }),
+      },
+    }));
+  });
+
+  it('streams: text deltas, then ONE assembled message with the tool call, usage and routing', async () => {
+    const model = createDynamicChatModel(deps);
+    const chunks: unknown[] = [];
+    await runWithRoutingCaller({ channel: 'portal' }, async () => {
+      for await (const chunk of model.stream([{ role: 'user', content: 'hi' }])) chunks.push(chunk);
+    });
+    expect(chunks.filter((c) => typeof c === 'string').join('')).toBe('Hello');
+    const finals = chunks.filter((c) => typeof c === 'object' && (c as { role?: string }).role);
+    expect(finals).toHaveLength(1);
+    expect(finals[0]).toMatchObject({
+      role: 'assistant',
+      content: 'Hello',
+      tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500, total_tokens: 1500 },
+      response_metadata: { routedModel: 'big', routedBy: 'router' },
+    });
+    expect((finals[0] as { response_metadata: { routedCost: { totalCost: number } } }).response_metadata.routedCost.totalCost).toBeGreaterThan(0);
+  });
+
+  it('binds SDK tools into the gateway body as OpenAI function tools', async () => {
+    const { createTool } = await import('@cognipeer/agent-sdk');
+    const { z } = await import('zod');
+    const lookup = createTool({ name: 'lookup', description: 'Find a thing', schema: z.object({ q: z.string() }), func: async () => 'ok' });
+    const bound = createDynamicChatModel(deps).bindTools([lookup]);
+    await runWithRoutingCaller({ channel: 'api' }, () => bound.invoke([{ role: 'user', content: 'hi' }]));
+    // The routed child received the tool through the gateway's own request handling.
+    const child = chatConfigs[0];
+    expect(child).toBeDefined();
+    const callOptions = invokeArgs[0]?.[1] as { tools?: Array<{ function?: { name?: string } }> } | undefined;
+    expect(JSON.stringify(callOptions?.tools ?? invokeArgs[0])).toContain('lookup');
+  });
+
+  it('carries the agent reasoning to the routed model', async () => {
+    const model = createDynamicChatModel({ ...deps, reasoning: { effort: 'high' } });
+    await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
+    expect(chatConfigs[0]).toMatchObject({ modelSettings: { reasoning: { effort: 'high' } } });
+  });
+
+  it('applies the agent sampling overrides to the routed call', async () => {
+    const model = createDynamicChatModel({ ...deps, overrides: { temperature: 0.3, max_tokens: 77 } });
+    await runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'hi' }]));
+    expect(chatConfigs[0]).toMatchObject({ modelSettings: { temperature: 0.3, maxTokens: 77 } });
+  });
+
+  it('a call made while another is in flight keeps its own routing facts', async () => {
+    const model = createDynamicChatModel(deps);
+    const pa = runWithRoutingCaller({ channel: 'portal' }, () => model.invoke([{ role: 'user', content: 'a' }]));
+    const pb = runWithRoutingCaller({ channel: 'api' }, () => model.invoke([{ role: 'user', content: 'b' }]));
+    const [a, b] = await Promise.all([pa, pb]);
+    expect(a.response_metadata).toMatchObject({ routedModel: 'big' });
+    expect(b.response_metadata).toMatchObject({ routedModel: 'small' });
+  });
+
+  it('a stream that fails midway rejects the call instead of ending quietly', async () => {
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+      runtime: {
+        createChatModel: vi.fn().mockResolvedValue({
+          async *stream() {
+            yield new AIMessageChunk({ content: 'par' });
+            throw new Error('upstream exploded');
+          },
+        }),
+      },
+    }));
+    const model = createDynamicChatModel(deps);
+    const run = async () => {
+      for await (const chunk of model.stream([{ role: 'user', content: 'hi' }])) void chunk;
+    };
+    await expect(runWithRoutingCaller({ channel: 'api' }, run)).rejects.toThrow(/invalid|failed|exploded/i);
+  });
+
+  it('is marked as a routed model and exposes the key as its name', () => {
+    const model = createDynamicChatModel(deps) as unknown as Record<string, unknown>;
+    expect(model.__dynamicRouted).toBe(true);
+    expect(model.modelName).toBe('router');
   });
 });

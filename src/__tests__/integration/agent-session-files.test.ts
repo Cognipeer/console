@@ -16,7 +16,7 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildNativeAgentModel: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
@@ -30,7 +30,7 @@ vi.mock('@/lib/services/users/userAuthState', () => ({ getUserAuthState: hoisted
 vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: hoisted.publish })) }));
 vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.recordAuditLog }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: hoisted.buildModelRuntime }));
+vi.mock('@/lib/services/agents/nativeAgentModel', () => ({ buildNativeAgentModel: hoisted.buildNativeAgentModel }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
   buildAgentSandboxTools: vi.fn(async () => ({ tools: [], definitions: [], cleanup: async () => undefined })),
   destroyConversationSandbox: vi.fn(),
@@ -94,6 +94,24 @@ const toolCall = (name: string, args: Record<string, unknown>): Reply => ({
   usage_metadata: usage,
 });
 
+/**
+ * What a provider puts on the wire for the SDK's `{ type: 'image', source: { base64 } }` part: an
+ * `image_url` data URL. The model below remembers messages in that form, as a provider would send them.
+ */
+function asWire(messages: Seen): Seen {
+  return messages.map((message) => {
+    if (!Array.isArray(message.content)) return message;
+    return {
+      ...message,
+      content: (message.content as Array<Record<string, any>>).map((part) => (
+        part.type === 'image' && part.source?.type === 'base64'
+          ? { type: 'image_url', image_url: { url: `data:${part.source.mediaType};base64,${part.source.data}` } }
+          : part
+      )),
+    };
+  }) as Seen;
+}
+
 /** A chat model that replies from a script and remembers the messages and tools it was shown. */
 class ScriptedModel {
   readonly modelName = 'scripted-model';
@@ -106,7 +124,7 @@ class ScriptedModel {
   }
   async invoke(messages: Seen): Promise<Reply> {
     const reply = this.script(this.seen.length, messages);
-    this.seen.push(messages);
+    this.seen.push(asWire(messages));
     return reply;
   }
 }
@@ -118,7 +136,7 @@ let keySeq: number;
 
 function scriptModel(script: (call: number, messages: Seen) => Reply): ScriptedModel {
   const model = new ScriptedModel(script);
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => model } });
+  hoisted.buildNativeAgentModel.mockResolvedValue(model);
   return model;
 }
 
@@ -613,7 +631,7 @@ describe('images', () => {
     expect(Array.isArray(content)).toBe(true);
     expect(content[0]).toMatchObject({ type: 'text' });
     expect(textOf(content)).toContain('what is this?');
-    // The provider adapter turns the SDK's `{ base64, media_type }` into the wire data URL.
+    // The native provider turns the SDK's base64 image part into the wire data URL (asWire models that).
     const image = content.find((part) => part.type === 'image_url') as { image_url: { url: string } };
     expect(image.image_url.url).toBe(`data:image/png;base64,${png.toString('base64')}`);
     // The transcript holds neither the bytes nor any note.

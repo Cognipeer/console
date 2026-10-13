@@ -7,10 +7,10 @@
  * token estimate carry a few dozen characters per image instead of megabytes of
  * base64 (a 55 KB photo made the SDK count ~18,000 tokens and compact a
  * conversation that was nowhere near full). This wrapper sits OUTSIDE the SDK
- * model, like `withAssembledStream`: whatever the SDK sends, `invoke`, `stream`
+ * model, as the usage tap does: whatever the SDK sends, `invoke`, `stream`
  * and the model `bindTools` returns, passes through `prepare` first, which
  *
- *  - turns each reference into the SDK's `{ base64, media_type }` image (read
+ *  - turns each reference into the native providers' `{ type: 'image', source: base64 }` part (read
  *    from the bucket once per run — the cache is shared by every bound copy),
  *  - keeps the request inside the agent's `attachments.maxImages` /
  *    `attachments.maxBytes`: the NEWEST images win, an older one becomes a text
@@ -238,7 +238,7 @@ export function withSessionImages<T extends object>(input: T, options: SessionIm
                 shown.delete(i);
                 continue;
             }
-            replacement.set(i, { type: 'image_url', image_url: { base64: data.base64, media_type: data.mediaType } });
+            replacement.set(i, { type: 'image', source: { type: 'base64', mediaType: data.mediaType, data: data.base64 } });
         }
         if (droppedTooLarge > 0) {
             logger.info('Session images left out of a model request (each larger than the agent\'s image size limit)', {
@@ -284,8 +284,7 @@ export function withSessionImages<T extends object>(input: T, options: SessionIm
         const stream = model.stream.bind(model);
         wrapped.stream = async function* withImages(messages: unknown, ...rest: unknown[]) {
             const started = stream(await prepare(messages), ...rest);
-            // LangChain's `stream` returns a promise of the iterator; the SDK adapter's is the iterator.
-            yield* ((typeof started?.then === 'function' ? await started : started) as AsyncIterable<unknown>);
+            yield* started as AsyncIterable<unknown>;
         };
     }
     return wrapped as unknown as T;

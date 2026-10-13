@@ -61,9 +61,8 @@ export interface AgentCodegenResult {
 }
 
 const SDK_VERSIONS = {
-    agentSdk: '^0.10.1',
+    agentSdk: '^0.11.0',
     consoleSdk: '^1.7.1',
-    langchainOpenAI: '^1.4.4',
     zod: '^3.25.0',
     dotenv: '^16.4.5',
     fastify: '^5.2.0',
@@ -111,7 +110,6 @@ function writePackageJson(
 ): GeneratedFile {
     const deps: Record<string, string> = {
         '@cognipeer/agent-sdk': SDK_VERSIONS.agentSdk,
-        '@langchain/openai': SDK_VERSIONS.langchainOpenAI,
         dotenv: SDK_VERSIONS.dotenv,
         zod: SDK_VERSIONS.zod,
     };
@@ -208,8 +206,7 @@ function writeModel(config: IAgentConfig, agentName: string): GeneratedFile {
         description: 'Model, routed through the console gateway',
         contents: `${banner(agentName)}
 
-import { ChatOpenAI } from '@langchain/openai';
-import { fromLangchainModel } from '@cognipeer/agent-sdk';
+import { createProvider, fromNativeProvider } from '@cognipeer/agent-sdk';
 
 import { env } from './env.js';
 
@@ -223,16 +220,18 @@ import { env } from './env.js';
  * currently pointed at.
  */
 export function createModel() {
-  const lcModel = new ChatOpenAI({
-    model: ${quote(config.modelKey ?? '')},
+  const provider = createProvider({
+    provider: 'openai-compatible',
     apiKey: env.CONSOLE_API_KEY,
-    configuration: { baseURL: \`\${env.CONSOLE_BASE_URL}/api/client/v1\` },
+    baseURL: \`\${env.CONSOLE_BASE_URL}/api/client/v1\`,
+  });
+
+  return fromNativeProvider(provider, {
+    model: ${quote(config.modelKey ?? '')},
 ${Object.entries(modelSettings)
     .map(([key, value]) => `    ${key}: ${literal(value)},`)
     .join('\n')}
   });
-
-  return fromLangchainModel(lcModel);
 }
 `,
     };

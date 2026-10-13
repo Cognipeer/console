@@ -9,7 +9,7 @@ import {
 import { ChatVertexAI, VertexAIEmbeddings } from '@langchain/google-vertexai';
 import { ChatAnthropic } from '@langchain/anthropic';
 import type { ProviderContract } from '../types';
-import type { ModelProviderRuntime } from '../domains/model';
+import type { ModelProviderRuntime, NativeProviderSpec } from '../domains/model';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
 import { withInlineReasoningNormalization } from './wireNormalization';
 import { createOpenAiImageRuntime } from './openaiImageHelpers';
@@ -96,7 +96,7 @@ interface RerankCredentials {
   apiKey: string;
 }
 
-interface ModelSettingsOverrides {
+export interface ModelSettingsOverrides {
   temperature?: number;
   topP?: number;
   presencePenalty?: number;
@@ -122,6 +122,12 @@ interface ModelSettingsOverrides {
    * through `extraBody` instead. See `applyMaxTokensRename`.
    */
   suppressMaxTokens?: boolean;
+  /**
+   * The operator declared `max_tokens` unsupported, so the budget travels as
+   * `max_completion_tokens`. A native provider reads this to pin its
+   * `maxTokensParam`, instead of guessing from the model id.
+   */
+  maxTokensRenamed?: boolean;
 }
 
 /**
@@ -158,6 +164,7 @@ function applyMaxTokensRename(
   if (budget === undefined) return;
 
   result.maxCompletionTokens ??= budget;
+  result.maxTokensRenamed = true;
 
   if (!langChainEmitsCompletionTokens(modelId)) {
     result.extraBody = { max_completion_tokens: budget, ...(result.extraBody ?? {}) };
@@ -229,7 +236,7 @@ const DEFAULT_PROVIDER_RETRIES = 2;
 /** Anthropic's Messages API requires max_tokens; this is the floor applied when
  *  an operator has cleared the field. Generous enough not to truncate a coding
  *  answer, bounded enough not to be a blank cheque. */
-const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
+export const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
 
 function resolveMaxRetries(config: { options?: { maxRetries?: number } }): number {
   return config.options?.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
@@ -243,7 +250,7 @@ function asPlainObject(value: unknown): Record<string, unknown> | undefined {
   return Object.keys(record).length > 0 ? { ...record } : undefined;
 }
 
-function resolveOverrides(
+export function resolveOverrides(
   overrides?: Record<string, unknown>,
   modelId?: string,
   driver?: string,
@@ -412,6 +419,17 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
     const audioBase = 'https://api.openai.com/v1';
 
     const runtime: ModelProviderRuntime = {
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'openai',
+          apiKey,
+          ...(settings.organization ? { organization: settings.organization } : {}),
+          // Chat Completions, as the LangChain model it replaces: the Responses
+          // API is a different request shape the gateway does not proxy.
+          responsesApi: 'never',
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'openai');
         return new ChatOpenAI({
@@ -578,6 +596,19 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
     const baseUrl = ensureValue(settings.baseUrl, 'Base URL is required.');
 
     const runtime: ModelProviderRuntime = {
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'openai-compatible',
+          apiKey,
+          baseURL: baseUrl,
+          ...(settings.organization ? { organization: settings.organization } : {}),
+          responsesApi: 'never',
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+        // Same reason `createChatModel` below wraps its fetch: an upstream that
+        // leaks a reasoning block into `content` breaks structured output.
+        normalizeInlineReasoning: true,
+      }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'openai-compatible');
         return new ChatOpenAI({
@@ -653,6 +684,9 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
   },
 };
 
+/** Together AI's OpenAI-schema endpoint, the one `ChatTogetherAI` talks to. */
+const TOGETHER_BASE_URL = 'https://api.together.xyz/v1';
+
 export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntime, TogetherCredentials, Record<string, never>> = {
   id: 'together',
   version: '1.0.0',
@@ -685,6 +719,15 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
     const apiKey = ensureValue(credentials.apiKey, 'Together API key is required.');
 
     const runtime: ModelProviderRuntime = {
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'openai-compatible',
+          apiKey,
+          baseURL: TOGETHER_BASE_URL,
+          responsesApi: 'never',
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'together');
         return new ChatTogetherAI({
@@ -777,6 +820,14 @@ export const AnthropicModelProviderContract: ProviderContract<ModelProviderRunti
       : undefined;
 
     const runtime: ModelProviderRuntime = {
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'anthropic',
+          apiKey,
+          ...(baseUrl ? { baseURL: baseUrl } : {}),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'anthropic');
         return new ChatAnthropic({
@@ -881,6 +932,16 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
     const region = ensureValue(settings.region, 'AWS region is required.');
 
     const runtime: ModelProviderRuntime = {
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'bedrock',
+          region,
+          accessKeyId,
+          secretAccessKey,
+          ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'bedrock');
         return new ChatBedrockConverse({
@@ -989,6 +1050,17 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
     const authOptions = parseServiceAccountKey(credentials.serviceAccountKey);
 
     const runtime: ModelProviderRuntime = {
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'vertex',
+          projectId,
+          location,
+          // Without a key the SDK has no way to mint a token (the LangChain
+          // client fell back to application-default credentials).
+          ...(authOptions ? { serviceAccountJson: authOptions } : {}),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'vertex');
         // `ChatVertexAI`, not `VertexAI`: the latter is a text-completion LLM
@@ -1136,6 +1208,17 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
     };
 
     const runtime: ModelProviderRuntime = {
+      createNativeProviderSpec: (config): NativeProviderSpec => ({
+        provider: {
+          provider: 'azure',
+          apiKey,
+          endpoint: `https://${instanceName}.openai.azure.com`,
+          // Per DEPLOYMENT, not per resource: see `deploymentFor` / `apiVersionFor`.
+          deploymentName: deploymentFor(config.modelId),
+          apiVersion: apiVersionFor(config.modelSettings),
+          retry: { maxRetries: resolveMaxRetries(config) },
+        },
+      }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'azure');
         return new AzureChatOpenAI({

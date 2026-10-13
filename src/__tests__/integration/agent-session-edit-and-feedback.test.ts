@@ -16,7 +16,7 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildNativeAgentModel: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
@@ -30,7 +30,7 @@ vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: hoi
 vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.recordAuditLog }));
 vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: hoisted.buildModelRuntime }));
+vi.mock('@/lib/services/agents/nativeAgentModel', () => ({ buildNativeAgentModel: hoisted.buildNativeAgentModel }));
 vi.mock('@/lib/services/models/usageLogger', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/services/models/usageLogger')>();
   return { ...actual, logModelUsage: hoisted.logModelUsage };
@@ -103,7 +103,7 @@ let tenantId: string;
 
 function scriptModel(script: ConstructorParameters<typeof ScriptedModel>[0]): ScriptedModel {
   const model = new ScriptedModel(script);
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => model } });
+  hoisted.buildNativeAgentModel.mockResolvedValue(model);
   return model;
 }
 
@@ -372,7 +372,7 @@ describe('rerunSessionTurn', () => {
 
   it('puts the transcript back when the new turn cannot run, and does not mark any rating', async () => {
     await createAgent();
-    hoisted.buildModelRuntime.mockRejectedValue(new Error('provider is down'));
+    hoisted.buildNativeAgentModel.mockRejectedValue(new Error('provider is down'));
     const id = await conversationWith(THREE_TURNS());
     await recordMessageFeedback({ ...scope(id), message: { index: 5 }, userId: 'u9', channel: 'portal', rating: 'up' });
 
@@ -618,7 +618,7 @@ describe('titles', () => {
     };
     hoisted.getModelByKey.mockResolvedValueOnce(null);
     expect(await generateConversationTitle(input)).toBeNull();
-    hoisted.buildModelRuntime.mockRejectedValueOnce(new Error('down'));
+    hoisted.buildNativeAgentModel.mockRejectedValueOnce(new Error('down'));
     expect(await generateConversationTitle(input)).toBeNull();
     scriptModel(() => ({ role: 'assistant', content: '   ' }));
     expect(await generateConversationTitle(input)).toBeNull();

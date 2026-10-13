@@ -301,6 +301,19 @@ describe('agent code export', () => {
         expect(files['src/agent.ts']).toContain('.strict()');
     });
 
+    it('the generated model is an agent-sdk native provider on the console gateway - no LangChain', () => {
+        const { files } = fileMap('cli');
+        const model = files['src/model.ts'];
+        expect(model).toContain("import { createProvider, fromNativeProvider } from '@cognipeer/agent-sdk'");
+        expect(model).toContain("provider: 'openai-compatible'");
+        expect(model).toContain('/api/client/v1');
+        expect(model).not.toMatch(/langchain|fromLangchainModel|ChatOpenAI/i);
+        const pkg = JSON.parse(files['package.json']);
+        expect(pkg.dependencies['@cognipeer/agent-sdk']).toBe('^0.11.0');
+        expect(Object.keys(pkg.dependencies).some((name) => name.includes('langchain'))).toBe(false);
+        for (const file of Object.values(files)) expect(file).not.toMatch(/@langchain|fromLangchainModel/);
+    });
+
     it('declares tools even when only sub-agents need them', () => {
         const result = generateAgentProject(
             AGENT,

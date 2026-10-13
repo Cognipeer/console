@@ -1,6 +1,6 @@
 /**
  * Model Hub showed no statistics for an agent's model: agents call the
- * provider through a LangChain model built straight from the runtime, so
+ * provider through a native model built straight from the provider record, so
  * their calls never reached `logModelUsage`, which only the gateway called.
  * The tap records one usage row per model call. These tests pin that it
  * does so for invoke, stream, errors and tool-bound models alike.
@@ -13,8 +13,6 @@ vi.mock('@/lib/services/models/usageLogger', () => ({
 
 import { logModelUsage } from '@/lib/services/models/usageLogger';
 import { extractTokenUsage, withModelUsageLogging } from '@/lib/services/agents/modelUsageTap';
-import { withAssembledStream } from '@/lib/services/agents/assembledStream';
-import { AIMessageChunk } from '@langchain/core/messages';
 
 const MODEL = { key: 'gpt-5.6-luna', tenantId: 't1', projectId: 'p1' } as never;
 const CTX = { tenantDbName: 'tenant_x', model: MODEL, route: 'agent.chat', agentKey: 'field-ops' };
@@ -41,18 +39,59 @@ describe('model usage tap', () => {
         expect(vi.mocked(logModelUsage).mock.calls[0][1]).toBe(MODEL);
     });
 
-    it('records a streamed call from the usage on its last chunk', async () => {
-        const model = withModelUsageLogging(withAssembledStream({
+    it('records a streamed call from the usage on the assembled message a native stream ends with', async () => {
+        const model = withModelUsageLogging({
             async *stream() {
-                yield new AIMessageChunk({ content: 'hel' });
-                yield new AIMessageChunk({ content: 'lo', usage_metadata: { input_tokens: 7, output_tokens: 2, total_tokens: 9 } });
+                yield 'hel';
+                yield { type: 'reasoning', reasoning_content: 'thinking' };
+                yield 'lo';
+                yield {
+                    role: 'assistant',
+                    content: 'hello',
+                    usage: {
+                        prompt_tokens: 7, completion_tokens: 2, total_tokens: 9,
+                        prompt_tokens_details: { cached_tokens: 3, cache_write_tokens: 0 },
+                        completion_tokens_details: { reasoning_tokens: 1 },
+                    },
+                    response_metadata: { finish_reason: 'length', model_name: 'gpt-x' },
+                };
             },
-        }), CTX);
+        }, CTX);
         const out: unknown[] = [];
         for await (const chunk of model.stream()) out.push(chunk);
-        expect(out.length).toBeGreaterThan(0);
+        expect(out).toHaveLength(4);
         expect(logged()).toHaveLength(1);
-        expect(logged()[0]).toMatchObject({ status: 'success', usage: { inputTokens: 7, outputTokens: 2 } });
+        expect(logged()[0]).toMatchObject({
+            status: 'success',
+            usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9, cachedInputTokens: 3, reasoningTokens: 1 },
+            finishReason: 'length',
+        });
+    });
+
+    it('a REAL native model: the tap reads cached + reasoning tokens and the finish reason off the SDK message (invoke and stream)', async () => {
+        const { createProvider, fromNativeProvider } = await import('@cognipeer/agent-sdk');
+        const usage = { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140, prompt_tokens_details: { cached_tokens: 60 }, completion_tokens_details: { reasoning_tokens: 12 } };
+        const fakeFetch = (async (_url: unknown, init?: RequestInit) => {
+            const streamed = JSON.parse(String(init?.body)).stream === true;
+            if (!streamed) {
+                return new Response(JSON.stringify({ id: 'a', model: 'm', choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage }), { status: 200, headers: { 'content-type': 'application/json' } });
+            }
+            const frames = [
+                { id: 'a', model: 'm', choices: [{ index: 0, delta: { content: 'ok' } }] },
+                { id: 'a', model: 'm', choices: [{ index: 0, delta: {}, finish_reason: 'length' }] },
+                { id: 'a', model: 'm', choices: [], usage },
+            ];
+            return new Response(`${frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('')}data: [DONE]\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+        }) as unknown as typeof fetch;
+        const native = fromNativeProvider(createProvider({ provider: 'openai-compatible', apiKey: 'k', baseURL: 'https://x.example/v1', fetch: fakeFetch }), { model: 'm' });
+        const model = withModelUsageLogging(native, CTX);
+
+        await model.invoke([{ role: 'user', content: 'hi' }]);
+        for await (const part of model.stream!([{ role: 'user', content: 'hi' }])) void part;
+
+        expect(logged()).toHaveLength(2);
+        expect(logged()[0]).toMatchObject({ usage: { inputTokens: 100, outputTokens: 40, cachedInputTokens: 60, reasoningTokens: 12 }, finishReason: 'stop' });
+        expect(logged()[1]).toMatchObject({ usage: { inputTokens: 100, outputTokens: 40, cachedInputTokens: 60, reasoningTokens: 12 }, finishReason: 'length' });
     });
 
     it('records a failed call as an error and still throws', async () => {
@@ -79,7 +118,22 @@ describe('model usage tap', () => {
 });
 
 describe('extractTokenUsage', () => {
-    it('reads LangChain usage_metadata with cache and reasoning details', () => {
+    it('reads the SDK usage shape (cached and reasoning inside the totals)', () => {
+        expect(extractTokenUsage({
+            usage: {
+                prompt_tokens: 50, completion_tokens: 30, total_tokens: 80,
+                prompt_tokens_details: { cached_tokens: 40, cache_write_tokens: 5 },
+                completion_tokens_details: { reasoning_tokens: 12 },
+            },
+        })).toEqual({ inputTokens: 50, outputTokens: 30, totalTokens: 80, cachedInputTokens: 40, reasoningTokens: 12 });
+    });
+
+    it('falls back to the mirror in response_metadata.token_usage', () => {
+        expect(extractTokenUsage({ response_metadata: { token_usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } } }))
+            .toEqual({ inputTokens: 5, outputTokens: 1, totalTokens: 6 });
+    });
+
+    it('still reads a restored LangChain usage_metadata with cache and reasoning details', () => {
         expect(extractTokenUsage({
             usage_metadata: {
                 input_tokens: 50, output_tokens: 30, total_tokens: 80,

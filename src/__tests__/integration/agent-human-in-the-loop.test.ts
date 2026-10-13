@@ -17,7 +17,7 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildNativeAgentModel: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
@@ -33,7 +33,7 @@ vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.re
 // What the session log tells webhook subscribers (the subscriptions themselves are covered elsewhere).
 vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: hoisted.buildModelRuntime }));
+vi.mock('@/lib/services/agents/nativeAgentModel', () => ({ buildNativeAgentModel: hoisted.buildNativeAgentModel }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
   buildAgentSandboxTools: vi.fn(async () => ({ tools: hoisted.sandboxTools, definitions: [], cleanup: async () => undefined })),
   destroyConversationSandbox: vi.fn(),
@@ -128,7 +128,7 @@ function buildTools() {
 
 function scriptModel(script: ConstructorParameters<typeof ScriptedModel>[0]): ScriptedModel {
   const model = new ScriptedModel(script);
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => model } });
+  hoisted.buildNativeAgentModel.mockResolvedValue(model);
   return model;
 }
 
@@ -487,7 +487,7 @@ describe('unattended callers', () => {
     const paused = await chat(id, 'list files');
     const actionId = paused.required_action!.actions[0].id;
 
-    hoisted.buildModelRuntime.mockRejectedValueOnce(new Error('model unavailable'));
+    hoisted.buildNativeAgentModel.mockRejectedValueOnce(new Error('model unavailable'));
     await expect(resolve(id, actionId, { decision: 'allow' })).rejects.toThrow('model unavailable');
 
     const [reopened] = await db.listAgentPendingActions(id, { status: 'pending' });
@@ -1022,7 +1022,7 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
     const { id, actionId } = await paused();
     const eventsBefore = (await events(id)).length;
     const stateBefore = (await db.findAgentConversationState(id))?.pausedSnapshot;
-    const modelCalls = hoisted.buildModelRuntime.mock.calls.length;
+    const modelCalls = hoisted.buildNativeAgentModel.mock.calls.length;
 
     expect(await check(id, actionId, { decision: 'allow' })).toBeNull();
     expect(await check(id, actionId, { decision: 'deny', comment: 'no' }, { agentKey: AGENT_KEY })).toBeNull();
@@ -1031,7 +1031,7 @@ describe('the read-only preflight (checkAgentPendingActionResolution)', () => {
     expect((await events(id)).length).toBe(eventsBefore);
     expect((await db.findAgentConversationState(id))?.pausedSnapshot).toBe(stateBefore);
     expect(await storedConversation(id)).toMatchObject({ runtimeStatus: 'requires_action' });
-    expect(hoisted.buildModelRuntime.mock.calls.length).toBe(modelCalls);
+    expect(hoisted.buildNativeAgentModel.mock.calls.length).toBe(modelCalls);
     expect(executed).toEqual([]);
     // ...and the real answer still goes through afterwards.
     expect((await resolve(id, actionId, { decision: 'allow' })).kind).toBe('resumed');

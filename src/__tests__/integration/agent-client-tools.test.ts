@@ -20,7 +20,7 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildNativeAgentModel: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
@@ -33,7 +33,7 @@ vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: hoi
 vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.recordAuditLog }));
 vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: hoisted.buildModelRuntime }));
+vi.mock('@/lib/services/agents/nativeAgentModel', () => ({ buildNativeAgentModel: hoisted.buildNativeAgentModel }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
   buildAgentSandboxTools: vi.fn(async () => ({ tools: [], definitions: [], cleanup: async () => undefined })),
   destroyConversationSandbox: vi.fn(),
@@ -113,7 +113,7 @@ let tenantId: string;
 
 function scriptModel(script: ConstructorParameters<typeof ScriptedModel>[0]): ScriptedModel {
   const model = new ScriptedModel(script);
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => model } });
+  hoisted.buildNativeAgentModel.mockResolvedValue(model);
   return model;
 }
 

@@ -21,7 +21,7 @@ import path from 'node:path';
 const hoisted = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildNativeAgentModel: vi.fn(),
   publish: vi.fn(),
   getUserAuthState: vi.fn(),
   recordAuditLog: vi.fn(),
@@ -35,7 +35,7 @@ vi.mock('@/lib/core/queue', () => ({ getQueue: vi.fn(async () => ({ publish: hoi
 vi.mock('@/lib/services/audit/auditService', () => ({ recordAuditLog: hoisted.recordAuditLog }));
 vi.mock('@/lib/services/webhooks/webhookService', () => ({ publishWebhookEvent: hoisted.publishWebhook }));
 vi.mock('@/lib/services/models/modelService', () => ({ getModelByKey: hoisted.getModelByKey }));
-vi.mock('@/lib/services/models/runtimeService', () => ({ buildModelRuntime: hoisted.buildModelRuntime }));
+vi.mock('@/lib/services/agents/nativeAgentModel', () => ({ buildNativeAgentModel: hoisted.buildNativeAgentModel }));
 vi.mock('@/lib/services/agents/agentSandboxTools', () => ({
   buildAgentSandboxTools: vi.fn(async () => ({ tools: hoisted.sandboxTools, definitions: [], cleanup: async () => undefined })),
   destroyConversationSandbox: vi.fn(),
@@ -147,7 +147,7 @@ beforeEach(async () => {
   reloadConfig();
 
   const model = new ScriptedModel();
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => model } });
+  hoisted.buildNativeAgentModel.mockResolvedValue(model);
   // The tool holds the turn until the test releases it.
   let markStarted: () => void;
   toolStarted = new Promise<void>((resolve) => { markStarted = resolve; });

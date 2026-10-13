@@ -61,7 +61,7 @@ describe('withSessionImages', () => {
 
     expect(calls[0]).toEqual([
       { role: 'system', content: 'be brief' },
-      { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image_url', image_url: { base64: 'B64(a)', media_type: 'image/png' } }] },
+      { role: 'user', content: [{ type: 'text', text: 'look' }, { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: 'B64(a)' } }] },
     ]);
     // The messages the SDK holds are not touched.
     expect(JSON.stringify(original)).toContain('session-file://a');
@@ -105,7 +105,7 @@ describe('withSessionImages', () => {
     await wrapped.invoke([{ role: 'user', content: [ref('a'), ref('b'), ref('c')] }]);
 
     const parts = (calls[0][0] as { content: Array<{ type: string; text?: string }> }).content;
-    expect(parts.map((part) => part.type)).toEqual(['text', 'image_url', 'image_url']);
+    expect(parts.map((part) => part.type)).toEqual(['text', 'image', 'image']);
     expect(parts[0].text).toBe('[Image "a.png" (id a) is not shown: a request carries at most 2 images / 12 MB, and newer images took the room. Use session_files_view_image to look at it again.]');
     expect(src.read).toHaveBeenCalledTimes(2);
     expect(src.read).not.toHaveBeenCalledWith('a');

@@ -708,9 +708,9 @@ export interface SessionImageBytes {
 }
 
 /**
- * The image's bytes, read only at the model call (`sessionImages.ts`). The SDK
- * takes them as `{ base64, media_type }` and renders the provider's data URL —
- * a plain `data:` URL part would be measured and logged as text by the SDK.
+ * The image's bytes, read only at the model call (`sessionImages.ts`). The
+ * native providers take them as a `{ type: 'image', source: { base64 } }` part
+ * and render the provider's own wire form.
  */
 export async function readSessionImage(scope: SessionFileScope, record: IFileRecord): Promise<SessionImageBytes> {
     // Only a format the providers accept goes out as a media type; anything else would fail the request.

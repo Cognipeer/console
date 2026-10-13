@@ -38,8 +38,6 @@ import {
 } from './promptVariables';
 import { getDatabase, type IAgent, type IAgentConfig, type IAgentConversation, type IAgentMessageAttachment, type IAgentPendingAction, type IAgentPendingActionResolution, type IFileRecord, type IAgentSessionBudget, type IAgentTracingEvent, type IAgentTracingSession, type IAgentTurnCompaction, type IAgentVersion, type IModelPricing } from '@/lib/database';
 import { getModelByKey } from '@/lib/services/models/modelService';
-import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
-import { buildModelRuntime } from '@/lib/services/models/runtimeService';
 import {
     getRagDocument,
     getRagDocumentFullText,
@@ -73,7 +71,7 @@ import {
     toAgentPlugin,
 } from '@/lib/services/guardrail/sdkAdapter';
 import type { PluginMessageRewrite } from '@/lib/services/guardrail/sdkAdapter';
-import type { AgentPlugin as AgentSdkPlugin } from '@cognipeer/agent-sdk';
+import type { AgentPlugin as AgentSdkPlugin, BaseChatModel } from '@cognipeer/agent-sdk';
 import type { GuardrailBindingSource } from '@/lib/services/guardrail/hooks/binding';
 import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/services/mcp';
 // By path: the barrel does not export it, and it is the ONE reader of a
@@ -102,7 +100,7 @@ import {
 } from '@/lib/services/runtimeContext';
 import { invokeExternalAgent } from './externalAgent';
 import { normalizePlaygroundUsage } from './playgroundUsage';
-import { withAssembledStream } from './assembledStream';
+import { buildNativeAgentModel, type NativeAgentReasoning } from './nativeAgentModel';
 import { createImageAwareTokenCounter } from './imageTokenCounter';
 import { withSessionImages, type SessionImagesOptions } from './sessionImages';
 import { withModelUsageLogging } from './modelUsageTap';
@@ -1389,26 +1387,30 @@ async function buildAgentCostEstimator(
 
 /**
  * Reasoning ("thinking") models expose their chain-of-thought separately from the
- * final answer. The agent SDK keeps it on the assistant message's
- * `additional_kwargs.reasoning_content` (our SDK LangChain integration maps the
- * OpenAI-compatible `reasoning_content` field there). Pull the reasoning trace from
- * the final assistant message so callers can surface it alongside the answer.
+ * final answer. A native provider puts it on the assistant message as
+ * `reasoning.summary` (OpenAI-compatible `reasoning_content` / `reasoning`,
+ * Anthropic thinking, Gemini thoughts, Bedrock reasoningContent all land there).
+ * Pull the trace from the final assistant message so callers can surface it
+ * alongside the answer. A turn saved before the native providers kept it on
+ * `additional_kwargs.reasoning_content`; that is still read.
  */
-function extractAgentReasoning(result: AgentSdkInvokeResult): string | undefined {
+export function extractAgentReasoning(result: AgentSdkInvokeResult): string | undefined {
     const messages = (result.messages ?? []) as Array<{
+        role?: string;
         getType?: () => string;
         _getType?: () => string;
+        reasoning?: { summary?: unknown };
         additional_kwargs?: Record<string, unknown>;
     }>;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
         const msg = messages[i];
-        const type = msg?.getType?.() ?? msg?._getType?.();
-        if (type && type !== 'ai') continue;
-        const reasoning = msg?.additional_kwargs?.['reasoning_content'];
-        if (typeof reasoning === 'string' && reasoning.length > 0) {
-            return reasoning;
-        }
-        if (type === 'ai') break;
+        const type = msg?.role ?? msg?.getType?.() ?? msg?._getType?.();
+        if (type && type !== 'assistant' && type !== 'ai') continue;
+        const summary = msg?.reasoning?.summary;
+        if (typeof summary === 'string' && summary.length > 0) return summary;
+        const legacy = msg?.additional_kwargs?.['reasoning_content'];
+        if (typeof legacy === 'string' && legacy.length > 0) return legacy;
+        if (type) break;
     }
     return undefined;
 }
@@ -1633,7 +1635,7 @@ function agentChatModelOptions(model: { settings?: unknown }): { disableStreamin
 }
 
 /**
- * Builds the LangChain model for a sub-agent's model override. Returns
+ * Builds the native model for a sub-agent's model override. Returns
  * undefined when the key no longer resolves, which makes the child fall back to
  * the parent's model rather than failing the whole run.
  */
@@ -1648,21 +1650,16 @@ async function buildSubagentModel(
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') return undefined;
-        let lcModel: unknown;
-        if (isDynamicModel(model)) {
-            lcModel = createDynamicChatModel({ tenantDbName, tenantId, projectId, modelKey: model.key });
-        } else {
-            const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
-            if (!runtime.createChatModel) return undefined;
-            lcModel = await runtime.createChatModel({
-                modelId: model.modelId,
-                category: 'llm',
-                modelSettings: resolveModelInvocationConfig(model, {}),
-                options: agentChatModelOptions(model),
+        const chatModel = isDynamicModel(model)
+            ? createDynamicChatModel({ tenantDbName, tenantId, projectId, modelKey: model.key })
+            : await buildNativeAgentModel({
+                tenantDbName,
+                tenantId,
+                projectId,
+                model,
+                disableStreaming: agentChatModelOptions(model).disableStreaming,
             });
-        }
-        const { fromLangchainModel } = await import('@cognipeer/agent-sdk');
-        const tapped = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+        const tapped = withModelUsageLogging(chatModel, {
             tenantDbName,
             model,
             route: 'agent.subagent',
@@ -2532,9 +2529,9 @@ export interface AgentModelCheckResult {
 }
 
 /**
- * The chat model an agent run (or the model check) talks to, built through the
- * model's own provider runtime. `lcModel` is returned as the runtime produced
- * it — not awaited.
+ * The chat model an agent run (or the model check, or a title) talks to: an
+ * agent-sdk native model built from the Model Hub record (nativeAgentModel.ts),
+ * or the routing model of a Dynamic LLM.
  */
 export async function buildAgentChatModel(
     tenantDbName: string,
@@ -2542,6 +2539,7 @@ export async function buildAgentChatModel(
     projectId: string,
     modelKey: string,
     overrides: Record<string, unknown> = {},
+    reasoning?: NativeAgentReasoning,
 ) {
     const model = await getModelByKey(tenantDbName, modelKey, projectId);
     if (!model) throw new Error(`Model "${modelKey}" not found`);
@@ -2554,26 +2552,30 @@ export async function buildAgentChatModel(
         }
         return {
             model,
-            lcModel: createDynamicChatModel({ tenantDbName, tenantId, projectId, modelKey: model.key, overrides: passthrough }) as unknown,
+            chatModel: createDynamicChatModel({
+                tenantDbName,
+                tenantId,
+                projectId,
+                modelKey: model.key,
+                overrides: passthrough,
+                ...(reasoning ? { reasoning } : {}),
+            }) as unknown as BaseChatModel,
         };
     }
-    const { runtime } = await buildModelRuntime(tenantDbName, tenantId, model.providerKey, projectId);
-    if (!runtime.createChatModel) throw new Error('Provider runtime does not support chat model creation');
 
-    // Resolved through the gateway's helper so an agent obeys the same model
-    // record everything else does. Previously this built its own settings object
-    // and never read `model.settings`, which meant: a hard-coded temperature of
-    // 0.7 reached models that reject the parameter outright, the operator could
-    // not override it from the Model Hub, and `top_p`/`max_tokens` were passed
-    // under snake_case keys the contract layer does not read — so an agent's
-    // Top P and Max Tokens settings had never taken effect at all.
-    const lcModel = runtime.createChatModel({
-        modelId: model.modelId,
-        category: model.category,
-        modelSettings: resolveModelInvocationConfig(model, overrides).modelSettings,
-        options: agentChatModelOptions(model),
+    // Resolved through the gateway's helper (inside buildNativeAgentModel) so an
+    // agent obeys the same model record everything else does: Top P, Max Tokens,
+    // `unsupportedParams` and `requestDefaults` all take effect.
+    const chatModel = await buildNativeAgentModel({
+        tenantDbName,
+        tenantId,
+        projectId,
+        model,
+        overrides,
+        disableStreaming: agentChatModelOptions(model).disableStreaming,
+        ...(reasoning ? { reasoning } : {}),
     });
-    return { model, lcModel };
+    return { model, chatModel };
 }
 
 /**
@@ -2590,8 +2592,8 @@ export async function checkAgentModel(
 ): Promise<AgentModelCheckResult> {
     const startedAt = Date.now();
     try {
-        const { model, lcModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, modelKey);
-        await ((await lcModel) as { invoke: (input: unknown) => Promise<unknown> })
+        const { model, chatModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, modelKey);
+        await chatModel
             .invoke([{ role: 'user', content: 'Reply with the single word OK.' }])
             .catch((error: unknown) => {
                 throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
@@ -3328,7 +3330,7 @@ async function buildLocalAgentRun(input: {
         : undefined;
 
     if (!config.modelKey) throw new Error('Agent has no model configured');
-    const { model, lcModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
+    const { model, chatModel } = await buildAgentChatModel(tenantDbName, tenantId, projectId, config.modelKey, {
         ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
         ...(config.topP !== undefined ? { top_p: config.topP } : {}),
         ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
@@ -3385,7 +3387,7 @@ async function buildLocalAgentRun(input: {
         onMessageRewrite: input.onMessageRewrite,
     });
 
-    const { createSmartAgent, fromLangchainModel, createTool } = await import('@cognipeer/agent-sdk');
+    const { createSmartAgent, createTool } = await import('@cognipeer/agent-sdk');
     const { z } = await import('zod');
 
     // RAG retrieval tools, and the instruction to use them first
@@ -3575,11 +3577,9 @@ async function buildLocalAgentRun(input: {
         }
     }
 
-    // Wrapped so a streamed turn keeps its tool calls and usage — see
-    // assembledStream.ts for what agent-sdk 0.10.1 drops without it.
     // Usage-tapped: agent calls bypass the gateway, so without this they
     // never reached Model Hub or the bill — see modelUsageTap.ts.
-    const tappedModel = withModelUsageLogging(withAssembledStream(fromLangchainModel(lcModel)), {
+    const tappedModel = withModelUsageLogging(chatModel, {
         tenantDbName,
         model,
         route: input.route,

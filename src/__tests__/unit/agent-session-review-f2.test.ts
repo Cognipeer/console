@@ -140,7 +140,7 @@ describe('F2-05: a picture that cannot fit a request at all', () => {
     const note = texts.find((text) => text.startsWith('[Image "big.png"'))!;
     expect(note).toBe('[Image "big.png" (id big) is not shown: it is 15 MB, too large for one request (the limit is 12 MB).]');
     expect(note).not.toContain('newer images took the room');
-    expect(JSON.stringify(m.calls[0])).not.toContain('"base64"');
+    expect(JSON.stringify(m.calls[0])).not.toContain('"source"');
   });
 
   it('does not use up the room: the pictures that do fit are still shown, and a crowded-out one keeps its own wording', async () => {
@@ -157,8 +157,8 @@ describe('F2-05: a picture that cannot fit a request at all', () => {
     // Newest first wins: c (5 MB) and b (5 MB) fit, a would be the third (15 MB total), big is too large by itself.
     await wrapped.invoke(turn('big', 'a', 'b', 'c'));
 
-    const content = (m.calls[0]![0] as { content: Array<{ type: string; text?: string; image_url?: { base64?: string } }> }).content;
-    expect(content.filter((part) => part.type === 'image_url').map((part) => part.image_url!.base64)).toEqual(['B64(b)', 'B64(c)']);
+    const content = (m.calls[0]![0] as { content: Array<{ type: string; text?: string; source?: { data?: string } }> }).content;
+    expect(content.filter((part) => part.type === 'image').map((part) => part.source!.data)).toEqual(['B64(b)', 'B64(c)']);
     const texts = content.map((part) => part.text ?? '');
     expect(texts.find((text) => text.startsWith('[Image "big.png"'))).toContain('too large for one request');
     expect(texts.find((text) => text.startsWith('[Image "a.png"'))).toContain('newer images took the room');

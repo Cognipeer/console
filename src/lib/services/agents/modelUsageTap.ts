@@ -2,8 +2,8 @@
  * Records every model call an agent makes, the way the gateway records its own.
  *
  * Model Hub showed no statistics for an agent's model — only for the
- * embedding model beside it. The cause: an agent builds a LangChain chat model
- * straight from the provider runtime and calls the provider directly, so its
+ * embedding model beside it. The cause: an agent builds a native (agent-sdk) chat
+ * model straight from the provider record and calls the provider directly, so its
  * calls never pass through the inference gateway, which is the only place
  * `logModelUsage` was ever called for chat. Embeddings (knowledge search,
  * memory) DO go through the gateway's service layer, so they were the only
@@ -51,15 +51,18 @@ export interface ModelUsageTapContext {
 }
 
 /**
- * Token usage out of a LangChain message or an SDK-shaped response. Providers
- * put it in different places: LangChain's `usage_metadata`, an OpenAI-shaped
- * `usage`, or `response_metadata.tokenUsage` / `token_usage`. Exported for tests.
+ * Token usage out of a model reply. A native provider's message carries the
+ * SDK's one documented shape in `usage` (`prompt_tokens` incl. cached,
+ * `completion_tokens` incl. reasoning, `*_details`), mirrored on
+ * `response_metadata.token_usage`. The older places are still read - LangChain's
+ * `usage_metadata`, `response_metadata.tokenUsage` - for replies restored from
+ * saved state and for gateway-shaped responses. Exported for tests.
  */
 export function extractTokenUsage(message: unknown): TokenUsage | undefined {
     if (!message || typeof message !== 'object') return undefined;
     const m = message as Record<string, unknown>;
     const meta = (m.response_metadata ?? {}) as Record<string, unknown>;
-    const candidates = [m.usage_metadata, m.usage, meta.tokenUsage, meta.token_usage, meta.usage];
+    const candidates = [m.usage, m.usage_metadata, meta.token_usage, meta.tokenUsage, meta.usage];
 
     for (const candidate of candidates) {
         if (!candidate || typeof candidate !== 'object') continue;
@@ -196,8 +199,8 @@ export function withModelUsageLogging<T extends object>(input: T, ctx: ModelUsag
         const stream = model.stream.bind(model);
         wrapped.stream = async function* tapped(...args: unknown[]) {
             const startedAt = Date.now();
-            // The usage rides on the LAST usage-bearing chunk (for a wrapped
-            // stream, the assembled message withAssembledStream yields).
+            // The usage rides on the LAST usage-bearing chunk: the assembled
+            // message a native stream ends with.
             let lastWithUsage: unknown;
             // Stays 'cancelled' when the consumer stops early: still billed for
             // what the provider generated, but neither a success nor a fault.

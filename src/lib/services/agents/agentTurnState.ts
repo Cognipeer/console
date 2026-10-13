@@ -42,7 +42,6 @@ import type {
     IModelPricing,
 } from '@/lib/database';
 
-import { chunkText } from './assembledStream';
 import { sdkContextWindow, type SdkContextWindowOptions } from './sdkContextWindow';
 import {
     rebuildUserTurn,
@@ -91,6 +90,21 @@ type LooseMessage = Record<string, unknown> & {
     tool_calls?: Array<Record<string, unknown>>;
     tool_call_id?: string;
 };
+
+/** Plain text of a message's content, whether a string or an array of parts. */
+function chunkText(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+        .map((part) => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
+                return (part as { text: string }).text;
+            }
+            return '';
+        })
+        .join('');
+}
 
 function roleOf(message: LooseMessage): string | undefined {
     if (typeof message.role === 'string') return message.role;

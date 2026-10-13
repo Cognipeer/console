@@ -104,12 +104,12 @@ export async function generateConversationTitle(input: GenerateTitleInput): Prom
                 });
                 await assertAgentSpendAllowed(spend, input.modelKey);
 
-                const { model, lcModel } = await buildAgentChatModel(input.tenantDbName, input.tenantId, input.projectId, input.modelKey, {
+                const { model, chatModel } = await buildAgentChatModel(input.tenantDbName, input.tenantId, input.projectId, input.modelKey, {
                     // A title is a few words: no room for a long answer, and nothing creative about it.
                     max_tokens: 40,
                     temperature: 0.2,
                 });
-                const tapped = withModelUsageLogging((await lcModel) as object, {
+                const tapped = withModelUsageLogging(chatModel, {
                     tenantDbName: input.tenantDbName,
                     model,
                     route: 'agent.title',

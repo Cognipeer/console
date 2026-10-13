@@ -34,7 +34,7 @@ const hoisted = vi.hoisted(() => ({
   runHook: vi.fn(),
   resolveGuardrail: vi.fn(),
   getModelByKey: vi.fn(),
-  buildModelRuntime: vi.fn(),
+  buildNativeAgentModel: vi.fn(),
   invokeExternalAgent: vi.fn(),
   evaluateGuardrail: vi.fn(),
   routeInstanceCall: vi.fn(),
@@ -52,8 +52,8 @@ vi.mock('@/lib/services/models/modelService', () => ({
   getModelByKey: hoisted.getModelByKey,
 }));
 
-vi.mock('@/lib/services/models/runtimeService', () => ({
-  buildModelRuntime: hoisted.buildModelRuntime,
+vi.mock('@/lib/services/agents/nativeAgentModel', () => ({
+  buildNativeAgentModel: hoisted.buildNativeAgentModel,
 }));
 
 vi.mock('@/lib/services/agents/externalAgent', () => ({
@@ -134,7 +134,6 @@ vi.mock('@cognipeer/agent-sdk', () => {
     },
     GuardrailPhase: { Request: 'request', Response: 'response' },
     createSmartAgent,
-    fromLangchainModel: (model: unknown) => model,
     createTool: (spec: unknown) => spec,
     customSink: (config: unknown) => config,
   };
@@ -275,7 +274,7 @@ beforeEach(() => {
     projectId: PROJECT_ID,
     settings: {},
   });
-  hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel: () => ({}) } });
+  hoisted.buildNativeAgentModel.mockResolvedValue({});
   hoisted.evaluateGuardrail.mockImplementation(async (params: { guardrailKey: string }) => allow(params.guardrailKey));
   hoisted.routeInstanceCall.mockImplementation(async (_ctx: unknown, _payload: unknown, local: () => Promise<unknown>) => local());
 });
@@ -672,11 +671,11 @@ describe('agent chat model — provider streaming option', () => {
     settings,
   });
 
-  /** The `createChatModel` the provider runtime exposes, as a spy. */
+  /** The native model builder (nativeAgentModel.ts), as a spy that records what each model was built with. */
   function installChatModelSpy() {
-    const createChatModel = vi.fn<(config: Record<string, unknown>) => object>(() => ({}));
-    hoisted.buildModelRuntime.mockResolvedValue({ runtime: { createChatModel } });
-    return createChatModel;
+    hoisted.buildNativeAgentModel.mockReset();
+    hoisted.buildNativeAgentModel.mockResolvedValue({});
+    return hoisted.buildNativeAgentModel;
   }
 
   it('a model flagged disableStreamingWithTools (an upstream that cannot stream tool calls) is built non-streaming', async () => {
@@ -688,28 +687,28 @@ describe('agent chat model — provider streaming option', () => {
 
     await executePlaygroundChatLocal(playground({ onTextChunk: vi.fn() }));
 
-    expect(createChatModel).toHaveBeenCalledTimes(1);
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ modelId: 'gpt-4o', options: { disableStreaming: true } });
+    expect(createChatModel.mock.calls).toHaveLength(1);
+    expect(createChatModel.mock.calls[0][0]).toMatchObject({ model: { modelId: 'gpt-4o' }, disableStreaming: true });
   });
 
   it('an ordinary model keeps streaming', async () => {
     const createChatModel = installChatModelSpy();
     await executePlaygroundChatLocal(playground({ onTextChunk: vi.fn() }));
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ options: { disableStreaming: false } });
+    expect(createChatModel.mock.calls[0][0]).toMatchObject({ disableStreaming: false });
   });
 
   it('only the exact flag counts', async () => {
     hoisted.getModelByKey.mockResolvedValue(modelRecord('gpt-4o', { disableStreamingWithTools: 'true' }));
     const createChatModel = installChatModelSpy();
     await executePlaygroundChatLocal(playground());
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ options: { disableStreaming: false } });
+    expect(createChatModel.mock.calls[0][0]).toMatchObject({ disableStreaming: false });
   });
 
   it('the chat entry point builds the model the same way', async () => {
     hoisted.getModelByKey.mockResolvedValue(modelRecord('gpt-4o', { disableStreamingWithTools: true }));
     const createChatModel = installChatModelSpy();
     await executeAgentChatLocal(chat({ onTextChunk: vi.fn() }));
-    expect(createChatModel.mock.calls[0][0]).toMatchObject({ options: { disableStreaming: true } });
+    expect(createChatModel.mock.calls[0][0]).toMatchObject({ disableStreaming: true });
   });
 
   it('a sub-agent with a model of its own gets the same treatment, independently of the parent', async () => {
@@ -728,7 +727,7 @@ describe('agent chat model — provider streaming option', () => {
     await executePlaygroundChatLocal(playground());
 
     const optionsByModel = Object.fromEntries(
-      createChatModel.mock.calls.map(([config]) => [config.modelId, config.options]),
+      createChatModel.mock.calls.map(([input]) => [(input.model as { modelId: string }).modelId, { disableStreaming: input.disableStreaming }]),
     );
     expect(optionsByModel).toEqual({
       'gpt-4o': { disableStreaming: false },

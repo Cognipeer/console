@@ -4,6 +4,7 @@ import type { OcrRuntime } from './ocr';
 import type { ImageRuntime } from './image';
 import type { ModerationRuntime } from './moderation';
 import type { DecisionRuntime } from './decision';
+import type { ProviderConfig } from '@cognipeer/agent-sdk';
 
 export type ModelRuntimeCategory = ModelCategory;
 
@@ -34,7 +35,26 @@ export interface ModelRuntimeConfig {
   options?: ModelRuntimeOptions;
 }
 
+/**
+ * What an agent-sdk native provider needs to talk to the same upstream this
+ * runtime talks to: credentials and endpoint, read from the SAME decrypted
+ * provider record the LangChain-backed methods use. The caller adds the
+ * transport (`fetch`, `timeoutMs`) and the per-model request settings.
+ */
+export interface NativeProviderSpec {
+  /** agent-sdk provider config, credentials and endpoint included. */
+  provider: ProviderConfig;
+  /**
+   * The upstream returns inline reasoning markup in `content` (OpenAI-compatible
+   * servers such as Bedrock's /openai/v1): the transport must normalize the
+   * response body before the SDK parses it.
+   */
+  normalizeInlineReasoning?: boolean;
+}
+
 export interface ModelProviderRuntime {
+  /** Native (agent-sdk) provider for an agent's chat model. See `NativeProviderSpec`. */
+  createNativeProviderSpec?(config: ModelRuntimeConfig): NativeProviderSpec;
   createChatModel?(config: ModelRuntimeConfig): Promise<unknown> | unknown;
   createEmbeddingModel?(config: ModelRuntimeConfig): Promise<unknown> | unknown;
   createSttRuntime?(config: ModelRuntimeConfig): Promise<SttRuntime> | SttRuntime;
