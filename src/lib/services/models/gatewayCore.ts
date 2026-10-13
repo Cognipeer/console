@@ -25,6 +25,7 @@
 import crypto from 'crypto';
 import type { ChatCompletionChunk, ChatCompletionResponse, ProviderResponseFields, UnifiedMessage } from '@cognipeer/agent-sdk';
 import { AGENT_REASONING_OVERRIDE, shouldReturnReasoning, withReasoningVisibility } from '@/lib/services/models/reasoning';
+import { resolveUpstreamApi, supportsUpstreamApiChoice } from '@/lib/services/models/upstreamApi';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
@@ -430,6 +431,7 @@ async function prepareCall(state: CallState, activeModel: IModel) {
     normalizeNativeReasoning(modelSettings.reasoning),
     state.includeReasoning,
     activeModel.providerDriver,
+    supportsUpstreamApiChoice(activeModel.providerDriver) ? resolveUpstreamApi(activeModel.settings) : undefined,
   );
   if (visibleReasoning) modelSettings.reasoning = visibleReasoning;
   const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);

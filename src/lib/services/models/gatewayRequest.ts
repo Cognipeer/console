@@ -9,6 +9,7 @@ import { AGENT_REASONING_OVERRIDE, normalizeReasoning, resolveGatewayReasoning }
 import { createLogger } from '@/lib/core/logger';
 import type { IModel } from '@/lib/database';
 import { requestReasoningEffortAccepted, resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
+import { resolveUpstreamApi, supportsUpstreamApiChoice } from '@/lib/services/models/upstreamApi';
 
 const logger = createLogger('inference');
 
@@ -508,7 +509,9 @@ export function resolveModelInvocationConfig(
   unsupportedParams: string[];
 } {
   const settings = asRecord(model.settings);
-  const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+  // Responses takes reasoning next to function tools, so the Chat Completions tools rules do not apply there.
+  const onResponses = supportsUpstreamApiChoice(model.providerDriver) && resolveUpstreamApi(model.settings) === 'responses';
+  const hasTools = Array.isArray(body.tools) && body.tools.length > 0 && !onResponses;
 
   // Resolved here as well as in the contract layer, because the passthrough body
   // is assembled here and must not smuggle back a parameter the provider is

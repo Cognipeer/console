@@ -29,6 +29,7 @@ import type {
   NativeModelOptions,
 } from '@cognipeer/agent-sdk';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
+import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { hasExplicitThinking, translateAnthropicThinking } from '@/lib/services/models/reasoning';
 import { withFileReferenceRestore, withInlineReasoningNormalization } from './wireNormalization';
 import type {
@@ -98,7 +99,10 @@ export function buildTransformRequest(input: {
     hasTools,
   });
   const plain = resolve(false);
-  const withTools = resolve(true);
+  // The tools-conditional rules (GPT-5: no reasoning effort next to function tools) are
+  // Chat Completions limits; a model whose upstream API is Responses takes both together.
+  const onResponses = openAiSchema && resolveUpstreamApi(input.settings) === 'responses';
+  const withTools = onResponses ? plain : resolve(true);
 
   return (request: ChatCompletionRequest) => {
     const hasTools = Boolean(request.tools?.length);
@@ -108,11 +112,10 @@ export function buildTransformRequest(input: {
     // `additionalModelRequestFields`), which would otherwise stick.
     let extra: AnyRecord | undefined = request.extra ? structuredClone(request.extra) : undefined;
 
-    // Chat Completions carries reasoning as `reasoning_effort`. A native
-    // `reasoning` config would send OpenAI-family reasoning models to the
-    // Responses API (a different request shape the gateway does not proxy)
-    // and, on Azure, to a route the deployment may not serve.
-    if (openAiSchema && request.reasoning) {
+    // Chat Completions carries reasoning as `reasoning_effort` (its wire name, so a
+    // gateway-namespaced model id keeps it). On the Responses upstream the typed
+    // `reasoning` stays: the provider sends it as `reasoning: {effort, summary}`.
+    if (openAiSchema && !onResponses && request.reasoning) {
       const { effort } = request.reasoning;
       if (effort) extra = { ...(extra ?? {}), reasoning_effort: effort };
       delete request.reasoning;
@@ -127,6 +130,7 @@ export function buildTransformRequest(input: {
       // `reasoning` must still keep it off the wire.
       const names = lower === 'reasoning' || lower === 'reasoning_effort' ? REASONING_WIRE_NAMES : [lower, name];
       if (extra) for (const key of names) delete extra[key];
+      if (lower === 'reasoning' || lower === 'reasoning_effort') delete request.reasoning;
     }
 
     // A rule can REQUIRE a value, not only forbid one (GPT-5 + tools:
