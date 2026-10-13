@@ -2632,6 +2632,9 @@ export const tr: typeof en = {
   },
   agents: {
     ...en.agents,
+    outputLimit: {
+      message: 'Model, yanıt veremeden çıktı token sınırına ulaştı. Modelin en yüksek çıktı token değerini artırın veya akıl yürütme eforunu düşürün, sonra tekrar deneyin.',
+    },
     title: 'Agent’lar',
     subtitle: 'Modellerinizle çalışan AI agent’ları oluşturun ve yönetin',
     createAgent: 'Yeni Agent',

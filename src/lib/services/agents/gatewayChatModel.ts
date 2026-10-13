@@ -51,6 +51,7 @@ import type { GatewayChatRequest, ModelCallInput, ModelCallOutcome } from '@/lib
 import type { UsageCostResult } from '@/lib/services/models/usageLogger';
 import { isSyntheticActor } from './syntheticActor';
 import { addRunUsage } from './runUsage';
+import { outputLimitNotice } from './outputLimitNotice';
 
 export { normalizeNativeReasoning };
 
@@ -96,6 +97,28 @@ export interface GatewayChatModelInput {
   onCost?: (cost: { currency: string; totalCost: number }) => void;
   /** A Dynamic LLM call reports the concrete model it was routed to. */
   onRouted?: (modelKey: string) => void;
+  /** The run's `limits.maxTotalOutputTokens`: a raised-limit retry never plans past what is left of it. */
+  maxTotalOutputTokens?: number;
+}
+
+/**
+ * The limit to retry with after a model hit `limit` without answering: double,
+ * capped by what the model record declares as its maximum output and by what is
+ * left of the run's output-token budget. `undefined` when no larger limit is available.
+ */
+export function raisedOutputLimit(
+  limit: number | undefined,
+  model: IModel,
+  budgetLeft?: number,
+): number | undefined {
+  if (!limit || limit <= 0) return undefined;
+  const settings = (model.settings ?? {}) as AnyRecord;
+  const declared = [settings.maxOutputTokens, settings.maxOutput]
+    .find((value): value is number => typeof value === 'number' && value > 0);
+  let next = limit * 2;
+  if (declared) next = Math.min(next, declared);
+  if (budgetLeft !== undefined) next = Math.min(next, budgetLeft);
+  return next > limit ? Math.floor(next) : undefined;
 }
 
 /** The SDK provider family whose capabilities (structured output, strict tools) fit the model's driver. */
@@ -160,6 +183,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     // A call that produced no usage settles nothing; a cost with no usage attached
     // (a Dynamic LLM's decider) is settled as it is.
     if (usage) {
+      spentOutputTokens += usage.outputTokens ?? 0;
       if (!usage.inputTokens && !usage.outputTokens) return;
       addRunUsage(usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0));
     }
@@ -171,7 +195,10 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     }
   };
 
-  const callInput = (request: ChatCompletionRequest, stream: boolean): ModelCallInput => {
+  // Output tokens this run's calls have spent (for the budget check of a retry).
+  let spentOutputTokens = 0;
+
+  const callInput = (request: ChatCompletionRequest, stream: boolean, limitOverride?: number): ModelCallInput => {
     const native: GatewayChatRequest = {
       messages: request.messages,
       ...(request.tools?.length ? { tools: request.tools } : {}),
@@ -194,6 +221,11 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       ...nativeRequestToWire(native, { streamUsage: true }),
       ...reasoningWire(requestPick ?? request.reasoning),
     };
+    if (limitOverride !== undefined) {
+      // The raised limit replaces whichever spelling the request carried.
+      wire.max_tokens = limitOverride;
+      if ('max_completion_tokens' in wire) wire.max_completion_tokens = limitOverride;
+    }
     return {
       tenantDbName: input.tenantDbName,
       tenantId: input.tenantId,
@@ -232,9 +264,77 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
     defaultModel: model.key,
 
     async complete(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+      try {
+        return await completeOnce(request);
+      } catch (error) {
+        if (!(error instanceof OutputTokenLimitError)) throw error;
+        const raised = nextLimit(error);
+        if (raised !== undefined) {
+          try {
+            return await completeOnce(request, raised);
+          } catch (retryError) {
+            if (!(retryError instanceof OutputTokenLimitError)) throw retryError;
+            return limitResponse(retryError.limit ?? raised);
+          }
+        }
+        return limitResponse(error.limit);
+      }
+    },
+
+    async *completeStream(request: ChatCompletionRequest): AsyncGenerator<ChatCompletionChunk, void, unknown> {
+      try {
+        yield* streamOnce(request);
+        return;
+      } catch (error) {
+        if (!(error instanceof OutputTokenLimitError)) throw error;
+        const raised = nextLimit(error);
+        let finalLimit = error.limit;
+        if (raised !== undefined) {
+          try {
+            yield* streamOnce(request, raised);
+            return;
+          } catch (retryError) {
+            if (!(retryError instanceof OutputTokenLimitError)) throw retryError;
+            finalLimit = retryError.limit ?? raised;
+          }
+        }
+        yield limitChunk(finalLimit);
+      }
+    },
+  };
+
+  const nextLimit = (error: OutputTokenLimitError): number | undefined => {
+    const budgetLeft = input.maxTotalOutputTokens !== undefined
+      ? Math.max(0, input.maxTotalOutputTokens - spentOutputTokens)
+      : undefined;
+    return raisedOutputLimit(error.limit, model, budgetLeft);
+  };
+
+  const emptyUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0, cachedWriteTokens: 0, cachedOutputTokens: 0, reasoningTokens: 0 };
+
+  /** The graceful end of a turn whose model cannot fit an answer in its output limit. */
+  const limitResponse = (limit?: number): ChatCompletionResponse => ({
+    id: `limit_${crypto.randomUUID()}`,
+    model: model.modelId,
+    content: outputLimitNotice(limit),
+    toolCalls: [],
+    usage: emptyUsage,
+    finishReason: 'stop',
+    raw: null,
+  });
+
+  const limitChunk = (limit?: number): ChatCompletionChunk => ({
+    id: `limit_${crypto.randomUUID()}`,
+    model: model.modelId,
+    delta: { content: outputLimitNotice(limit) },
+    finishReason: 'stop',
+  });
+
+  const completeOnce = async (request: ChatCompletionRequest, limitOverride?: number): Promise<ChatCompletionResponse> => {
+    {
       let outcome: ModelCallOutcome;
       try {
-        outcome = await executeModelCall(callInput(request, false));
+        outcome = await executeModelCall(callInput(request, false, limitOverride));
       } catch (error) {
         throw await asAgentBlock(error);
       }
@@ -245,12 +345,14 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         ? { ...response, toolCalls: response.toolCalls.map((call, index) => (call.id ? call : { ...call, id: `call_${index}_${crypto.randomUUID()}` })) }
         : response;
       return outcome.includeReasoning === false ? withoutReasoningText(named) : named;
-    },
+    }
+  };
 
-    async *completeStream(request: ChatCompletionRequest): AsyncGenerator<ChatCompletionChunk, void, unknown> {
+  async function* streamOnce(request: ChatCompletionRequest, limitOverride?: number): AsyncGenerator<ChatCompletionChunk, void, unknown> {
+    {
       let outcome: ModelCallOutcome;
       try {
-        outcome = await executeModelCall(callInput(request, true));
+        outcome = await executeModelCall(callInput(request, true, limitOverride));
       } catch (error) {
         throw await asAgentBlock(error);
       }
@@ -353,8 +455,8 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         // aborts the upstream and books the partial usage.
         if (!finished) await events.return?.(undefined).catch(() => undefined);
       }
-    },
-  };
+    }
+  }
 
   return provider as unknown as BaseProvider;
 }

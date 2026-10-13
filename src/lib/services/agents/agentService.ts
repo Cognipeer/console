@@ -2585,7 +2585,7 @@ export async function buildAgentChatModel(
 }
 
 /** The usage-row side of `buildAgentChatModel`. */
-export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'onCost' | 'onRouted'>;
+export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens'>;
 
 /**
  * One tiny completion through exactly the path an agent run uses (the model's
@@ -3078,7 +3078,7 @@ export interface AgentChatResponse {
  */
 export function incompleteReason(stopReason: AgentStopReason | 'budget_reached', stopDetail?: string): string {
     if (stopReason === 'limit') {
-        if (stopDetail?.startsWith('maxTotalOutputTokens')) return 'max_output_tokens';
+        if (stopDetail?.startsWith('maxTotalOutputTokens') || stopDetail?.startsWith('maxOutputTokens')) return 'max_output_tokens';
         if (stopDetail?.startsWith('maxCostUsd')) return 'max_cost';
         if (stopDetail?.startsWith('maxWallClockMs')) return 'max_duration';
         return 'run_limit';
@@ -3364,6 +3364,9 @@ async function buildLocalAgentRun(input: {
         ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
         ...(input.userId ? { userId: input.userId } : {}),
         onRouted: (key) => { routedModelKey = key; },
+        ...(Number(config.runtime?.limits?.maxTotalOutputTokens) > 0
+            ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
+            : {}),
         ...(spend ? { onCost: agentSpendSettler(spend, config.modelKey) } : {}),
     });
 

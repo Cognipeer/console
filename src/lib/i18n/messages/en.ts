@@ -4180,6 +4180,9 @@ export const en = {
     back: 'Back',
   },
   agents: {
+    outputLimit: {
+      message: "The model reached its output token limit before it could answer. Raise the model's maximum output tokens or lower its reasoning effort, then try again.",
+    },
     title: 'Agents',
     subtitle: 'Create and manage AI agents powered by your models',
     createAgent: 'New Agent',

@@ -24,6 +24,7 @@
  * the run already has.
  */
 
+import { parseOutputLimitNotice } from './outputLimitNotice';
 import { clientToolMeta } from './agentClientTools';
 import type {
     AgentInvokeResult as AgentSdkInvokeResult,
@@ -529,6 +530,20 @@ export function describeTurnOutcome(
             : ctx.__awaitingUserQuestion
                 ? (waitsOnHostPage(result.state) ? 'waiting for the host page to run a tool' : 'waiting for an answer to a question')
                 : undefined;
+    }
+
+    // The model could not fit an answer in its output limit even after a raised
+    // retry: the turn ended gracefully with a notice (gatewayChatModel.ts).
+    if (stopReason === 'completed') {
+        const notice = parseOutputLimitNotice(content);
+        if (notice) {
+            return {
+                stopReason: 'limit',
+                stopDetail: `maxOutputTokens${notice.limit ? ` (${notice.limit})` : ''} reached by the model`,
+                content,
+                partial: true,
+            };
+        }
     }
 
     if (stopReason === 'completed' || content.trim()) {
