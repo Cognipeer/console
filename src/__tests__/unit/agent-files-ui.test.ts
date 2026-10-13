@@ -651,7 +651,7 @@ describe('a model’s input types in the forms', () => {
       .map((file) => file.slice(root.length + 1));
     expect(offenders).toEqual([]);
 
-    for (const file of ['components/models/CreateModelModal.tsx', 'app/dashboard/models/[id]/edit/page.tsx']) {
+    for (const file of ['components/models/CreateModelModal.tsx', 'components/models/EditModelModal.tsx']) {
       const source = readFileSync(join(root, file), 'utf8');
       expect(source, file).toContain('inputModalitiesPayload(');
     }
