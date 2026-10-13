@@ -243,7 +243,7 @@ export function buildOverrides(body: Record<string, unknown>) {
   if (body.reasoning !== undefined) overrides.reasoning = body.reasoning;
 
   // Legacy reasoning_effort parameter (deprecated but still supported)
-  // Will be mapped to reasoning.effort by LangChain
+  // Read as a reasoning effort when no `reasoning` object is sent.
   if (body.reasoning_effort !== undefined)
     overrides.reasoning_effort = body.reasoning_effort;
 
@@ -537,10 +537,10 @@ export function resolveModelInvocationConfig(
 
   // A rule can also REQUIRE a value, not just forbid one — see
   // `forcedParamsWithTools`. It goes on the passthrough body under its WIRE
-  // name rather than through a typed setting: LangChain only forwards
-  // `reasoning` for a model its own `isReasoningModel()` recognises, and that
-  // check is prefix-anchored, so a gateway-namespaced id
-  // (`global.openai.gpt-5.6-terra`) silently loses the parameter on the way out.
+  // name rather than through a typed setting: a provider that decides from the
+  // model id whether a typed reasoning applies is prefix-anchored, so a
+  // gateway-namespaced id (`global.openai.gpt-5.6-terra`) would silently lose
+  // the parameter on the way out.
   // Merged last, after `buildPassthroughBody` has filtered the caller's fields,
   // so the forced value always wins.
   if (detected.forced) {

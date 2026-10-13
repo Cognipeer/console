@@ -278,8 +278,9 @@ function buildNativeCall(
   if (OPENAI_SCHEMA_DRIVERS.has(client.driver)) {
     const extra: AnyRecord = {};
     // The SDK pins `strict: true` on a json_schema it builds itself; the caller's
-    // own `response_format` (strict or not, with any extra keys) goes through verbatim.
-    if (request.responseFormat && wire.response_format !== undefined) extra.response_format = wire.response_format;
+    // own `response_format` (strict or not, with any extra keys, of any type) goes
+    // through verbatim.
+    if (wire.response_format !== undefined) extra.response_format = wire.response_format;
     if (hasNonFunctionTools(wire.tools)) {
       const functions = new Map((request.tools ?? []).map((tool) => [tool.name, tool]));
       extra.tools = (wire.tools as unknown[]).map((tool) => {
@@ -400,7 +401,11 @@ async function prepareCall(state: CallState, activeModel: IModel) {
   // context are resolved once from the pool model - a pool must not fork the
   // cache or split a budget.
   const call = resolveModelInvocationConfig(activeModel, state.invocationBody);
-  const { modelSettings, overrides } = call;
+  const { overrides } = call;
+  // `extraBody` is the sanitized merge of the operator's request defaults and the
+  // caller's passthrough (reserved keys removed). The raw `requestDefaults` stays
+  // out of the client's settings: the client would fall back to it, unsanitized.
+  const modelSettings: Record<string, unknown> = { ...call.modelSettings, requestDefaults: undefined };
   const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
 
   const client = await runtime.createNativeChatClient({
@@ -1228,6 +1233,7 @@ async function* streamEvents(args: {
     // missing fragment, so a strict client (and the agent loop) can parse them.
     if (!outputLimitError) {
       for (const blank of assembler.blankToolCalls()) {
+        assembler.complete(blank.index, blank.completion);
         const out = await emit({ type: 'delta', toolCalls: [{ index: blank.index, arguments: blank.completion }] });
         for (const event of out.events) yield event;
         if (out.blocked !== undefined) {

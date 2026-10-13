@@ -44,9 +44,32 @@ export function wireFinishReason(
   normalized: FinishReason | undefined,
 ): string {
   if (raw && ((driver && OPENAI_SCHEMA_DRIVERS.has(driver)) || OPENAI_FINISH_REASONS.has(raw))) return raw;
+  // Reasons of the other families the SDK's own collapse does not know (Bedrock's
+  // `guardrail_intervened`, Gemini's safety stops): a filtered answer must not
+  // read as a normal `stop`.
+  const own = raw ? PROVIDER_FINISH_REASONS[raw.toLowerCase()] : undefined;
+  if (own) return own;
   if (!normalized || normalized === 'error') return 'stop';
   return normalized;
 }
+
+const PROVIDER_FINISH_REASONS: Readonly<Record<string, string>> = {
+  end_turn: 'stop',
+  stop_sequence: 'stop',
+  tool_use: 'tool_calls',
+  max_tokens: 'length',
+  model_context_window_exceeded: 'length',
+  content_filtered: 'content_filter',
+  guardrail_intervened: 'content_filter',
+  guardrail: 'content_filter',
+  refusal: 'content_filter',
+  safety: 'content_filter',
+  recitation: 'content_filter',
+  blocklist: 'content_filter',
+  prohibited_content: 'content_filter',
+  spii: 'content_filter',
+  image_safety: 'content_filter',
+};
 
 function blankArguments(raw: string): boolean {
   const trimmed = raw.trim();
@@ -127,6 +150,12 @@ export class StreamAssembler {
       out.push({ index, completion: call.args.trim() === '' ? '{}' : '}' });
     }
     return out;
+  }
+
+  /** Applies the completion `blankToolCalls()` named, so the assembled answer parses like what the stream was told. */
+  complete(index: number, completion: string): void {
+    const call = this.calls.get(index);
+    if (call) call.args = call.args.trim() === '' ? completion : `${call.args}${completion}`;
   }
 
   toolCalls(): ToolCall[] {

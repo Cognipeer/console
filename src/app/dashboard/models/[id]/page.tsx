@@ -364,8 +364,8 @@ function parseToolCalls(source: Record<string, unknown> | undefined): ParsedTool
 /**
  * `providerResponse` takes one of a few shapes depending on how the request
  * completed: an OpenAI-style `{choices:[{message}]}` object (non-streaming
- * success), a flat LangChain `AIMessageChunk`-like object (`{content,
- * tool_calls,...}`, aggregated from stream deltas), or a wrapper around one
+ * success), a flat assistant-message-like object (`{content, tool_calls,
+ * reasoning_content}`, aggregated from stream deltas), or a wrapper around one
  * of those (`{partial: ...}` on cancel/guardrail-block, `{error}` on failure).
  * This normalizes all of them to one shape for display.
  */
