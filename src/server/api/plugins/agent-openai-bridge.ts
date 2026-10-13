@@ -1,3 +1,4 @@
+import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
 import type { AgentModelChoice } from '@/lib/services/agents/agentModelSelection';
 import { rememberSessionModel } from './agent-model-authz';
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
@@ -334,6 +335,8 @@ export interface RunAgentCompletionInput {
     answer?: ToolAnswerContext;
     /** The agent's model this run uses, resolved and authorized by the route (`agent_model`). */
     modelChoice?: AgentModelChoice;
+    /** `reasoning_effort` / `reasoning: { effort }` of the request, validated by the route. Lowest rung. */
+    requestReasoning?: NormalizedReasoning;
 }
 
 /** Why a request to answer a tool call was refused, as the chat-completions error. */
@@ -389,6 +392,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
 
     const result = await executeAgentChatExclusive({
         ...(input.modelChoice ? { modelKey: input.modelChoice.modelKey } : {}),
+        ...(input.requestReasoning ? { requestReasoning: input.requestReasoning } : {}),
         agentKey: input.agent.key,
         conversationId: conversation.conversationId,
         projectId: input.ctx.projectId,

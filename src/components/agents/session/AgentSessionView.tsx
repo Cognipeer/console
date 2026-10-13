@@ -21,7 +21,7 @@
 
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
     ActionIcon,
@@ -39,6 +39,7 @@ import {
     ScrollArea,
     Select,
     Stack,
+    Switch,
     Text,
     Textarea,
     TextInput,
@@ -143,6 +144,14 @@ interface VersionOption {
     version: number;
 }
 
+/**
+ * Operator view of the thinking text. An agent can hide reasoning from its API
+ * responses and stored messages (`showReasoning: false`); this session view is
+ * the operator's own window, so a live turn still carries it and this switch
+ * only decides whether it is drawn.
+ */
+const ReasoningViewContext = createContext(true);
+
 export interface AgentSessionViewProps {
     agentId: string;
     sessionId: string;
@@ -225,6 +234,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // The agent's models a turn can run on (main + additional); `''` = the agent's default / the session's last pick.
     const [agentModels, setAgentModels] = useState<Array<{ key: string; label: string; default: boolean }>>([]);
     const [pickedModel, setPickedModel] = useState('');
+    const [reasoningView, setReasoningView] = useState(true);
     const [loading, setLoading] = useState(true);
     // Why the page could not be shown: the session is not there, or the person may not open it.
     const [loadFailure, setLoadFailure] = useState<SessionLoadFailure | null>(null);
@@ -989,446 +999,457 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     }
 
     return (
-        <DetailShell
-            backHref={`/dashboard/agents/${agentId}?tab=sessions`}
-            backLabel="Back to sessions"
-            icon={<IconMessageCircle size={16} />}
-            title={
-                <>
-                    <span className="detail-title">{session?.title || 'Session'}</span>
-                    <SessionStatusBadge status={status} waitingElsewhere={Boolean(blockedReason)} />
-                    <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
-                        {agent.name}
-                    </Badge>
-                    <Badge size="sm" variant="light" color={pinnedVersion ? 'teal' : 'gray'}>
-                        {pinnedVersion ? `v${pinnedVersion}` : 'draft'}
-                    </Badge>
-                </>
-            }
-            meta={
-                <Group gap="sm" wrap="wrap">
-                    <Text size="xs" c="dimmed" ff="monospace">{sessionId}</Text>
-                    {totals.activeMs > 0 ? (
-                        <Tooltip label="Time the agent spent working, summed over turns" withArrow>
+        <ReasoningViewContext.Provider value={reasoningView}>
+            <DetailShell
+                backHref={`/dashboard/agents/${agentId}?tab=sessions`}
+                backLabel="Back to sessions"
+                icon={<IconMessageCircle size={16} />}
+                title={
+                    <>
+                        <span className="detail-title">{session?.title || 'Session'}</span>
+                        <SessionStatusBadge status={status} waitingElsewhere={Boolean(blockedReason)} />
+                        <Badge size="sm" variant="outline" color="gray" leftSection={<IconRobot size={11} />}>
+                            {agent.name}
+                        </Badge>
+                        <Badge size="sm" variant="light" color={pinnedVersion ? 'teal' : 'gray'}>
+                            {pinnedVersion ? `v${pinnedVersion}` : 'draft'}
+                        </Badge>
+                    </>
+                }
+                meta={
+                    <Group gap="sm" wrap="wrap">
+                        <Text size="xs" c="dimmed" ff="monospace">{sessionId}</Text>
+                        {totals.activeMs > 0 ? (
+                            <Tooltip label="Time the agent spent working, summed over turns" withArrow>
+                                <Group gap={3}>
+                                    <IconClock size={11} />
+                                    <Text size="xs" c="dimmed">{formatDuration(totals.activeMs)}</Text>
+                                </Group>
+                            </Tooltip>
+                        ) : null}
+                        {totals.totalTokens > 0 ? (
+                            <Tooltip label={`${totals.inputTokens} input · ${totals.outputTokens} output`} withArrow>
+                                <Text size="xs" c="dimmed">
+                                    {formatCompactTokens(totals.inputTokens)}/{formatCompactTokens(totals.outputTokens)} tokens
+                                </Text>
+                            </Tooltip>
+                        ) : null}
+                        {totals.costUsd > 0 ? (
                             <Group gap={3}>
-                                <IconClock size={11} />
-                                <Text size="xs" c="dimmed">{formatDuration(totals.activeMs)}</Text>
+                                <IconCoin size={11} />
+                                <Text size="xs" c="dimmed">{formatCost(totals.costUsd)}</Text>
                             </Group>
-                        </Tooltip>
-                    ) : null}
-                    {totals.totalTokens > 0 ? (
-                        <Tooltip label={`${totals.inputTokens} input · ${totals.outputTokens} output`} withArrow>
-                            <Text size="xs" c="dimmed">
-                                {formatCompactTokens(totals.inputTokens)}/{formatCompactTokens(totals.outputTokens)} tokens
-                            </Text>
-                        </Tooltip>
-                    ) : null}
-                    {totals.costUsd > 0 ? (
-                        <Group gap={3}>
-                            <IconCoin size={11} />
-                            <Text size="xs" c="dimmed">{formatCost(totals.costUsd)}</Text>
-                        </Group>
-                    ) : null}
-                    <BudgetMeter
-                        view={budgetView}
-                        busy={liveActive || budgetBusy}
-                        readOnly={readOnly}
-                        onSave={(budget) => void changeBudget(budget)}
-                        onRemove={() => void changeBudget(null)}
-                    />
-                    {session?.updatedAt ? (
-                        <Text size="xs" c="dimmed">{formatRelativeTime(session.updatedAt)}</Text>
-                    ) : null}
-                </Group>
-            }
-            actions={
-                <>
-                    {!isConnected && agentModels.length > 1 ? (
-                        <Select
-                            size="xs"
-                            w={180}
-                            data={agentModels.map((m) => ({ value: m.key, label: m.default ? `${m.label} *` : m.label }))}
-                            value={pickedModel || agentModels.find((m) => m.default)?.key || null}
-                            onChange={(next) => setPickedModel(next ?? '')}
-                            allowDeselect={false}
-                            disabled={liveActive}
+                        ) : null}
+                        <BudgetMeter
+                            view={budgetView}
+                            busy={liveActive || budgetBusy}
+                            readOnly={readOnly}
+                            onSave={(budget) => void changeBudget(budget)}
+                            onRemove={() => void changeBudget(null)}
                         />
-                    ) : null}
-                    {!isConnected ? (
-                        <Select
-                            size="xs"
-                            w={180}
-                            data={versionSelectData(versions, agent.publishedVersion)}
-                            value={pinnedVersion}
-                            onChange={(next) => setPinnedVersion(next ?? '')}
-                            allowDeselect={false}
-                            disabled={liveActive}
-                        />
-                    ) : null}
-                    {!isConnected && versions.length > 0 ? (
+                        {session?.updatedAt ? (
+                            <Text size="xs" c="dimmed">{formatRelativeTime(session.updatedAt)}</Text>
+                        ) : null}
+                    </Group>
+                }
+                actions={
+                    <>
+                        {!isConnected ? (
+                            <Switch
+                                size="xs"
+                                label={tp('showReasoning')}
+                                checked={reasoningView}
+                                onChange={(event) => setReasoningView(event.currentTarget.checked)}
+                                data-testid="session-reasoning-view"
+                            />
+                        ) : null}
+                        {!isConnected && agentModels.length > 1 ? (
+                            <Select
+                                size="xs"
+                                w={180}
+                                data={agentModels.map((m) => ({ value: m.key, label: m.default ? `${m.label} *` : m.label }))}
+                                value={pickedModel || agentModels.find((m) => m.default)?.key || null}
+                                onChange={(next) => setPickedModel(next ?? '')}
+                                allowDeselect={false}
+                                disabled={liveActive}
+                            />
+                        ) : null}
+                        {!isConnected ? (
+                            <Select
+                                size="xs"
+                                w={180}
+                                data={versionSelectData(versions, agent.publishedVersion)}
+                                value={pinnedVersion}
+                                onChange={(next) => setPinnedVersion(next ?? '')}
+                                allowDeselect={false}
+                                disabled={liveActive}
+                            />
+                        ) : null}
+                        {!isConnected && versions.length > 0 ? (
+                            <Button
+                                size="xs"
+                                variant="default"
+                                leftSection={<IconArrowsLeftRight size={14} />}
+                                onClick={() => setCompareOpen(true)}
+                            >
+                                {tp('compare')}
+                            </Button>
+                        ) : null}
+                        {/*
+                          A reopened session lands wherever you left the scroll, and
+                          the composer is a page-height away at the bottom. This is
+                          the "pick this back up" affordance the sessions table
+                          links straight to.
+                        */}
                         <Button
                             size="xs"
-                            variant="default"
-                            leftSection={<IconArrowsLeftRight size={14} />}
-                            onClick={() => setCompareOpen(true)}
+                            variant="light"
+                            leftSection={<IconPlayerPlay size={14} />}
+                            onClick={continueSession}
+                            disabled={liveActive}
                         >
-                            {tp('compare')}
+                            {tp('continue')}
                         </Button>
-                    ) : null}
-                    {/*
-                      A reopened session lands wherever you left the scroll, and
-                      the composer is a page-height away at the bottom. This is
-                      the "pick this back up" affordance the sessions table
-                      links straight to.
-                    */}
-                    <Button
-                        size="xs"
-                        variant="light"
-                        leftSection={<IconPlayerPlay size={14} />}
-                        onClick={continueSession}
-                        disabled={liveActive}
-                    >
-                        {tp('continue')}
-                    </Button>
-                    <Button
-                        size="xs"
-                        variant="light"
-                        color="red"
-                        leftSection={<IconTrash size={14} />}
-                        loading={deleting}
-                        onClick={() => void deleteSession()}
-                    >
-                        {tp('delete')}
-                    </Button>
-                </>
-            }
-        >
-            <Group align="stretch" gap="md" wrap="nowrap" className={classes.workspace}>
-                {/* ── Transcript ─────────────────────────────────────── */}
-                <Paper withBorder radius="md" className={classes.transcriptPanel}>
-                    <Group p="xs" gap="xs" wrap="nowrap" className={classes.transcriptToolbar}>
-                        <TextInput
+                        <Button
                             size="xs"
-                            placeholder="Find in transcript"
-                            leftSection={<IconSearch size={13} />}
-                            value={search}
-                            onChange={(event) => setSearch(event.currentTarget.value)}
-                            className={classes.flexGrow}
-                        />
-                        {matchedIndexes ? (
-                            <Text size="xs" c="dimmed" className={classes.noWrap}>
-                                {matchedIndexes.size} of {messages.length}
-                            </Text>
-                        ) : (
-                            <Text size="xs" c="dimmed" className={classes.noWrap}>
-                                {messages.length} message{messages.length === 1 ? '' : 's'}
-                            </Text>
-                        )}
-                        <Tooltip label="Zoom the timeline out" withArrow>
-                            <ActionIcon
-                                size="sm"
-                                variant="subtle"
-                                onClick={() => setZoom((value) => Math.max(0, value - 1))}
-                                disabled={zoom === 0}
-                            >
-                                <IconZoomOut size={14} />
-                            </ActionIcon>
-                        </Tooltip>
-                        <Tooltip label="Zoom the timeline in" withArrow>
-                            <ActionIcon
-                                size="sm"
-                                variant="subtle"
-                                onClick={() => setZoom((value) => Math.min(TIMELINE_ZOOM_LEVELS.length - 1, value + 1))}
-                                disabled={zoom === TIMELINE_ZOOM_LEVELS.length - 1}
-                            >
-                                <IconZoomIn size={14} />
-                            </ActionIcon>
-                        </Tooltip>
-                    </Group>
+                            variant="light"
+                            color="red"
+                            leftSection={<IconTrash size={14} />}
+                            loading={deleting}
+                            onClick={() => void deleteSession()}
+                        >
+                            {tp('delete')}
+                        </Button>
+                    </>
+                }
+            >
+                <Group align="stretch" gap="md" wrap="nowrap" className={classes.workspace}>
+                    {/* ── Transcript ─────────────────────────────────────── */}
+                    <Paper withBorder radius="md" className={classes.transcriptPanel}>
+                        <Group p="xs" gap="xs" wrap="nowrap" className={classes.transcriptToolbar}>
+                            <TextInput
+                                size="xs"
+                                placeholder="Find in transcript"
+                                leftSection={<IconSearch size={13} />}
+                                value={search}
+                                onChange={(event) => setSearch(event.currentTarget.value)}
+                                className={classes.flexGrow}
+                            />
+                            {matchedIndexes ? (
+                                <Text size="xs" c="dimmed" className={classes.noWrap}>
+                                    {matchedIndexes.size} of {messages.length}
+                                </Text>
+                            ) : (
+                                <Text size="xs" c="dimmed" className={classes.noWrap}>
+                                    {messages.length} message{messages.length === 1 ? '' : 's'}
+                                </Text>
+                            )}
+                            <Tooltip label="Zoom the timeline out" withArrow>
+                                <ActionIcon
+                                    size="sm"
+                                    variant="subtle"
+                                    onClick={() => setZoom((value) => Math.max(0, value - 1))}
+                                    disabled={zoom === 0}
+                                >
+                                    <IconZoomOut size={14} />
+                                </ActionIcon>
+                            </Tooltip>
+                            <Tooltip label="Zoom the timeline in" withArrow>
+                                <ActionIcon
+                                    size="sm"
+                                    variant="subtle"
+                                    onClick={() => setZoom((value) => Math.min(TIMELINE_ZOOM_LEVELS.length - 1, value + 1))}
+                                    disabled={zoom === TIMELINE_ZOOM_LEVELS.length - 1}
+                                >
+                                    <IconZoomIn size={14} />
+                                </ActionIcon>
+                            </Tooltip>
+                        </Group>
 
-                    {timeline.length > 0 ? (
-                        <TurnTimeline entries={timeline} zoom={zoom} onSelect={goToTurn} />
-                    ) : null}
-
-                    <div className={classes.panelBody}>
-                        {messages.length === 0 && !liveActive ? (
-                            <Center className={classes.chatEmpty}>
-                                <Stack align="center" gap="sm">
-                                    <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-                                        <IconRobot size={24} />
-                                    </ThemeIcon>
-                                    <Text fw={600}>{agent.name}</Text>
-                                    <Text size="sm" c="dimmed" ta="center" maw={320}>
-                                        {agent.description || 'Send a message to start this session.'}
-                                    </Text>
-                                </Stack>
-                            </Center>
-                        ) : (
-                            <ScrollArea className={classes.chatScroll} viewportRef={viewportRef} px="md" py="sm">
-                                <Stack gap="lg">
-                                    {messages.map((msg, i) => {
-                                        if (matchedIndexes && !matchedIndexes.has(i)) return null;
-                                        const previous = messages[i - 1];
-                                        return (
-                                            <Box
-                                                key={i}
-                                                ref={(node: HTMLDivElement | null) => { turnRefs.current[i] = node; }}
-                                                className={msg.role === 'error' ? `${classes.turn} ${classes.errorTurn}` : classes.turn}
-                                            >
-                                                {msg.role === 'error' ? (
-                                                    <FailedTurn
-                                                        message={msg}
-                                                        onRetry={previous?.role === 'user'
-                                                            ? () => {
-                                                                setInput(previous.content);
-                                                                setAttached((previous.attachments ?? []).map((file) => ({ ...file })));
-                                                                setMessages(messages.slice(0, i - 1));
-                                                                composerRef.current?.focus();
-                                                            }
-                                                            : undefined}
-                                                    />
-                                                ) : (
-                                                    <>
-                                                        <Group gap={6} mb={4} align="center">
-                                                            <RoleBadge user={msg.role === 'user'} agentName={agent.name} />
-                                                            {msg.role === 'assistant' ? <TurnPills message={msg} /> : null}
-                                                        </Group>
-                                                        {msg.role === 'assistant' ? (
-                                                            <AssistantTurn
-                                                                message={msg}
-                                                                busy={liveActive || Boolean(resolvingId)}
-                                                                resolvingId={resolvingId}
-                                                                onResolve={(actionId, body) => void resolveAction(actionId, body)}
-                                                                blocked={blockedReason}
-                                                                blockedById={blockedById}
-                                                                budgetBannerShown={budgetBannerShown}
-                                                                budgetStops={budgetStops}
-                                                            />
-                                                        ) : (
-                                                            <>
-                                                                <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
-                                                                <MessageAttachments attachments={toAttachmentViews(msg.attachments, { agentId, sessionId, files: sessionFiles })} />
-                                                            </>
-                                                        )}
-                                                        {msg.role === 'assistant' ? (
-                                                            <MessageFeedbackRow rows={feedbackForMessage(messageFeedback, persistedIndexOf(messages, i))} />
-                                                        ) : null}
-                                                    </>
-                                                )}
-                                            </Box>
-                                        );
-                                    })}
-                                    {matchedIndexes && matchedIndexes.size === 0 ? (
-                                        <Text size="sm" c="dimmed" ta="center" py="xl">
-                                            No message in this session contains “{search.trim()}”.
-                                        </Text>
-                                    ) : null}
-                                    {following && followedUser ? (
-                                        <Box>
-                                            <Group gap={6} mb={4}>
-                                                <RoleBadge user agentName={agent.name} />
-                                            </Group>
-                                            <Text size="sm" className={classes.preWrap}>{followedUser}</Text>
-                                        </Box>
-                                    ) : null}
-                                    {liveActive ? (
-                                        <Box>
-                                            <Group gap={6} mb={4}>
-                                                <RoleBadge agentName={agent.name} />
-                                                {following ? (
-                                                    <>
-                                                        <Text size="10px" c="dimmed">{t('following')}</Text>
-                                                        <Button
-                                                            size="compact-xs"
-                                                            variant="subtle"
-                                                            color="gray"
-                                                            onClick={() => setFollowDismissed(true)}
-                                                        >
-                                                            {t('stopFollowing')}
-                                                        </Button>
-                                                    </>
-                                                ) : null}
-                                            </Group>
-                                            {liveCompactions.map((compaction, index) => (
-                                                <ContextCompactionCard key={`live-${index}`} compaction={compaction} live />
-                                            ))}
-                                            {liveSegments.length === 0 ? (
-                                                <Group gap="xs">
-                                                    <Loader size="xs" />
-                                                    <Text size="xs" c="dimmed">The agent is working…</Text>
-                                                </Group>
-                                            ) : (
-                                                <Stack gap="xs">
-                                                    {liveSegments.map((segment, index) => (segment.kind === 'tools' ? (
-                                                        <LiveToolCalls
-                                                            key={`tools-${index}`}
-                                                            calls={segment.calls}
-                                                            generating={generating && index === liveSegments.length - 1}
-                                                        />
-                                                    ) : (
-                                                        <Box key={`text-${index}`} className={classes.chatMarkdown}>
-                                                            <Markdown text={segment.text} />
-                                                        </Box>
-                                                    )))}
-                                                </Stack>
-                                            )}
-                                        </Box>
-                                    ) : null}
-                                </Stack>
-                            </ScrollArea>
-                        )}
-
-                        {budgetView && budgetBannerShown ? (
-                            <Box px="sm" pt="sm">
-                                <BudgetBanner
-                                    view={budgetView}
-                                    busy={liveActive || budgetBusy}
-                                    onIncrease={(amount) => void changeBudget({ maxCostUsd: amount, onReach: budgetView.budget.onReach })}
-                                    onRemove={() => void changeBudget(null)}
-                                />
-                            </Box>
+                        {timeline.length > 0 ? (
+                            <TurnTimeline entries={timeline} zoom={zoom} onSelect={goToTurn} />
                         ) : null}
 
-                        <Box p="sm" className={classes.composer}>
-                            <AttachmentChips
-                                files={attached}
-                                uploading={uploadingNames}
-                                disabled={liveActive}
-                                onRemove={(fileId) => void removeAttachment(fileId)}
-                                textOnlyModel={textOnlyModel}
-                                linksFor={(file) => sessionFileLinks(agentId, sessionId, file.fileId)}
-                            />
-                            <Textarea
-                                ref={composerRef}
-                                placeholder={readOnly
-                                    ? `Read-only — this session came in via ${sessionSourceLabel(sessionSource)}`
-                                    : budgetBlocked
-                                        ? tb('composerPlaceholder')
-                                        : gate === 'blocked'
-                                            ? (waitingElsewhere ? tsa('composerWaitingElsewhere') : t('composerBlockedPlaceholder'))
-                                            : 'Send a message to the agent'}
-                                value={input}
-                                onChange={(event) => setInput(event.currentTarget.value)}
-                                onKeyDown={(event) => {
-                                    if (event.key === 'Enter' && !event.shiftKey) {
-                                        event.preventDefault();
-                                        void sendMessage();
-                                    }
-                                }}
-                                autosize
-                                minRows={1}
-                                maxRows={8}
-                                disabled={liveActive || readOnly || gate === 'blocked' || budgetBlocked}
-                                leftSection={takesAttachments ? (
-                                    <AttachButton
-                                        disabled={liveActive || gate === 'blocked' || budgetBlocked}
-                                        accept={attachmentsConfig.allowedMimeTypes.join(',')}
-                                        onFiles={(files) => void uploadFiles(files)}
-                                    />
-                                ) : undefined}
-                                leftSectionPointerEvents="all"
-                                rightSection={
-                                    <ActionIcon
-                                        size="sm"
-                                        variant="filled"
-                                        onClick={() => void sendMessage()}
-                                        disabled={(!input.trim() && attached.length === 0) || uploadingNames.length > 0 || removingFiles.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked}
-                                    >
-                                        <IconSend size={14} />
-                                    </ActionIcon>
-                                }
-                            />
-                            {gate !== 'open' && !readOnly ? (
-                                <Alert
-                                    variant="light"
-                                    color={gate === 'blocked' ? 'gray' : 'orange'}
-                                    icon={<IconHandStop size={14} />}
-                                    mt={6}
-                                    p="xs"
-                                >
-                                    <Text size="xs">
-                                        {gate === 'blocked'
-                                            ? (waitingElsewhere ? tsa('composerWaitingElsewhereNote') : t('composerBlocked'))
-                                            : t('composerCancelWarning')}
-                                    </Text>
-                                </Alert>
-                            ) : null}
-                            <Group justify="space-between" mt={6}>
-                                <Text size="10px" c="dimmed">{tp('enterToSend')}</Text>
-                                <UnstyledButton onClick={() => setOverrideOpen((value) => !value)}>
-                                    <Group gap={3}>
-                                        <Text size="10px" c="dimmed">{tp('contextOverride')}</Text>
-                                        {overrideOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
-                                    </Group>
-                                </UnstyledButton>
-                            </Group>
-                            <Collapse in={overrideOpen}>
-                                <Box mt="xs">
-                                    <Text size="10px" c="dimmed" mb={4}>
-                                        {tp('contextOverrideHint')}
-                                    </Text>
-                                    <RuntimeContextEditor value={runtimeContextJson} onChange={setRuntimeContextJson} />
-                                </Box>
-                            </Collapse>
-                        </Box>
-                    </div>
-                </Paper>
+                        <div className={classes.panelBody}>
+                            {messages.length === 0 && !liveActive ? (
+                                <Center className={classes.chatEmpty}>
+                                    <Stack align="center" gap="sm">
+                                        <ThemeIcon size={48} radius="xl" variant="light" color="gray">
+                                            <IconRobot size={24} />
+                                        </ThemeIcon>
+                                        <Text fw={600}>{agent.name}</Text>
+                                        <Text size="sm" c="dimmed" ta="center" maw={320}>
+                                            {agent.description || 'Send a message to start this session.'}
+                                        </Text>
+                                    </Stack>
+                                </Center>
+                            ) : (
+                                <ScrollArea className={classes.chatScroll} viewportRef={viewportRef} px="md" py="sm">
+                                    <Stack gap="lg">
+                                        {messages.map((msg, i) => {
+                                            if (matchedIndexes && !matchedIndexes.has(i)) return null;
+                                            const previous = messages[i - 1];
+                                            return (
+                                                <Box
+                                                    key={i}
+                                                    ref={(node: HTMLDivElement | null) => { turnRefs.current[i] = node; }}
+                                                    className={msg.role === 'error' ? `${classes.turn} ${classes.errorTurn}` : classes.turn}
+                                                >
+                                                    {msg.role === 'error' ? (
+                                                        <FailedTurn
+                                                            message={msg}
+                                                            onRetry={previous?.role === 'user'
+                                                                ? () => {
+                                                                    setInput(previous.content);
+                                                                    setAttached((previous.attachments ?? []).map((file) => ({ ...file })));
+                                                                    setMessages(messages.slice(0, i - 1));
+                                                                    composerRef.current?.focus();
+                                                                }
+                                                                : undefined}
+                                                        />
+                                                    ) : (
+                                                        <>
+                                                            <Group gap={6} mb={4} align="center">
+                                                                <RoleBadge user={msg.role === 'user'} agentName={agent.name} />
+                                                                {msg.role === 'assistant' ? <TurnPills message={msg} /> : null}
+                                                            </Group>
+                                                            {msg.role === 'assistant' ? (
+                                                                <AssistantTurn
+                                                                    message={msg}
+                                                                    busy={liveActive || Boolean(resolvingId)}
+                                                                    resolvingId={resolvingId}
+                                                                    onResolve={(actionId, body) => void resolveAction(actionId, body)}
+                                                                    blocked={blockedReason}
+                                                                    blockedById={blockedById}
+                                                                    budgetBannerShown={budgetBannerShown}
+                                                                    budgetStops={budgetStops}
+                                                                />
+                                                            ) : (
+                                                                <>
+                                                                    <Text size="sm" className={classes.preWrap}>{msg.content}</Text>
+                                                                    <MessageAttachments attachments={toAttachmentViews(msg.attachments, { agentId, sessionId, files: sessionFiles })} />
+                                                                </>
+                                                            )}
+                                                            {msg.role === 'assistant' ? (
+                                                                <MessageFeedbackRow rows={feedbackForMessage(messageFeedback, persistedIndexOf(messages, i))} />
+                                                            ) : null}
+                                                        </>
+                                                    )}
+                                                </Box>
+                                            );
+                                        })}
+                                        {matchedIndexes && matchedIndexes.size === 0 ? (
+                                            <Text size="sm" c="dimmed" ta="center" py="xl">
+                                                No message in this session contains “{search.trim()}”.
+                                            </Text>
+                                        ) : null}
+                                        {following && followedUser ? (
+                                            <Box>
+                                                <Group gap={6} mb={4}>
+                                                    <RoleBadge user agentName={agent.name} />
+                                                </Group>
+                                                <Text size="sm" className={classes.preWrap}>{followedUser}</Text>
+                                            </Box>
+                                        ) : null}
+                                        {liveActive ? (
+                                            <Box>
+                                                <Group gap={6} mb={4}>
+                                                    <RoleBadge agentName={agent.name} />
+                                                    {following ? (
+                                                        <>
+                                                            <Text size="10px" c="dimmed">{t('following')}</Text>
+                                                            <Button
+                                                                size="compact-xs"
+                                                                variant="subtle"
+                                                                color="gray"
+                                                                onClick={() => setFollowDismissed(true)}
+                                                            >
+                                                                {t('stopFollowing')}
+                                                            </Button>
+                                                        </>
+                                                    ) : null}
+                                                </Group>
+                                                {liveCompactions.map((compaction, index) => (
+                                                    <ContextCompactionCard key={`live-${index}`} compaction={compaction} live />
+                                                ))}
+                                                {liveSegments.length === 0 ? (
+                                                    <Group gap="xs">
+                                                        <Loader size="xs" />
+                                                        <Text size="xs" c="dimmed">The agent is working…</Text>
+                                                    </Group>
+                                                ) : (
+                                                    <Stack gap="xs">
+                                                        {liveSegments.map((segment, index) => (segment.kind === 'tools' ? (
+                                                            <LiveToolCalls
+                                                                key={`tools-${index}`}
+                                                                calls={segment.calls}
+                                                                generating={generating && index === liveSegments.length - 1}
+                                                            />
+                                                        ) : (
+                                                            <Box key={`text-${index}`} className={classes.chatMarkdown}>
+                                                                <Markdown text={segment.text} />
+                                                            </Box>
+                                                        )))}
+                                                    </Stack>
+                                                )}
+                                            </Box>
+                                        ) : null}
+                                    </Stack>
+                                </ScrollArea>
+                            )}
 
-                {/* ── Inspector ──────────────────────────────────────── */}
-                <Paper withBorder radius="md" className={classes.inspectorPanel}>
-                    <SessionSidePanel
-                        agentId={agentId}
-                        sessionId={sessionId}
-                        status={status}
-                        waitingElsewhere={Boolean(blockedReason)}
-                        stopReason={session?.stopReason}
-                        activityKey={`${session?.lastEventSeq ?? 0}:${session?.runtimeStatus ?? ''}:${messages.length}`}
-                        createdAt={session?.createdAt}
-                        updatedAt={session?.updatedAt}
-                        agentName={agent.name}
-                        agentKey={agent.key}
-                        pinnedVersion={pinnedVersion}
-                        publishedVersion={agent.publishedVersion ?? null}
-                        sessionContext={sessionContext}
-                        agentConfig={agent.config}
-                        messages={messages}
-                        onGoToTurn={goToTurn}
-                        // The tab is for agents with files, and for any session that holds some (an API upload, or files from before the setting was turned off).
-                        files={isConnected || !(filesConfigured || (sessionFiles?.length ?? 0) > 0) ? undefined : {
-                            items: sessionFiles,
-                            failed: sessionFilesFailed,
-                            maxFiles: filesConfigured ? attachmentsConfig.maxFiles : undefined,
-                            readOnly,
-                            deleting: deletingFiles,
-                            onDelete: (file) => setFileToDelete(file),
-                            onRetry: () => void loadSessionFiles(),
-                        }}
-                    />
-                </Paper>
-            </Group>
-            <ConfirmModal
-                opened={fileToDelete !== null}
-                title={ta('filesDelete')}
-                message={fileToDelete ? ta('filesDeleteConfirm', { name: fileToDelete.name }) : ''}
-                confirmLabel={ta('filesDeleteAction')}
-                cancelLabel={ta('cancel')}
-                loading={fileToDelete ? deletingFiles.includes(fileToDelete.id) : false}
-                onClose={() => setFileToDelete(null)}
-                onConfirm={() => {
-                    const file = fileToDelete;
-                    if (!file) return;
-                    void deleteSessionFile(file).finally(() => setFileToDelete(null));
-                }}
-            />
-            <CompareVersionsDrawer
-                opened={compareOpen}
-                onClose={() => setCompareOpen(false)}
-                agentId={agentId}
-                publishedVersion={agent.publishedVersion ?? null}
-                versions={versions.map((v) => v.version)}
-                initialMessage={[...messages].reverse().find((m) => m.role === 'user')?.content}
-            />
-        </DetailShell>
+                            {budgetView && budgetBannerShown ? (
+                                <Box px="sm" pt="sm">
+                                    <BudgetBanner
+                                        view={budgetView}
+                                        busy={liveActive || budgetBusy}
+                                        onIncrease={(amount) => void changeBudget({ maxCostUsd: amount, onReach: budgetView.budget.onReach })}
+                                        onRemove={() => void changeBudget(null)}
+                                    />
+                                </Box>
+                            ) : null}
+
+                            <Box p="sm" className={classes.composer}>
+                                <AttachmentChips
+                                    files={attached}
+                                    uploading={uploadingNames}
+                                    disabled={liveActive}
+                                    onRemove={(fileId) => void removeAttachment(fileId)}
+                                    textOnlyModel={textOnlyModel}
+                                    linksFor={(file) => sessionFileLinks(agentId, sessionId, file.fileId)}
+                                />
+                                <Textarea
+                                    ref={composerRef}
+                                    placeholder={readOnly
+                                        ? `Read-only — this session came in via ${sessionSourceLabel(sessionSource)}`
+                                        : budgetBlocked
+                                            ? tb('composerPlaceholder')
+                                            : gate === 'blocked'
+                                                ? (waitingElsewhere ? tsa('composerWaitingElsewhere') : t('composerBlockedPlaceholder'))
+                                                : 'Send a message to the agent'}
+                                    value={input}
+                                    onChange={(event) => setInput(event.currentTarget.value)}
+                                    onKeyDown={(event) => {
+                                        if (event.key === 'Enter' && !event.shiftKey) {
+                                            event.preventDefault();
+                                            void sendMessage();
+                                        }
+                                    }}
+                                    autosize
+                                    minRows={1}
+                                    maxRows={8}
+                                    disabled={liveActive || readOnly || gate === 'blocked' || budgetBlocked}
+                                    leftSection={takesAttachments ? (
+                                        <AttachButton
+                                            disabled={liveActive || gate === 'blocked' || budgetBlocked}
+                                            accept={attachmentsConfig.allowedMimeTypes.join(',')}
+                                            onFiles={(files) => void uploadFiles(files)}
+                                        />
+                                    ) : undefined}
+                                    leftSectionPointerEvents="all"
+                                    rightSection={
+                                        <ActionIcon
+                                            size="sm"
+                                            variant="filled"
+                                            onClick={() => void sendMessage()}
+                                            disabled={(!input.trim() && attached.length === 0) || uploadingNames.length > 0 || removingFiles.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked}
+                                        >
+                                            <IconSend size={14} />
+                                        </ActionIcon>
+                                    }
+                                />
+                                {gate !== 'open' && !readOnly ? (
+                                    <Alert
+                                        variant="light"
+                                        color={gate === 'blocked' ? 'gray' : 'orange'}
+                                        icon={<IconHandStop size={14} />}
+                                        mt={6}
+                                        p="xs"
+                                    >
+                                        <Text size="xs">
+                                            {gate === 'blocked'
+                                                ? (waitingElsewhere ? tsa('composerWaitingElsewhereNote') : t('composerBlocked'))
+                                                : t('composerCancelWarning')}
+                                        </Text>
+                                    </Alert>
+                                ) : null}
+                                <Group justify="space-between" mt={6}>
+                                    <Text size="10px" c="dimmed">{tp('enterToSend')}</Text>
+                                    <UnstyledButton onClick={() => setOverrideOpen((value) => !value)}>
+                                        <Group gap={3}>
+                                            <Text size="10px" c="dimmed">{tp('contextOverride')}</Text>
+                                            {overrideOpen ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
+                                        </Group>
+                                    </UnstyledButton>
+                                </Group>
+                                <Collapse in={overrideOpen}>
+                                    <Box mt="xs">
+                                        <Text size="10px" c="dimmed" mb={4}>
+                                            {tp('contextOverrideHint')}
+                                        </Text>
+                                        <RuntimeContextEditor value={runtimeContextJson} onChange={setRuntimeContextJson} />
+                                    </Box>
+                                </Collapse>
+                            </Box>
+                        </div>
+                    </Paper>
+
+                    {/* ── Inspector ──────────────────────────────────────── */}
+                    <Paper withBorder radius="md" className={classes.inspectorPanel}>
+                        <SessionSidePanel
+                            agentId={agentId}
+                            sessionId={sessionId}
+                            status={status}
+                            waitingElsewhere={Boolean(blockedReason)}
+                            stopReason={session?.stopReason}
+                            activityKey={`${session?.lastEventSeq ?? 0}:${session?.runtimeStatus ?? ''}:${messages.length}`}
+                            createdAt={session?.createdAt}
+                            updatedAt={session?.updatedAt}
+                            agentName={agent.name}
+                            agentKey={agent.key}
+                            pinnedVersion={pinnedVersion}
+                            publishedVersion={agent.publishedVersion ?? null}
+                            sessionContext={sessionContext}
+                            agentConfig={agent.config}
+                            messages={messages}
+                            onGoToTurn={goToTurn}
+                            // The tab is for agents with files, and for any session that holds some (an API upload, or files from before the setting was turned off).
+                            files={isConnected || !(filesConfigured || (sessionFiles?.length ?? 0) > 0) ? undefined : {
+                                items: sessionFiles,
+                                failed: sessionFilesFailed,
+                                maxFiles: filesConfigured ? attachmentsConfig.maxFiles : undefined,
+                                readOnly,
+                                deleting: deletingFiles,
+                                onDelete: (file) => setFileToDelete(file),
+                                onRetry: () => void loadSessionFiles(),
+                            }}
+                        />
+                    </Paper>
+                </Group>
+                <ConfirmModal
+                    opened={fileToDelete !== null}
+                    title={ta('filesDelete')}
+                    message={fileToDelete ? ta('filesDeleteConfirm', { name: fileToDelete.name }) : ''}
+                    confirmLabel={ta('filesDeleteAction')}
+                    cancelLabel={ta('cancel')}
+                    loading={fileToDelete ? deletingFiles.includes(fileToDelete.id) : false}
+                    onClose={() => setFileToDelete(null)}
+                    onConfirm={() => {
+                        const file = fileToDelete;
+                        if (!file) return;
+                        void deleteSessionFile(file).finally(() => setFileToDelete(null));
+                    }}
+                />
+                <CompareVersionsDrawer
+                    opened={compareOpen}
+                    onClose={() => setCompareOpen(false)}
+                    agentId={agentId}
+                    publishedVersion={agent.publishedVersion ?? null}
+                    versions={versions.map((v) => v.version)}
+                    initialMessage={[...messages].reverse().find((m) => m.role === 'user')?.content}
+                />
+            </DetailShell>
+        </ReasoningViewContext.Provider>
     );
 }
 
@@ -1571,6 +1592,8 @@ function AssistantTurn({
 
 function ReasoningDisclosure({ reasoning, latencyMs }: { reasoning: string; latencyMs?: number }) {
     const [open, setOpen] = useState(false);
+    const visible = useContext(ReasoningViewContext);
+    if (!visible) return null;
     return (
         <Box mb="xs">
             <UnstyledButton onClick={() => setOpen((v) => !v)} className={classes.disclosureButton}>

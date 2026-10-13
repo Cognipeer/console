@@ -27,8 +27,6 @@ import { IconInfoCircle } from '@tabler/icons-react';
 import type {
     AgentContextPolicy,
     AgentPlanningMode,
-    AgentReasoningEffort,
-    AgentReasoningLevel,
     AgentReplanPolicy,
     AgentRuntimeProfile,
     AgentToolResponsePolicy,
@@ -449,68 +447,19 @@ export default function AgentAdvancedSettings({
             </SettingsGroup>
 
             <SettingsGroup
-                title="Reasoning"
-                badge={reasoning.enabled ? <Badge size="xs" color="teal" variant="light">on</Badge> : null}
+                title="Reflection"
+                badge={reasoning.reflection === false ? <Badge size="xs" color="gray" variant="light">off</Badge> : null}
             >
+                {/* Effort, budget and thinking text moved next to the model (Build tab). */}
                 <Switch
-                    label="Enable reasoning"
-                    description="Turns on the model's native extended-thinking mode, on providers that support it. Uses more tokens — and, on some providers, more time — per response."
-                    checked={reasoning.enabled ?? false}
+                    label="Reflection pass"
+                    description="The agent reviews its draft before answering. On by default; turn it off for faster, cheaper turns. The reasoning level of each model is set next to the model in the Build tab."
+                    checked={reasoning.reflection !== false}
                     onChange={(event) =>
-                        patch({ reasoning: { ...reasoning, enabled: event.currentTarget.checked } })
+                        patch({ reasoning: event.currentTarget.checked ? undefined : { reflection: false } })
                     }
+                    data-testid="agent-reflection"
                 />
-                <Group grow>
-                    <Select
-                        label="Level"
-                        data={['minimal', 'low', 'medium', 'high']}
-                        value={reasoning.level ?? null}
-                        onChange={(next) =>
-                            patch({ reasoning: { ...reasoning, level: (next as AgentReasoningLevel) ?? undefined } })
-                        }
-                        disabled={!reasoning.enabled}
-                        clearable
-                    />
-                    <Select
-                        label="Provider effort"
-                        description="`none` is a value that gets sent, not off."
-                        data={['none', 'minimal', 'low', 'medium', 'high']}
-                        value={reasoning.effort ?? null}
-                        onChange={(next) =>
-                            patch({
-                                reasoning: { ...reasoning, effort: (next as AgentReasoningEffort) ?? undefined },
-                            })
-                        }
-                        disabled={!reasoning.enabled}
-                        clearable
-                    />
-                </Group>
-                <Group grow>
-                    <NumberInput
-                        label="Thinking budget (tokens)"
-                        description="Anthropic/Gemini-style token budget for the model's internal reasoning before it answers. Ignored by providers that use Provider effort instead (e.g. OpenAI)."
-                        placeholder="provider default"
-                        min={128}
-                        step={128}
-                        value={reasoning.budgetTokens ?? ''}
-                        onChange={(next) =>
-                            patch({ reasoning: { ...reasoning, budgetTokens: numberValue(next) } })
-                        }
-                        disabled={!reasoning.enabled}
-                    />
-                    <Switch
-                        mt="lg"
-                        label="Include thoughts in the trace"
-                        description="Exposes the model's raw reasoning text in the trace instead of hiding it — useful for debugging, but adds tokens and shows the chain of thought to anyone who can view traces."
-                        checked={reasoning.includeThoughts ?? false}
-                        onChange={(event) =>
-                            patch({
-                                reasoning: { ...reasoning, includeThoughts: event.currentTarget.checked },
-                            })
-                        }
-                        disabled={!reasoning.enabled}
-                    />
-                </Group>
             </SettingsGroup>
         </Stack>
     );

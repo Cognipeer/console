@@ -7,7 +7,8 @@
  */
 
 import { useMemo } from 'react';
-import { MultiSelect, Stack, Text, TextInput } from '@mantine/core';
+import { Group, MultiSelect, Stack, Text, TextInput } from '@mantine/core';
+import AgentReasoningPicker from './AgentReasoningPicker';
 import type { IAgentAdditionalModel } from '@/lib/database/provider/types.domain';
 
 export const MAX_ADDITIONAL_MODELS = 10;
@@ -16,6 +17,8 @@ export interface AdditionalModelOption {
     key: string;
     name: string;
     modelId?: string;
+    providerKey?: string;
+    settings?: Record<string, unknown>;
 }
 
 export interface AgentAdditionalModelsProps {
@@ -24,6 +27,8 @@ export interface AgentAdditionalModelsProps {
     models: AdditionalModelOption[];
     /** The main model: it is always usable, so it cannot be added here. */
     mainModelKey: string;
+    /** Provider key -> driver; with it each row gets its own reasoning dropdown next to the model. */
+    driverByProviderKey?: Record<string, string | undefined>;
     labels: {
         title: string;
         description: string;
@@ -35,7 +40,7 @@ export interface AgentAdditionalModelsProps {
     };
 }
 
-export default function AgentAdditionalModels({ value, onChange, models, mainModelKey, labels }: AgentAdditionalModelsProps) {
+export default function AgentAdditionalModels({ value, onChange, models, mainModelKey, driverByProviderKey, labels }: AgentAdditionalModelsProps) {
     const options = useMemo(
         () => models
             .filter((m) => m.key !== mainModelKey)
@@ -76,7 +81,23 @@ export default function AgentAdditionalModels({ value, onChange, models, mainMod
             />
             {value.map((entry) => (
                 <Stack key={entry.modelKey} gap={4} data-testid={`agent-additional-model-${entry.modelKey}`}>
-                    <Text size="xs" fw={600}>{nameOf(entry.modelKey)}</Text>
+                    <Group align="flex-end" gap="sm" wrap="wrap">
+                        <Text size="xs" fw={600}>{nameOf(entry.modelKey)}</Text>
+                        {driverByProviderKey ? (
+                            <AgentReasoningPicker
+                                model={models.find((m) => m.key === entry.modelKey)}
+                                driverByProviderKey={driverByProviderKey}
+                                value={entry}
+                                onChange={(next) => onChange(value.map((row) => {
+                                    if (row.modelKey !== entry.modelKey) return row;
+                                    const { reasoningEffort: _e, reasoningBudgetTokens: _b, ...rest } = row;
+                                    void _e; void _b;
+                                    return { ...rest, ...next };
+                                }))}
+                                testId={`agent-additional-reasoning-${entry.modelKey}`}
+                            />
+                        ) : null}
+                    </Group>
                     <TextInput
                         size="xs"
                         aria-label={`${labels.label} ${entry.modelKey}`}

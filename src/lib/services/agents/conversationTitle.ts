@@ -16,6 +16,7 @@ import { createLogger } from '@/lib/core/logger';
 import { runWithRequestContext } from '@/lib/core/requestContext';
 import type { IAgentConfig } from '@/lib/database';
 import { buildAgentChatModel } from './agentService';
+import { titleReasoning } from './agentReasoning';
 import { assertAgentSpendAllowed, agentSpendSettler, resolveAgentSpendScope } from './agentSpendLimits';
 import { withModelUsageLogging } from './modelUsageTap';
 import { runWithTenantDb } from './agentRunService';
@@ -108,7 +109,9 @@ export async function generateConversationTitle(input: GenerateTitleInput): Prom
                     // A title is a few words: no room for a long answer, and nothing creative about it.
                     max_tokens: 40,
                     temperature: 0.2,
-                });
+                    // Thinking would eat the 40-token budget and the agent's own pick is for answers.
+                    // Forced above every other rung (agent, Model Hub, request).
+                }, titleReasoning());
                 const tapped = withModelUsageLogging(chatModel, {
                     tenantDbName: input.tenantDbName,
                     model,

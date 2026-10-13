@@ -1,3 +1,4 @@
+import { parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
@@ -197,6 +198,14 @@ async function handleAgentChatCompletion(input: {
     source: 'api',
   });
 
+  // `reasoning_effort` / `reasoning: { effort }`: the lowest rung (agent pick > Model Hub > this), refused when invalid.
+  const reasoningRequest = parseAgentRequestReasoning(body);
+  if (reasoningRequest.error) {
+    return reply.code(400).send({
+      error: { message: reasoningRequest.error, type: 'invalid_request_error', param: 'reasoning_effort', code: 'invalid_reasoning' },
+    });
+  }
+
   // Which of the agent's models answers (`agent_model` in the body - `extra_body` for OpenAI SDKs - or the
   // `x-cognipeer-agent-model` header; the session's last model otherwise). `model` stays the agent's id.
   let modelChoice: Awaited<ReturnType<typeof resolveRunModelForRequest>> | undefined;
@@ -222,6 +231,7 @@ async function handleAgentChatCompletion(input: {
 
   const common = {
     ...(modelChoice ? { modelChoice } : {}),
+    ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     agent,
     model,
     messages: body.messages as OpenAiMessage[] | undefined,

@@ -74,7 +74,7 @@ describe('resolveAgentRuntimeOptions', () => {
                 planning: { mode: 'planner_executor', replanPolicy: 'every_n_steps', everyNSteps: 3 },
                 limits: { maxToolCalls: 40, maxCostUsd: 2.5 },
                 contextPilot: { enabled: true, excludeTools: ['knowledge_search'] },
-                reasoning: { enabled: true, level: 'high', effort: 'medium' },
+                reasoning: { enabled: true, level: 'high', effort: 'medium', reflection: false },
                 askUser: true,
             },
         });
@@ -86,7 +86,8 @@ describe('resolveAgentRuntimeOptions', () => {
         // untouched knob keeps the module default
         expect(resolved.limits?.maxContextTokens).toBe(CONSOLE_AGENT_DEFAULTS.maxContextTokens);
         expect(resolved.contextPilot).toEqual({ enabled: true, excludeTools: ['knowledge_search'] });
-        expect(resolved.reasoning).toEqual({ enabled: true, level: 'high', native: { effort: 'medium' } });
+        // Effort / level moved next to the model (agentReasoning.ts); only reflection is read here.
+        expect(resolved.reasoning).toEqual({ enabled: true, reflection: false });
         // A stored `askUser: true` is ignored: no console channel can answer
         // the question, so offering the tool only ever locked the conversation.
         expect((resolved as Record<string, unknown>).humanInTheLoop).toBeUndefined();

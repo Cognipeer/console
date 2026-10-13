@@ -63,8 +63,13 @@ export interface NativeAgentModelInput {
      * that cannot stream tool calls (`settings.disableStreamingWithTools`).
      */
     disableStreaming?: boolean;
-    /** The reasoning to ask for. Unset falls back to the Model Hub default; unset there too sends nothing. */
+    /** What the AGENT selected for this model. Wins over everything else; unset falls through. */
     reasoning?: NativeAgentReasoning;
+    /**
+     * What the API request asked for. Lowest rung: agent selection > Model Hub
+     * default > this > nothing sent (agentReasoning.ts has the full rule).
+     */
+    requestReasoning?: NativeAgentReasoning;
     /** Transport override (tests). Defaults to the SSRF-guarded `safeFetch`. */
     fetch?: typeof fetch;
     timeoutMs?: number;
@@ -320,7 +325,7 @@ export async function buildNativeAgentModel(input: NativeAgentModelInput): Promi
             modelId: model.modelId,
             overrides,
             settings: modelSettings as AnyRecord,
-            reasoning: input.reasoning ?? settingsReasoning,
+            reasoning: input.reasoning ?? settingsReasoning ?? input.requestReasoning,
         }),
     );
     const streaming = spec.normalizeInlineReasoning ? splitInlineReasoningStream(native) : native;

@@ -2278,6 +2278,11 @@ export interface IAgentRuntimeConfig {
   context?: IAgentContextConfig;
   toolResponses?: IAgentToolResponsesConfig;
   contextPilot?: IAgentContextPilotConfig;
+  /**
+   * Only `reflection` is live. The rest moved next to the model
+   * (`IAgentConfig.reasoningEffort`); old values are migrated on read and on
+   * save (`migrateAgentReasoning`).
+   */
   reasoning?: IAgentReasoningConfig;
   /**
    * @deprecated IGNORED. Used to expose the SDK's `ask_user_question` tool,
@@ -2424,11 +2429,25 @@ export interface IAgentAdditionalModel {
   /** What a picker shows; the model's name when omitted. */
   label?: string;
   description?: string;
+  /** Reasoning effort when a run uses THIS model. Unset = the Model Hub default, then the request, then nothing. */
+  reasoningEffort?: AgentReasoningEffort;
+  /** Token budget for engines that think in tokens (Anthropic, Bedrock, Vertex). */
+  reasoningBudgetTokens?: number;
 }
 
 export interface IAgentConfig {
   /** Required for native agents; omitted/empty for connected (external) agents. */
   modelKey?: string;
+  /** Reasoning effort of the main model. Unset = Model Hub default, then the API request, then nothing. */
+  reasoningEffort?: AgentReasoningEffort;
+  /** Token budget of the main model for engines that think in tokens. */
+  reasoningBudgetTokens?: number;
+  /**
+   * Whether reasoning text is handed back (API responses, session events and
+   * messages, Studio chat). Default true; false hides it everywhere except the
+   * operator's playground view. Tokens are counted either way.
+   */
+  showReasoning?: boolean;
   /**
    * Further models a caller may pick for a run (`model` on the client API, `agent_model` on the
    * OpenAI-compatible surfaces). Max 10, unique, never the main `modelKey`. The main model is

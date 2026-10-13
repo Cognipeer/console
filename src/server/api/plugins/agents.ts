@@ -1,3 +1,4 @@
+import { parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
 import { AgentDocumentParseError } from '@/lib/services/agents/import/document';
 import {
   AgentImportError,
@@ -491,6 +492,12 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       return null;
     }
   }
+  // `reasoning_effort` / `reasoning: { effort }` from the dashboard chat: same lowest rung as the client API.
+  const reasoningRequest = parseAgentRequestReasoning(body);
+  if (reasoningRequest.error) {
+    void reply.code(400).send({ error: reasoningRequest.error, code: 'invalid_reasoning' });
+    return null;
+  }
   // Which of the agent's models this turn runs on: `model` in the body (the playground's picker), else the
   // session's last choice. The draft config unless a version is asked for - the playground runs the draft.
   let modelChoice: AgentModelChoice | undefined;
@@ -543,6 +550,7 @@ async function prepareDashboardTurn(request: FastifyRequest, reply: FastifyReply
       ...(typeof body.version === 'number' ? { version: body.version } : {}),
       ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
       ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
+      ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
     },
   };
 }

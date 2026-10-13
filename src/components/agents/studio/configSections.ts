@@ -41,7 +41,7 @@ export function configSectionTitle(id: string, translate: (key: string) => strin
 }
 
 export const CONFIG_SECTION_KEYS: Record<string, string[]> = {
-    basic: ['modelKey', 'additionalModels', 'knowledgeEngineKey', 'toolBindings', 'guardrails', 'inputGuardrailKey', 'outputGuardrailKey'],
+    basic: ['modelKey', 'reasoningEffort', 'reasoningBudgetTokens', 'showReasoning', 'additionalModels', 'knowledgeEngineKey', 'toolBindings', 'guardrails', 'inputGuardrailKey', 'outputGuardrailKey'],
     prompt: ['systemPrompt', 'promptKey', 'promptVariables'],
     subagents: ['subagents', 'subagentPolicy'],
     skills: ['skills', 'skillPolicy'],

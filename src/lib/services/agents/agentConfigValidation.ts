@@ -29,6 +29,7 @@ import { validateHitlConfig } from './agentHumanInTheLoop';
 import { checkEmbeddedClientTools } from './agentClientTools';
 import { normalizeAttachmentsFolder } from './sessionFilesConfig';
 import { inspectFileBucket } from './sessionFilesBucket';
+import { reasoningConfigIssues } from './agentReasoning';
 
 export interface AgentConfigIssue {
     /** Dotted path into the config, e.g. `runtime.limits.maxCostUsd`. */
@@ -95,6 +96,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
 
     if (!config.modelKey) issues.errors.push({ field: 'modelKey', message: 'A model is required' });
     checkAdditionalModelsShape(issues, config);
+    issues.errors.push(...reasoningConfigIssues(config));
     if (config.systemPrompt && config.promptKey) {
         issues.warnings.push({
             field: 'promptKey',

@@ -1,3 +1,4 @@
+import { agentShowsReasoning, parseAgentRequestReasoning } from '@/lib/services/agents/agentReasoning';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AgentStatus, IAgentConfig, IAgentConversation, IAgentSessionBudget } from '@/lib/database';
 import { createLogger } from '@/lib/core/logger';
@@ -285,6 +286,13 @@ function createResponsesHandler(usePublished: boolean) {
         }
       }
 
+      // `reasoning_effort` / `reasoning: { effort }`: the lowest rung of the reasoning precedence (the agent's
+      // own pick and the Model Hub default win), so a bad value is refused instead of silently ignored.
+      const reasoningRequest = parseAgentRequestReasoning(body);
+      if (reasoningRequest.error) {
+        return reply.code(400).send(invalidRequestErrorBody(reasoningRequest.error, 'invalid_reasoning'));
+      }
+
       // Which of the agent's models this run uses (`agent_model` / header; the sticky model of the session otherwise).
       // The config that will run decides the list: the published one for /agents/responses or a pinned version.
       let modelChoice: AgentModelChoice | undefined;
@@ -471,6 +479,7 @@ function createResponsesHandler(usePublished: boolean) {
           version: requestedVersion,
           runtimeContext,
           ...(modelChoice ? { modelKey: modelChoice.modelKey } : {}),
+          ...(reasoningRequest.value ? { requestReasoning: reasoningRequest.value } : {}),
         },
         syncTimeoutMs: limits.syncTimeoutMs,
       });
@@ -481,8 +490,13 @@ function createResponsesHandler(usePublished: boolean) {
         return reply.code(504).send(agentSyncTimeoutErrorBody());
       }
 
-      const { _conversation_messages, ...responseBody } = syncOutcome.response;
+      const { _conversation_messages, ...fullBody } = syncOutcome.response;
       void _conversation_messages;
+      // The agent's `showReasoning` already left the reasoning item out; `include_reasoning: false` lets
+      // a request narrow it further for itself (it can never bring back what the agent hid).
+      const responseBody = body.include_reasoning === false
+        ? { ...fullBody, output: (fullBody.output ?? []).filter((item) => item.type !== 'reasoning') }
+        : fullBody;
       return reply.code(200).send(modelChoice ? { ...responseBody, cognipeer: { agent_model: modelChoice.modelKey } } : responseBody);
     } catch (error) {
       if (error instanceof AgentGuardrailBlockedError) {
@@ -528,6 +542,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             modelKey: agent.config.modelKey,
             temperature: agent.config.temperature,
             topP: agent.config.topP,
+            // false: the agent hides its reasoning text (agent-server / chat-ui honour it).
+            showReasoning: agentShowsReasoning(agent.config),
           },
           createdAt: agent.createdAt,
           description: agent.description,
@@ -574,6 +590,8 @@ export const clientAgentsApiPlugin: FastifyPluginAsync = async (app) => {
             modelKey: agent.config.modelKey,
             temperature: agent.config.temperature,
             topP: agent.config.topP,
+            // false: the agent hides its reasoning text (agent-server / chat-ui honour it).
+            showReasoning: agentShowsReasoning(agent.config),
           },
           createdAt: agent.createdAt,
           description: agent.description,

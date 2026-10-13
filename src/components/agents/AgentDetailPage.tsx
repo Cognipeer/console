@@ -88,6 +88,8 @@ import AgentSandboxPanel from './studio/AgentSandboxPanel';
 import { resolveSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import ConfigSection, { ConfigBlock } from './studio/ConfigSection';
 import AgentAdditionalModels from './studio/AgentAdditionalModels';
+import AgentReasoningPicker, { type ReasoningPickerValue } from './studio/AgentReasoningPicker';
+import { migrateAgentReasoning } from '@/lib/services/agents/agentReasoning';
 import type { SkillView } from '@/components/skills/types';
 import type {
   IAgentConfig,
@@ -152,6 +154,8 @@ interface Model {
   name: string;
   modelId: string;
   category: string;
+  providerKey?: string;
+  settings?: Record<string, unknown>;
 }
 
 interface RagModule {
@@ -242,10 +246,17 @@ export default function AgentDetailPage() {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [additionalModels, setAdditionalModels] = useState<IAgentAdditionalModel[]>([]);
+  // The main model's own reasoning pick, side by side with the model ("Model default" = unset).
+  const [mainReasoning, setMainReasoning] = useState<ReasoningPickerValue>({});
+  const [showReasoning, setShowReasoning] = useState(true);
   const [prompts, setPrompts] = useState<PromptOption[]>([]);
   const [ragModules, setRagModules] = useState<RagModule[]>([]);
   const [guardrails, setGuardrails] = useState<GuardrailBindingOption[]>([]);
-  const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string }>>([]);
+  const [providers, setProviders] = useState<Array<{ key: string; label?: string; name?: string; driver?: string }>>([]);
+  const driverByProviderKey = useMemo(
+    () => Object.fromEntries(providers.map((p) => [p.key, p.driver])) as Record<string, string | undefined>,
+    [providers],
+  );
   const [editConnectionOpen, setEditConnectionOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   // Overview is the landing tab — it's the one screen that answers "is this
@@ -375,8 +386,15 @@ export default function AgentDetailPage() {
           knowledgeEngineKey: cfg.knowledgeEngineKey || '',
         });
         setToolBindings(cfg.toolBindings ?? []);
-        setAdditionalModels(cfg.additionalModels ?? []);
-        setRuntimeConfig(cfg.runtime ?? {});
+        // Old Advanced-tab reasoning is folded into the model's own fields (the server does it on read too).
+        const migrated = migrateAgentReasoning(cfg);
+        setAdditionalModels(migrated.additionalModels ?? []);
+        setMainReasoning({
+          ...(migrated.reasoningEffort ? { reasoningEffort: migrated.reasoningEffort } : {}),
+          ...(migrated.reasoningBudgetTokens ? { reasoningBudgetTokens: migrated.reasoningBudgetTokens } : {}),
+        });
+        setShowReasoning(migrated.showReasoning !== false);
+        setRuntimeConfig(migrated.runtime ?? {});
         setStructuredOutput(cfg.structuredOutput);
         setSubagents(cfg.subagents ?? []);
         setSubagentPolicy(cfg.subagentPolicy);
@@ -598,6 +616,12 @@ export default function AgentDetailPage() {
       additionalModels: additionalModels.filter((entry) => entry.modelKey !== values.modelKey).length > 0
         ? additionalModels.filter((entry) => entry.modelKey !== values.modelKey)
         : undefined,
+      // Reasoning of the main model: set means the agent decides; unset leaves it to the Model Hub default.
+      reasoningEffort: mainReasoning.reasoningEffort,
+      reasoningBudgetTokens: mainReasoning.reasoningEffort && mainReasoning.reasoningEffort !== 'none'
+        ? mainReasoning.reasoningBudgetTokens
+        : undefined,
+      showReasoning: showReasoning ? undefined : false,
       // No temperature / maxTokens. The form used to send 0.7 and 4096 on
       // every save, so every agent was silently capped at 4096 output tokens
       // and pinned to a temperature — settings nobody chose and, once the
@@ -890,22 +914,38 @@ export default function AgentDetailPage() {
       </Stack>
     ) : (
       <Stack gap="xl">
-        <Select
-          label={t('config.model')}
-          placeholder={t('config.modelPlaceholder')}
-          data={models.map((m) => ({
-            value: m.key,
-            label: `${m.name} (${m.modelId})`,
-          }))}
-          searchable
-          {...configForm.getInputProps('modelKey')}
-        />
+        <Group align="flex-end" gap="sm" wrap="wrap">
+          <Select
+            label={t('config.model')}
+            placeholder={t('config.modelPlaceholder')}
+            data={models.map((m) => ({
+              value: m.key,
+              label: `${m.name} (${m.modelId})`,
+            }))}
+            searchable
+            style={{ flex: 1, minWidth: 220 }}
+            {...configForm.getInputProps('modelKey')}
+            onChange={(next) => {
+              // Another model may speak another reasoning dialect: its pick starts at "Model default".
+              if (next !== configForm.values.modelKey) setMainReasoning({});
+              configForm.setFieldValue('modelKey', next ?? '');
+            }}
+          />
+          <AgentReasoningPicker
+            model={models.find((m) => m.key === configForm.values.modelKey)}
+            driverByProviderKey={driverByProviderKey}
+            value={mainReasoning}
+            onChange={setMainReasoning}
+            testId="agent-main-reasoning"
+          />
+        </Group>
 
         <AgentAdditionalModels
           value={additionalModels}
           onChange={setAdditionalModels}
           models={models}
           mainModelKey={configForm.values.modelKey}
+          driverByProviderKey={driverByProviderKey}
           labels={{
             title: t('config.additionalModels'),
             description: t('config.additionalModelsDescription'),
@@ -915,6 +955,14 @@ export default function AgentDetailPage() {
             descriptionLabel: t('config.additionalModelDescription'),
             descriptionPlaceholder: t('config.additionalModelDescriptionPlaceholder'),
           }}
+        />
+
+        <Switch
+          label={t('config.showReasoning')}
+          description={t('config.showReasoningDescription')}
+          checked={showReasoning}
+          onChange={(event) => setShowReasoning(event.currentTarget.checked)}
+          data-testid="agent-show-reasoning"
         />
 
         {/* Prompt configuration (mode / template / managed prompt) lives in

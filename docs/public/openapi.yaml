@@ -13526,6 +13526,9 @@ components:
           type: integer
           nullable: true
           description: Maximum output tokens.
+        showReasoning:
+          type: boolean
+          description: "False when the agent hides its reasoning text (API responses, session messages, Studio chat). Clients such as the agent server and chat UI honour it. Default true."
     AgentConfigInput:
       type: object
       additionalProperties: true
@@ -13540,6 +13543,17 @@ components:
         modelKey:
           type: string
           description: Key of the model to run on. Required for native agents.
+        reasoningEffort:
+          type: string
+          enum: [none, minimal, low, medium, high]
+          description: "Reasoning effort of the main model. Unset = \"Model default\": the Model Hub default, then the API request, then nothing. The old `runtime.reasoning` (enabled/level/effort/budget) is migrated into this on read and on save; only `runtime.reasoning.reflection` stays there."
+        reasoningBudgetTokens:
+          type: integer
+          minimum: 1
+          description: Token budget of the main model for engines that think in tokens (Anthropic, Bedrock, Vertex). Ignored with `none`.
+        showReasoning:
+          type: boolean
+          description: "Default true. False leaves reasoning text out of API responses, session events/messages and Studio chat; the operator's playground view can still show it. Token accounting is unchanged."
         additionalModels:
           type: array
           maxItems: 10
@@ -13554,6 +13568,13 @@ components:
                 type: string
               description:
                 type: string
+              reasoningEffort:
+                type: string
+                enum: [none, minimal, low, medium, high]
+                description: Reasoning effort when a run uses this model. Unset = Model default.
+              reasoningBudgetTokens:
+                type: integer
+                minimum: 1
         connection:
           $ref: "#/components/schemas/AgentConnectionInput"
         temperature:
@@ -14359,6 +14380,20 @@ components:
         agent_model:
           type: string
           description: "Which of the agent's models answers this turn: its main model or one listed in `models` on the agent. Omit to use the session's last choice, else the main model. Not listed: `400` `model_not_allowed`. The `X-Cognipeer-Agent-Model` header does the same; the body wins."
+        reasoning_effort:
+          type: string
+          enum: [none, minimal, low, medium, high]
+          description: "Reasoning effort for the run. Lowest rung of the precedence: the agent's own pick for the model that answers wins, then the Model Hub default of that model, then this value, then nothing is sent (the provider's own default). An invalid value is `400` `invalid_reasoning`. Background runs ignore it."
+        reasoning:
+          type: object
+          description: "Same as `reasoning_effort`, in the Responses API shape (`reasoning: { effort }`). The object wins when both are sent."
+          properties:
+            effort:
+              type: string
+              enum: [none, minimal, low, medium, high]
+        include_reasoning:
+          type: boolean
+          description: "False leaves the reasoning output item out of this response. It can only narrow: what the agent's `showReasoning: false` hid stays hidden."
         input:
           description: "User message: a plain string, or an array of message items. The text and files (`input_file`, `input_image`) of the most recent `user` item are used."
           oneOf:
@@ -16409,6 +16444,17 @@ components:
         agent_model:
           type: string
           description: "When `model` names an agent that offers several models: which one answers (OpenAI SDKs: `extra_body`). The `X-Cognipeer-Agent-Model` header does the same; the body wins. Errors: `400` `model_not_allowed` (not offered by the agent). The response `model` stays the agent; the answering model is `cognipeer.agent_model`."
+        reasoning_effort:
+          type: string
+          enum: [none, minimal, low, medium, high]
+          description: "Reasoning effort. For a model: the Model Hub default of that model wins, then this value, then nothing is sent. For an agent: the agent's own pick wins, then the Model Hub default, then this value. `include_reasoning: false` hides the reasoning text from the response (it cannot show what the Model Hub or the agent hid)."
+        reasoning:
+          type: object
+          description: "Same as `reasoning_effort` (`reasoning: { effort }`); the object wins when both are sent."
+          properties:
+            effort:
+              type: string
+              enum: [none, minimal, low, medium, high]
         messages:
           type: array
           description: Ordered list of messages that make up the conversation.

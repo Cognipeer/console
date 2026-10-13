@@ -190,6 +190,13 @@ import {
     sessionAllowedTools,
 } from './agentHumanInTheLoop';
 import { additionalModelKeys, applyAgentModelChoice, type AgentModelChoice } from './agentModelSelection';
+import {
+    agentReasoningForModel,
+    agentShowsReasoning,
+    applyModelToConfig,
+    migrateAgentReasoning,
+} from './agentReasoning';
+import type { NormalizedReasoning } from '@/lib/services/models/reasoning';
 import { normalizeStaleRunningStatus, normalizeStaleRunningStatuses } from './sessionRuntime';
 import {
     AgentResumeError,
@@ -1492,6 +1499,11 @@ type BuildSubagentsInput = {
     spend?: AgentSpendScope;
     /** The session's images, read at a sub-agent's own model call (see `sessionImages.ts`). */
     images?: SessionImagesOptions;
+    /**
+     * Reasoning of a sub-agent's model: the parent's selection for the same
+     * model (when it is one the parent picked), then Model Hub, then the request.
+     */
+    reasoning?: { config: IAgentConfig; request?: NormalizedReasoning };
 };
 
 /**
@@ -1592,7 +1604,7 @@ async function buildAgentSubagents(
 
         let childModel: unknown;
         if (modelKey) {
-            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images);
+            childModel = await buildSubagentModel(input.tenantDbName, input.tenantId, input.projectId, modelKey, input.spend, input.images, input.reasoning);
         }
 
         subagents.push({
@@ -1646,18 +1658,28 @@ async function buildSubagentModel(
     modelKey: string,
     spend?: AgentSpendScope,
     images?: SessionImagesOptions,
+    reasoning?: BuildSubagentsInput['reasoning'],
 ): Promise<unknown> {
     try {
         const model = await getModelByKey(tenantDbName, modelKey, projectId);
         if (!model || model.category !== 'llm') return undefined;
+        const agentPick = agentReasoningForModel(reasoning?.config, modelKey);
         const chatModel = isDynamicModel(model)
-            ? createDynamicChatModel({ tenantDbName, tenantId, projectId, modelKey: model.key })
+            ? createDynamicChatModel({
+                tenantDbName,
+                tenantId,
+                projectId,
+                modelKey: model.key,
+                ...(agentPick || reasoning?.request ? { reasoning: { ...(agentPick ?? reasoning?.request) } } : {}),
+            })
             : await buildNativeAgentModel({
                 tenantDbName,
                 tenantId,
                 projectId,
                 model,
                 disableStreaming: agentChatModelOptions(model).disableStreaming,
+                ...(agentPick ? { reasoning: agentPick } : {}),
+                ...(reasoning?.request ? { requestReasoning: reasoning.request } : {}),
             });
         const tapped = withModelUsageLogging(chatModel, {
             tenantDbName,
@@ -2307,7 +2329,7 @@ export async function createAgentRecord(
         description: data.description,
         // Sandbox secrets are sealed here, the one write path every creator
         // (dashboard, client API, Assistants) goes through.
-        config: sealAgentConfigSecrets(data.config, undefined),
+        config: sealAgentConfigSecrets(migrateAgentReasoning(data.config), undefined),
         status: data.status || 'active',
         createdBy: userId,
     });
@@ -2324,6 +2346,8 @@ export async function updateAgentRecord(
 ): Promise<IAgent | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
+    // Old Advanced-tab reasoning moves next to the model on every save.
+    if (data.config) data = { ...data, config: migrateAgentReasoning(data.config) };
     if (data.config?.sandbox || data.config?.execution) {
         // `config` replaces the stored one wholesale; masked secret values
         // must resolve against what is stored, not be saved as the mask —
@@ -2350,7 +2374,7 @@ export async function getAgentById(
 ): Promise<IAgent | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    return db.findAgentById(agentId);
+    return withMigratedReasoning(await db.findAgentById(agentId));
 }
 
 export async function getAgentByKey(
@@ -2360,7 +2384,14 @@ export async function getAgentByKey(
 ): Promise<IAgent | null> {
     const db = await getDatabase();
     await db.switchToTenant(tenantDbName);
-    return db.findAgentByKey(key, projectId);
+    return withMigratedReasoning(await db.findAgentByKey(key, projectId));
+}
+
+/** Read-side half of the `runtime.reasoning` migration (the save side is in create/update). */
+function withMigratedReasoning(agent: IAgent | null): IAgent | null {
+    if (!agent?.config) return agent;
+    const config = migrateAgentReasoning(agent.config);
+    return config === agent.config ? agent : { ...agent, config };
 }
 
 export async function listAgents(
@@ -2539,7 +2570,10 @@ export async function buildAgentChatModel(
     projectId: string,
     modelKey: string,
     overrides: Record<string, unknown> = {},
+    /** What the agent selected for this model (wins over everything). */
     reasoning?: NativeAgentReasoning,
+    /** What the API request asked for (lowest rung; see agentReasoning.ts). */
+    requestReasoning?: NativeAgentReasoning,
 ) {
     const model = await getModelByKey(tenantDbName, modelKey, projectId);
     if (!model) throw new Error(`Model "${modelKey}" not found`);
@@ -2558,7 +2592,9 @@ export async function buildAgentChatModel(
                 projectId,
                 modelKey: model.key,
                 overrides: passthrough,
-                ...(reasoning ? { reasoning } : {}),
+                // A Dynamic LLM has no reasoning config of its own: the agent's pick (or
+                // else the caller's) rides to whichever model the call is routed to.
+                ...((reasoning ?? requestReasoning) ? { reasoning: (reasoning ?? requestReasoning)! } : {}),
             }) as unknown as BaseChatModel,
         };
     }
@@ -2574,6 +2610,7 @@ export async function buildAgentChatModel(
         overrides,
         disableStreaming: agentChatModelOptions(model).disableStreaming,
         ...(reasoning ? { reasoning } : {}),
+        ...(requestReasoning ? { requestReasoning } : {}),
     });
     return { model, chatModel };
 }
@@ -2828,6 +2865,11 @@ export interface AgentChatRequest {
      * A background turn takes the choice stored on its session instead.
      */
     modelKey?: string;
+    /**
+     * Reasoning the API request asked for (`reasoning_effort` / `reasoning: {effort}`, already
+     * validated by the route). The lowest rung: the agent's pick and the Model Hub default win.
+     */
+    requestReasoning?: NormalizedReasoning;
     /** Request a specific published version (API/SDK) */
     version?: number;
     /** When true, use the published version (default for API/SDK calls) */
@@ -2901,6 +2943,8 @@ export interface AgentPlaygroundChatRequest {
     userMessage: string;
     /** The model the route resolved for this turn - see `AgentChatRequest.modelKey`. */
     modelKey?: string;
+    /** See `AgentChatRequest.requestReasoning`. */
+    requestReasoning?: NormalizedReasoning;
     /** Who is asking and through which door - see `AgentChatRequest.callerContext`. Overrides what is derived from the runtime context. */
     callerContext?: RoutingCallerContext;
     /** Ids of the session's files this message attaches (a Session only; uploaded to it first). */
@@ -3272,6 +3316,8 @@ async function runExternalAgentTurn(input: {
 async function buildLocalAgentRun(input: {
     /** Which of the agent's models this run uses and why; tagged on the trace. */
     modelChoice?: AgentModelChoice;
+    /** See `AgentChatRequest.requestReasoning`. */
+    requestReasoning?: NormalizedReasoning;
     db: Awaited<ReturnType<typeof getDatabase>>;
     tenantDbName: string;
     tenantId: string;
@@ -3315,7 +3361,10 @@ async function buildLocalAgentRun(input: {
      */
     spend?: AgentSpendScope;
 }) {
-    const { db, tenantDbName, tenantId, projectId, agentKey, agent, config, runtimeContext, actorId, source } = input;
+    const { db, tenantDbName, tenantId, projectId, agentKey, agent, runtimeContext, actorId, source } = input;
+    // Old `runtime.reasoning` becomes the main model's own selection (a stored draft or a
+    // published snapshot may still carry it).
+    const config = migrateAgentReasoning(input.config);
     const hitl = resolveHitlConfig(config.humanInTheLoop);
     const hitlMode = resolveHitlRunMode(hitl, { unattended: input.unattended, canPause: input.canPause });
 
@@ -3334,7 +3383,7 @@ async function buildLocalAgentRun(input: {
         ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
         ...(config.topP !== undefined ? { top_p: config.topP } : {}),
         ...(config.maxTokens !== undefined ? { max_tokens: config.maxTokens } : {}),
-    });
+    }, agentReasoningForModel(config, config.modelKey), input.requestReasoning);
 
     // System prompt
     let systemPrompt = config.systemPrompt;
@@ -3603,6 +3652,7 @@ async function buildLocalAgentRun(input: {
         runtimeContext,
         ...(spend ? { spend } : {}),
         ...(sessionImages ? { images: sessionImages } : {}),
+        reasoning: { config, ...(input.requestReasoning ? { request: input.requestReasoning } : {}) },
     });
     cleanupTasks.push(...subagentCleanupTasks);
 
@@ -4033,7 +4083,7 @@ async function runAgentChatTurn(
     const modelChoice: AgentModelChoice | undefined = offersModels
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: conversation.metadata, background: Boolean(request.runId) })
         : undefined;
-    if (modelChoice && modelChoice.modelKey !== config.modelKey) config = { ...config, modelKey: modelChoice.modelKey };
+    if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -4177,6 +4227,7 @@ async function runAgentChatTurn(
         ...(request.answersClientTools ? { answersClientTools: true } : {}),
         ...(spend ? { spend } : {}),
         ...(modelChoice ? { modelChoice } : {}),
+        ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
     });
 
     // 4. What the agent resumes from: the state the conversation's last turn
@@ -4279,7 +4330,9 @@ async function runAgentChatTurn(
             ledger: rewriteLedger,
         });
 
-        const assistantReasoning = extractAgentReasoning(result);
+        // `config.showReasoning: false` keeps the thinking text out of the API response, the
+        // stored session message and Studio chat. The tokens were spent and are counted regardless.
+        const assistantReasoning = agentShowsReasoning(config) ? extractAgentReasoning(result) : undefined;
 
         // 5b. Output guardrail: `output.pre` ran inside the agent on
         // `postModelCall`, so a redaction is already in `result.content` and a
@@ -4731,7 +4784,7 @@ async function runPlaygroundChatTurn(
     const modelChoice: AgentModelChoice | undefined = offersModels
         ? applyAgentModelChoice(config, { chosen: request.modelKey, sessionMetadata: sessionConversation?.metadata })
         : undefined;
-    if (modelChoice && modelChoice.modelKey !== config.modelKey) config = { ...config, modelKey: modelChoice.modelKey };
+    if (modelChoice && modelChoice.modelKey !== config.modelKey) config = applyModelToConfig(config, modelChoice.modelKey);
 
     // A message that arrives while the session waits on an approval or a
     // question is refused (or cancels the request) per the agent's own setting.
@@ -4874,6 +4927,7 @@ async function runPlaygroundChatTurn(
         ...(request.embedded ? { embedded: request.embedded } : {}),
         ...(spend ? { spend } : {}),
         ...(modelChoice ? { modelChoice } : {}),
+        ...(request.requestReasoning ? { requestReasoning: request.requestReasoning } : {}),
     });
 
     const attached = await assembleMessageAttachments({
@@ -5053,7 +5107,15 @@ async function runPlaygroundChatTurn(
                 if (pause) playgroundResult.pendingActions = pause.actions.map(toMessagePendingAction);
                 else playgroundResult.warnings = [...(playgroundResult.warnings ?? []), PAUSE_UNAVAILABLE_WARNING];
             }
-            const messageCount = await persistSessionTurn(db, sessionConversation, userMessage, playgroundResult, attached.attachments);
+            // The operator's playground view always gets the thinking text; what is STORED on the
+            // session (and read back through the session API) follows the agent's setting.
+            const messageCount = await persistSessionTurn(
+                db,
+                sessionConversation,
+                userMessage,
+                agentShowsReasoning(config) ? playgroundResult : { ...playgroundResult, reasoning: undefined },
+                attached.attachments,
+            );
             if (messageCount !== undefined) {
                 await addSessionTurnSpend({
                     db, conversationId: String(sessionConversation._id), plan: spendAccount, spentUsd: budget?.turnCostUsd ?? costUsd ?? 0,
@@ -5438,7 +5500,7 @@ async function runAgentResumeTurn(
     const { conversation, agent, version } = loaded;
     // A turn that paused resumes on the model it ran with (stored on the session when the request was authorized).
     const config: IAgentConfig = additionalModelKeys(loaded.config).length > 0
-        ? { ...loaded.config, modelKey: applyAgentModelChoice(loaded.config, { sessionMetadata: conversation.metadata, background: true }).modelKey }
+        ? applyModelToConfig(loaded.config, applyAgentModelChoice(loaded.config, { sessionMetadata: conversation.metadata, background: true }).modelKey)
         : loaded.config;
     const paused = pausedRun?.paused ?? null;
     const approvals = pausedRun?.approvals ?? [];
@@ -5639,7 +5701,9 @@ async function runAgentResumeTurn(
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;
 
-        const assistantReasoning = extractAgentReasoning(result);
+        // `config.showReasoning: false` keeps the thinking text out of the API response, the
+        // stored session message and Studio chat. The tokens were spent and are counted regardless.
+        const assistantReasoning = agentShowsReasoning(config) ? extractAgentReasoning(result) : undefined;
         const turnOutcome = describeTurnOutcome(result, inputMessageCount);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const compactedTools = compactions.length > 0
