@@ -21,11 +21,11 @@
  *    the adapter's `transformRequest` hook, which sees the finished request.
  */
 
-import type { BaseChatModel, ChatCompletionRequest, NativeModelOptions } from '@cognipeer/agent-sdk';
+import type { BaseChatModel } from '@cognipeer/agent-sdk';
 import type { IModel } from '@/lib/database';
-import { resolveUnsupportedParamNames } from '@/lib/providers/unsupportedParams';
-import { ANTHROPIC_DEFAULT_MAX_TOKENS, resolveOverrides, type ModelSettingsOverrides } from '@/lib/providers/contracts/modelContracts';
-import { withInlineReasoningNormalization } from '@/lib/providers/contracts/wireNormalization';
+import { resolveOverrides } from '@/lib/providers/contracts/modelContracts';
+import { buildNativeOptions, buildProviderConfig, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
+import type { NativeReasoning } from '@/lib/providers/domains/model';
 import { createInlineReasoningSplitter } from '@/lib/shared/inlineReasoning';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { resolveModelInvocationConfig } from '@/lib/services/models/inferenceService';
@@ -44,15 +44,8 @@ export const AGENT_MODEL_REQUEST_TIMEOUT_MS = 600_000;
 /** `safeFetch` gets a little more, so the SDK's own timeout (a clean 408) fires first. */
 const GUARD_TIMEOUT_MARGIN_MS = 5_000;
 
-/** Drivers whose wire format is OpenAI Chat Completions. */
-const OPENAI_SCHEMA_DRIVERS = new Set(['openai', 'openai-compatible', 'azure', 'together']);
-
 /** The normalized reasoning value (`unset = send nothing`). */
-export interface NativeAgentReasoning {
-    effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
-    budgetTokens?: number;
-    includeThoughts?: boolean;
-}
+export type NativeAgentReasoning = NativeReasoning;
 
 export interface NativeAgentModelInput {
     tenantDbName: string;
@@ -79,20 +72,8 @@ export interface NativeAgentModelInput {
 }
 
 type AnyRecord = Record<string, unknown>;
-type SdkReasoning = NonNullable<NativeModelOptions['reasoning']>;
 
-const EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high']);
-
-/** Any of the reasoning shapes in circulation (legacy `{effort, summary}` included), as the normalized value. */
-export function normalizeNativeReasoning(value: unknown): NativeAgentReasoning | undefined {
-    if (!value || typeof value !== 'object') return undefined;
-    const raw = value as AnyRecord;
-    const out: NativeAgentReasoning = {};
-    if (typeof raw.effort === 'string' && EFFORTS.has(raw.effort)) out.effort = raw.effort as NativeAgentReasoning['effort'];
-    if (typeof raw.budgetTokens === 'number' && Number.isFinite(raw.budgetTokens) && raw.budgetTokens > 0) out.budgetTokens = raw.budgetTokens;
-    if (typeof raw.includeThoughts === 'boolean') out.includeThoughts = raw.includeThoughts;
-    return Object.keys(out).length > 0 ? out : undefined;
-}
+export { normalizeNativeReasoning };
 
 /** The transport every native agent call goes through: the SSRF guard, time-to-headers bounded. */
 export function guardedModelFetch(timeoutMs: number): typeof fetch {
@@ -102,122 +83,6 @@ export function guardedModelFetch(timeoutMs: number): typeof fetch {
         // reach the open response too, not only the wait for its headers.
         return safeFetch(url, init, { timeoutMs: timeoutMs + GUARD_TIMEOUT_MARGIN_MS, keepAbortLinked: true });
     };
-}
-
-/** Wire name -> the request field it lives in, for the parameters a tools-conditional rule may strip. */
-const STRIPPABLE_FIELDS: Readonly<Record<string, keyof ChatCompletionRequest>> = {
-    temperature: 'temperature',
-    top_p: 'topP',
-    presence_penalty: 'presencePenalty',
-    frequency_penalty: 'frequencyPenalty',
-    reasoning: 'reasoning',
-    reasoning_effort: 'reasoning',
-};
-
-const REASONING_WIRE_NAMES = ['reasoning', 'reasoning_effort'];
-
-/**
- * The adapter's last-mile hook: the finished request (tools bound, reasoning
- * applied) is made legal for this model.
- */
-function buildTransformRequest(input: {
-    driver: string;
-    modelId: string;
-    settings: AnyRecord;
-}): NonNullable<NativeModelOptions['transformRequest']> {
-    const openAiSchema = OPENAI_SCHEMA_DRIVERS.has(input.driver);
-    const resolve = (hasTools: boolean) => resolveUnsupportedParamNames({
-        driver: input.driver,
-        modelId: input.modelId,
-        manual: input.settings.unsupportedParams,
-        autoDetect: input.settings.autoDropUnsupportedParams,
-        hasTools,
-    });
-    const plain = resolve(false);
-    const withTools = resolve(true);
-
-    return (request: ChatCompletionRequest) => {
-        const hasTools = Boolean(request.tools?.length);
-        const rule = hasTools ? withTools : plain;
-        // A copy all the way down: the options object is shared by every call
-        // and a provider merges its reasoning INTO nested extras (Bedrock's
-        // `additionalModelRequestFields`), which would otherwise stick.
-        let extra: AnyRecord | undefined = request.extra ? structuredClone(request.extra) : undefined;
-
-        // Chat Completions carries reasoning as `reasoning_effort`. A native
-        // `reasoning` config would send OpenAI-family reasoning models to the
-        // Responses API (a different request shape the gateway does not proxy)
-        // and, on Azure, to a route the deployment may not serve.
-        if (openAiSchema && request.reasoning) {
-            const { effort } = request.reasoning;
-            if (effort) extra = { ...(extra ?? {}), reasoning_effort: effort };
-            delete request.reasoning;
-        }
-
-        for (const name of rule.params) {
-            const lower = name.toLowerCase();
-            const field = STRIPPABLE_FIELDS[lower];
-            if (field) delete request[field];
-            // `reasoning` and `reasoning_effort` are one setting to the gateway (resolveModelInvocationConfig
-            // drops both for either name), and here an OpenAI-schema effort already sits in `extra` under
-            // its wire name: listing only `reasoning` must still keep it off the wire.
-            const names = lower === 'reasoning' || lower === 'reasoning_effort' ? REASONING_WIRE_NAMES : [lower, name];
-            if (extra) for (const key of names) delete extra[key];
-        }
-
-        // A rule can REQUIRE a value, not only forbid one (GPT-5 + tools:
-        // `reasoning_effort: "none"`). Merged last so it always wins.
-        if (hasTools && rule.detected.forced) extra = { ...(extra ?? {}), ...rule.detected.forced };
-
-        if (extra && Object.keys(extra).length > 0) request.extra = extra;
-        else delete request.extra;
-        return request;
-    };
-}
-
-/** Sampling and token settings of the model record, as the adapter's defaults. */
-function buildNativeOptions(input: {
-    driver: string;
-    modelId: string;
-    overrides: ModelSettingsOverrides;
-    settings: AnyRecord;
-    reasoning?: NativeAgentReasoning;
-}): NativeModelOptions {
-    const { driver, overrides } = input;
-    const openAiSchema = OPENAI_SCHEMA_DRIVERS.has(driver);
-
-    let maxTokens = overrides.maxCompletionTokens ?? overrides.maxTokens;
-    // The Messages API refuses a request without `max_tokens`; an operator who
-    // cleared the field gets a floor instead of a 400.
-    if (driver === 'anthropic') maxTokens ??= ANTHROPIC_DEFAULT_MAX_TOKENS;
-
-    let extra: AnyRecord | undefined = overrides.extraBody ? { ...overrides.extraBody } : undefined;
-    // Converse carries model-specific parameters in its own envelope.
-    if (driver === 'bedrock' && extra) extra = { additionalModelRequestFields: extra };
-    // The LangChain Vertex client never forwarded the extra body; it would land
-    // at the top level of the Gemini request, where OpenAI-style keys are errors.
-    if (driver === 'vertex') extra = undefined;
-
-    const reasoning = input.reasoning;
-    const options: NativeModelOptions = {
-        model: input.modelId,
-        ...(overrides.temperature !== undefined ? { temperature: overrides.temperature } : {}),
-        ...(overrides.topP !== undefined ? { topP: overrides.topP } : {}),
-        ...(maxTokens !== undefined ? { maxTokens } : {}),
-        ...(openAiSchema && overrides.presencePenalty !== undefined ? { presencePenalty: overrides.presencePenalty } : {}),
-        ...(openAiSchema && overrides.frequencyPenalty !== undefined ? { frequencyPenalty: overrides.frequencyPenalty } : {}),
-    };
-
-    if (reasoning) {
-        if (openAiSchema) {
-            if (reasoning.effort) extra = { ...(extra ?? {}), reasoning_effort: reasoning.effort };
-        } else {
-            options.reasoning = reasoning as SdkReasoning;
-        }
-    }
-    if (extra) options.extra = extra;
-    options.transformRequest = buildTransformRequest({ driver, modelId: input.modelId, settings: input.settings });
-    return options;
 }
 
 /** `.stream()` answers with a single `invoke()`; tools bound later keep that. */
@@ -355,18 +220,7 @@ export async function buildNativeAgentModel(input: NativeAgentModelInput): Promi
     const settingsReasoning = normalizeNativeReasoning(overrides.reasoning);
 
     const timeoutMs = input.timeoutMs ?? AGENT_MODEL_REQUEST_TIMEOUT_MS;
-    const provider = {
-        ...spec.provider,
-        fetch: spec.normalizeInlineReasoning
-            ? withInlineReasoningNormalization(input.fetch ?? guardedModelFetch(timeoutMs))
-            : (input.fetch ?? guardedModelFetch(timeoutMs)),
-        timeoutMs,
-        // The budget was renamed by the operator (`max_tokens` is unsupported):
-        // say so instead of letting the SDK guess from the model id.
-        ...(overrides.maxTokensRenamed && (spec.provider.provider === 'openai' || spec.provider.provider === 'azure' || spec.provider.provider === 'openai-compatible')
-            ? { maxTokensParam: 'max_completion_tokens' as const }
-            : {}),
-    } as typeof spec.provider;
+    const provider = buildProviderConfig(spec, overrides, { fetch: input.fetch ?? guardedModelFetch(timeoutMs), timeoutMs });
 
     const { createProvider, fromNativeProvider } = await import('@cognipeer/agent-sdk');
     const native = fromNativeProvider(

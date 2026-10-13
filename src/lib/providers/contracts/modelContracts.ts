@@ -20,6 +20,7 @@ import {
   translateVertexThinking,
 } from '@/lib/services/models/reasoning';
 import { withInlineReasoningNormalization } from './wireNormalization';
+import { ANTHROPIC_DEFAULT_MAX_TOKENS, buildNativeChatClient, buildNativeEmbedder } from './nativeClients';
 import { createOpenAiImageRuntime } from './openaiImageHelpers';
 import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
 import { DECISION_CAPABILITIES } from './structuredDecisionRuntime';
@@ -241,7 +242,31 @@ const DEFAULT_PROVIDER_RETRIES = 2;
 /** Anthropic's Messages API requires max_tokens; this is the floor applied when
  *  an operator has cleared the field. Generous enough not to truncate a coding
  *  answer, bounded enough not to be a blank cheque. */
-export const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
+export { ANTHROPIC_DEFAULT_MAX_TOKENS };
+
+/**
+ * `createNativeChatClient` / `createNativeEmbedder` of one driver, built on the
+ * runtime's own `createNativeProviderSpec` (credentials and endpoint stay inside
+ * the contract's closure) and the same per-model overrides the LangChain
+ * `createChatModel` honours.
+ */
+function nativeClientMethods(
+  driver: string,
+  runtime: () => ModelProviderRuntime,
+): Pick<ModelProviderRuntime, 'createNativeChatClient' | 'createNativeEmbedder'> {
+  return {
+    createNativeChatClient: (config, transport) =>
+      buildNativeChatClient({
+        driver,
+        spec: runtime().createNativeProviderSpec!(config),
+        config,
+        overrides: resolveOverrides(config.modelSettings, config.modelId, driver),
+        transport,
+      }),
+    createNativeEmbedder: (config, transport) =>
+      buildNativeEmbedder({ driver, spec: runtime().createNativeProviderSpec!(config), config, transport }),
+  };
+}
 
 function resolveMaxRetries(config: { options?: { maxRetries?: number } }): number {
   return config.options?.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
@@ -431,6 +456,7 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
     const audioBase = 'https://api.openai.com/v1';
 
     const runtime: ModelProviderRuntime = {
+      ...nativeClientMethods('openai', () => runtime),
       createNativeProviderSpec: (config): NativeProviderSpec => ({
         provider: {
           provider: 'openai',
@@ -608,6 +634,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
     const baseUrl = ensureValue(settings.baseUrl, 'Base URL is required.');
 
     const runtime: ModelProviderRuntime = {
+      ...nativeClientMethods('openai-compatible', () => runtime),
       createNativeProviderSpec: (config): NativeProviderSpec => ({
         provider: {
           provider: 'openai-compatible',
@@ -731,6 +758,7 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
     const apiKey = ensureValue(credentials.apiKey, 'Together API key is required.');
 
     const runtime: ModelProviderRuntime = {
+      ...nativeClientMethods('together', () => runtime),
       createNativeProviderSpec: (config): NativeProviderSpec => ({
         provider: {
           provider: 'openai-compatible',
@@ -832,6 +860,7 @@ export const AnthropicModelProviderContract: ProviderContract<ModelProviderRunti
       : undefined;
 
     const runtime: ModelProviderRuntime = {
+      ...nativeClientMethods('anthropic', () => runtime),
       createNativeProviderSpec: (config): NativeProviderSpec => ({
         provider: {
           provider: 'anthropic',
@@ -953,6 +982,7 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
     const region = ensureValue(settings.region, 'AWS region is required.');
 
     const runtime: ModelProviderRuntime = {
+      ...nativeClientMethods('bedrock', () => runtime),
       createNativeProviderSpec: (config): NativeProviderSpec => ({
         provider: {
           provider: 'bedrock',
@@ -1080,6 +1110,7 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
     const authOptions = parseServiceAccountKey(credentials.serviceAccountKey);
 
     const runtime: ModelProviderRuntime = {
+      ...nativeClientMethods('vertex', () => runtime),
       createNativeProviderSpec: (config): NativeProviderSpec => ({
         provider: {
           provider: 'vertex',
@@ -1250,6 +1281,7 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
     };
 
     const runtime: ModelProviderRuntime = {
+      ...nativeClientMethods('azure', () => runtime),
       createNativeProviderSpec: (config): NativeProviderSpec => ({
         provider: {
           provider: 'azure',

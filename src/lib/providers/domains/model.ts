@@ -4,7 +4,14 @@ import type { OcrRuntime } from './ocr';
 import type { ImageRuntime } from './image';
 import type { ModerationRuntime } from './moderation';
 import type { DecisionRuntime } from './decision';
-import type { ProviderConfig } from '@cognipeer/agent-sdk';
+import type {
+  BaseProvider,
+  ChatCompletionChunk,
+  ChatCompletionRequest,
+  ChatCompletionResponse,
+  EmbeddingResponse,
+  ProviderConfig,
+} from '@cognipeer/agent-sdk';
 
 export type ModelRuntimeCategory = ModelCategory;
 
@@ -52,7 +59,62 @@ export interface NativeProviderSpec {
   normalizeInlineReasoning?: boolean;
 }
 
+/** Transport of a native client: the same fetch behaviour the caller has today (default: the global `fetch`). */
+export interface NativeTransport {
+  fetch?: typeof fetch;
+  /** Time to the response headers, per request; an open stream is never cut by it. */
+  timeoutMs?: number;
+}
+
+/** The normalized reasoning value (`unset = send nothing`). */
+export interface NativeReasoning {
+  effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
+  budgetTokens?: number;
+  includeThoughts?: boolean;
+}
+
+/** A unified request; `model` defaults to the client's model, unset sampling fields to the model record's. */
+export type NativeChatRequest = Omit<ChatCompletionRequest, 'model' | 'stream'> & { model?: string };
+
+/**
+ * A request-level chat client over an agent-sdk native provider. Per-model
+ * rules (requestDefaults / extraBody, unsupportedParams incl. the rules that
+ * depend on tools, the reasoning default, token-param naming) are applied to
+ * every request; what the request itself sets always wins.
+ */
+export interface NativeChatClient {
+  readonly driver: string;
+  readonly modelId: string;
+  readonly provider: BaseProvider;
+  /** The upstream may leak a reasoning block into `content` (Bedrock /openai/v1): the caller splits it. */
+  readonly normalizeInlineReasoning: boolean;
+  /** The finished request as the provider receives it (defaults folded in, made legal for the model). */
+  prepare(request: NativeChatRequest, options?: { stream?: boolean }): Promise<ChatCompletionRequest>;
+  complete(request: NativeChatRequest): Promise<ChatCompletionResponse>;
+  stream(request: NativeChatRequest): AsyncGenerator<ChatCompletionChunk, void, unknown>;
+}
+
+export interface NativeEmbedOptions {
+  dimensions?: number;
+  encodingFormat?: 'float' | 'base64';
+  inputType?: string;
+  batchSize?: number;
+  extra?: Record<string, unknown>;
+  signal?: AbortSignal;
+}
+
+export interface NativeEmbedder {
+  readonly driver: string;
+  readonly modelId: string;
+  readonly provider: BaseProvider;
+  embed(texts: string[], options?: NativeEmbedOptions): Promise<EmbeddingResponse>;
+}
+
 export interface ModelProviderRuntime {
+  /** Native (agent-sdk) chat client; the LangChain-free counterpart of `createChatModel`. */
+  createNativeChatClient?(config: ModelRuntimeConfig, transport?: NativeTransport): Promise<NativeChatClient>;
+  /** Native (agent-sdk) embedder; the LangChain-free counterpart of `createEmbeddingModel`. */
+  createNativeEmbedder?(config: ModelRuntimeConfig, transport?: NativeTransport): Promise<NativeEmbedder>;
   /** Native (agent-sdk) provider for an agent's chat model. See `NativeProviderSpec`. */
   createNativeProviderSpec?(config: ModelRuntimeConfig): NativeProviderSpec;
   createChatModel?(config: ModelRuntimeConfig): Promise<unknown> | unknown;
