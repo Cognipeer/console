@@ -51,6 +51,7 @@ import {
 import { createSessionEventWriter, toSessionStopReason, type SessionEventType } from './sessionEvents';
 import { cancelPendingForNewMessage } from './agentPendingActions';
 import { assertQueuedTurnSpendAllowed } from './agentSpendLimits';
+import { watchTurnCancellation } from './turnWatch';
 import type { AgentRuntimeContext } from '@/lib/services/runtimeContext';
 
 const logger = createLogger('agent-run');
@@ -430,9 +431,19 @@ export async function reserveConversationForSyncTurn(
 export async function executeAgentChatExclusive(request: AgentChatRequest): Promise<AgentChatResponse> {
   const reservation = await reserveConversationForSyncTurn(await getDatabase(), request);
   if (!reservation) throw new AgentRunConflictError(request.conversationId);
+  // A Stop (or the caller's own signal) ends the turn; what it had streamed is kept as the answer.
+  const watch = watchTurnCancellation({
+    tenantDbName: request.tenantDbName,
+    tenantId: request.tenantId,
+    projectId: request.projectId,
+    conversationId: request.conversationId,
+    runId: String(reservation.run._id),
+    parent: request.signal,
+  });
   try {
-    return await executeAgentChat(request);
+    return await executeAgentChat({ ...request, signal: watch.signal });
   } finally {
+    watch.stop();
     await reservation.release();
   }
 }
@@ -457,8 +468,16 @@ export async function runSyncAgentTurn(input: RunSyncAgentTurnInput): Promise<Sy
     if (!reservation) return { kind: 'conflict' };
 
     const cancellationCell: AgentRunCancellationCell = { deadlineAt, cancelled: false };
-    const invokePromise = executeAgentChat({ ...request, cancellationCell });
-    const settled = invokePromise.then(() => undefined, (error) => {
+    const watch = watchTurnCancellation({
+      tenantDbName: request.tenantDbName,
+      tenantId: request.tenantId,
+      projectId: request.projectId,
+      conversationId: request.conversationId,
+      runId: String(reservation.run._id),
+      parent: request.signal,
+    });
+    const invokePromise = executeAgentChat({ ...request, cancellationCell, signal: watch.signal });
+    const settled = invokePromise.finally(() => watch.stop()).then(() => undefined, (error) => {
       logger.warn('Synchronous agent turn failed or was abandoned after its ceiling', {
         conversationId: request.conversationId,
         agentKey: request.agentKey,

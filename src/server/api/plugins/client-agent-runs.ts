@@ -12,6 +12,8 @@ import type { FastifyPluginAsync } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
 import { getAgentRunStatus, getConversationById, requestAgentRunCancellation } from '@/lib/services/agents';
 import { agentRunNotFoundErrorBody, apiErrorBody, serializeAgentRun } from '@/lib/services/agents/agentRunService';
+import { getConversationById } from '@/lib/services/agents/agentService';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 import { withClientApiRequestContext } from '../fastify-utils';
 import { authorizeEndingOpenRequests } from './agent-approval-authz';
 import { refuseSessionLinked, sendAuthorizationUnavailable, sendClientSessionRefusal } from './agent-session-access';
@@ -94,4 +96,59 @@ export const clientAgentRunsApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(500).send(INTERNAL_ERROR_BODY);
     }
   }));
+
+  // ── Stop a turn that is running now, by the id the client already has ──
+  //
+  // An inline request (`/responses`, chat completions, A2A, Assistants) holds its
+  // connection until the answer is done, so the way to stop it is a second request
+  // naming the conversation. The turn ends with what it had streamed as its answer
+  // (`stop_reason: cancelled`) and the model call stops. Nothing running is a 200
+  // with `cancelled: false`, not an error: a Stop that lands as the turn ends is normal.
+  const cancelByConversation = async (
+    ctx: { tenantDbName: string; tenantId: string; projectId: string },
+    conversationId: string,
+  ) => {
+    const conversation = await getConversationById(ctx.tenantDbName, conversationId).catch(() => null);
+    if (!conversation || conversation.projectId !== ctx.projectId) return null;
+    return cancelConversationTurn({
+      tenantDbName: ctx.tenantDbName,
+      tenantId: ctx.tenantId,
+      projectId: ctx.projectId,
+      conversationId,
+    });
+  };
+
+  app.post('/client/v1/agents/conversations/:conversationId/cancel', withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const { conversationId } = request.params as { conversationId: string };
+      const outcome = await cancelByConversation(ctx, conversationId);
+      if (!outcome) return reply.code(404).send(agentRunNotFoundErrorBody());
+      return reply.code(200).send({ conversation_id: conversationId, cancelled: outcome.cancelled, run_ids: outcome.runIds });
+    } catch (error) {
+      logger.error('Client conversation cancel error', { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  }));
+
+  // `resp_<conversationId>` (what /responses returns) or `run_<runId>` (a background run).
+  const cancelResponse = withClientApiRequestContext(async (request, reply, ctx) => {
+    try {
+      const { responseId } = request.params as { responseId: string };
+      let conversationId: string | undefined;
+      if (responseId.startsWith('run_')) {
+        const run = await getAgentRunStatus(ctx.tenantDbName, ctx.tenantId, ctx.projectId, responseId.slice(4));
+        conversationId = run?.conversationId;
+      } else if (responseId.startsWith('resp_')) {
+        conversationId = responseId.slice(5);
+      }
+      const outcome = conversationId ? await cancelByConversation(ctx, conversationId) : null;
+      if (!outcome) return reply.code(404).send(agentRunNotFoundErrorBody());
+      return reply.code(200).send({ id: responseId, conversation_id: conversationId, cancelled: outcome.cancelled, run_ids: outcome.runIds });
+    } catch (error) {
+      logger.error('Client response cancel error', { error });
+      return reply.code(500).send(INTERNAL_ERROR_BODY);
+    }
+  });
+  app.post('/client/v1/responses/:responseId/cancel', cancelResponse);
+  app.post('/client/v1/agents/responses/:responseId/cancel', cancelResponse);
 };

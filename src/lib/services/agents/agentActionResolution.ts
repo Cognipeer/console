@@ -48,6 +48,7 @@ import {
     runWithTenantDb,
     settlePausedAgentRuns,
 } from './agentRunService';
+import { watchTurnCancellation } from './turnWatch';
 import { resolveHitlConfig, type ResolvedHitlConfig } from './agentHumanInTheLoop';
 import {
     CLIENT_TOOL_UNANSWERED_MESSAGE,
@@ -661,6 +662,14 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
             // so the reviewer can retry instead of getting 409 not_pending.
             let invoking = false;
             let resumed: AgentResumeResult;
+            // A Stop on the conversation ends the continuation like any other turn.
+            const watch = reservation
+                ? watchTurnCancellation({
+                    tenantDbName, tenantId, projectId, conversationId,
+                    runId: String(reservation.run._id),
+                    parent: input.stream?.signal,
+                })
+                : undefined;
             try {
                 resumed = await executeAgentResumeLocal({
                     tenantDbName,
@@ -678,13 +687,15 @@ export async function resolveAgentPendingAction(input: ResolveAgentActionInput):
                     ...(input.stream?.onToolEvent ? { onToolEvent: input.stream.onToolEvent } : {}),
                     ...(input.stream?.onTextChunk ? { onTextChunk: input.stream.onTextChunk } : {}),
                     ...(input.stream?.onCompaction ? { onCompaction: input.stream.onCompaction } : {}),
-                    ...(input.stream?.signal ? { signal: input.stream.signal } : {}),
+                    ...(watch ? { signal: watch.signal } : input.stream?.signal ? { signal: input.stream.signal } : {}),
                     onInvokeStart: () => { invoking = true; },
                 });
             } catch (error) {
                 const stateLost = error instanceof AgentResumeError && error.stateLost;
                 if (!invoking && !stateLost) await reopenAnsweredActions(db, conversationId);
                 throw error;
+            } finally {
+                watch?.stop();
             }
             // A background run that was paused on this turn is settled by it.
             await settlePausedAgentRuns(tenantDbName, { tenantId, projectId, conversationId }, resumed.response)

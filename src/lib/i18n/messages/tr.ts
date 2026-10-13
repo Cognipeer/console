@@ -3309,6 +3309,8 @@ export const tr: typeof en = {
       composerCancelWarning: 'Mesaj göndermek, agent’ın beklediği isteği iptal eder.',
       following: 'Devam eden bir tur izleniyor…',
       stopFollowing: 'İzlemeyi bırak',
+      stopTurn: 'Durdur',
+      stopTurnFailed: 'Tur durdurulamadı',
       resolveFailed: 'Yanıtınız gönderilemedi',
       resolveStateChanged: 'Bu istek zaten yanıtlanmış, iptal edilmiş veya süresi dolmuş. Oturum yeniden yüklendi.',
       pausedUnresolvable: 'Agent bir yanıt bekliyor ama buradan artık yanıtlanamıyor.',

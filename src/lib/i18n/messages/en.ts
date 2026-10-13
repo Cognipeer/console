@@ -4859,6 +4859,8 @@ export const en = {
       composerCancelWarning: 'Sending a message cancels the request the agent is waiting on.',
       following: 'Following a turn in progress…',
       stopFollowing: 'Stop following',
+      stopTurn: 'Stop',
+      stopTurnFailed: 'Could not stop the turn',
       resolveFailed: 'Could not send your response',
       resolveStateChanged: 'This request was already answered, was cancelled or has expired. The session was reloaded.',
       pausedUnresolvable: 'The agent is waiting for a response, but it can no longer be answered here.',

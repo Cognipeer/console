@@ -64,6 +64,7 @@ import {
     IconPlayerPlay,
     IconRobot,
     IconSearch,
+    IconPlayerStopFilled,
     IconSend,
     IconTimeline,
     IconTrash,
@@ -626,6 +627,20 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
      * type). Losing live progress is a downgrade; losing the ability to send
      * a message is a breakage, and the two should not be the same failure.
      */
+    /**
+     * Stops the turn that is running on this session — one this tab started, one it follows, or one
+     * started elsewhere. The server ends it with what it had streamed as the answer; the stream the
+     * tab is reading then closes with that result, so nothing is torn down here.
+     */
+    const stopTurn = async () => {
+        try {
+            const res = await fetch(`/api/agents/${agentId}/sessions/${sessionId}/cancel`, { method: 'POST' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        } catch {
+            notifications.show({ title: t('stopTurnFailed'), message: '', color: 'orange' });
+        }
+    };
+
     const sendMessage = async () => {
         if ((!input.trim() && attached.length === 0) || uploadingNames.length > 0 || removingFiles.length > 0 || liveActive || readOnly || gate === 'blocked' || budgetBlocked) return;
         const message = input.trim();
@@ -1347,7 +1362,19 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                         />
                                     ) : undefined}
                                     leftSectionPointerEvents="all"
-                                    rightSection={
+                                    rightSectionPointerEvents="all"
+                                    rightSection={liveActive && !readOnly ? (
+                                        <ActionIcon
+                                            size="sm"
+                                            variant="filled"
+                                            color="red"
+                                            aria-label={t('stopTurn')}
+                                            title={t('stopTurn')}
+                                            onClick={() => void stopTurn()}
+                                        >
+                                            <IconPlayerStopFilled size={12} />
+                                        </ActionIcon>
+                                    ) : (
                                         <ActionIcon
                                             size="sm"
                                             variant="filled"
@@ -1356,7 +1383,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                         >
                                             <IconSend size={14} />
                                         </ActionIcon>
-                                    }
+                                    )}
                                 />
                                 {gate !== 'open' && !readOnly ? (
                                     <Alert

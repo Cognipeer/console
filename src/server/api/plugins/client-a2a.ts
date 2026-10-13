@@ -1,4 +1,5 @@
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 /**
  * Inbound A2A (Agent2Agent) server — exposes Cognipeer agents to external
  * A2A clients over JSON-RPC 2.0 (spec v1.0).
@@ -400,15 +401,16 @@ export async function handleA2aRpc(
     }
 
     if (method === 'tasks/cancel') {
-      // A turn runs inside the `message/send` call, so there is nothing to stop from here.
-      // A task that waits on a person (`input-required`) is ended by answering it instead:
-      // say so, and hand over the ids to answer.
+      // A turn runs inside a `message/send` call, but another request can still stop it: the turn
+      // holds the conversation's run slot, which every node reads. A task that waits on a person
+      // (`input-required`) is cancelled with it — its open approvals and questions end as cancelled.
       const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
       const parsed = requestedId ? parseTaskId(requestedId) : null;
       const conversation = parsed ? await getConversationById(ctx.tenantDbName, parsed.conversationId) : null;
-      const message = parsed && conversationVisibleTo(conversation, agent, ctx)
-        ? conversation?.messages?.[parsed.messageIndex]
-        : undefined;
+      if (!parsed || !conversationVisibleTo(conversation, agent, ctx)) {
+        return reply.code(200).send(jsonRpcError(rpcId, -32001, 'Task not found'));
+      }
+      const message = conversation?.messages?.[parsed.messageIndex];
       const waitingOn = message?.role === 'assistant'
         ? (message.pendingActions ?? []).filter((action) => action.status === 'pending').map((action) => action.id)
         : [];
@@ -429,18 +431,25 @@ export async function handleA2aRpc(
             }));
           }
         }
-        return reply.code(200).send(jsonRpcError(
-          rpcId,
-          ERR_UNSUPPORTED_OPERATION,
-          'This task is waiting for an approval or an answer and cannot be canceled over A2A. '
-            + 'Answer it through POST /agents/sessions/{contextId}/actions/{actionId}: deny the approval, '
-            + 'or answer the question with cancelled: true.',
-          { pending_action_ids: waitingOn },
-        ));
       }
-      return reply.code(200).send(
-        jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'Tasks cannot be canceled over A2A: a turn finishes inside the message/send call, and a finished task has nothing left to cancel'),
-      );
+      const outcome = await cancelConversationTurn({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        conversationId: parsed.conversationId,
+        agentKey: agent.key,
+      });
+      if (!outcome.cancelled) {
+        return reply.code(200).send(
+          jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task is not running, so there is nothing to cancel'),
+        );
+      }
+      return reply.code(200).send(jsonRpcOk(rpcId, {
+        kind: 'task',
+        id: requestedId,
+        contextId: parsed.conversationId,
+        status: { state: 'canceled', timestamp: new Date().toISOString() },
+      }));
     }
 
     return reply.code(200).send(jsonRpcError(rpcId, -32601, `Method not found: ${method}`));

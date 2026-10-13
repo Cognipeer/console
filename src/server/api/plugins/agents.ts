@@ -25,6 +25,8 @@ import {
   listConversations,
   updateAgentRecord,
 } from '@/lib/services/agents';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
+import { watchTurnCancellation } from '@/lib/services/agents/turnWatch';
 // By path: the agents barrel does not export the error class.
 import {
   AgentGuardrailBlockedError,
@@ -328,6 +330,19 @@ async function reserveDashboardSession(input: {
     conversationId: input.conversationId,
     userMessage: input.userMessage,
     userId: input.session.userId,
+  });
+}
+
+/** Makes a dashboard turn stoppable from `POST .../sessions/:sessionId/cancel` (any node). */
+function turnWatchFor(turn: { reservation?: { run: { _id?: unknown } } | null; run: { tenantDbName: string; tenantId: string; projectId: string; conversationId?: string } }) {
+  const { reservation, run } = turn;
+  if (!reservation || !run.conversationId) return undefined;
+  return watchTurnCancellation({
+    tenantDbName: run.tenantDbName,
+    tenantId: run.tenantId,
+    projectId: run.projectId,
+    conversationId: run.conversationId,
+    runId: String(reservation.run._id),
   });
 }
 
@@ -1654,6 +1669,30 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
    * `/chat/stream`. A refusal (402, 409, 404) is a normal JSON response either
    * way: the stream only opens once there is a turn to report.
    */
+  /**
+   * Stop: ends the session's running turn (what it had streamed is kept as the
+   * answer, `cancelled`) and cancels the approvals/questions of a paused one.
+   * Works for a turn started from anywhere — the playground, the API, a portal
+   * — and on any node. Nothing to stop is a 200 with `cancelled: false`.
+   */
+  app.post('/agents/:agentId/sessions/:sessionId/cancel', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedSession(request, reply);
+      if (!scoped) return reply;
+      const outcome = await cancelConversationTurn({
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        conversationId: String(scoped.conversation._id),
+        agentKey: scoped.agent.key,
+        requestedBy: scoped.session.userId,
+      });
+      return reply.code(200).send(outcome);
+    } catch (error) {
+      return sendRouteError(reply, error, 'Cancel session turn error', 'Failed to stop the turn');
+    }
+  }));
+
   app.post('/agents/:agentId/sessions/:sessionId/continue', withApiRequestContext(async (request, reply) => {
     let scoped: Awaited<ReturnType<typeof requireScopedSession>>;
     try {
@@ -1689,8 +1728,19 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       })
       : undefined;
 
+    const watch = reservation
+      ? watchTurnCancellation({
+        tenantDbName: scoped.session.tenantDbName,
+        tenantId: scoped.session.tenantId,
+        projectId: scoped.projectId,
+        conversationId,
+        runId: String(reservation.run._id),
+      })
+      : undefined;
+
     try {
       const continued = await executeAgentContinueLocal({
+        ...(watch ? { signal: watch.signal } : {}),
         tenantDbName: scoped.session.tenantDbName,
         tenantId: scoped.session.tenantId,
         projectId: scoped.projectId,
@@ -1743,6 +1793,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         ...(classified.error.maxCostUsd !== undefined ? { maxCostUsd: classified.error.maxCostUsd } : {}),
       });
     } finally {
+      watch?.stop();
       unsubscribe?.();
       await reservation?.release();
     }
@@ -2108,9 +2159,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       })
       : undefined;
 
+    const watch = turnWatchFor(turn);
     try {
       const result = await runWithUsageSink(usage, () => executePlaygroundChatLocal({
         ...turn.run,
+        ...(watch ? { signal: watch.signal } : {}),
         onToolEvent: (event) => send('tool', event),
         onTextChunk: (text) => send('text', { text }),
         // The agent summarized its context mid-run: shown in the transcript
@@ -2137,6 +2190,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
         send('error', { error: classified.error.message, type: classified.error.type, code: classified.error.code });
       }
     } finally {
+      watch?.stop();
       unsubscribeSessionEvents?.();
       await turn.reservation?.release();
       if (!closed) reply.raw.end();
@@ -2151,9 +2205,11 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
       const { body } = turn;
 
       let result: Awaited<ReturnType<typeof executePlaygroundChat>>;
+      const watch = turnWatchFor(turn);
       try {
         result = await executePlaygroundChat({
           ...turn.run,
+          ...(watch ? { signal: watch.signal } : {}),
           // Ignored server-side when conversationId is set (history loads from
           // the session instead) — still parsed so a stateless call (no
           // conversationId) keeps working exactly as before.
@@ -2166,6 +2222,7 @@ export const agentsApiPlugin: FastifyPluginAsync = async (app) => {
             : undefined,
         });
       } finally {
+        watch?.stop();
         await turn.reservation?.release();
       }
 
