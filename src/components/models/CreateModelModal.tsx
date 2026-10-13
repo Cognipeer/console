@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { resolveUpstreamApi, supportsUpstreamApiChoice, type UpstreamApi } from '@/lib/services/models/upstreamApi';
 import { Button, NumberInput, Textarea } from '@mantine/core';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -34,6 +35,7 @@ import {
   ProviderSection,
   ReasoningSection,
   RequestParamsSection,
+  UpstreamApiSection,
 } from './modelFormSections';
 import {
   detectUnsupportedParams,
@@ -128,6 +130,7 @@ interface FormValues {
     autoDropUnsupportedParams: boolean;
     requestDefaults: string;
     allowUnknownPassthrough: boolean;
+    upstreamApi: UpstreamApi;
   };
   ocr: {
     mode: OcrMode;
@@ -222,6 +225,7 @@ export default function CreateModelModal({
         autoDropUnsupportedParams: true,
         requestDefaults: '',
         allowUnknownPassthrough: false,
+        upstreamApi: 'chat',
       },
       ocr: {
         mode: 'vlm',
@@ -464,6 +468,10 @@ export default function CreateModelModal({
               : {}),
             ...(values.settings.unsupportedParams.length
               ? { unsupportedParams: values.settings.unsupportedParams }
+              : {}),
+            // Chat Completions is the default; only an explicit Responses pick is stored.
+            ...(values.settings.upstreamApi === 'responses' && supportsUpstreamApiChoice(selectedProvider?.driver)
+              ? { upstreamApi: 'responses' }
               : {}),
             // Only persisted when switched off — detection is the default.
             ...(values.settings.autoDropUnsupportedParams === false
@@ -896,6 +904,14 @@ export default function CreateModelModal({
           forcedNoneWithTools={Boolean(
             detectForcedParams(selectedProvider?.driver, formValues.modelId, true).forced?.reasoning_effort,
           )}
+        />
+      ) : null}
+
+      {isLlm && supportsUpstreamApiChoice(selectedProvider?.driver) ? (
+        <UpstreamApiSection
+          number={sectionNumber()}
+          value={formValues.settings.upstreamApi}
+          onChange={(next) => setFieldValue('settings.upstreamApi', next)}
         />
       ) : null}
 

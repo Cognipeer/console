@@ -250,6 +250,20 @@ export const tr: typeof en = {
       },
     },
   },
+  modelUpstreamApi: {
+    title: 'Upstream API',
+    description:
+      'Console bu model icin hangi OpenAI endpoint\'ini cagirir. Hicbir zaman otomatik secilmez. Gateway endpoint\'leri, modeli hangi API sunarsa sunsun istemcinin istedigi formatta yanit vermeye devam eder.',
+    label: 'Upstream API',
+    option: {
+      chat: 'Chat Completions (varsayilan)',
+      responses: 'Responses',
+    },
+    hint: {
+      chat: '/chat/completions cagrilir. Tum OpenAI uyumlu sunucularla calisir.',
+      responses: '/responses cagrilir. Yalnizca orada sunulan modeller veya muhakeme ozetleri icin secin. Upstream Responses API\'sini desteklemelidir.',
+    },
+  },
   modelReasoning: {
     title: 'Akıl yürütme',
     description:

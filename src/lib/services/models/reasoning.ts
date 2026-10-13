@@ -144,6 +144,27 @@ export function shouldReturnReasoning(modelSettings: unknown, body?: unknown): b
   return true;
 }
 
+/**
+ * The reasoning a call is sent upstream with, given whether its text will be shown.
+ * Hidden: the provider is told not to produce thought text (`includeThoughts: false`),
+ * so a Claude model does not spend output tokens summarizing thoughts nobody sees; the
+ * thinking itself still runs. Visible: Claude (Anthropic, Bedrock) is asked for them
+ * explicitly unless the Model Hub record already decided. Nothing is added when the
+ * call has no reasoning at all.
+ */
+export function withReasoningVisibility<T extends { includeThoughts?: boolean }>(
+  reasoning: T | undefined,
+  visible: boolean,
+  driver?: string,
+): T | undefined {
+  if (!reasoning) return reasoning;
+  if (!visible) return reasoning.includeThoughts === false ? reasoning : { ...reasoning, includeThoughts: false };
+  if (reasoning.includeThoughts === undefined && (driver === 'anthropic' || driver === 'bedrock')) {
+    return { ...reasoning, includeThoughts: true };
+  }
+  return reasoning;
+}
+
 // ─── Provider translation (pure; contracts apply the result) ────────────────
 
 /** Anthropic requires budget_tokens >= 1024. */

@@ -3285,6 +3285,20 @@ export const en = {
       providers: 'Providers',
     },
   },
+  modelUpstreamApi: {
+    title: 'Upstream API',
+    description:
+      'Which OpenAI endpoint the console calls for this model. It is never chosen automatically. The gateway endpoints keep answering in the format your client asked for, whichever API serves the model.',
+    label: 'Upstream API',
+    option: {
+      chat: 'Chat Completions (default)',
+      responses: 'Responses',
+    },
+    hint: {
+      chat: 'Calls /chat/completions. Works with every OpenAI-compatible server.',
+      responses: 'Calls /responses. Pick it for models that are only served there, or for reasoning summaries. The upstream must support the Responses API.',
+    },
+  },
   modelReasoning: {
     title: 'Reasoning',
     description:

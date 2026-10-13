@@ -81,6 +81,8 @@ export interface GatewayChatModelInput {
    * default > this > nothing sent (agentReasoning.ts has the full rule).
    */
   requestReasoning?: NativeAgentReasoning;
+  /** false: the agent hides its reasoning, so the provider is not asked for thought text. */
+  showReasoning?: boolean;
   /** The usage row's `route`: tells an agent call apart from a gateway call. */
   route?: string;
   agentKey?: string;
@@ -241,6 +243,7 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         // Who is asking comes from the run's own routing scope; the agent adds its key.
         ...(input.agentKey ? { callerContext: { agentKey: input.agentKey } } : {}),
         ...(agentPick ? { reasoningOverride: agentPick } : {}),
+        ...(input.showReasoning === false ? { showReasoning: false } : {}),
         requestTags: {
           ...(input.agentKey ? { agentKey: input.agentKey } : {}),
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),

@@ -32,7 +32,8 @@ import type {
   ModelProviderView,
   CreateModelProviderInput,
 } from './types';
-import { applyModelCapabilityOverrides } from './modelCapabilities';
+import { applyModelCapabilityOverrides, ModelCapabilityValidationError } from './modelCapabilities';
+import { validateUpstreamApi } from './upstreamApi';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
 
 const logger = createLogger('model-service');
@@ -180,6 +181,11 @@ async function generateUniqueKey(
   throw new Error('Could not generate unique model key');
 }
 
+function assertUpstreamApi(settings: unknown, driver: string | undefined): void {
+  const problem = validateUpstreamApi(settings, driver);
+  if (problem) throw new ModelCapabilityValidationError(problem);
+}
+
 export async function createModel(
   tenantDbName: string,
   tenantId: string,
@@ -198,6 +204,7 @@ export async function createModel(
   );
 
   ensureProviderSupportsCategory(provider, payload.category);
+  assertUpstreamApi(payload.settings, provider.driver);
   validateSettingsDynamicConfig(payload.settings);
   const createDynamic = settingsDynamicConfig(payload.settings);
   if (createDynamic) {
@@ -619,6 +626,15 @@ export async function updateModel(
 
   if (userId) {
     updatePayload.updatedBy = userId;
+  }
+
+  // Checked when the settings or the provider change: the saved value has to
+  // stay legal for the driver that will serve it.
+  if (updatePayload.settings !== undefined || updatePayload.providerDriver !== undefined) {
+    assertUpstreamApi(
+      updatePayload.settings ?? existing.settings,
+      updatePayload.providerDriver ?? existing.providerDriver,
+    );
   }
 
   // `updates.settings` may attach a brand-new `dynamic` config or (via a

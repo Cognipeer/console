@@ -1,6 +1,7 @@
 'use client';
 
 import ReasoningSummary from '@/components/models/ReasoningSummary';
+import UpstreamApiSummary from '@/components/models/UpstreamApiSummary';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
@@ -1653,6 +1654,10 @@ function OverviewTab({
             driver={model.providerDriver}
             modelId={model.modelId}
           />
+        ) : null}
+
+        {model.category === 'llm' ? (
+          <UpstreamApiSummary settings={model.settings} driver={model.providerDriver} />
         ) : null}
 
         {Object.keys(model.settings || {}).length > 0 ? (

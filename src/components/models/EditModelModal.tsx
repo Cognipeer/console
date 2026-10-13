@@ -1,5 +1,6 @@
 'use client';
 
+import { resolveUpstreamApi, supportsUpstreamApiChoice, type UpstreamApi } from '@/lib/services/models/upstreamApi';
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { Badge, Button, Group, NumberInput, Select, Text } from '@mantine/core';
@@ -22,6 +23,7 @@ import {
   ProviderSection,
   ReasoningSection,
   RequestParamsSection,
+  UpstreamApiSection,
 } from '@/components/models/modelFormSections';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
@@ -791,6 +793,18 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             forcedNoneWithTools={Boolean(
               detectForcedParams(selectedProvider?.driver, form.values.modelId, true).forced?.reasoning_effort,
             )}
+          />
+        ) : null}
+
+        {isLlm && supportsUpstreamApiChoice(selectedProvider?.driver) ? (
+          <UpstreamApiSection
+            number={sectionNumber()}
+            value={resolveUpstreamApi(form.values.settings)}
+            onChange={(next) => {
+              const settings = { ...form.values.settings };
+              if (next === 'responses') settings.upstreamApi = 'responses'; else delete settings.upstreamApi;
+              form.setFieldValue('settings', settings);
+            }}
           />
         ) : null}
 

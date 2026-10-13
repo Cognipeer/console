@@ -74,6 +74,12 @@ export interface GatewayCallContext {
   attribution?: Partial<UsageAttribution>;
   /** An agent's own reasoning pick: outranks the Model Hub default. In-process only. */
   reasoningOverride?: unknown;
+  /**
+   * false: the caller will not show the reasoning text (an agent with `showReasoning: false`).
+   * Like the Model Hub's `returnReasoning`, it can only narrow what is shown, and the provider
+   * is not asked for thought text it would only have thrown away.
+   */
+  showReasoning?: boolean;
   /** Extra facts about the caller (agent key, session, purpose ...): merged into the `providerRequest` of every usage row of this call. */
   requestTags?: Record<string, unknown>;
   /**

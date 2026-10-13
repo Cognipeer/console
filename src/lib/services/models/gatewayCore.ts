@@ -24,7 +24,7 @@
 
 import crypto from 'crypto';
 import type { ChatCompletionChunk, ChatCompletionResponse, ProviderResponseFields, UnifiedMessage } from '@cognipeer/agent-sdk';
-import { AGENT_REASONING_OVERRIDE, shouldReturnReasoning } from '@/lib/services/models/reasoning';
+import { AGENT_REASONING_OVERRIDE, shouldReturnReasoning, withReasoningVisibility } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
 import { withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
@@ -33,7 +33,7 @@ import type { UsageAttribution } from '@/lib/services/usage/usageEvents';
 import { createInlineReasoningSplitter, splitInlineReasoning } from '@/lib/shared/inlineReasoning';
 import { repairJsonContent } from '@/lib/shared/jsonExtraction';
 import { InvalidRequestError } from '@/lib/providers/contracts/upstreamError';
-import { OPENAI_SCHEMA_DRIVERS } from '@/lib/providers/contracts/nativeClients';
+import { OPENAI_SCHEMA_DRIVERS, normalizeNativeReasoning } from '@/lib/providers/contracts/nativeClients';
 import type { NativeChatClient, NativeChatRequest } from '@/lib/providers/domains/model';
 import { createStreamGate } from '@/lib/services/guardrail';
 import type { HookScope } from '@/lib/services/guardrail';
@@ -425,6 +425,13 @@ async function prepareCall(state: CallState, activeModel: IModel) {
   // caller's passthrough (reserved keys removed). The raw `requestDefaults` stays
   // out of the client's settings: the client would fall back to it, unsanitized.
   const modelSettings: Record<string, unknown> = { ...call.modelSettings, requestDefaults: undefined };
+  // Thought text is requested from the provider only when someone will see it.
+  const visibleReasoning = withReasoningVisibility(
+    normalizeNativeReasoning(modelSettings.reasoning),
+    state.includeReasoning,
+    activeModel.providerDriver,
+  );
+  if (visibleReasoning) modelSettings.reasoning = visibleReasoning;
   const outputTokenLimit = resolveOutputTokenLimit(overrides, modelSettings);
 
   const client = await runtime.createNativeChatClient({
@@ -589,7 +596,7 @@ export async function executeModelCall(input: ModelCallInput): Promise<ModelCall
   // available, so an edit to a policy also retires the entries produced under
   // the old one.
   const outputGuardrailKeys = resolveBindings(model, 'output.pre');
-  const includeReasoning = shouldReturnReasoning(model.settings, wire);
+  const includeReasoning = shouldReturnReasoning(model.settings, wire) && context.showReasoning !== false;
   const cacheEnabled = Boolean(
     !stream && tenantId && isSemanticCacheEnabled(model) && isCacheableConversation(request, wire, route),
   );

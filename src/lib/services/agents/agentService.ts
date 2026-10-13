@@ -1668,6 +1668,7 @@ async function buildSubagentModel(
             ...(caller?.userId ? { userId: caller.userId } : {}),
             ...(agentPick ? { reasoning: agentPick } : {}),
             ...(reasoning?.request ? { requestReasoning: reasoning.request } : {}),
+            ...(reasoning?.config && !agentShowsReasoning(reasoning.config) ? { showReasoning: false } : {}),
             ...(spend ? { onCost: agentSpendSettler(spend, model.key) } : {}),
         });
         // A sub-agent can be handed the parent's context, image references included.
@@ -2585,7 +2586,7 @@ export async function buildAgentChatModel(
 }
 
 /** The usage-row side of `buildAgentChatModel`. */
-export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens'>;
+export type AgentModelCall = AgentModelCaller & Pick<Parameters<typeof buildGatewayChatModel>[0], 'route' | 'purpose' | 'showReasoning' | 'onCost' | 'onRouted' | 'maxTotalOutputTokens'>;
 
 /**
  * One tiny completion through exactly the path an agent run uses (the model's
@@ -3364,6 +3365,7 @@ async function buildLocalAgentRun(input: {
         ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
         ...(input.userId ? { userId: input.userId } : {}),
         onRouted: (key) => { routedModelKey = key; },
+        ...(agentShowsReasoning(config) ? {} : { showReasoning: false }),
         ...(Number(config.runtime?.limits?.maxTotalOutputTokens) > 0
             ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
             : {}),

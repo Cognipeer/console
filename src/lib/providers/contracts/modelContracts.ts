@@ -24,6 +24,7 @@ import {
   createOpenAiSttRuntime,
   createOpenAiTtsRuntime,
 } from './openaiAudioHelpers';
+import { resolveUpstreamApi } from '@/lib/services/models/upstreamApi';
 import { createVlmOcrRuntime } from './vlmOcrHelpers';
 import { OPENAI_REALTIME_TRANSCRIPTION_URL } from './openaiRealtimeTranscription';
 
@@ -244,6 +245,14 @@ function nativeClientMethods(
   };
 }
 
+/**
+ * The model's explicit "Upstream API" choice (Chat Completions unless the operator
+ * picked Responses). Never inferred from the model id.
+ */
+function upstreamApiOf(config: { modelSettings?: unknown }): 'chat' | 'responses' {
+  return resolveUpstreamApi(config.modelSettings);
+}
+
 function resolveMaxRetries(config: { options?: { maxRetries?: number } }): number {
   return config.options?.maxRetries ?? DEFAULT_PROVIDER_RETRIES;
 }
@@ -389,9 +398,7 @@ export const OpenAiModelProviderContract: ProviderContract<ModelProviderRuntime,
           provider: 'openai',
           apiKey,
           ...(settings.organization ? { organization: settings.organization } : {}),
-          // Chat Completions, as the LangChain model it replaces: the Responses
-          // API is a different request shape the gateway does not proxy.
-          responsesApi: 'never',
+          api: upstreamApiOf(config),
           retry: { maxRetries: resolveMaxRetries(config) },
         },
       }),
@@ -549,7 +556,7 @@ export const OpenAiCompatibleModelProviderContract: ProviderContract<ModelProvid
           apiKey,
           baseURL: baseUrl,
           ...(settings.organization ? { organization: settings.organization } : {}),
-          responsesApi: 'never',
+          api: upstreamApiOf(config),
           retry: { maxRetries: resolveMaxRetries(config) },
         },
         // Same reason `createChatModel` below wraps its fetch: an upstream that
@@ -647,7 +654,7 @@ export const TogetherModelProviderContract: ProviderContract<ModelProviderRuntim
           provider: 'openai-compatible',
           apiKey,
           baseURL: TOGETHER_BASE_URL,
-          responsesApi: 'never',
+          api: upstreamApiOf(config),
           retry: { maxRetries: resolveMaxRetries(config) },
         },
       }),
@@ -1051,6 +1058,7 @@ export const AzureModelProviderContract: ProviderContract<ModelProviderRuntime, 
           // Per DEPLOYMENT, not per resource: see `deploymentFor` / `apiVersionFor`.
           deploymentName: deploymentFor(config.modelId),
           apiVersion: apiVersionFor(config.modelSettings),
+          api: upstreamApiOf(config),
           retry: { maxRetries: resolveMaxRetries(config) },
         },
       }),
