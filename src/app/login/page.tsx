@@ -21,6 +21,7 @@ import {
 } from '@tabler/icons-react';
 import LoadingState from '@/components/common/LoadingState';
 import AuthShell from '@/components/layout/AuthShell';
+import { ssoErrorMessageKey, ssoErrorNeedsAdmin } from '@/lib/auth/ssoLoginErrors';
 import { useTranslations } from '@/lib/i18n';
 import { assignIfPortal, buildChangePasswordPath, buildLoginPath, safeReturnTo } from '@/lib/security/returnTo';
 
@@ -28,21 +29,6 @@ type SsoDiscovery =
   | { available: false }
   | { available: true; mode: 'direct'; startUrl: string }
   | { available: true; mode: 'email' };
-
-const SSO_ERROR_MESSAGES: Record<string, string> = {
-  not_found: 'No single sign-on connection is set up for that email address.',
-  unavailable: 'Single sign-on is not available right now.',
-  state_mismatch: 'Your sign-in session expired. Please try again.',
-  expired: 'Your sign-in session expired. Please try again.',
-  invalid_request: 'Something went wrong starting single sign-on. Please try again.',
-  idp_error: 'The identity provider declined the sign-in request.',
-  no_subject: 'The identity provider did not return a usable identity.',
-  no_email: 'The identity provider did not return a usable email address.',
-  email_not_verified: 'Your identity provider email is not verified.',
-  'account-link-refused': 'This identity cannot be linked to an existing account automatically. Contact your admin.',
-  'login-disabled': 'This account cannot sign in.',
-  callback_failed: 'Single sign-on failed. Please try again.',
-};
 
 function LoginPageContent() {
   const router = useRouter();
@@ -119,12 +105,13 @@ function LoginPageContent() {
     if (!errorCode) return;
     notifications.show({
       title: tNotifications('loginFailedTitle'),
-      message: SSO_ERROR_MESSAGES[errorCode] ?? SSO_ERROR_MESSAGES.callback_failed,
+      message: t(`sso.errors.${ssoErrorMessageKey(errorCode)}`),
       color: 'red',
+      ...(ssoErrorNeedsAdmin(errorCode) ? { autoClose: false } : {}),
     });
     // Keep the return trip: the person still has to sign in another way.
     router.replace(buildLoginPath(searchParams.get('returnTo')));
-  }, [searchParams, router, tNotifications]);
+  }, [searchParams, router, t, tNotifications]);
 
   const handleSsoButtonClick = () => {
     if (sso.available && sso.mode === 'direct') {
