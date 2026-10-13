@@ -10,9 +10,9 @@ const tools = [{ type: 'function', function: { name: 'lookup', parameters: { typ
 
 describe('Responses upstream', () => {
   it('asks an OpenAI-schema model for its reasoning summary only when the text will be shown', () => {
-    expect(withReasoningVisibility({ effort: 'high' }, true, 'azure', 'responses')).toEqual({ effort: 'high', includeThoughts: true });
-    expect(withReasoningVisibility({ effort: 'high' }, true, 'azure', 'chat')).toEqual({ effort: 'high' });
-    expect(withReasoningVisibility({ effort: 'high' }, false, 'azure', 'responses')).toEqual({ effort: 'high', includeThoughts: false });
+    expect(withReasoningVisibility({ effort: "high" } as { effort: string; includeThoughts?: boolean }, true, 'azure', 'responses')).toEqual({ effort: 'high', includeThoughts: true });
+    expect(withReasoningVisibility({ effort: "high" } as { effort: string; includeThoughts?: boolean }, true, 'azure', 'chat')).toEqual({ effort: 'high' });
+    expect(withReasoningVisibility({ effort: "high" } as { effort: string; includeThoughts?: boolean }, false, 'azure', 'responses')).toEqual({ effort: 'high', includeThoughts: false });
   });
 
   it('keeps the requested reasoning effort next to tools on Responses, forces none on Chat Completions', async () => {

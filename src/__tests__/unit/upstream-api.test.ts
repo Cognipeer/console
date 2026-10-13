@@ -142,6 +142,14 @@ describe('a chat-completions request over a Responses upstream', () => {
     expect(body.usage.completion_tokens_details?.reasoning_tokens ?? body.usage.reasoning_tokens).toBe(12);
   });
 
+  it('asks the Responses upstream for a reasoning summary when the caller sets reasoning_effort (openai-compatible)', async () => {
+    useModel(model({ providerDriver: 'openai-compatible', modelId: 'gpt-5.6-luna', settings: { upstreamApi: 'responses' } }));
+    const upstream = stubUpstream(() => responsesAnswer());
+    await handleChatCompletion({ ...BASE, body: { messages: [{ role: 'user', content: 'hello' }], reasoning_effort: 'high' } });
+    expect(upstream.calls[0].url).toMatch(/\/responses$/);
+    expect(upstream.calls[0].body.reasoning).toEqual({ effort: 'high', summary: 'auto' });
+  });
+
   it('keeps the reasoning text out when the Model Hub hides it', async () => {
     useModel(model({ modelId: 'gpt-5', settings: { upstreamApi: 'responses', returnReasoning: false } }));
     stubUpstream(() => responsesAnswer());

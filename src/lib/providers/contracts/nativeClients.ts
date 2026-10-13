@@ -203,7 +203,10 @@ export function buildNativeOptions(input: {
   // their own reasoning envelope and are left alone.
   const reasoning = driver === 'bedrock' && !/anthropic|claude/i.test(input.modelId) ? undefined : input.reasoning;
   if (reasoning && !((driver === 'anthropic' || driver === 'bedrock') && hasExplicitThinking(overrides.extraBody))) {
-    if (openAiSchema) {
+    if (openAiSchema && resolveUpstreamApi(input.settings) === 'responses') {
+      // Responses: the provider sends `reasoning: {effort, summary}` itself.
+      options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
+    } else if (openAiSchema) {
       if (reasoning.effort) extra = { ...(extra ?? {}), reasoning_effort: reasoning.effort };
     } else {
       options.reasoning = reasoning as NonNullable<NativeModelOptions['reasoning']>;
@@ -269,7 +272,9 @@ export async function buildNativeChatClient(input: BuildNativeChatClientInput): 
     modelId,
     overrides,
     settings,
-    reasoning: normalizeNativeReasoning(overrides.reasoning),
+    // The settings carry the full normalized reasoning (includeThoughts too); the typed
+    // overrides only know effort/summary.
+    reasoning: normalizeNativeReasoning(settings.reasoning) ?? normalizeNativeReasoning(overrides.reasoning),
   });
   const { transformRequest, extra: defaultExtra, reasoning: defaultReasoning, ...scalarDefaults } = defaults;
   void scalarDefaults.model;
