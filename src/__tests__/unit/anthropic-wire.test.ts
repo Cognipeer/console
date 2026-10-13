@@ -12,6 +12,7 @@ import {
   anthropicErrorTypeForUpstream,
   anthropicRequestToOpenAi,
   AnthropicRequestError,
+  isThinkingRequested,
   openAiResponseToAnthropic,
   openAiStreamToAnthropic,
 } from '@/lib/services/models/anthropicWire';
@@ -214,6 +215,15 @@ describe('request translation', () => {
 
     expect(() => doc({ type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' }))
       .toThrow(/application\/pdf/);
+  });
+});
+
+describe('adaptive thinking on /messages', () => {
+  it('passes output_config.effort through as the reasoning effort and counts as a thinking request', () => {
+    const body: any = { model: 'claude-opus-5-1', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], thinking: { type: 'adaptive' }, output_config: { effort: 'low' } };
+    expect((anthropicRequestToOpenAi(body) as any).reasoning_effort).toBe('low');
+    expect(isThinkingRequested(body)).toBe(true);
+    expect((anthropicRequestToOpenAi({ ...body, output_config: undefined }) as any).reasoning_effort).toBe('medium');
   });
 });
 

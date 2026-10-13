@@ -381,6 +381,13 @@ function loggedRequest(state: CallState, request: unknown): unknown {
   return requestTags ? { ...asRecord(request), ...requestTags } : request;
 }
 
+/** The agent a call runs for (agent runs set it on the caller context and the request tags). */
+function callerAgentKey(state: CallState): string | undefined {
+  const fromTags = state.context.requestTags?.agentKey;
+  const key = state.context.callerContext?.agentKey ?? fromTags;
+  return typeof key === 'string' && key ? key : undefined;
+}
+
 function usageRow(state: CallState, label: string, payload: Parameters<typeof logModelUsage>[2]) {
   fireAndForget(label, () =>
     logModelUsage(state.tenantDbName, state.model, {
@@ -388,6 +395,7 @@ function usageRow(state: CallState, label: string, payload: Parameters<typeof lo
       providerRequest: loggedRequest(state, payload.providerRequest),
       ...state.routedByLog,
       ...(state.attribution ? { attribution: state.attribution } : {}),
+      ...(callerAgentKey(state) ? { agentKey: callerAgentKey(state) } : {}),
     } as Parameters<typeof logModelUsage>[2]),
   );
 }
@@ -811,7 +819,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     latencyMs,
     usage,
     cacheHit: false,
-    finishReason: native.rawFinishReason ?? native.finishReason,
+    finishReason: wireFinish,
   });
 
   // Output guardrails: check the assistant response before returning it
@@ -1291,7 +1299,7 @@ async function* streamEvents(args: {
       errorMessage: outputLimitError?.message,
       latencyMs,
       usage,
-      finishReason: assembler.rawFinishReason ?? assembler.finishReason,
+      finishReason: finish,
     });
 
     auditStreamedOutput(`${state.route}:stream`);
@@ -1488,7 +1496,7 @@ async function* streamEvents(args: {
       errorMessage: normalized.error.message,
       latencyMs,
       usage: {},
-      finishReason: assembler.rawFinishReason,
+      finishReason: assembler.finishReason === "error" ? undefined : assembler.finishReason,
     });
     yield { type: 'failed', error: normalized.error, status: normalized.status };
   } finally {

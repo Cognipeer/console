@@ -206,7 +206,7 @@ export function buildNativeOptions(input: {
       // Thinking tokens come out of `max_tokens`: leave the answer the room the console's
       // rule promises (the SDK's own floor is thinner), and keep a roomy cap as it is.
       if (driver === 'anthropic' || driver === 'bedrock') {
-        const thinking = translateAnthropicThinking(reasoning, maxTokens);
+        const thinking = translateAnthropicThinking(reasoning, maxTokens, input.modelId);
         if (thinking?.thinking.type === 'enabled' && thinking.maxTokens !== undefined) options.maxTokens = thinking.maxTokens;
       }
     }

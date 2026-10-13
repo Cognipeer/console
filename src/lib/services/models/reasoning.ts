@@ -168,11 +168,32 @@ export function reasoningBudget(reasoning: NormalizedReasoning | undefined): num
 
 export interface ThinkingTranslation {
   /** Body fragment, in Anthropic's wire shape. */
-  thinking: { type: 'enabled'; budget_tokens: number } | { type: 'disabled' };
+  thinking: { type: 'enabled'; budget_tokens: number } | { type: 'adaptive' } | { type: 'disabled' };
+  /** `output_config` fragment: adaptive thinking carries its level here. */
+  outputConfig?: { effort: 'low' | 'medium' | 'high' };
   /** max_tokens to send: always above the budget when thinking is on. */
   maxTokens?: number;
   /** Thinking forbids temperature / top_p. */
   dropSampling: boolean;
+}
+
+/**
+ * Claude 5.x and fable models take `thinking: {type:'adaptive'}` + `output_config.effort`;
+ * older ones take `enabled` + `budget_tokens`. Mirrors the SDK's per-model choice
+ * (its `supportsAdaptiveThinking` is not exported from the package root, so the rule
+ * lives here too: keep the two in step when the SDK moves).
+ */
+export function supportsAdaptiveThinking(modelId: string | undefined): boolean {
+  if (typeof modelId !== 'string') return false;
+  const id = modelId.toLowerCase();
+  const at = id.indexOf('claude-');
+  if (at < 0) return false;
+  for (const tok of id.slice(at + 7).split('-')) {
+    if (tok === 'fable') return true;
+    if (/^\d{1,2}$/.test(tok)) return Number(tok) >= 5;
+    if (/^\d+$/.test(tok)) return false;
+  }
+  return false;
 }
 
 /**
@@ -183,10 +204,22 @@ export interface ThinkingTranslation {
 export function translateAnthropicThinking(
   reasoning: NormalizedReasoning | undefined,
   currentMaxTokens: number | undefined,
+  modelId?: string,
 ): ThinkingTranslation | undefined {
   const budget = reasoningBudget(reasoning);
   if (budget === undefined) return undefined;
-  if (budget === 0) return { thinking: { type: 'disabled' }, maxTokens: currentMaxTokens, dropSampling: false };
+  if (budget === 0) {
+    // `none` on an adaptive model sends no thinking at all (the SDK does the same).
+    return supportsAdaptiveThinking(modelId)
+      ? undefined
+      : { thinking: { type: 'disabled' }, maxTokens: currentMaxTokens, dropSampling: false };
+  }
+  if (supportsAdaptiveThinking(modelId)) {
+    const effort = reasoning?.effort
+      ? (reasoning.effort === 'minimal' ? 'low' : reasoning.effort as 'low' | 'medium' | 'high')
+      : budget <= EFFORT_BUDGET.low ? 'low' : budget <= EFFORT_BUDGET.medium ? 'medium' : 'high';
+    return { thinking: { type: 'adaptive' }, outputConfig: { effort }, maxTokens: currentMaxTokens, dropSampling: true };
+  }
 
   const budgetTokens = Math.max(budget, ANTHROPIC_MIN_THINKING_BUDGET);
   const floor = budgetTokens + THINKING_ANSWER_HEADROOM;

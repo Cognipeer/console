@@ -672,11 +672,11 @@ describe('finish_reason on the wire, per driver', () => {
     const outcome = await executeModelCall({ ...BASE, request: ASK });
     await flush();
     expect((outcome.wire as any).choices[0].finish_reason).toBe(wire);
-    // The usage row keeps the provider's own word for analytics.
-    expect(rows()[0].finishReason).toBe(stopReason);
+    // The usage row carries the normalized reason, not the provider's own word.
+    expect(rows()[0].finishReason).toBe(wire);
   });
 
-  it('Anthropic\'s non-streamed turn: end_turn is stop, tool_use is tool_calls, and the row keeps the raw word', async () => {
+  it('Anthropic\'s non-streamed turn: end_turn is stop, tool_use is tool_calls, and the row is normalized', async () => {
     (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
     useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
     stubUpstream(() => json({
@@ -691,12 +691,28 @@ describe('finish_reason on the wire, per driver', () => {
       finish_reason: 'tool_calls',
       message: { tool_calls: [{ id: 'toolu_1', type: 'function', function: { name: 'lookup', arguments: '{"q":1}' } }] },
     });
-    expect(rows()[0].finishReason).toBe('tool_use');
+    expect(rows()[0].finishReason).toBe('tool_calls');
     expect(outcome.usage).toMatchObject({ inputTokens: 120, cachedInputTokens: 100, outputTokens: 5, totalTokens: 125, toolCalls: 1 });
   });
 });
 
 describe('a native request, as an agent makes it', () => {
+  it('stamps the agent key onto the usage row so the rollup can bucket by agent', async () => {
+    (buildModelRuntime as ReturnType<typeof vi.fn>).mockResolvedValue({ runtime: anthropic });
+    useModel(model({ providerDriver: 'anthropic', modelId: 'claude-sonnet-4-5' }));
+    stubUpstream(() => json({
+      id: 'm', model: 'c', type: 'message', role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+      usage: { input_tokens: 2, output_tokens: 1 },
+    }));
+    await executeModelCall({
+      ...BASE, request: ASK,
+      context: { route: 'agent.chat', callerContext: { agentKey: 'triage' }, requestTags: { agentKey: 'triage', sessionId: 's1' } },
+    });
+    await flush();
+    expect(rows()[0]).toMatchObject({ agentKey: 'triage', finishReason: 'stop' });
+  });
+
   it('carries messages with images, tools, tool choice and a response format to the upstream', async () => {
     useModel(model());
     const upstream = stubUpstream(() => json(completion({ content: '{"a":1}' })));

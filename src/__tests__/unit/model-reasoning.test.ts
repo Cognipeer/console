@@ -132,6 +132,18 @@ describe('reasoning: translation helpers', () => {
     expect(translateAnthropicThinking(undefined, 500)).toBeUndefined();
   });
 
+  it('anthropic 5.x / fable: adaptive thinking + output_config effort, no budget; older ids keep enabled', () => {
+    for (const id of ['claude-opus-5-1', 'us.anthropic.claude-sonnet-5-20260101-v1:0', 'claude-fable-1']) {
+      expect(translateAnthropicThinking({ effort: 'minimal' }, 2000, id)).toEqual({
+        thinking: { type: 'adaptive' }, outputConfig: { effort: 'low' }, maxTokens: 2000, dropSampling: true,
+      });
+      expect(translateAnthropicThinking({ effort: 'high' }, undefined, id)?.outputConfig).toEqual({ effort: 'high' });
+      expect(translateAnthropicThinking({ effort: 'none' }, 500, id)).toBeUndefined();
+    }
+    expect(translateAnthropicThinking({ effort: 'high' }, 2000, 'claude-sonnet-4-5')?.thinking.type).toBe('enabled');
+    expect(translateAnthropicThinking({ effort: 'high' }, 2000, 'claude-3-7-sonnet-20250219')?.thinking.type).toBe('enabled');
+  });
+
   it('vertex: thinkingConfig, budget 0 turns thinking off', () => {
     expect(translateVertexThinking({ effort: 'low' })).toEqual({
       thinkingConfig: { thinkingBudget: 2048, includeThoughts: true },

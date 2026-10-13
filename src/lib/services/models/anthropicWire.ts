@@ -56,6 +56,7 @@ export interface AnthropicMessagesRequest {
   stream?: boolean;
   metadata?: { user_id?: string };
   thinking?: { type?: string; budget_tokens?: number };
+  output_config?: { effort?: string };
 }
 
 type OpenAiToolCall = {
@@ -305,6 +306,12 @@ export function anthropicRequestToOpenAi(
   // supplies the request's own value (see `resolveGatewayReasoning`).
   if (body.thinking?.type === 'enabled' && typeof body.thinking.budget_tokens === 'number') {
     openAi.reasoning = { budget_tokens: body.thinking.budget_tokens };
+  } else if (body.thinking?.type === 'adaptive') {
+    // Adaptive thinking carries its level in `output_config.effort`.
+    const effort = body.output_config?.effort;
+    openAi.reasoning_effort = effort === 'low' || effort === 'medium' || effort === 'high'
+      ? effort
+      : effort === 'max' || effort === 'xhigh' ? 'high' : 'medium';
   } else if (body.thinking?.type === 'disabled') {
     openAi.reasoning_effort = 'none';
   }
@@ -432,7 +439,7 @@ export interface ThinkingEmission {
 
 /** True when the Messages request turned extended thinking on. */
 export function isThinkingRequested(body: { thinking?: { type?: string } | null }): boolean {
-  return body?.thinking?.type === 'enabled';
+  return body?.thinking?.type === 'enabled' || body?.thinking?.type === 'adaptive';
 }
 
 /** Buffered OpenAI chat completion → Messages response. */
