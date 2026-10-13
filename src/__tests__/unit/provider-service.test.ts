@@ -9,6 +9,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
+vi.mock('@/lib/services/providers/providerEndpointGuard', () => ({ assertProviderEndpointsAllowed: vi.fn(async () => undefined) }));
+
 vi.mock('@/lib/database', () => ({
   getDatabase: vi.fn(),
 }));
