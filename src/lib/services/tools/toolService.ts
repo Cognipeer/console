@@ -5,6 +5,7 @@
  * Tools are registered centrally and can be bound to agents or called via API.
  */
 
+import { currentTurnSignal } from '@/lib/core/turnSignal';
 import slugify from 'slugify';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import { normalizeApiSpec, type SpecFormatHint } from '@/lib/services/specImport';
@@ -530,6 +531,8 @@ async function executeOpenApiAction(
     fetchOptions.body = JSON.stringify(bodyContent);
   }
 
+  const turnSignal = currentTurnSignal();
+  if (turnSignal) fetchOptions.signal = turnSignal;
   const response = await safeFetch(url, fetchOptions);
   const latencyMs = Date.now() - start;
 
@@ -588,10 +591,12 @@ async function executeMcpAction(
     },
   });
 
+  const turnSignal = currentTurnSignal();
   const response = await safeFetch(tool.mcpEndpoint, {
     method: 'POST',
     headers,
     body: callBody,
+    ...(turnSignal ? { signal: turnSignal } : {}),
   });
 
   const latencyMs = Date.now() - start;

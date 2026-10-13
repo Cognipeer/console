@@ -663,3 +663,13 @@ export function buildCostEstimator(
         }).totalCost;
     };
 }
+
+/**
+ * A turn the caller's signal aborted is a cancelled turn even when the SDK reports
+ * it as finished: a text stream that is cut short ends like a normal one, with no
+ * cancellation mark on the run. What was written so far stays as the answer.
+ */
+export function endedByCallerAbort(outcome: AgentTurnOutcome, signal: AbortSignal | undefined): AgentTurnOutcome {
+    if (!signal?.aborted || outcome.stopReason !== 'completed') return outcome;
+    return { ...outcome, stopReason: 'cancelled', stopDetail: 'aborted', partial: true };
+}

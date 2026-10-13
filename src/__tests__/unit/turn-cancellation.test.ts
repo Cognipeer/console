@@ -53,3 +53,35 @@ describe('watchTurnCancellation', () => {
     watch.stop();
   });
 });
+
+import { currentTurnSignal, runWithTurnSignal } from '@/lib/core/turnSignal';
+import { endedByCallerAbort } from '@/lib/services/agents/agentTurnState';
+
+describe('turn signal binding', () => {
+  it('is visible to async code inside the turn and nowhere else', async () => {
+    const controller = new AbortController();
+    expect(currentTurnSignal()).toBeUndefined();
+    const seen = await runWithTurnSignal(controller.signal, async () => {
+      await Promise.resolve();
+      return currentTurnSignal();
+    });
+    expect(seen).toBe(controller.signal);
+    expect(currentTurnSignal()).toBeUndefined();
+  });
+});
+
+describe('endedByCallerAbort', () => {
+  const done = { stopReason: 'completed' as const, content: 'partial', partial: false };
+  it('turns a "completed" outcome of an aborted turn into a cancelled one, keeping the text', () => {
+    const controller = new AbortController();
+    controller.abort();
+    expect(endedByCallerAbort(done, controller.signal)).toMatchObject({ stopReason: 'cancelled', stopDetail: 'aborted', content: 'partial', partial: true });
+  });
+  it('leaves other outcomes and live signals alone', () => {
+    expect(endedByCallerAbort(done, new AbortController().signal)).toBe(done);
+    const controller = new AbortController();
+    controller.abort();
+    const limit = { stopReason: 'limit' as const, content: '', partial: true };
+    expect(endedByCallerAbort(limit, controller.signal)).toBe(limit);
+  });
+});

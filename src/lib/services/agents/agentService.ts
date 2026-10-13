@@ -77,6 +77,7 @@ import { getMcpServerByKey, executeMcpTool, isMcpToolEnabled } from '@/lib/servi
 // By path: the barrel does not export it, and it is the ONE reader of a
 // server's `guardrail` / legacy `aegis` columns (`mcpService.ts`).
 import { resolveMcpGuardrailBinding } from '@/lib/services/mcp/mcpService';
+import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { executeToolAction, logToolRequest, toolRequestSecretValues } from '@/lib/services/tools';
 import {
     resolveAgentBindingMcpServer,
@@ -157,6 +158,7 @@ import {
     compactedToolResults,
     compactionFromEvent,
     describeTurnOutcome,
+    endedByCallerAbort,
     buildContinueInputState,
     loadConversationState,
     saveConversationState,
@@ -4260,7 +4262,7 @@ async function runAgentChatTurn(
             ...sessionBudgetInvokeOptions(budgetPlan),
         };
 
-        const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(inputState, liveInvokeConfig)
+        const settled: AgentSdkInvokeResult | null = await runWithTurnSignal(cancellationBridge.signal, () => sdkAgent.invoke(inputState, liveInvokeConfig))
             .catch((error: unknown) => {
                 // The caller aborted and the in-flight model call threw for
                 // it: an aborted turn resolves with what it had streamed.
@@ -4325,7 +4327,7 @@ async function runAgentChatTurn(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const turnOutcome = describeTurnOutcome(result, inputState.messages.length);
+        const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         // What the turn cost: kept on the message (the session's running total
         // is the sum of these) and, with a session budget, checked against it.
@@ -4974,7 +4976,7 @@ async function runPlaygroundChatTurn(
 
     const invokeStartedAt = Date.now();
     try {
-        const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(inputState, invokeConfig)
+        const settled: AgentSdkInvokeResult | null = await runWithTurnSignal(signal, () => sdkAgent.invoke(inputState, invokeConfig))
             .catch((error: unknown) => {
                 // The caller aborted and the in-flight model call threw for
                 // it: an aborted turn resolves with what it had streamed.
@@ -5022,7 +5024,7 @@ async function runPlaygroundChatTurn(
         //
         // A run a limit or a cancellation cut short has no final answer; the
         // outcome carries why, and the last text the agent did write.
-        const turnOutcome = describeTurnOutcome(result, inputState.messages.length);
+        const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputState.messages.length), signal);
         const compactedTools = compactions.length > 0
             ? compactedToolResults(inputState.messages, result.state?.messages as AgentSdkMessage[] | undefined)
             : [];
@@ -5649,7 +5651,7 @@ async function runAgentResumeTurn(
         };
 
         request.onInvokeStart?.();
-        const settled: AgentSdkInvokeResult | null = await sdkAgent.invoke(state, invokeConfig)
+        const settled: AgentSdkInvokeResult | null = await runWithTurnSignal(cancellationBridge.signal, () => sdkAgent.invoke(state, invokeConfig))
             .catch((error: unknown) => {
                 if (request.signal?.aborted) return null;
                 throw annotateAgentRunError(error, { modelKey: model.key, providerKey: model.providerKey });
@@ -5688,7 +5690,7 @@ async function runAgentResumeTurn(
         // `config.showReasoning: false` keeps the thinking text out of the API response, the
         // stored session message and Studio chat. The tokens were spent and are counted regardless.
         const assistantReasoning = agentShowsReasoning(config) ? extractAgentReasoning(result) : undefined;
-        const turnOutcome = describeTurnOutcome(result, inputMessageCount);
+        const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const compactedTools = compactions.length > 0
             ? compactedToolResults(state.messages as AgentSdkMessage[], result.state?.messages as AgentSdkMessage[] | undefined)
