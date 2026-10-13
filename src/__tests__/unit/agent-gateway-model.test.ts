@@ -247,6 +247,62 @@ describe('abort', () => {
   });
 });
 
+describe('agent stream edge cases', () => {
+  it('mints a tool-call id when the upstream sends none, and keeps it across fragments', async () => {
+    upstream = stubUpstream(() => sse([
+      chunk.tool(0, { name: 'lookup', arguments: '{"q":' }),
+      chunk.tool(0, { arguments: '"x"}' }),
+      chunk.finish('tool_calls'),
+    ]));
+    const parts: any[] = [];
+    for await (const part of (await build('m')).stream!(USER)) parts.push(part);
+    const final = parts.find((part) => typeof part === 'object' && part.role);
+    expect(final.tool_calls).toHaveLength(1);
+    expect(final.tool_calls[0].id).toMatch(/^call_0_/);
+    expect(final.tool_calls[0].function).toMatchObject({ name: 'lookup', arguments: '{"q":"x"}' });
+  });
+
+  it('a consumer that stops reading without a signal still aborts the upstream, books a cancelled row and settles usage', async () => {
+    let upstreamSignal: AbortSignal | undefined;
+    upstream = stubUpstream((call) => {
+      upstreamSignal = call.signal;
+      const live = controlledStream(call.signal);
+      live.send(chunk.text('a partial answer'));
+      return live.response;
+    });
+    const sink = createRunUsageSink();
+    await runWithUsageSink(sink, async () => {
+      for await (const part of (await build('m')).stream!(USER)) {
+        if (typeof part === 'string') break;
+      }
+    });
+    await flush();
+    expect(upstreamSignal?.aborted).toBe(true);
+    expect(rows().at(-1)).toMatchObject({ status: 'cancelled' });
+    expect(sink.totalTokens).toBeGreaterThan(0);
+  });
+
+  it('a stream cut by an output guardrail still settles the partial usage', async () => {
+    useModels(llm('m', { outputGuardrailKey: 'gr' }));
+    (createStreamGate as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+      push: vi.fn(async () => ({ emit: [], blocked: true, verdict: { guardrailKey: 'gr', message: { body: 'no', reasonClass: 'secret' } } })),
+      end: vi.fn(async () => ({ emit: [], blocked: false })),
+    }));
+    upstream = stubUpstream((call) => {
+      const live = controlledStream(call.signal);
+      live.send(chunk.text('a secret'));
+      return live.response;
+    });
+    const sink = createRunUsageSink();
+    await runWithUsageSink(sink, async () => {
+      const drain = async () => { for await (const part of (await build('m')).stream!(USER)) void part; };
+      await expect(drain()).rejects.toMatchObject({ name: 'AgentGuardrailBlockedError' });
+    });
+    await flush();
+    expect(sink.totalTokens).toBeGreaterThan(0);
+  });
+});
+
 describe('a model with a semantic cache, called by an agent', () => {
   it('is not served from the cache: the tool loop makes its upstream calls and runs its tool once', async () => {
     // A cache that would answer step 2 with step 1's stored tool call (same last user text).

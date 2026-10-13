@@ -195,8 +195,9 @@ async function runAcrossReplicas<T>(
  * breaker is open` for requests that would have succeeded. A genuine provider
  * outage still trips, once per model in use, which is what the breaker is for.
  */
-function chatResilienceKey(prefix: 'chat' | 'chat-stream', model: IModel): string {
-  return `${prefix}:${model.providerKey}:${model.modelId}`;
+function chatResilienceKey(prefix: 'chat' | 'chat-stream', tenantDbName: string, model: IModel): string {
+  // Tenant-scoped: the breaker map is process-global and provider keys are tenant-chosen names.
+  return `${prefix}:${tenantDbName}:${model.providerKey}:${model.modelId}`;
 }
 
 // ── Input guardrails: once per turn ───────────────────────────────────────
@@ -718,7 +719,7 @@ async function completeOnce(state: CallState): Promise<ModelCallOutcome> {
     const response = await withResilience(
       (signal) => prepared.client.complete({ ...prepared.request, signal }),
       {
-        key: chatResilienceKey('chat', candidate),
+        key: chatResilienceKey('chat', tenantDbName, candidate),
         ...(context.signal ? { signal: context.signal } : {}),
       },
     );
@@ -906,7 +907,7 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
       const response = await withResilience(
         (signal) => prepared.client.complete({ ...prepared.request, signal }),
         {
-          key: chatResilienceKey('chat', activeModel),
+          key: chatResilienceKey('chat', state.tenantDbName, activeModel),
           ...(context.signal ? { signal: context.signal } : {}),
         },
       );
@@ -923,7 +924,7 @@ async function openStream(state: CallState): Promise<ModelCallOutcome> {
         return { gen: generator, first: await generator.next() };
       },
       {
-        key: chatResilienceKey('chat-stream', activeModel),
+        key: chatResilienceKey('chat-stream', state.tenantDbName, activeModel),
         ...(context.signal ? { signal: context.signal } : {}),
       },
     );
@@ -1172,6 +1173,33 @@ async function* streamEvents(args: {
   let donePending = false;
   let settled = false;
 
+  let exitedEarly = true;
+  const settleCancelled = () => {
+    settled = true;
+    const latencyMs = Date.now() - startedAt;
+    const cancelledUsage = partialUsage();
+    context.onUsageSettled?.(calculateCost(model.pricing, cancelledUsage), cancelledUsage);
+    usageRow(state, 'log-stream-cancelled', {
+      requestId,
+      route: state.route,
+      status: 'cancelled',
+      providerRequest: sanitizeForLogging({
+        model: modelKey,
+        messages: state.loggedMessages,
+        overrides,
+        stream: true,
+      }),
+      providerResponse: sanitizeForLogging({
+        cancelled: 'client_disconnected',
+        partial: partialMessage(),
+        ...(assembler.usage ? {} : { output_tokens_estimated: true }),
+      }),
+      latencyMs,
+      usage: cancelledUsage,
+    });
+    auditStreamedOutput(`${state.route}:stream:cancelled`);
+  };
+
   const finalizeBlock = () => {
     if (blockFinalized || !blockedByGuardrail) return;
     blockFinalized = true;
@@ -1185,6 +1213,13 @@ async function* streamEvents(args: {
     // a policy block would be reported as a user pressing stop, and the usage row
     // would be wrong with it.
     blockCtl.abort();
+
+    // The provider generated and billed these tokens whether or not they were delivered.
+    const blockedUsage = partialUsage();
+    if (!settled) {
+      settled = true;
+      context.onUsageSettled?.(calculateCost(model.pricing, blockedUsage), blockedUsage);
+    }
 
     usageRow(state, 'log-stream-guardrail-block', {
       requestId,
@@ -1207,7 +1242,7 @@ async function* streamEvents(args: {
       errorMessage: blockMessage,
       latencyMs: Date.now() - startedAt,
       // The same estimator the cancel path uses, for the same reason.
-      usage: partialUsage(),
+      usage: blockedUsage,
       finishReason: 'content_filter',
     });
 
@@ -1422,7 +1457,9 @@ async function* streamEvents(args: {
       outputLimitReached: Boolean(outputLimitError),
     };
     settleSuccess(finishForSettle);
+    exitedEarly = false;
   } catch (error: unknown) {
+    exitedEarly = false;
     // CHECKED FIRST, and before the cancellation branch below: a guardrail block
     // aborts the upstream itself, so the provider iterator can still throw its way
     // out of `for await`'s `return()` afterwards. Everything that had to be
@@ -1436,27 +1473,7 @@ async function* streamEvents(args: {
     // pressed stop: the error rate rose, alerting fired, and the tokens the
     // provider had already generated (and bills us for) were written as zero.
     if (external?.aborted) {
-      const cancelledUsage = partialUsage();
-      context.onUsageSettled?.(calculateCost(model.pricing, cancelledUsage), cancelledUsage);
-      usageRow(state, 'log-stream-cancelled', {
-        requestId,
-        route: state.route,
-        status: 'cancelled',
-        providerRequest: sanitizeForLogging({
-          model: modelKey,
-          messages: state.loggedMessages,
-          overrides,
-          stream: true,
-        }),
-        providerResponse: sanitizeForLogging({
-          cancelled: 'client_disconnected',
-          partial: partialMessage(),
-          ...(assembler.usage ? {} : { output_tokens_estimated: true }),
-        }),
-        latencyMs,
-        usage: cancelledUsage,
-      });
-      auditStreamedOutput(`${state.route}:stream:cancelled`);
+      settleCancelled();
       yield { type: 'cancelled' };
       return;
     }
@@ -1479,5 +1496,11 @@ async function* streamEvents(args: {
     // bookkeeping: the block's abort + row, or the success row.
     if (blockedByGuardrail) finalizeBlock();
     else if (donePending) settleSuccess(finishForSettle);
+    else if (exitedEarly && !settled) {
+      // The consumer walked away without a terminal event or a signal: stop the
+      // upstream and book what was generated, as for a cancellation.
+      blockCtl.abort();
+      settleCancelled();
+    }
   }
 }

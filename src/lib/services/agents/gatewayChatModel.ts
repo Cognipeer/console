@@ -241,7 +241,10 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       noteRoute(outcome);
       const response = outcome.result?.response;
       if (!response) throw new Error('The gateway returned no answer');
-      return outcome.includeReasoning === false ? withoutReasoningText(response) : response;
+      const named = response.toolCalls?.some((call) => !call.id)
+        ? { ...response, toolCalls: response.toolCalls.map((call, index) => (call.id ? call : { ...call, id: `call_${index}_${crypto.randomUUID()}` })) }
+        : response;
+      return outcome.includeReasoning === false ? withoutReasoningText(named) : named;
     },
 
     async *completeStream(request: ChatCompletionRequest): AsyncGenerator<ChatCompletionChunk, void, unknown> {
@@ -263,6 +266,8 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
       let lastCall: { id: string; name?: string } | undefined;
       let limit: Error | undefined;
 
+      let finished = false;
+      try {
       for (;;) {
         const next = await events.next();
         if (next.done) break;
@@ -271,13 +276,17 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         if (event.type === 'delta') {
           const toolCalls = event.toolCalls?.map((call) => {
             const known = (call.index !== undefined ? idByIndex.get(call.index) : undefined) ?? (call.id ? undefined : lastCall);
-            const callId = call.id ?? known?.id;
-            const callName = call.name ?? known?.name;
-            if (callId) {
-              lastCall = { id: callId, name: callName };
-              if (call.index !== undefined) idByIndex.set(call.index, lastCall);
+            // Some OpenAI-compatible upstreams send no tool-call id; the SDK joins
+            // fragments by id, so mint one per index and reuse it for every fragment.
+            const index = call.index ?? 0;
+            let callId = call.id || known?.id;
+            if (!callId) {
+              callId = `call_${index}_${crypto.randomUUID()}`;
             }
-            return { ...call, ...(callId ? { id: callId } : {}), ...(callName ? { name: callName } : {}) };
+            const callName = call.name ?? known?.name;
+            lastCall = { id: callId, name: callName };
+            idByIndex.set(index, lastCall);
+            return { ...call, id: callId, ...(callName ? { name: callName } : {}) };
           });
           const blocks = event.reasoningPayload?.blocks;
           const summary = showReasoning ? event.reasoning : undefined;
@@ -337,7 +346,13 @@ function createGatewayProvider(input: GatewayChatModelInput): BaseProvider {
         // 'start', 'finish' and 'usage' say nothing the chunks above do not.
       }
 
+      finished = true;
       if (limit) throw limit;
+      } finally {
+        // Stopped reading early (a consumer error or break): close the core so it
+        // aborts the upstream and books the partial usage.
+        if (!finished) await events.return?.(undefined).catch(() => undefined);
+      }
     },
   };
 

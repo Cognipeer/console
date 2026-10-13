@@ -69,7 +69,7 @@ async function callLlm(ctx: LlmCallContext, systemPrompt: string, userPrompt: st
         { role: 'user', content: userPrompt },
       ],
     }),
-    { key: `guardrail:${ctx.modelKey}` },
+    { key: `guardrail:${ctx.tenantDbName}:${ctx.modelKey}` },
   );
 
   return response.content ?? '';

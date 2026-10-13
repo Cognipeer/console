@@ -390,7 +390,7 @@ export async function handleEmbeddingRequest(params: {
 
   const embedded = await withResilience(
     () => embedder.embed(inputs, embedOptions),
-    { key: `embedding:${model.providerKey}` },
+    { key: `embedding:${tenantDbName}:${model.providerKey}` },
   );
   const embeddings = embedded.vectors;
   const latencyMs = Date.now() - start;
