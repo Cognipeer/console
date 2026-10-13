@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { resolveGatewayReasoning, shouldReturnReasoning } from '@/lib/services/models/reasoning';
 import { createLogger } from '@/lib/core/logger';
 import { abortErrorFrom, withResilience } from '@/lib/core/resilience';
 import { fireAndForget } from '@/lib/core/asyncTask';
@@ -776,6 +777,7 @@ const KNOWN_REQUEST_FIELDS = new Set([
   'modality',
   'model',
   'presence_penalty',
+  'include_reasoning',
   'reasoning',
   'reasoning_effort',
   'request_id',
@@ -893,15 +895,17 @@ function buildChatModelSettings(
     settings.maxCompletionTokens = overrides.max_completion_tokens;
   }
 
-  if (overrides.reasoning !== undefined) {
-    settings.reasoning = overrides.reasoning;
-  } else if (overrides.reasoning_effort !== undefined) {
-    settings.reasoning = {
-      ...(typeof settings.reasoning === 'object' && settings.reasoning !== null
-        ? settings.reasoning as Record<string, unknown>
-        : {}),
-      effort: overrides.reasoning_effort,
-    };
+  // Model Hub default > request value > nothing. The request only fills the
+  // gap when the operator left the model's reasoning unset; it never overrides
+  // what the UI pinned (see `resolveGatewayReasoning`).
+  const resolved = resolveGatewayReasoning(settings, {
+    reasoning: overrides.reasoning,
+    reasoning_effort: overrides.reasoning_effort,
+  });
+  if (resolved.reasoning) {
+    settings.reasoning = resolved.reasoning;
+  } else {
+    delete settings.reasoning;
   }
 
   return settings;
@@ -2238,6 +2242,7 @@ export async function handleChatCompletion(params: {
       completionId,
       created: completionCreated,
       reasoningSplitter,
+      includeReasoning: shouldReturnReasoning(model.settings, body),
     };
 
     // ── Real-time streaming enforcement ──────────────────────────────────
@@ -2604,7 +2609,7 @@ export async function handleChatCompletion(params: {
           if (!outputLimitError && (reasoningTail.content || reasoningTail.reasoning)) {
             const tailDelta: Record<string, unknown> = {};
             if (reasoningTail.content) tailDelta.content = reasoningTail.content;
-            if (reasoningTail.reasoning) tailDelta.reasoning_content = reasoningTail.reasoning;
+            if (reasoningTail.reasoning && chunkOptions.includeReasoning) tailDelta.reasoning_content = reasoningTail.reasoning;
             const tailPayload = openAIStreamDeltaChunk(chunkOptions, tailDelta);
             if (gate) {
               const gatedTail = await gate.push(toGateChunk(tailPayload));
@@ -2823,6 +2828,7 @@ export async function handleChatCompletion(params: {
     // must not be able to tell which deployment answered.
     model: model.modelId,
     stream: false,
+    includeReasoning: shouldReturnReasoning(model.settings, body),
   });
 
   // JSON mode is a contract: the caller asked for a parseable document and is

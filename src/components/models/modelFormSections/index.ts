@@ -5,3 +5,4 @@ export { default as PricingSection } from './PricingSection';
 export { default as LimitsSection } from './LimitsSection';
 export { default as RequestParamsSection } from './RequestParamsSection';
 export type { FieldProps } from './types';
+export { default as ReasoningSection } from './ReasoningSection';

@@ -250,6 +250,58 @@ export const tr: typeof en = {
       },
     },
   },
+  modelReasoning: {
+    title: 'Akıl yürütme',
+    description:
+      'Bu modelin varsayılan düşünme seviyesi ve düşünme metninin çağıranlara dönüp dönmeyeceği. Ayarlanmamış hiçbir şey göndermez; sağlayıcının kendi varsayılanı geçerli olur.',
+    notSet: 'Ayarlanmadı (sağlayıcı varsayılanı)',
+    effortLabel: 'Varsayılan akıl yürütme seviyesi',
+    toggleLabel: 'Düşünme',
+    effort: {
+      none: 'Yok (düşünme kapalı)',
+      minimal: 'Minimal',
+      low: 'Düşük',
+      medium: 'Orta',
+      high: 'Yüksek',
+    },
+    toggle: {
+      none: 'Kapalı',
+      medium: 'Açık',
+    },
+    hint: {
+      effort: 'reasoning_effort olarak gönderilir. Burada ayarlıysa API isteğindeki değerin önüne geçer.',
+      budget: 'Seviye bir düşünme token bütçesine çevrilir; üzerine yazmak için aşağıya tam bütçe girin.',
+      toggle: 'Bu motorda yalnızca düşünme açık veya kapalı olabilir.',
+      none: '',
+    },
+    budgetLabel: 'Düşünme bütçesi (token)',
+    budgetHint: 'Seviyenin üzerine yazar. Çıktı sınırı bütçenin üstüne otomatik çıkarılır.',
+    budgetPlaceholder: 'Seviyeden gelir',
+    includeThoughts: {
+      label: 'Düşünceleri iste',
+      description: 'Modelden düşüncesini üretmesini iste, böylece döndürülebilir.',
+    },
+    returnReasoning: {
+      label: 'Akıl yürütmeyi çağıranlara döndür',
+      description:
+        'Varsayılan olarak açık. Kapalıyken akıl yürütme metni API yanıtlarından çıkarılır; düşünme token\'ları yine sayılır ve faturalanır. Bir istek bunu tekrar açamaz.',
+    },
+    unsupportedDriver: 'Bu sağlayıcıda akıl yürütme ayarı yok.',
+    forcedNoneWithTools:
+      'İstekte araç varsa bu model, burada ne seçili olursa olsun akıl yürütme seviyesi none ile çağrılır: sağlayıcı fonksiyon araçlarının yanında başka değeri reddeder.',
+    detail: {
+      title: 'Akıl yürütme',
+      effective: 'Etkin ayar',
+      notSet: 'Ayarlanmadı (sağlayıcı varsayılanı)',
+      budget: '{tokens} token bütçe',
+      returned: 'Akıl yürütme metni çağıranlara döner',
+      hidden: 'Akıl yürütme metni çağıranlardan gizli',
+    },
+    playground: {
+      show: 'Akıl yürütmeyi göster',
+      label: 'Akıl yürütme',
+    },
+  },
   modelWizard: {
     ...en.modelWizard,
     decision: {

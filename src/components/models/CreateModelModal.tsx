@@ -32,6 +32,7 @@ import {
   LimitsSection,
   PricingSection,
   ProviderSection,
+  ReasoningSection,
   RequestParamsSection,
 } from './modelFormSections';
 import {
@@ -39,6 +40,8 @@ import {
   parseRequestDefaults,
   validateRequestDefaults,
 } from '@/components/models/requestParams';
+import { EMPTY_REASONING_FORM, reasoningSettingsPatch, type ReasoningFormValue } from '@/components/models/reasoningForm';
+import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/unsupportedParams';
 import type { ModelProviderView } from '@/lib/services/models/types';
 import type { IModel } from '@/lib/database';
 
@@ -117,6 +120,7 @@ interface FormValues {
     pagePer1K: number | '';
     imagePer1K: number | '';
   };
+  reasoning: ReasoningFormValue;
   settings: {
     temperature: number | '';
     maxTokens: number | '';
@@ -162,6 +166,10 @@ function providerSupportsToolCalls(provider?: ModelProviderView) {
   return Boolean(provider?.driverCapabilities?.[CAPABILITY_KEYS.toolCalls]);
 }
 
+const isLlmCategory = (category: ModelCategory) => CAPABILITY_CATEGORIES.includes(category);
+const definedOnly = (patch: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+
 export default function CreateModelModal({
   opened,
   onClose,
@@ -206,6 +214,7 @@ export default function CreateModelModal({
         pagePer1K: '',
         imagePer1K: '',
       },
+      reasoning: { ...EMPTY_REASONING_FORM },
       settings: {
         temperature: '',
         maxTokens: '',
@@ -466,6 +475,7 @@ export default function CreateModelModal({
             ...(values.settings.allowUnknownPassthrough
               ? { allowUnknownPassthrough: true }
               : {}),
+            ...(isLlmCategory(values.category) ? definedOnly(reasoningSettingsPatch(values.reasoning, undefined)) : {}),
             // P1 decision models are always served by the structured-output emulator
             // over the chat model named below; `native` is reserved for later phases.
             ...(values.category === 'decision'
@@ -876,6 +886,18 @@ export default function CreateModelModal({
         maxTokens={{ props: form.getInputProps('settings.maxTokens') }}
         temperatureProps={form.getInputProps('settings.temperature')}
       />
+
+      {isLlm ? (
+        <ReasoningSection
+          number={sectionNumber()}
+          driver={selectedProvider?.driver}
+          value={formValues.reasoning}
+          onChange={(patch) => setFieldValue('reasoning', { ...formValues.reasoning, ...patch })}
+          forcedNoneWithTools={Boolean(
+            detectForcedParams(selectedProvider?.driver, formValues.modelId, true).forced?.reasoning_effort,
+          )}
+        />
+      ) : null}
 
       <RequestParamsSection
         number={sectionNumber()}

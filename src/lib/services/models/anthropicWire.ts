@@ -55,6 +55,7 @@ export interface AnthropicMessagesRequest {
   stop_sequences?: string[];
   stream?: boolean;
   metadata?: { user_id?: string };
+  thinking?: { type?: string; budget_tokens?: number };
 }
 
 type OpenAiToolCall = {
@@ -300,6 +301,14 @@ export function anthropicRequestToOpenAi(
   // strips it as an unknown parameter, which is the right outcome too.
   if (typeof body.top_k === 'number') openAi.top_k = body.top_k;
 
+  // Extended thinking: a Model Hub default still wins at the gateway; this only
+  // supplies the request's own value (see `resolveGatewayReasoning`).
+  if (body.thinking?.type === 'enabled' && typeof body.thinking.budget_tokens === 'number') {
+    openAi.reasoning = { budget_tokens: body.thinking.budget_tokens };
+  } else if (body.thinking?.type === 'disabled') {
+    openAi.reasoning_effort = 'none';
+  }
+
   if (Array.isArray(body.tools) && body.tools.length > 0) {
     openAi.tools = body.tools.map((tool, index) => {
       assertClientTool(tool, `tools[${index}]`);
@@ -419,6 +428,11 @@ export function openAiResponseToAnthropic(
   const message = (choice.message ?? {}) as Record<string, unknown>;
 
   const content: Array<Record<string, unknown>> = [];
+  // Present only when the gateway let the reasoning through (Model Hub
+  // "return reasoning" on, no `include_reasoning: false`).
+  if (typeof message.reasoning_content === 'string' && message.reasoning_content) {
+    content.push({ type: 'thinking', thinking: message.reasoning_content, signature: '' });
+  }
   if (typeof message.content === 'string' && message.content) {
     content.push({ type: 'text', text: message.content });
   } else if (Array.isArray(message.content)) {
@@ -494,6 +508,7 @@ export function openAiStreamToAnthropic(
   let model = requestedModel;
   let nextIndex = 0;
   let textIndex: number | null = null;
+  let thinkingIndex: number | null = null;
   /** OpenAI tool_call index → the Messages content-block index we opened for it. */
   const toolBlocks = new Map<number, number>();
   /** The one tool block currently open, if any — Messages allows a single open block. */
@@ -548,6 +563,8 @@ export function openAiStreamToAnthropic(
 
       /** Closes whichever block is open so exactly one is open at any time. */
       const closeOpenBlocks = () => {
+        closeBlock(thinkingIndex);
+        thinkingIndex = null;
         closeBlock(textIndex);
         textIndex = null;
         closeBlock(openToolIndex);
@@ -576,8 +593,27 @@ export function openAiStreamToAnthropic(
 
         openMessage();
 
+        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+          if (thinkingIndex === null) {
+            closeOpenBlocks();
+            thinkingIndex = nextIndex++;
+            emit('content_block_start', {
+              type: 'content_block_start',
+              index: thinkingIndex,
+              content_block: { type: 'thinking', thinking: '', signature: '' },
+            });
+          }
+          emit('content_block_delta', {
+            type: 'content_block_delta',
+            index: thinkingIndex,
+            delta: { type: 'thinking_delta', thinking: delta.reasoning_content },
+          });
+        }
+
         if (typeof delta.content === 'string' && delta.content) {
           if (textIndex === null) {
+            closeBlock(thinkingIndex);
+            thinkingIndex = null;
             // Text after a tool call: the tool block is finished first.
             closeOpenBlocks();
             textIndex = nextIndex++;

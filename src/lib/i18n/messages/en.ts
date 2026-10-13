@@ -3282,6 +3282,58 @@ export const en = {
       providers: 'Providers',
     },
   },
+  modelReasoning: {
+    title: 'Reasoning',
+    description:
+      'The default thinking effort for this model and whether the thinking text is returned to callers. Not set sends nothing, so the provider\'s own default applies.',
+    notSet: 'Not set (provider default)',
+    effortLabel: 'Default reasoning effort',
+    toggleLabel: 'Thinking',
+    effort: {
+      none: 'None (thinking off)',
+      minimal: 'Minimal',
+      low: 'Low',
+      medium: 'Medium',
+      high: 'High',
+    },
+    toggle: {
+      none: 'Off',
+      medium: 'On',
+    },
+    hint: {
+      effort: 'Sent as reasoning_effort. When set here it wins over the value in an API request.',
+      budget: 'A level is turned into a thinking token budget; enter an exact budget below to override it.',
+      toggle: 'This engine only has thinking on or off.',
+      none: '',
+    },
+    budgetLabel: 'Thinking budget (tokens)',
+    budgetHint: 'Overrides the level. The output cap is raised above the budget automatically.',
+    budgetPlaceholder: 'From the level',
+    includeThoughts: {
+      label: 'Ask for thoughts',
+      description: 'Ask the model to emit its thinking so it can be returned.',
+    },
+    returnReasoning: {
+      label: 'Return reasoning to callers',
+      description:
+        'On by default. When off, reasoning text is removed from API responses; the thinking tokens are still counted and billed. A request cannot turn this back on.',
+    },
+    unsupportedDriver: 'This provider has no reasoning controls.',
+    forcedNoneWithTools:
+      'With tools in a request this model is called with reasoning effort none, whatever is set here: the provider rejects any other value next to function tools.',
+    detail: {
+      title: 'Reasoning',
+      effective: 'Effective setting',
+      notSet: 'Not set (provider default)',
+      budget: '{tokens} token budget',
+      returned: 'Reasoning text is returned to callers',
+      hidden: 'Reasoning text is hidden from callers',
+    },
+    playground: {
+      show: 'Show reasoning',
+      label: 'Reasoning',
+    },
+  },
   modelWizard: {
     decision: {
       title: 'Decision mode',

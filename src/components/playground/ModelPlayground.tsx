@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { ActionIcon, Button, CopyButton, Tooltip } from '@mantine/core';
+import { useTranslations } from '@/lib/i18n';
 import { notifications } from '@mantine/notifications';
 import {
   IconCheck,
+  IconBrain,
   IconCopy,
   IconPhoto,
   IconPlayerPlay,
@@ -29,6 +31,21 @@ export default function ModelPlayground({
   const [output, setOutput] = useState('');
   const [reasoning, setReasoning] = useState('');
   const [reasoningOpen, setReasoningOpen] = useState(true);
+  const tReasoning = useTranslations('modelReasoning');
+  // Operator view toggle only: it never changes what is requested, and it is
+  // always available. A model that hides its reasoning simply has nothing to show.
+  const [showReasoning, setShowReasoning] = useState(true);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem('playground.showReasoning') === 'false') setShowReasoning(false);
+    } catch { /* storage can be blocked */ }
+  }, []);
+  const toggleShowReasoning = () => {
+    setShowReasoning((prev) => {
+      try { window.localStorage.setItem('playground.showReasoning', String(!prev)); } catch { /* ignore */ }
+      return !prev;
+    });
+  };
   const [running, setRunning] = useState(false);
   const [temperature, setTemperature] = useState(0.2);
   // Reasoning models spend a large share of the budget on the thinking trace
@@ -358,6 +375,18 @@ export default function ModelPlayground({
               </span>
             ) : null}
           </div>
+          <div className="ds-row ds-gap-sm">
+          <Button
+            variant={showReasoning ? 'light' : 'subtle'}
+            size="xs"
+            leftSection={<IconBrain size={12} stroke={1.7} />}
+            aria-pressed={showReasoning}
+            aria-label={tReasoning('playground.show')}
+            onClick={toggleShowReasoning}
+            data-testid="playground-reasoning-toggle"
+          >
+            {tReasoning('playground.label')}
+          </Button>
           <CopyButton value={output} timeout={1500}>
             {({ copied, copy }) => (
               <Button
@@ -377,9 +406,10 @@ export default function ModelPlayground({
               </Button>
             )}
           </CopyButton>
+          </div>
         </div>
         <div className="ds-playground-output">
-          {reasoning ? (
+          {reasoning && showReasoning ? (
             <div
               style={{
                 marginBottom: output ? 12 : 0,
@@ -441,7 +471,7 @@ export default function ModelPlayground({
                 <span className="ds-playground-cursor" aria-hidden="true" />
               ) : null}
             </div>
-          ) : !reasoning ? (
+          ) : !(reasoning && showReasoning) ? (
             <div
               className="ds-faint"
               style={{ fontSize: 13, fontStyle: 'italic' }}

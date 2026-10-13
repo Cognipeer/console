@@ -20,12 +20,15 @@ import {
   LimitsSection,
   PricingSection,
   ProviderSection,
+  ReasoningSection,
   RequestParamsSection,
 } from '@/components/models/modelFormSections';
 import { useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import { IconBrain, IconDeviceFloppy, IconShield } from '@tabler/icons-react';
 import { useTranslations } from '@/lib/i18n';
+import { reasoningFormFromSettings, reasoningSettingsPatch } from '@/components/models/reasoningForm';
+import { detectUnsupportedParams as detectForcedParams } from '@/lib/providers/unsupportedParams';
 import { useConfirmKeyChange } from '@/components/common/confirm/useConfirmKeyChange';
 import { PROVIDER_DEFINITIONS } from '@/lib/services/models/providerCatalog';
 import {
@@ -542,6 +545,10 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             unsupportedParams: toStringArray(values.settings.unsupportedParams).length
               ? toStringArray(values.settings.unsupportedParams)
               : null,
+            // `null` removes the key: "Not set" must stop sending anything.
+            ...(model.category === 'llm'
+              ? reasoningSettingsPatch(reasoningFormFromSettings(values.settings), null, values.settings)
+              : {}),
           },
           isMultimodal: isMultimodalFor(shownInputModalities(inputModalities, inferredModalities)),
           supportsToolCalls: values.supportsToolCalls,
@@ -767,6 +774,25 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             props: form.getInputProps('settings.maxTokens'),
           }}
         />
+
+        {isLlm ? (
+          <ReasoningSection
+            number={sectionNumber()}
+            driver={selectedProvider?.driver}
+            value={reasoningFormFromSettings(form.values.settings)}
+            onChange={(patch) => {
+              const next = { ...reasoningFormFromSettings(form.values.settings), ...patch };
+              const { reasoning, returnReasoning } = reasoningSettingsPatch(next, undefined, form.values.settings);
+              const settings = { ...form.values.settings };
+              if (reasoning) settings.reasoning = reasoning; else delete settings.reasoning;
+              if (returnReasoning === false) settings.returnReasoning = false; else delete settings.returnReasoning;
+              form.setFieldValue('settings', settings);
+            }}
+            forcedNoneWithTools={Boolean(
+              detectForcedParams(selectedProvider?.driver, form.values.modelId, true).forced?.reasoning_effort,
+            )}
+          />
+        ) : null}
 
         {isLlm ? (
           <RequestParamsSection

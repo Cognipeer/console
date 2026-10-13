@@ -11,6 +11,14 @@ import { ChatAnthropic } from '@langchain/anthropic';
 import type { ProviderContract } from '../types';
 import type { ModelProviderRuntime, NativeProviderSpec } from '../domains/model';
 import { resolveUnsupportedParamNames } from '../unsupportedParams';
+import {
+  type NormalizedReasoning,
+  THINKING_ANSWER_HEADROOM,
+  hasExplicitThinking,
+  normalizeReasoning,
+  translateAnthropicThinking,
+  translateVertexThinking,
+} from '@/lib/services/models/reasoning';
 import { withInlineReasoningNormalization } from './wireNormalization';
 import { createOpenAiImageRuntime } from './openaiImageHelpers';
 import { createOpenAiModerationRuntime } from './openaiModerationHelpers';
@@ -103,10 +111,7 @@ export interface ModelSettingsOverrides {
   frequencyPenalty?: number;
   maxTokens?: number;
   maxCompletionTokens?: number;
-  reasoning?: {
-    effort?: 'low' | 'medium' | 'high';
-    summary?: 'auto' | 'concise';
-  };
+  reasoning?: NormalizedReasoning;
   /**
    * Merged verbatim into the upstream request body. This is how non-OpenAI-schema
    * parameters reach a self-hosted server — vLLM/SGLang take things like
@@ -271,9 +276,9 @@ export function resolveOverrides(
   result.maxTokens = num('maxTokens');
   result.maxCompletionTokens = num('maxCompletionTokens');
 
-  if (overrides.reasoning && typeof overrides.reasoning === 'object') {
-    result.reasoning = overrides.reasoning as ModelSettingsOverrides['reasoning'];
-  }
+  // Typed value, legacy `{effort, summary}` and bare strings all land here.
+  const reasoning = normalizeReasoning(overrides.reasoning);
+  if (reasoning) result.reasoning = reasoning;
 
   // `extraBody` is what the gateway resolved for this call (model defaults +
   // caller passthrough). `requestDefaults` is the raw model-level field, honoured
@@ -329,7 +334,14 @@ function openAiChatOverrides(
     // being supplied through the extra body instead.
     maxCompletionTokens: overrides.suppressMaxTokens ? -1 : overrides.maxCompletionTokens,
     maxTokens: overrides.suppressMaxTokens ? -1 : overrides.maxTokens,
-    reasoning: overrides.reasoning,
+    // LangChain's `reasoning` is `{effort, summary}`; the budget / thoughts
+    // fields only mean something to token-budget engines.
+    reasoning: overrides.reasoning && (overrides.reasoning.effort || overrides.reasoning.summary)
+      ? {
+          ...(overrides.reasoning.effort ? { effort: overrides.reasoning.effort } : {}),
+          ...(overrides.reasoning.summary ? { summary: overrides.reasoning.summary } : {}),
+        } as never
+      : undefined,
     modelKwargs: overrides.extraBody,
     ...(overrides.streamUsage === false ? { streamUsage: false } : {}),
     // Only ever pass `streaming: true`. An explicit `streaming: false` is not
@@ -830,22 +842,31 @@ export const AnthropicModelProviderContract: ProviderContract<ModelProviderRunti
       }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'anthropic');
+        const baseMaxTokens = overrides.maxCompletionTokens ?? overrides.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS;
+        const thinking = hasExplicitThinking(overrides.extraBody)
+          ? undefined
+          : translateAnthropicThinking(overrides.reasoning, baseMaxTokens);
+        const thinkingOn = thinking?.thinking.type === 'enabled';
         return new ChatAnthropic({
           model: config.modelId,
           apiKey,
           maxRetries: resolveMaxRetries(config),
           ...(baseUrl ? { anthropicApiUrl: baseUrl } : {}),
-          temperature: overrides.temperature,
-          topP: overrides.topP,
+          // Extended thinking forbids temperature / top_p.
+          temperature: thinkingOn ? undefined : overrides.temperature,
+          topP: thinkingOn ? undefined : overrides.topP,
           // Messages API rejects a request without max_tokens, and treats
           // maxCompletionTokens as unknown. Fold the two names into the one the
           // provider accepts and keep a floor so a cleared field cannot 400.
-          maxTokens: overrides.maxCompletionTokens ?? overrides.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+          // With thinking on it is raised above the thinking budget.
+          maxTokens: thinking?.maxTokens ?? baseMaxTokens,
           // Anthropic's passthrough channel is `invocationKwargs`, not the
           // `modelKwargs` every OpenAI-schema contract in this file uses. The
           // operator's configured beta fields — `thinking`, `cache_control`
           // breakpoints, anything Anthropic ships next — ride here.
-          invocationKwargs: overrides.extraBody,
+          invocationKwargs: thinking
+            ? { ...(overrides.extraBody ?? {}), thinking: thinking.thinking }
+            : overrides.extraBody,
           streaming: config.options?.streaming ?? false,
         });
       },
@@ -944,6 +965,14 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
       }),
       createChatModel: (config) => {
         const overrides = resolveOverrides(config.modelSettings, config.modelId, 'bedrock');
+        // Extended thinking is a Claude feature; Converse carries it in
+        // `additionalModelRequestFields`. Other Bedrock families have their own
+        // reasoning envelope and are left alone.
+        const isClaude = /anthropic|claude/i.test(config.modelId);
+        const thinking = isClaude && !hasExplicitThinking(overrides.extraBody)
+          ? translateAnthropicThinking(overrides.reasoning, overrides.maxCompletionTokens ?? overrides.maxTokens)
+          : undefined;
+        const thinkingOn = thinking?.thinking.type === 'enabled';
         return new ChatBedrockConverse({
           maxRetries: resolveMaxRetries(config),
           model: config.modelId,
@@ -953,15 +982,16 @@ export const BedrockModelProviderContract: ProviderContract<ModelProviderRuntime
             secretAccessKey,
             sessionToken: credentials.sessionToken,
           },
-          temperature: overrides.temperature,
-          topP: overrides.topP,
+          temperature: thinkingOn ? undefined : overrides.temperature,
+          topP: thinkingOn ? undefined : overrides.topP,
           // Converse carries model-specific parameters in its own envelope
           // rather than as top-level body fields. The cast is unavoidable:
           // Smithy types this as a recursive `DocumentType`, which plain
           // operator-supplied JSON does not structurally satisfy.
-          additionalModelRequestFields:
-            overrides.extraBody as ChatBedrockConverseInput['additionalModelRequestFields'],
-          maxTokens: overrides.maxCompletionTokens ?? overrides.maxTokens,
+          additionalModelRequestFields: (thinking
+            ? { ...(overrides.extraBody ?? {}), thinking: thinking.thinking }
+            : overrides.extraBody) as ChatBedrockConverseInput['additionalModelRequestFields'],
+          maxTokens: thinking?.maxTokens ?? overrides.maxCompletionTokens ?? overrides.maxTokens,
           streaming: config.options?.streaming ?? false,
         });
       },
@@ -1067,6 +1097,13 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
         // whose `.stream()` yields plain strings, so every streamed chunk came
         // out of the gateway as an empty delta.
         // `project` is accepted at runtime but not in the published types.
+        const vertexThinking = translateVertexThinking(overrides.reasoning);
+        const vertexMaxOutput = overrides.maxCompletionTokens ?? overrides.maxTokens;
+        // The client refuses a cap at or under the thinking budget.
+        const vertexBudget = vertexThinking?.thinkingConfig.thinkingBudget ?? 0;
+        const maxOutputTokens = vertexMaxOutput !== undefined && vertexBudget > 0 && vertexMaxOutput <= vertexBudget
+          ? vertexBudget + THINKING_ANSWER_HEADROOM
+          : vertexMaxOutput;
         return new ChatVertexAI({
           maxRetries: resolveMaxRetries(config),
           model: config.modelId,
@@ -1074,8 +1111,13 @@ export const VertexModelProviderContract: ProviderContract<ModelProviderRuntime,
           authOptions,
           temperature: overrides.temperature,
           topP: overrides.topP,
-          maxOutputTokens: overrides.maxCompletionTokens ?? overrides.maxTokens,
+          maxOutputTokens,
           streaming: config.options?.streaming ?? false,
+          // The client's own channel for thinking: `thinkingBudget` becomes
+          // `generationConfig.thinkingConfig.thinkingBudget`. Budget 0 = off.
+          ...(vertexThinking
+            ? { thinkingBudget: vertexThinking.thinkingConfig.thinkingBudget }
+            : {}),
           ...({ project: projectId } as Record<string, unknown>),
         });
       },

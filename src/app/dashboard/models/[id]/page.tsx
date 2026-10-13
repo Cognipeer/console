@@ -1,5 +1,6 @@
 'use client';
 
+import ReasoningSummary from '@/components/models/ReasoningSummary';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
@@ -1645,6 +1646,14 @@ function OverviewTab({
             ) : null}
           </Stack>
         </div>
+
+        {model.category === 'llm' ? (
+          <ReasoningSummary
+            settings={model.settings}
+            driver={model.providerDriver}
+            modelId={model.modelId}
+          />
+        ) : null}
 
         {Object.keys(model.settings || {}).length > 0 ? (
           <div className="ds-card ds-card-pad-lg">

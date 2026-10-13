@@ -89,6 +89,13 @@ export interface ChatTransformOptions {
    * `@/lib/shared/inlineReasoning`.
    */
   reasoningSplitter?: InlineReasoningSplitter;
+  /**
+   * false hides the model's reasoning text (`reasoning_content` / `reasoning`)
+   * from the caller: the Model Hub's "return reasoning" switch, or a request's
+   * `include_reasoning: false`. The tokens are still counted — usage is read
+   * from the upstream, not from what is shown.
+   */
+  includeReasoning?: boolean;
 }
 
 function normalizeContent(
@@ -471,10 +478,10 @@ export function toOpenAIChatResponse(
   const mergedReasoningContent = [reasoningContent, inlineReasoning]
     .filter((part): part is string => typeof part === 'string' && part.length > 0)
     .join('');
-  if (mergedReasoningContent) {
+  if (mergedReasoningContent && options.includeReasoning !== false) {
     assistantMessage.reasoning_content = mergedReasoningContent;
   }
-  if (reasoning !== undefined) {
+  if (reasoning !== undefined && options.includeReasoning !== false) {
     assistantMessage.reasoning = reasoning;
   }
 
@@ -621,14 +628,16 @@ export function toOpenAIStreamChunk(
   }
 
   const { reasoningContent, reasoning } = extractReasoning(chunk);
+  const showReasoning = options.includeReasoning !== false;
   if (
-    reasoningContent !== undefined
-    || reasoningFromContent !== undefined
-    || inlineReasoning !== undefined
+    showReasoning
+    && (reasoningContent !== undefined
+      || reasoningFromContent !== undefined
+      || inlineReasoning !== undefined)
   ) {
     delta.reasoning_content = `${reasoningContent ?? ''}${reasoningFromContent ?? ''}${inlineReasoning ?? ''}`;
   }
-  if (reasoning !== undefined) {
+  if (reasoning !== undefined && showReasoning) {
     delta.reasoning = reasoning;
   }
 
