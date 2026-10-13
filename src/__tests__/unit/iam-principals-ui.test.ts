@@ -10,7 +10,7 @@ import EffectivePermissions, { sourceDetail } from '@/components/iam/principals/
 import {
   PrincipalDetailView,
   type PrincipalDetailViewProps,
-} from '@/components/iam/principals/PrincipalDetailDrawer';
+} from '@/components/iam/principals/PrincipalDetail';
 import {
   parsePrincipalDetail,
   type AttachedPolicy,

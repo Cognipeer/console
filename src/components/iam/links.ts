@@ -5,7 +5,9 @@
  *   /dashboard/iam?tab=check&decisionId=<id>
  *   /dashboard/iam?tab=check&principalType=user|token&principalId=<id>&action=<action>
  *   /dashboard/iam?tab=policies&new=1[&principalType=user|group|token&principalId=<id>]
- *   /dashboard/iam?tab=policies&policyId=<id>          (opens that policy)
+ *   /dashboard/iam?tab=policies&policyId=<id>          (opens that policy in the editor; read-only viewers land on its page)
+ *   /dashboard/iam/principals/<user|group|token>/<id>  (a person, group or token on a page of its own)
+ *   /dashboard/iam/policies/<id>                       (a policy on a page of its own)
  *
  * and the places OUTSIDE the center where a setting that decides access is
  * changed (a person's workspace role, a project member's project limits, a token).
@@ -59,9 +61,15 @@ const nonEmpty = (v: string | null): string | undefined => (v && v.trim() !== ''
 
 // ── Where access settings are changed (outside the center) ────────────────
 
-/** A person's drawer in the IAM center (Principals tab): workspace role, access, groups, projects and tokens. */
+/** The page of a person, a group or a token: workspace role, access, groups, projects and tokens. */
+export function principalHref(type: IamPrincipalType, id: string, params: { edit?: string | null } = {}): string {
+  const base = `${IAM_PATH}/principals/${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
+  return params.edit ? `${base}?edit=${encodeURIComponent(params.edit)}` : base;
+}
+
+/** A person's page in the IAM center. */
 export function memberHref(userId: string): string {
-  return iamHref('principals', { principalType: 'user', principalId: userId });
+  return principalHref('user', userId);
 }
 
 /**
@@ -160,6 +168,11 @@ export function newPolicyHref(params: NewPolicyLinkParams = {}): string {
 
 export function policyHref(policyId: string): string {
   return iamHref('policies', { policyId });
+}
+
+/** The read-only page of a policy. */
+export function policyPageHref(policyId: string): string {
+  return `${IAM_PATH}/policies/${encodeURIComponent(policyId)}`;
 }
 
 export interface PolicyLinkParams {

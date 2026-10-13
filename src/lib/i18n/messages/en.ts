@@ -1398,6 +1398,14 @@ export const en = {
       searching: 'Searching…',
       nothing: 'No matches',
     },
+    page: {
+      backToList: 'Back to principals',
+      backTo: {
+        user: 'All people',
+        group: 'All groups',
+        token: 'All tokens',
+      },
+    },
     drawer: {
       title: 'Access details',
       back: 'Back',
@@ -2908,6 +2916,12 @@ export const en = {
         allowedNow: 'With the policies as they are now, this request would be allowed.',
         stillDenied: 'With the policies as they are now, it is still denied.',
       },
+    },
+    policyPage: {
+      back: 'All policies',
+      edit: 'Edit policy',
+      notFound: 'This policy no longer exists.',
+      loadFailed: 'The policy could not be loaded.',
     },
     drawer: {
       meta: 'Created {created} · Updated {updated} by {by}',

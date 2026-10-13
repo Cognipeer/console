@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
   Alert,
@@ -42,7 +42,6 @@ import {
   PRINCIPAL_TYPES,
   type PrincipalPage,
   type PrincipalSummary,
-  type PrincipalTarget,
   type PrincipalType,
 } from './client';
 import { directoryApi, type InviteResult, type ProjectChoice } from './directoryApi';
@@ -72,7 +71,7 @@ import {
 import MembershipShell from './MembershipShell';
 import NewTokenShell from './NewTokenShell';
 import { PagerControls, useCursorPager } from './pager';
-import PrincipalDetailDrawer, { type DrawerContext } from './PrincipalDetailDrawer';
+import { principalHref } from '../links';
 import { replaceUrlParams } from './urlState';
 import { useBulkFlow } from './useBulkFlow';
 import { usePeopleActions } from './usePeopleActions';
@@ -104,7 +103,7 @@ const dash = (
   </Text>
 );
 
-export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
+export default function PrincipalsTab(_props: { canManage: boolean }) {
   const t = useTranslations(NS);
   const td = useTranslations('iamDirectory');
   const locale = useLocale();
@@ -124,11 +123,14 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
   const [debouncedSearch] = useDebouncedValue(searchInput.trim(), 300);
   const [pageSize, setPageSize] = useState<number>(25);
   const [overlay, setOverlay] = useState<OverlayState>(() => parseOverlay(params));
-  // The drawer is a stack so that a group or token opened from a user can go back.
-  const [stack, setStack] = useState<PrincipalTarget[]>(() =>
-    isPrincipalType(urlType) && urlId ? [{ type: urlType, id: urlId }] : [],
-  );
-  const target = stack[stack.length - 1] ?? null;
+  const router = useRouter();
+
+  // A link from before principals had pages of their own (`?principalType=user&principalId=…`) lands on the page.
+  useEffect(() => {
+    if (isPrincipalType(urlType) && urlId) router.replace(principalHref(urlType, urlId, { edit: params.get('edit') }));
+    // Read once per address.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlType, urlId]);
 
   // Query strings this tab wrote itself: the router reports them back, and they must not be re-read as navigation.
   const written = useRef(new Set<string>([paramsKey]));
@@ -149,7 +151,6 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
     setFilters(nextFilters);
     setSearchInput(nextFilters.q);
     setOverlay(parseOverlay(params));
-    setStack(isPrincipalType(urlType) && urlId ? [{ type: urlType, id: urlId }] : []);
     // `params` is derived from `paramsKey`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramsKey]);
@@ -284,63 +285,28 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
       setType(next);
       setFilters(fresh);
       setSearchInput('');
-      setStack([]);
       setOverlay(NO_OVERLAY);
       mirror({ ...listStateToParams(next, fresh), principalType: next, principalId: null, new: null, edit: null });
     },
     [mirror, type],
   );
 
-  const showStack = useCallback(
-    (next: PrincipalTarget[], edit: EditKind | null = null) => {
-      setStack(next);
-      const top = next[next.length - 1] ?? null;
-      setOverlay((o) => ({ ...o, edit: top ? edit : null }));
-      // The segment stays in the address bar when the drawer closes.
-      mirror({
-        principalType: top ? top.type : type,
-        principalId: top ? top.id : null,
-        edit: top ? edit : null,
-      });
-    },
-    [mirror, type],
-  );
-
   const openFromList = useCallback(
-    (row: PrincipalSummary, edit: EditKind | null = null) => showStack([{ type: row.type, id: row.id, summary: row }], edit),
-    [showStack],
+    (row: Pick<PrincipalSummary, 'type' | 'id'>, edit: EditKind | null = null) =>
+      router.push(principalHref(row.type, row.id, { edit })),
+    [router],
   );
-  const openNested = useCallback(
-    (next: PrincipalTarget) => {
-      const top = stack[stack.length - 1];
-      if (top && top.type === next.type && top.id === next.id) return;
-      showStack([...stack, next]);
-    },
-    [showStack, stack],
-  );
-  const goBack = useCallback(() => showStack(stack.slice(0, -1)), [showStack, stack]);
-  const closeDrawer = useCallback(() => showStack([]), [showStack]);
 
   const setNew = useCallback(
     (kind: NewKind | null) => {
-      const next: OverlayState = { new: kind, edit: kind ? null : overlay.edit };
+      const next: OverlayState = { new: kind, edit: null };
       setOverlay(next);
       mirror(overlayToParams(next));
     },
-    [mirror, overlay.edit],
-  );
-  const setEdit = useCallback(
-    (kind: EditKind | null) => {
-      setOverlay((o) => ({ ...o, edit: kind }));
-      mirror({ edit: kind });
-    },
     [mirror],
   );
-
   // ── actions ───────────────────────────────────────────────────────────
-  // A dialog or a form that is open owns the Escape key; the drawer must not close under it.
-  const [busy, setBusy] = useState(0);
-  const [drawerForm, setDrawerForm] = useState(false);
+  const [, setBusy] = useState(0);
   const guard = useCallback(async <T,>(run: () => Promise<T>): Promise<T> => {
     setBusy((n) => n + 1);
     try {
@@ -358,25 +324,6 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
   const [bulkIds, setBulkIds] = useState<string[]>([]);
   const me = caps.me;
   const canWrite = caps.ready && caps.peopleManage;
-
-  const drawerContext = useMemo<DrawerContext>(
-    () => ({
-      me,
-      assignableRoles: caps.assignableRoles,
-      canMintForOthers: caps.tokensManageOthers,
-      actions,
-      edit: overlay.edit,
-      onEdit: setEdit,
-      onChanged: refresh,
-      onOverlayChange: setDrawerForm,
-      onNewToken: (owner) => {
-        setTokenOwner(owner);
-        setNew('token');
-      },
-      onGone: closeDrawer,
-    }),
-    [me, caps.assignableRoles, caps.tokensManageOthers, actions, overlay.edit, setEdit, refresh, setNew, closeDrawer],
-  );
 
   // ── columns ───────────────────────────────────────────────────────────
   const columns = useMemo<DataGridColumn<PrincipalSummary>[]>(() => {
@@ -561,7 +508,7 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
               <UnstyledButton
                 onClick={(e) => {
                   e.stopPropagation();
-                  openNested({ type: 'user', id: row.ownerId ?? '' });
+                  openFromList({ type: 'user', id: row.ownerId ?? '' });
                 }}
               >
                 <Text size="sm">{row.ownerLabel ?? row.ownerId}</Text>
@@ -657,7 +604,7 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
       },
       created,
     ];
-  }, [type, t, td, locale, openFromList, openNested]);
+  }, [type, t, td, locale, openFromList]);
 
   // ── row actions: what the server says THIS viewer may do to the row ───
   // The list carries `allowedActions` per row (the same verdicts the writes enforce); an older server that
@@ -843,8 +790,6 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
         ? t('showing', { count: items.length })
         : undefined;
 
-  const overlayOpen = busy > 0 || drawerForm || overlay.new !== null || bulkGroup !== null;
-
   return (
     <Stack gap="md">
       <Group align="center" gap="md" wrap="wrap">
@@ -960,18 +905,6 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
         }
       />
 
-      <PrincipalDetailDrawer
-        opened={stack.length > 0}
-        target={target}
-        canManage={canManage}
-        canGoBack={stack.length > 1}
-        onBack={goBack}
-        onClose={closeDrawer}
-        onOpen={openNested}
-        context={drawerContext}
-        closeOnEscape={!overlayOpen}
-      />
-
       {/* creation forms */}
       <InvitePersonShell
         open={overlay.new === 'person' || overlay.new === 'service'}
@@ -980,7 +913,7 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
         onCreated={() => refresh()}
         onClose={(created?: InviteResult) => {
           setNew(null);
-          if (created?.userId) openFromList({ type: 'user', id: created.userId, label: created.name || created.email, sublabel: created.email || null, role: created.role, status: null, memberCount: null, policyCount: 0 });
+          if (created?.userId) openFromList({ type: 'user', id: created.userId });
         }}
         onCreateToken={(created) => {
           setTokenOwner({ id: created.userId, label: created.name || created.email });
@@ -999,7 +932,7 @@ export default function PrincipalsTab({ canManage }: { canManage: boolean }) {
         onClose={() => setNew(null)}
         onSaved={(id) => {
           refresh();
-          if (id) openFromList({ type: 'group', id, label: id, sublabel: null, role: null, status: null, memberCount: null, policyCount: 0 });
+          if (id) openFromList({ type: 'group', id });
         }}
       />
       <NewTokenShell

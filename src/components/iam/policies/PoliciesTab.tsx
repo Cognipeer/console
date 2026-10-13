@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ActionIcon,
   Alert,
@@ -43,7 +43,7 @@ import {
   type PolicyRow,
   type PolicyWriteBody,
 } from '../api';
-import { iamHref, parsePolicyParams, type PolicyLinkParams } from '../links';
+import { iamHref, parsePolicyParams, policyPageHref, type PolicyLinkParams } from '../links';
 import { useProjects } from '../pickers/lookups';
 import { useGroupLabels } from '../pickers/principalLabels';
 import { formatDateTime, formatRelative } from '../timeFormat';
@@ -52,7 +52,6 @@ import { useIamCatalog } from '../useIamCatalog';
 import { useIamLabels } from '../useIamLabels';
 import ManagedPolicies from './ManagedPolicies';
 import { EffectBadge } from './PolicyBadges';
-import PolicyDetailDrawer from './PolicyDetailDrawer';
 import PolicyEditor, { type PolicyEditorTarget } from './PolicyEditor';
 import { summarizeSpec } from './specModel';
 import { describeSpec } from './specSummary';
@@ -84,6 +83,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
   const deleteResource = useDeleteResource();
   const errorText = useErrorText();
   const searchParams = useSearchParams();
+  const router = useRouter();
   // One card per policy instead of a wide table when the table does not fit. Decided by the
   // width of the box the table lives in, not the window: the sidebar takes ~300px, so a
   // 1280px laptop leaves the table less than its minimum width and its right-hand columns
@@ -108,7 +108,6 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
 
   const [editor, setEditor] = useState<{ key: number; target: PolicyEditorTarget } | null>(null);
   const editorKey = useRef(0);
-  const [viewing, setViewing] = useState<PolicyRow | null>(null);
 
   const load = useCallback(
     async (quiet = false) => {
@@ -192,10 +191,10 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
           return;
         }
         if (canManage) openEditor({ kind: 'edit', policy: row });
-        else setViewing(row);
+        else router.replace(policyPageHref(row.policyId));
       }
     })();
-  }, [data, catalog, searchParams, canManage, openEditor, t]);
+  }, [data, catalog, searchParams, canManage, openEditor, router, t]);
 
   // ── list ─────────────────────────────────────────────────────────────────
 
@@ -348,7 +347,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
     );
   };
 
-  const openRow = (row: PolicyRow) => (canManage ? openEditor({ kind: 'edit', policy: row }) : setViewing(row));
+  const openRow = (row: PolicyRow) => (canManage ? openEditor({ kind: 'edit', policy: row }) : router.push(policyPageHref(row.policyId)));
 
   const renderName = (row: PolicyRow, wrap: boolean) => (
     <>
@@ -418,7 +417,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
             </Menu.Item>
           </>
         ) : (
-          <Menu.Item leftSection={<IconEye size={14} />} onClick={() => setViewing(row)}>
+          <Menu.Item leftSection={<IconEye size={14} />} onClick={() => router.push(policyPageHref(row.policyId))}>
             {t('table.view')}
           </Menu.Item>
         )}
@@ -654,7 +653,6 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
         />
       ) : null}
 
-      <PolicyDetailDrawer policy={viewing} labels={labels} onClose={() => setViewing(null)} />
     </Stack>
   );
 }

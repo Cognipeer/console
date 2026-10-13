@@ -22,7 +22,8 @@ const placeholders = (text: string): string[] => [...text.matchAll(/\{(\w+)\}/g)
 const NAMESPACES = {
   iamPrincipals: [
     'components/iam/principals/PrincipalsTab.tsx',
-    'components/iam/principals/PrincipalDetailDrawer.tsx',
+    'components/iam/principals/PrincipalDetail.tsx',
+    'components/iam/principals/PrincipalDetailPage.tsx',
     'components/iam/principals/PrincipalPicker.tsx',
     'components/iam/principals/AttachedPolicies.tsx',
     'components/iam/principals/EffectivePermissions.tsx',

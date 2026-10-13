@@ -465,7 +465,7 @@ describe('deep links', () => {
     expect(iamLinks.createPolicy('group', 'g1')).toBe('/dashboard/iam?tab=policies&new=1&principalType=group&principalId=g1');
     expect(iamLinks.policy('pol 1')).toBe('/dashboard/iam?tab=policies&policyId=pol+1');
     expect(iamLinks.audit('user', 'u1')).toBe('/dashboard/iam?tab=audit&principalType=user&principalId=u1');
-    expect(iamLinks.principal('group', 'g1')).toBe('/dashboard/iam?tab=principals&principalType=group&principalId=g1');
+    expect(iamLinks.principal('group', 'g1')).toBe('/dashboard/iam/principals/group/g1');
     // People are managed in the center itself: there is no member page to link to any more.
     expect('member' in iamLinks).toBe(false);
     expect(iamLinks.tokensOf('u 1')).toBe('/dashboard/iam?tab=principals&principalType=token&ownerId=u+1');

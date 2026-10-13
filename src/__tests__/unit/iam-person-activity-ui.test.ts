@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * The Activity section of a person's drawer: usage by service with the application tokens the calls came through, and the
+ * The Activity section of a person's page: usage by service with the application tokens the calls came through, and the
  * recent actions with the token and the issuer behind a call made on the person's behalf.
  */
 import { createElement } from 'react';
@@ -20,17 +20,21 @@ import {
 import { CAPS_ADMIN, directoryRoutes, EMPTY_ACTIVITY } from '../helpers/iamDirectoryFixtures';
 import { parsePersonActivity } from '@/components/iam/principals/directoryApi';
 
-const nav = vi.hoisted(() => ({ search: '', cache: new Map<string, URLSearchParams>() }));
+const nav = vi.hoisted(() => ({
+  search: '',
+  cache: new Map<string, URLSearchParams>(),
+  router: { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() },
+}));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => {
     if (!nav.cache.has(nav.search)) nav.cache.set(nav.search, new URLSearchParams(nav.search));
     return nav.cache.get(nav.search)!;
   },
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => nav.router,
   usePathname: () => '/dashboard/iam',
 }));
 
-import PrincipalsTab from '@/components/iam/principals/PrincipalsTab';
+import PrincipalDetailPage from '@/components/iam/principals/PrincipalDetailPage';
 
 let mounted: Mounted;
 let api: ApiMock;
@@ -48,10 +52,10 @@ vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
 const ACTIVITY_URL = /^\/api\/iam\/principals\/user\/u-ann\/activity$/;
 
 async function open(activity: RouteHandler, locale = 'en') {
-  nav.search = 'tab=principals&principalType=user&principalId=u-ann';
-  window.history.replaceState(null, '', `/dashboard/iam?${nav.search}`);
+  nav.search = '';
+  window.history.replaceState(null, '', '/dashboard/iam/principals/user/u-ann');
   api = installApiMock([...directoryRoutes(CAPS_ADMIN), ['GET', ACTIVITY_URL, activity]]);
-  mounted = await mount(createElement(PrincipalsTab, { canManage: true }), locale);
+  mounted = await mount(createElement(PrincipalDetailPage, { type: 'user', id: 'u-ann', canManage: true }), locale);
   await settle(300);
 }
 const section = () => q('[data-testid="section-activity"]');
@@ -71,7 +75,7 @@ const BUSY = {
 };
 
 describe('the Activity section', () => {
-  it('asks for the person\'s activity when the drawer opens, and shows nothing but empty notes for a quiet person', async () => {
+  it('asks for the person\'s activity when the page opens, and shows nothing but empty notes for a quiet person', async () => {
     await open(() => EMPTY_ACTIVITY);
     expect(api.to('GET', ACTIVITY_URL)).toHaveLength(1);
     expect(section()?.textContent).toContain('Activity');
@@ -98,7 +102,7 @@ describe('the Activity section', () => {
     expect(qa('[data-testid="activity-events"] > div')[1].textContent).not.toContain('via ');
   });
 
-  it('says when it could not load, without hiding the rest of the drawer', async () => {
+  it('says when it could not load, without hiding the rest of the page', async () => {
     await open(() => jsonResponse({ error: 'boom' }, 500));
     expect(section()?.textContent).toContain('The activity could not be loaded.');
     expect(document.body.textContent).toContain('Ann Lee');

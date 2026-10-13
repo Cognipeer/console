@@ -15,7 +15,7 @@
 
 import { normalizeServicePermissions, type UserServicePermissions } from '@/lib/security/rbac';
 import type { ApiTokenRow } from '../tokens/tokenModel';
-import { checkHref, iamHref, newPolicyHref, policyHref } from '../links';
+import { checkHref, iamHref, newPolicyHref, policyHref, principalHref } from '../links';
 
 // ── primitives ────────────────────────────────────────────────────────────
 
@@ -843,8 +843,8 @@ export async function fetchPrincipalDetail(
  * tabs this part owns (`principals`, `audit`) are built with its generic form.
  */
 export const iamLinks = {
-  /** Principals tab with the detail drawer of one principal open. */
-  principal: (type: PrincipalType, id: string) => iamHref('principals', { principalType: type, principalId: id }),
+  /** The page of one principal. */
+  principal: (type: PrincipalType, id: string) => principalHref(type, id),
   /** Access check prefilled with a principal (and optionally a catalog action). */
   simulate: (type: SimulatablePrincipalType, id: string, action?: string | null) =>
     checkHref({ principalType: type, principalId: id, action: action ?? undefined }),

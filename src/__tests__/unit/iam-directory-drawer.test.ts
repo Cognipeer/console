@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * The drawer of a person, a group and a token: what it loads and when, which
+ * The page of a person, a group and a token: what it loads and when, which
  * actions the server's `allowedActions` switch on or off (and why), the managed
  * banner, and the confirmations behind remove and revoke.
  */
@@ -24,16 +24,21 @@ import { CAPS_ADMIN, directoryRoutes, groupDetail, listHandler, personDetail } f
 import { ACTION_DENIAL_REASONS, reasonKey } from '@/components/iam/principals/detailParts';
 import { messages } from '@/lib/i18n/messages';
 
-const nav = vi.hoisted(() => ({ search: '', cache: new Map<string, URLSearchParams>() }));
+const nav = vi.hoisted(() => ({
+  search: '',
+  cache: new Map<string, URLSearchParams>(),
+  router: { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() },
+}));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => {
     if (!nav.cache.has(nav.search)) nav.cache.set(nav.search, new URLSearchParams(nav.search));
     return nav.cache.get(nav.search)!;
   },
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => nav.router,
   usePathname: () => '/dashboard/iam',
 }));
 
+import PrincipalDetailPage from '@/components/iam/principals/PrincipalDetailPage';
 import PrincipalsTab from '@/components/iam/principals/PrincipalsTab';
 
 let mounted: Mounted;
@@ -46,20 +51,22 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   nav.search = '';
+  nav.router.push.mockClear();
+  nav.router.replace.mockClear();
 });
 
 vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
 
 async function open(target: string, extra: Array<[string, string | RegExp, RouteHandler]> = [], search = '') {
   const [type, id] = target.split(':');
-  nav.search = `tab=principals&principalType=${type}&principalId=${id}${search}`;
-  window.history.replaceState(null, '', `/dashboard/iam?${nav.search}`);
+  nav.search = search.replace(/^&/, '');
+  window.history.replaceState(null, '', `/dashboard/iam/principals/${type}/${id}${nav.search ? `?${nav.search}` : ''}`);
   api = installApiMock([...directoryRoutes(CAPS_ADMIN), ...extra]);
-  mounted = await mount(createElement(PrincipalsTab, { canManage: true }));
+  mounted = await mount(createElement(PrincipalDetailPage, { type: type!, id: id!, canManage: true }));
   await settle(250);
 }
 
-const drawer = () => q('[role="dialog"]')!;
+const drawer = () => q('[data-testid="principal-detail-page"]')!;
 const inDrawer = (sel: string) => q(sel, drawer());
 const action = (id: string) => q<HTMLButtonElement>(`[data-testid="${id}"]`);
 const detailCalls = (id: string) => api.calls.filter((c) => c.path === `/api/iam/principals/user/${id}`);
@@ -322,7 +329,7 @@ describe('a token', () => {
     await click(qa<HTMLButtonElement>('button', qa('[role="dialog"]').at(-1)!).find((b) => b.textContent === 'Revoke'));
     await settle(200);
     expect(api.to('POST', '/api/tokens/revoke')[0]?.body).toEqual({ ids: ['t-ci'] });
-    expect(new URLSearchParams(window.location.search).get('principalId')).toBeNull();
+    expect(nav.router.push).toHaveBeenCalledWith('/dashboard/iam?tab=principals&principalType=token');
   });
 
   it('keeps a refusal inside the confirmation instead of closing', async () => {

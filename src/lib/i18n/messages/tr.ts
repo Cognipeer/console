@@ -1206,6 +1206,14 @@ export const tr: typeof en = {
       searching: 'Aranıyor…',
       nothing: 'Eşleşme yok',
     },
+    page: {
+      backToList: 'Ana listeye dön',
+      backTo: {
+        user: 'Tüm kişiler',
+        group: 'Tüm gruplar',
+        token: 'Tüm tokenlar',
+      },
+    },
     drawer: {
       title: 'Erişim ayrıntıları',
       back: 'Geri',
@@ -2090,6 +2098,12 @@ export const tr: typeof en = {
         allowedNow: 'Politikalar şu anki haliyle bu isteğe izin verirdi.',
         stillDenied: 'Politikalar şu anki haliyle istek hâlâ reddediliyor.',
       },
+    },
+    policyPage: {
+      back: 'Tüm politikalar',
+      edit: 'Politikayı düzenle',
+      notFound: 'Bu politika artık yok.',
+      loadFailed: 'Politika yüklenemedi.',
     },
     drawer: {
       meta: 'Oluşturuldu: {created} · Güncelleyen {by}, {updated}',

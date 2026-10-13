@@ -24,17 +24,22 @@ import {
   type RouteHandler,
 } from '../helpers/iamCenterUi';
 
-const nav = vi.hoisted(() => ({ search: '', cache: new Map<string, URLSearchParams>() }));
+const nav = vi.hoisted(() => ({
+  search: '',
+  cache: new Map<string, URLSearchParams>(),
+  router: { push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() },
+}));
 vi.mock('next/navigation', () => ({
   useSearchParams: () => {
     if (!nav.cache.has(nav.search)) nav.cache.set(nav.search, new URLSearchParams(nav.search));
     return nav.cache.get(nav.search)!;
   },
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => nav.router,
   usePathname: () => '/dashboard/iam',
 }));
 
 import AuditTab from '@/components/iam/audit/AuditTab';
+import PrincipalDetailPage from '@/components/iam/principals/PrincipalDetailPage';
 import PrincipalsTab from '@/components/iam/principals/PrincipalsTab';
 
 // ── contract-shaped answers ──────────────────────────────────────────────
@@ -161,6 +166,8 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   nav.search = '';
+  nav.router.push.mockClear();
+  nav.router.replace.mockClear();
   window.history.replaceState(null, '', '/');
 });
 
@@ -189,6 +196,17 @@ const principalCalls = () => api.to('GET', '/api/iam/principals').filter((c) => 
 const lastQuery = (calls: ReturnType<ApiMock['to']>) => calls[calls.length - 1]?.query ?? {};
 
 // ── Principals ───────────────────────────────────────────────────────────
+
+async function renderPage(
+  type: string,
+  id: string,
+  canManage = true,
+  extra: Array<[string, string | RegExp, RouteHandler]> = [],
+  locale = 'en',
+) {
+  window.history.replaceState(null, '', `/dashboard/iam/principals/${type}/${id}`);
+  await render(createElement(PrincipalDetailPage, { type, id, canManage }), extra, '', locale);
+}
 
 // These render whole component trees (jsdom + Mantine) or run the policy engine; on a busy machine the default 5 s is too tight.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -265,10 +283,8 @@ describe('PrincipalsTab', () => {
     expect(text()).toContain('A group grants access to all of its members');
   });
 
-  it('opens the detail drawer: effective permissions with their sources, groups, projects, policies, tokens', async () => {
-    await render(createElement(PrincipalsTab, { canManage: true }));
-    await click(buttonByText(/Ann Lee/));
-    await settle(300);
+  it('shows the page of a person: effective permissions with their sources, groups, projects, policies, tokens', async () => {
+    await renderPage('user', 'u-ann');
     const detailCalls = api.to('GET', '/api/iam/principals/user/u-ann');
     // the profile first, without the (expensive) effective table; this server sends it anyway, so one request is enough
     expect(detailCalls).toHaveLength(1);
@@ -288,71 +304,55 @@ describe('PrincipalsTab', () => {
     expect(hrefs).toContain('/dashboard/iam?tab=check&principalType=user&principalId=u-ann');
     expect(hrefs).toContain('/dashboard/iam?tab=policies&new=1&principalType=user&principalId=u-ann');
     expect(hrefs).toContain('/dashboard/iam?tab=policies&policyId=p-notebooks');
-    // the open principal is mirrored into the address bar
-    expect(window.location.search).toContain('principalType=user');
-    expect(window.location.search).toContain('principalId=u-ann');
   });
 
   it('shows "Create policy" to admins only', async () => {
-    await render(createElement(PrincipalsTab, { canManage: false }));
-    await click(buttonByText(/Ann Lee/));
-    await settle(300);
+    await renderPage('user', 'u-ann', false);
     expect(text()).toContain('Effective permissions');
     expect(text()).not.toContain('Create policy');
     expect(text()).toContain('Simulate access');
   });
 
-  it('goes from a group chip into the group and back', async () => {
+  it('opens a row as a page of its own', async () => {
     await render(createElement(PrincipalsTab, { canManage: true }));
     await click(buttonByText(/Ann Lee/));
-    await settle(300);
-    const chip = qa<HTMLButtonElement>('.mantine-Drawer-body button').find((b) => b.textContent === 'Engineering');
-    await click(chip);
-    await settle(300);
-    expect(api.to('GET', '/api/iam/principals/group/g-eng')).toHaveLength(1);
-    expect(window.location.search).toContain('principalType=group');
-    await click(qa<HTMLButtonElement>('button[aria-label="Back"]')[0]);
-    await settle(300);
-    expect(window.location.search).toContain('principalType=user');
-    expect(text()).toContain('ann@example.com');
+    await settle(100);
+    expect(nav.router.push).toHaveBeenCalledWith('/dashboard/iam/principals/user/u-ann');
   });
 
-  it('opens an owned token and its owner', async () => {
-    await render(createElement(PrincipalsTab, { canManage: true }));
-    await click(buttonByText(/Ann Lee/));
-    await settle(300);
-    await click(qa<HTMLButtonElement>('.mantine-Drawer-body button').find((b) => b.textContent?.includes('CI pipeline')));
-    await settle(300);
+  it('goes from a group chip into the group page, and has a way back to the list', async () => {
+    await renderPage('user', 'u-ann');
+    const chip = qa<HTMLButtonElement>('[data-testid="principal-detail-page"] button').find((b) => b.textContent === 'Engineering');
+    await click(chip);
+    await settle(100);
+    expect(nav.router.push).toHaveBeenCalledWith('/dashboard/iam/principals/group/g-eng');
+    expect(q('[data-testid="principal-back-to-list"]')?.getAttribute('href')).toBe('/dashboard/iam?tab=principals&principalType=user');
+  });
+
+  it('opens an owned token and its owner as pages', async () => {
+    await renderPage('user', 'u-ann');
+    await click(qa<HTMLButtonElement>('[data-testid="principal-detail-page"] button').find((b) => b.textContent?.includes('CI pipeline')));
+    await settle(100);
+    expect(nav.router.push).toHaveBeenCalledWith('/dashboard/iam/principals/token/t-ci');
+  });
+
+  it('shows the token page with its owner and scope', async () => {
+    await renderPage('token', 't-ci');
     expect(api.to('GET', '/api/iam/principals/token/t-ci')).toHaveLength(1);
     expect(text()).toContain('Owner');
     expect(text()).toContain('Scoped');
-    // the owner is a link back to the user
-    await click(qa<HTMLButtonElement>('.mantine-Drawer-body button').find((b) => b.textContent === 'Ann Lee'));
-    await settle(300);
-    expect(window.location.search).toContain('principalType=user');
+    expect(q('[data-testid="principal-back-to-list"]')?.getAttribute('href')).toBe('/dashboard/iam?tab=principals&principalType=token');
   });
 
-  it('closes the drawer and removes the principal from the address bar', async () => {
-    await render(createElement(PrincipalsTab, { canManage: true }));
-    await click(buttonByText(/Ann Lee/));
-    await settle(300);
-    expect(window.location.search).toContain('principalId=u-ann');
-    await click(q('.mantine-Drawer-close'));
-    await settle(200);
-    expect(window.location.search).not.toContain('principalId');
-    // the segment stays in the address bar when the drawer closes
-    expect(window.location.search).toContain('principalType=user');
+  it('sends ?principalType=group&principalId=… of the list address to the group page', async () => {
+    await render(createElement(PrincipalsTab, { canManage: true }), [], 'tab=principals&principalType=group&principalId=g-eng');
+    expect(nav.router.replace).toHaveBeenCalledWith('/dashboard/iam/principals/group/g-eng');
   });
 
-  it('?principalType=group&principalId=… opens that group straight away, on the right segment', async () => {
-    await render(createElement(PrincipalsTab, { canManage: true }), [], '?tab=principals&principalType=group&principalId=g-eng');
-    expect(api.to('GET', '/api/iam/principals/group/g-eng')).toHaveLength(1);
-    expect(principalCalls()[0]?.query.type).toBe('group');
-    expect(text()).toContain('Effective permissions');
-  });
-
-  it('tells the admin when the principal of a link is gone', async () => {
-    await render(createElement(PrincipalsTab, { canManage: true }), [], '?principalType=user&principalId=u-gone');
+  it('tells the admin when the principal of a page is gone', async () => {
+    await renderPage('user', 'u-gone', true, [
+      ['GET', '/api/iam/principals/user/u-gone', () => jsonResponse({ error: 'Not found', code: 'principal_not_found' }, 404)],
+    ]);
     expect(text()).toContain('This principal no longer exists.');
   });
 
@@ -381,8 +381,8 @@ describe('PrincipalsTab', () => {
     await render(createElement(PrincipalsTab, { canManage: true }), [], '', 'tr');
     expect(text()).toContain('Kişiler');
     expect(text()).toContain('Sahip'); // role badge
-    await click(buttonByText(/Ann Lee/));
-    await settle(300);
+    await mounted.unmount();
+    await renderPage('user', 'u-ann', true, [], 'tr');
     expect(text()).toContain('Etkin izinler');
   });
 });
@@ -411,9 +411,9 @@ describe('AuditTab', () => {
     expect(hrefs).toContain('/dashboard/iam?tab=check&decisionId=dec-0001');
     // its decision id opens the Access check too, which explains that there was no policy answer
     expect(hrefs).toContain('/dashboard/iam?tab=check&decisionId=dec-0003');
-    // the principal opens in the Principals tab
-    expect(hrefs).toContain('/dashboard/iam?tab=principals&principalType=user&principalId=u-bob');
-    expect(hrefs).toContain('/dashboard/iam?tab=principals&principalType=token&principalId=t-ci');
+    // the principal opens on its page
+    expect(hrefs).toContain('/dashboard/iam/principals/user/u-bob');
+    expect(hrefs).toContain('/dashboard/iam/principals/token/t-ci');
   });
 
   it('says how long denials look back when no date range is picked', async () => {
