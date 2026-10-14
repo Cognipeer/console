@@ -21,6 +21,7 @@ import {
   uploadContentType,
   type PendingAttachment,
 } from '@/components/agents/session/sessionAttachmentsUi';
+import { toAttachmentViews } from '@/components/agents/session/sessionFilesUi';
 import { resolveAttachmentsConfig } from '@/lib/services/agents/sessionFilesConfig';
 import type { ChatMessage } from '@/components/agents/session/sessionTypes';
 import { CONFIG_SECTION_KEYS } from '@/components/agents/studio/configSections';
@@ -134,6 +135,14 @@ describe('the composer pieces', () => {
     expect(html).toContain('notes.txt · 2.0 KB');
     expect(render(h(MessageAttachments, { attachments: undefined }))).not.toContain('message-attachments');
     expect(render(h(MessageAttachments, { attachments: [] }))).not.toContain('message-attachments');
+  });
+
+  it('an agent output file is a download chip on the content route', () => {
+    const views = toAttachmentViews([{ fileId: 'f9', name: 'report.pdf', mimeType: 'application/pdf', size: 4096 }], { agentId: 'ag', sessionId: 'se' });
+    const html = render(h(MessageAttachments, { attachments: views }));
+    expect(html).toContain('report.pdf · 4.0 KB');
+    expect(html).toContain('download="report.pdf"');
+    expect(html).toContain('files/f9/content');
   });
 });
 

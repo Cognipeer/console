@@ -86,6 +86,15 @@ data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"delta":
 data: [DONE]
 ```
 
+## Files the agent produced
+
+When `model` is an agent with a sandbox and the turn left files in the sandbox's `/outputs/` folder, the reply also carries them (additive; absent otherwise, see [Session files](/guide/session-files#files-the-agent-produces)):
+
+- non-streaming: `output_files: [{ id, name, mime_type, size, download_url }]` on the body and `file_path` annotations (`{ type, file_id, filename }`) on `choices[0].message.annotations`;
+- streaming: the same `output_files`-shaped list as `files` on the closing chunk (the one with `finish_reason`).
+
+`download_url` is relative to the API origin; fetch it with the same credentials.
+
 ## Guardrail Blocking
 
 If a guardrail blocks the request:

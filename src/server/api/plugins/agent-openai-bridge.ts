@@ -31,7 +31,7 @@ import {
     type ResolveActor,
     type ResolveOutcome,
 } from '@/lib/services/agents/agentActionResolution';
-import { toClientPendingAction, type ClientPendingAction } from '@/lib/services/agents/clientWire';
+import { toClientPendingAction, toFileAnnotations, type ClientOutputFile, type ClientPendingAction } from '@/lib/services/agents/clientWire';
 import type { IAgent } from '@/lib/database';
 import { createConversation, getAgentByKey, getConversationById } from '@/lib/services/agents';
 import {
@@ -254,8 +254,11 @@ export function toChatCompletion(input: {
     toolCalls?: ChatToolCall[];
     /** The agent's thinking text, when the agent and the request let it out (`reasoning_content`, as the model gateway names it). */
     reasoning?: string;
+    /** Files the agent produced this turn: `output_files` on the body, `file_path` annotations on the message. */
+    outputFiles?: ClientOutputFile[];
 }) {
     const calling = (input.toolCalls?.length ?? 0) > 0;
+    const files = input.outputFiles?.length ? input.outputFiles : undefined;
     const thinking = input.reasoning ? { reasoning_content: input.reasoning } : {};
     return {
         id: input.id,
@@ -266,10 +269,17 @@ export function toChatCompletion(input: {
             index: 0,
             message: calling
                 ? { role: 'assistant' as const, content: input.content || null, ...thinking, tool_calls: input.toolCalls }
-                : { role: 'assistant' as const, content: input.content, ...thinking },
+                : {
+                    role: 'assistant' as const,
+                    content: input.content,
+                    ...thinking,
+                    ...(files ? { annotations: toFileAnnotations(files) } : {}),
+                },
             finish_reason: calling ? ('tool_calls' as const) : agentFinishReason(input.stopReason),
         }],
         ...(input.usage ? { usage: input.usage } : {}),
+        // Not an OpenAI field: files the agent wrote for the user (download via `download_url`).
+        ...(files ? { output_files: files } : {}),
         // Not OpenAI fields either: why a run ended without a final answer.
         ...(input.stopReason && input.stopReason !== 'completed' && !calling
             ? { stop_reason: input.stopReason, ...(input.stopDetail ? { stop_detail: input.stopDetail } : {}) }
@@ -290,6 +300,8 @@ export function toChatChunk(input: {
     reasoning?: string;
     finish?: boolean;
     stopReason?: AgentChatResponse['stop_reason'];
+    /** On the closing chunk: files the agent produced this turn (`files`, not an OpenAI field). */
+    files?: ClientOutputFile[];
 }) {
     return {
         id: input.id,
@@ -305,6 +317,7 @@ export function toChatChunk(input: {
                     : { content: input.delta ?? '' },
             finish_reason: input.finish ? agentFinishReason(input.stopReason) : null,
         }],
+        ...(input.finish && input.files?.length ? { files: input.files } : {}),
     };
 }
 
@@ -377,6 +390,8 @@ export type AgentCompletionResult =
         toolCalls?: ChatToolCall[];
         /** The agent's thinking text (already empty when the agent hides it). */
         reasoning?: string;
+        /** Files the agent produced this turn (sandbox /outputs), as `output_files`. */
+        outputFiles?: ClientOutputFile[];
     };
 
 function toCompletionUsage(usage: AgentChatResponse['usage'] | undefined): { usage?: AgentCompletionUsage } {
@@ -442,6 +457,7 @@ function completionFrom(result: AgentChatResponse, conversationId: string): Agen
         ...(result.stop_reason ? { stopReason: result.stop_reason } : {}),
         ...(result.stop_detail ? { stopDetail: result.stop_detail } : {}),
         ...(toolCalls.length > 0 ? { toolCalls } : {}),
+        ...(result.output_files?.length ? { outputFiles: result.output_files } : {}),
         ...toCompletionUsage(result.usage),
     };
 }
