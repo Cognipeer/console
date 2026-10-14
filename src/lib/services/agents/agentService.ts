@@ -2873,6 +2873,14 @@ export interface AgentChatRequest {
      */
     onTextChunk?: (text: string) => void;
     /**
+     * Incremental reasoning ("thinking") text while the model thinks, for a
+     * caller that can show it live. Asking for it turns the model call into a
+     * stream; nothing fires when the agent hides its reasoning
+     * (`showReasoning: false`) or the model produced none. Same relay caveat
+     * as `onTextChunk`.
+     */
+    onReasoningChunk?: (text: string) => void;
+    /**
      * Shared deadline/cancel reference for the synchronous ceiling (§5) and
      * background max-duration/cancel (§7) — see `AgentRunCancellationCell`.
      * Absent for ordinary calls (dashboard, playground-adjacent callers),
@@ -2967,6 +2975,11 @@ export interface AgentPlaygroundChatRequest {
      * Same relay caveat as `onToolEvent`.
      */
     onTextChunk?: (text: string) => void;
+    /**
+     * Incremental reasoning text while the model thinks (the operator's playground
+     * always gets it when the model produced it). Same relay caveat as `onToolEvent`.
+     */
+    onReasoningChunk?: (text: string) => void;
     /**
      * Fires when the agent summarizes its context mid-run. Same relay caveat
      * as `onToolEvent`.
@@ -3096,14 +3109,16 @@ export function incompleteReason(stopReason: AgentStopReason | 'budget_reached',
  */
 function agentRelayOptions(request: {
     onTextChunk?: (text: string) => void;
+    onReasoningChunk?: (text: string) => void;
     onToolEvent?: (event: AgentToolCallEvent) => void;
     onCompaction?: (compaction: IAgentTurnCompaction) => void;
     signal?: AbortSignal;
 }): RelayCallerOptions {
-    const { onTextChunk, onToolEvent, onCompaction } = request;
+    const { onTextChunk, onReasoningChunk, onToolEvent, onCompaction } = request;
     return {
         handlers: {
             text: onTextChunk ? (data) => { if (typeof data === 'string') onTextChunk(data); } : undefined,
+            reasoning: onReasoningChunk ? (data) => { if (typeof data === 'string') onReasoningChunk(data); } : undefined,
             tool: onToolEvent ? (data) => onToolEvent(data as AgentToolCallEvent) : undefined,
             compaction: onCompaction ? (data) => onCompaction(data as IAgentTurnCompaction) : undefined,
         },
@@ -3120,11 +3135,12 @@ function agentRelayOptions(request: {
  */
 export function agentRelayCallbacks(relay: WorkerRelay | null): Pick<
     AgentPlaygroundChatRequest,
-    'onTextChunk' | 'onToolEvent' | 'onCompaction' | 'signal'
+    'onTextChunk' | 'onReasoningChunk' | 'onToolEvent' | 'onCompaction' | 'signal'
 > {
     if (!relay) return {};
     return {
         ...(relay.events.has('text') ? { onTextChunk: (text: string) => relay.emit('text', text) } : {}),
+        ...(relay.events.has('reasoning') ? { onReasoningChunk: (text: string) => relay.emit('reasoning', text) } : {}),
         ...(relay.events.has('tool') ? { onToolEvent: (event: AgentToolCallEvent) => relay.emit('tool', event) } : {}),
         ...(relay.events.has('compaction')
             ? { onCompaction: (compaction: IAgentTurnCompaction) => relay.emit('compaction', compaction) }
@@ -3172,6 +3188,7 @@ export async function executeAgentChat(
     // the cluster stream relay when the run is routed.
     const payload = { ...request };
     delete payload.onTextChunk;
+    delete payload.onReasoningChunk;
     delete payload.signal;
     // What the run's model calls spend is tallied as they happen, so a run that fails or
     // is aborted late is still charged (see runUsage.ts).
@@ -3367,7 +3384,8 @@ async function buildLocalAgentRun(input: {
         ...(input.conversation?._id ? { sessionId: String(input.conversation._id) } : {}),
         ...(input.userId ? { userId: input.userId } : {}),
         onRouted: (key) => { routedModelKey = key; },
-        ...(agentShowsReasoning(config) ? {} : { showReasoning: false }),
+        // The operator's own playground still asks for the thinking text; every other surface follows the agent.
+        ...(agentShowsReasoning(config) || input.source === 'agent-playground' ? {} : { showReasoning: false }),
         ...(Number(config.runtime?.limits?.maxTotalOutputTokens) > 0
             ? { maxTotalOutputTokens: Number(config.runtime?.limits?.maxTotalOutputTokens) }
             : {}),
@@ -3736,6 +3754,69 @@ function textStreamOptions(onTextChunk: ((text: string) => void) | undefined, ag
             }
         },
     };
+}
+
+/**
+ * Taps the SDK's `reasoning` events of one turn: forwards each piece to the
+ * caller and keeps the whole text.
+ *
+ * The SDK emits them only while the model call streams (`stream: true`), one
+ * event per provider delta and no marker between model steps; a step boundary
+ * (a tool call, or answer text) is therefore remembered and the next piece
+ * starts a new paragraph, so a turn that thought before and after a tool call
+ * reads as two thoughts rather than one run-on. `enabled: false` swallows
+ * everything (the agent hides its reasoning).
+ */
+export function createReasoningTap(
+    onReasoningChunk: ((text: string) => void) | undefined,
+    agentKey: string,
+    enabled = true,
+): {
+    listening: boolean;
+    onEvent: (event: AgentSdkEvent) => void;
+    text: () => string;
+} {
+    let collected = '';
+    let boundary = false;
+    return {
+        listening: Boolean(onReasoningChunk) && enabled,
+        onEvent: (event) => {
+            if (!enabled) return;
+            if (event.type === 'tool_call' || event.type === 'stream') {
+                if (collected) boundary = true;
+                return;
+            }
+            if (event.type !== 'reasoning' || typeof event.text !== 'string' || !event.text) return;
+            const piece = boundary ? `\n\n${event.text}` : event.text;
+            boundary = false;
+            collected += piece;
+            if (!onReasoningChunk) return;
+            try {
+                onReasoningChunk(piece);
+            } catch (callbackError) {
+                logger.warn('onReasoningChunk callback failed', { agentKey, error: callbackError });
+            }
+        },
+        text: () => collected,
+    };
+}
+
+/**
+ * `textStreamOptions` plus the switch for reasoning: a caller that wants only
+ * the thinking still needs the model call to stream, or the SDK emits nothing.
+ */
+function liveStreamOptions(
+    onTextChunk: ((text: string) => void) | undefined,
+    reasoningTap: { listening: boolean },
+    agentKey: string,
+) {
+    const text = textStreamOptions(onTextChunk, agentKey);
+    return reasoningTap.listening ? { ...text, stream: true } : text;
+}
+
+/** The reasoning of a finished turn: what streamed (every model step), else the last message's. */
+function turnReasoning(result: AgentSdkInvokeResult, reasoningTap: { text: () => string }): string | undefined {
+    return reasoningTap.text() || extractAgentReasoning(result);
 }
 
 /**
@@ -4127,6 +4208,13 @@ async function runAgentChatTurn(
             request.onTextChunk?.(text);
         }
         : undefined;
+    // Same for the thinking: live to the caller and to a session follower, never stored as an event.
+    const onReasoningChunk = request.onReasoningChunk
+        ? (text: string) => {
+            turnEvents.onReasoning(text);
+            request.onReasoningChunk?.(text);
+        }
+        : undefined;
 
     // 2b. Connected (external) agent — see `runExternalAgentTurn`.
     if (config.kind === 'external' && config.connection) {
@@ -4244,6 +4332,7 @@ async function runAgentChatTurn(
         const compactions: IAgentTurnCompaction[] = [];
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
         const streamed = captureStreamedText(onTextChunk);
+        const reasoningTap = createReasoningTap(onReasoningChunk, agentKey, agentShowsReasoning(config));
         const liveInvokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
                 if (event.type === 'summarization') {
@@ -4252,9 +4341,10 @@ async function runAgentChatTurn(
                     turnEvents.onCompaction(compaction);
                     return;
                 }
+                reasoningTap.onEvent(event);
                 turnEvents.onSdkEvent(event);
             },
-            ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
+            ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
             ...(request.cancellationCell?.deadlineAt !== undefined
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
@@ -4318,7 +4408,7 @@ async function runAgentChatTurn(
 
         // `config.showReasoning: false` keeps the thinking text out of the API response, the
         // stored session message and Studio chat. The tokens were spent and are counted regardless.
-        const assistantReasoning = agentShowsReasoning(config) ? extractAgentReasoning(result) : undefined;
+        const assistantReasoning = agentShowsReasoning(config) ? turnReasoning(result, reasoningTap) : undefined;
 
         // 5b. Output guardrail: `output.pre` ran inside the agent on
         // `postModelCall`, so a redaction is already in `result.content` and a
@@ -4483,6 +4573,7 @@ export async function executePlaygroundChat(
     const payload = { ...request };
     delete payload.onToolEvent;
     delete payload.onTextChunk;
+    delete payload.onReasoningChunk;
     delete payload.onCompaction;
     delete payload.signal;
     const usage = createRunUsageSink();
@@ -4833,6 +4924,12 @@ async function runPlaygroundChatTurn(
             request.onTextChunk?.(text);
         }
         : request.onTextChunk;
+    const onReasoningChunk = turnEvents && request.onReasoningChunk
+        ? (text: string) => {
+            turnEvents.onReasoning(text);
+            request.onReasoningChunk?.(text);
+        }
+        : request.onReasoningChunk;
     // A Session resumes from the state its last turn ended in (tool results,
     // summaries, plan) — the text transcript alone lost all of that. A
     // stateless call has only the history it was handed.
@@ -4937,8 +5034,11 @@ async function runPlaygroundChatTurn(
     const { onToolEvent, onCompaction, signal } = request;
     const compactions: IAgentTurnCompaction[] = [];
     const streamed = captureStreamedText(onTextChunk);
+    // The operator's playground always sees the thinking the model produced.
+    const reasoningTap = createReasoningTap(onReasoningChunk, agentKey);
     const invokeConfig = {
         onEvent: (event: AgentSdkEvent) => {
+            reasoningTap.onEvent(event);
             turnEvents?.onSdkEvent(event);
             if (event.type === 'summarization') {
                 // Collected for the turn record either way; forwarded live
@@ -4968,7 +5068,7 @@ async function runPlaygroundChatTurn(
                 logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
             }
         },
-        ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
+        ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
         // The SDK checks it between steps and hands it to the model call.
         ...(signal ? { cancellationToken: signal } : {}),
         ...sessionBudgetInvokeOptions(budgetPlan),
@@ -5018,7 +5118,7 @@ async function runPlaygroundChatTurn(
         const blocked = guardrailBlockedError(result);
         if (blocked) throw blocked;
 
-        const assistantReasoning = extractAgentReasoning(result);
+        const assistantReasoning = turnReasoning(result, reasoningTap);
 
         // Already adjudicated by the plugin's `postModelCall`; see the live path.
         //
@@ -5221,6 +5321,7 @@ export interface AgentResumeRequest {
     signal?: AbortSignal;
     onToolEvent?: (event: AgentToolCallEvent) => void;
     onTextChunk?: (text: string) => void;
+    onReasoningChunk?: (text: string) => void;
     onCompaction?: (compaction: IAgentTurnCompaction) => void;
     /** Called right before the SDK loop is invoked — after this the answers are spent. */
     onInvokeStart?: () => void;
@@ -5554,6 +5655,12 @@ async function runAgentResumeTurn(
                 request.onTextChunk?.(text);
             }
             : undefined;
+        const onReasoningChunk = request.onReasoningChunk
+            ? (text: string) => {
+                turnEvents.onReasoning(text);
+                request.onReasoningChunk?.(text);
+            }
+            : undefined;
 
         // Apply every answer with the SDK, then run the loop again. A budget-stopped
         // session has no answers: it carries on from the state it ended in.
@@ -5612,9 +5719,11 @@ async function runAgentResumeTurn(
         const inputMessageCount = (state.messages ?? []).length;
         const compactions: IAgentTurnCompaction[] = [];
         const streamed = captureStreamedText(onTextChunk);
+        const reasoningTap = createReasoningTap(onReasoningChunk, agentKey, agentShowsReasoning(config) || source === 'agent-playground');
         const cancellationBridge = bridgeCancellationCell(request.cancellationCell, request.signal);
         const invokeConfig = {
             onEvent: (event: AgentSdkEvent) => {
+                reasoningTap.onEvent(event);
                 turnEvents.onSdkEvent(event);
                 if (event.type === 'summarization') {
                     const compaction = compactionFromEvent(event);
@@ -5642,7 +5751,7 @@ async function runAgentResumeTurn(
                     logger.warn('onToolEvent callback failed', { agentKey, error: callbackError });
                 }
             },
-            ...textStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, agentKey),
+            ...liveStreamOptions(agentMayStreamAnswer(config) ? streamed.onTextChunk : undefined, reasoningTap, agentKey),
             ...(cancellationBridge.signal ? { cancellationToken: cancellationBridge.signal } : {}),
             ...(request.cancellationCell?.deadlineAt !== undefined
                 ? { timeoutMs: Math.max(0, request.cancellationCell.deadlineAt - Date.now()) }
@@ -5689,7 +5798,7 @@ async function runAgentResumeTurn(
 
         // `config.showReasoning: false` keeps the thinking text out of the API response, the
         // stored session message and Studio chat. The tokens were spent and are counted regardless.
-        const assistantReasoning = agentShowsReasoning(config) ? extractAgentReasoning(result) : undefined;
+        const assistantReasoning = agentShowsReasoning(config) ? turnReasoning(result, reasoningTap) : undefined;
         const turnOutcome = endedByCallerAbort(describeTurnOutcome(result, inputMessageCount), request.signal);
         const usage = normalizePlaygroundUsage(result.metadata?.usage)?.usage;
         const compactedTools = compactions.length > 0

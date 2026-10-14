@@ -21,7 +21,7 @@
 
 import { useTranslations } from '@/lib/i18n';
 import { useDeleteResource } from '@/components/common/confirm';
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
     ActionIcon,
@@ -39,7 +39,6 @@ import {
     ScrollArea,
     Select,
     Stack,
-    Switch,
     Text,
     Textarea,
     TextInput,
@@ -50,7 +49,6 @@ import {
 import { notifications } from '@mantine/notifications';
 import {
     IconAlertTriangle,
-    IconBrain,
     IconCheck,
     IconChevronDown,
     IconChevronRight,
@@ -90,8 +88,9 @@ import SessionStatusBadge from './SessionStatusBadge';
 import StopNotice from './StopNotice';
 import TurnTimeline, { DEFAULT_TIMELINE_ZOOM, TIMELINE_ZOOM_LEVELS } from './TurnTimeline';
 import LiveToolCalls, {
-    appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
+    appendLiveReasoning, appendLiveText, applyLiveToolEvent, isGenerating, type LiveSegment, type LiveToolEvent,
 } from './LiveToolCalls';
+import ReasoningBlock from './ReasoningBlock';
 import { consumeSse } from './consumeSse';
 import PendingActionList from './PendingActionCards';
 import {
@@ -144,14 +143,6 @@ interface AgentSummary {
 interface VersionOption {
     version: number;
 }
-
-/**
- * Operator view of the thinking text. An agent can hide reasoning from its API
- * responses and stored messages (`showReasoning: false`); this session view is
- * the operator's own window, so a live turn still carries it and this switch
- * only decides whether it is drawn.
- */
-const ReasoningViewContext = createContext(true);
 
 export interface AgentSessionViewProps {
     agentId: string;
@@ -235,7 +226,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     // The agent's models a turn can run on (main + additional); `''` = the agent's default / the session's last pick.
     const [agentModels, setAgentModels] = useState<Array<{ key: string; label: string; default: boolean }>>([]);
     const [pickedModel, setPickedModel] = useState('');
-    const [reasoningView, setReasoningView] = useState(true);
     const [loading, setLoading] = useState(true);
     // Why the page could not be shown: the session is not there, or the person may not open it.
     const [loadFailure, setLoadFailure] = useState<SessionLoadFailure | null>(null);
@@ -583,6 +573,8 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
             setLiveSegments((current) => applyLiveToolEvent(current, data as LiveToolEvent));
         } else if (event === 'text') {
             setLiveSegments((current) => appendLiveText(current, String((data as { text?: string }).text ?? '')));
+        } else if (event === 'reasoning') {
+            setLiveSegments((current) => appendLiveReasoning(current, String((data as { text?: string }).text ?? '')));
         } else if (event === 'summary') {
             setLiveCompactions((current) => [...current, data as TurnCompaction]);
         } else if (event === 'result') {
@@ -937,6 +929,7 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     if (step.kind === 'user') setFollowedUser(step.content);
                     else if (step.kind === 'tool') setLiveSegments((current) => applyLiveToolEvent(current, step.event));
                     else if (step.kind === 'text') setLiveSegments((current) => appendLiveText(current, step.text));
+                    else if (step.kind === 'reasoning') setLiveSegments((current) => appendLiveReasoning(current, step.text));
                     else if (step.kind === 'compaction') setLiveCompactions((current) => [...current, step.compaction as unknown as TurnCompaction]);
                     else if (step.kind === 'idle' || step.kind === 'error') {
                         stopped.current = true;
@@ -1014,7 +1007,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
     }
 
     return (
-        <ReasoningViewContext.Provider value={reasoningView}>
             <DetailShell
                 backHref={`/dashboard/agents/${agentId}?tab=sessions`}
                 backLabel="Back to sessions"
@@ -1069,15 +1061,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                 }
                 actions={
                     <>
-                        {!isConnected ? (
-                            <Switch
-                                size="xs"
-                                label={tp('showReasoning')}
-                                checked={reasoningView}
-                                onChange={(event) => setReasoningView(event.currentTarget.checked)}
-                                data-testid="session-reasoning-view"
-                            />
-                        ) : null}
                         {!isConnected && agentModels.length > 1 ? (
                             <Select
                                 size="xs"
@@ -1294,7 +1277,15 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                                                     </Group>
                                                 ) : (
                                                     <Stack gap="xs">
-                                                        {liveSegments.map((segment, index) => (segment.kind === 'tools' ? (
+                                                        {liveSegments.map((segment, index) => (segment.kind === 'reasoning' ? (
+                                                            <Box key={`reasoning-${index}`} className={classes.chatMarkdown}>
+                                                                <ReasoningBlock
+                                                                    reasoning={segment.text}
+                                                                    streaming={index === liveSegments.length - 1}
+                                                                    testId="agent-live-reasoning"
+                                                                />
+                                                            </Box>
+                                                        ) : segment.kind === 'tools' ? (
                                                             <LiveToolCalls
                                                                 key={`tools-${index}`}
                                                                 calls={segment.calls}
@@ -1476,7 +1467,6 @@ export default function AgentSessionView({ agentId, sessionId }: AgentSessionVie
                     initialMessage={[...messages].reverse().find((m) => m.role === 'user')?.content}
                 />
             </DetailShell>
-        </ReasoningViewContext.Provider>
     );
 }
 
@@ -1570,7 +1560,7 @@ function AssistantTurn({
     return (
         <Box className={classes.chatMarkdown}>
             {message.reasoning ? (
-                <ReasoningDisclosure reasoning={message.reasoning} latencyMs={message.latencyMs} />
+                <ReasoningBlock reasoning={message.reasoning} />
             ) : null}
             {message.steps?.length ? <NarratedSteps steps={message.steps} /> : null}
             {message.compactions?.map((compaction, index) => (
@@ -1613,30 +1603,6 @@ function AssistantTurn({
                     </Stack>
                 </Alert>
             ) : null}
-        </Box>
-    );
-}
-
-function ReasoningDisclosure({ reasoning, latencyMs }: { reasoning: string; latencyMs?: number }) {
-    const [open, setOpen] = useState(false);
-    const visible = useContext(ReasoningViewContext);
-    if (!visible) return null;
-    return (
-        <Box mb="xs">
-            <UnstyledButton onClick={() => setOpen((v) => !v)} className={classes.disclosureButton}>
-                <IconBrain size={13} color="var(--mantine-color-violet-6)" />
-                <Text size="xs" fw={500} c="violet.6">
-                    {latencyMs !== undefined ? `Thought for ${formatDuration(latencyMs)}` : 'Reasoning'}
-                </Text>
-                {open
-                    ? <IconChevronDown size={12} color="var(--mantine-color-violet-6)" />
-                    : <IconChevronRight size={12} color="var(--mantine-color-violet-6)" />}
-            </UnstyledButton>
-            <Collapse in={open}>
-                <Text size="xs" c="dimmed" mt={4} pl="xs" className={classes.reasoningBody}>
-                    {reasoning}
-                </Text>
-            </Collapse>
         </Box>
     );
 }

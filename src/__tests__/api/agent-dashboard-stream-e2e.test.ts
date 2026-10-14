@@ -179,6 +179,32 @@ describe('channel: dashboard session stream', () => {
         expect(result?.data.latencyMs).toBe(4200);
     });
 
+    it('streams the model\'s thinking as `reasoning` events, ahead of the result that carries it whole', async () => {
+        mockFn(executePlaygroundChatLocal).mockImplementation(
+            async (request: { onReasoningChunk?: (t: string) => void; onTextChunk?: (t: string) => void }) => {
+                request.onReasoningChunk?.('Checking the ');
+                request.onReasoningChunk?.('status page.');
+                request.onTextChunk?.('The database is down.');
+                return { ...PLAYGROUND_RESULT, reasoning: 'Checking the status page.' };
+            },
+        );
+
+        const app = await build();
+        const res = await app.inject({
+            method: 'POST',
+            url: '/api/agents/agent-1/chat/stream',
+            headers: { authorization: 'Bearer tok' },
+            payload: { message: 'what is broken?', conversationId: 'conv-1' },
+        });
+
+        const events = readEvents(res.body);
+        const names = events.map((e) => e.event);
+        expect(events.filter((e) => e.event === 'reasoning').map((e) => e.data.text).join('')).toBe('Checking the status page.');
+        expect(names.indexOf('reasoning')).toBeLessThan(names.indexOf('text'));
+        expect(names.indexOf('text')).toBeLessThan(names.indexOf('result'));
+        expect(events.find((e) => e.event === 'result')?.data.reasoning).toBe('Checking the status page.');
+    });
+
     it('adds action and status events (with id: seq) for a session turn, and leaves the existing events alone', async () => {
         mockFn(executePlaygroundChatLocal).mockImplementation(
             async (request: { onToolEvent?: (e: Record<string, unknown>) => void }) => {

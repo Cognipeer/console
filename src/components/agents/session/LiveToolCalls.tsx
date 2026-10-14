@@ -58,6 +58,7 @@ export function summariseArgs(args: unknown): string | undefined {
  */
 export type LiveSegment =
     | { kind: 'text'; text: string }
+    | { kind: 'reasoning'; text: string }
     | { kind: 'tools'; calls: LiveToolCall[] };
 
 export interface LiveToolEvent {
@@ -76,6 +77,16 @@ export function appendLiveText(segments: LiveSegment[], text: string): LiveSegme
         return [...segments.slice(0, -1), { kind: 'text', text: last.text + text }];
     }
     return [...segments, { kind: 'text', text }];
+}
+
+/** Thinking text joins the reasoning block it continues; text or a tool call in between starts a new one. */
+export function appendLiveReasoning(segments: LiveSegment[], text: string): LiveSegment[] {
+    if (!text) return segments;
+    const last = segments[segments.length - 1];
+    if (last?.kind === 'reasoning') {
+        return [...segments.slice(0, -1), { kind: 'reasoning', text: last.text + text }];
+    }
+    return [...segments, { kind: 'reasoning', text: text.replace(/^\n+/, '') }];
 }
 
 export function applyLiveToolEvent(segments: LiveSegment[], event: LiveToolEvent): LiveSegment[] {

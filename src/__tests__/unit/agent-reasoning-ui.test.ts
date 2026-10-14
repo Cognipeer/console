@@ -42,6 +42,31 @@ describe('options follow the chosen model', () => {
   });
 });
 
+describe('the dropdown is not lost when the provider list cannot say the driver', () => {
+  const everyLevel = ['none', 'minimal', 'low', 'medium', 'high'];
+
+  it('the model record\'s own driver wins over (and replaces) the provider lookup', () => {
+    expect(reasoningPickerOptions({ ...m('missing'), providerDriver: 'anthropic' }, {})).toMatchObject({ kind: 'budget', budget: true });
+    expect(reasoningPickerOptions({ ...m('openaiProv'), providerDriver: 'anthropic' }, drivers)).toMatchObject({ kind: 'budget' });
+  });
+
+  it('a driver nobody can name (empty provider map, no record driver) still offers the generic effort list', () => {
+    expect(reasoningPickerOptions(m('missing'), {})).toEqual({ kind: 'effort', efforts: everyLevel, budget: false });
+    expect(reasoningPickerOptions(m('missing'), drivers)?.efforts).toEqual(everyLevel);
+  });
+
+  it('a known driver without controls shows the list only for a model flagged as reasoning', () => {
+    expect(reasoningPickerOptions({ ...m('odd'), capabilities: { supportsReasoning: true } }, drivers)?.efforts).toEqual(everyLevel);
+    expect(reasoningPickerOptions({ ...m('odd'), capabilities: { supportsReasoning: false } }, drivers)).toBeUndefined();
+  });
+
+  it('the Build tab loads the project-scoped provider list (the tenant one is provider-admin only)', () => {
+    const detail = read('src/components/agents/AgentDetailPage.tsx');
+    expect(detail).toContain("loadList('/api/providers', (d) => d.providers");
+    expect(detail).not.toContain('/api/providers?scope=tenant');
+  });
+});
+
 describe('placement', () => {
   const detail = read('src/components/agents/AgentDetailPage.tsx');
 
@@ -96,13 +121,5 @@ describe('i18n', () => {
     }
     expect(en.agents.sessionPage.showReasoning).toBeTruthy();
     expect(tr.agents.sessionPage.showReasoning).toBeTruthy();
-  });
-});
-
-describe('operator view toggle', () => {
-  it('the session view has a switch that hides the thinking block without touching the data', () => {
-    const view = read('src/components/agents/session/AgentSessionView.tsx');
-    expect(view).toContain('session-reasoning-view');
-    expect(view).toContain('ReasoningViewContext');
   });
 });

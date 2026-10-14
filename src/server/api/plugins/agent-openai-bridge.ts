@@ -252,8 +252,11 @@ export function toChatCompletion(input: {
     stopDetail?: string;
     /** Client tools the agent is waiting on: the reply is a `tool_calls` message. */
     toolCalls?: ChatToolCall[];
+    /** The agent's thinking text, when the agent and the request let it out (`reasoning_content`, as the model gateway names it). */
+    reasoning?: string;
 }) {
     const calling = (input.toolCalls?.length ?? 0) > 0;
+    const thinking = input.reasoning ? { reasoning_content: input.reasoning } : {};
     return {
         id: input.id,
         object: 'chat.completion' as const,
@@ -262,8 +265,8 @@ export function toChatCompletion(input: {
         choices: [{
             index: 0,
             message: calling
-                ? { role: 'assistant' as const, content: input.content || null, tool_calls: input.toolCalls }
-                : { role: 'assistant' as const, content: input.content },
+                ? { role: 'assistant' as const, content: input.content || null, ...thinking, tool_calls: input.toolCalls }
+                : { role: 'assistant' as const, content: input.content, ...thinking },
             finish_reason: calling ? ('tool_calls' as const) : agentFinishReason(input.stopReason),
         }],
         ...(input.usage ? { usage: input.usage } : {}),
@@ -283,6 +286,8 @@ export function toChatChunk(input: {
     id: string;
     model: string;
     delta?: string;
+    /** A piece of the agent's thinking text; the chunk then carries `delta.reasoning_content` and no `content`. */
+    reasoning?: string;
     finish?: boolean;
     stopReason?: AgentChatResponse['stop_reason'];
 }) {
@@ -293,7 +298,11 @@ export function toChatChunk(input: {
         model: input.model,
         choices: [{
             index: 0,
-            delta: input.finish ? {} : { content: input.delta ?? '' },
+            delta: input.finish
+                ? {}
+                : input.reasoning !== undefined
+                    ? { reasoning_content: input.reasoning }
+                    : { content: input.delta ?? '' },
             finish_reason: input.finish ? agentFinishReason(input.stopReason) : null,
         }],
     };
@@ -331,6 +340,8 @@ export interface RunAgentCompletionInput {
     ctx: AgentCompletionContext;
     /** Present for the streaming form; the deltas go here as they arrive. */
     onTextChunk?: (text: string) => void;
+    /** Present for the streaming form when the caller wants the thinking text too. */
+    onReasoningChunk?: (text: string) => void;
     /** What answering a client tool call needs (the `tool` messages of the request). */
     answer?: ToolAnswerContext;
     /** The agent's model this run uses, resolved and authorized by the route (`agent_model`). */
@@ -364,6 +375,8 @@ export type AgentCompletionResult =
         stopDetail?: string;
         /** Client tools the agent is waiting on (reply with `tool` messages, `tool_call_id` = `id`). */
         toolCalls?: ChatToolCall[];
+        /** The agent's thinking text (already empty when the agent hides it). */
+        reasoning?: string;
     };
 
 function toCompletionUsage(usage: AgentChatResponse['usage'] | undefined): { usage?: AgentCompletionUsage } {
@@ -412,6 +425,7 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
         ...(input.version !== undefined ? { version: input.version } : {}),
         ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
         ...(input.onTextChunk ? { onTextChunk: input.onTextChunk } : {}),
+        ...(input.onReasoningChunk ? { onReasoningChunk: input.onReasoningChunk } : {}),
     });
 
     return completionFrom(result, conversation.conversationId);
@@ -420,8 +434,10 @@ export async function runAgentCompletion(input: RunAgentCompletionInput): Promis
 /** A Responses-shaped agent result as a chat completion: the answer, or the client tools it is waiting on. */
 function completionFrom(result: AgentChatResponse, conversationId: string): AgentCompletionResult {
     const toolCalls = toChatToolCalls(result.required_action?.actions);
+    const reasoning = extractAnswerReasoning(result);
     return {
         content: extractAnswerText(result),
+        ...(reasoning ? { reasoning } : {}),
         conversationId,
         ...(result.stop_reason ? { stopReason: result.stop_reason } : {}),
         ...(result.stop_detail ? { stopDetail: result.stop_detail } : {}),
@@ -462,7 +478,9 @@ async function answerToolCalls(input: RunAgentCompletionInput, answers: ToolAnsw
             unattended: true,
             answersClientTools: true,
             ...(input.runtimeContext ? { runtimeContext: input.runtimeContext } : {}),
-            ...(input.onTextChunk ? { stream: { onTextChunk: input.onTextChunk } } : {}),
+            ...(input.onTextChunk
+                ? { stream: { onTextChunk: input.onTextChunk, ...(input.onReasoningChunk ? { onReasoningChunk: input.onReasoningChunk } : {}) } }
+                : {}),
             ...(input.answer.audit ? { audit: input.answer.audit } : {}),
         });
         const refusal = answerRefusal(last);
@@ -497,5 +515,19 @@ export function extractAnswerText(result: AgentChatResponse): string {
             ? (part as { text: string }).text
             : ''))
         .join('')
+        .trim();
+}
+
+/**
+ * The thinking text of a Responses-shaped result (its `reasoning` items), for
+ * `reasoning_content`. The agent's `showReasoning: false` already left the
+ * item out, so there is nothing to apply again here.
+ */
+export function extractAnswerReasoning(result: AgentChatResponse): string {
+    return (result.output ?? [])
+        .filter((item): item is Extract<typeof item, { type: 'reasoning' }> => item.type === 'reasoning')
+        .flatMap((item) => item.summary ?? [])
+        .map((part) => (typeof part.text === 'string' ? part.text : ''))
+        .join('\n\n')
         .trim();
 }

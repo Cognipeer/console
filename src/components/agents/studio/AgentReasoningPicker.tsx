@@ -17,6 +17,9 @@ export interface ReasoningPickerModel {
     key: string;
     name: string;
     providerKey?: string;
+    /** The driver the model record itself carries; wins over the provider lookup. */
+    providerDriver?: string;
+    capabilities?: { supportsReasoning?: boolean } | null;
     settings?: Record<string, unknown>;
 }
 
@@ -31,7 +34,13 @@ export interface ReasoningPickerOptions {
     budget: boolean;
 }
 
-/** What the picker offers for a model; undefined when its provider has no reasoning controls. */
+/**
+ * What the picker offers for a model. The driver comes from the model record
+ * first, then from the provider list (which a non-admin may not be able to
+ * load). A driver nobody can name still gets the generic effort list, so the
+ * dropdown is never silently missing; a driver with no reasoning controls
+ * only gets it when the model is flagged as a reasoning model.
+ */
 export function reasoningPickerOptions(
     model: ReasoningPickerModel | undefined,
     driverByProviderKey: Record<string, string | undefined>,
@@ -39,8 +48,14 @@ export function reasoningPickerOptions(
     if (!model) return undefined;
     const dynamic = Boolean((model.settings as { dynamic?: unknown } | undefined)?.dynamic);
     if (dynamic) return { kind: 'effort', efforts: [...REASONING_EFFORTS], budget: false };
-    const control = reasoningControlForDriver(model.providerKey ? driverByProviderKey[model.providerKey] : undefined);
-    if (control.kind === 'none') return undefined;
+    const driver = model.providerDriver || (model.providerKey ? driverByProviderKey[model.providerKey] : undefined);
+    const control = reasoningControlForDriver(driver);
+    if (control.kind === 'none') {
+        if (!driver || model.capabilities?.supportsReasoning) {
+            return { kind: 'effort', efforts: [...REASONING_EFFORTS], budget: false };
+        }
+        return undefined;
+    }
     return { kind: control.kind, efforts: control.efforts, budget: control.budget };
 }
 
@@ -71,7 +86,7 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
         <>
             <Select
                 size="sm"
-                w={190}
+                w={170}
                 label={t('reasoningEffort')}
                 aria-label={t('reasoningPickerAria', { model: model?.name ?? '' })}
                 data={data}

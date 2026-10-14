@@ -16,6 +16,7 @@ export type FollowStep =
         event: { phase: 'start' | 'success' | 'error'; name: string; id?: string; args?: unknown; durationMs?: number; error?: string };
     }
     | { kind: 'text'; text: string }
+    | { kind: 'reasoning'; text: string }
     | { kind: 'compaction'; compaction: Record<string, unknown> }
     /** The turn stopped; `stopReason` is the session's (`end_turn`, `requires_action`, …). */
     | { kind: 'idle'; stopReason?: string }
@@ -60,6 +61,8 @@ export function interpretSessionEvent(event: string, frame: unknown): FollowStep
                 : IGNORE;
         case 'agent.message.delta':
             return typeof data.text === 'string' ? { kind: 'text', text: data.text } : IGNORE;
+        case 'agent.reasoning.delta':
+            return typeof data.text === 'string' ? { kind: 'reasoning', text: data.text } : IGNORE;
         case 'agent.compaction':
             return { kind: 'compaction', compaction: data };
         case 'session.status_idle':
