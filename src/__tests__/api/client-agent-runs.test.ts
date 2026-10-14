@@ -35,7 +35,11 @@ const hoisted = vi.hoisted(() => ({
   getConversationById: vi.fn(),
   ending: vi.fn(),
   access: vi.fn(),
+  cancelTurn: vi.fn(),
 }));
+
+// What a Stop does to the running turn has its own tests (unit/agent-sdk-cancellation.test.ts); only the wiring is checked here.
+vi.mock('@/lib/services/agents/turnCancellation', () => ({ cancelConversationTurn: hoisted.cancelTurn }));
 
 vi.mock('@/lib/services/agents', () => ({
   getAgentRunStatus: hoisted.getAgentRunStatus,
@@ -249,6 +253,88 @@ describe('client agent runs routes', () => {
       hoisted.getConversationById.mockResolvedValue({ ...conversation, projectId: 'proj-2' });
       await cancel();
       expect(hoisted.ending).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('stopping the turn running now, by the id the client already has', () => {
+    const conversation = { _id: 'conv-1', projectId: 'proj-1', agentKey: 'support-agent', createdBy: 'user-1' };
+    const post = (url: string) => app.inject({ method: 'POST', url, headers: { authorization: '******' } });
+
+    beforeEach(() => {
+      hoisted.getConversationById.mockResolvedValue(conversation);
+      hoisted.cancelTurn.mockReset();
+      hoisted.cancelTurn.mockResolvedValue({ cancelled: true, runIds: ['run-1'], cancelledActions: false });
+    });
+
+    it('POST /api/client/v1/agents/conversations/:conversationId/cancel stops the turn in tenant/project scope', async () => {
+      const res = await post('/api/client/v1/agents/conversations/conv-1/cancel');
+      expect(res.statusCode).toBe(200);
+      expect(parseJsonBody(res.body)).toEqual({ conversation_id: 'conv-1', cancelled: true, run_ids: ['run-1'] });
+      expect(hoisted.access).toHaveBeenCalledWith(expect.anything(), conversation, expect.objectContaining({ need: 'manage' }));
+      expect(hoisted.cancelTurn).toHaveBeenCalledWith({
+        tenantDbName: 'tenant_acme', tenantId: 'tenant-1', projectId: 'proj-1', conversationId: 'conv-1', cancelActions: true,
+      });
+    });
+
+    it('nothing running is a 200 with cancelled: false, not an error', async () => {
+      hoisted.cancelTurn.mockResolvedValue({ cancelled: false, runIds: [], cancelledActions: false });
+      const res = await post('/api/client/v1/agents/conversations/conv-1/cancel');
+      expect(res.statusCode).toBe(200);
+      expect(parseJsonBody(res.body)).toEqual({ conversation_id: 'conv-1', cancelled: false, run_ids: [] });
+    });
+
+    it('is 404 for a session of another project, and stops nothing', async () => {
+      hoisted.getConversationById.mockResolvedValue({ ...conversation, projectId: 'proj-2' });
+      const res = await post('/api/client/v1/agents/conversations/conv-1/cancel');
+      expect(res.statusCode).toBe(404);
+      expect(hoisted.cancelTurn).not.toHaveBeenCalled();
+    });
+
+    it('a session the token may not manage is refused before anything stops', async () => {
+      hoisted.access.mockResolvedValue({ ok: false, status: 403, reason: 'forbidden', need: 'manage', decisionId: 'dec-9' });
+      const res = await post('/api/client/v1/agents/conversations/conv-1/cancel');
+      expect(res.statusCode).toBe(403);
+      expect(parseJsonBody(res.body)).toEqual({ error: { code: 'forbidden', decision_id: 'dec-9' } });
+      expect(hoisted.cancelTurn).not.toHaveBeenCalled();
+    });
+
+    it('without the right to answer an open approval the turn still stops and the approval stays', async () => {
+      hoisted.ending.mockResolvedValue({ allowed: false });
+      const res = await post('/api/client/v1/agents/conversations/conv-1/cancel');
+      expect(res.statusCode).toBe(200);
+      expect(hoisted.cancelTurn).toHaveBeenCalledWith(expect.objectContaining({ cancelActions: false }));
+    });
+
+    it('is 503 when the engine could not decide: nothing stops', async () => {
+      hoisted.ending.mockResolvedValue({ allowed: false, unavailable: true, decisionId: 'dec-10' });
+      const res = await post('/api/client/v1/agents/conversations/conv-1/cancel');
+      expect(res.statusCode).toBe(503);
+      expect(hoisted.cancelTurn).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      '/api/client/v1/responses/:responseId/cancel',
+      '/api/client/v1/agents/responses/:responseId/cancel',
+    ])('POST %s takes the resp_<conversationId> that /responses returned', async (route) => {
+      const res = await post(route.replace(':responseId', 'resp_conv-1'));
+      expect(res.statusCode).toBe(200);
+      expect(parseJsonBody(res.body)).toEqual({ id: 'resp_conv-1', conversation_id: 'conv-1', cancelled: true, run_ids: ['run-1'] });
+      expect(hoisted.cancelTurn).toHaveBeenCalledWith(expect.objectContaining({ conversationId: 'conv-1', projectId: 'proj-1' }));
+    });
+
+    it('POST /api/client/v1/responses/:responseId/cancel takes a background run id (run_<runId>) through its session', async () => {
+      hoisted.getAgentRunStatus.mockResolvedValue({ _id: 'run-7', conversationId: 'conv-1', status: 'running' });
+      const res = await post('/api/client/v1/responses/run_run-7/cancel');
+      expect(res.statusCode).toBe(200);
+      expect(hoisted.getAgentRunStatus).toHaveBeenCalledWith('tenant_acme', 'tenant-1', 'proj-1', 'run-7');
+      expect(parseJsonBody(res.body)).toMatchObject({ id: 'run_run-7', conversation_id: 'conv-1' });
+    });
+
+    it('an id that is neither resp_ nor run_, or a run that is not there, is 404', async () => {
+      expect((await post('/api/client/v1/agents/responses/xyz/cancel')).statusCode).toBe(404);
+      hoisted.getAgentRunStatus.mockResolvedValue(null);
+      expect((await post('/api/client/v1/responses/run_missing/cancel')).statusCode).toBe(404);
+      expect(hoisted.cancelTurn).not.toHaveBeenCalled();
     });
   });
 });
