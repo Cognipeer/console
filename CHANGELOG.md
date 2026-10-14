@@ -110,11 +110,17 @@ For the full changelog, see [docs/changelog.md](docs/changelog.md). Released ver
 ### Acting for a user (verified identity)
 
 - An application can send a signed statement about the person a call is for in the `X-Cognipeer-User-Token` header,
-  next to its API token. The call then runs as that person (their access, limits, quotas and name in the logs), capped
+  next to its API token, or both in the one `Authorization` header as `Bearer <api token>~<user token>` for SDKs that
+  can only set an API key (split at the door by `src/lib/iam/combinedCredential.ts`; sending both forms is `400
+  invalid_combined_credential`). The call then runs as that person (their access, limits, quotas and name in the logs), capped
   by the token's scope and project; the token stays the actor. Owners and admins set it up per token under **IAM center
   → Principals → API tokens → Acting for users**: issuer, audience, a pinned algorithm (`HS256`, `RS256`, `ES256`), a
   shared secret with key ids, a public key or a key set URL, how the person is found (identity and/or verified email)
   and what to do when nobody matches (nothing, an external account, or a person managed by the identity provider).
+- An API token can be flagged `requireUserToken`: it is then only served on behalf of a verified person, and a call without a
+  user token is refused (`401 user_token_required`) instead of running as the token's owner. The flag lives on the token
+  record (no extra lookup per call), outlives a missing or disabled delegation (the token then refuses everything), is
+  passed on to tokens it mints and is refused by endpoints and the AI App Gateway that cannot act for users.
 - The workspace owner can never be acted for; an administrator only when the setup allows it, and a refused account is
   left untouched (not linked to the subject, no group changes). A refused call
   is answered `401` (`delegation_not_enabled`, `invalid_assertion`, `expired`, `untrusted_key`, `unknown_principal`,

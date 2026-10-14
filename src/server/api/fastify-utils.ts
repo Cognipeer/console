@@ -1087,6 +1087,7 @@ async function applyDelegation(request: FastifyRequest, apiToken: ApiTokenContex
       tenantId: apiToken.tenantId,
       // The project the call runs in: the person must be able to open it themselves.
       projectId: apiToken.projectId,
+      requireUserToken: apiToken.tokenRecord.requireUserToken === true,
     });
     if (!caller) return apiToken;
     const delegated: ApiTokenContext = {
@@ -1135,6 +1136,10 @@ export async function getApiTokenContextForRequest(
   // the token's owner.
   if (request.headers[USER_TOKEN_HEADER] !== undefined) {
     throw new ApiTokenAuthError('This endpoint does not act for users: remove the user token header', 400, 'user_token_not_supported');
+  }
+  // A token that must act for a person has no business on an endpoint that cannot: refused, never answered as its owner.
+  if (context.tokenRecord.requireUserToken === true) {
+    throw new ApiTokenAuthError('This API token only acts for users and this endpoint does not support that', 403, 'user_token_required');
   }
   request.apiTokenContext = context;
   return context;

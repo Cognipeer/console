@@ -42,6 +42,8 @@ import {
 
 /** The header an application sends the signed statement about the person in. */
 const HEADER_NAME = 'X-Cognipeer-User-Token';
+/** The same statement for clients that can only set the API key: both values in the `Authorization` header. */
+const COMBINED_EXAMPLE = 'Authorization: Bearer <api token>~<jwt>';
 
 interface Props {
   tokenId: string;
@@ -453,7 +455,7 @@ export default function TokenDelegationSection({ tokenId }: Props) {
         <Stack gap={4}>
           <Text size="xs" fw={600}>{t('delegation.usage.title')}</Text>
           <Text size="xs">{t('delegation.usage.body', { header: HEADER_NAME })}</Text>
-          <Code block fz={11}>{`${HEADER_NAME}: <jwt>\n${t('delegation.usage.claims')}`}</Code>
+          <Code block fz={11}>{`${HEADER_NAME}: <jwt>\n${COMBINED_EXAMPLE}\n${t('delegation.usage.claims')}`}</Code>
         </Stack>
       </Alert>
 

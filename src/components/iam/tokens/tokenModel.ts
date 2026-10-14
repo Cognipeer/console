@@ -45,6 +45,8 @@ export interface ApiTokenRow {
   /** Whether the token carries an allowlist, for everybody (the badge); `allowedIpRangeCount` is its size. */
   ipRestricted?: boolean;
   allowedIpRangeCount?: number;
+  /** The token is only served on behalf of a verified person (a user token must accompany every call). */
+  requireUserToken?: boolean;
   exceedsTenantPolicy?: boolean;
   servicePermissions?: Record<string, string> | null;
 }

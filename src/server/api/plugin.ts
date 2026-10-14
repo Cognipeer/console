@@ -14,6 +14,8 @@ import { criticalFireAndForget } from '@/lib/core/asyncTask';
 import { getRequiredPermissionLevel } from '@/lib/security/rbac';
 import { serviceForRequest } from '@/lib/iam/routeAuthz';
 import { recordRegisteredRoute } from '@/lib/iam/routeRegistry';
+import { CombinedCredentialError, splitCombinedAuthorization } from '@/lib/iam/combinedCredential';
+import { USER_TOKEN_HEADER } from '@/lib/iam/delegationGate';
 import { canonicalizeRequestPathname } from '@/lib/security/requestPath';
 import { recordAuditLog } from '@/lib/services/audit';
 import { anthropicErrorBody } from '@/lib/services/models/anthropicWire';
@@ -412,6 +414,24 @@ export const fastifyApiPlugin: FastifyPluginAsync = async (app) => {
     }
 
     if (clientApiRequest) {
+      // `Authorization: Bearer <api token>~<user token>`: the one header an SDK lets its caller set, carrying both the
+      // application token and the statement about the person. Split it here, once, into the two headers every later
+      // step already reads, so nothing downstream knows the combined form exists.
+      try {
+        const combined = splitCombinedAuthorization(request.headers.authorization);
+        if (combined) {
+          if (request.headers[USER_TOKEN_HEADER] !== undefined) {
+            throw new CombinedCredentialError('Send the user token either inside Authorization or in X-Cognipeer-User-Token, not both');
+          }
+          request.headers.authorization = `Bearer ${combined.apiToken}`;
+          request.headers[USER_TOKEN_HEADER] = combined.userToken;
+        }
+      } catch (error) {
+        if (error instanceof CombinedCredentialError) {
+          return reply.code(error.status).send({ error: error.message, code: error.code });
+        }
+        throw error;
+      }
       const authHeader = request.headers.authorization;
       if (!authHeader || !authHeader.startsWith('Bearer ')) {
         const message = 'Missing or invalid Authorization header. Use: Bearer <token>';

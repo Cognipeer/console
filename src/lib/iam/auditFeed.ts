@@ -318,13 +318,14 @@ function describeChange(row: IAuditLog): { summary: string; text?: AuditFeedText
       };
     }
     case TOKEN_RESTRICTIONS_EVENT: {
-      const after = (m.after ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
-      const before = (m.before ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number };
+      const after = (m.after ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number; requireUserToken?: boolean };
+      const before = (m.before ?? {}) as { expiresAt?: string | null; allowedIpRanges?: unknown; allowedIpRangeCount?: number; requireUserToken?: boolean };
       const parts: string[] = [];
       const expiryChanged = before.expiresAt !== after.expiresAt;
       const ipChanged = (before.allowedIpRangeCount ?? 0) !== (after.allowedIpRangeCount ?? 0)
         || JSON.stringify(before.allowedIpRanges) !== JSON.stringify(after.allowedIpRanges);
       if (expiryChanged) parts.push(`expiry ${before.expiresAt ? before.expiresAt.slice(0, 10) : 'none'} -> ${after.expiresAt ? after.expiresAt.slice(0, 10) : 'none'}`);
+      if ((before.requireUserToken === true) !== (after.requireUserToken === true)) parts.push(`user token ${after.requireUserToken === true ? 'now required' : 'no longer required'}`);
       if (ipChanged) parts.push(`IP allowlist ${before.allowedIpRangeCount ?? 0} -> ${after.allowedIpRangeCount ?? 0} ranges`);
       const label = str(m.label) ?? String(row.resourceId ?? '');
       return {

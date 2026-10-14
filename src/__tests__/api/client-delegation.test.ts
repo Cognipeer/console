@@ -16,7 +16,7 @@
  *   dialects           the same refusals in the JSON, OpenAI and Anthropic envelopes
  *   audit              the person is the subject and the application token the actor, `via` names the issuer
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 process.env.QUOTA_POLICY_CACHE_TTL_SECONDS = '0';
 
@@ -121,10 +121,11 @@ const mkUser = async (name: string, role: 'owner' | 'admin' | 'user', extra: Rec
 };
 
 /** A real token row, and the context the application's authentication would hand the wrapper. */
-const mkAppToken = async (name: string, owner: IUser, scope: Record<string, string> | null, projectId?: string) => {
+const mkAppToken = async (name: string, owner: IUser, scope: Record<string, string> | null, projectId?: string, requireUserToken = false) => {
   const row = await env.db.createApiToken({
     label: name, projectId: projectId ?? defaultProjectId, tenantId: env.tenantId, tokenHash: `hash-${name}`, tokenPrefix: `cpeer_${name}`,
     userId: String(owner._id), servicePermissions: scope as never,
+    ...(requireUserToken ? { requireUserToken: true } : {}),
   } as never);
   apps[name] = row;
   hoisted.tokens.set(`tok-${name}`, {
@@ -280,6 +281,7 @@ beforeAll(async () => {
   await mkAppToken('p1', svc, null, projectOneId);
   await mkAppToken('p2', svc, null, projectTwoId);
   await mkAppToken('off', svc, null);
+  await mkAppToken('must', svc, null, undefined, true);
 
   app = await createFastifyApiTestApp(async (instance) => {
     instance.addHook('onSend', async (request, reply, payload) => { stampDecisionHeader(request, reply); return payload; });
@@ -970,5 +972,56 @@ describe('the audit trail', () => {
     expect(row).toMatchObject({ apiTokenId: String(apps.app._id), outcome: 'denied', metadata: { code: 'delegation_refused', reasons: ['invalid_assertion'] } });
     expect(row.actorUserId ?? null).toBeNull();
     expect((row.metadata as Record<string, unknown>).via).toBeUndefined();
+  });
+});
+
+describe('a token that requires a user token', () => {
+  afterEach(async () => {
+    await env.db.runWithTenant!(env.tenantDbName, () => env.db.iamDocDelete('iam_delegations', String(apps.must._id)));
+    resetTokenDelegationCacheForTests();
+  });
+
+  it('refuses a call without one - 401 user_token_required, never answered as the owner', async () => {
+    await delegate('must');
+    const res = await call('GET', '/api/client/v1/probe/models', { token: 'tok-must' });
+    expect(res.status).toBe(401);
+    expect(res.body).toMatchObject({ code: 'user_token_required', decisionId: expect.any(String) });
+    expect(res.headers['x-decision-id']).toBe(res.body.decisionId);
+    expect(res.body.principalUserId).toBeUndefined();
+  });
+
+  it('serves a call that carries one, as that person', async () => {
+    await delegate('must');
+    const res = await call('GET', '/api/client/v1/probe/models', { token: 'tok-must', userToken: await userToken({ sub: 'sub-alice', email: 'alice@bank.test', emailVerified: true }) });
+    expect(res.status).toBe(200);
+    expect(res.body.delegation).toMatchObject({ state: 'active' });
+    expect(res.body.principalUserId).toBe(String(users.alice._id));
+  });
+
+  it('keeps refusing when the delegation is missing or switched off: the requirement outlives its configuration', async () => {
+    const none = await call('GET', '/api/client/v1/probe/models', { token: 'tok-must', userToken: await userToken() });
+    expect(none.status).toBe(401);
+    expect(none.body).toMatchObject({ code: 'delegation_not_enabled' });
+    await delegate('must', { enabled: false });
+    expect((await call('GET', '/api/client/v1/probe/models', { token: 'tok-must' })).body).toMatchObject({ code: 'user_token_required' });
+    expect((await call('GET', '/api/client/v1/probe/models', { token: 'tok-must', userToken: await userToken() })).body).toMatchObject({ code: 'delegation_not_enabled' });
+  });
+
+  it('refuses it on a route outside the client wrapper, which cannot act for users', async () => {
+    await delegate('must');
+    const res = await call('GET', '/api/client/v1/probe/unwrapped', { token: 'tok-must' });
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: 'user_token_required' });
+  });
+
+  it('speaks each dialect', async () => {
+    await delegate('must');
+    const openai = await call('POST', '/api/client/v1/probe/openai', { token: 'tok-must' });
+    expect(openai.status).toBe(401);
+    expect(openai.body.error).toMatchObject({ code: 'user_token_required' });
+  });
+
+  it('leaves a token without the flag exactly as it was', async () => {
+    expect((await call('GET', '/api/client/v1/probe/models', { token: 'tok-app' })).status).toBe(200);
   });
 });

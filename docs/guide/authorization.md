@@ -201,6 +201,7 @@ With a **group map**, the person's memberships follow the statement's `groups` c
 
 ### Recommendations
 
+- For SDKs that can only set an API key, send both values in it as `<api token>~<user token>` - see [the combined credential](/guide/authentication#one-header-the-combined-credential).
 - Send the statement from your application's **backend**, together with the application token, and never from a browser: the token is a secret, and `X-Cognipeer-User-Token` is deliberately not among the headers a browser is allowed to send across origins.
 - Prefer `RS256` or `ES256` with a key set over a shared secret: the console then holds no secret that can mint statements.
 - Give the token a **scope** (the screen warns when it has none): the people it acts for are then capped by it. Bind it to a **project**, and give the people (or their delegated groups) access to that project: a person who cannot open it is refused.

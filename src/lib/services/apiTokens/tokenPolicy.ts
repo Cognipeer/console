@@ -264,6 +264,8 @@ export interface PreparedTokenCreate {
   ok: true;
   expiresAt: Date | null;
   allowedIpRanges: string[] | null;
+  /** Calls with the token must act for a verified person (`X-Cognipeer-User-Token`). */
+  requireUserToken: boolean;
   policy: TokenPolicy;
 }
 
@@ -273,6 +275,16 @@ export interface TokenRestrictionBody {
   expiresAt?: unknown;
   expiresInDays?: unknown;
   allowedIpRanges?: unknown;
+  requireUserToken?: unknown;
+}
+
+/** The flag as a body field: absent = not set; anything but a boolean is refused. */
+function parseRequireUserToken(value: unknown): { ok: true; value: boolean | undefined } | TokenPrepareFailure {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (typeof value !== 'boolean') {
+    return { ok: false, ...requestError(400, 'invalid_body', 'requireUserToken must be true or false') };
+  }
+  return { ok: true, value };
 }
 
 /**
@@ -295,6 +307,9 @@ export async function prepareTokenCreate(args: {
   const ranges = validateAllowedIpRanges(args.body.allowedIpRanges);
   if (!ranges.ok) return { ok: false, ...invalidIpRanges(ranges.message, ranges.issues) };
 
+  const requireUserToken = parseRequireUserToken(args.body.requireUserToken);
+  if (!requireUserToken.ok) return requireUserToken;
+
   let policy: TokenPolicy;
   try {
     policy = await loadTokenPolicy(args.tenantDbName, args.reader);
@@ -306,13 +321,14 @@ export async function prepareTokenCreate(args: {
   const violation = checkExpiryAgainstPolicy({ policy, expiresAt, createdAt: now });
   if (violation) return { ok: false, ...violation };
 
-  return { ok: true, expiresAt, allowedIpRanges: ranges.ranges, policy };
+  return { ok: true, expiresAt, allowedIpRanges: ranges.ranges, requireUserToken: requireUserToken.value === true, policy };
 }
 
 export interface TokenPatch {
   label?: string;
   expiresAt?: Date | null;
   allowedIpRanges?: string[] | null;
+  requireUserToken?: boolean;
 }
 
 export interface PreparedTokenUpdate {
@@ -355,6 +371,10 @@ export async function prepareTokenUpdate(args: {
     if (!ranges.ok) return { ok: false, ...invalidIpRanges(ranges.message, ranges.issues) };
     patch.allowedIpRanges = ranges.ranges;
   }
+
+  const requireUserToken = parseRequireUserToken(args.body.requireUserToken);
+  if (!requireUserToken.ok) return requireUserToken;
+  if (requireUserToken.value !== undefined) patch.requireUserToken = requireUserToken.value;
 
   const expiry = parseExpiryInput(args.body, now);
   if (!expiry.ok) return { ok: false, ...expiry.error };
@@ -424,6 +444,8 @@ export function presentApiToken(
     // The list of ranges (an internal network map: office, CI egress...) is for whoever may edit the token.
     // Everybody sees THAT a token is restricted, which is all a badge needs.
     allowedIpRanges: options.canEdit ? presentAllowedIpRanges(token.allowedIpRanges) : null,
+    // Everybody sees THAT the token needs a user token (it is how it behaves, not a secret).
+    requireUserToken: token.requireUserToken === true,
     ipRestricted: (presentAllowedIpRanges(token.allowedIpRanges)?.length ?? 0) > 0,
     allowedIpRangeCount: presentAllowedIpRanges(token.allowedIpRanges)?.length ?? 0,
     exceedsTenantPolicy: tokenExceedsPolicy(token, options.policy, now),

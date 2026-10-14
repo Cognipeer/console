@@ -200,3 +200,34 @@ describe('upgrading an existing SQLite main database', () => {
     expect(single?.allowedIpRanges).toEqual(['10.0.0.0/8']);
   });
 });
+
+describeForEachProvider('API token requireUserToken', (getDb) => {
+  const mint = (extra: Record<string, unknown> = {}) =>
+    getDb().createApiToken({
+      userId: 'u1', tenantId: TENANT, projectId: 'p1', label: 'app token', tokenHash: nextHash(), tokenPrefix: 'cpeer_abcdef', ...extra,
+    } as never);
+
+  it('reads back as required only when it was set; every other token is optional', async () => {
+    const required = await mint({ requireUserToken: true });
+    const plain = await mint();
+    const off = await mint({ requireUserToken: false });
+    expect((await getDb().findApiTokenByHash(required.tokenHash!))?.requireUserToken).toBe(true);
+    expect((await getDb().findApiTokenById(String(required._id), TENANT))?.requireUserToken).toBe(true);
+    expect((await getDb().listProjectApiTokens(TENANT, 'p1')).find((t) => String(t._id) === String(required._id))?.requireUserToken).toBe(true);
+    for (const token of [plain, off]) {
+      expect((await getDb().findApiTokenById(String(token._id), TENANT))?.requireUserToken ?? false).toBe(false);
+    }
+  });
+
+  it('updateApiToken switches it on and off and touches nothing else', async () => {
+    const created = await mint({ allowedIpRanges: ['10.0.0.0/8'] });
+    const on = await getDb().updateApiToken(String(created._id), TENANT, { requireUserToken: true });
+    expect(on?.requireUserToken).toBe(true);
+    expect(on?.allowedIpRanges).toEqual(['10.0.0.0/8']);
+    const renamed = await getDb().updateApiToken(String(created._id), TENANT, { label: 'renamed' });
+    expect(renamed?.requireUserToken).toBe(true);
+    const off = await getDb().updateApiToken(String(created._id), TENANT, { requireUserToken: false });
+    expect(off?.requireUserToken ?? false).toBe(false);
+    expect(off?.label).toBe('renamed');
+  });
+});

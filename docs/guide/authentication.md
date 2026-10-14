@@ -146,6 +146,7 @@ export async function POST(request: NextRequest) {
 | `servicePermissions` | Least-privilege scope that caps the owner's permissions, group grants included (optional) |
 | `expiresAt` | Expiration date (optional) |
 | `allowedIpRanges` | CIDR ranges the token may be used from (optional, see below) |
+| `requireUserToken` | `true` = the token is only served on behalf of a verified person (optional, see [Requiring a user token](#requiring-a-user-token)) |
 | `lastUsed` | Last usage timestamp |
 
 ### Expiry and the tenant token policy
@@ -180,7 +181,7 @@ a `400` with a stable `code`: `token_expiry_required`, `token_expiry_too_long`
 (`details.latestExpiresAt` says how far it may go), `token_expiry_invalid`, or
 `policy_unavailable` (`503`, the policy could not be read; nothing is created).
 `GET /api/tokens/policy` returns the rules for a form; `PUT /api/tokens/:id`
-edits a token's `label`, `expiresAt` / `expiresInDays` and `allowedIpRanges`.
+edits a token's `label`, `expiresAt` / `expiresInDays`, `allowedIpRanges` and `requireUserToken`.
 A change to the expiry or the allowlist is written to the audit log with the old
 and the new value (service `tokens`, event `token.restrictions.updated`), next to
 the regular request row, and takes effect on the very next call.
@@ -229,7 +230,47 @@ curl https://gateway.example.com/api/client/v1/models \
   -H "X-Cognipeer-User-Token: eyJhbGciOiJSUzI1NiIs..."
 ```
 
-The call then runs as that person (their access, limits and name in the logs), capped by the token's scope and project; the person must be able to open that project themselves, or the call is refused with `403` and `code: "project_not_accessible"`. The token must be set up for it by an owner or admin; sending the header to a token that is not set up is refused with `401` and `code: "delegation_not_enabled"`, never answered as the token's owner. See [Acting for a user](/guide/authorization#acting-for-a-user-verified-identity).
+Two forms are accepted and equivalent: this two-header form, and a [single combined `Authorization` value](#one-header-the-combined-credential) for SDKs that can only set an API key. The call then runs as that person (their access, limits and name in the logs), capped by the token's scope and project; the person must be able to open that project themselves, or the call is refused with `403` and `code: "project_not_accessible"`. The token must be set up for it by an owner or admin; sending the header to a token that is not set up is refused with `401` and `code: "delegation_not_enabled"`, never answered as the token's owner. See [Acting for a user](/guide/authorization#acting-for-a-user-verified-identity).
+
+#### One header: the combined credential
+
+Most SDKs (OpenAI, Anthropic and similar) take a single "API key" and send it as `Authorization: Bearer <key>`; they offer no way to add a second header. For those, put both values in the key, joined by `~`:
+
+```
+Authorization: Bearer <api token>~<user token>
+```
+
+```bash
+curl https://gateway.example.com/api/client/v1/models \
+  -H "Authorization: Bearer cpeer_abc123...~eyJhbGciOiJSUzI1NiIs..."
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://gateway.example.com/api/client/v1",
+    api_key=f"{console_api_token}~{user_id_token}",  # SDK sends it as the Bearer value
+)
+```
+
+`~` can occur in neither part (an API token is `cpeer_` plus hex; a user token is a JWT, whose characters are `A-Z a-z 0-9 - _ .`), so the split is unambiguous. The console splits the value at the door and then treats the two halves exactly as if they had arrived in the two headers: the first is authenticated as the API token, the second is verified as the statement, with every rule above. A combined credential is no weaker and no stronger than sending both headers.
+
+- A plain API token (no `~`) behaves as before.
+- Sending the combined form **and** `X-Cognipeer-User-Token` is refused (`400`, `code: "invalid_combined_credential"`): two statements about who the call is for are never reconciled by guessing.
+- An empty half or more than one `~` is refused with the same code.
+- The user token is short-lived by design; with an SDK, refresh the key (for example per request or through the SDK's key callback) before it expires. Treat the whole value as a secret and never log it.
+- Applies to the client API (`/api/client/v1/*`).
+
+#### Requiring a user token
+
+Set `requireUserToken: true` on a token (when creating it, through `PUT /api/tokens/:id`, or with the switch under **IAM center → API tokens → Acting for users**) and it is only served on behalf of a verified person. A call without a user token (neither `X-Cognipeer-User-Token` nor the combined `Authorization` value) is refused with `401` and `code: "user_token_required"`; the token's owner is never the fallback. Use it for tokens that live inside an application that signs its users in, so a leaked token alone cannot call the API.
+
+- Set up [Acting for a user](#acting-for-a-user) for the token too. A required token whose delegation is missing or switched off refuses every call (`401 delegation_not_enabled`): the requirement outlives the configuration it depends on.
+- A required token is refused (`403 user_token_required`) by the few endpoints that cannot act for a user (they answer `user_token_not_supported` to a token that sends the header), and by the AI App Gateway.
+- A required token that mints another token (`POST /api/client/v1/users/:id/tokens`) passes the requirement on; asking for `requireUserToken: false` there is refused (`403 user_token_requirement_inherited`).
+- Switching the flag takes effect at once on the node that saved it and within a minute on the others (the token record is cached for up to 60 seconds); the change is written to the audit trail.
+- Keep the user token short-lived (`maxTokenAgeSeconds` on the delegation) and the audience specific to this application.
 
 ### Permission denials
 

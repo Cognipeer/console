@@ -203,7 +203,8 @@ export async function editApiTokenForSession(args: {
   const policy = prepared.policy ?? await loadTokenPolicyForDisplay(session.tenantDbName);
   // Being allowed to edit a token is being allowed to manage it, so it can be revoked as well.
   const view = presentApiToken(updated, { policy, canDelete: true, canEdit: true });
-  const restrictionsTouched = prepared.patch.expiresAt !== undefined || prepared.patch.allowedIpRanges !== undefined;
+  const restrictionsTouched = prepared.patch.expiresAt !== undefined || prepared.patch.allowedIpRanges !== undefined
+    || prepared.patch.requireUserToken !== undefined;
   const change: TokenRestrictionChange | undefined = restrictionsTouched
     ? {
       tokenId,
@@ -217,11 +218,12 @@ export async function editApiTokenForSession(args: {
   return { status: 200, body: view, change };
 }
 
-function restrictionSnapshot(token: { expiresAt?: Date | string | null; allowedIpRanges?: string[] | null }) {
+function restrictionSnapshot(token: { expiresAt?: Date | string | null; allowedIpRanges?: string[] | null; requireUserToken?: boolean }) {
   const expires = token.expiresAt ? new Date(token.expiresAt) : null;
   return {
     expiresAt: expires && Number.isFinite(expires.getTime()) ? expires.toISOString() : null,
     allowedIpRanges: presentAllowedIpRanges(token.allowedIpRanges),
+    requireUserToken: token.requireUserToken === true,
   };
 }
 
@@ -423,6 +425,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         expiresAt?: unknown;
         expiresInDays?: unknown;
         allowedIpRanges?: unknown;
+        requireUserToken?: unknown;
       }>(request);
 
       if (typeof body.label !== 'string' || body.label.length < 3) {
@@ -545,6 +548,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         servicePermissions,
         ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
         ...(prepared.allowedIpRanges ? { allowedIpRanges: prepared.allowedIpRanges } : {}),
+        ...(prepared.requireUserToken ? { requireUserToken: true } : {}),
       });
 
       return reply.code(201).send({
@@ -557,6 +561,7 @@ export const tokensApiPlugin: FastifyPluginAsync = async (app) => {
         userId: apiToken.userId,
         expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
         allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        requireUserToken: apiToken.requireUserToken === true,
         lastUsedAt: null,
         exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),
       });

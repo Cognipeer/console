@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Text, TextInput } from '@mantine/core';
+import { Alert, Switch, Text, TextInput } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconAlertCircle, IconKey, IconLock } from '@tabler/icons-react';
 import FormShell, {
@@ -64,6 +64,7 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
   const [label, setLabel] = useState('');
   const [expiry, setExpiry] = useState<ExpiryChoice>({ kind: 'keep' });
   const [ipText, setIpText] = useState('');
+  const [requireUserToken, setRequireUserToken] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,6 +74,7 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
     setLabel(token.label);
     setExpiry({ kind: 'keep' });
     setIpText(allowlistToText(token.allowedIpRanges));
+    setRequireUserToken(token.requireUserToken === true);
     setError(null);
     setSaving(false);
     // Re-seed only when a different token is opened; saving replaces the object under the same id.
@@ -94,7 +96,8 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
   const labelChanged = label.trim() !== token.label;
   const expiryChanged = expiry.kind !== 'keep';
   const ipChanged = !sameRanges(allowlist.ranges, token.allowedIpRanges);
-  const dirty = labelChanged || expiryChanged || ipChanged;
+  const requireChanged = requireUserToken !== (token.requireUserToken === true);
+  const dirty = labelChanged || expiryChanged || ipChanged || requireChanged;
   const canSave = canEdit && dirty && labelValid && !expiryError && ipValid;
 
   const save = async () => {
@@ -103,6 +106,7 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
     if (labelChanged) body.label = label.trim();
     if (expiryChanged) Object.assign(body, expiryPayload(expiry, 'edit'));
     if (ipChanged) body.allowedIpRanges = allowlist.ranges;
+    if (requireChanged) body.requireUserToken = requireUserToken;
 
     setSaving(true);
     setError(null);
@@ -235,8 +239,19 @@ export default function TokenDetailModal({ token, onClose, onSaved, updateUrl }:
         <IpAllowlistField text={ipText} onChange={setIpText} policy={policy} disabled={!canEdit} />
       </FormSection>
 
+      <FormSection number={4} title={t('userToken.title')} description={t('userToken.description')}>
+        <Switch
+          checked={requireUserToken}
+          onChange={(event) => setRequireUserToken(event.currentTarget.checked)}
+          disabled={!canEdit}
+          label={t('userToken.label')}
+          data-testid="token-require-user-token"
+        />
+        <Text size="xs" c="dimmed" mt={4}>{t('userToken.hint')}</Text>
+      </FormSection>
+
       {canSetUpDelegation && canEdit ? (
-        <FormSection number={4} title={t('delegation.title')} description={t('delegation.sectionDescription')} collapsible defaultOpen={false}>
+        <FormSection number={5} title={t('delegation.title')} description={t('delegation.sectionDescription')} collapsible defaultOpen={false}>
           <TokenDelegationSection tokenId={token._id} />
         </FormSection>
       ) : null}

@@ -179,6 +179,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         expiresAt?: unknown;
         expiresInDays?: unknown;
         allowedIpRanges?: unknown;
+        requireUserToken?: unknown;
       }>(request);
       if (!body.label || body.label.length < 3) {
         return reply.code(400).send({ error: 'Label must be at least 3 characters' });
@@ -259,6 +260,15 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // The requirement never goes down either: a token that must act for a person cannot mint one that does not.
+      if (auth.tokenRecord.requireUserToken === true && body.requireUserToken === false) {
+        return reply.code(403).send({
+          error: 'requireUserToken cannot be switched off by a token that requires a user token',
+          code: 'user_token_requirement_inherited',
+        });
+      }
+      const requireUserToken = auth.tokenRecord.requireUserToken === true || prepared.requireUserToken;
+
       const token = createApiTokenSecret();
       const apiToken = await db.createApiToken({
         label: body.label,
@@ -271,6 +281,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         servicePermissions,
         ...(prepared.expiresAt ? { expiresAt: prepared.expiresAt } : {}),
         ...(allowlist.ranges ? { allowedIpRanges: allowlist.ranges } : {}),
+        ...(requireUserToken ? { requireUserToken: true } : {}),
       });
 
       return reply.code(201).send({
@@ -282,6 +293,7 @@ export const clientUsersApiPlugin: FastifyPluginAsync = async (app) => {
         userId: apiToken.userId,
         expiresAt: prepared.expiresAt ? prepared.expiresAt.toISOString() : null,
         allowedIpRanges: presentAllowedIpRanges(apiToken.allowedIpRanges),
+        requireUserToken: apiToken.requireUserToken === true,
         lastUsedAt: null,
         exceedsTenantPolicy: tokenExceedsPolicy(apiToken, prepared.policy),
       });

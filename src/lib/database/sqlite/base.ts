@@ -333,6 +333,8 @@ export class SQLiteProviderBase {
     // Optional per-token network allowlist (JSON array of CIDR strings). Legacy
     // rows read as NULL = unrestricted, so nothing changes for existing tokens.
     this.ensureTableColumn(db, TABLES.apiTokens, 'allowedIpRanges', 'allowedIpRanges TEXT');
+    // 1 = calls with the token must act for a verified person. Legacy rows read as 0 = optional.
+    this.ensureTableColumn(db, TABLES.apiTokens, 'requireUserToken', 'requireUserToken INTEGER NOT NULL DEFAULT 0');
   }
 
   private applyTenantMigrations(db: Database.Database): void {

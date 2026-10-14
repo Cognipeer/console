@@ -28,6 +28,23 @@ curl -X POST https://gateway.example.com/api/client/v1/chat/completions \
 
 Tokens are created in the dashboard under **Settings → API Tokens**.
 
+### Acting for a user
+
+An application that signs its own users in can make a call run as one of them. There are two equivalent ways to send the application token together with the signed statement (a JWT) about the person:
+
+```bash
+# 1. Two headers
+curl https://gateway.example.com/api/client/v1/models \
+  -H "Authorization: Bearer cpeer_your_token_here" \
+  -H "X-Cognipeer-User-Token: eyJhbGciOiJSUzI1NiIs..."
+
+# 2. One header, for SDKs that only let you set an API key: <api token>~<user token>
+curl https://gateway.example.com/api/client/v1/models \
+  -H "Authorization: Bearer cpeer_your_token_here~eyJhbGciOiJSUzI1NiIs..."
+```
+
+Both are verified identically; sending both at once is refused (`400`, `invalid_combined_credential`). The token must be set up for it first. See [Authentication](/guide/authentication#acting-for-a-user) and [Acting for a user](/guide/authorization#acting-for-a-user-verified-identity).
+
 ## Official SDK
 
 If you are integrating from a TypeScript or JavaScript application, use the official [Cognipeer Console SDK](https://cognipeer.github.io/console-sdk/).

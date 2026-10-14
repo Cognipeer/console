@@ -254,6 +254,12 @@ export interface IApiToken {
    * Enforced in token authentication, before anything else is decided.
    */
   allowedIpRanges?: string[] | null;
+  /**
+   * When true, a call with this token is only served on behalf of a verified person (`X-Cognipeer-User-Token`, or the
+   * combined `Authorization` value). Without one the call is refused; the token's owner is never the fallback.
+   * `undefined` / `false` = optional, which is every token minted before this field existed.
+   */
+  requireUserToken?: boolean;
 }
 
 export interface ITenantUserDirectoryEntry {

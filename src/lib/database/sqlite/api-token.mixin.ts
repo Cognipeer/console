@@ -15,8 +15,8 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       const now = this.now();
 
       db.prepare(`
-        INSERT INTO ${TABLES.apiTokens} (id, userId, tenantId, projectId, label, tokenHash, tokenPrefix, servicePermissions, createdBy, lastUsed, createdAt, expiresAt, allowedIpRanges)
-        VALUES (@id, @userId, @tenantId, @projectId, @label, @tokenHash, @tokenPrefix, @servicePermissions, @createdBy, @lastUsed, @createdAt, @expiresAt, @allowedIpRanges)
+        INSERT INTO ${TABLES.apiTokens} (id, userId, tenantId, projectId, label, tokenHash, tokenPrefix, servicePermissions, createdBy, lastUsed, createdAt, expiresAt, allowedIpRanges, requireUserToken)
+        VALUES (@id, @userId, @tenantId, @projectId, @label, @tokenHash, @tokenPrefix, @servicePermissions, @createdBy, @lastUsed, @createdAt, @expiresAt, @allowedIpRanges, @requireUserToken)
       `).run({
         id,
         userId: tokenData.userId,
@@ -36,6 +36,8 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         allowedIpRanges: tokenData.allowedIpRanges?.length
           ? JSON.stringify(tokenData.allowedIpRanges)
           : null,
+        // 0 = optional (every pre-existing row).
+        requireUserToken: tokenData.requireUserToken ? 1 : 0,
       });
 
       return { ...tokenData, _id: id, createdAt: new Date(now) };
@@ -79,7 +81,7 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
     async updateApiToken(
       id: string,
       tenantId: string,
-      data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null },
+      data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null; requireUserToken?: boolean },
     ): Promise<IApiToken | null> {
       const db = this.getMainDb();
       // Column names are fixed literals; only values are bound.
@@ -96,6 +98,10 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
       if (data.allowedIpRanges !== undefined) {
         sets.push('allowedIpRanges = @allowedIpRanges');
         params.allowedIpRanges = data.allowedIpRanges?.length ? JSON.stringify(data.allowedIpRanges) : null;
+      }
+      if (data.requireUserToken !== undefined) {
+        sets.push('requireUserToken = @requireUserToken');
+        params.requireUserToken = data.requireUserToken ? 1 : 0;
       }
       if (sets.length > 0) {
         const result = db
@@ -151,6 +157,7 @@ export function ApiTokenMixin<TBase extends Constructor<SQLiteProviderBase>>(Bas
         createdAt: this.toDate(r.createdAt),
         expiresAt: this.toDate(r.expiresAt),
         allowedIpRanges: this.parseAllowedIpRanges(r.allowedIpRanges),
+        requireUserToken: Number(r.requireUserToken) === 1,
       };
     }
 

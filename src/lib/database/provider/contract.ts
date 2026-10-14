@@ -352,7 +352,7 @@ export interface DatabaseProvider extends EnterpriseDbMethods {
   updateApiToken(
     id: string,
     tenantId: string,
-    data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null },
+    data: { label?: string; expiresAt?: Date | null; allowedIpRanges?: string[] | null; requireUserToken?: boolean },
   ): Promise<IApiToken | null>;
   deleteApiToken(id: string, userId: string): Promise<boolean>;
   deleteTenantApiToken(id: string, tenantId: string): Promise<boolean>;

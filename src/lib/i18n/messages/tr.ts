@@ -707,6 +707,12 @@ export const tr: typeof en = {
         notFuture: 'Bitiş tarihi gelecekte olmalı.',
       },
     },
+    userToken: {
+      title: 'Kullanıcı adına çalışma',
+      description: 'Token\'ı yalnızca doğrulanmış bir kişi adına kullanılabilir yap.',
+      label: 'Her çağrıda kullanıcı token\'ı zorunlu olsun',
+      hint: 'Kullanıcı token\'ı olmayan çağrılar (X-Cognipeer-User-Token ya da Authorization içinde "<api token>~<user token>") 401 user_token_required ile reddedilir; token sahibine asla geri düşülmez. Önce aşağıdaki "Kullanıcı adına çalışma" ayarını yapın, yoksa tüm çağrılar reddedilir.',
+    },
     network: {
       title: 'Ağ erişimi',
       description: 'Token\'ı güvendiğiniz IP adresleriyle sınırlayın. Başka bir yerden gelen çağrılar reddedilir (403) ve denetim günlüğüne yazılır. Sınır istemiyorsanız boş bırakın.',

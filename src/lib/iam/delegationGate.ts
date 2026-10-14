@@ -6,6 +6,11 @@
  * runs as:
  *
  *   header absent                 not a delegated call: nothing here applies (null).
+ *   header absent, token requires one
+ *                                 401 `user_token_required`. A token flagged `requireUserToken` is only ever served on behalf of
+ *                                 a verified person: with no statement the call is refused, never answered as the token's owner.
+ *                                 A flagged token whose delegation is missing or switched off refuses every call
+ *                                 (`delegation_not_enabled`) - the requirement outlives the configuration it depends on.
  *   header present, not enabled   401 `delegation_not_enabled` - the token has no delegation, or it is switched off.
  *                                 NEVER answered as the token's owner: a caller that sent a user token wants that
  *                                 user's access or none.
@@ -58,6 +63,7 @@ export const USER_TOKEN_HEADER_NAME = 'X-Cognipeer-User-Token';
 
 export type DelegationErrorCode =
   | 'delegation_not_enabled'
+  | 'user_token_required'
   | IdentityAssertionErrorCode
   | DelegatedIdentityErrorCode
   | 'delegation_refused'
@@ -132,6 +138,8 @@ export interface ResolveDelegatedCallerInput {
   tenantId: string;
   /** The project the call runs in: the one the API token is bound to (its default project when it names none). */
   projectId: string;
+  /** The token's `requireUserToken`: a call without the header is refused instead of answered as the token's owner. */
+  requireUserToken?: boolean;
 }
 
 /**
@@ -139,7 +147,12 @@ export interface ResolveDelegatedCallerInput {
  * stores being unreadable (fail closed).
  */
 export async function resolveDelegatedCaller(input: ResolveDelegatedCallerInput): Promise<DelegatedCaller | null> {
-  if (input.headerValue === undefined) return null;
+  if (input.headerValue === undefined) {
+    if (input.requireUserToken === true) {
+      throw new DelegationError('user_token_required', `This API token only acts for users: send the user token in ${USER_TOKEN_HEADER_NAME}, or as "<api token>~<user token>" in Authorization`);
+    }
+    return null;
+  }
   const { tenantDbName, tenantId } = input;
 
   // One header, one statement. Two of them are ambiguous and are not guessed at.

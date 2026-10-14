@@ -16,6 +16,8 @@ import { recordAuditLog } from '@/lib/services/audit';
 export interface TokenRestrictionSnapshot {
   expiresAt: string | null;
   allowedIpRanges: string[] | null;
+  /** Absent in older callers = not required. */
+  requireUserToken?: boolean;
 }
 
 export interface TokenRestrictionChange {
@@ -51,6 +53,7 @@ function snapshot(value: TokenRestrictionSnapshot) {
     expiresAt: value.expiresAt,
     allowedIpRanges: ranges ? ranges.slice(0, MAX_LOGGED_RANGES) : null,
     allowedIpRangeCount: ranges ? ranges.length : 0,
+    requireUserToken: value.requireUserToken === true,
   };
 }
 
@@ -58,6 +61,7 @@ function snapshot(value: TokenRestrictionSnapshot) {
 export function restrictionsChanged(change: TokenRestrictionChange): boolean {
   const { before, after } = change;
   if (before.expiresAt !== after.expiresAt) return true;
+  if ((before.requireUserToken === true) !== (after.requireUserToken === true)) return true;
   const a = before.allowedIpRanges ?? [];
   const b = after.allowedIpRanges ?? [];
   return a.length !== b.length || a.some((range, index) => range !== b[index]);
