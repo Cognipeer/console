@@ -52,7 +52,8 @@ import {
   withApiRequestContext,
   withClientApiRequestContext,
 } from '../fastify-utils';
-import { requireScopedSession } from './agents';
+import { requireScopedAgent, requireScopedSession } from './agents';
+import { deleteSeedFile, uploadSeedFile } from '@/lib/services/agents/agentSandboxSeedStorage';
 import { loadSessionForPrincipal, sendClientSessionRefusal, type SessionNeed } from './agent-session-access';
 import { FILES_READ_REQUIRED_MESSAGE, requestBucketOptions, requestHasFilesRead } from './files-permission';
 
@@ -204,6 +205,50 @@ export const agentSessionFilesApiPlugin: FastifyPluginAsync = async (app) => {
       return reply.code(200).send({ buckets });
     } catch (error) {
       return sendDashboardError(reply, error, 'List attachment buckets error', 'Failed to list the buckets');
+    }
+  }));
+
+  // Sandbox seed files: bytes the agent's sandbox is preloaded with. Whoever may edit the agent may upload;
+  // the response is the config entry the editor adds to `sandbox.seedFiles` (saved with the agent).
+  app.post('/agents/:agentId/sandbox-seed-files', { bodyLimit }, withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const payload = readUploadPayload(request);
+      if (typeof payload === 'string') return reply.code(400).send({ error: payload });
+      const data = typeof payload.data === 'string' ? Buffer.from(payload.data.replace(/^data:[^,]*;base64,/, ''), 'base64') : payload.data;
+      const seedFile = await uploadSeedFile({
+        scope: { tenantDbName: scoped.session.tenantDbName, tenantId: scoped.session.tenantId, projectId: scoped.projectId },
+        agent: scoped.agent,
+        fileName: payload.fileName,
+        ...(payload.contentType ? { contentType: payload.contentType } : {}),
+        data,
+        userId: scoped.session.userId,
+      });
+      return reply.code(201).send({ seedFile });
+    } catch (error) {
+      return sendDashboardError(reply, error, 'Upload sandbox seed file error', 'Failed to upload the file');
+    }
+  }));
+
+  app.delete('/agents/:agentId/sandbox-seed-files', withApiRequestContext(async (request, reply) => {
+    try {
+      const scoped = await requireScopedAgent(request, reply);
+      if (!scoped) return reply;
+      const query = (request.query ?? {}) as Record<string, unknown>;
+      if (typeof query.objectKey !== 'string' || typeof query.bucketKey !== 'string') {
+        return reply.code(400).send({ error: 'bucketKey and objectKey are required.' });
+      }
+      const deleted = await deleteSeedFile({
+        scope: { tenantDbName: scoped.session.tenantDbName, tenantId: scoped.session.tenantId, projectId: scoped.projectId },
+        agent: scoped.agent,
+        bucketKey: query.bucketKey,
+        objectKey: query.objectKey,
+        userId: scoped.session.userId,
+      });
+      return reply.code(deleted ? 200 : 404).send(deleted ? { success: true } : { error: 'File not found' });
+    } catch (error) {
+      return sendDashboardError(reply, error, 'Delete sandbox seed file error', 'Failed to delete the file');
     }
   }));
 

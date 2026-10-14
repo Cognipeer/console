@@ -3575,6 +3575,9 @@ async function buildLocalAgentRun(input: {
     tools.push(...sandboxTools.tools);
     toolDefinitions.push(...sandboxTools.definitions);
     cleanupTasks.push(sandboxTools.cleanup);
+    if (sandboxTools.promptNote) {
+        systemPrompt = systemPrompt ? `${systemPrompt}\n\n${sandboxTools.promptNote}` : sandboxTools.promptNote;
+    }
 
     // Tools the CALLER runs. Two sources: the ones the agent declares itself
     // (`config.clientTools` — any channel: a portal page, an API client answering on the

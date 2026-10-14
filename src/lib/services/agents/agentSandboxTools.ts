@@ -37,6 +37,8 @@ import { getDatabase, type IAgentConversation, type IAgentSandboxConfig } from '
 import { isTenantEnterpriseLicensed } from '@/lib/license/tenantLicense';
 import type { TraceToolDefinition } from '@/lib/services/tracingToolDefinitions';
 import { resolveSandboxMode } from './agentSandboxMode';
+import { downloadFile } from '@/lib/services/files';
+import { applySeedFiles, buildSeedPromptNote, isOwnedObjectKey, type SeedApplyResult } from './agentSandboxSeedFiles';
 import { openAgentSandboxSecrets, scrubSecretValues } from './agentSandboxSecrets';
 
 const logger = createLogger('agent-sandbox');
@@ -121,9 +123,11 @@ export interface AgentSandboxTools {
     definitions: TraceToolDefinition[];
     /** Deletes the sandbox this run used (ephemeral); a session sandbox is left up and only recorded. */
     cleanup: () => Promise<void>;
+    /** Preloaded-files block for the system prompt (empty when the agent has none). */
+    promptNote: string;
 }
 
-const NO_TOOLS: AgentSandboxTools = { tools: [], definitions: [], cleanup: async () => undefined };
+const NO_TOOLS: AgentSandboxTools = { tools: [], definitions: [], promptNote: '', cleanup: async () => undefined };
 
 export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput): Promise<AgentSandboxTools> {
     const config = input.sandbox;
@@ -166,6 +170,9 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     // ── The instance, provisioned on first use ───────────────────────────
     let instance: Promise<string> | null = null;
     let createdAt: string | undefined;
+    let seedResult: SeedApplyResult | undefined;
+    /** Told to the model once, with the first command result, when a seed file failed. */
+    let seedNotice: string | undefined;
 
     /**
      * Writes the conversation's sandbox record. `metadata` is replaced
@@ -248,7 +255,35 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         await saveRecord(instanceId).catch((error: unknown) => {
             logger.warn('Could not record the conversation sandbox', { instanceId, error: error instanceof Error ? error.message : String(error) });
         });
+        await seedInstance(instanceId);
         return instanceId;
+    };
+
+    /** Writes the operator's seed files (missing or changed ones only); never throws. */
+    const seedInstance = async (instanceId: string): Promise<void> => {
+        const files = config.seedFiles ?? [];
+        if (files.length === 0) return;
+        try {
+            seedResult = await applySeedFiles({
+                files,
+                agentKey: input.agentKey,
+                runner: { exec: (cmd) => runner.exec(ref, instanceId, { ...cmd, env: secrets }) },
+                readBytes: async (file) => {
+                    const { bucketKey, objectKey } = file.fileRef;
+                    if (!isOwnedObjectKey(objectKey, input.agentKey)) throw new Error('not an agent asset');
+                    const result = await downloadFile(input.tenantDbName, input.tenantId, input.projectId, bucketKey, objectKey);
+                    return Buffer.from(result.data as Uint8Array);
+                },
+                ...(currentTurnSignal() ? { signal: currentTurnSignal() } : {}),
+                onWarn: (message, meta) => logger.warn(message, { agentKey: input.agentKey, instanceId, ...meta }),
+            });
+        } catch (error) {
+            logger.warn('Sandbox seeding failed', { agentKey: input.agentKey, error: error instanceof Error ? error.message : String(error) });
+            return;
+        }
+        if (seedResult.failed.length > 0) {
+            seedNotice = `Some preloaded files could not be written: ${seedResult.failed.map((f) => `${f.path} (${f.reason})`).join('; ')}.`;
+        }
     };
 
     const getInstance = (): Promise<string> => {
@@ -261,11 +296,16 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         return instance;
     };
 
-    const shapeExec = (result: AgentSandboxExecResult) => ({
-        exitCode: result.exitCode,
-        stdout: scrub(tail(result.stdout ?? '', MAX_STREAM_CHARS)),
-        stderr: scrub(tail(result.stderr ?? '', MAX_STREAM_CHARS)),
-    });
+    const shapeExec = (result: AgentSandboxExecResult) => {
+        const notice = seedNotice;
+        seedNotice = undefined;
+        return {
+            exitCode: result.exitCode,
+            stdout: scrub(tail(result.stdout ?? '', MAX_STREAM_CHARS)),
+            stderr: scrub(tail(result.stderr ?? '', MAX_STREAM_CHARS)),
+            ...(notice ? { notice } : {}),
+        };
+    };
 
     const lifetime = session
         ? 'Files and installed packages stay across turns of this conversation while you keep using the sandbox. After a long idle period it is shut down and the next use starts a fresh, empty one.'
@@ -417,7 +457,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
         }
     };
 
-    return { tools, definitions, cleanup };
+    return { tools, definitions, cleanup, promptNote: tools.length > 0 ? buildSeedPromptNote(config.seedFiles) : '' };
 }
 
 /** The running turn's abort signal as an optional field: a Stop ends a command that is in flight. */

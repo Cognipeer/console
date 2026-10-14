@@ -23,6 +23,7 @@ import {
     resolveAgentBindingTool,
     resolveAgentKnowledgeModule,
 } from './bindingResolution';
+import { validateSeedFiles } from './agentSandboxSeedFiles';
 import { SANDBOX_MODES } from './agentSandboxMode';
 import { resolveSandboxAvailability } from './agentSandboxTools';
 import { validateHitlConfig } from './agentHumanInTheLoop';
@@ -279,6 +280,7 @@ export function validateAgentConfigShape(config: IAgentConfig): AgentConfigValid
         if (sandbox.mode !== undefined && !SANDBOX_MODES.includes(sandbox.mode)) {
             issues.errors.push({ field: 'sandbox.mode', message: 'must be one of: session, ephemeral' });
         }
+        for (const issue of validateSeedFiles(sandbox.seedFiles)) issues.errors.push(issue);
         checkNumber(issues, 'sandbox.commandTimeoutSec', sandbox.commandTimeoutSec, { min: 1, max: 600, integer: true });
         checkNumber(issues, 'sandbox.retentionHours', sandbox.retentionHours, { min: 1, max: 24 * 30, integer: true });
         checkNumber(issues, 'sandbox.resources.cpuCores', sandbox.resources?.cpuCores, { min: 0, exclusiveMin: true, max: 64 });

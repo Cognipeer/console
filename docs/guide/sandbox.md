@@ -168,6 +168,18 @@ New sandboxes default to **0.5 vCPU / 1 GB RAM / 1 GB disk**. The effective limi
 
 CPU and memory are always enforced by the container engine. **Disk** (`diskMb`) is enforced only when `SANDBOX_DISK_QUOTA=on` **and** the Docker storage driver supports `--storage-opt size` (overlay2 on xfs pquota, or btrfs); otherwise it is tracked and shown but advisory.
 
+## Preloaded files (agent sandbox)
+
+An agent's sandbox settings (Agents → Configure → Sandbox → **Preloaded files**) can carry files that are written into the sandbox automatically when it starts, before the agent works — for example a presentation template (`.pptx`).
+
+- Click **Add file** (or drop files on the list) and type the destination path for each. The suggestion is `/workspace/templates/<file name>`; parent folders are created for you.
+- Paths must be absolute, include the file name, be normalized (no `..`, `//`, `./`), and must not be under `/proc`, `/sys`, `/dev`, `/etc`, `/bin`, `/sbin`, `/usr` or `/lib`. Two files cannot share a destination.
+- Limits: 25 files, 25 MB each, 100 MB in total. The bytes are stored in the agent's attachments bucket (Configure → Files) under `agent-assets/<agent key>/`, so that bucket must be set up.
+- Works for both `session` and `ephemeral` sandboxes. A reused session sandbox only gets files that are missing or whose content changed (checked by SHA-256).
+- The agent's system prompt gets a "Preloaded files" list (path and name). If a file cannot be written the turn still runs: the failure is logged and the first command result carries a `notice` naming the files that are not available.
+
+API: `POST /api/agents/:agentId/sandbox-seed-files?name=<file>` (raw body) returns the entry to add to `config.sandbox.seedFiles`; `DELETE` takes `bucketKey` and `objectKey` query parameters.
+
 ## Runtime architecture
 
 A sandbox is driven by a **runner**. The console never blocks on container work — it enqueues a command and reconciles state from the events the runner reports back.

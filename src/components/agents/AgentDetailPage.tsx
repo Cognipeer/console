@@ -1321,7 +1321,7 @@ export default function AgentDetailPage() {
             {buildSection(
               'sandbox',
               'An isolated machine the agent can run commands and code in — template, lifetime, limits and secrets.',
-              <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} />,
+              <AgentSandboxPanel value={sandboxConfig} onChange={setSandboxConfig} agentId={agentId} />,
               sandboxConfig?.enabled ? (
                 <Badge size="xs" color="grape" variant="light" w="fit-content">
                   {resolveSandboxMode(sandboxConfig.mode) === 'session' ? 'session' : 'per message'}

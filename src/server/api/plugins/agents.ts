@@ -190,7 +190,7 @@ async function agentInProjectScope(
  * The caller's project context plus the agent `:agentId` names, or null —
  * with the 404 already sent — when it is missing or out of scope.
  */
-async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) {
+export async function requireScopedAgent(request: FastifyRequest, reply: FastifyReply) {
   const context = await requireProjectContextForRequest(request);
   const { agentId } = request.params as { agentId: string };
   const agent = await agentInProjectScope(context.session.tenantDbName, agentId, context.projectId, context.user);

@@ -34,6 +34,8 @@ import { IconInfoCircle, IconLock, IconPlus, IconTrash } from '@tabler/icons-rea
 import type { IAgentSandboxConfig } from '@/lib/database/provider/types.domain';
 import { resolveSandboxMode, type ResolvedSandboxMode } from '@/lib/services/agents/agentSandboxMode';
 import { ConfigBlock } from './ConfigSection';
+import SandboxSeedFiles from './SandboxSeedFiles';
+import { useTranslations } from '@/lib/i18n';
 
 export const SANDBOX_SECRET_MASK = '••••••';
 
@@ -48,6 +50,8 @@ interface SandboxCapabilities {
 export interface AgentSandboxPanelProps {
     value: IAgentSandboxConfig | undefined;
     onChange: (next: IAgentSandboxConfig | undefined) => void;
+    /** Needed to upload preloaded files. */
+    agentId?: string;
 }
 
 type Row = { id: number; key: string; value: string };
@@ -67,7 +71,8 @@ const SANDBOX_TOOLS = [
     ['files', 'Files (read / write / list)'],
 ] as const;
 
-export default function AgentSandboxPanel({ value, onChange }: AgentSandboxPanelProps) {
+export default function AgentSandboxPanel({ value, onChange, agentId }: AgentSandboxPanelProps) {
+    const tSeed = useTranslations('agents.sandboxSeed');
     const [capabilities, setCapabilities] = useState<SandboxCapabilities | null>(null);
     const enabled = value?.enabled ?? false;
     const mode = resolveSandboxMode(value?.mode);
@@ -214,6 +219,14 @@ export default function AgentSandboxPanel({ value, onChange }: AgentSandboxPanel
                                 />
                             </Group>
                         </Stack>
+                    </ConfigBlock>
+
+                    <ConfigBlock title={tSeed('title')}>
+                        <SandboxSeedFiles
+                            agentId={agentId}
+                            value={value?.seedFiles}
+                            onChange={(next) => patch({ seedFiles: next.length > 0 ? next : undefined })}
+                        />
                     </ConfigBlock>
 
                     <ConfigBlock title="Preview">
