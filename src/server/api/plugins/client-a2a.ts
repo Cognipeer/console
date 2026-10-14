@@ -406,8 +406,12 @@ export async function handleA2aRpc(
       // (`input-required`) is cancelled with it — its open approvals and questions end as cancelled.
       const requestedId = typeof body.params?.id === 'string' ? body.params.id : '';
       const parsed = requestedId ? parseTaskId(requestedId) : null;
-      const conversation = parsed ? await getConversationById(ctx.tenantDbName, parsed.conversationId) : null;
-      if (!parsed || !conversationVisibleTo(conversation, agent, ctx)) {
+      if (!parsed) {
+        // Not an id this server hands out: nothing to look up, and nothing that could be canceled.
+        return reply.code(200).send(jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'));
+      }
+      const conversation = await getConversationById(ctx.tenantDbName, parsed.conversationId);
+      if (!conversationVisibleTo(conversation, agent, ctx)) {
         return reply.code(200).send(jsonRpcError(rpcId, -32001, 'Task not found'));
       }
       const message = conversation?.messages?.[parsed.messageIndex];
@@ -440,8 +444,16 @@ export async function handleA2aRpc(
         agentKey: agent.key,
       });
       if (!outcome.cancelled) {
+        if (waitingOn.length > 0) {
+          return reply.code(200).send(jsonRpcError(
+            rpcId,
+            ERR_UNSUPPORTED_OPERATION,
+            'The task is waiting for an approval or an answer, so there is no running turn to stop; answer the open requests (or reject them) through the actions endpoint to end the wait.',
+            { pending_action_ids: waitingOn },
+          ));
+        }
         return reply.code(200).send(
-          jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task is not running, so there is nothing to cancel'),
+          jsonRpcError(rpcId, ERR_UNSUPPORTED_OPERATION, 'The task cannot be canceled: it is not running'),
         );
       }
       return reply.code(200).send(jsonRpcOk(rpcId, {

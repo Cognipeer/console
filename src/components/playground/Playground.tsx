@@ -167,6 +167,7 @@ export function Playground({
 
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+    const partial = { content: '', reasoning: '' };
 
     try {
       // Build messages array with optional system prompt
@@ -199,6 +200,8 @@ export function Playground({
       const decoder = new TextDecoder();
       let fullContent = '';
       let fullReasoning = '';
+      partial.content = '';
+      partial.reasoning = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -218,11 +221,13 @@ export function Playground({
               const reasoningDelta = extractReasoningDelta(choiceDelta);
               if (reasoningDelta) {
                 fullReasoning += reasoningDelta;
+                partial.reasoning = fullReasoning;
                 setStreamingReasoning(fullReasoning);
               }
               const delta = choiceDelta.content ?? '';
               if (delta) {
                 fullContent += delta;
+                partial.content = fullContent;
                 setStreamingContent(fullContent);
               }
             } catch {
@@ -244,7 +249,15 @@ export function Playground({
         ]);
       }
     } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
+      if ((error as Error).name === 'AbortError') {
+        // Stop: what was already streamed stays in the conversation as the (partial) answer.
+        if (partial.content || partial.reasoning) {
+          setMessages((prev) => [
+            ...prev,
+            { role: 'assistant', content: partial.content, reasoning: partial.reasoning || undefined },
+          ]);
+        }
+      } else {
         console.error('Chat error:', error);
         notifications.show({
           title: t('errors.chatTitle'),
@@ -262,10 +275,8 @@ export function Playground({
   };
 
   const stopGeneration = () => {
+    // The partial answer is committed by sendMessage's abort handler, so the text stays on screen.
     abortControllerRef.current?.abort();
-    setIsGenerating(false);
-    setStreamingContent('');
-    setStreamingReasoning('');
   };
 
   const clearConversation = () => {

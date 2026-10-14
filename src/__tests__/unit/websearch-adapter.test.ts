@@ -15,6 +15,7 @@ vi.mock('@/lib/security/outboundFetch', () => ({
   safeFetch: vi.fn(),
 }));
 
+import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { callWebSearchProvider, parseDuckDuckGoHtml } from '@/lib/services/webSearch/webSearchAdapter';
 import { safeFetch } from '@/lib/security/outboundFetch';
 import type { IProviderRecord } from '@/lib/database';
@@ -198,5 +199,25 @@ describe('parseDuckDuckGoHtml', () => {
 
   it('returns empty on markup without results', () => {
     expect(parseDuckDuckGoHtml('<html><body>No results.</body></html>', 5)).toEqual([]);
+  });
+});
+
+describe('the agent turn\'s Stop reaches the provider request', () => {
+  const searxng = providerRecord('searxng', { baseUrl: 'https://searx.example' });
+
+  it('aborts the request in flight with the signal of the running turn', async () => {
+    vi.mocked(safeFetch).mockImplementation(async () => jsonResponse({ results: [] }));
+    const controller = new AbortController();
+    await runWithTurnSignal(controller.signal, () => callWebSearchProvider(searxng, {}, { query: 'x' }));
+    expect(vi.mocked(safeFetch).mock.calls[0][1]).toMatchObject({ signal: controller.signal });
+  });
+
+  it('a signal passed in the input wins, and outside a turn there is none', async () => {
+    vi.mocked(safeFetch).mockImplementation(async () => jsonResponse({ results: [] }));
+    const own = new AbortController();
+    await callWebSearchProvider(searxng, {}, { query: 'x', signal: own.signal });
+    await callWebSearchProvider(searxng, {}, { query: 'x' });
+    expect(vi.mocked(safeFetch).mock.calls[0][1]).toMatchObject({ signal: own.signal });
+    expect((vi.mocked(safeFetch).mock.calls[1][1] as { signal?: AbortSignal }).signal).toBeUndefined();
   });
 });

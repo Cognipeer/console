@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { createLogger } from '@/lib/core/logger';
+import { abortSignalOnDisconnect } from '../requestAbort';
 import { authz } from '@/lib/iam/routeAuthz';
 import { getDashboardData } from '@/lib/services/dashboard/dashboardService';
 import {
@@ -189,6 +190,9 @@ export const dashboardApiPlugin: FastifyPluginAsync = async (app) => {
           projectId,
           userId: context.session.userId,
         },
+        // Stop in the playground closes the connection: the model call (and its billing) stops with it,
+        // streamed or not.
+        signal: abortSignalOnDisconnect(reply),
       });
 
       if (result.stream) {

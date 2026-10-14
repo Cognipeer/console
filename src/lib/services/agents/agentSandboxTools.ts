@@ -26,6 +26,7 @@
  */
 
 import { createLogger } from '@/lib/core/logger';
+import { currentTurnSignal } from '@/lib/core/turnSignal';
 import {
     agentSandboxRunner,
     type AgentSandboxExecResult,
@@ -297,6 +298,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                     cwd: args.cwd || WORKDIR,
                     env: secrets,
                     timeoutSec,
+                    ...turnSignalField(),
                 }));
             },
         }));
@@ -316,6 +318,7 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
                     code: args.code,
                     env: secrets,
                     timeoutSec,
+                    ...turnSignalField(),
                 }));
             },
         }));
@@ -415,6 +418,12 @@ export async function buildAgentSandboxTools(input: BuildAgentSandboxToolsInput)
     };
 
     return { tools, definitions, cleanup };
+}
+
+/** The running turn's abort signal as an optional field: a Stop ends a command that is in flight. */
+function turnSignalField(): { signal?: AbortSignal } {
+    const signal = currentTurnSignal();
+    return signal ? { signal } : {};
 }
 
 function resolvePath(path: string): string {

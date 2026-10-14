@@ -32,6 +32,7 @@ vi.mock('@/lib/database', async (importOriginal) => {
 });
 
 import { agentSandboxRunner, type AgentSandboxRunner } from '@/enterprise/registry';
+import { runWithTurnSignal } from '@/lib/core/turnSignal';
 import { buildAgentSandboxTools, destroyConversationSandbox } from '@/lib/services/agents/agentSandboxTools';
 import { sealAgentSandboxConfig } from '@/lib/services/agents/agentSandboxSecrets';
 import type { IAgentSandboxConfig } from '@/lib/database';
@@ -353,5 +354,21 @@ describe('preview', () => {
         const { byName } = await build({ enabled: true, preview: { enabled: true, public: true } });
         const link = await byName('sandbox_preview_link').invoke({ port: 9999 }) as Record<string, unknown>;
         expect(String(link.warning)).toMatch(/Nothing answered on port 9999/);
+    });
+});
+
+describe('the turn\'s Stop reaches a running command', () => {
+    it('sandbox_exec and sandbox_run_code get the turn signal; outside a turn they get none', async () => {
+        const { byName } = await build({ enabled: true });
+        const controller = new AbortController();
+        await runWithTurnSignal(controller.signal, async () => {
+            await byName('sandbox_exec').invoke({ command: 'sleep 60' });
+            await byName('sandbox_run_code').invoke({ language: 'python', code: 'print(1)' });
+        });
+        await byName('sandbox_exec').invoke({ command: 'ls' });
+        const execs = fake.calls.filter((c) => c.op === 'exec' || c.op === 'runCode').map((c) => c.args[2] as { signal?: AbortSignal });
+        expect(execs[0].signal).toBe(controller.signal);
+        expect(execs[1].signal).toBe(controller.signal);
+        expect('signal' in execs[2]).toBe(false);
     });
 });

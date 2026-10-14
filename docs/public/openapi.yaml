@@ -130,7 +130,7 @@ paths:
         Supported methods:
         - `message/send` — send a user message. `params.message.parts` must contain text. Omit `params.message.contextId` to start a new conversation, or supply a prior `contextId` (equal to the conversation id) to continue one. Returns a terminal `completed` task whose `id` encodes the conversation and assistant-message index and whose artifacts carry the assistant reply text. Optional caller-supplied runtime headers may be provided via `params.message.metadata.runtime_context`.
         - `tasks/get` — retrieve a previously completed task by its `params.id`; rebuilds the task from the stored conversation.
-        - `tasks/cancel` — not supported, always rejected (`-32004`): a turn runs inside the `message/send` call, so there is nothing to stop. A task that is waiting for an approval or an answer (`input-required`) is ended by answering its requests through `POST /agents/sessions/{conversationId}/actions/{actionId}` (deny an approval, or answer a question with `cancelled: true`); the error of `tasks/cancel` on such a task lists the ids in `error.data.pending_action_ids`.
+        - `tasks/cancel` — stops the turn of the task through the conversation's run slot (the same cooperative cancel as `POST /agents/conversations/{conversationId}/cancel`); on success the task is returned in the `canceled` state. If no turn is running the call is rejected with `-32004` (`The task cannot be canceled`). A task that is waiting for an approval or an answer (`input-required`) has no running turn: the `-32004` error lists the ids in `error.data.pending_action_ids`, and the wait is ended by answering its requests through `POST /agents/sessions/{conversationId}/actions/{actionId}` (deny an approval, or answer a question with `cancelled: true`).
 
         A turn that pauses for a tool approval or a question is reported as an `input-required` task; the requests to answer ride in `metadata.pendingActions` (same item shape as `required_action.actions` of the Responses API) and are answered through `POST /agents/sessions/{conversationId}/actions/{actionId}`, the `contextId` being the conversation id.
 
@@ -460,6 +460,95 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/conversations/{conversationId}/cancel:
+    post:
+      tags:
+        - Agents
+      summary: Stop the running turn of a conversation
+      description: "Stops the turn that is running in a conversation, from a second request: an inline request (`/responses`, chat completions, A2A, Assistants) holds its connection until the answer is done, so this is how a Stop button ends it. Cancellation is cooperative: the model call and the tools that take a signal are aborted, and the turn ends with the partial answer it had already produced, kept in the transcript with `stop_reason: cancelled`. Nothing running is not an error: the response is `200` with `cancelled: false` (a Stop that lands as the turn ends is normal). A conversation that does not exist in the token's project returns `404`. Open approvals and questions are ended as cancelled only when the caller may answer them (`agent.approve`); without that right the turn still stops and the requests stay open. Stopping another person's session needs `agent.session_manage_others`."
+      operationId: cancelAgentConversationTurn
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          description: "The conversation (session) id."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The cancel request was handled. `cancelled` says whether a running turn was stopped; `run_ids` lists the runs that were told to stop.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - cancelled
+                  - run_ids
+                properties:
+                  conversation_id:
+                    type: string
+                  cancelled:
+                    type: boolean
+                  run_ids:
+                    type: array
+                    items:
+                      type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /agents/responses/{responseId}/cancel:
+    post:
+      tags:
+        - Agents
+      summary: Stop the running turn behind a response id
+      description: "Stops the turn that is running in a conversation, from a second request: an inline request (`/responses`, chat completions, A2A, Assistants) holds its connection until the answer is done, so this is how a Stop button ends it. Cancellation is cooperative: the model call and the tools that take a signal are aborted, and the turn ends with the partial answer it had already produced, kept in the transcript with `stop_reason: cancelled`. Nothing running is not an error: the response is `200` with `cancelled: false` (a Stop that lands as the turn ends is normal). A conversation that does not exist in the token's project returns `404`. Open approvals and questions are ended as cancelled only when the caller may answer them (`agent.approve`); without that right the turn still stops and the requests stay open. Stopping another person's session needs `agent.session_manage_others`."
+      operationId: cancelAgentResponse
+      parameters:
+        - name: responseId
+          in: path
+          required: true
+          description: "The response id: `resp_{conversationId}` (as returned by `/responses`) or `run_{runId}` (a background run; its conversation is stopped)."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The cancel request was handled. `cancelled` says whether a running turn was stopped; `run_ids` lists the runs that were told to stop.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - cancelled
+                  - run_ids
+                properties:
+                  id:
+                    type: string
+                    description: The id that was passed, echoed back.
+                  conversation_id:
+                    type: string
+                  cancelled:
+                    type: boolean
+                  run_ids:
+                    type: array
+                    items:
+                      type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "503":
           $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
@@ -8504,6 +8593,52 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /responses/{responseId}/cancel:
+    post:
+      tags:
+        - Agents
+      summary: Stop the running turn behind a response id
+      description: "Stops the turn that is running in a conversation, from a second request: an inline request (`/responses`, chat completions, A2A, Assistants) holds its connection until the answer is done, so this is how a Stop button ends it. Cancellation is cooperative: the model call and the tools that take a signal are aborted, and the turn ends with the partial answer it had already produced, kept in the transcript with `stop_reason: cancelled`. Nothing running is not an error: the response is `200` with `cancelled: false` (a Stop that lands as the turn ends is normal). A conversation that does not exist in the token's project returns `404`. Open approvals and questions are ended as cancelled only when the caller may answer them (`agent.approve`); without that right the turn still stops and the requests stay open. Stopping another person's session needs `agent.session_manage_others`."
+      operationId: cancelResponse
+      parameters:
+        - name: responseId
+          in: path
+          required: true
+          description: "The response id: `resp_{conversationId}` (as returned by `/responses`) or `run_{runId}` (a background run; its conversation is stopped)."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The cancel request was handled. `cancelled` says whether a running turn was stopped; `run_ids` lists the runs that were told to stop.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - cancelled
+                  - run_ids
+                properties:
+                  id:
+                    type: string
+                    description: The id that was passed, echoed back.
+                  conversation_id:
+                    type: string
+                  cancelled:
+                    type: boolean
+                  run_ids:
+                    type: array
+                    items:
+                      type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /sandbox/sandboxes:
     post:
       tags:

@@ -351,12 +351,26 @@ export interface AgentSandboxRunner {
   exec(
     ref: AgentSandboxRef,
     instanceId: string,
-    input: { command: string; cwd?: string; env?: Record<string, string>; timeoutSec?: number },
+    input: {
+      command: string;
+      cwd?: string;
+      env?: Record<string, string>;
+      timeoutSec?: number;
+      /** The agent turn's signal: a Stop aborts the command instead of waiting for it (optional; a runner may ignore it). */
+      signal?: AbortSignal;
+    },
   ): Promise<AgentSandboxExecResult>;
   runCode(
     ref: AgentSandboxRef,
     instanceId: string,
-    input: { code: string; language: 'python' | 'javascript' | 'typescript' | 'bash'; env?: Record<string, string>; timeoutSec?: number },
+    input: {
+      code: string;
+      language: 'python' | 'javascript' | 'typescript' | 'bash';
+      env?: Record<string, string>;
+      timeoutSec?: number;
+      /** The agent turn's signal (see `exec`). */
+      signal?: AbortSignal;
+    },
   ): Promise<AgentSandboxExecResult>;
   readFile(ref: AgentSandboxRef, instanceId: string, path: string): Promise<string>;
   writeFile(ref: AgentSandboxRef, instanceId: string, path: string, content: string): Promise<void>;

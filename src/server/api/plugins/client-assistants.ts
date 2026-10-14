@@ -24,8 +24,11 @@
  *    pauses mid-run for the caller to act, so there is no `queued` /
  *    `in_progress` state and no `requires_action` /
  *    `submit_tool_outputs`. A run is created already `completed` or `failed`.
- *    `POST .../runs/:runId/cancel` therefore always 400s — there is nothing
- *    in flight to cancel by the time a caller could reach it.
+ *    A run is recorded when its turn ends, so `POST .../runs/:runId/cancel`
+ *    on a recorded run 400s. What it can still do is stop the turn that is
+ *    running on the thread right now (the run that is not recorded yet): that
+ *    goes through the shared `cancelConversationTurn`, answers `cancelling`,
+ *    and the run is then recorded `cancelled` with the partial answer kept.
  *
  * 3. CLIENT-EXECUTED FUNCTION TOOLS ARE NOT SUPPORTED, for the same reason:
  *    a `function` tool's contract is "the run pauses, the caller executes the
@@ -39,6 +42,7 @@ import { classifyAgentRunError } from '@/lib/services/agents/agentErrors';
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { executeAgentChatExclusive } from '@/lib/services/agents/agentRunService';
+import { cancelConversationTurn } from '@/lib/services/agents/turnCancellation';
 import { createLogger } from '@/lib/core/logger';
 import { getDatabase } from '@/lib/database';
 import type {
@@ -66,7 +70,7 @@ import {
   withClientApiRequestContext,
 } from '../fastify-utils';
 import { resolveConfigGuardrailBindings } from './guardrail-bindings';
-import { CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
+import { authorizeEndingOpenRequests, CANCEL_PENDING_FORBIDDEN_MESSAGE, refuseCancelPending } from './agent-approval-authz';
 import { decideSessionAccess, SESSION_FORBIDDEN_MESSAGE, sessionRefusalError, type SessionNeed } from './agent-session-access';
 
 const logger = createLogger('api:client-assistants');
@@ -94,9 +98,10 @@ interface PendingMessage {
 interface RunRecord {
   id: string;
   /** `incomplete`: a run limit, a cancellation or a pause ended it without a final answer. */
-  status: 'completed' | 'failed' | 'incomplete';
+  status: 'completed' | 'failed' | 'incomplete' | 'cancelled';
   created_at: number;
   completed_at?: number;
+  cancelled_at?: number;
   failed_at?: number;
   incomplete_at?: number;
   incomplete_details?: { reason: string };
@@ -203,6 +208,7 @@ export function toRunObject(threadIdValue: string, run: RunRecord) {
     created_at: run.created_at,
     started_at: run.created_at,
     completed_at: run.completed_at ?? null,
+    cancelled_at: run.cancelled_at ?? null,
     failed_at: run.failed_at ?? null,
     incomplete_at: run.incomplete_at ?? null,
     incomplete_details: run.incomplete_details ?? null,
@@ -828,7 +834,11 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
       // `executeAgentChat` just persisted the (user, assistant) pair itself —
       // the pending entry is now redundant history, so it comes off the queue
       // rather than being replayed on the next run.
-      if (result.status === 'incomplete') {
+      if (result.stop_reason === 'cancelled') {
+        // A Stop (POST .../runs/:id/cancel, or the caller hanging up): the partial answer is kept in the thread.
+        record.status = 'cancelled';
+        record.cancelled_at = Math.floor(Date.now() / 1000);
+      } else if (result.status === 'incomplete') {
         record.status = 'incomplete';
         record.incomplete_at = Math.floor(Date.now() / 1000);
         record.incomplete_details = result.incomplete_details ?? { reason: result.stop_reason ?? 'incomplete' };
@@ -945,8 +955,12 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
     }
   }));
 
-  /** Always refuses: see the module doc's point 2 — a run is terminal the
-   * instant it exists, so there is never anything in flight to cancel. */
+  /**
+   * Stops the turn that is running on the thread (see the module doc's point 2). A run is only recorded when its
+   * turn ends, so a recorded run is terminal and refuses with 400; any other id stops the thread's running turn
+   * through the shared cancel, and answers `cancelling` - the request that runs the turn then records the run
+   * `cancelled`, with the partial answer kept. Nothing running: 404.
+   */
   app.post('/client/v1/threads/:threadId/runs/:runId/cancel', withClientApiRequestContext(async (request, reply) => {
     try {
       const ctx = await getApiTokenContextForRequest(request);
@@ -956,10 +970,44 @@ export const clientAssistantsApiPlugin: FastifyPluginAsync = async (app) => {
 
       const runs = readAssistantsMetadata(loaded.conversation).runs ?? [];
       const run = runs.find((r) => r.id === rawRunId);
-      if (!run) return reply.code(404).send({ error: 'Run not found' });
-      return reply.code(400).send({
-        error: `Run "${rawRunId}" is already "${run.status}": every run on this Assistants dialect completes `
-          + 'synchronously, so by the time a client could reach this endpoint there is nothing left in flight.',
+      if (run) {
+        return reply.code(400).send({
+          error: `Run "${rawRunId}" is already "${run.status}": a run is recorded when its turn ends, `
+            + 'so there is nothing left in flight to cancel.',
+        });
+      }
+
+      // Stopping a session's turn is acting on it: the owner always may, anybody else needs `agent.session_manage_others`.
+      const managed = await loadThreadOr404(request, ctx, rawId, 'manage');
+      if ('error' in managed) return sendThreadError(reply, managed.error);
+      // Ending an open approval is answering it "no": without that right the turn still stops, the approval stays.
+      const verdict = await authorizeEndingOpenRequests(request, {
+        tenantDbName: ctx.tenantDbName,
+        conversation: managed.conversation,
+        agent: managed.agent,
+      });
+      if (!verdict.allowed && verdict.unavailable) {
+        return reply.code(503).send({
+          error: 'Authorization is temporarily unavailable',
+          ...(verdict.decisionId ? { decision_id: verdict.decisionId } : {}),
+        });
+      }
+      const outcome = await cancelConversationTurn({
+        tenantDbName: ctx.tenantDbName,
+        tenantId: ctx.tenantId,
+        projectId: ctx.projectId,
+        conversationId: conversationIdFromThreadId(rawId),
+        agentKey: managed.agent.key,
+        cancelActions: verdict.allowed,
+      });
+      if (!outcome.cancelled) return reply.code(404).send({ error: 'Run not found' });
+      return reply.code(200).send({
+        id: rawRunId,
+        object: 'thread.run',
+        thread_id: threadId(conversationIdFromThreadId(rawId)),
+        assistant_id: assistantId(managed.agent.key),
+        status: 'cancelling',
+        required_action: null,
       });
     } catch (error) {
       logger.error('Cancel run error', { error });
