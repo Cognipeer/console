@@ -1,4 +1,4 @@
-import { getConfig } from '@/lib/core/config';
+import { getConfig, getConfigSource } from '@/lib/core/config';
 import { assertPublicUrl, OutboundNetworkError } from '@/lib/security/outboundFetch';
 import type { ProviderDomain } from '@/lib/database';
 
@@ -25,9 +25,12 @@ const AZURE_RESOURCE_LABEL = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/i;
  * Validates every user-supplied endpoint of a model-type provider.
  *
  * SaaS: the outbound guard is always enforced (private, loopback and link-local
- * targets are rejected). On-prem: the deployment's
- * OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK / OUTBOUND_HTTP_ALLOWED_HOSTS settings
- * decide, so in-network servers keep working when the operator allows them.
+ * targets are rejected). On-prem: private and loopback endpoints are allowed by
+ * default, since operators point providers at in-network servers (vLLM, Ollama,
+ * LM Studio, GPU Fleet). They are blocked only when
+ * OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK is explicitly set to true, in which case
+ * OUTBOUND_HTTP_ALLOWED_HOSTS still exempts listed hosts. The raw env value is
+ * read here on purpose; the global outbound default is unchanged.
  */
 export async function assertProviderEndpointsAllowed(
   type: ProviderDomain | string | undefined,
@@ -35,6 +38,11 @@ export async function assertProviderEndpointsAllowed(
 ): Promise<void> {
   if (!type || !GUARDED_DOMAINS.has(type)) return;
   const enforce = !getConfig().deployment.isOnPrem;
+  const rawBlock = String(getConfigSource().get('OUTBOUND_HTTP_BLOCK_PRIVATE_NETWORK') ?? '').trim().toLowerCase();
+  const onPremBlocks = rawBlock === 'true' || rawBlock === '1';
+  const guardOptions = enforce
+    ? { forceBlock: true }
+    : onPremBlocks ? undefined : { allowPrivate: true };
 
   for (const source of sources) {
     if (!source) continue;
@@ -48,7 +56,7 @@ export async function assertProviderEndpointsAllowed(
       }
       if (!URL_FIELDS.has(field)) continue;
       try {
-        await assertPublicUrl(value.trim(), enforce ? { forceBlock: true } : undefined);
+        await assertPublicUrl(value.trim(), guardOptions);
       } catch (error) {
         if (error instanceof OutboundNetworkError) {
           throw new ProviderEndpointError(field, error.message);

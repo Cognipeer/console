@@ -49,6 +49,15 @@ describe('assertProviderEndpointsAllowed', () => {
       .resolves.toBeUndefined();
   });
 
+  it('on-prem allows private and loopback endpoints by default', async () => {
+    use(onprem);
+    for (const url of ['http://127.0.0.1:8000/v1', 'http://10.1.2.3:11434/v1']) {
+      await expect(assertProviderEndpointsAllowed('model', { baseUrl: url })).resolves.toBeUndefined();
+    }
+    await expect(assertProviderEndpointsAllowed('model', { baseUrl: 'file:///etc/passwd' }))
+      .rejects.toBeInstanceOf(ProviderEndpointError);
+  });
+
   it('ignores non-inference domains', async () => {
     use(saas);
     await expect(assertProviderEndpointsAllowed('vector', { baseUrl: 'http://127.0.0.1' })).resolves.toBeUndefined();
