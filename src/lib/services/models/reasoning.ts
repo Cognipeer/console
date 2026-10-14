@@ -16,6 +16,7 @@
  * hid. Hiding never stops token accounting; the upstream still bills the tokens.
  */
 
+import { mapReasoningEffort } from '@cognipeer/agent-sdk/model-rules';
 import { EFFORT_BUDGETS, GEMINI_EFFORT_BUDGETS, effortsOfRule, resolveRuleForDriver } from './modelRules';
 
 export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -227,9 +228,12 @@ export function translateAnthropicThinking(
       : { thinking: { type: 'disabled' }, maxTokens: currentMaxTokens, dropSampling: false };
   }
   if (supportsAdaptiveThinking(modelId)) {
-    const effort = reasoning?.effort
-      ? (reasoning.effort === 'minimal' ? 'low' : reasoning.effort as Exclude<ReasoningEffort, 'none' | 'minimal'>)
-      : budget <= EFFORT_BUDGET.low ? 'low' : budget <= EFFORT_BUDGET.medium ? 'medium' : 'high';
+    const asked: ReasoningEffort = reasoning?.effort
+      ?? (budget <= EFFORT_BUDGET.low ? 'low' : budget <= EFFORT_BUDGET.medium ? 'medium' : 'high');
+    // The model's rule decides what it takes (4.6 tops out at max, 4.7+ adds xhigh; 'minimal' is not offered).
+    const rule = resolveRuleForDriver('anthropic', modelId);
+    const mapped = rule ? mapReasoningEffort(rule, asked).effort : undefined;
+    const effort = (mapped ?? (asked === 'minimal' ? 'low' : asked)) as Exclude<ReasoningEffort, 'none' | 'minimal'>;
     return { thinking: { type: 'adaptive' }, outputConfig: { effort }, maxTokens: currentMaxTokens, dropSampling: true };
   }
 

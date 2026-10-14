@@ -1,68 +1,36 @@
 /**
- * Per-model request rules: the console's view of the agent-sdk rule table.
+ * Per-model request rules: the console's thin adapter over the agent-sdk rule table.
  *
  * What a model reasons with, which efforts it takes, whether sampling parameters
  * and `max_tokens` pass, the GPT "tools + reasoning" limit, how reasoning is
- * turned off - all of it lives in the SDK's `model-rules.json` and nowhere else.
- * The SDK applies the rules (and maps/learns at request time); this module reads
- * the same table for the places that decide BEFORE a request exists: the pickers,
- * the Model Hub form, the "detected unsupported parameters" list.
- *
- * It mirrors `resolveModelRule` of the SDK instead of importing it because the
- * SDK entry pulls Node built-ins and this module is bundled into client
- * components. `model-rules-parity.test.ts` runs both over a model matrix, so the
- * two cannot drift. Learned (per-process) adjustments are SDK-internal and are
- * reported through `onModelRuleLearned` (see nativeClients.ts), not read here.
+ * turned off - all of it lives in the SDK's rule table and nowhere else. The SDK
+ * applies the rules (and maps/learns at request time); this module only maps a
+ * console driver to an SDK provider and derives what the places that decide BEFORE
+ * a request exists need: the pickers, the Model Hub form, the "detected
+ * unsupported parameters" list. It imports the client-safe `model-rules` subpath
+ * (no Node built-ins), so it is safe in client components.
  */
 
-import rulesJson from '@cognipeer/agent-sdk/model-rules.json';
-import type { ReasoningEffort } from './reasoning';
+import {
+  MODEL_RULES,
+  effortBudget,
+  modelIdCandidates,
+  resolveModelRule,
+  type ModelRule,
+  type ReasoningEffort,
+  type ResolvedModelRule,
+} from '@cognipeer/agent-sdk/model-rules';
 
-type RuleFamily = 'openai' | 'anthropic' | 'gemini' | 'other';
-type OffMechanism = 'none' | 'disabled' | 'between_tools';
-
-export interface ModelRuleView {
-  id: string;
-  family: RuleFamily;
-  match: string;
-  reasoning: {
-    style: 'effort' | 'adaptive' | 'budget' | 'toggle' | 'none';
-    efforts: ReasoningEffort[];
-    responsesEfforts?: ReasoningEffort[];
-    off: OffMechanism | null;
-  };
-  sampling: {
-    temperature: 'any' | 'default-only' | 'unsupported' | 'thinking-requires-1';
-    topP: boolean;
-    topK: boolean;
-    penalties: boolean;
-    logprobs: boolean;
-  };
-  maxTokensParam: 'max_tokens' | 'max_completion_tokens';
-  chatTools: { reasoning: 'any' | 'force-none' };
-  dropParams?: string[];
-  source: string;
-  note: string;
-}
-
-export interface ResolvedRuleView extends ModelRuleView {
-  matchedRuleId: string;
-  /** Only the family's permissive default matched: the model is not in the table. */
-  isDefault: boolean;
-}
-
-const TABLE = rulesJson as unknown as {
-  effortLadder: ReasoningEffort[];
-  budgets: Record<Exclude<ReasoningEffort, 'none'>, number>;
-  geminiBudgets: Record<Exclude<ReasoningEffort, 'none'>, number>;
-  rules: ModelRuleView[];
-};
+export type ModelRuleView = ModelRule;
+export type ResolvedRuleView = ResolvedModelRule;
+export { modelIdCandidates };
 
 /** none < minimal < low < medium < high < xhigh < max. */
-export const EFFORT_LADDER: readonly ReasoningEffort[] = TABLE.effortLadder;
+export const EFFORT_LADDER: readonly ReasoningEffort[] = MODEL_RULES.effortLadder;
 /** Thinking-token budget per effort for budget-style engines. */
-export const EFFORT_BUDGETS: Readonly<Record<Exclude<ReasoningEffort, 'none'>, number>> = TABLE.budgets;
-export const GEMINI_EFFORT_BUDGETS: Readonly<Record<Exclude<ReasoningEffort, 'none'>, number>> = TABLE.geminiBudgets;
+export const EFFORT_BUDGETS: Readonly<Record<Exclude<ReasoningEffort, 'none'>, number>> = MODEL_RULES.budgets;
+export const GEMINI_EFFORT_BUDGETS: Readonly<Record<Exclude<ReasoningEffort, 'none'>, number>> = MODEL_RULES.geminiBudgets;
+export { effortBudget };
 
 /** Console driver -> the SDK provider name its client is built with. Unlisted drivers have no reasoning control. */
 const SDK_PROVIDER_BY_DRIVER: Readonly<Record<string, string>> = {
@@ -79,66 +47,11 @@ export function sdkProviderForDriver(driver: string | undefined): string | undef
   return driver ? SDK_PROVIDER_BY_DRIVER[driver] : undefined;
 }
 
-const OPENAI_WIRE = new Set(['openai', 'azure', 'openai-compatible', 'together']);
-const GATEWAY_PREFIX = /^(?:(?:global|us|eu|apac|jp|au|ca|us-gov)\.)?(?:(?:openai|anthropic|google|meta|amazon|deepseek|qwen|mistral|cohere|ai21)\.)?/;
-
-/** Normalised ids a rule is matched against (same as the SDK's `modelIdCandidates`). */
-export function modelIdCandidates(model: string | undefined): string[] {
-  if (!model) return [];
-  const lower = String(model).trim().toLowerCase();
-  const last = lower.split('/').pop() ?? lower;
-  const out: string[] = [];
-  for (const id of [lower, last]) {
-    for (const candidate of [id, id.replace(GATEWAY_PREFIX, '')]) {
-      if (candidate && !out.includes(candidate)) out.push(candidate);
-    }
-  }
-  return out;
-}
-
-function familiesFor(provider: string): RuleFamily[] {
-  if (OPENAI_WIRE.has(provider)) return ['openai'];
-  if (provider === 'anthropic') return ['anthropic'];
-  if (provider === 'bedrock') return ['anthropic', 'openai', 'other'];
-  if (provider === 'vertex') return ['gemini', 'anthropic'];
-  return ['openai', 'anthropic', 'gemini', 'other'];
-}
-
-const compiled = new Map<string, RegExp>();
-function matchRule(family: RuleFamily, ids: string[], allowDefault: boolean): ModelRuleView | undefined {
-  for (const rule of TABLE.rules) {
-    if (rule.family !== family) continue;
-    if (rule.match === '.*') {
-      if (allowDefault) return rule;
-      continue;
-    }
-    let re = compiled.get(rule.id);
-    if (!re) {
-      re = new RegExp(rule.match, 'i');
-      compiled.set(rule.id, re);
-    }
-    if (ids.some((id) => re!.test(id))) return rule;
-  }
-  return undefined;
-}
-
 /** The rule of a model behind a console driver, or undefined for a driver without reasoning/parameter rules. */
-export function resolveRuleForDriver(driver: string | undefined, modelId: string | undefined): ResolvedRuleView | undefined {
+export function resolveRuleForDriver(driver: string | undefined, modelId: string | undefined, scope?: string): ResolvedRuleView | undefined {
   const provider = sdkProviderForDriver(driver);
   if (!provider) return undefined;
-  const families = familiesFor(provider);
-  const ids = modelIdCandidates(modelId);
-  let rule: ModelRuleView | undefined;
-  for (const family of families) {
-    rule = matchRule(family, ids, false);
-    if (rule) break;
-  }
-  let isDefault = false;
-  if (!rule) {
-    isDefault = true;
-    rule = matchRule(families[0], ids, true) ?? TABLE.rules[TABLE.rules.length - 1];
-  }
-  return { ...rule, matchedRuleId: rule.id, isDefault };
+  return resolveModelRule({ provider, model: modelId, scope });
 }
 
 /**

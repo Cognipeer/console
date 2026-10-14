@@ -9,8 +9,9 @@
  * Bedrock, Vertex) also get an optional budget field once a level is picked.
  */
 
-import { NumberInput, Select, Stack } from '@mantine/core';
+import { NumberInput, Select, Stack, Text } from '@mantine/core';
 import { useTranslations } from '@/lib/i18n';
+import { reasoningTextNeedsResponses } from '@/lib/services/models/upstreamApi';
 import { REASONING_EFFORTS, reasoningControlForDriver, type ReasoningEffort } from '@/lib/services/models/reasoning';
 
 export interface ReasoningPickerModel {
@@ -91,6 +92,9 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
         data.push({ value: stored, label: options.kind === 'toggle' ? tm(`toggle.${stored}`) : tm(`effort.${stored}`) });
     }
 
+    const driver = model?.providerDriver || (model?.providerKey ? driverByProviderKey[model.providerKey] : undefined);
+    const responsesHint = reasoningTextNeedsResponses(driver, model?.modelId, model?.settings);
+
     const controls = (
         <>
             <Select
@@ -130,6 +134,11 @@ export default function AgentReasoningPicker({ model, driverByProviderKey, value
                     })}
                     data-testid={testId ? `${testId}-budget` : undefined}
                 />
+            ) : null}
+            {responsesHint ? (
+                <Text size="xs" c="dimmed" data-testid={testId ? `${testId}-responses-hint` : undefined}>
+                    {tm('hint.responsesOnly')}
+                </Text>
             ) : null}
         </>
     );

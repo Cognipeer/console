@@ -2,6 +2,7 @@ import { NumberInput, Select, Text } from '@mantine/core';
 import { FormField, FormSection, ToggleList, ToggleRow } from '@/components/common/ui/FormShell';
 import { useTranslations } from '@/lib/i18n';
 import { reasoningControlForDriver } from '@/lib/services/models/reasoning';
+import { reasoningTextNeedsResponses } from '@/lib/services/models/upstreamApi';
 import type { ReasoningFormValue } from '@/components/models/reasoningForm';
 
 interface ReasoningSectionProps {
@@ -13,6 +14,8 @@ interface ReasoningSectionProps {
   onChange: (patch: Partial<ReasoningFormValue>) => void;
   /** The GPT-5 + tools rule applies to this model: it is shown, not editable. */
   forcedNoneWithTools?: boolean;
+  /** The model's settings: the Upstream API decides whether reasoning text can come back. */
+  settings?: unknown;
   /** Opened from a "set the reasoning" shortcut: scroll here and focus the effort picker. */
   focusOnMount?: boolean;
 }
@@ -31,6 +34,7 @@ export default function ReasoningSection({
   onChange,
   forcedNoneWithTools,
   focusOnMount,
+  settings,
 }: ReasoningSectionProps) {
   const t = useTranslations('modelReasoning');
   const control = reasoningControlForDriver(driver, modelId);
@@ -88,6 +92,12 @@ export default function ReasoningSection({
           ) : null}
         </>
       )}
+
+      {control.kind !== 'none' && reasoningTextNeedsResponses(driver, modelId, settings) ? (
+        <Text size="sm" c="dimmed" data-testid="reasoning-responses-hint">
+          {t('hint.responsesOnly')}
+        </Text>
+      ) : null}
 
       {forcedNoneWithTools ? (
         <Text size="sm" c="orange" data-testid="reasoning-forced-none">

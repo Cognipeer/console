@@ -285,6 +285,7 @@ export const tr: typeof en = {
       medium: 'Açık',
     },
     hint: {
+      responsesOnly: 'Akıl yürütme metni yalnızca Responses API üzerinden döner. Görmek için Upstream API\'yi Responses yapın.',
       effort: 'reasoning_effort olarak gönderilir. Burada ayarlıysa API isteğindeki değerin önüne geçer.',
       budget: 'Seviye bir düşünme token bütçesine çevrilir; üzerine yazmak için aşağıya tam bütçe girin.',
       toggle: 'Bu motorda yalnızca düşünme açık veya kapalı olabilir.',

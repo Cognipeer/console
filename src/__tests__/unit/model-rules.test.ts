@@ -1,11 +1,12 @@
 /**
  * The console reads per-model request rules from the agent-sdk table (one source).
- * `modelRules.ts` mirrors the SDK's resolver for client bundles; this runs both over
- * a model matrix so they cannot drift, then pins what the pickers, the detected
- * unsupported parameters and the token-field rename derive from a rule.
+ * `modelRules.ts` is a thin driver->provider adapter over the SDK's client-safe
+ * `model-rules` subpath; this pins the adapter over a model matrix, then what the
+ * pickers, the detected unsupported parameters and the token-field rename derive
+ * from a rule.
  */
 import { describe, expect, it } from 'vitest';
-import { MODEL_RULES, resolveModelRule } from '@cognipeer/agent-sdk';
+import { MODEL_RULES, resolveModelRule } from '@cognipeer/agent-sdk/model-rules';
 import { reasoningPickerOptions } from '@/components/agents/studio/AgentReasoningPicker';
 import { playgroundReasoningControl } from '@/components/playground/playgroundReasoning';
 import {
@@ -34,7 +35,7 @@ const MATRIX: Array<[string, string]> = [
   ['vertex', 'claude-sonnet-5-5@20260101'], ['vertex', 'gemini-2.5-pro'], ['vertex', 'gemini-3-flash'],
 ];
 
-describe('modelRules mirrors the SDK resolver', () => {
+describe('modelRules adapter resolves through the SDK table', () => {
   it.each(MATRIX)('%s / %s', (driver, modelId) => {
     const sdk = resolveModelRule({ provider: sdkProviderForDriver(driver), model: modelId });
     const mine = resolveRuleForDriver(driver, modelId)!;
@@ -150,5 +151,21 @@ describe('Claude thinking form follows the rule', () => {
       thinking: { type: 'adaptive' }, outputConfig: { effort: 'max' },
     });
     expect(translateAnthropicThinking({ effort: 'high' }, 4000, 'claude-sonnet-4-5')?.thinking).toEqual({ type: 'enabled', budget_tokens: EFFORT_BUDGETS.high });
+  });
+});
+
+describe('reasoning text needs the Responses API hint', () => {
+  it('shows for OpenAI/Azure and OpenAI reasoning models on compatible endpoints, on Chat Completions only', async () => {
+    const { reasoningTextNeedsResponses } = await import('@/lib/services/models/upstreamApi');
+    const { en } = await import('@/lib/i18n/messages/en');
+    const { tr } = await import('@/lib/i18n/messages/tr');
+    expect(reasoningTextNeedsResponses('azure', 'gpt-6-luna', {})).toBe(true);
+    expect(reasoningTextNeedsResponses('openai', 'gpt-5', { upstreamApi: 'chat' })).toBe(true);
+    expect(reasoningTextNeedsResponses('openai', 'gpt-5', { upstreamApi: 'responses' })).toBe(false);
+    expect(reasoningTextNeedsResponses('openai-compatible', 'o3-mini', {})).toBe(true);
+    expect(reasoningTextNeedsResponses('openai-compatible', 'llama-3.3-70b', {})).toBe(false);
+    expect(reasoningTextNeedsResponses('anthropic', 'claude-sonnet-5-5', {})).toBe(false);
+    expect(en.modelReasoning.hint.responsesOnly).toBeTruthy();
+    expect(tr.modelReasoning.hint.responsesOnly).toBeTruthy();
   });
 });

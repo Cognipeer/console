@@ -784,6 +784,7 @@ export default function EditModelModal({ modelId: editModelId, opened, onClose, 
             number={sectionNumber()}
             driver={selectedProvider?.driver}
             modelId={form.values.modelId ?? undefined}
+            settings={form.values.settings}
             focusOnMount={initialSection === 'reasoning'}
             value={reasoningFormFromSettings(form.values.settings)}
             onChange={(patch) => {

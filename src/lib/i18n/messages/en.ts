@@ -3351,6 +3351,7 @@ export const en = {
       medium: 'On',
     },
     hint: {
+      responsesOnly: 'Reasoning text is only returned over the Responses API. Set Upstream API to Responses to see it.',
       effort: 'Sent as reasoning_effort. When set here it wins over the value in an API request.',
       budget: 'A level is turned into a thinking token budget; enter an exact budget below to override it.',
       toggle: 'This engine only has thinking on or off.',
