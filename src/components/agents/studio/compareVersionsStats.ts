@@ -26,6 +26,10 @@ export interface CompareTurnUsage {
 export interface CompareTurn extends CompareTurnUsage {
     role: 'user' | 'assistant' | 'error';
     content: string;
+    /** The model's thinking text, when it produced any (operator view: shown whatever the agent publishes). */
+    reasoning?: string;
+    /** Stopped by the operator: `content` is what had streamed. */
+    stopped?: boolean;
     steps?: PlaygroundStep[];
     latencyMs?: number;
 }

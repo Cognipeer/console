@@ -3412,6 +3412,11 @@ export const tr: typeof en = {
       responseFormat: 'Yanıt biçimi',
       formatMarkdown: 'Markdown',
       formatPlain: 'Düz metin',
+      stop: 'Durdur',
+      stopped: 'Durduruldu',
+      reasoning: 'Akıl yürütme',
+      thinking: 'Düşünüyor…',
+      noAnswer: 'Akış yanıt vermeden sona erdi.',
       stats: {
         ...en.agents.compare.stats,
         latency: 'Gecikme',

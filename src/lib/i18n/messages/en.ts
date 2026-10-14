@@ -4962,6 +4962,11 @@ export const en = {
       responseFormat: 'Response format',
       formatMarkdown: 'Markdown',
       formatPlain: 'Plain text',
+      stop: 'Stop',
+      stopped: 'Stopped',
+      reasoning: 'Reasoning',
+      thinking: 'Thinking…',
+      noAnswer: 'The stream ended without an answer.',
       stats: {
         latency: 'Latency',
         tokens: 'Tokens',
