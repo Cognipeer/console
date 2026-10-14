@@ -191,7 +191,7 @@ function UsageCodeBlock({ title, code }: UsageCodeBlockProps) {
 /* ── Page ─────────────────────────────────────────────────────────────── */
 
 export default function VectorIndexDetailPage() {
-  const params = useParams();
+  const params = useParams()!;
   const router = useRouter();
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');

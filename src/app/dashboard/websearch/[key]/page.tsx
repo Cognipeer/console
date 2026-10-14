@@ -117,7 +117,7 @@ export default function WebSearchInstancePage() {
   const router = useRouter();
   const tConfirm = useTranslations('common.confirm');
   const deleteResource = useDeleteResource();
-  const params = useParams<{ key: string }>();
+  const params = useParams<{ key: string }>()!;
   const key = params.key;
 
   const [tab, setTab] = useState<TabId>('playground');

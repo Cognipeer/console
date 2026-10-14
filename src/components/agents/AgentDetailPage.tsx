@@ -239,9 +239,9 @@ function resolveSubTabFromQuery(raw: string | null, group: string, fallback: str
 }
 
 export default function AgentDetailPage() {
-  const params = useParams();
+  const params = useParams()!;
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const agentId = params.agentId as string;
   const t = useTranslations('agents');
 

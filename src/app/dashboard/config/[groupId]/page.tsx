@@ -88,7 +88,7 @@ export default function ConfigGroupDetailPage() {
   const tSafe = useTranslations('common.confirm.dataSafety');
   const deleteResource = useDeleteResource();
   const router = useRouter();
-  const params = useParams<{ groupId: string }>();
+  const params = useParams<{ groupId: string }>()!;
   const groupId = params.groupId;
 
   const [group, setGroup] = useState<ConfigGroup | null>(null);

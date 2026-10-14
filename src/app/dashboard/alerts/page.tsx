@@ -226,7 +226,7 @@ export default function AlertsPage() {
   const t = useTranslations('alerts');
   const tq = useTranslations('common.confirm.qos');
   const deleteResource = useDeleteResource();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
 
   // Deep-link support: ?create=1&module=models[&metric=error_rate] opens the
   // create form prefilled (used by dashboard report drill-downs).

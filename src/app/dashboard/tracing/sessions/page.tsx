@@ -45,7 +45,7 @@ const DEFAULT_PAGE_SIZE = 25;
 
 export default function TracingSessionsPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const { openDocs } = useDocsDrawer();
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [totalSessions, setTotalSessions] = useState(0);

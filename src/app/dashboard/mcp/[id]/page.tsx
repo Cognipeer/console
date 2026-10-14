@@ -137,12 +137,12 @@ interface McpAggregateView {
 }
 
 export default function McpDetailPage() {
-  const params = useParams<{ id: string }>();
+  const params = useParams<{ id: string }>()!;
   const router = useRouter();
   const confirmKeyChange = useConfirmKeyChange();
   const deleteResource = useDeleteResource();
   const tNouns = useTranslations('common.confirm.nouns');
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const tabParam = searchParams.get('tab');
   const initialTab = ['overview', 'usage', 'members', 'tools', 'playground', 'logs', 'audit'].includes(tabParam ?? '')
     ? (tabParam as string)

@@ -109,7 +109,7 @@ function endOfDay(date: Date): Date {
 
 export default function SnapshotWizard() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const t = useTranslations('snapshots');
   const tSeverity = useTranslations('pii.severity');
   const locale = useLocale();

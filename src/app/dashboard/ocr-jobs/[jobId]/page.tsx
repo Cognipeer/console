@@ -70,7 +70,7 @@ function CodeBlock({ code }: { code: string }) {
 }
 
 export default function OcrJobDetailPage() {
-  const params = useParams<{ jobId: string }>();
+  const params = useParams<{ jobId: string }>()!;
   const jobId = params.jobId;
   const router = useRouter();
 

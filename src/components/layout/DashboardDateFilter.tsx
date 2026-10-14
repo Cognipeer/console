@@ -38,8 +38,8 @@ export function useDashboardDateFilterState(): [
   (next: DashboardDateFilterState) => void,
 ] {
   const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
+  const pathname = usePathname()!;
+  const searchParams = useSearchParams()!;
   const [filter, setFilter] = useState<DashboardDateFilterState>(() =>
     dashboardDateFilterFromSearchParams(new URLSearchParams(searchParams.toString())));
 

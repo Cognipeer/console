@@ -11,7 +11,7 @@ import { assignIfPortal, buildChangePasswordPath, safeReturnTo } from '@/lib/sec
 
 function SsoCallbackContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const ticket = searchParams.get('ticket');
   const tCommon = useTranslations('common');
   const [error, setError] = useState<string | null>(null);

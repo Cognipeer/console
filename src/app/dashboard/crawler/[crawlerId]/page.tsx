@@ -100,7 +100,7 @@ interface ScheduleForm {
 type TabId = 'overview' | 'urls' | 'plan' | 'http' | 'integration' | 'schedule' | 'runs';
 
 export default function CrawlerDetailPage() {
-  const params = useParams<{ crawlerId: string }>();
+  const params = useParams<{ crawlerId: string }>()!;
   const crawlerId = params.crawlerId;
   const deleteResource = useDeleteResource();
   const tSafe = useTranslations('common.confirm.dataSafety');

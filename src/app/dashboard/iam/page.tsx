@@ -34,7 +34,7 @@ import { useTranslations } from '@/lib/i18n';
  */
 function IamCenter() {
   const t = useTranslations('iamCenter');
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const active = parseTabId(searchParams.get('tab'));
   const { canManage, ready } = useIamCapabilities();
 

@@ -47,7 +47,7 @@ interface PolicyView {
 }
 
 export default function PiiPolicyDetailPage() {
-  const params = useParams<{ id: string }>();
+  const params = useParams<{ id: string }>()!;
   const router = useRouter();
   const t = useTranslations('pii');
   const tSafe = useTranslations('common.confirm.dataSafety');

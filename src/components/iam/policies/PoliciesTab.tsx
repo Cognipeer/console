@@ -82,7 +82,7 @@ export default function PoliciesTab({ canManage }: PoliciesTabProps) {
   const { confirm } = useConfirm();
   const deleteResource = useDeleteResource();
   const errorText = useErrorText();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams()!;
   const router = useRouter();
   // One card per policy instead of a wide table when the table does not fit. Decided by the
   // width of the box the table lives in, not the window: the sidebar takes ~300px, so a
